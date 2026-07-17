@@ -18,7 +18,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import MemoryRecord
+    from collections.abc import Sequence
+
+    from ai_assistant.core.types import MemoryKind, MemoryRecord
 
 
 def _relevance(query_terms: set[str], content: str) -> float:
@@ -62,7 +64,17 @@ class InMemoryMemoryStore:
         self._records[record.id] = record
         return record.id
 
-    async def search(self, query: str, *, limit: int = 10) -> list[MemoryRecord]:
+    async def get(self, record_id: str) -> MemoryRecord | None:
+        """Return the record with ``record_id``, or ``None`` if absent."""
+        return self._records.get(record_id)
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+    ) -> list[MemoryRecord]:
         """Return the records most relevant to ``query``, best first.
 
         Relevance is naive lexical overlap: the fraction of query terms that
@@ -72,6 +84,7 @@ class InMemoryMemoryStore:
         Args:
             query: The search text.
             limit: Maximum number of records to return.
+            kinds: If given, restrict results to these memory kinds.
 
         Returns:
             Matching records, highest score first, each carrying its relevance
@@ -81,10 +94,12 @@ class InMemoryMemoryStore:
         if not query_terms:
             return []
 
+        wanted = {str(kind) for kind in kinds} if kinds is not None else None
         scored = [
             record.model_copy(update={"score": score})
             for record in self._records.values()
-            if (score := _relevance(query_terms, record.content)) > 0.0
+            if (wanted is None or record.kind in wanted)
+            and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
         return scored[:limit]
