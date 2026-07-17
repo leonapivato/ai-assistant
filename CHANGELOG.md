@@ -14,6 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   subsystem packages (`models`, `memory`, `context`, `planning`, `tools`,
   `permissions`, `learning`, `orchestration`, `interfaces`).
 - CLI adapter with an `assistant` console script.
+- `memory`: `InMemoryMemoryStore`, a dependency-free, non-persistent
+  `MemoryStore` with lexical retrieval, for developing and testing downstream
+  subsystems against a real contract.
 - Development standards: `CONTRIBUTING.md`, ADR process, and ratified policies
   (ADR-0002, ADR-0003, ADR-0004 privacy & data handling).
 - `LICENSE` (MIT), `justfile` task runner, and `.editorconfig`.
