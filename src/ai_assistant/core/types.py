@@ -7,7 +7,7 @@ everyone can depend on them. Keep this module free of behaviour — data only.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -136,3 +136,66 @@ MemoryRecord = Annotated[
     Field(discriminator="kind"),
 ]
 """A unit of long-term memory: one of the four typed kinds, tagged by ``kind``."""
+
+
+class DataTier(StrEnum):
+    """Sensitivity classification of stored data (see ADR-0004)."""
+
+    SECRET = "secret"  # noqa: S105  # Tier 0 tier name, not a credential value.
+    PERSONAL = "personal"  # Tier 1: PII, memories, user-model facts.
+    OPERATIONAL = "operational"  # Tier 2: non-sensitive settings, caches.
+
+
+class MemoryUpdateProposal(BaseModel):
+    """A proposed change to memory, awaiting a policy decision.
+
+    The model never writes memory directly: it emits a proposal that a
+    deterministic :class:`~ai_assistant.core.protocols.MemoryPolicy` disposes of.
+    """
+
+    proposed: MemoryRecord
+    rationale: str = Field(description="Why this memory is being proposed.")
+    sensitivity: DataTier = Field(
+        default=DataTier.PERSONAL,
+        description="How sensitive the proposed memory is.",
+    )
+    conflicts: list[str] = Field(
+        default_factory=list,
+        description="Ids of existing records this proposal contradicts (from the conflict check).",
+    )
+
+
+class MemoryDecisionKind(StrEnum):
+    """The possible rulings a memory policy can make on a proposal."""
+
+    ACCEPT = "accept"
+    REJECT = "reject"
+    MERGE = "merge"
+    ASK_USER = "ask_user"
+    STORE_TEMPORARY = "store_temporary"
+
+
+class MemoryDecision(BaseModel):
+    """A policy's ruling on a :class:`MemoryUpdateProposal`."""
+
+    kind: MemoryDecisionKind
+    reason: str = Field(description="Human-readable justification, for transparency.")
+    merge_into: str | None = Field(
+        default=None,
+        description="Target record id; required when ``kind`` is MERGE.",
+    )
+    ttl: timedelta | None = Field(
+        default=None,
+        description="Retention window; required when ``kind`` is STORE_TEMPORARY.",
+    )
+
+    @model_validator(mode="after")
+    def _outcome_fields_are_consistent(self) -> MemoryDecision:
+        """Ensure outcome-specific fields are present for the decision kind."""
+        if self.kind is MemoryDecisionKind.MERGE and self.merge_into is None:
+            msg = "MERGE decision requires merge_into"
+            raise ValueError(msg)
+        if self.kind is MemoryDecisionKind.STORE_TEMPORARY and self.ttl is None:
+            msg = "STORE_TEMPORARY decision requires ttl"
+            raise ValueError(msg)
+        return self

@@ -25,7 +25,13 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryKind, MemoryRecord, Message
+    from ai_assistant.core.types import (
+        MemoryDecision,
+        MemoryKind,
+        MemoryRecord,
+        MemoryUpdateProposal,
+        Message,
+    )
 
 
 @runtime_checkable
@@ -81,5 +87,34 @@ class MemoryStore(Protocol):
             query: The search text.
             limit: Maximum number of records to return.
             kinds: If given, restrict results to these memory kinds.
+        """
+        ...
+
+
+@runtime_checkable
+class MemoryPolicy(Protocol):
+    """Decides the fate of a proposed memory update — the "dispose" half.
+
+    The model *proposes* memories; a deterministic policy implementing this
+    Protocol *disposes* of them, so writes to long-term memory are reviewable
+    and bounded rather than an unmediated side effect of generation.
+    """
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+    ) -> MemoryDecision:
+        """Rule on a proposed memory update.
+
+        Args:
+            proposal: The candidate memory and why it was proposed.
+            conflicts: Existing records the proposal contradicts, already
+                resolved from the store (the proposal carries their ids).
+
+        Returns:
+            The decision to accept, reject, merge, defer to the user, or store
+            the proposal temporarily.
         """
         ...

@@ -15,6 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `core` + `memory`: the propose/dispose memory write path (ADR-0005) —
+  `MemoryUpdateProposal`, `MemoryDecision`, and a `MemoryPolicy` Protocol, with a
+  deterministic `DefaultMemoryPolicy` that accepts, rejects, merges, defers, or
+  temporarily stores proposed memories. Adds a `DataTier` sensitivity type.
 - Project skeleton: Python 3.14 + uv, `src/` layout, package `ai_assistant`.
 - Tooling: ruff (lint + format), mypy (strict), pytest, pre-commit, import-linter.
 - Architecture scaffold: `core` contracts (Protocols, types, config, errors) and
