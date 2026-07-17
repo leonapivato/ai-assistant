@@ -16,6 +16,37 @@ model. Every subsystem below exists to build, protect, or exploit that graph.
 Portability and user control of this graph are already commitments in
 [ADR-0004](adr/0004-privacy-and-data-handling.md) (export/delete/data rights).
 
+## Product thesis and priorities
+
+The defensible value is an **accumulated, dynamic user model plus continuous
+learning** — personal understanding that compounds over time and cannot be
+copied. It is **not** model quality. We do not try to out-answer
+GPT/Claude/Gemini on general intelligence; we aim for *"any model might answer a
+random question better, but my assistant understands **me** better."* Success
+feels like "it knows me," not "it remembers my name."
+
+Two consequences that shape everything below:
+
+- **Model-agnosticism is the strategy, not a preference.** Because the value
+  lives in the user model *around* the interchangeable model, the `models/` seam
+  ([ADR-0002](adr/0002-foundational-stack-and-architecture.md)) is load-bearing.
+- **Trust is upstream of personalization, not polish.** No trust → no access to
+  email/calendar/accounts → no behavioural data → no user model. The
+  propose/dispose write path, permissions, and transparency are prerequisites
+  for the data that personalization needs.
+
+Rough priority ordering (user's ranking): personalization, trust, and continuous
+learning (long-term) are the top tier; then memory and context awareness; then
+initiative, integrations, and reasoning/planning; then speed and personality.
+This is why the sequence favours **one closed learning loop over breadth of
+integrations**.
+
+Note on layering: the "user model" the product promises (communication style,
+decision patterns, motivations, evolving interests) is largely a **derived view
+over** the memory substrate, not individual records. [ADR-0005](adr/0005-memory-model.md)
+defines that record substrate; a later ADR will define the derived
+user-model projection built on top of it.
+
 ## Guiding principle (candidate ADR)
 
 > **The LLM proposes; deterministic services dispose.**
