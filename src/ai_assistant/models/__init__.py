@@ -7,3 +7,9 @@ change confined to this package.
 
 Implements: ``ModelProvider``.
 """
+
+from __future__ import annotations
+
+from ai_assistant.models.provider import PydanticAIProvider
+
+__all__ = ["PydanticAIProvider"]
