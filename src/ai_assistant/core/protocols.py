@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import MemoryRecord, Message
+    from ai_assistant.core.types import MemoryKind, MemoryRecord, Message
 
 
 @runtime_checkable
@@ -64,6 +64,22 @@ class MemoryStore(Protocol):
         """Persist a record and return its id."""
         ...
 
-    async def search(self, query: str, *, limit: int = 10) -> list[MemoryRecord]:
-        """Return the records most relevant to ``query``, best first."""
+    async def get(self, record_id: str) -> MemoryRecord | None:
+        """Return the record with ``record_id``, or ``None`` if absent."""
+        ...
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+    ) -> list[MemoryRecord]:
+        """Return the records most relevant to ``query``, best first.
+
+        Args:
+            query: The search text.
+            limit: Maximum number of records to return.
+            kinds: If given, restrict results to these memory kinds.
+        """
         ...

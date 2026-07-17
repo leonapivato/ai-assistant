@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `core`: `MemoryRecord` is now a typed discriminated union (episodic, semantic,
+  preference, procedural) with per-record `Provenance` (source, confidence,
+  evidence), replacing the flat content blob. `MemoryStore` gains `get()` and a
+  `kinds` filter on `search()`. (ADR-0005; breaking Protocol/`core` change.)
+
 ### Added
 
 - Project skeleton: Python 3.14 + uv, `src/` layout, package `ai_assistant`.
