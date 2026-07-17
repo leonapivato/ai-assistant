@@ -1,6 +1,6 @@
 # 5. Memory model: typed memory, provenance, and update proposals
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-16
 
 ## Context
