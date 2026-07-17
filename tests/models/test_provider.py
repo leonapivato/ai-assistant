@@ -23,7 +23,9 @@ from ai_assistant.core.errors import ModelError
 from ai_assistant.core.protocols import ModelProvider
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIProvider
-from ai_assistant.models.provider import _to_model_messages
+from ai_assistant.models.provider import (
+    _to_model_messages,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def test_provider_conforms_to_protocol() -> None:
