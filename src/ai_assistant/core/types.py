@@ -7,6 +7,7 @@ everyone can depend on them. Keep this module free of behaviour — data only.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -15,6 +16,9 @@ from pydantic import BaseModel, Field, model_validator
 
 # A user-asserted memory is, by definition, fully trusted.
 _FULL_CONFIDENCE = 1.0
+
+Embedding = Sequence[float]
+"""A dense vector embedding of a piece of text (see ADR-0006)."""
 
 
 class Role(StrEnum):

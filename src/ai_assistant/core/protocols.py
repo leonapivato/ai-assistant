@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import (
+        Embedding,
         MemoryDecision,
         MemoryKind,
         MemoryRecord,
@@ -59,6 +60,28 @@ class ModelProvider(Protocol):
         Returns:
             The assistant's reply as a :class:`~ai_assistant.core.types.Message`.
         """
+        ...
+
+
+@runtime_checkable
+class Embedder(Protocol):
+    """Turns text into dense vectors for semantic retrieval (see ADR-0006).
+
+    A model-agnostic embedding seam, separate from :class:`ModelProvider`
+    because embedding is a distinct capability a provider may not offer.
+
+    An embedder is bound to a single model. Per-call model selection is
+    intentionally omitted: vectors from different models are not comparable, so
+    a store must embed everything with one model (ADR-0006 §4).
+    """
+
+    @property
+    def dimensions(self) -> int:
+        """The fixed length of the vectors this embedder produces."""
+        ...
+
+    async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+        """Embed a batch of texts, returning one vector per input, in order."""
         ...
 
 
