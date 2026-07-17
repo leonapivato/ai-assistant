@@ -7,3 +7,9 @@ conversations and projects. Default backend is local-first SQLite with
 
 Implements: ``MemoryStore``.
 """
+
+from __future__ import annotations
+
+from ai_assistant.memory.store import InMemoryMemoryStore
+
+__all__ = ["InMemoryMemoryStore"]
