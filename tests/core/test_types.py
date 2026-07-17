@@ -8,9 +8,13 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
+    DataTier,
     EpisodicMemory,
+    MemoryDecision,
+    MemoryDecisionKind,
     MemoryRecord,
     MemorySource,
+    MemoryUpdateProposal,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -62,3 +66,29 @@ def test_discriminated_union_resolves_by_kind(
         }
     )
     assert isinstance(record, expected)
+
+
+def test_merge_decision_requires_target() -> None:
+    with pytest.raises(ValidationError, match="requires merge_into"):
+        MemoryDecision(kind=MemoryDecisionKind.MERGE, reason="x")
+
+
+def test_store_temporary_decision_requires_ttl() -> None:
+    with pytest.raises(ValidationError, match="requires ttl"):
+        MemoryDecision(kind=MemoryDecisionKind.STORE_TEMPORARY, reason="x")
+
+
+def test_accept_decision_needs_no_extra_fields() -> None:
+    decision = MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="ok")
+    assert decision.merge_into is None
+
+
+def test_proposal_defaults_to_personal_sensitivity() -> None:
+    record = SemanticMemory(
+        id="1",
+        content="c",
+        fact="f",
+        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN),
+    )
+    proposal = MemoryUpdateProposal(proposed=record, rationale="because")
+    assert proposal.sensitivity is DataTier.PERSONAL

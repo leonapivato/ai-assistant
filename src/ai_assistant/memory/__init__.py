@@ -10,6 +10,7 @@ Implements: ``MemoryStore``.
 
 from __future__ import annotations
 
+from ai_assistant.memory.policy import DefaultMemoryPolicy
 from ai_assistant.memory.store import InMemoryMemoryStore
 
-__all__ = ["InMemoryMemoryStore"]
+__all__ = ["DefaultMemoryPolicy", "InMemoryMemoryStore"]
