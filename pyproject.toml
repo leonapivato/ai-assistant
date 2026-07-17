@@ -23,6 +23,7 @@ dependencies = [
     "pydantic-ai-slim[anthropic]>=2.11.0",
     "pydantic-settings>=2.14.2",
     "rich>=15.0.0",
+    "sqlite-vec>=0.1.6",
     "structlog>=26.1.0",
     "typer>=0.27.0",
 ]
@@ -122,6 +123,11 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 show_error_codes = true
 pretty = true
+
+# sqlite-vec ships no type stubs (no py.typed); it is used only in memory/.
+[[tool.mypy.overrides]]
+module = ["sqlite_vec"]
+ignore_missing_imports = true
 
 # -----------------------------------------------------------------------------
 # pytest

@@ -76,6 +76,15 @@ class Embedder(Protocol):
     """
 
     @property
+    def model_id(self) -> str:
+        """A stable identifier for the embedding model.
+
+        Vectors are tagged with this so a store can detect that it was built
+        with a different model and must be re-embedded (ADR-0006 §4).
+        """
+        ...
+
+    @property
     def dimensions(self) -> int:
         """The fixed length of the vectors this embedder produces."""
         ...
