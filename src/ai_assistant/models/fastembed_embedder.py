@@ -51,6 +51,11 @@ class FastEmbedEmbedder:
         self._model: TextEmbedding | None = None
 
     @property
+    def model_id(self) -> str:
+        """The fastembed model name, identifying the embedding space."""
+        return self._model_name
+
+    @property
     def dimensions(self) -> int:
         """The fixed length of the vectors this embedder produces."""
         return self._dimensions

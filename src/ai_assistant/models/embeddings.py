@@ -33,6 +33,11 @@ class HashingEmbedder:
         self._dimensions = dimensions
 
     @property
+    def model_id(self) -> str:
+        """A stable identifier for this embedder's (non-semantic) scheme."""
+        return f"hashing-{self._dimensions}"
+
+    @property
     def dimensions(self) -> int:
         """The fixed length of the vectors this embedder produces."""
         return self._dimensions
