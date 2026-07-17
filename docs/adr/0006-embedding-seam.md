@@ -1,6 +1,6 @@
 # 6. Embedding seam for semantic memory retrieval
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 
 ## Context
