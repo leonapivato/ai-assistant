@@ -1,0 +1,123 @@
+"""Ingesting proposed memories: conflict detection, policy, and application.
+
+``MemoryIngestor`` closes the propose/dispose/persist loop. Given a
+:class:`~ai_assistant.core.types.MemoryUpdateProposal` (the "propose" half), it:
+
+1. detects conflicting existing memories (same kind, highly similar content),
+2. asks the injected :class:`~ai_assistant.core.protocols.MemoryPolicy` to rule
+   on the proposal given those conflicts (the "dispose" half), and
+3. applies the ruling to the injected
+   :class:`~ai_assistant.core.protocols.MemoryStore` (the "persist" half).
+
+It depends only on the store and policy contracts, so it is agnostic to which
+concrete store or policy is wired in.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+from ai_assistant.core.types import (
+    MemoryDecisionKind,
+    MemoryIngestResult,
+    MemoryKind,
+    Provenance,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
+    from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
+
+_DEFAULT_CONFLICT_THRESHOLD = 0.75
+_DEFAULT_CONFLICT_LIMIT = 5
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+    """Fold ``incoming`` into ``target``, keeping the target's id.
+
+    Newer content wins; evidence is unioned and confidence taken as the maximum,
+    so a merge strengthens rather than weakens what is known.
+    """
+    provenance = Provenance(
+        source=incoming.provenance.source,
+        confidence=max(target.provenance.confidence, incoming.provenance.confidence),
+        evidence=list(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence])),
+        last_updated=incoming.provenance.last_updated,
+    )
+    return incoming.model_copy(update={"id": target.id, "provenance": provenance})
+
+
+class MemoryIngestor:
+    """Runs a proposed memory through conflict detection, policy, and storage."""
+
+    def __init__(
+        self,
+        *,
+        store: MemoryStore,
+        policy: MemoryPolicy,
+        conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
+        conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
+        now: Callable[[], datetime] = _utcnow,
+    ) -> None:
+        """Initialise the ingestor.
+
+        Args:
+            store: Where accepted memories are persisted and conflicts sought.
+            policy: The deterministic policy that rules on each proposal.
+            conflict_threshold: Minimum retrieval score for an existing record to
+                count as conflicting with the proposal.
+            conflict_limit: Maximum number of conflict candidates to consider.
+            now: Clock used to stamp expiry on temporary stores; injectable for
+                deterministic tests.
+        """
+        self._store = store
+        self._policy = policy
+        self._conflict_threshold = conflict_threshold
+        self._conflict_limit = conflict_limit
+        self._now = now
+
+    async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+        """Detect conflicts, apply the policy, and persist the outcome."""
+        conflicts = await self._detect_conflicts(proposal.proposed)
+        proposal = proposal.model_copy(update={"conflicts": [record.id for record in conflicts]})
+        decision = await self._policy.decide(proposal, conflicts=conflicts)
+        record_id = await self._apply(decision, proposal.proposed, conflicts)
+        return MemoryIngestResult(decision=decision, record_id=record_id)
+
+    async def _detect_conflicts(self, record: MemoryRecord) -> list[MemoryRecord]:
+        matches = await self._store.search(
+            record.content,
+            limit=self._conflict_limit,
+            kinds=[MemoryKind(record.kind)],
+        )
+        return [
+            match
+            for match in matches
+            if match.id != record.id and (match.score or 0.0) >= self._conflict_threshold
+        ]
+
+    async def _apply(
+        self,
+        decision: MemoryDecision,
+        proposed: MemoryRecord,
+        conflicts: list[MemoryRecord],
+    ) -> str | None:
+        match decision.kind:
+            case MemoryDecisionKind.ACCEPT:
+                return await self._store.add(proposed)
+            case MemoryDecisionKind.STORE_TEMPORARY:
+                expires_at = self._now() + decision.ttl if decision.ttl is not None else None
+                return await self._store.add(proposed.model_copy(update={"expires_at": expires_at}))
+            case MemoryDecisionKind.MERGE:
+                target = next((c for c in conflicts if c.id == decision.merge_into), None)
+                record = proposed if target is None else _merge(target, proposed)
+                return await self._store.add(record)
+            case _:  # REJECT, ASK_USER — nothing is written.
+                return None

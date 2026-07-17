@@ -11,8 +11,14 @@ Implements: ``MemoryStore`` and ``MemoryPolicy``.
 
 from __future__ import annotations
 
+from ai_assistant.memory.ingest import MemoryIngestor
 from ai_assistant.memory.policy import DefaultMemoryPolicy
 from ai_assistant.memory.sqlite_store import SqliteMemoryStore
 from ai_assistant.memory.store import InMemoryMemoryStore
 
-__all__ = ["DefaultMemoryPolicy", "InMemoryMemoryStore", "SqliteMemoryStore"]
+__all__ = [
+    "DefaultMemoryPolicy",
+    "InMemoryMemoryStore",
+    "MemoryIngestor",
+    "SqliteMemoryStore",
+]

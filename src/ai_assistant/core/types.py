@@ -95,6 +95,10 @@ class MemoryBase(BaseModel):
         default=None,
         description="Relevance score, populated by retrieval; None when stored.",
     )
+    expires_at: datetime | None = Field(
+        default=None,
+        description="Retention deadline after which the record may be forgotten (ADR-0004).",
+    )
 
 
 class EpisodicMemory(MemoryBase):
@@ -203,3 +207,13 @@ class MemoryDecision(BaseModel):
             msg = "STORE_TEMPORARY decision requires ttl"
             raise ValueError(msg)
         return self
+
+
+class MemoryIngestResult(BaseModel):
+    """The outcome of ingesting a :class:`MemoryUpdateProposal`."""
+
+    decision: MemoryDecision
+    record_id: str | None = Field(
+        default=None,
+        description="Id of the record written or merged, or None if nothing was stored.",
+    )

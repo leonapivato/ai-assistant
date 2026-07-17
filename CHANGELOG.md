@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `memory`: `SqliteMemoryStore` now ranks with cosine distance, so `search`
+  scores are cosine similarity in `[0, 1]` — better separated and directly
+  usable as a similarity threshold.
 - `core`: `MemoryRecord` is now a typed discriminated union (episodic, semantic,
   preference, procedural) with per-record `Provenance` (source, confidence,
   evidence), replacing the flat content blob. `MemoryStore` gains `get()` and a
@@ -15,6 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `memory`: `MemoryIngestor`, closing the propose/dispose/persist loop —
+  detects conflicting memories (same kind, high similarity), runs the
+  `MemoryPolicy`, and applies the ruling to the store (accept, merge, store
+  temporarily with an expiry, or defer). Adds `MemoryIngestResult` and an
+  `expires_at` retention field on memory records (ADR-0005/0004).
 - `memory`: `SqliteMemoryStore`, the persistent local-first `MemoryStore` over
   SQLite + `sqlite-vec` (ADR-0002/0006) — embeds records on write, ranks by
   vector similarity on `search`, tags vectors with the embedding model/dimension

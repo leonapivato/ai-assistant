@@ -70,7 +70,7 @@ class SqliteMemoryStore:
         self._verify_or_init_meta(conn)
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
-            f"USING vec0(embedding float[{self._embedder.dimensions}])"
+            f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
         )
         conn.commit()
         self._restrict_permissions()
@@ -151,8 +151,8 @@ class SqliteMemoryStore:
                 after the vector search, so results are over-fetched first).
 
         Returns:
-            Matching records, most relevant first, each carrying a ``score`` in
-            ``(0, 1]`` derived from vector distance.
+            Matching records, most relevant first, each carrying a ``score``
+            that is the cosine similarity to the query, in ``[0, 1]``.
         """
         if not query.strip():
             return []
@@ -182,7 +182,8 @@ class SqliteMemoryStore:
         for data, kind, distance in rows:
             if wanted is not None and kind not in wanted:
                 continue
-            results.append((data, 1.0 / (1.0 + distance)))
+            # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
+            results.append((data, max(0.0, 1.0 - distance)))
             if len(results) >= limit:
                 break
         return results
