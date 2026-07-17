@@ -1,0 +1,49 @@
+# 2. Foundational stack and architecture
+
+- Status: Accepted
+- Date: 2026-07-16
+
+## Context
+
+Starting a new, model-agnostic AI-assistant project intended to be built mostly
+by AI agents. We needed to fix the runtime stack, the module architecture, and
+the development workflow before feature work begins.
+
+## Decision
+
+**Language & tooling.** Python 3.14 (pinned via `.python-version`), managed with
+`uv` (+ `uv_build` backend). Quality gates: `ruff` (lint + format), `mypy`
+(strict), `pytest` (+ `pytest-asyncio`, `pytest-cov`).
+
+**Architecture.** A `core` package holds the contracts — `typing.Protocol`
+interfaces plus shared pydantic types, config, and errors. Every other subsystem
+(`models`, `memory`, `context`, `planning`, `tools`, `permissions`, `learning`)
+implements or consumes those contracts and never imports another subsystem's
+concrete code. `orchestration` wires implementations together via dependency
+injection. `interfaces` holds thin adapters. This inversion is what lets agents
+build/replace one subsystem in isolation with reviewable diffs.
+
+**Model layer.** We own the high-level orchestration; the LLM + tool-calling
+plumbing uses **pydantic-ai** (`pydantic-ai-slim` with per-provider extras),
+wrapped behind our own `ModelProvider` Protocol so no provider SDK leaks outside
+`models/`.
+
+**Interface.** CLI-first (`typer` + `rich`), registered as the `assistant`
+console script. The core stays interface-agnostic; API/UI adapters come later.
+
+**Persistence.** Local-first by default: SQLite with `sqlite-vec` for embedding
+search (dependencies added when `memory/` is implemented).
+
+**Workflow / CI.** Local-only for now: `pre-commit` runs format + lint +
+type-check. Remote CI (e.g. GitHub Actions) is deferred; revisit in a future ADR
+when hosting is chosen.
+
+## Consequences
+
+- New model providers are a change confined to `models/`.
+- Swapping SQLite for a networked DB (e.g. Postgres/pgvector) is confined to
+  `memory/` because callers depend on the `MemoryStore` Protocol.
+- Deferring remote CI means the `pre-commit` gate is the only automated check
+  until a hosting decision is made; contributors must run it.
+- Choosing pydantic-ai is reversible: it lives behind `ModelProvider`, so a
+  future move to hand-rolled provider clients touches only `models/`.

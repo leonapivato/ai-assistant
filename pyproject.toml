@@ -5,6 +5,7 @@ description = "A model-agnostic AI operating system that orchestrates language m
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Leonardo Pivato", email = "pivato.l@northeastern.edu" },
 ]
@@ -16,11 +17,17 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "pydantic>=2.13.4",
+    "pydantic-ai-slim[anthropic]>=2.11.0",
+    "pydantic-settings>=2.14.2",
+    "rich>=15.0.0",
+    "structlog>=26.1.0",
+    "typer>=0.27.0",
+]
 
-[project.urls]
-Homepage = "https://github.com/leonardopivato/ai-assistant"
-Repository = "https://github.com/leonardopivato/ai-assistant"
+[project.scripts]
+assistant = "ai_assistant.interfaces.cli:app"
 
 [dependency-groups]
 dev = [
@@ -28,7 +35,9 @@ dev = [
     "mypy>=1.18.0",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.2.0",
-    "pytest-cov>=7.0.0",
+    "pre-commit>=4.6.0",
+    "import-linter>=2.0",
+    "pip-audit>=2.7",
 ]
 
 [build-system]
@@ -50,21 +59,52 @@ select = [
     "F",    # pyflakes
     "I",    # isort
     "N",    # pep8-naming
+    "D",    # pydocstyle (Google convention, configured below)
     "UP",   # pyupgrade
     "B",    # flake8-bugbear
+    "A",    # flake8-builtins (no shadowing builtins)
     "C4",   # flake8-comprehensions
+    "C90",  # mccabe complexity
     "SIM",  # flake8-simplify
     "TCH",  # flake8-type-checking
     "PTH",  # flake8-use-pathlib
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "ARG",  # flake8-unused-arguments
+    "PIE",  # flake8-pie
+    "TID",  # flake8-tidy-imports (ban relative imports)
+    "DTZ",  # flake8-datetimez (timezone-aware datetimes)
+    "ASYNC",# flake8-async (async pitfalls)
+    "S",    # flake8-bandit (security)
+    "ERA",  # eradicate (no commented-out code)
+    "PL",   # pylint (subset)
     "RUF",  # ruff-specific rules
 ]
 ignore = []
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101"]  # allow asserts in tests
+# Tests may assert, use magic values, and skip docstrings.
+"tests/**/*.py" = ["S101", "D", "PLR2004", "ARG"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ai_assistant"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-type-checking]
+# pydantic evaluates annotations at runtime to build models, so imports used in
+# annotations on these base classes must stay at module scope (not TYPE_CHECKING).
+runtime-evaluated-base-classes = [
+    "pydantic.BaseModel",
+    "pydantic_settings.BaseSettings",
+]
 
 [tool.ruff.format]
 docstring-code-format = true
@@ -90,18 +130,74 @@ minversion = "8.0"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
-
-# -----------------------------------------------------------------------------
-# coverage
-# -----------------------------------------------------------------------------
-[tool.coverage.run]
-branch = true
-source = ["src/ai_assistant"]
-
-[tool.coverage.report]
-show_missing = true
-exclude_lines = [
-    "pragma: no cover",
-    "if TYPE_CHECKING:",
-    "raise NotImplementedError",
+markers = [
+    "integration: tests that touch the network, filesystem, or external services",
 ]
+
+# -----------------------------------------------------------------------------
+# import-linter — mechanically enforce the architecture's dependency rules
+# Run with: uv run lint-imports
+# -----------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "ai_assistant"
+# Required because a contract forbids importing external packages (provider SDKs).
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "core depends on nothing else in ai_assistant"
+type = "forbidden"
+source_modules = ["ai_assistant.core"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+]
+
+[[tool.importlinter.contracts]]
+name = "subsystems are independent of each other"
+type = "independence"
+modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+]
+
+[[tool.importlinter.contracts]]
+name = "subsystems do not import orchestration or interfaces"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+]
+forbidden_modules = ["ai_assistant.orchestration", "ai_assistant.interfaces"]
+
+[[tool.importlinter.contracts]]
+name = "provider SDKs are confined to the models layer"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+]
+forbidden_modules = ["pydantic_ai", "anthropic", "openai"]

@@ -35,7 +35,12 @@ uv run ruff format .
 
 # Type-check
 uv run mypy
+
+# Check architecture boundaries
+uv run lint-imports
 ```
+
+See `CONTRIBUTING.md` for the full development standards.
 
 ## Project layout
 
@@ -50,10 +55,11 @@ ai-assistant/
 
 ## Tooling
 
-| Concern            | Tool                         |
-| ------------------ | ---------------------------- |
-| Packaging / env    | uv + `uv_build`              |
-| Lint + format      | ruff                         |
-| Static typing      | mypy (strict)                |
-| Testing            | pytest + pytest-asyncio      |
-| Coverage           | pytest-cov / coverage        |
+| Concern             | Tool                         |
+| ------------------- | ---------------------------- |
+| Packaging / env     | uv + `uv_build`              |
+| Lint + format       | ruff (maximum rule set)      |
+| Static typing       | mypy (strict)                |
+| Architecture rules  | import-linter                |
+| Testing             | pytest + pytest-asyncio      |
+| Commit hygiene      | pre-commit + Conventional Commits |

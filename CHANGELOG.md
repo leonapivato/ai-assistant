@@ -1,0 +1,19 @@
+# Changelog
+
+All notable changes to this project are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Project skeleton: Python 3.14 + uv, `src/` layout, package `ai_assistant`.
+- Tooling: ruff (lint + format), mypy (strict), pytest, pre-commit, import-linter.
+- Architecture scaffold: `core` contracts (Protocols, types, config, errors) and
+  subsystem packages (`models`, `memory`, `context`, `planning`, `tools`,
+  `permissions`, `learning`, `orchestration`, `interfaces`).
+- CLI adapter with an `assistant` console script.
+- Development standards: `CONTRIBUTING.md`, ADR process, and ratified policies
+  (ADR-0002, ADR-0003, ADR-0004 privacy & data handling).
+- `LICENSE` (MIT), `justfile` task runner, and `.editorconfig`.

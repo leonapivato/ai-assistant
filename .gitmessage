@@ -1,0 +1,14 @@
+# <type>(<scope>): <subject>            ← ≤72 chars, imperative mood
+#
+# <body: WHY the change, not what. Wrap at ~72 chars.>
+#
+# Refs: ADR-NNNN                        ← link to the decision(s) this implements
+#
+# ── Conventional Commits ────────────────────────────────────────────────────
+# type:  feat | fix | docs | refactor | test | chore | perf | build | ci
+# scope: subsystem, e.g. core, models, memory, context, planning, tools,
+#        permissions, learning, orchestration, interfaces
+# Breaking change: add "!" after type/scope  →  feat(models)!: ...
+#
+# Enable this template once with:
+#   git config commit.template .gitmessage

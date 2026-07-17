@@ -1,0 +1,108 @@
+# 4. Privacy and data handling
+
+- Status: Accepted
+- Date: 2026-07-16
+
+## Context
+
+The assistant's value comes from knowing its user deeply: goals, routines,
+relationships, communication style, and — via tool integrations — access tokens
+for calendars, email, GitHub, messaging, and smart-home devices. That makes the
+data it holds among the most sensitive a person owns. Trust is a core product
+pillar (see `README.md`), and `memory/`, `tools`, and `permissions` all depend
+on how we classify, store, protect, and expose this data. We need a ratified
+policy before those subsystems are built, rather than retrofitting one.
+
+ADR-0002 already commits us to a **local-first** architecture (SQLite by
+default) and confines model access to the `models/` layer. This ADR builds the
+data-handling rules on top of that foundation.
+
+## Decision
+
+### 1. Data classification
+
+Every piece of stored data is one of three tiers, and its tier determines how it
+is handled:
+
+- **Tier 0 — Secrets/credentials:** OAuth tokens, API keys, refresh tokens.
+- **Tier 1 — Personal data:** user-model facts, memories, conversation history,
+  anything identifying the user or third parties (PII).
+- **Tier 2 — Operational:** non-sensitive settings, caches, logs (which must
+  never contain Tier 0/1 data — see §5).
+
+### 2. Residency and egress (local-first, minimal egress)
+
+- All persistent data lives on the user's machine, under a single
+  platform-appropriate data directory (resolved via `platformdirs`, e.g.
+  `~/.local/share/ai-assistant/` on Linux). No cloud storage by default.
+- The **only** component permitted to send user data off-device is the
+  `models/` layer, and only to the model provider the user has configured.
+  Every other egress is a bug.
+- **Telemetry is off by default and there is no data egress for
+  observability.** pydantic-ai's `logfire-api` is a no-op unless Logfire is
+  explicitly installed and configured; instrumentation that transmits data
+  requires a documented, opt-in setting.
+
+### 3. Secrets/credentials (Tier 0)
+
+- Tier 0 secrets are stored in the **OS keyring** via the `keyring` library —
+  never in the memory database, never in a committed file. `.env` is for local
+  developer convenience only and is git-ignored.
+- The `models/` and `tools/` layers read credentials through a small
+  `SecretStore` Protocol (added to `core/protocols.py`) so the keyring backing
+  can be faked in tests and swapped per platform.
+
+### 4. Encryption at rest (Tier 1)
+
+- The memory database is created with owner-only file permissions (`0600`) in
+  the user's data directory.
+- **Baseline** protection assumes the host uses OS full-disk encryption; this
+  assumption is documented for the user.
+- **Application-level encryption of the memory store is supported and
+  configurable** (via SQLCipher), with the key held in the OS keyring. It is
+  **off by default** and opt-in: for a single-user local app the baseline
+  (OS full-disk encryption + `0600` perms) is adequate, and default-on
+  encryption would impose real key-management/recovery burden (a lost key means
+  unrecoverable memory). Users who cannot rely on disk encryption can enable it.
+
+### 5. Logging and redaction
+
+- Logs are Tier 2 only. Tier 0/1 data must never be logged.
+- structlog is configured with a redaction processor that drops/masks known
+  sensitive keys (tokens, secrets, message bodies, PII fields) as a safety net;
+  redaction failing closed is preferred over leaking.
+
+### 6. User data rights (retention, export, deletion)
+
+- The user can **view, export, and delete** their data. `memory/` exposes
+  export (portable JSON) and delete operations from day one.
+- Memory supports **retention rules** (e.g. TTLs, size caps) so data does not
+  accumulate indefinitely; specifics are set per memory type when `memory/` is
+  designed.
+- Deleting the user's data purges Tier 0 (keyring entries) and Tier 1 (database
+  rows) together.
+
+### 7. Permissions, audit, and minimization
+
+- Access to Tier 0/1 data and every side-effecting tool call is gated by the
+  `permissions/` layer and recorded in an **audit trail**, making the
+  assistant's behaviour transparent and reviewable (a Tier 1 store itself).
+- **Data minimization:** collect and store only what a capability needs, and
+  send the minimum necessary context to the model provider. Prefer references
+  over copies where practical.
+
+## Consequences
+
+- New dependencies when the relevant subsystems land: `keyring` (Tier 0) and,
+  if application-level encryption is adopted, a SQLCipher binding — each with a
+  fake for tests.
+- `core/protocols.py` gains a `SecretStore` Protocol; `memory/` must implement
+  export/delete/retention and owner-only file permissions; `tools/` must read
+  credentials only via `SecretStore`; `permissions/` owns the audit trail.
+- We will add an import-linter contract asserting that only `models/` (and the
+  designated `tools/` integration boundary) imports network/provider clients, so
+  the minimal-egress rule is mechanically enforced like the other boundaries.
+- Application-level encryption remains available but off by default; users
+  relying on it accept that a lost keyring key means unrecoverable memory.
+- Building for user data rights (export/delete/retention) from the start is
+  cheaper than retrofitting them into a populated store later.

@@ -1,0 +1,53 @@
+# Enable once:  uv run pre-commit install --install-hooks --hook-type commit-msg
+# Run manually:  uv run pre-commit run --all-files
+# Local hooks shell out to `uv run` so they use the project's locked environment.
+default_install_hook_types: [pre-commit, commit-msg]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.22
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  # Enforce Conventional Commits on the commit message.
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.0.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
+  # Project-env checks. `language: system` + `uv run` guarantees the locked venv
+  # (with the package installed) rather than pre-commit's isolated environments.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: import-linter
+        name: import-linter (architecture boundaries)
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false
+        files: ^(src/|pyproject\.toml$)
+      - id: pip-audit
+        name: pip-audit (advisory, manual)
+        entry: uv run pip-audit
+        language: system
+        pass_filenames: false
+        stages: [manual]
