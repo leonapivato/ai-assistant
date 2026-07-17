@@ -12,8 +12,10 @@ in the personalization and orchestration surrounding it.
 
 ## Status
 
-Pre-alpha. This repository currently contains only the project skeleton and
-tooling setup; feature implementation has not started.
+Pre-alpha. The project skeleton and tooling are in place and the first
+subsystem slices (`models`, `memory`) have landed. See `docs/roadmap.md` for the
+orchestration-artifact catalogue and build sequence, and `docs/adr/` for
+ratified decisions.
 
 ## Requirements
 
