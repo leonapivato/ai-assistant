@@ -15,6 +15,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `core` + `models`: an `Embedder` seam for semantic retrieval (ADR-0006) — an
+  `Embedder` Protocol and `Embedding` type, an on-device default
+  `FastEmbedEmbedder` (local, lazy-loaded), and a deterministic dependency-free
+  `HashingEmbedder` for offline tests. `fastembed` is confined to `models/` by
+  the import-linter contract.
 - `core` + `memory`: the propose/dispose memory write path (ADR-0005) —
   `MemoryUpdateProposal`, `MemoryDecision`, and a `MemoryPolicy` Protocol, with a
   deterministic `DefaultMemoryPolicy` that accepts, rejects, merges, defers, or
