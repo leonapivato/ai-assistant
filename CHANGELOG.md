@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `memory`: `SqliteMemoryStore` now ranks with cosine distance, so `search`
+  scores are cosine similarity in `[0, 1]` — better separated and directly
+  usable as a similarity threshold.
 - `core`: `MemoryRecord` is now a typed discriminated union (episodic, semantic,
   preference, procedural) with per-record `Provenance` (source, confidence,
   evidence), replacing the flat content blob. `MemoryStore` gains `get()` and a
