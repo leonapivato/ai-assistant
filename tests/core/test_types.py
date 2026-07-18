@@ -11,8 +11,11 @@ from ai_assistant.core.types import (
     CurrentContext,
     DataTier,
     EpisodicMemory,
+    FeedbackEvent,
+    FeedbackKind,
     MemoryDecision,
     MemoryDecisionKind,
+    MemoryKind,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
@@ -148,6 +151,28 @@ def test_current_context_now_naive_is_coerced_to_utc() -> None:
     )
     assert ctx.now == datetime(2026, 1, 1, 12, tzinfo=UTC)
     assert ctx.now.tzinfo is UTC
+
+
+def test_feedback_event_constructs_with_defaults() -> None:
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers concise replies",
+        created_at=_WHEN,
+    )
+    assert event.subject is None
+    assert event.evidence == []
+
+
+def test_feedback_event_created_at_naive_is_coerced_to_utc() -> None:
+    event = FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=MemoryKind.SEMANTIC,
+        content="office is in Boston",
+        created_at=datetime(2026, 1, 1, 9),  # noqa: DTZ001  naive input
+    )
+    assert event.created_at == datetime(2026, 1, 1, 9, tzinfo=UTC)
+    assert event.created_at.tzinfo is UTC
 
 
 def test_proposal_defaults_to_personal_sensitivity() -> None:
