@@ -119,6 +119,9 @@ jobs:
           PERSONA: ${{ steps.ctx.outputs.persona }}
         run: |
           set -euo pipefail
+          # codex exec does not read OPENAI_API_KEY directly; authenticate first
+          # (reads the key from stdin, never an argument or the log).
+          printenv OPENAI_API_KEY | codex login --with-api-key
           git fetch --no-tags origin master
           # stdout is the review body; progress goes to stderr.
           scripts/codex-review.sh "$PERSONA" origin/master >review.out
