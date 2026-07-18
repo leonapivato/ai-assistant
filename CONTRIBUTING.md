@@ -28,6 +28,33 @@ uv run pytest               # tests
 `pre-commit` runs the fast subset on every commit. There is no remote CI yet
 (see ADR-0002), so the local gate is the only automated safety net — run it.
 
+## Review (pre-merge)
+
+The gate is mechanical; it cannot judge design or the adequacy of tests. Before
+merging a slice branch — **after** the gate is green — put the change through
+adversarial review. Claude writes the code; **Codex reviews it**, so every change
+is judged by a model independent of the one that produced it.
+
+Two reviewers, defined by shared rubrics in `docs/review/`:
+
+- **architecture** — boundaries, contract discipline, ADR adherence, and drift
+  from `VISION.md`.
+- **adversarial** — tries to break the code: edge cases, error paths,
+  concurrency, data integrity, and test gaps.
+
+Run each against the base branch (read-only; this **sends the diff to OpenAI**,
+so it is a deliberate pre-merge step, not per-commit):
+
+```bash
+just review-codex architecture      # or: scripts/codex-review.sh architecture main
+just review-codex adversarial
+```
+
+Reviewers are advisory tooling, not a hard gate. Resolve `blocker`/`major`
+findings before merging, or waive them with a written rationale in the PR/commit.
+A reviewer that disagrees with a ratified decision files an ADR proposal — it
+does not block on it (see the authority hierarchy in `docs/review/guide.md`).
+
 ## Git & commits
 
 - **Trunk-based.** `main` is always green. Do each unit of work on a short-lived
