@@ -8,11 +8,11 @@ everyone can depend on them. Keep this module free of behaviour — data only.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # A user-asserted memory is, by definition, fully trusted.
 _FULL_CONFIDENCE = 1.0
@@ -97,8 +97,24 @@ class MemoryBase(BaseModel):
     )
     expires_at: datetime | None = Field(
         default=None,
-        description="Retention deadline after which the record may be forgotten (ADR-0004).",
+        description=(
+            "Retention deadline after which the record is forgotten (ADR-0004); "
+            "a naive datetime is interpreted as UTC."
+        ),
     )
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expires_at_is_utc_aware(cls, value: datetime | None) -> datetime | None:
+        """Normalise the retention deadline to a UTC-aware datetime.
+
+        Retention is enforced by comparing ``expires_at`` against a UTC clock, so
+        a naive value would either crash the comparison or be read in host-local
+        time. Assuming UTC keeps every store consistent.
+        """
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class EpisodicMemory(MemoryBase):

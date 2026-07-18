@@ -3,24 +3,28 @@
 This is the first, dependency-free implementation of the memory contract. It
 keeps records in a process-local dict and scores retrieval by naive lexical
 overlap — it is **not persistent and not semantic**. Its purpose is to satisfy
-the ``add``/``search`` contract so downstream subsystems (planning,
-orchestration) can be developed and tested against a real ``MemoryStore``
-without standing up a database.
+the ``MemoryStore`` contract so downstream subsystems (planning, orchestration)
+can be developed and tested against a real store without standing up a database.
 
-The persistent local-first backend (SQLite + vector search per ADR-0002) and
-the user-data-rights operations (export/delete/retention per ADR-0004) are a
-separate, later slice: they need an embedding seam and Protocol additions that
-warrant their own ADR.
+It implements the full contract, including the data-rights operations
+(``delete``/``clear``/``export``/``purge_expired``) and read-time retention
+(expired records are hidden from ``get``/``search``) per ADR-0007. Semantic
+retrieval and persistence live in ``SqliteMemoryStore`` (ADR-0002/0006).
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import MemoryKind, MemoryRecord
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def _relevance(query_terms: set[str], content: str) -> float:
@@ -47,9 +51,23 @@ class InMemoryMemoryStore:
     their id; adding a record whose id already exists overwrites it.
     """
 
-    def __init__(self) -> None:
-        """Create an empty store."""
+    def __init__(self, *, now: Callable[[], datetime] = _utcnow) -> None:
+        """Create an empty store.
+
+        Args:
+            now: Clock used to decide whether a record has expired; injectable
+                for deterministic tests. Defaults to UTC wall-clock.
+        """
         self._records: dict[str, MemoryRecord] = {}
+        self._now = now
+
+    def _now_utc(self) -> datetime:
+        """The clock's current time, normalising a naive result to UTC."""
+        now = self._now()
+        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+
+    def _is_expired(self, record: MemoryRecord) -> bool:
+        return record.expires_at is not None and record.expires_at <= self._now_utc()
 
     async def add(self, record: MemoryRecord) -> str:
         """Persist a record and return its id.
@@ -65,8 +83,12 @@ class InMemoryMemoryStore:
         return record.id
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent."""
-        return self._records.get(record_id)
+        """Return the record with ``record_id``, or ``None`` if absent or expired."""
+        record = self._records.get(record_id)
+        if record is None or self._is_expired(record):
+            return None
+        # Copy so callers cannot mutate stored state, matching the persistent store.
+        return record.model_copy()
 
     async def search(
         self,
@@ -79,7 +101,8 @@ class InMemoryMemoryStore:
 
         Relevance is naive lexical overlap: the fraction of query terms that
         appear as substrings of a record's content. Records that match no query
-        term are omitted. An empty or whitespace-only query matches nothing.
+        term, and expired records, are omitted. An empty or whitespace-only
+        query matches nothing.
 
         Args:
             query: The search text.
@@ -98,8 +121,32 @@ class InMemoryMemoryStore:
         scored = [
             record.model_copy(update={"score": score})
             for record in self._records.values()
-            if (wanted is None or record.kind in wanted)
+            if not self._is_expired(record)
+            and (wanted is None or record.kind in wanted)
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
         return scored[:limit]
+
+    async def delete(self, record_id: str) -> bool:
+        """Delete one record, returning whether it existed."""
+        return self._records.pop(record_id, None) is not None
+
+    async def clear(self) -> int:
+        """Delete every record, returning the number removed."""
+        count = len(self._records)
+        self._records.clear()
+        return count
+
+    async def export(self) -> list[MemoryRecord]:
+        """Return an independent snapshot of all live (non-expired) records."""
+        return [
+            record.model_copy() for record in self._records.values() if not self._is_expired(record)
+        ]
+
+    async def purge_expired(self) -> int:
+        """Physically remove expired records, returning the number removed."""
+        expired = [rid for rid, record in self._records.items() if self._is_expired(record)]
+        for rid in expired:
+            del self._records[rid]
+        return len(expired)

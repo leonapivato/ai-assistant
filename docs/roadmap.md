@@ -74,9 +74,10 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
 - [x] **`memory` — persistent store + write loop.** SQLite + `sqlite-vec`
       semantic store (0600 perms, model/dim tagging) and a `MemoryIngestor`
       closing conflict-detect → policy → persist (ADR-0006 slices 2–3).
-- [ ] **`memory` — retention & data rights.** Enforce `expires_at` (prune/filter
-      expired) and add export/delete (ADR-0004 §6). `expires_at` is stamped but
-      not yet enforced.
+- [x] **`memory` — retention & data rights.** `expires_at` enforced at read time
+      (`get`/`search` hide expired) plus `purge_expired`; `delete`/`clear`/
+      `export` added to the `MemoryStore` contract (ADR-0007, satisfying ADR-0004
+      §6). Deferred: size caps, import, cross-tier keyring purge.
 - [ ] **`context` — `CurrentContext` assembly.**
 - [ ] **`planning` — `Goal`/`ActionPlan`/`ExecutionState`.**
 - [ ] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.

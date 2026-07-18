@@ -156,7 +156,9 @@ async def test_overflowing_temporary_ttl_raises_and_stores_nothing() -> None:
 
 
 async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:
-    store = InMemoryMemoryStore()
+    # The store shares the ingestor's fixed clock, so the just-stamped expiry
+    # (a week out) is still in the future and the record remains retrievable.
+    store = InMemoryMemoryStore(now=_fixed_now)
 
     result = await _ingestor(store).ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
 
