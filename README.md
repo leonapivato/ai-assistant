@@ -12,9 +12,9 @@ in the personalization and orchestration surrounding it.
 
 ## Status
 
-Pre-alpha. The project skeleton and tooling are in place and the first
-subsystem slices (`models`, `memory`) have landed. See `docs/roadmap.md` for the
-orchestration-artifact catalogue and build sequence, and `docs/adr/` for
+Pre-alpha. The project skeleton, tooling, and the `models` and `memory`
+subsystems have landed. See [`VISION.md`](VISION.md) for what we are building and
+why, `docs/roadmap.md` for the build sequence and status, and `docs/adr/` for
 ratified decisions.
 
 ## Requirements
