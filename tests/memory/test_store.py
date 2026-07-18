@@ -100,6 +100,14 @@ async def test_search_respects_limit() -> None:
     assert len(results) == 3
 
 
+async def test_non_positive_limit_matches_nothing() -> None:
+    store = InMemoryMemoryStore()
+    await store.add(_semantic("1", "shared keyword here"))
+
+    assert await store.search("keyword", limit=0) == []
+    assert await store.search("keyword", limit=-2) == []
+
+
 async def test_empty_query_matches_nothing() -> None:
     store = InMemoryMemoryStore()
     await store.add(_semantic("1", "some content"))

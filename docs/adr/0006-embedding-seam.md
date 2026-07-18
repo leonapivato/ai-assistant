@@ -113,3 +113,13 @@ Semantic retrieval ranks by vector similarity. Combining it with lexical signals
   memory sizes we see, if we adopt hybrid retrieval, or if `sqlite-vec`'s
   similarity performance forces a different vector backend (which, thanks to the
   `MemoryStore` seam, stays confined to `memory/`).
+
+## Amendments
+
+- **`Embedder` gains a `model_id` property** (added while implementing the
+  persistent store). §4 requires tagging stored vectors with the embedding model
+  so a mismatch is detectable, which the store cannot do from `dimensions` alone
+  (two models can share a dimension). `model_id` returns a stable identifier for
+  the embedding space. This is an additive extension to the `Embedder` Protocol
+  introduced by this ADR; both implementations (`FastEmbedEmbedder`,
+  `HashingEmbedder`) provide it, and the `SqliteMemoryStore` persists it.
