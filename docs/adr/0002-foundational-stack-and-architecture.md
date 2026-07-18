@@ -36,7 +36,8 @@ search (dependencies added when `memory/` is implemented).
 
 **Workflow / CI.** Local-only for now: `pre-commit` runs format + lint +
 type-check. Remote CI (e.g. GitHub Actions) is deferred; revisit in a future ADR
-when hosting is chosen.
+when hosting is chosen. *(Superseded by ADR-0010: hosting is now GitHub and the
+gate runs in CI on protected pull requests.)*
 
 ## Consequences
 

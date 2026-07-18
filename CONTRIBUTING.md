@@ -25,8 +25,11 @@ uv run lint-imports         # architecture boundary check
 uv run pytest               # tests
 ```
 
-`pre-commit` runs the fast subset on every commit. There is no remote CI yet
-(see ADR-0002), so the local gate is the only automated safety net — run it.
+`pre-commit` runs the fast subset on every commit; CI runs the full gate on
+every pull request and push to `master` (`.github/workflows/gate.yml`, ADR-0010).
+CI is the backstop now that more than one person commits — but run the gate
+locally before you push. A red PR is a wasted round-trip, not a first line of
+defence.
 
 ## Review (pre-merge)
 
@@ -75,10 +78,10 @@ inconsistency with a prior ADR, a seam that will not extend). **Trivial ADRs**
 
 ## Git & commits
 
-- **Trunk-based.** `main` is always green. Do each unit of work on a short-lived
-  branch named `<area>/<slug>` (e.g. `models/provider-protocol`).
-- **Linear history.** Rebase onto `main`; no merge commits. Condense a branch to
-  one (or a few) logical commits before integrating.
+- **Trunk-based.** `master` is always green. Do each unit of work on a
+  short-lived branch named `<area>/<slug>` (e.g. `models/provider-protocol`).
+- **Linear history.** Rebase onto `master`; no merge commits. Condense a branch
+  to one (or a few) logical commits before integrating.
 - **One logical change per commit.**
 - **Conventional Commits**, enforced by a `commit-msg` hook:
 
@@ -100,6 +103,28 @@ inconsistency with a prior ADR, a seam that will not extend). **Trivial ADRs**
   `git log --grep 'ADR-0003'`.
 - **Never commit** secrets or generated artifacts (`.gitignore` covers the
   common cases; `detect-private-key` guards commits).
+
+### Working on GitHub (pull requests)
+
+The repository is hosted on GitHub with more than one contributor, so `master`
+is protected and integration happens through pull requests — not local merges
+(ADR-0010).
+
+- **Never push to `master`.** Push your `<area>/<slug>` branch and open a PR.
+- **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
+  on every PR and push; a PR cannot merge while it is red. This is enforced for
+  everyone. Run the gate locally first anyway — CI is the backstop, not the
+  substitute.
+- **One approving review is required** before merge. Report the pre-merge Codex
+  reviews (architecture / adversarial, above) in the PR description: the outcome,
+  and any `blocker`/`major` finding you waived with its rationale.
+- **Rebase and merge.** Rebase your branch onto `master` and merge via GitHub's
+  *Rebase and merge* so linear history holds and each commit keeps its
+  `Refs: ADR-NNNN` trailer. Delete the branch after merge.
+- **Low-collision by design.** Work is split across low-overlap sections, so
+  rebase conflicts should be rare; whoever merges second resolves them.
+- Administrators retain a bypass for genuine emergencies — the gate still runs,
+  but use the escape hatch sparingly and say why in the PR.
 
 ## Typing & code style
 
