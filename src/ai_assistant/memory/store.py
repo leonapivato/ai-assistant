@@ -83,7 +83,7 @@ class InMemoryMemoryStore:
 
         Args:
             query: The search text.
-            limit: Maximum number of records to return.
+            limit: Maximum number of records to return; ``<= 0`` matches nothing.
             kinds: If given, restrict results to these memory kinds.
 
         Returns:
@@ -91,7 +91,7 @@ class InMemoryMemoryStore:
             ``score``, truncated to ``limit``.
         """
         query_terms = {term for term in query.lower().split() if term}
-        if not query_terms:
+        if limit <= 0 or not query_terms:
             return []
 
         wanted = {str(kind) for kind in kinds} if kinds is not None else None

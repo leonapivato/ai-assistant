@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `memory`: `SqliteMemoryStore.add` is now transactional — a failed multi-table
+  write rolls back and raises `MemoryStoreError` instead of leaving a partial
+  record/vector pair a later write could commit; a wrong-sized embedder vector
+  is rejected up front. `search` with a non-positive `limit` returns `[]` instead
+  of erroring or mis-slicing (also fixed in `InMemoryMemoryStore`). Found by the
+  Codex adversarial reviewer.
+
 ### Changed
 
 - `memory`: `SqliteMemoryStore` now ranks with cosine distance, so `search`

@@ -13,6 +13,7 @@ embedder fails loudly rather than returning meaningless similarities.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -98,8 +99,20 @@ class SqliteMemoryStore:
             Path(self._path).chmod(_OWNER_ONLY)
 
     async def add(self, record: MemoryRecord) -> str:
-        """Embed the record's content and persist it, returning its id."""
+        """Embed the record's content and persist it, returning its id.
+
+        Raises:
+            MemoryStoreError: If the embedder returns a wrong-sized vector, or
+                the write fails (the write is transactional — a failure leaves
+                the store unchanged).
+        """
         [vector] = await self._embedder.embed([record.content])
+        if len(vector) != self._embedder.dimensions:
+            msg = (
+                f"embedder returned a {len(vector)}-dim vector, "
+                f"expected {self._embedder.dimensions}"
+            )
+            raise MemoryStoreError(msg)
         async with self._lock:
             await asyncio.to_thread(self._add_sync, record, vector)
         return record.id
@@ -108,22 +121,31 @@ class SqliteMemoryStore:
         conn = self._conn
         blob = sqlite_vec.serialize_float32(list(vector))
         data = record.model_dump_json()
-        row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
-        if row is None:
-            cursor = conn.execute(
-                "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
-                (record.id, record.kind, data),
-            )
-            rowid = cursor.lastrowid
-        else:
-            rowid = row[0]
-            conn.execute(
-                "UPDATE records SET kind = ?, data = ? WHERE rowid = ?",
-                (record.kind, data, rowid),
-            )
-            conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
-        conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
-        conn.commit()
+        try:
+            row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
+            if row is None:
+                cursor = conn.execute(
+                    "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
+                    (record.id, record.kind, data),
+                )
+                rowid = cursor.lastrowid
+            else:
+                rowid = row[0]
+                conn.execute(
+                    "UPDATE records SET kind = ?, data = ? WHERE rowid = ?",
+                    (record.kind, data, rowid),
+                )
+                conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
+            conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
+            conn.commit()
+        except sqlite3.Error as exc:
+            # Roll back the partial multi-table write so a later commit cannot
+            # persist an inconsistent record/vector pair. A rollback failure
+            # (e.g. the connection is closed) must not mask the original cause.
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            msg = f"failed to store memory {record.id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if absent."""
@@ -146,7 +168,7 @@ class SqliteMemoryStore:
 
         Args:
             query: The search text; whitespace-only queries match nothing.
-            limit: Maximum number of records to return.
+            limit: Maximum number of records to return; ``<= 0`` matches nothing.
             kinds: If given, restrict results to these memory kinds (applied
                 after the vector search, so results are over-fetched first).
 
@@ -154,7 +176,7 @@ class SqliteMemoryStore:
             Matching records, most relevant first, each carrying a ``score``
             that is the cosine similarity to the query, in ``[0, 1]``.
         """
-        if not query.strip():
+        if limit <= 0 or not query.strip():
             return []
         [vector] = await self._embedder.embed([query])
         async with self._lock:
