@@ -27,7 +27,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The deadline is per attempt, so a hung call can be abandoned and retried;
   outer cancellation still propagates rather than being mistaken for a timeout.
   Tunables live in a `RetryPolicy` dataclass, mirrored by validated
-  `model_timeout_seconds`/`model_max_attempts`/`model_backoff_*` `Settings`.
+  `model_timeout_seconds`/`model_max_attempts`/`model_backoff_*` `Settings`,
+  with `RetryPolicy.from_settings` owning the mapping. Both layers reject
+  non-finite values — NaN and infinity slip past ordinary bounds checks and then
+  degrade silently — and backoff clamps its exponent and saturates through
+  division, so an extreme attempt count or base cannot overflow to infinity and
+  defeat the cap. (Non-finite config, the overflow, and the unmapped settings
+  were found by the Codex adversarial reviewer.) Recorded in ADR-0011.
 - `models`/`core`: a model-failure taxonomy. `ModelError` gains specific
   subclasses — `ModelAuthError`, `ModelRateLimitError`, `ModelTimeoutError`,
   `ModelUnavailableError`, `ModelContentFilterError`, `ModelResponseError` —

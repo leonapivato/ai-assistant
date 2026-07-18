@@ -19,17 +19,24 @@ start the next one.
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelTimeoutError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
+    from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import Message
+
+# 2.0 ** 1024 raises OverflowError, so the exponent is clamped below that. The
+# bound never truncates real growth: once the ceiling saturates the configured
+# cap, further doublings are discarded by the cap anyway.
+_MAX_BACKOFF_DOUBLINGS: Final = 1023
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,13 +62,45 @@ class RetryPolicy:
     backoff_base_seconds: float = 0.5
     backoff_max_seconds: float = 30.0
 
+    @classmethod
+    def from_settings(cls, settings: Settings) -> RetryPolicy:
+        """Build a policy from application configuration.
+
+        The mapping lives here so the `Settings` knobs have exactly one
+        interpretation. Constructing the wrapper itself belongs to whoever
+        composes the pipeline, which today is nobody — `orchestration` will.
+
+        Args:
+            settings: Loaded application settings.
+
+        Returns:
+            The policy those settings describe.
+        """
+        return cls(
+            timeout_seconds=settings.model_timeout_seconds,
+            max_attempts=settings.model_max_attempts,
+            backoff_base_seconds=settings.model_backoff_base_seconds,
+            backoff_max_seconds=settings.model_backoff_max_seconds,
+        )
+
     def __post_init__(self) -> None:
         """Validate the policy at construction.
 
         Raises:
-            ConfigurationError: If any bound is non-positive, ``max_attempts``
-                is below 1, or the base delay exceeds the cap.
+            ConfigurationError: If any bound is non-positive or non-finite,
+                ``max_attempts`` is below 1, or the base delay exceeds the cap.
         """
+        # NaN and infinity pass every comparison below (NaN compares False to
+        # everything, infinity is "positive"), so they are rejected explicitly.
+        # Unchecked they degrade silently rather than loudly: an infinite
+        # timeout disables the deadline, an infinite cap unbounds backoff, and
+        # a NaN deadline makes asyncio.timeout behave unpredictably.
+        for name in ("timeout_seconds", "backoff_base_seconds", "backoff_max_seconds"):
+            value: float = getattr(self, name)
+            if not math.isfinite(value):
+                msg = f"{name} must be a finite number, got {value}"
+                raise ConfigurationError(msg)
+
         if self.timeout_seconds <= 0:
             msg = f"timeout_seconds must be positive, got {self.timeout_seconds}"
             raise ConfigurationError(msg)
@@ -130,10 +169,14 @@ class RetryingProvider:
         """
         # 2.0 rather than 2: ``int ** int`` is typed as Any (it may return a
         # float for a negative exponent), which would leak into the return type.
-        ceiling = min(
-            self._policy.backoff_base_seconds * 2.0 ** (attempt - 1),
-            self._policy.backoff_max_seconds,
-        )
+        growth = 2.0 ** min(attempt - 1, _MAX_BACKOFF_DOUBLINGS)
+        base = self._policy.backoff_base_seconds
+        cap = self._policy.backoff_max_seconds
+        # Compare by dividing rather than computing ``base * growth`` and
+        # capping after: for a large base that product can overflow to inf, and
+        # min() would then hand back the cap only by luck. Division cannot
+        # overflow, so this saturates cleanly.
+        ceiling = cap if base >= cap / growth else base * growth
         return ceiling * self._jitter()
 
     async def complete(
