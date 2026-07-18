@@ -30,6 +30,7 @@ Highest merged ADR is **0010**; drop your row when the ADR merges.
 | ADR  | Title                | Owner  | Branch                 |
 | ---- | -------------------- | ------ | ---------------------- |
 | 0011 | Model resilience     | mattewolf | `models/error-taxonomy` |
+| 0012 | Codex review in CI   | leonapivato | `docs/adr-0012-codex-review-ci` |
 
 ## Shared surface
 
