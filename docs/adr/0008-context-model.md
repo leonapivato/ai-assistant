@@ -1,6 +1,6 @@
 # 8. Situational context: `CurrentContext` and a source seam
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 
 ## Context
