@@ -1,6 +1,6 @@
 # 7. Memory data rights and retention
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 
 ## Context
