@@ -41,16 +41,19 @@ backend is swappable exactly like the chat model is:
 ```python
 class Embedder(Protocol):
     @property
+    def model_id(self) -> str: ...
+
+    @property
     def dimensions(self) -> int: ...
 
-    async def embed(
-        self, texts: Sequence[str], *, model: str | None = None
-    ) -> list[Sequence[float]]: ...
+    async def embed(self, texts: Sequence[str]) -> list[Sequence[float]]: ...
 ```
 
 Batch is the primitive (embedding is far cheaper amortised over a batch). A
 `dimensions` property lets the store size its vector column without a probe
 call. A `core` type alias `Embedding = Sequence[float]` names the return element.
+(This block reflects the as-built signature; see **Amendments** for the two
+changes from the originally-proposed shape.)
 
 ### 2. On-device embedding is the default; cloud embedding is opt-in
 
@@ -123,3 +126,11 @@ Semantic retrieval ranks by vector similarity. Combining it with lexical signals
   the embedding space. This is an additive extension to the `Embedder` Protocol
   introduced by this ADR; both implementations (`FastEmbedEmbedder`,
   `HashingEmbedder`) provide it, and the `SqliteMemoryStore` persists it.
+- **`embed` drops the per-call `model` parameter** (ratifying the as-built
+  contract). The originally-proposed signature took `*, model: str | None = None`,
+  but §4 of this ADR requires a store to embed every record with one model —
+  vectors from different models are not comparable, so per-call model selection
+  would produce a silently corrupt index. An embedder is therefore bound to a
+  single model for its lifetime (identified by `model_id`), and `embed` takes
+  only `texts`. This is a narrowing of the Protocol; both implementations already
+  match it. The §1 code block above has been updated to this signature.
