@@ -96,3 +96,19 @@ async def test_procedural_and_episodic_targets_are_deferred() -> None:
 async def test_rationale_records_the_feedback() -> None:
     [proposal] = await _processor().process(_event(content="likes tea"))
     assert "likes tea" in proposal.rationale
+
+
+async def test_deferred_target_does_not_consume_an_id() -> None:
+    issued: list[str] = []
+
+    def factory() -> str:
+        issued.append(f"id-{len(issued) + 1}")
+        return issued[-1]
+
+    processor = RuleBasedFeedbackProcessor(id_factory=factory)
+
+    assert await processor.process(_event(memory_kind=MemoryKind.PROCEDURAL)) == []
+    assert issued == []  # a deferred target minted no id
+
+    [proposal] = await processor.process(_event(memory_kind=MemoryKind.PREFERENCE))
+    assert proposal.proposed.id == "id-1"  # the first id goes to the first real record

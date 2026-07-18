@@ -66,29 +66,36 @@ class RuleBasedFeedbackProcessor:
         ]
 
     def _to_record(self, event: FeedbackEvent) -> MemoryRecord | None:
-        """Build the typed record for ``event``, or ``None`` for a deferred kind."""
-        provenance = Provenance(
+        """Build the typed record for ``event``, or ``None`` for a deferred kind.
+
+        A new id and provenance are minted only for a *supported* target, so a
+        deferred kind does not consume an id from an allocating factory.
+        """
+        match event.memory_kind:
+            case MemoryKind.PREFERENCE:
+                return PreferenceMemory(
+                    id=self._id_factory(),
+                    content=event.content,
+                    preference=event.content,
+                    context=event.subject,
+                    provenance=self._provenance(event),
+                )
+            case MemoryKind.SEMANTIC:
+                return SemanticMemory(
+                    id=self._id_factory(),
+                    content=event.content,
+                    fact=event.content,
+                    provenance=self._provenance(event),
+                )
+            case _:  # PROCEDURAL, EPISODIC — need richer structure (deferred, ADR-0009 §6)
+                return None
+
+    @staticmethod
+    def _provenance(event: FeedbackEvent) -> Provenance:
+        """User-asserted provenance carrying the feedback's evidence and time."""
+        return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
             evidence=list(event.evidence),
             last_updated=event.created_at,
         )
-        record_id = self._id_factory()
-        match event.memory_kind:
-            case MemoryKind.PREFERENCE:
-                return PreferenceMemory(
-                    id=record_id,
-                    content=event.content,
-                    preference=event.content,
-                    context=event.subject,
-                    provenance=provenance,
-                )
-            case MemoryKind.SEMANTIC:
-                return SemanticMemory(
-                    id=record_id,
-                    content=event.content,
-                    fact=event.content,
-                    provenance=provenance,
-                )
-            case _:  # PROCEDURAL, EPISODIC — need richer structure (deferred, ADR-0009 §6)
-                return None
