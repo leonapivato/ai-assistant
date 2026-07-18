@@ -319,8 +319,20 @@ class FeedbackEvent(BaseModel):
     )
     created_at: datetime = Field(description="When the feedback was given (tz-aware).")
 
+    @field_validator("content")
+    @classmethod
+    def _content_is_present(cls, value: str) -> str:
+        """Require non-empty content, so feedback cannot become a blank memory."""
+        stripped = value.strip()
+        if not stripped:
+            msg = "feedback content must not be empty"
+            raise ValueError(msg)
+        return stripped
+
     @field_validator("created_at")
     @classmethod
-    def _created_at_is_utc_aware(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC-aware (a naive value is assumed UTC)."""
-        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    def _created_at_is_utc(cls, value: datetime) -> datetime:
+        """Normalise the timestamp to UTC (a naive value is assumed UTC)."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)

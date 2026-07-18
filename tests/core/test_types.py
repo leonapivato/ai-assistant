@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -173,6 +174,40 @@ def test_feedback_event_created_at_naive_is_coerced_to_utc() -> None:
     )
     assert event.created_at == datetime(2026, 1, 1, 9, tzinfo=UTC)
     assert event.created_at.tzinfo is UTC
+
+
+def test_feedback_event_created_at_aware_is_converted_to_utc() -> None:
+    # 09:00 in New York (UTC-5 in January) is 14:00 UTC — the same instant, in UTC.
+    aware = datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("America/New_York"))
+    event = FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=MemoryKind.SEMANTIC,
+        content="office is in Boston",
+        created_at=aware,
+    )
+    assert event.created_at == datetime(2026, 1, 1, 14, tzinfo=UTC)
+    assert event.created_at.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_feedback_event_rejects_blank_content(blank: str) -> None:
+    with pytest.raises(ValidationError, match="content must not be empty"):
+        FeedbackEvent(
+            kind=FeedbackKind.PREFERENCE,
+            memory_kind=MemoryKind.PREFERENCE,
+            content=blank,
+            created_at=_WHEN,
+        )
+
+
+def test_feedback_event_strips_content() -> None:
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="  prefers tea  ",
+        created_at=_WHEN,
+    )
+    assert event.content == "prefers tea"
 
 
 def test_proposal_defaults_to_personal_sensitivity() -> None:

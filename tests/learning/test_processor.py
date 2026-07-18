@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+from feedback_processor_contract import FeedbackProcessorContract
+
 from ai_assistant.core.protocols import FeedbackProcessor
 from ai_assistant.core.types import (
     FeedbackEvent,
@@ -38,6 +41,14 @@ def _event(
 
 def _processor() -> RuleBasedFeedbackProcessor:
     return RuleBasedFeedbackProcessor(id_factory=lambda: "rec-1")
+
+
+class TestRuleBasedFeedbackProcessorContract(FeedbackProcessorContract):
+    """Runs RuleBasedFeedbackProcessor through the shared FeedbackProcessor suite."""
+
+    @pytest.fixture
+    def processor(self) -> FeedbackProcessor:
+        return RuleBasedFeedbackProcessor()
 
 
 def test_conforms_to_protocol() -> None:
