@@ -13,7 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `within_working_hours`) and a `ContextProvider` Protocol.
   `AssemblingContextProvider` composes internal `ContextSource`s
   (`ClockContextSource` today) — merging them concurrently, degrading gracefully
-  when a source fault occurs (an optional facet just goes absent), and raising
+  when a source faults, hangs (a per-source timeout), or returns a faulting
+  mapping (an optional facet just goes absent), and raising
   the new `ContextError` only on a wiring bug (a field collision or a missing
   required facet). Adds `timezone`/working-hours `Settings`, validated at load
   (an unknown timezone or empty window is a `ConfigurationError`). The

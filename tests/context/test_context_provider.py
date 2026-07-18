@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 import pytest
 
@@ -11,9 +12,6 @@ from ai_assistant.context import AssemblingContextProvider, ClockContextSource
 from ai_assistant.core.errors import ContextError
 from ai_assistant.core.protocols import ContextProvider
 from ai_assistant.core.types import CurrentContext, TimeOfDay
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 _THU_2PM = datetime(2026, 1, 1, 14, tzinfo=UTC)
 
@@ -56,6 +54,43 @@ class _FailingNameSource:
     async def contribute(self) -> Mapping[str, object]:
         msg = "source down"
         raise RuntimeError(msg)
+
+
+class _HangingSource:
+    """A source whose contribute() never completes, to exercise the timeout."""
+
+    @property
+    def name(self) -> str:
+        return "hang"
+
+    async def contribute(self) -> Mapping[str, object]:
+        await asyncio.Event().wait()  # never set → hangs until cancelled
+        return {}
+
+
+class _ExplodingMapping(Mapping[str, object]):
+    """A Mapping whose iteration raises, mimicking a lazy/faulting contribution."""
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        msg = "lazy decode failed"
+        raise RuntimeError(msg)
+
+    def __len__(self) -> int:
+        return 1
+
+
+class _LazyFailSource:
+    """A source that returns successfully, but whose mapping faults on use."""
+
+    @property
+    def name(self) -> str:
+        return "lazy"
+
+    async def contribute(self) -> Mapping[str, object]:
+        return _ExplodingMapping()
 
 
 def _clock() -> ClockContextSource:
@@ -108,6 +143,26 @@ async def test_degradation_survives_a_source_whose_name_also_raises() -> None:
     # The degradation path must not itself raise while resolving a failing
     # source's name; the clock still supplies the required core.
     provider = AssemblingContextProvider([_clock(), _FailingNameSource()])
+
+    ctx = await provider.assemble()
+
+    assert ctx.time_of_day is TimeOfDay.AFTERNOON
+
+
+async def test_hung_source_times_out_and_degrades() -> None:
+    # A source that never returns must not stall assembly; it times out and the
+    # clock still supplies the required core.
+    provider = AssemblingContextProvider([_clock(), _HangingSource()], source_timeout=0.05)
+
+    ctx = await provider.assemble()
+
+    assert ctx.time_of_day is TimeOfDay.AFTERNOON
+
+
+async def test_faulting_returned_mapping_degrades() -> None:
+    # A source that returns a mapping which raises on consumption degrades within
+    # _safe_contribute rather than leaking into the merge loop.
+    provider = AssemblingContextProvider([_clock(), _LazyFailSource()])
 
     ctx = await provider.assemble()
 

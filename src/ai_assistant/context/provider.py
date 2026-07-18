@@ -45,14 +45,20 @@ class AssemblingContextProvider:
     :class:`~ai_assistant.core.protocols.ContextProvider`.
     """
 
-    def __init__(self, sources: Sequence[ContextSource]) -> None:
+    def __init__(
+        self, sources: Sequence[ContextSource], *, source_timeout: float | None = 5.0
+    ) -> None:
         """Initialise the provider.
 
         Args:
             sources: The context sources to compose. Their field contributions
                 must be disjoint; overlap is treated as a wiring bug.
+            source_timeout: Per-source deadline in seconds; a source that exceeds
+                it is skipped (its facet degrades to absent) so a hung source
+                cannot stall assembly. ``None`` disables the timeout.
         """
         self._sources = tuple(sources)
+        self._source_timeout = source_timeout
 
     async def assemble(self) -> CurrentContext:
         """Merge all sources' contributions into a single ``CurrentContext``.
@@ -82,9 +88,24 @@ class AssemblingContextProvider:
             raise ContextError(msg) from exc
 
     async def _safe_contribute(self, source: ContextSource) -> Mapping[str, object]:
-        """Return a source's contribution, degrading a failure to an empty one."""
+        """Return a source's contribution, degrading any failure to an empty one.
+
+        Covers a raise, a timeout (a hung source), and a fault raised while
+        *consuming* the returned mapping (a lazy/faulting ``Mapping``) — the
+        contribution is materialised here, under the guard, so nothing escapes to
+        the merge loop.
+        """
         try:
-            return await source.contribute()
+            async with asyncio.timeout(self._source_timeout):
+                contribution = await source.contribute()
+            return dict(contribution)  # materialise now, so a lazy failure degrades here
+        except TimeoutError:
+            _log.warning(
+                "context source timed out; skipping",
+                source=_safe_name(source),
+                timeout=self._source_timeout,
+            )
+            return {}
         except Exception as exc:  # advisory: a failing source degrades, not aborts
             # Resolve the name defensively — the degradation path must not itself
             # raise if a misbehaving source's ``name`` also fails.
