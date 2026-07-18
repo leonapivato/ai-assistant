@@ -182,6 +182,16 @@ async def test_expiry_boundary_is_exclusive_at_now() -> None:
     assert await store.get("future") is not None
 
 
+async def test_naive_expiry_is_treated_as_utc_not_a_crash() -> None:
+    store = InMemoryMemoryStore(now=_fixed_now)
+    # A naive deadline (accepted by the model, coerced to UTC) must not crash the
+    # aware-vs-naive comparison; here it is in the past, so the record is hidden.
+    await store.add(_semantic("1", "keyword", expires_at=datetime(2026, 1, 2)))  # noqa: DTZ001
+
+    assert await store.get("1") is None
+    assert await store.search("keyword") == []
+
+
 async def test_purge_expired_removes_only_expired_and_returns_count() -> None:
     store = InMemoryMemoryStore(now=_fixed_now)
     await store.add(_semantic("live", "keeps"))

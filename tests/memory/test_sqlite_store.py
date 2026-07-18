@@ -362,10 +362,9 @@ async def test_purge_expired_removes_only_expired_and_returns_count(
     assert await store.purge_expired() == 0
 
 
-async def test_migration_adds_expires_at_column_to_legacy_db(tmp_path: Path) -> None:
-    # A database created before ADR-0007 has a records table with no expires_at.
-    db = tmp_path / "legacy.db"
-    legacy = sqlite3.connect(db)
+def _write_legacy_db(path: Path, records: list[MemoryRecord]) -> None:
+    """Create a pre-ADR-0007 database (records table without expires_at)."""
+    legacy = sqlite3.connect(path)
     legacy.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     legacy.executemany(
         "INSERT INTO meta(key, value) VALUES (?, ?)",
@@ -375,8 +374,17 @@ async def test_migration_adds_expires_at_column_to_legacy_db(tmp_path: Path) -> 
         "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
         "kind TEXT NOT NULL, data TEXT NOT NULL)"
     )
+    legacy.executemany(
+        "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
+        [(r.id, r.kind, r.model_dump_json()) for r in records],
+    )
     legacy.commit()
     legacy.close()
+
+
+async def test_migration_adds_expires_at_column_and_accepts_writes(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    _write_legacy_db(db, [])
 
     store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
     try:
@@ -386,6 +394,42 @@ async def test_migration_adds_expires_at_column_to_legacy_db(tmp_path: Path) -> 
         assert await store.get("1") is not None
     finally:
         store.close()
+
+
+async def test_migration_backfills_expiry_so_legacy_expired_stays_forgotten(
+    tmp_path: Path,
+) -> None:
+    # Pre-ADR-0007 records carry expires_at only inside their JSON. Migration must
+    # backfill it, or an already-expired legacy memory would come back to life.
+    db = tmp_path / "legacy.db"
+    _write_legacy_db(
+        db,
+        [
+            _semantic("expired", "legacy expired", expires_at=datetime(2026, 1, 2, tzinfo=UTC)),
+            _semantic("live", "legacy live"),
+        ],
+    )
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        assert await store.get("expired") is None  # backfilled deadline honoured
+        assert await store.get("live") is not None
+        assert [r.id for r in await store.export()] == ["live"]
+        assert await store.purge_expired() == 1
+    finally:
+        store.close()
+
+
+async def test_export_wraps_corrupt_stored_record(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    store = make_store()
+    await store.add(_semantic("1", "fine"))
+    store._conn.execute("UPDATE records SET data = ? WHERE id = ?", ("not-json", "1"))
+    store._conn.commit()
+
+    with pytest.raises(MemoryStoreError, match="could not be decoded"):
+        await store.export()
 
 
 async def test_persists_across_reopen(make_store: Callable[..., SqliteMemoryStore]) -> None:

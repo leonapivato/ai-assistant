@@ -44,6 +44,27 @@ def test_confidence_is_bounded() -> None:
         Provenance(source=MemorySource.INFERRED, confidence=1.5, last_updated=_WHEN)
 
 
+def test_naive_expires_at_is_coerced_to_utc() -> None:
+    prov = Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN)
+    record = SemanticMemory(
+        id="1",
+        content="c",
+        fact="f",
+        provenance=prov,
+        expires_at=datetime(2026, 1, 2),  # noqa: DTZ001
+    )
+    assert record.expires_at == datetime(2026, 1, 2, tzinfo=UTC)
+    assert record.expires_at is not None
+    assert record.expires_at.tzinfo is UTC
+
+
+def test_aware_expires_at_is_left_unchanged() -> None:
+    prov = Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN)
+    deadline = datetime(2026, 1, 2, tzinfo=UTC)
+    record = SemanticMemory(id="1", content="c", fact="f", provenance=prov, expires_at=deadline)
+    assert record.expires_at == deadline
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [

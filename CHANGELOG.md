@@ -15,8 +15,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its `expires_at` is treated as forgotten — `get`/`search` never return it,
   independent of whether `purge_expired` has reclaimed it — with an injectable
   clock for deterministic expiry. `clear` scopes to this store's Tier-1 rows;
-  the cross-tier keyring purge remains a higher-layer concern. (Additive
-  `MemoryStore` Protocol change.)
+  the cross-tier keyring purge remains a higher-layer concern. Opening a
+  pre-ADR-0007 database backfills the new `expires_at` column from each record's
+  JSON, so already-expired legacy memories stay forgotten; a naive `expires_at`
+  is normalised to UTC so both stores agree; and `export` surfaces read/decode
+  failures as `MemoryStoreError` like the other operations. (Additive
+  `MemoryStore` Protocol change; backfill, tz-normalisation, and export error
+  wrapping found by the Codex adversarial reviewer.)
 
 ### Fixed
 

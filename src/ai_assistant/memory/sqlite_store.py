@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import sqlite_vec
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import MemoryRecord
@@ -111,10 +112,35 @@ class SqliteMemoryStore:
         return conn
 
     def _migrate_records(self, conn: sqlite3.Connection) -> None:
-        """Add the ``expires_at`` column to a records table created before ADR-0007."""
+        """Add and backfill the ``expires_at`` column for a pre-ADR-0007 table.
+
+        Records written before this slice carry their retention deadline only
+        inside the JSON blob. Adding the column alone would leave it ``NULL`` and
+        resurrect already-expired memories, so we backfill it from each record's
+        stored ``expires_at`` (transactionally, within the setup commit).
+        """
         columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
-        if "expires_at" not in columns:
-            conn.execute("ALTER TABLE records ADD COLUMN expires_at REAL")
+        if "expires_at" in columns:
+            return
+        conn.execute("ALTER TABLE records ADD COLUMN expires_at REAL")
+        for rowid, data in conn.execute("SELECT rowid, data FROM records").fetchall():
+            expires = self._expires_epoch_from_json(data)
+            if expires is not None:
+                conn.execute("UPDATE records SET expires_at = ? WHERE rowid = ?", (expires, rowid))
+
+    def _expires_epoch_from_json(self, data: str) -> float | None:
+        """Read a record's retention deadline from its JSON, as an epoch or None."""
+        try:
+            raw = json.loads(data).get("expires_at")
+            if raw is None:
+                return None
+            deadline = datetime.fromisoformat(raw)
+        except (ValueError, TypeError, AttributeError) as exc:
+            msg = f"failed to read a retention deadline during migration: {exc}"
+            raise MemoryStoreError(msg) from exc
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        return deadline.timestamp()
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
         want = {
@@ -212,11 +238,20 @@ class SqliteMemoryStore:
     def _now_epoch(self) -> float:
         return self._now().timestamp()
 
+    @staticmethod
+    def _decode(data: str) -> MemoryRecord:
+        """Decode a stored JSON record, surfacing corruption as ``MemoryStoreError``."""
+        try:
+            return _ADAPTER.validate_json(data)
+        except ValidationError as exc:
+            msg = f"stored memory could not be decoded: {exc}"
+            raise MemoryStoreError(msg) from exc
+
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if absent or expired."""
         async with self._lock:
             data = await asyncio.to_thread(self._get_sync, record_id, self._now_epoch())
-        return None if data is None else _ADAPTER.validate_json(data)
+        return None if data is None else self._decode(data)
 
     def _get_sync(self, record_id: str, now: float) -> str | None:
         row = self._conn.execute(
@@ -256,9 +291,7 @@ class SqliteMemoryStore:
             rows = await asyncio.to_thread(
                 self._search_sync, vector, limit, kinds, self._now_epoch()
             )
-        return [
-            _ADAPTER.validate_json(data).model_copy(update={"score": score}) for data, score in rows
-        ]
+        return [self._decode(data).model_copy(update={"score": score}) for data, score in rows]
 
     def _search_sync(
         self,
@@ -331,16 +364,26 @@ class SqliteMemoryStore:
         return int(count)
 
     async def export(self) -> list[MemoryRecord]:
-        """Return a snapshot of all live (non-expired) records."""
+        """Return a snapshot of all live (non-expired) records.
+
+        Raises:
+            MemoryStoreError: If the store cannot be read or a stored record is
+                corrupt.
+        """
         async with self._lock:
             rows = await asyncio.to_thread(self._export_sync, self._now_epoch())
-        return [_ADAPTER.validate_json(data) for data in rows]
+        return [self._decode(data) for data in rows]
 
     def _export_sync(self, now: float) -> list[str]:
-        rows = self._conn.execute(
-            "SELECT data FROM records WHERE expires_at IS NULL OR expires_at > ? ORDER BY rowid",
-            (now,),
-        ).fetchall()
+        try:
+            rows = self._conn.execute(
+                "SELECT data FROM records "
+                "WHERE expires_at IS NULL OR expires_at > ? ORDER BY rowid",
+                (now,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to export memories: {exc}"
+            raise MemoryStoreError(msg) from exc
         return [row[0] for row in rows]
 
     async def purge_expired(self) -> int:
