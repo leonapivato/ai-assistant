@@ -6,11 +6,25 @@ test exercises the real env-in / KEY=VALUE-out contract, not an imported shape.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "codex_review_decision.py"
+
+
+def test_helper_uses_only_single_type_excepts() -> None:
+    # The CI runner invokes this script with its *stock* python3 (older than the
+    # project's 3.14). A multi-type `except (A, B)` is reformatted by ruff to the
+    # 3.14-only `except A, B:` — a SyntaxError there. Keep excepts single-type.
+    tree = ast.parse(_SCRIPT.read_text())
+    multi = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ExceptHandler) and isinstance(n.type, ast.Tuple)
+    ]
+    assert not multi, "multi-type except becomes 3.14-only syntax; use single-type here"
 
 
 def _run(env: dict[str, str]) -> dict[str, str]:
