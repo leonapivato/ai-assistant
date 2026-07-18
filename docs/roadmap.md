@@ -78,7 +78,10 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       (`get`/`search` hide expired) plus `purge_expired`; `delete`/`clear`/
       `export` added to the `MemoryStore` contract (ADR-0007, satisfying ADR-0004
       §6). Deferred: size caps, import, cross-tier keyring purge.
-- [ ] **`context` — `CurrentContext` assembly.**
+- [x] **`context` — `CurrentContext` assembly.** Temporal `CurrentContext` +
+      `ContextProvider`, assembled from an internal `ContextSource` seam
+      (`ClockContextSource`), with graceful degradation (ADR-0008). Facets
+      (calendar, tasks, ...) added as optional fields when their sources land.
 - [ ] **`planning` — `Goal`/`ActionPlan`/`ExecutionState`.**
 - [ ] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.
 - [ ] **`permissions` — `ActionPolicy` + audit trail** (ADR-0004).

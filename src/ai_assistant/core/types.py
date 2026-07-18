@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # A user-asserted memory is, by definition, fully trusted.
 _FULL_CONFIDENCE = 1.0
@@ -251,4 +251,31 @@ class MemoryIngestResult(BaseModel):
     record_id: str | None = Field(
         default=None,
         description="Id of the record written or merged, or None if nothing was stored.",
+    )
+
+
+class TimeOfDay(StrEnum):
+    """A coarse bucket of the local time of day."""
+
+    MORNING = "morning"
+    AFTERNOON = "afternoon"
+    EVENING = "evening"
+    NIGHT = "night"
+
+
+class CurrentContext(BaseModel):
+    """The situational "right now" that shapes a response (see ADR-0008).
+
+    A temporal core today; future facets (calendar, tasks, device, ...) are added
+    as optional fields when their source subsystems exist. Advisory, not durable
+    state: it is assembled fresh per request and never stored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    now: datetime = Field(description="The tz-aware reference instant for this context.")
+    time_of_day: TimeOfDay
+    is_weekend: bool
+    within_working_hours: bool = Field(
+        description="Whether the local time falls in the configured working-hours window.",
     )

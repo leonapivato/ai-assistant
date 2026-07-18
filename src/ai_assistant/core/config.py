@@ -37,6 +37,21 @@ class Settings(BaseSettings):
         description="Default model in pydantic-ai 'provider:model' form.",
     )
 
+    # --- Context ---------------------------------------------------------
+    # Used to localise the situational context (ADR-0008). ``timezone`` is an
+    # IANA name (validated when the clock source is wired); working hours are a
+    # local-time window, end-exclusive.
+    timezone: str = Field(default="UTC", description="IANA timezone for local-time context.")
+    working_hours_start: int = Field(
+        default=9, ge=0, le=23, description="First hour of the working-hours window (local)."
+    )
+    working_hours_end: int = Field(
+        default=17,
+        ge=1,
+        le=24,
+        description="End hour of the working-hours window (local, exclusive).",
+    )
+
 
 def load_settings() -> Settings:
     """Load and validate settings from the environment.

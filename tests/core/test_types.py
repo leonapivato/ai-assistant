@@ -8,6 +8,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
+    CurrentContext,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -19,6 +20,7 @@ from ai_assistant.core.types import (
     ProceduralMemory,
     Provenance,
     SemanticMemory,
+    TimeOfDay,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -116,6 +118,25 @@ def test_decision_rejects_fields_foreign_to_its_kind() -> None:
         MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", merge_into="other")
     with pytest.raises(ValidationError, match="ttl is only valid"):
         MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", ttl=timedelta(days=1))
+
+
+def test_current_context_constructs_and_forbids_extra_fields() -> None:
+    ctx = CurrentContext(
+        now=_WHEN,
+        time_of_day=TimeOfDay.MORNING,
+        is_weekend=False,
+        within_working_hours=True,
+    )
+    assert ctx.time_of_day is TimeOfDay.MORNING
+
+    with pytest.raises(ValidationError):
+        CurrentContext(
+            now=_WHEN,
+            time_of_day=TimeOfDay.MORNING,
+            is_weekend=False,
+            within_working_hours=True,
+            calendar="busy",  # type: ignore[call-arg]  # extra field must be rejected
+        )
 
 
 def test_proposal_defaults_to_personal_sensitivity() -> None:
