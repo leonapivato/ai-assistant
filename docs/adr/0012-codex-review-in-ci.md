@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-18
+- Amended: 2026-07-18 (§4 — CI cannot run Codex's own sandbox; see the amendment)
 
 ## Context
 
@@ -41,10 +42,11 @@ findings to the PR.
 ### 1. One engine, two triggers
 
 `scripts/codex-review.sh` and the rubrics in `docs/review/` remain the single
-review engine: CI runs that **same script**, with the same read-only repo access
-the local run has, rather than reimplementing review logic in YAML. So local and
-CI cannot drift, and the reviewer can read across the tree to confirm a finding
-(the trust this rests on is §4). The local invocation (`just review-codex …`) is
+review engine: CI runs that **same script**, rather than reimplementing review
+logic in YAML. So local and CI cannot drift, and the reviewer can read across the
+tree to confirm a finding (the trust this rests on is §4). The local run confines
+that access with Codex's read-only sandbox; the CI runner cannot initialize that
+sandbox and drops it — see the §4 amendment. The local invocation (`just review-codex …`) is
 **kept** for fast, zero-latency iteration with no remote round-trip.
 
 Triggers:
@@ -138,6 +140,39 @@ secrets from fork PRs by default, so an untrusted fork's diff cannot reach the k
 answer. Building an isolated reviewer (tool-less, or a sandboxed/scoped-retrieval
 harness) before then would defend against a contributor we do not have, at the
 cost of real work and a shallower reviewer.
+
+**Amendment (2026-07-18): Codex's own sandbox does not run in CI.** The local
+run executes Codex with its read-only sandbox (`-s read-only`), which confines
+the reviewer to reading the repo and — critically — **blocks network egress**.
+On GitHub-hosted runners that sandbox cannot initialize: bubblewrap fails to
+bring up the loopback interface in its network namespace
+(`bwrap: loopback: Failed RTM_NEWADDR`), and under read-only mode that failure
+breaks every file read, degrading the review to an apology instead of a verdict.
+No Codex mode keeps the filesystem read-only *and* blocks the network without
+that namespace, so in CI we run Codex **without its sandbox**
+(`--dangerously-bypass-approvals-and-sandbox`, the case its own help documents
+for "environments that are externally sandboxed" — the ephemeral runner is
+exactly that). `scripts/codex-review.sh` selects this only when
+`GITHUB_ACTIONS == "true"` (or `CODEX_REVIEW_NO_SANDBOX=1`) and keeps
+`-s read-only` locally, where the sandbox works and is a real layer.
+
+- *Threat-model consequence.* Dropping the sandbox removes the network-egress
+  block. A successful prompt injection through the diff (above) could therefore
+  now exfiltrate the review key **silently over the network**, not only by
+  emitting it into the visible PR comment. We accept this for the current team:
+  the *channel* widens, but the *stake* and the *risk owner* do not — the key is
+  dedicated, spend-capped, and rotatable; the runner is ephemeral; and both
+  review paths are gated to write-access actors we already trust. A leak still
+  costs a capped key we rotate in minutes, not user data or a primary credential.
+- *Alternatives rejected.* Making bubblewrap's namespace work on the runner is
+  fragile — pinned to the runner image's kernel/AppArmor and to Codex's sandbox
+  internals (both change without notice), and against Codex's documented CI
+  guidance; when it breaks it degrades silently to no review. An egress allowlist
+  (permit only OpenAI) needs recurring DNS/IP maintenance GitHub gives no native
+  support for. Neither is worth it to protect a capped, rotatable key.
+- *Revisit trigger unchanged — and it also resolves this.* Moving to fork-based
+  contribution when the trust assumption weakens withholds the key from untrusted
+  diffs entirely, at which point the widened exfil channel is moot.
 
 ### 5. Freshness: a result binds to the commit it reviewed
 
