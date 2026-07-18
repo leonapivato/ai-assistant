@@ -1,0 +1,154 @@
+name: codex-review
+
+# Runs the existing Codex review engine (scripts/codex-review.sh) in CI and posts
+# its findings to the PR as an advisory, non-blocking comment. Ratified in
+# ADR-0012.
+#
+# Two triggers:
+#   - workflow_run: after the `gate` workflow succeeds on a PR, auto-review the
+#     ready (non-draft) PR with the adversarial persona. Using workflow_run is
+#     what ties review to a *green gate for the same SHA* (ADR-0012 §1).
+#   - issue_comment: a "/review [persona]" comment from an authorized actor runs
+#     a review on demand (default adversarial; "/review architecture" for the
+#     architecture lens). This path does not wait on the gate.
+#
+# NOTE: workflow_run/issue_comment workflows only take effect from the DEFAULT
+# branch, so this does nothing until merged to master — and it is inert until a
+# maintainer adds the dedicated, spend-capped OPENAI_API_KEY secret (ADR-0012 §4).
+
+on:
+  workflow_run:
+    workflows: [gate]
+    types: [completed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write # post the review comment
+
+# Supersede an in-flight auto-review when a newer commit lands on the same branch
+# (a new gate run → a new workflow_run). A manual /review is keyed by PR number
+# and does not dedupe against an in-flight auto-review — a rare, bounded overlap
+# on advisory output, not worth the machinery to unify the two event shapes.
+concurrency:
+  group: codex-review-${{ github.event.workflow_run.head_branch || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Cheap event-shape gate; deeper eligibility (draft / auth / SHA match) is
+    # resolved in the first step, which decides run=true|false.
+    if: >
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != '' &&
+       startsWith(github.event.comment.body, '/review'))
+    steps:
+      # Trusted base-branch code (default ref for workflow_run/issue_comment),
+      # so the decision — and its auth/fork gates — runs from reviewed code, not
+      # from the PR head. The reviewed SHA is checked out later, after the helper
+      # authorizes it.
+      - name: Check out the trusted base
+        uses: actions/checkout@v4
+
+      - name: Resolve review context
+        id: ctx
+        # Every user-controlled value comes through env, never interpolated into
+        # the script body — a PR comment must not be able to run as shell. The
+        # actual decision (draft / SHA-match / auth / persona) is made by the
+        # unit-tested helper, not this shell.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          WR_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Exact PR for the run (empty for a fork PR) — no branch-name guessing.
+          WR_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          # Presence only — the value is never read into the decision.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          pr_json='{}' perm=none
+          # No key -> CI review is inert (ADR-0012 §4): the helper skips, so the
+          # install/run/post steps below never execute — no failed, comment-less run.
+          has_key=false
+          [[ -n "${OPENAI_API_KEY:-}" ]] && has_key=true
+          # isCrossRepository lets the helper reject a fork head before checkout;
+          # a fork must never be reviewed with the secret in scope (ADR-0012 §4).
+          if [[ "$EVENT" == "workflow_run" ]]; then
+            if [[ -n "$WR_PR_NUMBER" ]]; then
+              pr_json=$(gh pr view "$WR_PR_NUMBER" --repo "$REPO" \
+                          --json isDraft,headRefOid,isCrossRepository 2>/dev/null || echo '{}')
+            fi
+          elif [[ -n "$ISSUE_NUM" ]]; then
+            # Real permission, not author_association: a read/triage collaborator
+            # must not authorize a paid review. Fails closed (none) on error.
+            perm=$(gh api "repos/$REPO/collaborators/$COMMENT_USER/permission" \
+                     --jq .permission 2>/dev/null || echo none)
+            pr_json=$(gh pr view "$ISSUE_NUM" --repo "$REPO" \
+                        --json headRefOid,isCrossRepository 2>/dev/null || echo '{}')
+          fi
+          PR_JSON="$pr_json" COMMENT_PERM="$perm" HAS_KEY="$has_key" \
+            python3 scripts/codex_review_decision.py >>"$GITHUB_OUTPUT"
+
+      - name: Check out the reviewed commit
+        if: steps.ctx.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ctx.outputs.sha }}
+          fetch-depth: 0 # need history to diff against origin/master
+
+      - name: Install the Codex CLI
+        if: steps.ctx.outputs.run == 'true'
+        # Pinned for reproducibility — bump deliberately after testing a new
+        # version, not implicitly on every run.
+        run: npm install -g @openai/codex@0.144.5
+
+      - name: Run the Codex review
+        if: steps.ctx.outputs.run == 'true'
+        env:
+          # A dedicated, spend-capped review key (ADR-0012 §4), not a primary key.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PERSONA: ${{ steps.ctx.outputs.persona }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master
+          # stdout is the review body; progress goes to stderr.
+          scripts/codex-review.sh "$PERSONA" origin/master >review.out
+
+      - name: Post the review as a PR comment
+        if: steps.ctx.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUM: ${{ steps.ctx.outputs.num }}
+          SHA: ${{ steps.ctx.outputs.sha }}
+          PERSONA: ${{ steps.ctx.outputs.persona }}
+        run: |
+          set -euo pipefail
+          # GitHub rejects a comment body over 65536 chars; keep well under and
+          # flag truncation so an oversized review still posts (bounded) rather
+          # than failing and leaving nothing on the PR.
+          max=60000
+          if [[ "$(wc -c <review.out)" -gt "$max" ]]; then
+            # Truncate on a byte budget, then drop any partial multibyte char at
+            # the boundary (iconv -c) so the body stays valid UTF-8 — otherwise
+            # gh may reject it and nothing posts.
+            head -c "$max" review.out | iconv -f UTF-8 -t UTF-8 -c >review.trunc
+            printf '\n\n_…review truncated near %d bytes; run `just review-codex` locally for the full output._\n' "$max" >>review.trunc
+            mv review.trunc review.out
+          fi
+          # Freshness header (ADR-0012 §5): name the commit this review covers.
+          {
+            echo "🤖 **Codex ${PERSONA} review** — commit \`${SHA:0:12}\` (advisory, non-blocking)"
+            echo
+            cat review.out
+          } >comment.md
+          gh pr comment "$NUM" --repo "$REPO" --body-file comment.md

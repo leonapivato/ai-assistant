@@ -5,7 +5,11 @@ name: gate
 # machine. Ratified in ADR-0010.
 
 on:
+  # `ready_for_review` is explicit so marking a draft PR ready re-runs the gate —
+  # which is what lets the codex-review workflow (ADR-0012) fire on that
+  # transition via workflow_run. The other three are the default pull_request set.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [master]
 

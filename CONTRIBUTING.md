@@ -58,6 +58,29 @@ findings before merging, or waive them with a written rationale in the PR/commit
 A reviewer that disagrees with a ratified decision files an ADR proposal — it
 does not block on it (see the authority hierarchy in `docs/review/guide.md`).
 
+### Review in CI (ADR-0012)
+
+The same engine also runs in CI (`.github/workflows/codex-review.yml`) and posts
+its findings as a **PR comment** — so the review is on the record, not just in
+someone's terminal. It is **advisory and non-blocking**: the only required check
+is `gate`; a review comment never blocks merge.
+
+- **Automatic.** When you mark a PR **ready for review** (and on later pushes to
+  a ready PR), the adversarial review runs — but only **after `gate` is green**
+  for that commit. Draft PRs are never auto-reviewed. Each comment names the
+  commit it covers; a new push supersedes the old comment.
+- **On demand.** Comment **`/review`** (or **`/review architecture`**) on a PR to
+  run a review, including the architecture lens for a `Proposed` ADR. Restricted
+  to contributors with write access.
+
+The **local** `just review-codex` above is unchanged — use it for fast iteration
+before pushing. Local and CI run the *same* script and rubrics, so they cannot
+drift.
+
+CI review runs with full repo read access on the trust assumption of ADR-0012
+§4, keyed by a **dedicated, spend-capped** `OPENAI_API_KEY` in the repository's
+Actions secrets. No key → CI review is inert and the local path is the fallback.
+
 ### Architecture review of ADRs (at the Proposed stage)
 
 The architecture reviewer's natural subject is a *decision*, not just a diff. A
