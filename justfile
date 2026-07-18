@@ -37,6 +37,11 @@ test *args:
 audit:
     uv run pip-audit
 
+# Adversarial review by Codex (a different model) vs a base branch; read-only.
+# persona is `architecture` or `adversarial`. Sends the diff to OpenAI.
+review-codex persona base="main":
+    scripts/codex-review.sh {{persona}} {{base}}
+
 # First-time developer setup
 setup:
     uv sync
