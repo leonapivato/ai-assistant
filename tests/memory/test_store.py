@@ -182,6 +182,25 @@ async def test_expiry_boundary_is_exclusive_at_now() -> None:
     assert await store.get("future") is not None
 
 
+async def test_naive_injected_clock_is_treated_as_utc() -> None:
+    store = InMemoryMemoryStore(now=lambda: datetime(2026, 6, 1))  # noqa: DTZ001  naive clock
+    await store.add(_semantic("1", "keyword", expires_at=datetime(2026, 1, 2, tzinfo=UTC)))
+
+    assert await store.get("1") is None  # no crash; expired under the UTC-normalised clock
+
+
+async def test_export_is_an_independent_snapshot() -> None:
+    store = InMemoryMemoryStore()
+    await store.add(_semantic("1", "original"))
+
+    exported = await store.export()
+    exported[0].content = "mutated"  # must not reach into stored state
+
+    got = await store.get("1")
+    assert got is not None
+    assert got.content == "original"
+
+
 async def test_naive_expiry_is_treated_as_utc_not_a_crash() -> None:
     store = InMemoryMemoryStore(now=_fixed_now)
     # A naive deadline (accepted by the model, coerced to UTC) must not crash the

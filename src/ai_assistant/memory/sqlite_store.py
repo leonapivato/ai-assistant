@@ -236,7 +236,12 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg) from exc
 
     def _now_epoch(self) -> float:
-        return self._now().timestamp()
+        # Normalise a naive clock result to UTC so expiry is consistent with the
+        # UTC-normalised expires_at stored on each record (rather than host-local).
+        now = self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        return now.timestamp()
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:

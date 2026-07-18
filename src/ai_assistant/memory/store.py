@@ -61,8 +61,13 @@ class InMemoryMemoryStore:
         self._records: dict[str, MemoryRecord] = {}
         self._now = now
 
+    def _now_utc(self) -> datetime:
+        """The clock's current time, normalising a naive result to UTC."""
+        now = self._now()
+        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+
     def _is_expired(self, record: MemoryRecord) -> bool:
-        return record.expires_at is not None and record.expires_at <= self._now()
+        return record.expires_at is not None and record.expires_at <= self._now_utc()
 
     async def add(self, record: MemoryRecord) -> str:
         """Persist a record and return its id.
@@ -82,7 +87,8 @@ class InMemoryMemoryStore:
         record = self._records.get(record_id)
         if record is None or self._is_expired(record):
             return None
-        return record
+        # Copy so callers cannot mutate stored state, matching the persistent store.
+        return record.model_copy()
 
     async def search(
         self,
@@ -133,8 +139,10 @@ class InMemoryMemoryStore:
         return count
 
     async def export(self) -> list[MemoryRecord]:
-        """Return a snapshot of all live (non-expired) records."""
-        return [record for record in self._records.values() if not self._is_expired(record)]
+        """Return an independent snapshot of all live (non-expired) records."""
+        return [
+            record.model_copy() for record in self._records.values() if not self._is_expired(record)
+        ]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
