@@ -60,6 +60,22 @@ class Settings(BaseSettings):
         description="Default model in pydantic-ai 'provider:model' form.",
     )
 
+    # Resilience knobs for the model layer. The deadline is per attempt, so the
+    # worst-case wall time of a call is roughly
+    # ``max_attempts * timeout + total backoff``.
+    model_timeout_seconds: float = Field(
+        default=60.0, gt=0, description="Deadline for a single model attempt, in seconds."
+    )
+    model_max_attempts: int = Field(
+        default=3, ge=1, description="Total model attempts, including the first. 1 disables retry."
+    )
+    model_backoff_base_seconds: float = Field(
+        default=0.5, gt=0, description="Backoff ceiling after the first failure; doubles per retry."
+    )
+    model_backoff_max_seconds: float = Field(
+        default=30.0, gt=0, description="Upper bound on the backoff ceiling, in seconds."
+    )
+
     # --- Context ---------------------------------------------------------
     # Used to localise the situational context (ADR-0008). ``timezone`` is an
     # IANA name; working hours are a local-time window, end-exclusive. Both are
@@ -85,6 +101,18 @@ class Settings(BaseSettings):
             msg = f"unknown timezone {value!r}"
             raise ValueError(msg) from exc
         return value
+
+    @model_validator(mode="after")
+    def _backoff_bounds_are_ordered(self) -> Settings:
+        """Require the backoff cap to be at least the base delay."""
+        if self.model_backoff_max_seconds < self.model_backoff_base_seconds:
+            msg = (
+                f"invalid backoff window: model_backoff_max_seconds="
+                f"{self.model_backoff_max_seconds} must be >= "
+                f"model_backoff_base_seconds={self.model_backoff_base_seconds}"
+            )
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def _working_hours_are_a_range(self) -> Settings:
