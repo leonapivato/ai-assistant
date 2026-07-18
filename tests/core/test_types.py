@@ -139,6 +139,17 @@ def test_current_context_constructs_and_forbids_extra_fields() -> None:
         )
 
 
+def test_current_context_now_naive_is_coerced_to_utc() -> None:
+    ctx = CurrentContext(
+        now=datetime(2026, 1, 1, 12),  # noqa: DTZ001  naive input
+        time_of_day=TimeOfDay.AFTERNOON,
+        is_weekend=False,
+        within_working_hours=True,
+    )
+    assert ctx.now == datetime(2026, 1, 1, 12, tzinfo=UTC)
+    assert ctx.now.tzinfo is UTC
+
+
 def test_proposal_defaults_to_personal_sensitivity() -> None:
     record = SemanticMemory(
         id="1",

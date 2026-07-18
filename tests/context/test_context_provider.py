@@ -45,6 +45,19 @@ class _FailingSource:
         raise RuntimeError(msg)
 
 
+class _FailingNameSource:
+    """A pathological source whose contribute *and* name both raise."""
+
+    @property
+    def name(self) -> str:
+        msg = "name unavailable"
+        raise RuntimeError(msg)
+
+    async def contribute(self) -> Mapping[str, object]:
+        msg = "source down"
+        raise RuntimeError(msg)
+
+
 def _clock() -> ClockContextSource:
     return ClockContextSource(now=lambda: _THU_2PM)
 
@@ -89,6 +102,16 @@ async def test_failing_source_is_skipped_not_fatal() -> None:
     ctx = await provider.assemble()
 
     assert ctx.time_of_day is TimeOfDay.AFTERNOON  # assembled despite the failure
+
+
+async def test_degradation_survives_a_source_whose_name_also_raises() -> None:
+    # The degradation path must not itself raise while resolving a failing
+    # source's name; the clock still supplies the required core.
+    provider = AssemblingContextProvider([_clock(), _FailingNameSource()])
+
+    ctx = await provider.assemble()
+
+    assert ctx.time_of_day is TimeOfDay.AFTERNOON
 
 
 async def test_failing_required_source_surfaces_as_context_error() -> None:

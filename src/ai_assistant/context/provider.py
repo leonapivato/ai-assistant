@@ -30,6 +30,14 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+def _safe_name(source: ContextSource) -> str:
+    """A source's name, or a placeholder if even that access raises."""
+    try:
+        return source.name
+    except Exception:  # a pathological source whose name property fails
+        return "<unknown>"
+
+
 class AssemblingContextProvider:
     """Assembles ``CurrentContext`` by merging a set of internal context sources.
 
@@ -61,7 +69,10 @@ class AssemblingContextProvider:
         for source, contribution in zip(self._sources, contributions, strict=True):
             for key, value in contribution.items():
                 if key in merged:
-                    msg = f"context sources collided on field {key!r} (at source {source.name!r})"
+                    msg = (
+                        f"context sources collided on field {key!r} "
+                        f"(at source {_safe_name(source)!r})"
+                    )
                     raise ContextError(msg)
                 merged[key] = value
         try:
@@ -75,5 +86,9 @@ class AssemblingContextProvider:
         try:
             return await source.contribute()
         except Exception as exc:  # advisory: a failing source degrades, not aborts
-            _log.warning("context source failed; skipping", source=source.name, error=str(exc))
+            # Resolve the name defensively — the degradation path must not itself
+            # raise if a misbehaving source's ``name`` also fails.
+            _log.warning(
+                "context source failed; skipping", source=_safe_name(source), error=str(exc)
+            )
             return {}

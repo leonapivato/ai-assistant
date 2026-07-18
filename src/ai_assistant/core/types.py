@@ -279,3 +279,14 @@ class CurrentContext(BaseModel):
     within_working_hours: bool = Field(
         description="Whether the local time falls in the configured working-hours window.",
     )
+
+    @field_validator("now")
+    @classmethod
+    def _now_is_utc_aware(cls, value: datetime) -> datetime:
+        """Normalise the reference instant to UTC-aware (a naive value is UTC).
+
+        The context is compared against UTC-aware timestamps downstream, so a
+        naive ``now`` would risk a naive-vs-aware ``TypeError``; assuming UTC
+        keeps it consistent with the rest of the system.
+        """
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)

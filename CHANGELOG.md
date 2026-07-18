@@ -15,9 +15,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`ClockContextSource` today) — merging them concurrently, degrading gracefully
   when a source fault occurs (an optional facet just goes absent), and raising
   the new `ContextError` only on a wiring bug (a field collision or a missing
-  required facet). Adds `timezone`/working-hours `Settings`. The `ContextSource`
-  seam is internal to `context/`, so only the typed `CurrentContext` crosses a
-  subsystem boundary.
+  required facet). Adds `timezone`/working-hours `Settings`, validated at load
+  (an unknown timezone or empty window is a `ConfigurationError`). The
+  `ContextSource` seam is internal to `context/`, so only the typed
+  `CurrentContext` crosses a subsystem boundary.
 - `memory`/`core`: user data rights and retention (ADR-0007, closing the
   ADR-0004 §6 obligation). `MemoryStore` gains `delete`, `clear`, `export`
   (portable live snapshot), and `purge_expired`; both `InMemoryMemoryStore` and
