@@ -28,6 +28,10 @@ class MemoryStoreError(AssistantError):
     """
 
 
+class ContextError(AssistantError):
+    """Situational context could not be assembled (e.g. a source-wiring bug)."""
+
+
 class ToolError(AssistantError):
     """An external tool failed to execute."""
 

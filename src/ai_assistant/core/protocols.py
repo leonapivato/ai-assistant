@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import (
+        CurrentContext,
         Embedding,
         MemoryDecision,
         MemoryKind,
@@ -191,5 +192,23 @@ class MemoryPolicy(Protocol):
         Returns:
             The decision to accept, reject, merge, defer to the user, or store
             the proposal temporarily.
+        """
+        ...
+
+
+@runtime_checkable
+class ContextProvider(Protocol):
+    """Assembles the situational :class:`~ai_assistant.core.types.CurrentContext`.
+
+    The pipeline's context step (ADR-0008). Implementations compose one or more
+    internal sources; only this typed contract crosses a subsystem boundary.
+    """
+
+    async def assemble(self) -> CurrentContext:
+        """Return the situational context for right now.
+
+        Assembly is advisory: a failing optional source degrades its facet rather
+        than aborting, so this returns a valid context whenever the required core
+        can be built.
         """
         ...
