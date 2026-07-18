@@ -85,7 +85,12 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
 - [ ] **`planning` — `Goal`/`ActionPlan`/`ExecutionState`.**
 - [ ] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.
 - [ ] **`permissions` — `ActionPolicy` + audit trail** (ADR-0004).
-- [ ] **`learning` — `FeedbackEvent` capture.**
+- [x] **`learning` — `FeedbackEvent` capture.** `FeedbackEvent` +
+      `FeedbackProcessor`; a deterministic processor turns explicit
+      correction/preference feedback into `USER_ASSERTED` memory proposals
+      (ADR-0009). The first closed loop (feedback → proposal → ingest → retrieve)
+      is proven by an integration test; `orchestration` will automate the wiring.
+      Deferred: `RATING`/implicit signals, a model-backed processor.
 - [ ] **`orchestration` — the pipeline** wiring the above via injected contracts,
       then the first closed loop above.
 - [ ] Later: `NotificationCandidate`/proactivity, `EvaluationTrace`/eval harness,

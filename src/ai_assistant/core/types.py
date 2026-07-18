@@ -290,3 +290,49 @@ class CurrentContext(BaseModel):
         keeps it consistent with the rest of the system.
         """
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+class FeedbackKind(StrEnum):
+    """The kind of explicit feedback the user gave (see ADR-0009)."""
+
+    CORRECTION = "correction"
+    PREFERENCE = "preference"
+
+
+class FeedbackEvent(BaseModel):
+    """A unit of explicit, memory-affecting feedback (see ADR-0009).
+
+    The learning subsystem turns this into a :class:`MemoryUpdateProposal`. It
+    carries ``memory_kind`` so a correction lands in the right typed record (a
+    fact becomes a :class:`SemanticMemory`, not a preference).
+    """
+
+    kind: FeedbackKind
+    memory_kind: MemoryKind = Field(description="The typed memory this feedback establishes.")
+    content: str = Field(description="Canonical text of the feedback, e.g. 'office is in Boston'.")
+    subject: str | None = Field(
+        default=None, description="Optional scope/context, e.g. 'email tone'."
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="Interaction/episode ids supporting this, carried into provenance.",
+    )
+    created_at: datetime = Field(description="When the feedback was given (tz-aware).")
+
+    @field_validator("content")
+    @classmethod
+    def _content_is_present(cls, value: str) -> str:
+        """Require non-empty content, so feedback cannot become a blank memory."""
+        stripped = value.strip()
+        if not stripped:
+            msg = "feedback content must not be empty"
+            raise ValueError(msg)
+        return stripped
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_is_utc(cls, value: datetime) -> datetime:
+        """Normalise the timestamp to UTC (a naive value is assumed UTC)."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)

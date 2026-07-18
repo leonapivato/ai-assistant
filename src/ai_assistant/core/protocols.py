@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         CurrentContext,
         Embedding,
+        FeedbackEvent,
         MemoryDecision,
         MemoryKind,
         MemoryRecord,
@@ -211,4 +212,20 @@ class ContextProvider(Protocol):
         than aborting, so this returns a valid context whenever the required core
         can be built.
         """
+        ...
+
+
+@runtime_checkable
+class FeedbackProcessor(Protocol):
+    """Turns feedback into memory-update proposals — the learning step (ADR-0009).
+
+    Implementations (in `learning`) map a
+    :class:`~ai_assistant.core.types.FeedbackEvent` into zero or more
+    :class:`~ai_assistant.core.types.MemoryUpdateProposal`s. They *propose* only;
+    the pipeline feeds the proposals to the memory write-path, so the model never
+    writes memory directly.
+    """
+
+    async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
+        """Return the memory-update proposals implied by ``event`` (possibly none)."""
         ...

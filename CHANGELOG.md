@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `learning` + `core`: feedback capture that closes the first learning loop
+  (ADR-0009). Adds `FeedbackEvent`/`FeedbackKind` and a `FeedbackProcessor`
+  Protocol; `RuleBasedFeedbackProcessor` maps explicit correction/preference
+  feedback to a `USER_ASSERTED` memory proposal of the event's target
+  `memory_kind` (a fact → `SemanticMemory`, a preference → `PreferenceMemory`),
+  which the existing policy accepts. Learning *proposes* only — the pipeline
+  wires proposals to the ingestor — so no subsystem writes memory directly. An
+  integration test proves the vertical end to end (feedback → proposal → ingest
+  → retrieve). `RATING`/implicit signals are deferred to a follow-up ADR.
 - `context` + `core`: the situational-context step of the pipeline (ADR-0008).
   Adds a temporal `CurrentContext` (`now`, `time_of_day`, `is_weekend`,
   `within_working_hours`) and a `ContextProvider` Protocol.
