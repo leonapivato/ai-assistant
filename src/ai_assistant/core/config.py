@@ -63,17 +63,28 @@ class Settings(BaseSettings):
     # Resilience knobs for the model layer. The deadline is per attempt, so the
     # worst-case wall time of a call is roughly
     # ``max_attempts * timeout + total backoff``.
+    # ``allow_inf_nan=False`` matters: ``gt=0`` rejects NaN but happily accepts
+    # infinity, which would silently disable the deadline or unbound backoff.
     model_timeout_seconds: float = Field(
-        default=60.0, gt=0, description="Deadline for a single model attempt, in seconds."
+        default=60.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Deadline for a single model attempt, in seconds.",
     )
     model_max_attempts: int = Field(
         default=3, ge=1, description="Total model attempts, including the first. 1 disables retry."
     )
     model_backoff_base_seconds: float = Field(
-        default=0.5, gt=0, description="Backoff ceiling after the first failure; doubles per retry."
+        default=0.5,
+        gt=0,
+        allow_inf_nan=False,
+        description="Backoff ceiling after the first failure; doubles per retry.",
     )
     model_backoff_max_seconds: float = Field(
-        default=30.0, gt=0, description="Upper bound on the backoff ceiling, in seconds."
+        default=30.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Upper bound on the backoff ceiling, in seconds.",
     )
 
     # --- Context ---------------------------------------------------------

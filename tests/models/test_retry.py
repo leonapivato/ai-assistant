@@ -8,10 +8,13 @@ few milliseconds.
 from __future__ import annotations
 
 import asyncio
+import math
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import (
     ConfigurationError,
     ModelAuthError,
@@ -26,7 +29,7 @@ from ai_assistant.models import RetryingProvider
 from ai_assistant.models.retry import RetryPolicy
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 
 class FakeProvider:
@@ -239,6 +242,79 @@ async def test_model_override_is_passed_through() -> None:
 def test_invalid_configuration_is_rejected(kwargs: dict[str, float | int]) -> None:
     with pytest.raises(ConfigurationError):
         RetryPolicy(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field", ["timeout_seconds", "backoff_base_seconds", "backoff_max_seconds"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_configuration_is_rejected(field: str, value: float) -> None:
+    # NaN compares False to everything and infinity counts as "positive", so
+    # both slip past ordinary bounds checks and then degrade silently.
+    with pytest.raises(ConfigurationError, match="finite"):
+        RetryPolicy(**{field: value})  # type: ignore[arg-type]
+
+
+async def test_backoff_does_not_overflow_at_extreme_attempt_counts() -> None:
+    # 2.0 ** 1024 raises OverflowError; without clamping, a persistent failure
+    # would surface that instead of the underlying ModelError.
+    inner = FakeProvider(ModelUnavailableError("503"))
+    sleep = SleepSpy()
+
+    with pytest.raises(ModelUnavailableError):
+        await _provider(inner, sleep, max_attempts=1100).complete(PROMPT)
+
+    assert len(sleep.delays) == 1099
+    assert all(d <= 30.0 for d in sleep.delays)
+
+
+async def test_backoff_saturates_for_a_very_large_base() -> None:
+    # base * growth would overflow to inf if computed before capping.
+    inner = FakeProvider(ModelUnavailableError("503"))
+    sleep = SleepSpy()
+
+    with pytest.raises(ModelUnavailableError):
+        await _provider(
+            inner,
+            sleep,
+            max_attempts=3,
+            backoff_base_seconds=1e300,
+            backoff_max_seconds=1e308,
+        ).complete(PROMPT)
+
+    assert all(math.isfinite(d) for d in sleep.delays)
+    assert sleep.delays == [1e300, 2e300]
+
+
+def test_policy_is_built_from_settings() -> None:
+    settings = Settings(
+        model_timeout_seconds=12.5,
+        model_max_attempts=7,
+        model_backoff_base_seconds=0.25,
+        model_backoff_max_seconds=9.0,
+    )
+
+    assert RetryPolicy.from_settings(settings) == RetryPolicy(
+        timeout_seconds=12.5,
+        max_attempts=7,
+        backoff_base_seconds=0.25,
+        backoff_max_seconds=9.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda v: Settings(model_timeout_seconds=v),
+        lambda v: Settings(model_backoff_base_seconds=v),
+        lambda v: Settings(model_backoff_max_seconds=v),
+    ],
+    ids=["timeout", "backoff_base", "backoff_max"],
+)
+def test_settings_reject_non_finite_values(make: Callable[[float], Settings]) -> None:
+    # pydantic's gt=0 rejects NaN but accepts infinity, hence allow_inf_nan.
+    with pytest.raises(ValidationError):
+        make(float("inf"))
 
 
 async def test_bare_model_error_is_treated_as_non_retryable() -> None:
