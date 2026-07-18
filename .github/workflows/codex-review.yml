@@ -54,6 +54,13 @@ jobs:
       # authorizes it.
       - name: Check out the trusted base
         uses: actions/checkout@v4
+        with:
+          # Leave no git credential in .git/config. The reviewed commit is checked
+          # out over this workspace and Codex runs there without its sandbox in CI
+          # (§4 amendment), so a persisted GITHUB_TOKEN would be readable by an
+          # injected diff and carries pull-requests:write. gh uses GH_TOKEN from the
+          # step env instead; the repo is public, so fetches need no credential.
+          persist-credentials: false
 
       - name: Resolve review context
         id: ctx
@@ -104,6 +111,7 @@ jobs:
         with:
           ref: ${{ steps.ctx.outputs.sha }}
           fetch-depth: 0 # need history to diff against origin/master
+          persist-credentials: false # no job token in .git/config for the bypassed-sandbox review to read
 
       - name: Install the Codex CLI
         if: steps.ctx.outputs.run == 'true'
