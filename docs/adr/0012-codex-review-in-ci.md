@@ -164,6 +164,16 @@ exactly that). `scripts/codex-review.sh` selects this only when
   dedicated, spend-capped, and rotatable; the runner is ephemeral; and both
   review paths are gated to write-access actors we already trust. A leak still
   costs a capped key we rotate in minutes, not user data or a primary credential.
+- *The job's GitHub token is kept out of the review's reach.* The OpenAI key is
+  not the only credential present: `actions/checkout` persists the job
+  `GITHUB_TOKEN` (scope `pull-requests: write`) into `.git/config` by default,
+  where the bypassed-sandbox reviewer could read and abuse or exfiltrate it. We
+  set **`persist-credentials: false`** on both checkouts, so no git credential is
+  left in the workspace the reviewer runs in. `gh` uses the token from the step
+  *environment* (never in scope during the Codex run), and the repo is public so
+  history fetches need no credential. The token is also job-scoped and expires
+  with the run. If the repo ever goes private, restore credentials for the fetch
+  by other means — not by re-persisting them into the reviewed workspace.
 - *Alternatives rejected.* Making bubblewrap's namespace work on the runner is
   fragile — pinned to the runner image's kernel/AppArmor and to Codex's sandbox
   internals (both change without notice), and against Codex's documented CI
