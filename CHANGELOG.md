@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `memory`/`core`/`models`: adversarial-review hardening of the store's error
+  boundary. `SqliteMemoryStore` now translates any failed open (missing parent
+  directory, extension load, schema, embedder mismatch) to `MemoryStoreError`
+  and closes a half-open connection rather than leaking it; wraps embedder
+  faults, wrong-sized/mis-counted vectors, and malformed results as
+  `MemoryStoreError` in both `add` and `search` (previously raw exceptions
+  escaped the store boundary), validating the query vector, not just the record
+  vector. `MemoryIngestor` now raises instead of silently storing a proposal as
+  new when a `MERGE` names an absent target, and reports an overflowing
+  temporary-store ttl as `MemoryStoreError` rather than a raw `OverflowError`.
+  `MemoryDecision` rejects a non-positive `STORE_TEMPORARY` ttl and outcome
+  fields foreign to its kind. `HashingEmbedder` rejects non-positive dimensions.
+  Found across two Codex adversarial passes.
+- `docs`: ADR-0006 now reflects the as-built `Embedder` contract — the ratified
+  §1 signature still showed a per-call `model` parameter the implementation had
+  dropped; recorded as an amendment (golden rule 5). Found by the Codex
+  architecture reviewer.
 - `memory`: `SqliteMemoryStore.add` is now transactional — a failed multi-table
   write rolls back and raises `MemoryStoreError` instead of leaving a partial
   record/vector pair a later write could commit; a wrong-sized embedder vector

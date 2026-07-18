@@ -28,8 +28,15 @@ class HashingEmbedder:
         """Initialise the embedder.
 
         Args:
-            dimensions: The length of the vectors produced.
+            dimensions: The length of the vectors produced; must be >= 1.
+
+        Raises:
+            ValueError: If ``dimensions`` is less than one (which would make the
+                bucket modulo undefined).
         """
+        if dimensions < 1:
+            msg = f"dimensions must be >= 1, got {dimensions}"
+            raise ValueError(msg)
         self._dimensions = dimensions
 
     @property
