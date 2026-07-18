@@ -111,6 +111,13 @@ is protected and integration happens through pull requests — not local merges
 (ADR-0010).
 
 - **Never push to `master`.** Push your `<area>/<slug>` branch and open a PR.
+- **Open a draft PR early — always.** As soon as you have a branch and a first
+  commit, open it as a **draft**, before the work is done. CI runs on every push
+  so you get the gate continuously, and the other contributor can see your
+  direction (and any contract change) before it lands. Mark it **ready for
+  review** only when the change is complete: that flip is the signal that it
+  wants a review — and the trigger the automated review acts on (see "Review",
+  above). A change that is genuinely complete in one commit may open ready.
 - **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
   on every PR and push; a PR cannot merge while it is red. This is enforced for
   everyone. Run the gate locally first anyway — CI is the backstop, not the
@@ -139,12 +146,13 @@ rebase. Coordinate them by hand:
   branch does not grab the same one. If two branches still land on the same
   number, **the second to merge renumbers** — it is a file rename plus its
   internal `ADR-NNNN` references and any `Refs:` trailers, no code change.
-- **Changing `core/` is the one high-collision edit — flag it early.**
+- **Changing `core/` is the one high-collision edit — flag it loudly.**
   `core/protocols.py` and `core/types.py` are touched by every subsystem, and a
-  Protocol change is breaking (golden rule 5). Open the PR as a **draft as soon
-  as the contract shape is drafted**, before the implementation is done, so the
-  other stream sees the new shape before building against the old one. The flag
-  golden rule 5 asks for has to reach the *other contributor*, not just the
+  Protocol change is breaking (golden rule 5). Every branch is a draft PR early
+  (above), so the shape is already visible — but for a `core/` change, push the
+  contract *first* (ahead of the implementation) and say so in the PR title, so
+  the other stream sees the new shape before building against the old one. The
+  flag golden rule 5 asks for has to reach the *other contributor*, not just the
   reviewer.
 - **Stay in your lane.** Who currently owns which subsystem is recorded in
   [`WORKING.md`](WORKING.md). Check it before starting, and update it when you
