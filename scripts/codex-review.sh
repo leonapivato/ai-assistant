@@ -58,9 +58,23 @@ trap 'rm -f "$prompt"' EXIT
     echo '```'
 } >"$prompt"
 
+# Codex sandboxes the shell commands the model runs (file reads, git) with
+# bubblewrap. In CI the runner is already an ephemeral, externally-sandboxed
+# environment where bwrap cannot set up its network namespace
+# ("bwrap: loopback: Failed RTM_NEWADDR"); that failure breaks every file read
+# and degrades the review to an apology. There, skip Codex's own sandbox — the
+# exact case --dangerously-bypass-approvals-and-sandbox documents. Locally the
+# read-only sandbox works and is a real safety layer, so keep it. GITHUB_ACTIONS
+# is set automatically on the runner; CODEX_REVIEW_NO_SANDBOX=1 forces it either
+# way. The prompt still instructs a read-only review regardless of sandbox mode.
+sandbox_args=(-s read-only)
+if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || -n "${GITHUB_ACTIONS:-}" ]]; then
+    sandbox_args=(--dangerously-bypass-approvals-and-sandbox)
+fi
+
 echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
 # -o captures just the final review; progress streams to stderr.
-codex exec -s read-only -o "$out" - <"$prompt" >&2
+codex exec "${sandbox_args[@]}" -o "$out" - <"$prompt" >&2
 
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
