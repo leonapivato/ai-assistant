@@ -65,10 +65,11 @@ trap 'rm -f "$prompt"' EXIT
 # and degrades the review to an apology. There, skip Codex's own sandbox — the
 # exact case --dangerously-bypass-approvals-and-sandbox documents. Locally the
 # read-only sandbox works and is a real safety layer, so keep it. GITHUB_ACTIONS
-# is set automatically on the runner; CODEX_REVIEW_NO_SANDBOX=1 forces it either
-# way. The prompt still instructs a read-only review regardless of sandbox mode.
+# is "true" on the runner — matched exactly, so an inherited GITHUB_ACTIONS=false
+# cannot silently disable the local sandbox; CODEX_REVIEW_NO_SANDBOX=1 forces the
+# bypass either way. The prompt still instructs a read-only review regardless.
 sandbox_args=(-s read-only)
-if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || -n "${GITHUB_ACTIONS:-}" ]]; then
+if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
     sandbox_args=(--dangerously-bypass-approvals-and-sandbox)
 fi
 
