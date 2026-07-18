@@ -148,9 +148,9 @@ def _classify(exc: Exception) -> ModelError:
             # bare httpx errors escape from chunk reads.
             return ModelUnavailableError(message)
         case TimeoutError():
-            # Our own deadline, not the provider's: asyncio.timeout() raises the
-            # builtin TimeoutError. Nothing raises this today — it is here for
-            # the timeout/retry slice that wraps this call.
+            # Defensive: a deadline raised *inside* the call, e.g. an http
+            # client configured with its own. RetryingProvider's deadline is
+            # applied outside this adapter, so it never reaches here.
             return ModelTimeoutError(message)
         case _:
             return ModelError(message)
