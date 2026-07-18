@@ -1,6 +1,6 @@
 # 9. Learning: feedback capture that proposes memory updates
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 
 ## Context
