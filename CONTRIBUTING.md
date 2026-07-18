@@ -126,6 +126,30 @@ is protected and integration happens through pull requests — not local merges
 - Administrators retain a bypass for genuine emergencies — the gate still runs,
   but use the escape hatch sparingly and say why in the PR.
 
+### Coordinating parallel work
+
+The subsystem split keeps most work in non-overlapping folders, but two places
+are shared surfaces that the gate cannot referee — a collision there is a valid
+diff that passes every check and only surfaces as a conflict on the second
+rebase. Coordinate them by hand:
+
+- **ADR numbers are a shared counter — claim yours up front.** The number is
+  *provisional until merge*. Before drafting, record the number you are taking in
+  the "ADR numbers in flight" list in [`WORKING.md`](WORKING.md) so a concurrent
+  branch does not grab the same one. If two branches still land on the same
+  number, **the second to merge renumbers** — it is a file rename plus its
+  internal `ADR-NNNN` references and any `Refs:` trailers, no code change.
+- **Changing `core/` is the one high-collision edit — flag it early.**
+  `core/protocols.py` and `core/types.py` are touched by every subsystem, and a
+  Protocol change is breaking (golden rule 5). Open the PR as a **draft as soon
+  as the contract shape is drafted**, before the implementation is done, so the
+  other stream sees the new shape before building against the old one. The flag
+  golden rule 5 asks for has to reach the *other contributor*, not just the
+  reviewer.
+- **Stay in your lane.** Who currently owns which subsystem is recorded in
+  [`WORKING.md`](WORKING.md). Check it before starting, and update it when you
+  pick up or hand off a subsystem, so two people do not converge on the same one.
+
 ## Typing & code style
 
 - **mypy `strict`** is mandatory. No implicit `Any`.
