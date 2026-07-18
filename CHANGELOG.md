@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `memory`/`core`: user data rights and retention (ADR-0007, closing the
+  ADR-0004 §6 obligation). `MemoryStore` gains `delete`, `clear`, `export`
+  (portable live snapshot), and `purge_expired`; both `InMemoryMemoryStore` and
+  `SqliteMemoryStore` implement them. Retention is now enforced: a record past
+  its `expires_at` is treated as forgotten — `get`/`search` never return it,
+  independent of whether `purge_expired` has reclaimed it — with an injectable
+  clock for deterministic expiry. `clear` scopes to this store's Tier-1 rows;
+  the cross-tier keyring purge remains a higher-layer concern. (Additive
+  `MemoryStore` Protocol change.)
+
 ### Fixed
 
 - `memory`/`core`/`models`: adversarial-review hardening of the store's error

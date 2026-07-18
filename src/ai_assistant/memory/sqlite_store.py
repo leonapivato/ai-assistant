@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,34 +26,50 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import MemoryRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding, MemoryKind
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
-# When filtering by kind we over-fetch nearest neighbours, since the kind filter
-# is applied after the vector search.
-_KIND_OVERFETCH = 8
+# ``search`` applies the kind and expiry filters *after* the vector KNN (sqlite-vec
+# cannot cleanly pre-filter joined columns within a KNN), so it over-fetches
+# candidates to leave room for filtered-out rows. A tracked limitation: a caller
+# can still be under-served if more than this multiple of ``limit`` nearer
+# neighbours are all filtered out.
+_RESULT_OVERFETCH = 8
 _OWNER_ONLY = 0o600
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 class SqliteMemoryStore:
     """A persistent, semantically-searchable ``MemoryStore``."""
 
-    def __init__(self, *, path: Path | str, embedder: Embedder) -> None:
+    def __init__(
+        self,
+        *,
+        path: Path | str,
+        embedder: Embedder,
+        now: Callable[[], datetime] = _utcnow,
+    ) -> None:
         """Open (or create) the store at ``path``.
 
         Args:
             path: Database file path, or ``":memory:"`` for an ephemeral store.
             embedder: The embedder used for all records; a store is bound to one
                 embedding model for its lifetime.
+            now: Clock used to decide whether a record has expired; injectable
+                for deterministic tests. Defaults to UTC wall-clock.
 
         Raises:
             MemoryStoreError: If the store was previously built with a different
                 embedding model or dimension.
         """
         self._embedder = embedder
+        self._now = now
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
         self._conn = self._setup()
@@ -74,8 +91,9 @@ class SqliteMemoryStore:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
-                "kind TEXT NOT NULL, data TEXT NOT NULL)"
+                "kind TEXT NOT NULL, data TEXT NOT NULL, expires_at REAL)"
             )
+            self._migrate_records(conn)
             self._verify_or_init_meta(conn)
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
@@ -91,6 +109,12 @@ class SqliteMemoryStore:
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         return conn
+
+    def _migrate_records(self, conn: sqlite3.Connection) -> None:
+        """Add the ``expires_at`` column to a records table created before ADR-0007."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
+        if "expires_at" not in columns:
+            conn.execute("ALTER TABLE records ADD COLUMN expires_at REAL")
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
         want = {
@@ -158,19 +182,20 @@ class SqliteMemoryStore:
         conn = self._conn
         blob = sqlite_vec.serialize_float32(list(vector))
         data = record.model_dump_json()
+        expires = record.expires_at.timestamp() if record.expires_at is not None else None
         try:
             row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
             if row is None:
                 cursor = conn.execute(
-                    "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
-                    (record.id, record.kind, data),
+                    "INSERT INTO records(id, kind, data, expires_at) VALUES (?, ?, ?, ?)",
+                    (record.id, record.kind, data, expires),
                 )
                 rowid = cursor.lastrowid
             else:
                 rowid = row[0]
                 conn.execute(
-                    "UPDATE records SET kind = ?, data = ? WHERE rowid = ?",
-                    (record.kind, data, rowid),
+                    "UPDATE records SET kind = ?, data = ?, expires_at = ? WHERE rowid = ?",
+                    (record.kind, data, expires, rowid),
                 )
                 conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
             conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
@@ -184,14 +209,20 @@ class SqliteMemoryStore:
             msg = f"failed to store memory {record.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
 
+    def _now_epoch(self) -> float:
+        return self._now().timestamp()
+
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent."""
+        """Return the record with ``record_id``, or ``None`` if absent or expired."""
         async with self._lock:
-            data = await asyncio.to_thread(self._get_sync, record_id)
+            data = await asyncio.to_thread(self._get_sync, record_id, self._now_epoch())
         return None if data is None else _ADAPTER.validate_json(data)
 
-    def _get_sync(self, record_id: str) -> str | None:
-        row = self._conn.execute("SELECT data FROM records WHERE id = ?", (record_id,)).fetchone()
+    def _get_sync(self, record_id: str, now: float) -> str | None:
+        row = self._conn.execute(
+            "SELECT data FROM records WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
+            (record_id, now),
+        ).fetchone()
         return None if row is None else row[0]
 
     async def search(
@@ -211,7 +242,8 @@ class SqliteMemoryStore:
 
         Returns:
             Matching records, most relevant first, each carrying a ``score``
-            that is the cosine similarity to the query, in ``[0, 1]``.
+            that is the cosine similarity to the query, in ``[0, 1]``. Expired
+            records are never returned.
 
         Raises:
             MemoryStoreError: If the embedder fails or returns a wrong-sized
@@ -221,7 +253,9 @@ class SqliteMemoryStore:
             return []
         vector = await self._embed_one(query)
         async with self._lock:
-            rows = await asyncio.to_thread(self._search_sync, vector, limit, kinds)
+            rows = await asyncio.to_thread(
+                self._search_sync, vector, limit, kinds, self._now_epoch()
+            )
         return [
             _ADAPTER.validate_json(data).model_copy(update={"score": score}) for data, score in rows
         ]
@@ -231,25 +265,110 @@ class SqliteMemoryStore:
         vector: Embedding,
         limit: int,
         kinds: Sequence[MemoryKind] | None,
+        now: float,
     ) -> list[tuple[str, float]]:
         wanted = {str(kind) for kind in kinds} if kinds is not None else None
-        fetch_k = limit if wanted is None else limit * _KIND_OVERFETCH
+        # Over-fetch to leave room for kind- and expiry-filtered rows.
+        fetch_k = limit * _RESULT_OVERFETCH
         blob = sqlite_vec.serialize_float32(list(vector))
         rows = self._conn.execute(
-            "SELECT r.data, r.kind, v.distance FROM vec_records v "
+            "SELECT r.data, r.kind, r.expires_at, v.distance FROM vec_records v "
             "JOIN records r ON r.rowid = v.rowid "
             "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
             (blob, fetch_k),
         ).fetchall()
         results: list[tuple[str, float]] = []
-        for data, kind, distance in rows:
+        for data, kind, expires_at, distance in rows:
             if wanted is not None and kind not in wanted:
+                continue
+            if expires_at is not None and expires_at <= now:
                 continue
             # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
             results.append((data, max(0.0, 1.0 - distance)))
             if len(results) >= limit:
                 break
         return results
+
+    async def delete(self, record_id: str) -> bool:
+        """Delete one record, returning whether it existed."""
+        async with self._lock:
+            return await asyncio.to_thread(self._delete_sync, record_id)
+
+    def _delete_sync(self, record_id: str) -> bool:
+        conn = self._conn
+        try:
+            row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record_id,)).fetchone()
+            if row is None:
+                return False
+            rowid = row[0]
+            conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
+            conn.execute("DELETE FROM records WHERE rowid = ?", (rowid,))
+            conn.commit()
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            msg = f"failed to delete memory {record_id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return True
+
+    async def clear(self) -> int:
+        """Delete every record in this store, returning the number removed."""
+        async with self._lock:
+            return await asyncio.to_thread(self._clear_sync)
+
+    def _clear_sync(self) -> int:
+        conn = self._conn
+        try:
+            (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
+            conn.execute("DELETE FROM vec_records")
+            conn.execute("DELETE FROM records")
+            conn.commit()
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            msg = f"failed to clear the memory store: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return int(count)
+
+    async def export(self) -> list[MemoryRecord]:
+        """Return a snapshot of all live (non-expired) records."""
+        async with self._lock:
+            rows = await asyncio.to_thread(self._export_sync, self._now_epoch())
+        return [_ADAPTER.validate_json(data) for data in rows]
+
+    def _export_sync(self, now: float) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT data FROM records WHERE expires_at IS NULL OR expires_at > ? ORDER BY rowid",
+            (now,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    async def purge_expired(self) -> int:
+        """Physically remove expired records, returning the number removed."""
+        async with self._lock:
+            return await asyncio.to_thread(self._purge_expired_sync, self._now_epoch())
+
+    def _purge_expired_sync(self, now: float) -> int:
+        conn = self._conn
+        try:
+            rowids = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT rowid FROM records WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                    (now,),
+                )
+            ]
+            if not rowids:
+                return 0
+            conn.executemany("DELETE FROM vec_records WHERE rowid = ?", [(r,) for r in rowids])
+            conn.executemany("DELETE FROM records WHERE rowid = ?", [(r,) for r in rowids])
+            conn.commit()
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            msg = f"failed to purge expired memories: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return len(rowids)
 
     def close(self) -> None:
         """Close the underlying database connection."""

@@ -96,14 +96,19 @@ class Embedder(Protocol):
 
 @runtime_checkable
 class MemoryStore(Protocol):
-    """Persistent long-term memory with semantic retrieval."""
+    """Persistent long-term memory with semantic retrieval.
+
+    Records carry an optional ``expires_at`` retention deadline. A record past
+    that deadline is treated as already forgotten: ``get`` and ``search`` never
+    return it, whether or not ``purge_expired`` has reclaimed it yet (ADR-0007).
+    """
 
     async def add(self, record: MemoryRecord) -> str:
         """Persist a record and return its id."""
         ...
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent."""
+        """Return the record with ``record_id``, or ``None`` if absent or expired."""
         ...
 
     async def search(
@@ -115,10 +120,48 @@ class MemoryStore(Protocol):
     ) -> list[MemoryRecord]:
         """Return the records most relevant to ``query``, best first.
 
+        Expired records are never returned.
+
         Args:
             query: The search text.
             limit: Maximum number of records to return.
             kinds: If given, restrict results to these memory kinds.
+        """
+        ...
+
+    async def delete(self, record_id: str) -> bool:
+        """Delete one record.
+
+        Args:
+            record_id: The id of the record to remove.
+
+        Returns:
+            ``True`` if a record was removed, ``False`` if none had that id.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Delete every record in this store, returning the number removed.
+
+        This empties the store's own (Tier 1) rows only; it is not a
+        whole-system erase (ADR-0007 §4).
+        """
+        ...
+
+    async def export(self) -> list[MemoryRecord]:
+        """Return a portable snapshot of all live (non-expired) records.
+
+        The caller serialises the records to JSON (e.g. ``model_dump(mode="json")``);
+        the snapshot excludes expired records and carries no embeddings (ADR-0007 §3).
+        """
+        ...
+
+    async def purge_expired(self) -> int:
+        """Physically remove records past their ``expires_at``.
+
+        Returns:
+            The number of expired records removed. Read methods already hide
+            expired records, so this changes reclaimed space, not visibility.
         """
         ...
 
