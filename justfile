@@ -39,7 +39,7 @@ audit:
 
 # Adversarial review by Codex (a different model) vs a base branch; read-only.
 # persona is `architecture` or `adversarial`. Sends the diff to OpenAI.
-review-codex persona base="main":
+review-codex persona base="master":
     scripts/codex-review.sh {{persona}} {{base}}
 
 # First-time developer setup

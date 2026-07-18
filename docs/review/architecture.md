@@ -7,6 +7,13 @@ architecture and the decisions already made?**
 Also read, as needed: `CLAUDE.md` (golden rules + architecture map), the
 relevant files in `docs/adr/`, and `VISION.md` (advisory intent).
 
+This persona also reviews a **drafted ADR** at the `Proposed` stage (before it is
+ratified), not only code. When the change under review is an ADR, judge the
+*decision*: is the contract shape sound, does it fit the architecture and prior
+ADRs, does it name a better alternative it rejected, and will its seam extend?
+The "assume the gate is green" note in `guide.md` does not apply — there is no
+code to run yet.
+
 ## What to scrutinise
 
 **Boundaries (spirit, not just the letter import-linter enforces).**

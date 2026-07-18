@@ -46,7 +46,7 @@ Run each against the base branch (read-only; this **sends the diff to OpenAI**,
 so it is a deliberate pre-merge step, not per-commit):
 
 ```bash
-just review-codex architecture      # or: scripts/codex-review.sh architecture main
+just review-codex architecture      # or: scripts/codex-review.sh architecture master
 just review-codex adversarial
 ```
 
@@ -54,6 +54,24 @@ Reviewers are advisory tooling, not a hard gate. Resolve `blocker`/`major`
 findings before merging, or waive them with a written rationale in the PR/commit.
 A reviewer that disagrees with a ratified decision files an ADR proposal — it
 does not block on it (see the authority hierarchy in `docs/review/guide.md`).
+
+### Architecture review of ADRs (at the Proposed stage)
+
+The architecture reviewer's natural subject is a *decision*, not just a diff. A
+**substantive contract ADR** — one that adds or changes a Protocol or a `core`
+type that crosses subsystem boundaries — gets an architecture review **while it
+is still `Proposed`, before ratification**, so a finding can still change the
+decision (reviewing an already-Accepted ADR is too late to matter):
+
+```bash
+just review-codex architecture      # run on the branch holding the drafted ADR
+```
+
+Triage the findings, fold real ones into the draft, then flip the ADR to
+`Accepted`. This is advisory like all review: the author still owns
+ratification; the reviewer only surfaces blind spots (a missed alternative,
+inconsistency with a prior ADR, a seam that will not extend). **Trivial ADRs**
+(amendments, status changes, supersedes) skip this — not worth the round-trip.
 
 ## Git & commits
 

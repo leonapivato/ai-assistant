@@ -10,11 +10,11 @@
 # pre-merge step, not something to run on every change.
 #
 # Usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]
-#   base-ref defaults to "main"; the review covers HEAD's changes vs base-ref.
+#   base-ref defaults to "master"; the review covers HEAD's changes vs base-ref.
 set -euo pipefail
 
 persona="${1:-}"
-base="${2:-main}"
+base="${2:-master}"
 
 if [[ -z "$persona" ]]; then
     echo "usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]" >&2
