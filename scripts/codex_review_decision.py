@@ -65,9 +65,14 @@ def _pr_field(pr_json: str, field: str) -> str:
         The field's value as a string, or ``""`` when the JSON is empty,
         malformed, or lacks the field.
     """
+    # Single exception type, deliberately: this script runs under the CI
+    # runner's *stock* python3 (older than the project's 3.14), so it must avoid
+    # 3.14-only syntax — a multi-type `except (A, B)` gets reformatted by ruff to
+    # the parens-free 3.14 form, which is a SyntaxError there. json.loads on a str
+    # raises only ValueError (JSONDecodeError); non-object JSON is caught below.
     try:
         data = json.loads(pr_json)
-    except ValueError, TypeError:
+    except ValueError:
         return ""
     if not isinstance(data, dict):
         return ""  # valid JSON but not an object (e.g. [], null, "text")
