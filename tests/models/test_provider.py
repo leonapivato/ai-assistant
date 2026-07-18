@@ -12,6 +12,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 from model_provider_contract import ModelProviderContract
+from pydantic_ai.exceptions import (
+    ContentFilterError,
+    ModelAPIError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+)
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -23,7 +29,15 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import (
+    ModelAuthError,
+    ModelContentFilterError,
+    ModelError,
+    ModelRateLimitError,
+    ModelResponseError,
+    ModelTimeoutError,
+    ModelUnavailableError,
+)
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.models.provider import (
@@ -138,3 +152,101 @@ async def test_provider_failure_is_wrapped() -> None:
 
     with pytest.raises(ModelError, match="model completion failed"):
         await provider.complete([Message(role=Role.USER, content="hi")])
+
+
+async def _complete_raising(exc: Exception) -> ModelError:
+    """Drive a completion whose model raises ``exc``, returning what surfaced."""
+
+    def boom(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        raise exc
+
+    provider = PydanticAIProvider(default_model=FunctionModel(boom))
+
+    with pytest.raises(ModelError) as caught:
+        await provider.complete([Message(role=Role.USER, content="hi")])
+    return caught.value
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (401, ModelAuthError),
+        (403, ModelAuthError),
+        (408, ModelTimeoutError),
+        (429, ModelRateLimitError),
+        (500, ModelUnavailableError),
+        (503, ModelUnavailableError),
+    ],
+)
+async def test_http_status_is_classified(status_code: int, expected: type[ModelError]) -> None:
+    error = await _complete_raising(ModelHTTPError(status_code=status_code, model_name="fake"))
+
+    assert type(error) is expected
+
+
+async def test_other_4xx_stays_a_bare_model_error() -> None:
+    # A malformed request is our bug, not a transient fault — retrying it would
+    # fail identically, so it must not land on a retryable subclass.
+    error = await _complete_raising(ModelHTTPError(status_code=400, model_name="fake"))
+
+    assert type(error) is ModelError
+    assert not error.retryable
+
+
+async def test_content_filter_is_classified_before_its_base_class() -> None:
+    # ContentFilterError subclasses UnexpectedModelBehavior; the more specific
+    # pattern has to win.
+    error = await _complete_raising(ContentFilterError("refused"))
+
+    assert type(error) is ModelContentFilterError
+
+
+async def test_unexpected_behaviour_is_a_response_error() -> None:
+    error = await _complete_raising(UnexpectedModelBehavior("garbled"))
+
+    assert type(error) is ModelResponseError
+
+
+async def test_connection_failure_is_unavailable() -> None:
+    error = await _complete_raising(ModelAPIError(model_name="fake", message="connection reset"))
+
+    assert type(error) is ModelUnavailableError
+
+
+async def test_timeout_is_classified() -> None:
+    error = await _complete_raising(TimeoutError("deadline exceeded"))
+
+    assert type(error) is ModelTimeoutError
+
+
+async def test_unknown_failure_is_not_retryable() -> None:
+    error = await _complete_raising(RuntimeError("something new"))
+
+    assert type(error) is ModelError
+    assert not error.retryable
+
+
+@pytest.mark.parametrize(
+    ("error_type", "retryable"),
+    [
+        (ModelError, False),
+        (ModelAuthError, False),
+        (ModelContentFilterError, False),
+        (ModelResponseError, False),
+        (ModelRateLimitError, True),
+        (ModelTimeoutError, True),
+        (ModelUnavailableError, True),
+    ],
+)
+def test_retryable_flags(error_type: type[ModelError], retryable: bool) -> None:
+    assert error_type.retryable is retryable
+    assert issubclass(error_type, ModelError)
+
+
+async def test_classified_error_preserves_the_cause() -> None:
+    cause = ModelHTTPError(status_code=429, model_name="fake")
+
+    error = await _complete_raising(cause)
+
+    # The original provider exception stays reachable for logging/debugging.
+    assert error.__cause__ is not None

@@ -66,6 +66,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wires proposals to the ingestor — so no subsystem writes memory directly. An
   integration test proves the vertical end to end (feedback → proposal → ingest
   → retrieve). `RATING`/implicit signals are deferred to a follow-up ADR.
+- `models`/`core`: a model-failure taxonomy. `ModelError` gains specific
+  subclasses — `ModelAuthError`, `ModelRateLimitError`, `ModelTimeoutError`,
+  `ModelUnavailableError`, `ModelContentFilterError`, `ModelResponseError` —
+  each carrying a `retryable` class attribute, so a caller can distinguish a
+  transient fault from one that would fail identically on every attempt.
+  `PydanticAIProvider` now maps pydantic-ai's exceptions (and HTTP status
+  codes) onto that taxonomy. Purely additive: `complete` still raises only
+  `ModelError`, so existing callers are unaffected and no Protocol changed.
+  Unrecognised failures stay a bare, non-retryable `ModelError` — a wrong
+  "retryable" is worse than none. Deferred: distinguishing context-length
+  overflow, which needs provider-specific response-body sniffing.
 - `context` + `core`: the situational-context step of the pipeline (ADR-0008).
   Adds a temporal `CurrentContext` (`now`, `time_of_day`, `is_weekend`,
   `within_working_hours`) and a `ContextProvider` Protocol.
