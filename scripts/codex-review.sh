@@ -2,21 +2,22 @@
 # Run an adversarial review with Codex — a different model, for a perspective
 # independent of the one that wrote the code.
 #
-# Uses the same rubric as the in-session Claude reviewers (docs/review/<persona>.md),
-# so only the model differs. Runs read-only: Codex may not modify the repo.
+# Uses the same rubric as documented in docs/review/, feeding it plus the branch
+# diff to `codex exec`, read-only. `codex exec review --base` cannot take custom
+# instructions on stdin, so we drive `codex exec` directly with an explicit diff.
 #
 # NOTE: this sends the diff and repository context to OpenAI. It is a deliberate
 # pre-merge step, not something to run on every change.
 #
-# Usage: scripts/codex-review.sh <architecture|adversarial> [base-branch]
-#   base-branch defaults to "main".
+# Usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]
+#   base-ref defaults to "main"; the review covers HEAD's changes vs base-ref.
 set -euo pipefail
 
 persona="${1:-}"
 base="${2:-main}"
 
 if [[ -z "$persona" ]]; then
-    echo "usage: scripts/codex-review.sh <architecture|adversarial> [base-branch]" >&2
+    echo "usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]" >&2
     exit 2
 fi
 
@@ -29,18 +30,38 @@ if [[ ! -f "$rubric" ]]; then
 fi
 
 if ! command -v codex >/dev/null 2>&1; then
-    echo "codex CLI not found on PATH; install it or run the in-session Claude reviewers instead" >&2
+    echo "codex CLI not found on PATH; install it to run reviews" >&2
     exit 127
 fi
 
-out="$(mktemp -t "codex-review-${persona}.XXXXXX.md")"
+diff="$(git diff "${base}...HEAD")"
+if [[ -z "$diff" ]]; then
+    echo "no changes between ${base} and HEAD to review" >&2
+    exit 0
+fi
 
-echo "Running Codex '${persona}' review against '${base}' (read-only)…" >&2
-# `codex exec review` diffs against --base and takes custom instructions on
-# stdin; -s read-only forbids any repo mutation. -o captures just the final
-# review (progress is streamed to stderr), which we then print cleanly.
-codex exec -s read-only -o "$out" review --base "$base" - < "$rubric" >&2
+prompt="$(mktemp -t "codex-prompt-${persona}.XXXXXX.md")"
+out="$(mktemp -t "codex-review-${persona}.XXXXXX.md")"
+trap 'rm -f "$prompt"' EXIT
+
+{
+    cat "$rubric"
+    echo
+    echo "## Change under review"
+    echo
+    echo "Review ONLY the committed diff below (HEAD vs ${base}). You may read full"
+    echo "files in the repo for context, but do not modify anything. Output exactly the"
+    echo "ranked findings and verdict from docs/review/guide.md."
+    echo
+    echo '```diff'
+    printf '%s\n' "$diff"
+    echo '```'
+} >"$prompt"
+
+echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
+# -o captures just the final review; progress streams to stderr.
+codex exec -s read-only -o "$out" - <"$prompt" >&2
 
 echo >&2
-echo "===== ${persona} review (${base}) =====" >&2
+echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
 cat "$out"
