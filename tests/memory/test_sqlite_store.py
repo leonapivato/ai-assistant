@@ -7,8 +7,9 @@ retrieval is reproducible and offline.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -52,14 +53,18 @@ def _preference(record_id: str, content: str) -> MemoryRecord:
 
 
 class _FlakyEmbedder:
-    """Returns valid vectors until ``fail`` is set, then a wrong-sized one.
+    """A misbehaving embedder for exercising the store's error boundary.
 
-    Used to exercise the store's behaviour when an embedder misbehaves.
+    Returns valid vectors until one of the fault flags is set: ``fail`` yields a
+    wrong-sized vector, ``boom`` raises (mimicking a provider outage), and
+    ``malformed`` returns a contract-violating result element (``None``).
     """
 
     def __init__(self) -> None:
         self._inner = HashingEmbedder(dimensions=8)
         self.fail = False
+        self.boom = False
+        self.malformed = False
 
     @property
     def model_id(self) -> str:
@@ -70,6 +75,11 @@ class _FlakyEmbedder:
         return 8
 
     async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+        if self.boom:
+            msg = "provider outage"
+            raise RuntimeError(msg)
+        if self.malformed:
+            return cast("list[Embedding]", [None for _ in texts])  # non-sized element
         if self.fail:
             return [[0.0, 0.0, 0.0] for _ in texts]  # wrong length (3 != 8)
         return await self._inner.embed(texts)
@@ -207,6 +217,71 @@ async def test_rollback_on_mid_transaction_failure(
     got = await store.get("1")
     assert got is not None
     assert got.content == "original content"  # UPDATE/DELETE were rolled back
+
+
+async def test_embedder_exception_is_wrapped_as_store_error(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    embedder = _FlakyEmbedder()
+    store = make_store(embedder=embedder)
+
+    embedder.boom = True
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await store.add(_semantic("1", "content"))
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await store.search("content")
+
+    embedder.boom = False
+    embedder.malformed = True  # a non-sized result element must not leak a TypeError
+    with pytest.raises(MemoryStoreError, match="embedder failed"):
+        await store.add(_semantic("1", "content"))
+
+
+async def test_wrong_sized_query_vector_raises_store_error(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    embedder = _FlakyEmbedder()
+    store = make_store(embedder=embedder)
+    await store.add(_semantic("1", "content"))
+
+    embedder.fail = True  # search now embeds the query to a wrong-sized vector
+    with pytest.raises(MemoryStoreError, match="expected 8"):
+        await store.search("content")
+
+
+async def test_connect_failure_is_wrapped(tmp_path: Path) -> None:
+    # A path under a non-existent directory makes sqlite3.connect() itself raise,
+    # before any connection exists to close.
+    missing = tmp_path / "no_such_dir" / "memory.db"
+    with pytest.raises(MemoryStoreError, match="failed to open memory store"):
+        SqliteMemoryStore(path=missing, embedder=HashingEmbedder(dimensions=8))
+
+
+async def test_setup_failure_is_wrapped_and_closes_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force a failure *after* the connection is opened; the store must translate
+    # it to MemoryStoreError and close the half-open connection (no leak).
+    captured: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def _capturing_connect(database: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
+        conn = real_connect(database, check_same_thread=check_same_thread)
+        captured.append(conn)
+        return conn
+
+    def _boom(_conn: object) -> None:
+        raise sqlite3.OperationalError("cannot load extension")
+
+    monkeypatch.setattr("ai_assistant.memory.sqlite_store.sqlite3.connect", _capturing_connect)
+    monkeypatch.setattr("ai_assistant.memory.sqlite_store.sqlite_vec.load", _boom)
+
+    with pytest.raises(MemoryStoreError, match="failed to open memory store"):
+        SqliteMemoryStore(path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=8))
+
+    assert len(captured) == 1  # a connection was opened
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured[0].execute("SELECT 1")  # ...and closed on the failure path
 
 
 async def test_persists_across_reopen(make_store: Callable[..., SqliteMemoryStore]) -> None:

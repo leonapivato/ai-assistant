@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
+import pytest
+
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     DataTier,
+    MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
     MemorySource,
@@ -15,6 +20,9 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -97,6 +105,54 @@ async def test_conflicting_proposal_merges_into_existing() -> None:
     assert merged.provenance.confidence == 0.7  # max of the two
     assert set(merged.provenance.evidence) == {"ev1", "ev2"}
     assert await store.get("new") is None  # merged in place, not duplicated
+
+
+class _MergeToAbsentTargetPolicy:
+    """A policy that always asks to merge into a record that isn't a conflict."""
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+    ) -> MemoryDecision:
+        return MemoryDecision(
+            kind=MemoryDecisionKind.MERGE, merge_into="ghost", reason="test misdirection"
+        )
+
+
+async def test_merge_into_absent_target_raises_and_stores_nothing() -> None:
+    store = InMemoryMemoryStore()
+    ingestor = MemoryIngestor(store=store, policy=_MergeToAbsentTargetPolicy(), now=_fixed_now)
+
+    with pytest.raises(MemoryStoreError, match="not among the conflicts"):
+        await ingestor.ingest(_proposal(_semantic("1", "some fact", confidence=0.9)))
+
+    assert await store.get("1") is None  # nothing was silently stored as new
+
+
+class _MaxTtlPolicy:
+    """A policy whose STORE_TEMPORARY ttl overflows the representable date range."""
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+    ) -> MemoryDecision:
+        return MemoryDecision(
+            kind=MemoryDecisionKind.STORE_TEMPORARY, ttl=timedelta.max, reason="test overflow"
+        )
+
+
+async def test_overflowing_temporary_ttl_raises_and_stores_nothing() -> None:
+    store = InMemoryMemoryStore()
+    ingestor = MemoryIngestor(store=store, policy=_MaxTtlPolicy(), now=_fixed_now)
+
+    with pytest.raises(MemoryStoreError, match="overflows"):
+        await ingestor.ingest(_proposal(_semantic("1", "some fact", confidence=0.9)))
+
+    assert await store.get("1") is None
 
 
 async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:

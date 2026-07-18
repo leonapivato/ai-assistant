@@ -199,13 +199,32 @@ class MemoryDecision(BaseModel):
 
     @model_validator(mode="after")
     def _outcome_fields_are_consistent(self) -> MemoryDecision:
-        """Ensure outcome-specific fields are present for the decision kind."""
-        if self.kind is MemoryDecisionKind.MERGE and self.merge_into is None:
-            msg = "MERGE decision requires merge_into"
+        """Ensure outcome-specific fields match the decision kind.
+
+        Each kind requires its own field and forbids the other's, so a decision
+        cannot carry contradictory state (e.g. an ``ACCEPT`` with a ``ttl``). A
+        temporary store's ``ttl`` must be positive, since a non-positive window
+        would produce an already-expired record.
+        """
+        if self.kind is MemoryDecisionKind.MERGE:
+            if self.merge_into is None:
+                msg = "MERGE decision requires merge_into"
+                raise ValueError(msg)
+        elif self.merge_into is not None:
+            msg = "merge_into is only valid for a MERGE decision"
             raise ValueError(msg)
-        if self.kind is MemoryDecisionKind.STORE_TEMPORARY and self.ttl is None:
-            msg = "STORE_TEMPORARY decision requires ttl"
+
+        if self.kind is MemoryDecisionKind.STORE_TEMPORARY:
+            if self.ttl is None:
+                msg = "STORE_TEMPORARY decision requires ttl"
+                raise ValueError(msg)
+            if self.ttl <= timedelta(0):
+                msg = "STORE_TEMPORARY decision requires a positive ttl"
+                raise ValueError(msg)
+        elif self.ttl is not None:
+            msg = "ttl is only valid for a STORE_TEMPORARY decision"
             raise ValueError(msg)
+
         return self
 
 

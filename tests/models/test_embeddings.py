@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+import pytest
+
 from ai_assistant.core.protocols import Embedder
 from ai_assistant.models import HashingEmbedder
 
@@ -18,6 +20,12 @@ def _dot(a: Sequence[float], b: Sequence[float]) -> float:
 
 def test_conforms_to_protocol() -> None:
     assert isinstance(HashingEmbedder(), Embedder)
+
+
+@pytest.mark.parametrize("dimensions", [0, -1])
+def test_non_positive_dimensions_are_rejected(dimensions: int) -> None:
+    with pytest.raises(ValueError, match="dimensions must be >= 1"):
+        HashingEmbedder(dimensions=dimensions)
 
 
 async def test_dimensions_and_shape() -> None:

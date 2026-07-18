@@ -58,23 +58,38 @@ class SqliteMemoryStore:
         self._conn = self._setup()
 
     def _setup(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, check_same_thread=False)
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS records("
-            "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
-            "kind TEXT NOT NULL, data TEXT NOT NULL)"
-        )
-        self._verify_or_init_meta(conn)
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
-            f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
-        )
-        conn.commit()
-        self._restrict_permissions()
+        try:
+            conn = sqlite3.connect(self._path, check_same_thread=False)
+        except (sqlite3.Error, OSError) as exc:
+            # e.g. the parent directory does not exist — no connection to close.
+            msg = f"failed to open memory store at {self._path!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS records("
+                "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+                "kind TEXT NOT NULL, data TEXT NOT NULL)"
+            )
+            self._verify_or_init_meta(conn)
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
+                f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
+            )
+            conn.commit()
+            self._restrict_permissions()
+        except MemoryStoreError:
+            conn.close()  # never leak the connection when opening fails
+            raise
+        except (sqlite3.Error, OSError) as exc:
+            conn.close()
+            msg = f"failed to open memory store at {self._path!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
         return conn
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
@@ -98,21 +113,43 @@ class SqliteMemoryStore:
         if self._path != ":memory:":
             Path(self._path).chmod(_OWNER_ONLY)
 
+    async def _embed_one(self, text: str) -> Embedding:
+        """Embed a single text, mapping any embedder misbehaviour to our error.
+
+        The embedder is an injected contract, so a provider fault, a wrong batch
+        cardinality, or a wrong-sized vector must surface as ``MemoryStoreError``
+        rather than an arbitrary exception leaking through the store's boundary.
+        """
+        try:
+            vectors = await self._embedder.embed([text])
+            if len(vectors) != 1:
+                msg = f"embedder returned {len(vectors)} vectors for a single text"
+                raise MemoryStoreError(msg)
+            vector = vectors[0]
+            if len(vector) != self._embedder.dimensions:
+                msg = (
+                    f"embedder returned a {len(vector)}-dim vector, "
+                    f"expected {self._embedder.dimensions}"
+                )
+                raise MemoryStoreError(msg)
+        except MemoryStoreError:
+            raise
+        except Exception as exc:  # any fault or malformed result from the embedder
+            # Also catches a malformed result container/element (e.g. ``None`` or
+            # a non-sized vector), whose ``len()`` raises ``TypeError`` here.
+            msg = f"embedder failed: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return vector
+
     async def add(self, record: MemoryRecord) -> str:
         """Embed the record's content and persist it, returning its id.
 
         Raises:
-            MemoryStoreError: If the embedder returns a wrong-sized vector, or
-                the write fails (the write is transactional — a failure leaves
-                the store unchanged).
+            MemoryStoreError: If the embedder fails or returns a wrong-sized
+                vector, or the write fails (the write is transactional — a
+                failure leaves the store unchanged).
         """
-        [vector] = await self._embedder.embed([record.content])
-        if len(vector) != self._embedder.dimensions:
-            msg = (
-                f"embedder returned a {len(vector)}-dim vector, "
-                f"expected {self._embedder.dimensions}"
-            )
-            raise MemoryStoreError(msg)
+        vector = await self._embed_one(record.content)
         async with self._lock:
             await asyncio.to_thread(self._add_sync, record, vector)
         return record.id
@@ -175,10 +212,14 @@ class SqliteMemoryStore:
         Returns:
             Matching records, most relevant first, each carrying a ``score``
             that is the cosine similarity to the query, in ``[0, 1]``.
+
+        Raises:
+            MemoryStoreError: If the embedder fails or returns a wrong-sized
+                query vector.
         """
         if limit <= 0 or not query.strip():
             return []
-        [vector] = await self._embedder.embed([query])
+        vector = await self._embed_one(query)
         async with self._lock:
             rows = await asyncio.to_thread(self._search_sync, vector, limit, kinds)
         return [

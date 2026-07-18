@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryIngestResult,
@@ -27,6 +28,7 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import timedelta
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
@@ -113,11 +115,26 @@ class MemoryIngestor:
             case MemoryDecisionKind.ACCEPT:
                 return await self._store.add(proposed)
             case MemoryDecisionKind.STORE_TEMPORARY:
-                expires_at = self._now() + decision.ttl if decision.ttl is not None else None
+                expires_at = self._expiry(decision.ttl)
                 return await self._store.add(proposed.model_copy(update={"expires_at": expires_at}))
             case MemoryDecisionKind.MERGE:
                 target = next((c for c in conflicts if c.id == decision.merge_into), None)
-                record = proposed if target is None else _merge(target, proposed)
-                return await self._store.add(record)
+                if target is None:
+                    # A MERGE naming an absent target must fail loudly: silently
+                    # storing the proposal as new would create the duplicate the
+                    # merge was meant to prevent, while reporting success.
+                    msg = f"MERGE target {decision.merge_into!r} is not among the conflicts"
+                    raise MemoryStoreError(msg)
+                return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    def _expiry(self, ttl: timedelta | None) -> datetime | None:
+        """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""
+        if ttl is None:
+            return None
+        try:
+            return self._now() + ttl
+        except OverflowError as exc:
+            msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
+            raise MemoryStoreError(msg) from exc
