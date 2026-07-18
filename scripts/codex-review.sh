@@ -33,7 +33,14 @@ if ! command -v codex >/dev/null 2>&1; then
     exit 127
 fi
 
+out="$(mktemp -t "codex-review-${persona}.XXXXXX.md")"
+
 echo "Running Codex '${persona}' review against '${base}' (read-only)…" >&2
 # `codex exec review` diffs against --base and takes custom instructions on
-# stdin; -s read-only forbids any repo mutation.
-codex exec -s read-only review --base "$base" - < "$rubric"
+# stdin; -s read-only forbids any repo mutation. -o captures just the final
+# review (progress is streamed to stderr), which we then print cleanly.
+codex exec -s read-only -o "$out" review --base "$base" - < "$rubric" >&2
+
+echo >&2
+echo "===== ${persona} review (${base}) =====" >&2
+cat "$out"
