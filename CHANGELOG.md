@@ -22,9 +22,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-call `model=` override disables routing rather than silently answering
   from a different model, and exhausting every route re-raises the last failure
   untouched — so its identity, type and message survive routing — while every
-  candidate and its failure *class* is logged — including one a later route
-  papers over, so a silently degrading primary is visible before the fallback
-  also fails. Diagnostics name a route by *position* (`route[1]`) and a failure
+  every *routable* candidate failure is logged by class — including one a later
+  route papers over, which is the case that would otherwise be invisible, since
+  the call goes on to succeed. A non-routable failure is not logged: it is
+  raised to the caller, so it is not invisible to begin with. Diagnostics name a route by *position* (`route[1]`) and a failure
   by the nearest class in this project's own taxonomy, so neither a caller's
   string nor a provider's class name reaches a Tier 2 log; and they are emitted
   best-effort, because a broken log sink was able to abort the fallback

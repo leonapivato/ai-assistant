@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant.core import errors as _errors
 from ai_assistant.core.errors import ConfigurationError, ModelError
 
 if TYPE_CHECKING:
@@ -41,26 +42,40 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+# The failure classes this project defines, captured by identity at import so a
+# later-defined class cannot join the set by claiming our __module__. Read out
+# of the errors module's own namespace rather than listed by name, so a class
+# added to the taxonomy is picked up without editing this file.
+_TAXONOMY: Final[frozenset[type[ModelError]]] = frozenset(
+    obj for obj in vars(_errors).values() if isinstance(obj, type) and issubclass(obj, ModelError)
+)
+
 
 def _classify(exc: ModelError) -> str:
     """Name a failure using only the project's own taxonomy.
 
     ``type(exc).__name__`` is provider-controlled: a route may be any
-    ``ModelProvider``, so the class it raises can be named anything at all,
-    and that name reaches a Tier 2 log under a key the ADR-0004 §5 redactor
-    treats as innocuous. Walking the MRO for the nearest class defined in
-    `core.errors` keeps the diagnostic value — a third-party
-    ``ProviderQuotaError(ModelRateLimitError)`` still logs as
-    ``ModelRateLimitError`` — while the emitted string can only ever be one we
-    wrote.
+    ``ModelProvider``, so the class it raises can be named anything at all, and
+    that name reaches a Tier 2 log under a key the ADR-0004 §5 redactor treats
+    as innocuous. Walking the MRO for the nearest *known* class keeps the
+    diagnostic value — a third-party ``ProviderQuotaError(ModelRateLimitError)``
+    still logs as ``ModelRateLimitError`` — while the emitted string can only
+    ever be one we wrote.
 
-    The threat model here is narrow, since a hostile provider already runs in
-    this process and logging would be the least of the problems. The realistic
-    version is duller: a provider that names its exception after the tenant,
-    customer, or record it failed on.
+    Membership is by **object identity** against :data:`_TAXONOMY`, a set frozen
+    at import. An earlier version compared ``cls.__module__`` to this project's
+    errors module, which a class can simply claim:
+    ``type("PATIENT_SSN_...", (ModelRateLimitError,), {"__module__":
+    "ai_assistant.core.errors"})`` passed that check and had its name logged.
+    ``__module__`` is a writable attribute; identity is not forgeable.
+
+    The threat model is narrow — a provider spoofing ``__module__`` to smuggle
+    text into a log already runs in this process and could log directly. The
+    realistic version is duller: a provider that names its exception after the
+    tenant, customer, or record it failed on.
     """
     for cls in type(exc).__mro__:
-        if cls.__module__ == ModelError.__module__:
+        if cls in _TAXONOMY:
             return cls.__name__
     return ModelError.__name__
 
@@ -206,6 +221,11 @@ class RoutingProvider:
                 return await route.provider.complete(messages, model=route.model)
             except ModelError as exc:
                 if not exc.routable:
+                    # Deliberately not logged. The routable case is logged
+                    # because a later route may paper over it, leaving a
+                    # degrading provider invisible behind a successful call.
+                    # This one is raised to the caller, so it is already
+                    # visible; logging it too would only duplicate.
                     raise
                 # Logged here, not only on exhaustion: a failure that a later
                 # route papers over is invisible otherwise, and a primary
