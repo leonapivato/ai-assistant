@@ -12,6 +12,7 @@ import math
 from typing import TYPE_CHECKING
 
 import pytest
+from model_provider_contract import ModelProviderContract
 from pydantic import ValidationError
 
 from ai_assistant.core.config import Settings
@@ -23,17 +24,38 @@ from ai_assistant.core.errors import (
     ModelTimeoutError,
     ModelUnavailableError,
 )
-from ai_assistant.core.protocols import ModelProvider
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import RetryingProvider
 from ai_assistant.models.retry import RetryPolicy
+from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.protocols import ModelProvider
+
+
+class TestRetryingProviderContract(ModelProviderContract):
+    """Runs RetryingProvider through the shared ModelProvider conformance suite.
+
+    A wrapper is substitutable for what it wraps, so it owes the contract in its
+    own right — over the canonical fake, which never fails, so the suite sees the
+    pass-through path rather than the retry machinery.
+    """
+
+    @pytest.fixture
+    def provider(self) -> ModelProvider:
+        return RetryingProvider(FakeModelProvider())
+
 
 class FakeProvider:
-    """A ``ModelProvider`` that replays a scripted sequence of outcomes."""
+    """A ``ModelProvider`` that replays a scripted sequence of outcomes.
+
+    Local rather than :class:`FakeModelProvider`: these tests need to script
+    *typed failures* (a rate limit, then a success) to drive the retry loop, and
+    the canonical fake deliberately wraps every reply failure in a bare
+    ``ModelError``, which would erase the classification under test.
+    """
 
     def __init__(self, *outcomes: Message | Exception) -> None:
         self._outcomes = list(outcomes)
@@ -70,10 +92,6 @@ PROMPT = [Message(role=Role.USER, content="hi")]
 
 def _provider(inner: FakeProvider, sleep: SleepSpy, **kwargs: float | int) -> RetryingProvider:
     return RetryingProvider(inner, policy=RetryPolicy(**kwargs), sleep=sleep, jitter=lambda: 1.0)  # type: ignore[arg-type]
-
-
-def test_conforms_to_protocol() -> None:
-    assert isinstance(_provider(FakeProvider(REPLY), SleepSpy()), ModelProvider)
 
 
 async def test_succeeds_without_retrying() -> None:
