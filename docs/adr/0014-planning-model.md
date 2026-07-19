@@ -128,11 +128,23 @@ plan. `JsonValue` makes "this is storable and portable" a property the type
 system checks at construction rather than a hope the store discovers at write
 time. The same reasoning applies to `StepExecution.output` (§3).
 
+**`frozen=True` is not enough on its own, so parameters are deep-frozen at
+validation.** Pydantic's `frozen=True` blocks field *reassignment*; it does not
+freeze what a field contains, so `step.parameters["recipient"] = ...` would
+still mutate a supposedly immutable decision record — and an audit record that
+can be edited after the fact, or between plan and execution, is not an audit
+record. `PlanStep` therefore runs a recursive validator converting the incoming
+JSON value into an immutable one (mappings to `MappingProxyType`, lists to
+`tuple`) before storing it. The guarantee is then depth-independent rather than
+true only at the top level. This is why `parameters` is typed `Mapping`, not
+`dict`: callers get a read-only view, and pydantic still serialises it as a
+JSON object.
+
 ### 3. `ExecutionState` — the durable half, owned by deterministic code
 
 ```python
 class StepStatus(StrEnum):
-    PENDING; AWAITING_APPROVAL; RUNNING; SUCCEEDED; FAILED; SKIPPED
+    PENDING; AWAITING_APPROVAL; RUNNING; SUCCEEDED; FAILED; SKIPPED; INDETERMINATE
 
 class SkipReason(StrEnum):
     APPROVAL_DENIED; UNMET_DEPENDENCY; NO_CAPABLE_TOOL; SUPERSEDED
@@ -206,11 +218,37 @@ and rejects everything else with `PlanningError`:
 | `RUNNING` | `SUCCEEDED` | tool returned | `output`, `finished_at` |
 | `RUNNING` | `FAILED` | tool raised | `error`, `finished_at` |
 | `FAILED` | `RUNNING` | retry | `attempts += 1`, `started_at` |
+| `RUNNING` | `INDETERMINATE` | recovery found it running after a crash | `finished_at` |
+
+**The `→ RUNNING` transition is a claim, and must be committed before the tool
+is invoked.** This ordering is the point of the CAS in §5: two workers racing
+the same step both attempt the claim, one's `commit_execution` fails with
+`StaleExecutionError`, and the loser has not yet acted. Committing *after*
+invocation would make CAS useless — it would reject a write only once both side
+effects had already happened.
 
 `SUCCEEDED` and `SKIPPED` are terminal. `FAILED` is terminal *unless* retried,
 and the retry ceiling is enforced by the tracker, not by a model — retries are
 named in VISION §7 as deterministic state. `AWAITING_APPROVAL` is a durable
 state rather than an in-memory pause precisely so a restart preserves it.
+
+**We do not claim exactly-once execution, and `INDETERMINATE` is where we say
+so.** A crash between a tool's side effect and the commit of `RUNNING →
+SUCCEEDED` leaves a durable `RUNNING` that cannot, from planning's vantage
+point, be distinguished from a crash *before* the effect. Automatically
+retrying it would risk acting twice; automatically failing it would risk
+reporting a completed action as failed. So recovery does neither: it moves such
+a step to `INDETERMINATE`, which is never auto-retried and must be resolved
+explicitly — by reconciling with the tool or by asking the user. Making the
+ambiguity a first-class durable state is the deterministic answer VISION §7
+asks for; guessing would not be.
+
+Recovery scans `active_executions()` at startup, which presumes no executor is
+live for those states — true for a single-user local app with one executor. A
+lease (`RUNNING` with an expiry, reclaimable by a peer) is the generalisation
+and is deferred with the rest of concurrent execution. Genuine exactly-once
+needs the *tool* to dedupe against an idempotency key, so it is Lane B's to
+offer and this ADR's to consume later (§7).
 
 `PlanExecution` takes an injectable `now: Callable[[], datetime]`, matching
 `memory` and `context`, so timestamps are deterministic in tests. Each
@@ -314,6 +352,12 @@ Protocol.
   which step 3 consumes step 1's output is a follow-on, because it is a
   substitution language with real injection-safety questions and no consumer
   until an executor exists.
+- **Idempotency keys and `INDETERMINATE` resolution.** Turning at-most-once into
+  exactly-once requires tools that dedupe against a caller-supplied key; that is
+  Lane B's contract to offer. Automated reconciliation of an `INDETERMINATE`
+  step waits on it (§4).
+- **Execution leases**, which would let a peer reclaim a `RUNNING` step from a
+  dead worker — unnecessary while one executor runs at a time (§4).
 - **Step dependencies / parallel execution.** Steps are an ordered sequence.
   A `depends_on` DAG is additive later (an optional field defaulting to the
   implicit "after the previous step") and is not worth the executor complexity
@@ -347,9 +391,15 @@ Protocol.
 - **`planning` owns durable state it is accountable for**, with ADR-0004's
   export/delete obligations written into the `PlanStore` contract rather than
   deferred to whoever implements it.
-- **Concurrent execution is safe by contract, not by convention:** a lost update
-  — and the duplicated side effect behind it — becomes a `StaleExecutionError`
-  rather than silent data loss.
+- **Concurrent execution is safe by contract, not by convention:** claiming a
+  step commits before the tool runs, so a racing worker loses with a
+  `StaleExecutionError` before it acts, not after.
+- **Exactly-once is explicitly out of scope.** A crash mid-effect yields an
+  `INDETERMINATE` step requiring explicit resolution. This is a real operational
+  cost — someone or something must adjudicate — accepted in preference to a
+  system that silently double-books a flight or wrongly reports success.
+- **The audit record is immutable in fact, not just in annotation** — plan
+  parameters are deep-frozen, so what executes is what was decided.
 - **Plan data is serialisable by construction.** `JsonValue` means an
   unpersistable parameter is rejected where it is built, not discovered by
   whichever store tries to write it.
