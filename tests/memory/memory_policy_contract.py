@@ -23,7 +23,9 @@ abstract base directly; it is collected via a ``Test``-prefixed subclass.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import product
 
 import pytest
 
@@ -94,6 +96,32 @@ def _record(
             )
 
 
+@dataclass(frozen=True)
+class _Case:
+    """One point in the input space ``decide`` must handle."""
+
+    record_kind: str
+    source: MemorySource
+    confidence: float
+    sensitivity: DataTier
+    conflicts: bool
+
+    def __str__(self) -> str:
+        conflicts = "conflicts" if self.conflicts else "clean"
+        return f"{self.record_kind}-{self.source}-{self.confidence}-{self.sensitivity}-{conflicts}"
+
+
+# The full cross-product of everything a caller can vary. Bundled into one
+# parameter rather than stacked `parametrize` decorators, which would push the
+# test past the argument limit.
+_TOTALITY_CASES = [
+    _Case(record_kind, source, confidence, sensitivity, conflicts=conflicts)
+    for record_kind, source, confidence, sensitivity, conflicts in product(
+        _RECORD_KINDS, MemorySource, [0.0, 0.5, 1.0], DataTier, [False, True]
+    )
+]
+
+
 def _proposal(
     record: MemoryRecord | None = None,
     *,
@@ -117,24 +145,21 @@ class MemoryPolicyContract:
     def test_conforms_to_protocol(self, policy: MemoryPolicy) -> None:
         assert isinstance(policy, MemoryPolicy)
 
-    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
-    @pytest.mark.parametrize("source", list(MemorySource))
-    @pytest.mark.parametrize("confidence", [0.0, 0.5, 1.0])
-    @pytest.mark.parametrize("with_conflicts", [False, True])
-    async def test_decide_rules_on_every_proposal(
-        self,
-        policy: MemoryPolicy,
-        source: MemorySource,
-        confidence: float,
-        record_kind: str,
-        *,
-        with_conflicts: bool,
-    ) -> None:
+    @pytest.mark.parametrize("case", _TOTALITY_CASES, ids=str)
+    async def test_decide_rules_on_every_proposal(self, policy: MemoryPolicy, case: _Case) -> None:
         # A policy is total over well-formed input: every proposal gets a ruling,
-        # so the write path can never stall on an unhandled combination.
-        conflicts = [_record("existing", record_kind=record_kind)] if with_conflicts else []
+        # so the write path can never stall on an unhandled combination. The
+        # sweep spans every axis a caller can vary — record variant, source,
+        # confidence, tier, and whether anything conflicts.
+        conflicts = [_record("existing", record_kind=case.record_kind)] if case.conflicts else []
         proposal = _proposal(
-            _record("new", source=source, confidence=confidence, record_kind=record_kind)
+            _record(
+                "new",
+                source=case.source,
+                confidence=case.confidence,
+                record_kind=case.record_kind,
+            ),
+            sensitivity=case.sensitivity,
         )
 
         decision = await policy.decide(proposal, conflicts=conflicts)
@@ -189,12 +214,17 @@ class MemoryPolicyContract:
         assert decision.kind not in _COMMITTING
 
     @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
-    async def test_decide_is_deterministic(self, policy: MemoryPolicy, record_kind: str) -> None:
+    @pytest.mark.parametrize("with_conflicts", [False, True])
+    async def test_decide_is_deterministic(
+        self, policy: MemoryPolicy, record_kind: str, *, with_conflicts: bool
+    ) -> None:
         # The Protocol docstring makes determinism the point of the "dispose"
         # half: the same proposal must not be accepted once and deferred the
-        # next time, or the write path stops being reviewable.
+        # next time, or the write path stops being reviewable. Both branches are
+        # swept: the conflict-free path is a different branch in every policy
+        # written so far, and equally bound by this.
         proposal = _proposal(_record("new", record_kind=record_kind))
-        conflicts = [_record("existing", record_kind=record_kind)]
+        conflicts = [_record("existing", record_kind=record_kind)] if with_conflicts else []
 
         first = await policy.decide(proposal, conflicts=conflicts)
         second = await policy.decide(proposal, conflicts=conflicts)
