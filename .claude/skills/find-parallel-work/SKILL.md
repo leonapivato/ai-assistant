@@ -86,17 +86,31 @@ style. Structure:
 - **One checklist section per lane**, each with:
   - Subsystem name and the roadmap artifact(s) it delivers.
   - Proposed `area/slug` for `just claim-workspace`.
-  - Whether it touches `core/protocols.py`, `core/types.py`, or both, and the
-    coordination instruction if so, in this order: **first**
+  - Whether it touches `core/protocols.py`, `core/types.py`, or both. If so,
+    **pre-assign its provisional ADR number in the issue itself** — read
+    `WORKING.md`'s "Highest merged ADR" line and its "ADR numbers in flight"
+    table, take one past the higher of the two, and write that number into
+    this lane's checklist item (e.g. "touches `core/`: claim ADR-0014").
+    Don't leave the picker to compute it independently later: within a batch
+    this skill proposes, step 2's cross-check already limits it to at most
+    one `core/`-touching lane starting now (any second one stacks on the
+    first, sequenced, so it never races for a number), but the picker still
+    has to look the number up somehow — pre-assigning it here removes that
+    lookup and the ambiguity window around it. It is still provisional, the
+    same as any ADR number is (`CONTRIBUTING.md` — "provisional until
+    merge"): unrelated concurrent work *outside* this batch can still land
+    ADR-0014 first, in which case the standard "second to merge renumbers"
+    process applies, unchanged. The coordination instruction: **first**
     `just claim-workspace <area>/<slug>` (CLAUDE.md — claiming a workspace is
     the first action of any task, before editing anything, `WORKING.md`
     included); **then**, from inside that workspace, register the lane and
-    claim the ADR number in `WORKING.md`; **then draft the ADR and get it
-    through architecture review and ratified before implementing against the
-    new contract** (golden rule 5 — claiming the number reserves it, it is
-    not ratification); only once ratified, push the contract commit ahead of
-    the dependent implementation and flag it in the PR title, so a
-    concurrent lane sees the new shape before building against the old one.
+    the pre-assigned ADR number in `WORKING.md`; **then draft the ADR and
+    get it through architecture review and ratified before implementing
+    against the new contract** (golden rule 5 — claiming the number reserves
+    it, it is not ratification); only once ratified, push the contract
+    commit ahead of the dependent implementation and flag it in the PR
+    title, so a concurrent lane sees the new shape before building against
+    the old one.
   - A reminder that registering the lane in `WORKING.md` (per the ordering
     above) is the picker's job on pickup — this skill does not do that
     itself.
@@ -110,7 +124,8 @@ style. Structure:
 shared GitHub state other people see. Print the drafted body and get
 explicit confirmation before running it. Never auto-fire this step.
 
-Also run `gh issue list --state open` first and scan titles/bodies for an
+Also run `gh issue list --state open --limit 200` first and scan titles/bodies
+for an
 existing tracking issue already proposing one or more of the same lanes —
 two runs of this skill (by different people, or the same person re-running
 it) can otherwise both observe the same unclaimed lane and each post a
@@ -123,19 +138,25 @@ is a best-effort check, not an atomic reservation — same limitation as the
 would need a real lane-reservation mechanism, out of scope for a proposal
 tool.
 
-State can go stale between step 1 and this one — someone else can claim a
-lane in `WORKING.md` while the draft sits waiting for confirmation. Re-reading
-the local checkout's `WORKING.md` alone does not catch this: a claim another
-contributor pushed in the meantime only shows up after a fetch. Immediately
-before creating the issue, run `git fetch origin` and diff the local
-`WORKING.md` against `origin/master`'s copy (`git show origin/master:WORKING.md`)
-— drop or re-flag any lane that gained an owner in either, rather than
-posting a batch that includes work someone already picked up. This closes the
-gap for a claim already merged to `master`; a claim only pushed to someone
-else's still-open feature branch is outside what `WORKING.md` itself
-guarantees at any point — the ledger is authoritative once merged, not
-before (same reason `CONTRIBUTING.md`'s "stay in your lane" check is
-best-effort, not atomic, for two people claiming at once). If this check
-changes the lane list or any checklist content from what was already shown,
-**re-print the revised draft and get confirmation again** — never post a body
-different from the one actually approved.
+State can go stale between step 1 and this one — not just `WORKING.md`
+ownership, but *any* input the candidates were computed from: a lane's
+roadmap item can get checked off, its `core/protocols.py`/`core/types.py`
+entry can land, or its module count in `just status` can move, all while the
+draft sits waiting for confirmation. Immediately before creating the issue,
+run `git fetch origin` and **redo all of step 1 and step 2 against
+`origin/master`** (`just status` reflects the local checkout's `src/`, so
+also diff local `src/`, `core/protocols.py`, and `core/types.py` against
+`origin/master`'s copies the same way as `WORKING.md` below) — not just the
+`WORKING.md` check alone, which only catches a lane losing its owner, not a
+lane finishing entirely. Diff the local `WORKING.md` against `origin/master`'s
+copy (`git show origin/master:WORKING.md`) as part of this — drop or re-flag
+any lane whose candidacy changed in any of these ways, rather than posting a
+batch that includes work someone already picked up or finished. This closes
+the gap for anything already merged to `master`; work only pushed to someone
+else's still-open feature branch is outside what any of these sources
+guarantee at any point — merged state is authoritative, not before (same
+reason `CONTRIBUTING.md`'s "stay in your lane" check is best-effort, not
+atomic, for two people claiming at once). If this recheck changes the lane
+list or any checklist content from what was already shown, **re-print the
+revised draft and get confirmation again** — never post a body different
+from the one actually approved.
