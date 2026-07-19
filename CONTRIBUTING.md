@@ -22,7 +22,10 @@ pre-commit install --install-hooks     # both pre-commit and commit-msg hooks
 git config commit.template .gitmessage # scaffold commit messages
 ```
 
-(`just setup` runs all four for you.)
+(`just setup` runs all four for you. If step 2 warns that `uv`'s tool
+directory isn't on `PATH`, or step 3 then reports `pre-commit: command not
+found`, run `uv tool update-shell` and open a new shell — a one-time,
+machine-level fix, same as installing `uv` or `just` itself.)
 
 Install pre-commit as a standalone tool (`uv tool install`), not via
 `uv run` inside a workspace. Git hooks live under the repo's shared
