@@ -799,6 +799,37 @@ def test_claim_rejects_an_ambiguous_explicit_base(tmp_path: Path) -> None:
     assert "area/new" not in branches
 
 
+def test_claim_rejects_an_ambiguous_base_regardless_of_caller_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambiguity detection must not depend on inheriting an English locale.
+
+    The check matches git's own diagnostic text; under a translated locale
+    git would print a localised warning that does not contain "is
+    ambiguous", silently defeating the check (a separate PR #23 review
+    finding). The fix pins that one git invocation to LC_ALL=C. This
+    environment has no non-English locale data installed to reproduce actual
+    translated output, so this instead proves the override is applied
+    regardless of what the caller's own environment sets, rather than
+    reproducing a specific translation (none is available here to test
+    against).
+    """
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+    _git(repo, "branch", "collide", "area/a")
+    _git(repo, "tag", "collide")
+
+    result = _run(_CLAIM, repo, "area/new", "collide")
+
+    assert result.returncode == 2
+    assert "ambiguous" in result.stderr
+
+
 def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
     tmp_path: Path,
 ) -> None:
