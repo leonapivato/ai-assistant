@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 from model_provider_contract import ModelProviderContract
 
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import Message, Role
 from ai_assistant.testing import FakeModelProvider
 
@@ -26,6 +27,16 @@ class TestFakeModelProviderContract(ModelProviderContract):
     @pytest.fixture
     def provider(self) -> ModelProvider:
         return FakeModelProvider()
+
+
+async def test_empty_conversation_is_rejected_like_the_real_provider() -> None:
+    # Not a shared-contract requirement (the Protocol is silent on empty input),
+    # but the fake mirrors PydanticAIProvider so code exercised against it cannot
+    # pass on an empty conversation the real provider would reject.
+    provider = FakeModelProvider()
+
+    with pytest.raises(ModelError):
+        await provider.complete([])
 
 
 async def test_constant_reply_is_returned_verbatim() -> None:
