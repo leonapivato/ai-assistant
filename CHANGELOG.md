@@ -8,6 +8,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `core`: the ADR-0004 §5 log redaction safety net, which the ADR has described
+  as configured since it was ratified but which did not exist — there was no
+  `structlog.configure` call anywhere in the tree. `core/logging.py` adds
+  `configure_logging` (idempotent, called by the CLI before any subcommand, so
+  the net is installed process-wide rather than depending on which module logs
+  first) and a `redact_sensitive` processor masking values under known-sensitive
+  keys. Matching is case-insensitive and substring-based, so `ANTHROPIC_API_KEY`
+  and `chat_messages` are caught without enumerating every compound, and it
+  recurses through the `Mapping`/`Sequence`/`Set` protocols rather than the
+  concrete `dict`/`list` types — a `UserDict` or `MappingProxyType` is an
+  ordinary thing to log and sailed straight through an earlier `dict`-only
+  check with its secrets intact (found by the Codex adversarial reviewer).
+  Loggers are deliberately not cached, so a module-level
+  `structlog.get_logger(__name__)` bound at import time still picks up the
+  redaction processor once the CLI configures it; caching left such a logger
+  emitting through an unredacted chain forever (same reviewer). Mapping *keys*
+  are masked too when they look like data rather than field names, dataclasses
+  and pydantic models are unwrapped and scrubbed rather than reaching the
+  renderer as a leaky repr, and any object the net cannot look inside is masked
+  outright — "unknown" means "hidden", not "assumed harmless". Mapping keys are
+  judged by *shape*: a field name is an identifier, so anything else is treated
+  as data and masked, which catches an SSN or a person's name used as a key.
+  Safe types are matched by exact type rather than `isinstance`, since a
+  subclass can override `__repr__` to render anything, and an `Enum` renders by
+  member name because its *value* can be a secret. Importing the package
+  **composes with** an existing structlog configuration rather than replacing
+  it, so an embedding application keeps its own (possibly stricter) processors
+  and gains ours. It fails
+  closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
+  dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
+  `content_type`) keeps type and enum names readable, and each entry is pinned by
+  a test since every exemption is a hole in the net.
+
+### Fixed
+
+- `core`: `ASSISTANT_LOG_LEVEL` is now validated. An unrecognised level (a typo
+  like `EROR`) silently fell back to INFO, so an operator who set `DEBUG` to
+  diagnose something got neither the level they asked for nor any indication
+  why. It is now rejected at load as a `ConfigurationError`, like every other
+  malformed setting, and normalised to upper case.
+- `context`: a real Tier 1 leak on the degradation path — a failing context
+  source logged `error=str(exc)`, and a source wrapping calendars, tasks or email
+  can quote the very personal data it was fetching. Now logs the exception's
+  *class*. Key-based redaction cannot catch this (an `error` key looks
+  innocuous), which is the point: the net is a safety net, and the primary
+  defence remains logging identifiers, classes and counts rather than content.
+
+### Added
+
 - `learning` + `core`: feedback capture that closes the first learning loop
   (ADR-0009). Adds `FeedbackEvent`/`FeedbackKind` and a `FeedbackProcessor`
   Protocol; `RuleBasedFeedbackProcessor` maps explicit correction/preference

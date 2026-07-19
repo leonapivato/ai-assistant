@@ -11,6 +11,8 @@ import typer
 from rich.console import Console
 
 from ai_assistant import __version__
+from ai_assistant.core.config import load_settings
+from ai_assistant.core.logging import configure_logging
 
 app = typer.Typer(
     name="assistant",
@@ -23,7 +25,13 @@ console = Console()
 
 @app.callback()
 def main() -> None:
-    """Root command group. Keeps subcommands addressable by name."""
+    """Root command group. Keeps subcommands addressable by name.
+
+    Configures logging before any subcommand runs, so the ADR-0004 §5 redaction
+    processor is installed for the whole process rather than depending on
+    whichever module happens to log first.
+    """
+    configure_logging(load_settings())
 
 
 @app.command()
