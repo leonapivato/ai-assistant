@@ -74,12 +74,19 @@ class FakeContextProvider:
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
             raise ValueError(msg)
-        # Deep-copied on ingress as well as egress: the context is fixed *at
+        # Snapshotted on ingress as well as egress: the context is fixed *at
         # construction*, so a caller that keeps its reference and mutates it later
-        # must not be able to change what assemble returns. Copying the default
+        # must not be able to change what assemble returns. Snapshotting the default
         # too keeps the module-level constant from being reachable at all.
+        #
+        # Re-validated rather than `model_copy`d: `CurrentContext` does not validate
+        # on assignment, so a caller can hand over a model it mutated into an
+        # invalid state (a naive `now`, most likely) — and the fake would then fail
+        # the tz-aware assertion in its own conformance suite. Validating here
+        # rejects it at the point the mistake was made, and normalises a naive
+        # `now` to UTC exactly as constructing the model would have.
         source = context if context is not None else _DEFAULT_CONTEXT
-        self._context = source.model_copy(deep=True)
+        self._context = CurrentContext.model_validate(source.model_dump())
         self._failure = failure
         self.call_count = 0
 
