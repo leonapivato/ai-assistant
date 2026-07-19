@@ -47,6 +47,16 @@ def test_model_id_is_configurable() -> None:
     assert FakeEmbedder(model_id="custom-space").model_id == "custom-space"
 
 
+@pytest.mark.parametrize("model_id", ["", "   "])
+def test_blank_model_id_is_rejected(model_id: str) -> None:
+    # A blank id cannot identify an embedding space, and would yield a fake that
+    # fails its own shared contract (test_model_id_is_a_nonblank_string) — a
+    # test double must not be configurable into violating the contract it exists
+    # to stand in for.
+    with pytest.raises(ValueError, match="model_id must not be blank"):
+        FakeEmbedder(model_id=model_id)
+
+
 async def test_shared_tokens_are_more_similar_than_disjoint() -> None:
     embedder = FakeEmbedder()
 
