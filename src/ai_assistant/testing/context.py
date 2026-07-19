@@ -96,9 +96,15 @@ class FakeContextProvider:
         reach the fake's stored context and change what a later call sees.
 
         Raises:
-            ContextError: The ``failure`` passed at construction, if any.
+            ContextError: A fresh equivalent of the ``failure`` passed at
+                construction, if any.
         """
         self.call_count += 1
         if self._failure is not None:
-            raise self._failure
+            # A fresh instance per call, rebuilt from the configured one's type and
+            # args (so a ContextError subclass stays itself). Re-raising the single
+            # stored instance would attach a new traceback to it every call,
+            # accumulating frames across a test and sharing mutable traceback state
+            # between concurrent callers.
+            raise type(self._failure)(*self._failure.args)
         return self._context.model_copy(deep=True)

@@ -58,6 +58,10 @@ class TestFakeContextProviderWithSuppliedContextContract(ContextProviderContract
 async def test_default_context_is_a_weekday_inside_working_hours() -> None:
     context = await FakeContextProvider().assemble()
 
+    # The exact instant, not just the facets: the default is advertised as a fixed,
+    # deterministic context, so a drift to some other weekday morning is a change
+    # to what consumers' tests are pinned against, not an implementation detail.
+    assert context.now == datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
     assert context.time_of_day is TimeOfDay.MORNING
     assert context.is_weekend is False
     assert context.within_working_hours is True
@@ -139,12 +143,29 @@ async def test_failure_is_raised_and_still_counted() -> None:
     assert provider.call_count == 1
 
 
-async def test_failure_repeats_on_every_call() -> None:
+async def test_failure_repeats_as_a_distinct_instance_each_call() -> None:
+    # Each call raises a fresh equivalent, never the stored instance: re-raising
+    # one object would accumulate a traceback on it across calls.
     provider = FakeContextProvider(failure=ContextError("still broken"))
 
+    raised = []
     for _ in range(2):
-        with pytest.raises(ContextError):
+        with pytest.raises(ContextError, match="still broken") as caught:
             await provider.assemble()
+        raised.append(caught.value)
+
+    assert raised[0] is not raised[1]
+    assert all(error.__traceback__ is not None for error in raised)
+
+
+async def test_a_context_error_subclass_keeps_its_type() -> None:
+    class _NarrowerContextError(ContextError):
+        pass
+
+    provider = FakeContextProvider(failure=_NarrowerContextError("specific"))
+
+    with pytest.raises(_NarrowerContextError):
+        await provider.assemble()
 
 
 def test_an_out_of_contract_failure_type_is_rejected() -> None:
