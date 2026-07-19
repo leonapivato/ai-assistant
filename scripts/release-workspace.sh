@@ -7,6 +7,13 @@
 # names cannot remove each other's worktree. Refuses on a dirty worktree
 # unless FORCE=1, which *deliberately discards* the uncommitted work.
 #
+# Only ever touches a branch carrying the `refs/workspace-claimed/<branch>`
+# marker claim-workspace.sh sets (see its header) — a worktree for some other,
+# unclaimed branch (created directly with `git worktree add`, never through
+# this tooling) is refused, not removed, even with FORCE=1. `master` is
+# refused outright: it is the permanent main-checkout branch, never a claimed
+# workspace, so it is rejected before even looking for a worktree to match.
+#
 # Usage: scripts/release-workspace.sh <area>/<slug>
 #   FORCE=1  discard uncommitted changes (any other value, or unset, does not).
 set -euo pipefail
@@ -14,6 +21,10 @@ set -euo pipefail
 branch="${1:-}"
 if [[ -z "$branch" ]]; then
     echo "usage: scripts/release-workspace.sh <area>/<slug>" >&2
+    exit 2
+fi
+if [[ "$branch" == "master" ]]; then
+    echo "refusing to release 'master' — it is the permanent main checkout, never a claimed workspace." >&2
     exit 2
 fi
 force=0
@@ -41,6 +52,11 @@ wt_path="$(git worktree list --porcelain | awk -v ref="refs/heads/${branch}" '
     /^branch /{if ($2 == ref) print path}')"
 
 if [[ -n "$wt_path" ]]; then
+    if ! git -C "$main_root" rev-parse --verify --quiet \
+        "refs/workspace-claimed/${branch}" >/dev/null; then
+        echo "'${branch}' was not claimed by this tooling (no refs/workspace-claimed/${branch} marker) — refusing to remove its worktree." >&2
+        exit 1
+    fi
     if (( force )); then
         git -C "$main_root" worktree remove --force "$wt_path"
     else
