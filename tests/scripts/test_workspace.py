@@ -103,6 +103,35 @@ def test_claim_from_main_checkout_creates_a_worktree(tmp_path: Path) -> None:
     assert _current_branch(repo) == "master"  # main checkout untouched
 
 
+def test_claim_tags_the_branch_as_workspace_claimed(tmp_path: Path) -> None:
+    """prune-workspaces.sh trusts only branches carrying this tag (PR #17 review).
+
+    Without it, a hand-created branch that coincidentally shares a commit with
+    some old closed PR would look identical to a real claim. The tag is a
+    dedicated ref, not `git config` — a shared file that would serialise
+    concurrent claims on its lock (see the N-way concurrency test below).
+    """
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/one")
+
+    assert _GIT is not None
+    result = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [
+            _GIT,
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/workspace-claimed/area/one",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,  # asserting on returncode below
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_second_claim_gets_its_own_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     ws_one = Path(_workspace(_run(_CLAIM, repo, "area/one")))
