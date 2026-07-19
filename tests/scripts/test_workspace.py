@@ -59,19 +59,21 @@ def _init_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _run(
+def _run(  # noqa: PLR0913  # test helper threading claim/release's real optional knobs individually
     script: Path,
     repo: Path,
     *args: str,
     cwd: Path | None = None,
     bootstrap: str = "true",
     force: str | None = None,
+    env_extra: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     assert _BASH is not None
     env = os.environ.copy()
     env["WORKSPACE_BOOTSTRAP"] = bootstrap
     if force is not None:
         env["FORCE"] = force
+    env.update(env_extra or {})
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test env
         [_BASH, str(script), *args],
         cwd=str(cwd or repo),
@@ -799,32 +801,56 @@ def test_claim_rejects_an_ambiguous_explicit_base(tmp_path: Path) -> None:
     assert "area/new" not in branches
 
 
-def test_claim_rejects_an_ambiguous_base_regardless_of_caller_locale(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_claim_rejects_an_ambiguous_base_regardless_of_caller_locale(tmp_path: Path) -> None:
     """Ambiguity detection must not depend on inheriting an English locale.
 
     The check matches git's own diagnostic text; under a translated locale
     git would print a localised warning that does not contain "is
-    ambiguous", silently defeating the check (a separate PR #23 review
-    finding). The fix pins that one git invocation to LC_ALL=C. This
-    environment has no non-English locale data installed to reproduce actual
-    translated output, so this instead proves the override is applied
-    regardless of what the caller's own environment sets, rather than
-    reproducing a specific translation (none is available here to test
-    against).
-    """
-    monkeypatch.setenv("LANG", "de_DE.UTF-8")
-    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
-    repo = _init_repo(tmp_path)
-    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
-    (ws_a / "a.txt").write_text("work from a\n")
-    _git(ws_a, "add", "a.txt")
-    _git(ws_a, "commit", "-qm", "commit on a")
-    _git(repo, "branch", "collide", "area/a")
-    _git(repo, "tag", "collide")
+    ambiguous", silently defeating the check (a PR #23 review finding). This
+    environment has no non-English locale data installed to generate real
+    translated git output, so a real branch/tag collision (as in the test
+    above) can't actually distinguish "the LC_ALL=C fix is present" from
+    "it was silently removed" — git falls back to English regardless either
+    way, and the test would pass under both.
 
-    result = _run(_CLAIM, repo, "area/new", "collide")
+    Stubs `git` itself instead: the fake emits an English "is ambiguous"
+    warning only when invoked with LC_ALL=C exactly (what the fix forces for
+    this one call) and a different, non-matching message otherwise
+    (standing in for a translated locale) — every other git call delegates
+    to the real binary untouched. If the fix were removed, this call would
+    inherit whatever locale the *test's own* environment has (not literally
+    "C"), the fake would emit the "translated" message, and the assertion
+    below would correctly fail — unlike the real-collision test, this one
+    actually has the power to catch that regression.
+    """
+    assert _GIT is not None
+    repo = _init_repo(tmp_path)
+    stub_bin = tmp_path / "fake-git-bin"
+    stub_bin.mkdir()
+    fake_git = stub_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env bash\n"
+        f'REAL_GIT="{_GIT}"\n'
+        'if [[ "$*" == *"--end-of-options"* && "$*" == *"^{commit}"* ]]; then\n'
+        '    if [[ "${LC_ALL:-}" == "C" ]]; then\n'
+        "        echo \"warning: refname 'fake' is ambiguous.\" >&2\n"
+        "    else\n"
+        '        echo "Warnung: Referenzname ist mehrdeutig." >&2\n'
+        "    fi\n"
+        '    echo "0123456789012345678901234567890123456789"\n'
+        "    exit 0\n"
+        "fi\n"
+        'exec "$REAL_GIT" "$@"\n'
+    )
+    fake_git.chmod(0o755)
+
+    result = _run(
+        _CLAIM,
+        repo,
+        "area/new",
+        "whatever-the-fake-intercepts-this-call-regardless-of-value",
+        env_extra={"PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
 
     assert result.returncode == 2
     assert "ambiguous" in result.stderr

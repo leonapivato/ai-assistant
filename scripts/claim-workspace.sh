@@ -102,10 +102,17 @@ if (( base_given )); then
     # locale is scoped to just this call, not the whole script, so it cannot
     # affect anything else that might genuinely want the caller's locale.
     base_err_file="$(mktemp)"
+    # Scoped cleanup: a signal between mktemp and the `rm -f` below would
+    # otherwise leave this temp file behind on every interrupted explicit-base
+    # claim (PR #23 review finding). Cleared right after use, not left
+    # installed for the rest of the script — create_worktree installs its own
+    # ERR/INT/TERM trap later and this must not linger to interfere with it.
+    trap 'rm -f "$base_err_file"' EXIT
     resolved_base="$(LC_ALL=C git rev-parse --verify --end-of-options \
         "${base_override}^{commit}" 2>"$base_err_file")" || true
     base_err="$(cat "$base_err_file")"
     rm -f "$base_err_file"
+    trap - EXIT
     if [[ -z "$resolved_base" ]]; then
         echo "base '${base_override}' does not resolve to a commit" >&2
         exit 2
