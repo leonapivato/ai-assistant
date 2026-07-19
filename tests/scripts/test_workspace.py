@@ -639,3 +639,66 @@ def test_worktree_branches_from_master_not_a_sibling_worktree(tmp_path: Path) ->
         text=True,
     ).stdout
     assert "commit on a" not in log  # b started from master, not a's HEAD
+
+
+def test_claim_with_an_explicit_base_stacks_on_it(tmp_path: Path) -> None:
+    """The opt-in counterpart to the test above: given a base, do inherit it.
+
+    Splitting a task into dependent PRs (claim `models/part-2` from
+    `models/part-1` before the latter has merged) needs exactly the commits
+    the default-base test above proves a claim normally does *not* pick up.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+
+    result = _run(_CLAIM, repo, "area/b", "area/a")  # explicit base: area/a
+
+    assert result.returncode == 0, result.stderr
+    ws_b = Path(_workspace(result))
+    assert _GIT is not None
+    log = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(ws_b), "log", "--oneline"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "commit on a" in log  # b explicitly stacked on a, so it inherits it
+
+
+def test_claim_with_an_explicit_base_of_a_tag_or_sha(tmp_path: Path) -> None:
+    """The base override accepts any commit-ish, not just a branch name."""
+    repo = _init_repo(tmp_path)
+    assert _GIT is not None
+    sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(repo, "tag", "v0")
+
+    by_tag = _run(_CLAIM, repo, "area/from-tag", "v0")
+    assert by_tag.returncode == 0, by_tag.stderr
+
+    by_sha = _run(_CLAIM, repo, "area/from-sha", sha)
+    assert by_sha.returncode == 0, by_sha.stderr
+
+
+def test_claim_rejects_an_invalid_explicit_base(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    result = _run(_CLAIM, repo, "area/b", "no-such-branch")
+
+    assert result.returncode == 2
+    assert "no-such-branch" in result.stderr
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/b" not in branches  # rejected before anything was created

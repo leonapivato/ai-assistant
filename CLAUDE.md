@@ -59,15 +59,18 @@ learn/update memory.
   `git checkout master`, which would move the shared main checkout off `master`),
   then `just claim-workspace <area>/<slug>` as the first action of any task. The
   claim branches your new work from `origin/master`, so the fetch keeps you
-  current. It puts you on a fresh branch in its own linked worktree — always,
-  so any number of agents can run in parallel with none sharing a working tree —
-  and prints `WORKSPACE=<path>`. **Work only in that path**, and never commit to
-  `master`. Running several agents at once: `just claim-workspaces <area>/<slug>
-  ...` claims multiple branches concurrently; `just workspaces` lists what's
-  claimed; `just prune-workspaces` reports worktrees whose PR has merged or
-  closed. Release a workspace after its PR merges with
-  `just release-workspace <area>/<slug>`. (Details: `CONTRIBUTING.md` →
-  "Coordinating parallel work".)
+  current — give it a second argument (`just claim-workspace <area>/<slug>
+  <base>`) to stack it on another branch instead, for a task split into
+  dependent PRs; omitted, it always defaults to `origin/master`, never
+  "wherever some other worktree happens to be." It puts you on a fresh branch
+  in its own linked worktree — always, so any number of agents can run in
+  parallel with none sharing a working tree — and prints `WORKSPACE=<path>`.
+  **Work only in that path**, and never commit to `master`. Running several
+  agents at once: `just claim-workspaces <area>/<slug> ...` claims multiple
+  branches concurrently; `just workspaces` lists what's claimed; `just
+  prune-workspaces` reports worktrees whose PR has merged or closed. Release a
+  workspace after its PR merges with `just release-workspace <area>/<slug>`.
+  (Details: `CONTRIBUTING.md` → "Coordinating parallel work".)
 - **Stage explicit paths, never `git add -A`/`git add .`.** Add the specific
   files your change touches, so a stray sweep can't pick up unrelated work.
 - **One subsystem per change.** Scope a change to a single package plus its

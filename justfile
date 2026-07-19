@@ -56,8 +56,10 @@ review-codex persona base="master":
 # any number of agents can run in parallel with none sharing a working tree.
 # Prints WORKSPACE=<path> — work only there. See CONTRIBUTING "Coordinating
 # parallel work". Example: just claim-workspace memory/add-cache
-claim-workspace branch:
-    scripts/claim-workspace.sh "$1"
+# Omit base for the default (origin/master); give one to stack this branch on
+# another, e.g. just claim-workspace models/part-2 models/part-1
+claim-workspace branch base="":
+    scripts/claim-workspace.sh "$1" "$2"
 
 # Claim several workspaces at once, concurrently (one worktree per branch).
 # Example: just claim-workspaces memory/add-cache tools/registry planning/goal

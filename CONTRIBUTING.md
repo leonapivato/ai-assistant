@@ -190,6 +190,12 @@ silently accumulate on disk.
   elsewhere. `fetch` updates `origin/master` without touching any working tree,
   and the claim branches new work from `origin/master`, so your branch starts
   from the latest merged state.
+- **Stacking one branch on another** (splitting a task into dependent PRs
+  before the first has merged): `just claim-workspace <area>/<slug> <base>`
+  takes an optional second argument — any branch, tag, or commit — as the new
+  branch's start-point instead of `origin/master`. This is opt-in only: a
+  claim never guesses at "wherever some other worktree happens to be" on its
+  own, so omitting it always means the usual `origin/master` default.
 - The main checkout is never claimed — it stays on `master` permanently, as a
   read-only integration copy. The `no-commit-to-branch` pre-commit hook refuses
   direct commits to it, so nothing can accidentally treat it as a workspace.
