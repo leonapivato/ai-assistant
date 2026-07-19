@@ -90,17 +90,19 @@ view points to rather than re-parsing.
 
 **Origin:** review of AI-agent scalability — onboarding-context cost.
 
-## 5. Formalize the "new Protocol" ritual in CONTRIBUTING
+## 5. Formalize the "new Protocol" ritual in CONTRIBUTING — DONE
 
 **What:** adding a Protocol today is documented as "edit `protocols.py` + write an
 ADR." The machinery that keeps implementations honest — a conformance suite
 (item 1) and a canonical fake (item 3) — is created *later, as debt* rather than
 *with* the contract. That is precisely how items 1 and 3 became TODOs.
 
-**Direction:** make the required unit of work for a new Protocol a *triad* —
-Protocol definition + canonical fake + shared conformance suite — landing
-together, and state this in `CONTRIBUTING.md` (Architecture boundaries / Testing).
-Prevents the backfill debt from recurring for the remaining subsystems.
+**Done:** `CONTRIBUTING.md` → "Adding a Protocol: land the triad together"
+(under Architecture boundaries) makes the required unit of work for a new
+Protocol a *triad* — Protocol definition + shared conformance suite + canonical
+fake — landing in one change. Cross-referenced from the Testing section and from
+`CLAUDE.md`'s "Contract first" rule. Prevents the backfill debt from recurring
+for the remaining subsystems.
 
 **Origin:** review of AI-agent scalability — process fix that closes the loop on
 items 1 and 3.

@@ -75,9 +75,11 @@ learn/update memory.
   files your change touches, so a stray sweep can't pick up unrelated work.
 - **One subsystem per change.** Scope a change to a single package plus its
   tests. Small diffs review faster and fail more clearly.
-- **Contract first.** If a subsystem needs a new capability from another, add or
-  extend a Protocol in `core/protocols.py` first, get it reviewed, then
-  implement against it.
+- **Contract first, and land the triad.** If a subsystem needs a new capability
+  from another, add or extend a Protocol in `core/protocols.py` first, get it
+  reviewed, then implement against it. A *new* Protocol ships as a triad —
+  Protocol + shared conformance suite + canonical fake in `ai_assistant.testing`
+  — in the same change, never deferred (`CONTRIBUTING.md` → "Adding a Protocol").
 - **Tests are the guardrail.** Add tests under `tests/` mirroring the package
   path. Test implementations against their Protocol. Use fakes/mocks for other
   subsystems — never reach into their internals.

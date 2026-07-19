@@ -347,6 +347,30 @@ rebase. Coordinate them by hand:
 Subsystems communicate only through the Protocols in `core/protocols.py`. A
 Protocol change is a breaking change: call it out and add an ADR first.
 
+### Adding a Protocol: land the triad together
+
+A Protocol on its own is an unenforced promise. The required unit of work for a
+**new** Protocol is a triad, landing in the same change:
+
+1. **The Protocol** in `core/protocols.py`, plus any types it exchanges in
+   `core/types.py`.
+2. **A shared conformance suite** — the abstract `…Contract` base described
+   under [Testing](#testing), encoding what every implementation must do.
+3. **A canonical fake** in `ai_assistant.testing`, passing that suite.
+
+Not "Protocol now, tests when someone implements it." Deferring 2 and 3 is how
+`TODO.md` items 1 and 3 came to exist: contracts landed, the machinery that
+keeps implementations honest did not, and the backfill fell to whoever came
+later. A fake with no suite drifts from the contract silently; a suite with no
+fake leaves every consumer hand-rolling a private mock.
+
+The triad is what a Protocol *change* is measured against too — extend the suite
+in the same change, so the new obligation is enforced rather than assumed.
+
+Order within the change is still contract-first: the ADR is ratified before you
+implement against the new shape (golden rule 5). The triad is about what ships
+together, not about writing tests before you know the contract.
+
 ## Documentation
 
 - **Google-style docstrings**, enforced by ruff (`D`, `convention = "google"`).
@@ -364,7 +388,9 @@ Protocol change is a breaking change: call it out and add an ADR first.
   every implementation must pass — an abstract `…Contract` base (not
   `Test`-prefixed) with a subject fixture overridden per implementation. See
   `tests/memory/memory_store_contract.py` and
-  `tests/learning/feedback_processor_contract.py`.
+  `tests/learning/feedback_processor_contract.py`. For a *new* Protocol the
+  suite is not optional and not deferrable — it ships with the contract and its
+  fake, as [one triad](#adding-a-protocol-land-the-triad-together).
 - **Fakes over mocks.** A test never imports another subsystem's internals; use
   the Protocol and a fake. Canonical shared fakes live in `ai_assistant.testing`
   (e.g. `FakeMemoryStore`) — import those rather than hand-rolling a mock, and
