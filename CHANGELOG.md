@@ -8,6 +8,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `core`: the ADR-0004 §5 log redaction safety net, which the ADR has described
+  as configured since it was ratified but which did not exist — there was no
+  `structlog.configure` call anywhere in the tree. `core/logging.py` adds
+  `configure_logging` (idempotent, called by the CLI before any subcommand, so
+  the net is installed process-wide rather than depending on which module logs
+  first) and a `redact_sensitive` processor masking values under known-sensitive
+  keys. Matching is case-insensitive and substring-based, so `ANTHROPIC_API_KEY`
+  and `chat_messages` are caught without enumerating every compound, and it
+  recurses into nested dicts and lists because structured logs nest. It fails
+  closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
+  dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
+  `content_type`) keeps type and enum names readable, and each entry is pinned by
+  a test since every exemption is a hole in the net.
+
+### Fixed
+
+- `context`: a real Tier 1 leak on the degradation path — a failing context
+  source logged `error=str(exc)`, and a source wrapping calendars, tasks or email
+  can quote the very personal data it was fetching. Now logs the exception's
+  *class*. Key-based redaction cannot catch this (an `error` key looks
+  innocuous), which is the point: the net is a safety net, and the primary
+  defence remains logging identifiers, classes and counts rather than content.
+
+### Added
+
 - `learning` + `core`: feedback capture that closes the first learning loop
   (ADR-0009). Adds `FeedbackEvent`/`FeedbackKind` and a `FeedbackProcessor`
   Protocol; `RuleBasedFeedbackProcessor` maps explicit correction/preference

@@ -109,7 +109,15 @@ class AssemblingContextProvider:
         except Exception as exc:  # advisory: a failing source degrades, not aborts
             # Resolve the name defensively — the degradation path must not itself
             # raise if a misbehaving source's ``name`` also fails.
+            #
+            # The failure's *class*, not str(exc): a source wraps calendars,
+            # tasks and email, so its exception message can quote the very Tier 1
+            # content it was fetching, which ADR-0004 §5 keeps out of logs. The
+            # key-based redaction net cannot catch that — an `error` key looks
+            # innocuous — so the call site has to.
             _log.warning(
-                "context source failed; skipping", source=_safe_name(source), error=str(exc)
+                "context source failed; skipping",
+                source=_safe_name(source),
+                error=type(exc).__name__,
             )
             return {}
