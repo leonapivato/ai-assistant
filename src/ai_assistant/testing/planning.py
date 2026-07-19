@@ -222,12 +222,7 @@ class FakePlanStore:
         if transition.to_status is StepStatus.RUNNING:
             updated = self._to_running(step, transition)
         elif transition.to_status is StepStatus.AWAITING_APPROVAL:
-            updated = step.model_copy(
-                update={
-                    "status": StepStatus.AWAITING_APPROVAL,
-                    "bound_tool": transition.bound_tool or step.bound_tool,
-                }
-            )
+            updated = self._to_awaiting_approval(step, transition)
         elif transition.to_status is StepStatus.SKIPPED:
             updated = self._to_skipped(step, transition)
         else:
@@ -240,6 +235,18 @@ class FakePlanStore:
                 }
             )
         return StepExecution.model_validate(updated.model_dump())
+
+    def _to_awaiting_approval(
+        self, step: StepExecution, transition: StepTransition
+    ) -> StepExecution:
+        """Queue the step for approval; there must be a specific tool to approve."""
+        bound_tool = transition.bound_tool or step.bound_tool
+        if bound_tool is None:
+            msg = f"step {step.step_id} cannot await approval without a bound_tool"
+            raise IllegalTransitionError(msg)
+        return step.model_copy(
+            update={"status": StepStatus.AWAITING_APPROVAL, "bound_tool": bound_tool}
+        )
 
     def _to_skipped(self, step: StepExecution, transition: StepTransition) -> StepExecution:
         """Skip the step, checking the reason is one this status could produce."""

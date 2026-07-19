@@ -244,15 +244,31 @@ class PlanExecution:
         if transition.to_status is StepStatus.RUNNING:
             return self._to_running(step, transition)
         if transition.to_status is StepStatus.AWAITING_APPROVAL:
-            return step.model_copy(
-                update={
-                    "status": StepStatus.AWAITING_APPROVAL,
-                    "bound_tool": transition.bound_tool or step.bound_tool,
-                }
-            )
+            return self._to_awaiting_approval(step, transition)
         if transition.to_status is StepStatus.SKIPPED:
             return self._to_skipped(step, transition)
         return self._to_finished(step, transition)
+
+    def _to_awaiting_approval(
+        self, step: StepExecution, transition: StepTransition
+    ) -> StepExecution:
+        """Queue the step for approval, which requires knowing what would run.
+
+        Approval is consent to a *specific* action, so asking before selection
+        has chosen a tool would seek agreement to something unspecified
+        (ADR-0014 §4).
+        """
+        bound_tool = transition.bound_tool or step.bound_tool
+        if bound_tool is None:
+            msg = (
+                f"step {step.step_id} cannot await approval without a bound_tool: "
+                "there would be nothing specific to approve"
+            )
+            raise IllegalTransitionError(msg)
+
+        return step.model_copy(
+            update={"status": StepStatus.AWAITING_APPROVAL, "bound_tool": bound_tool}
+        )
 
     def _to_skipped(self, step: StepExecution, transition: StepTransition) -> StepExecution:
         """Skip the step, checking the reason is one this status could produce."""
