@@ -19,19 +19,25 @@ _DEFAULT_ADRS = (
     ("0003-third.md", "# 3. Third decision\n\n- Status: Proposed\n"),
 )
 
+_DEFAULT_PROTOCOLS = (
+    "from typing import Protocol\n\n\n"
+    "class AlphaStore(Protocol):\n    ...\n\n\n"
+    "class BetaProvider(Protocol):\n    ...\n\n\n"
+    "class _Helper:\n    ...\n"
+)
 
-def _make_repo(root: Path, adrs: tuple[tuple[str, str], ...] = _DEFAULT_ADRS) -> None:
+
+def _make_repo(
+    root: Path,
+    adrs: tuple[tuple[str, str], ...] = _DEFAULT_ADRS,
+    protocols_src: str = _DEFAULT_PROTOCOLS,
+) -> None:
     """Build a minimal checkout: two packages (one built, one stub) and the given ADRs."""
     pkg = root / "src" / "ai_assistant"
     (pkg / "core").mkdir(parents=True)
     (pkg / "core" / "__init__.py").write_text("")
     (pkg / "core" / "types.py").write_text("")
-    (pkg / "core" / "protocols.py").write_text(
-        "from typing import Protocol\n\n\n"
-        "class AlphaStore(Protocol):\n    ...\n\n\n"
-        "class BetaProvider(Protocol):\n    ...\n\n\n"
-        "class _Helper:\n    ...\n"
-    )
+    (pkg / "core" / "protocols.py").write_text(protocols_src)
     (pkg / "memory").mkdir()
     (pkg / "memory" / "__init__.py").write_text("")
     (pkg / "memory" / "store.py").write_text("")
@@ -55,14 +61,20 @@ def _run(root: Path) -> str:
     return result.stdout
 
 
-def test_reports_packages_with_built_and_stub_states(tmp_path: Path) -> None:
+def _line_with(out: str, token: str) -> str:
+    """Return the single output line containing ``token`` (assert there is one)."""
+    matches = [line for line in out.splitlines() if token in line]
+    assert len(matches) == 1, f"expected exactly one line with {token!r}, got {len(matches)}"
+    return matches[0]
+
+
+def test_reports_packages_with_module_counts(tmp_path: Path) -> None:
     _make_repo(tmp_path)
     out = _run(tmp_path)
 
-    assert "memory" in out
-    assert "module(s)" in out  # memory is built (has store.py)
-    assert "planning" in out
-    assert "contract only" in out  # planning is a stub (only __init__)
+    # Assertions are tied to the specific package's row, not "anywhere in output".
+    assert "module(s)" in _line_with(out, "memory")  # built: has store.py
+    assert "contract only" in _line_with(out, "planning")  # stub: only __init__
 
 
 def test_lists_only_protocol_classes(tmp_path: Path) -> None:
@@ -78,9 +90,13 @@ def test_reports_adrs_with_status_and_excludes_template(tmp_path: Path) -> None:
     _make_repo(tmp_path)
     out = _run(tmp_path)
 
-    assert "0001" in out
-    assert "Accepted" in out
-    assert "Proposed" in out
+    # number, status, and title must appear on the *same* row, not just somewhere.
+    first = _line_with(out, "First decision")
+    assert "0001" in first
+    assert "Accepted" in first
+    third = _line_with(out, "Third decision")
+    assert "0003" in third
+    assert "Proposed" in third
     assert "Template" not in out  # template.md is not a numbered ADR
 
 
@@ -116,3 +132,35 @@ def test_flags_duplicate_adr_numbers(tmp_path: Path) -> None:
 
     assert "duplicate" in out.lower()
     assert "0002" in out
+
+
+def test_counts_modules_in_nested_subpackages(tmp_path: Path) -> None:
+    # A package whose only implementation lives in a nested subpackage is still
+    # counted (not mislabeled contract-only).
+    _make_repo(tmp_path)
+    nested = tmp_path / "src" / "ai_assistant" / "planning" / "feature"
+    nested.mkdir()
+    (nested / "__init__.py").write_text("")
+    (nested / "handler.py").write_text("")
+
+    out = _run(tmp_path)
+
+    assert "module(s)" in _line_with(out, "planning")
+
+
+def test_protocol_discovery_resolves_aliases_and_rejects_lookalikes(tmp_path: Path) -> None:
+    _make_repo(
+        tmp_path,
+        protocols_src=(
+            "import typing\n"
+            "from typing import Protocol as P\n\n\n"
+            "class Aliased(P):\n    ...\n\n\n"
+            "class Qualified(typing.Protocol):\n    ...\n\n\n"
+            "class Lookalike(vendor.Protocol):\n    ...\n"  # unrelated .Protocol
+        ),
+    )
+    out = _run(tmp_path)
+
+    assert "Aliased" in out  # `Protocol as P` alias resolved
+    assert "Qualified" in out  # `typing.Protocol` qualified base resolved
+    assert "Lookalike" not in out  # unrelated `vendor.Protocol` not misreported
