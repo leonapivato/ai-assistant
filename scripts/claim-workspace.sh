@@ -41,6 +41,15 @@ worktrees_root="${main_root}-worktrees"
 # Word-split is intended, so `WORKSPACE_BOOTSTRAP="uv sync --quiet"` runs as argv.
 bootstrap_cmd="${WORKSPACE_BOOTSTRAP:-uv sync --quiet}"
 
+# New work branches from origin/master when present, so it starts at the latest
+# integration point. This script does no network itself (it stays offline) — the
+# caller runs `git fetch origin` first (per CONTRIBUTING) to refresh that ref.
+# Falls back to the local master ref when there is no remote-tracking branch.
+base=master
+if git rev-parse --verify --quiet refs/remotes/origin/master >/dev/null 2>&1; then
+    base=origin/master
+fi
+
 bootstrap() {
     # Recreate the untracked local state a fresh workspace needs: the venv (uv's
     # cache makes this cheap after the first sync) and git-ignored config the
@@ -62,14 +71,15 @@ create_worktree() {
     # on any failure.
     local wt="${worktrees_root}/${branch}"
     mkdir -p "$(dirname "$wt")"
-    # Branch from the master *ref* explicitly, never the main checkout's current
-    # HEAD — which may be another claimant's branch, whose commits would then leak
-    # into this workspace.
-    git -C "$main_root" worktree add -q "$wt" -b "$branch" master
+    # Branch from $base (origin/master when available), never the main checkout's
+    # current HEAD — which may be another claimant's branch, whose commits would
+    # otherwise leak into this workspace. Trap set immediately, and on INT/TERM
+    # too, so an interrupt rolls back the worktree and its branch.
+    git -C "$main_root" worktree add -q "$wt" -b "$branch" "$base"
     trap 'git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
-          git -C "$main_root" branch -D "$branch" 2>/dev/null || true' ERR
+          git -C "$main_root" branch -D "$branch" 2>/dev/null || true' ERR INT TERM
     bootstrap "$wt"
-    trap - ERR
+    trap - ERR INT TERM
     echo "WORKSPACE=${wt}"
 }
 
@@ -108,13 +118,16 @@ main_is_free() {
 
 require_new_branch
 if main_is_free && mkdir "$lock" 2>/dev/null; then
-    printf '%s\n' "$branch" >"${lock}/branch"
+    # Install the rollback trap *immediately* after acquiring the lock (and on
+    # INT/TERM), before writing metadata or switching branches — so an interrupt
+    # in that window can never leave a lock behind.
     trap 'git -C "$main_root" checkout -q master 2>/dev/null || true
           git -C "$main_root" branch -D "$branch" 2>/dev/null || true
-          rm -rf "$lock"' ERR
-    git -C "$main_root" checkout -q -b "$branch"
+          rm -rf "$lock"' ERR INT TERM
+    printf '%s\n' "$branch" >"${lock}/branch"
+    git -C "$main_root" checkout -q -b "$branch" "$base"
     bootstrap "$main_root"
-    trap - ERR
+    trap - ERR INT TERM
     echo "Claimed the MAIN checkout for '${branch}'." >&2
     echo "WORKSPACE=${main_root}"
 else

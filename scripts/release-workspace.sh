@@ -61,6 +61,12 @@ elif [[ -n "$wt_path" ]]; then
         git -C "$main_root" worktree remove "$wt_path"
     fi
     echo "Removed the worktree for '${branch}' (${wt_path})." >&2
+elif [[ -d "$lock" && ! -f "${lock}/branch" ]]; then
+    # Stale-lock recovery: a claim hard-killed (SIGKILL) between acquiring the
+    # lock and writing its metadata leaves an owner-less lock that would wedge the
+    # main checkout for every future claim. It has no owner, so clear it.
+    rm -rf "$lock"
+    echo "Cleared an orphaned main-workspace lock (no owner metadata)." >&2
 else
     echo "No workspace found for '${branch}' (already released?)." >&2
 fi
