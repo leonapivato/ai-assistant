@@ -65,10 +65,14 @@ first" only defuses the collision for one of them; the second is now building
 against a contract file that's about to change out from under it. Don't
 present both as start-now-in-parallel. Either drop the batch to one `core/`
 touching lane plus everything that's a pure leaf (no `core/` change needed),
-or explicitly sequence the second to stack on the first (`just
-claim-workspace <area>/<slug> <first-lane-branch>`) once the first's contract
-commit is pushed — state which of the two this batch is doing, don't leave it
-implicit.
+or explicitly sequence the second to stack on the first once the first's
+contract commit is pushed. The picker of the second lane must `git fetch
+origin` first and stack on `origin/<first-lane-branch>`, not the bare branch
+name — the first lane's contract commit exists on a teammate's push, not
+necessarily as a local ref on the second picker's machine, and
+`claim-workspace` resolves whatever base string it's given without fetching
+for you (`just claim-workspace <area>/<slug> origin/<first-lane-branch>`).
+State which of the two this batch is doing, don't leave it implicit.
 
 ## 3. Draft the issue
 
@@ -104,7 +108,10 @@ shared GitHub state other people see. Print the drafted body and get
 explicit confirmation before running it. Never auto-fire this step.
 
 State can go stale between step 1 and this one — someone else can claim a
-lane in `WORKING.md` while the draft sits waiting for confirmation.
-Immediately before creating the issue, reread `WORKING.md` (cheap — it's one
-file) and drop or re-flag any lane that gained an owner since step 1 rather
-than posting a batch that includes work someone already picked up.
+lane in `WORKING.md` while the draft sits waiting for confirmation. Re-reading
+the local checkout's `WORKING.md` alone does not catch this: a claim another
+contributor pushed in the meantime only shows up after a fetch. Immediately
+before creating the issue, run `git fetch origin` and diff the local
+`WORKING.md` against `origin/master`'s copy (`git show origin/master:WORKING.md`)
+— drop or re-flag any lane that gained an owner in either, rather than
+posting a batch that includes work someone already picked up.
