@@ -62,7 +62,10 @@ create_worktree() {
     # on any failure.
     local wt="${worktrees_root}/${branch}"
     mkdir -p "$(dirname "$wt")"
-    git -C "$main_root" worktree add -q "$wt" -b "$branch"
+    # Branch from the master *ref* explicitly, never the main checkout's current
+    # HEAD — which may be another claimant's branch, whose commits would then leak
+    # into this workspace.
+    git -C "$main_root" worktree add -q "$wt" -b "$branch" master
     trap 'git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
           git -C "$main_root" branch -D "$branch" 2>/dev/null || true' ERR
     bootstrap "$wt"

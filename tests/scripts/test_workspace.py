@@ -202,3 +202,67 @@ def test_release_removes_the_correct_worktree_under_slug_collision(tmp_path: Pat
     assert result.returncode == 0, result.stderr
     assert not ws2.is_dir()  # released the requested one
     assert ws1.is_dir()  # the similarly-named one survives
+
+
+def test_worktree_branches_from_master_not_main_head(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # claims main; main HEAD is now area/a
+    (repo / "a.txt").write_text("work from a\n")  # commit on area/a in the main checkout
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-qm", "commit on a")
+
+    ws_b = Path(_workspace(_run(_CLAIM, repo, "area/b")))  # worktree for a second PR
+
+    assert _GIT is not None
+    log = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(ws_b), "log", "--oneline"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "commit on a" not in log  # b started from master, not a's HEAD
+
+
+def test_clean_main_release_returns_to_master(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")
+
+    result = _run(_RELEASE, repo, "area/a")
+
+    assert result.returncode == 0, result.stderr
+    assert _current_branch(repo) == "master"
+    assert not _lock(repo).exists()
+
+
+def test_unforced_main_release_refuses_when_dirty(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")
+    (repo / "junk.txt").write_text("untracked\n")
+
+    result = _run(_RELEASE, repo, "area/a")  # no FORCE
+
+    assert result.returncode != 0
+    assert _lock(repo).exists()  # not released
+    assert _current_branch(repo) == "area/a"  # left as-is
+
+
+def test_forced_main_release_discards_tracked_and_untracked(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")
+    (repo / "f.txt").write_text("modified\n")  # tracked change
+    (repo / "junk.txt").write_text("untracked\n")  # untracked file
+
+    result = _run(_RELEASE, repo, "area/a", force="1")
+
+    assert result.returncode == 0, result.stderr
+    assert _current_branch(repo) == "master"
+    assert not _lock(repo).exists()
+    assert not (repo / "junk.txt").exists()  # untracked discarded too
+    assert _GIT is not None
+    status = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert status == ""  # main is genuinely clean, so future claims can use it
