@@ -21,7 +21,13 @@
 # the branch and any partial worktree — a failed claim never leaves debris.
 # Prints the resolved workspace as the final `WORKSPACE=<path>` line.
 #
-# Usage: scripts/claim-workspace.sh <area>/<slug>   (e.g. memory/add-cache)
+# Usage: scripts/claim-workspace.sh <area>/<slug> [<base>]   (e.g. memory/add-cache)
+#   <base>, if given, is the start-point for the new branch (any ref, tag, or
+#   commit `git worktree add -b` accepts) — for stacking one task's branch on
+#   another's, e.g. claiming `models/part-2` from `models/part-1` before the
+#   latter has merged. Omit it for the default: origin/master (falling back to
+#   local master), same as always. `require_new_branch` below still refuses a
+#   name collision the same way regardless of where the branch starts from.
 # Env:   WORKSPACE_BOOTSTRAP, if set, overrides the bootstrap step with a single
 #        command/executable run without word-splitting (e.g. `true` to skip); the
 #        default is `uv sync --quiet`. Used by the tests.
@@ -31,12 +37,17 @@
 set -Eeuo pipefail
 
 branch="${1:-}"
+base_override="${2:-}"
 if [[ -z "$branch" || "$branch" != */* ]]; then
-    echo "usage: scripts/claim-workspace.sh <area>/<slug>  (e.g. memory/add-cache)" >&2
+    echo "usage: scripts/claim-workspace.sh <area>/<slug> [<base>]  (e.g. memory/add-cache)" >&2
     exit 2
 fi
 if ! git check-ref-format "refs/heads/${branch}"; then
     echo "invalid branch name: '${branch}'" >&2
+    exit 2
+fi
+if [[ -n "$base_override" ]] && ! git rev-parse --verify --quiet "${base_override}^{commit}" >/dev/null; then
+    echo "base '${base_override}' does not resolve to a commit" >&2
     exit 2
 fi
 
@@ -49,9 +60,15 @@ worktrees_root="${main_root}-worktrees"
 # integration point. This script does no network itself (it stays offline) — the
 # caller runs `git fetch origin` first (per CONTRIBUTING) to refresh that ref.
 # Falls back to the local master ref when there is no remote-tracking branch.
+# An explicit base (validated above) skips this auto-resolution entirely — the
+# caller is choosing the start-point deliberately (e.g. stacking on another
+# task's still-unmerged branch), not asking for "wherever master is".
 base=master
 if git rev-parse --verify --quiet refs/remotes/origin/master >/dev/null 2>&1; then
     base=origin/master
+fi
+if [[ -n "$base_override" ]]; then
+    base="$base_override"
 fi
 
 bootstrap() {
@@ -121,14 +138,17 @@ create_worktree() {
           }
           exit 1' ERR INT TERM
     mkdir -p "$(dirname "$wt")"
-    # Branch from $base (origin/master when available), never the main checkout's
-    # current HEAD — which stays on master, but this also keeps a second worktree
-    # from ever branching off a sibling worktree's HEAD. `git worktree add` for a
-    # fresh branch name is itself safe under concurrency (git serialises its own
-    # worktree-administration writes), so many agents can call this at once for
-    # distinct branches with no lock here — and for the *same* branch name, the
-    # `created` gate above means the loser backs off cleanly instead of
-    # clobbering the winner.
+    # Branch from $base — origin/master by default, or the caller's explicit
+    # override (validated above). Never the main checkout's current HEAD
+    # implicitly: that stays on master, and a claim never guesses at "wherever
+    # a sibling worktree happens to be" on its own — stacking on another
+    # branch is opt-in via the explicit base, not a side effect of where this
+    # command happens to be run from. `git worktree add` for a fresh branch
+    # name is itself safe under concurrency (git serialises its own
+    # worktree-administration writes), so many agents can call this at once
+    # for distinct branches with no lock here — and for the *same* branch
+    # name, the `created` gate above means the loser backs off cleanly
+    # instead of clobbering the winner.
     git -C "$main_root" worktree add -q "$wt" -b "$branch" "$base"
     created=1
     # Tag the branch as ours, in its own ref (never pushed — no `push` default
