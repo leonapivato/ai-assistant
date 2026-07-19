@@ -83,9 +83,14 @@ style. Structure:
   - Subsystem name and the roadmap artifact(s) it delivers.
   - Proposed `area/slug` for `just claim-workspace`.
   - Whether it touches `core/protocols.py`, `core/types.py`, or both, and the
-    coordination instruction if so (claim the ADR number and lane in
-    `WORKING.md` before starting; push the contract commit first and flag it
-    in the PR title).
+    coordination instruction if so: claim the ADR number and lane in
+    `WORKING.md` before starting; **draft the ADR and get it through
+    architecture review and ratified before implementing against the new
+    contract** (golden rule 5 — an ADR number claimed in `WORKING.md` reserves
+    the number, it is not ratification); only once ratified, push the
+    contract commit ahead of the dependent implementation and flag it in the
+    PR title, so a concurrent lane sees the new shape before building against
+    the old one.
   - A reminder to register the lane in `WORKING.md` on pickup — this skill
     does not do that itself.
 - **Out of scope**: name anything that looked tempting but got excluded in
