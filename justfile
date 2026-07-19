@@ -61,8 +61,12 @@ review-codex persona base="":
 # parallel work". Example: just claim-workspace memory/add-cache
 # Omit base for the default (origin/master); give one to stack this branch on
 # another, e.g. just claim-workspace models/part-2 models/part-1
+# The empty default here is just-level only: when base is genuinely omitted
+# the script gets a single argument, not an explicit-but-empty one — an
+# explicit "" is invalid (base must not be empty), so this recipe must not
+# forward it as if it were real input the caller typed.
 claim-workspace branch base="":
-    scripts/claim-workspace.sh "$1" "$2"
+    if [ -n "$2" ]; then scripts/claim-workspace.sh "$1" "$2"; else scripts/claim-workspace.sh "$1"; fi
 
 # Claim several workspaces at once, concurrently (one worktree per branch).
 # Example: just claim-workspaces memory/add-cache tools/registry planning/goal
