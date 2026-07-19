@@ -82,13 +82,19 @@ class MemoryStoreContract:
     async def test_get_missing_returns_none(self, store: MemoryStore) -> None:
         assert await store.get("nope") is None
 
-    async def test_add_overwrites_same_id(self, store: MemoryStore) -> None:
-        await store.add(_semantic("1", "old note"))
-        await store.add(_semantic("1", "new note"))
+    async def test_add_overwrites_same_id_with_full_replacement(self, store: MemoryStore) -> None:
+        # Upsert is a full replacement, not a merge: re-adding an id with a
+        # different kind must leave no trace of the previous record — not its
+        # kind, nor its subtype fields. (Overwriting across kinds also proves the
+        # backend rewrites every column, not just the payload.)
+        await store.add(_semantic("1", "old semantic note"))
+        replacement = _preference("1", "new preference note")
+        await store.add(replacement)
 
         got = await store.get("1")
         assert got is not None
-        assert got.content == "new note"
+        assert got.kind == "preference"  # the old semantic kind is gone
+        assert got == replacement  # the whole record equals the second input
 
     async def test_search_finds_a_matching_record(self, store: MemoryStore) -> None:
         await store.add(_semantic("c", "the user likes coffee"))

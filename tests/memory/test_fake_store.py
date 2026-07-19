@@ -75,3 +75,31 @@ async def test_returned_records_are_isolated_from_stored_state() -> None:
     assert fresh is not None
     assert fresh.content == "original content"  # no mutation reached stored state
     assert fresh.provenance.evidence == []
+
+
+async def test_search_results_are_isolated_from_stored_state() -> None:
+    store = FakeMemoryStore(now=_fixed_now)
+    await store.add(_semantic("1", "coffee note"))
+
+    results = await store.search("coffee")
+    assert results
+    results[0].provenance.evidence.append("injected")  # mutate a nested field of a result
+
+    fresh = await store.get("1")
+    assert fresh is not None
+    assert fresh.provenance.evidence == []
+
+
+async def test_exported_records_are_isolated_from_stored_state() -> None:
+    store = FakeMemoryStore(now=_fixed_now)
+    await store.add(_semantic("1", "coffee note"))
+
+    exported = await store.export()
+    assert exported
+    exported[0].content = "mutated"
+    exported[0].provenance.evidence.append("injected")
+
+    fresh = await store.get("1")
+    assert fresh is not None
+    assert fresh.content == "coffee note"
+    assert fresh.provenance.evidence == []
