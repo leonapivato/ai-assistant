@@ -114,4 +114,12 @@ contributor pushed in the meantime only shows up after a fetch. Immediately
 before creating the issue, run `git fetch origin` and diff the local
 `WORKING.md` against `origin/master`'s copy (`git show origin/master:WORKING.md`)
 — drop or re-flag any lane that gained an owner in either, rather than
-posting a batch that includes work someone already picked up.
+posting a batch that includes work someone already picked up. This closes the
+gap for a claim already merged to `master`; a claim only pushed to someone
+else's still-open feature branch is outside what `WORKING.md` itself
+guarantees at any point — the ledger is authoritative once merged, not
+before (same reason `CONTRIBUTING.md`'s "stay in your lane" check is
+best-effort, not atomic, for two people claiming at once). If this check
+changes the lane list or any checklist content from what was already shown,
+**re-print the revised draft and get confirmation again** — never post a body
+different from the one actually approved.
