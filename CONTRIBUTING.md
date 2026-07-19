@@ -365,7 +365,8 @@ A triad spans `core/`, `ai_assistant/testing/`, and `tests/`, and that is
 deliberate: it is **one** unit of work, the standing exception to "one subsystem
 per change" (`CLAUDE.md`). Splitting it across PRs is the failure mode this rule
 exists to prevent, not a way to satisfy the scoping rule. It stays a small diff
-because it is a contract and its guardrails, with no implementation attached.
+because it is a contract and its guardrails, with no *production* implementation
+attached (the canonical fake is an implementation, but a test-only one).
 
 Not "Protocol now, tests when someone implements it." Deferring 2 and 3 is how
 `TODO.md` items 1 and 3 came to exist: contracts landed, the machinery that
@@ -375,6 +376,12 @@ fake leaves every consumer hand-rolling a private mock.
 
 The triad is what a Protocol *change* is measured against too — extend the suite
 in the same change, so the new obligation is enforced rather than assumed.
+
+**Protocols that predate this rule** (`MemoryPolicy`, `ContextProvider`) have no
+suite or fake yet — that backfill is `TODO.md` items 1 and 3. Changing one does
+not oblige you to complete its triad first; that would make an unrelated change
+absorb the whole backfill. Add suite coverage for *the behaviour you change*,
+and say in the PR that the rest of the triad is still outstanding.
 
 This does not loosen contract-first. The sequence is two stages, not one:
 
