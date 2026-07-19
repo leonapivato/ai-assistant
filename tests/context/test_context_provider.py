@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -139,6 +139,24 @@ async def test_assembles_context_from_the_clock_source() -> None:
     assert ctx.time_of_day is TimeOfDay.AFTERNOON
     assert ctx.is_weekend is False
     assert ctx.within_working_hours is True
+
+
+async def test_each_assembly_recomputes_from_the_clock() -> None:
+    # Assembly is per-request: a provider that read its sources once and served a
+    # cached context forever would satisfy the shared contract (which asserts only
+    # a distinct object, since a wall-clock provider's facets may legitimately
+    # change between calls) while breaking ADR-0008. An advancing clock is what
+    # distinguishes the two, so it is pinned here rather than in the suite.
+    instants = iter([_THU_2PM, _THU_2PM + timedelta(hours=7)])  # 14:00 → 21:00
+    provider = AssemblingContextProvider([ClockContextSource(now=lambda: next(instants))])
+
+    first = await provider.assemble()
+    second = await provider.assemble()
+
+    assert first.now == _THU_2PM
+    assert second.now == _THU_2PM + timedelta(hours=7)
+    assert first.time_of_day is TimeOfDay.AFTERNOON
+    assert second.time_of_day is TimeOfDay.NIGHT  # recomputed, not cached
 
 
 async def test_colliding_sources_raise_context_error() -> None:
