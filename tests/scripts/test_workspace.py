@@ -742,6 +742,29 @@ def test_claim_with_an_explicit_base_of_a_tag_or_sha(tmp_path: Path) -> None:
     assert (Path(_workspace(by_sha)) / "scratch.txt").exists()
 
 
+def test_claim_with_an_explicit_base_starting_with_a_hyphen(tmp_path: Path) -> None:
+    """A ref name starting with "-" is valid per `check-ref-format` (verified
+    directly), even though `git branch`/`git tag` refuse to create one —
+    `update-ref` doesn't share that extra guard, so such a ref can genuinely
+    exist. Without treating it as "end of options", git parses it as a flag
+    instead of a revision and wrongly reports a real ref as not resolving
+    (PR #23 review finding).
+    """
+    repo = _init_repo(tmp_path)
+    assert _GIT is not None
+    sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(repo, "update-ref", "refs/heads/-hyphenated", sha)
+
+    result = _run(_CLAIM, repo, "area/from-hyphen", "-hyphenated")
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
     tmp_path: Path,
 ) -> None:

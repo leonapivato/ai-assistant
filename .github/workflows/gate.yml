@@ -35,6 +35,20 @@ jobs:
       - name: Sync the locked environment
         run: uv sync --locked
 
+      # Pinned so a `just`-language change (e.g. how a variadic parameter
+      # forwards arguments) can't silently start behaving differently between
+      # a contributor's machine and CI. Needed only for the tests that drive
+      # the actual justfile end to end (test_workspace.py's
+      # test_just_claim_workspace_recipe_*) rather than the underlying
+      # scripts directly — without this, those tests unconditionally skip in
+      # CI (the only place the gate is actually enforced), so a broken recipe
+      # could pass the required check while making the documented `just`
+      # command unusable (PR #23 review finding).
+      - name: Install just
+        uses: extractions/setup-just@v3
+        with:
+          just-version: 1.57.0
+
       # The five gate steps, in the same order as the local gate. `--check`
       # makes the formatter report drift instead of rewriting files in CI.
       - name: Format

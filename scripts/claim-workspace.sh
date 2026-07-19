@@ -81,7 +81,14 @@ if (( base_given )); then
         echo "base must not be empty" >&2
         exit 2
     fi
-    resolved_base="$(git rev-parse --verify --quiet "${base_override}^{commit}" 2>/dev/null || true)"
+    # --end-of-options: a ref genuinely can start with "-" (`check-ref-format`
+    # allows it; `git branch`'s own extra guard against it can be bypassed by
+    # `update-ref`, so such a ref can exist — confirmed directly). Without
+    # this, git parses a leading-hyphen base as a flag instead of a revision
+    # and rev-parse fails, wrongly reporting a real ref as not resolving (PR
+    # #23 review finding).
+    resolved_base="$(git rev-parse --verify --quiet --end-of-options \
+        "${base_override}^{commit}" 2>/dev/null || true)"
     if [[ -z "$resolved_base" ]]; then
         echo "base '${base_override}' does not resolve to a commit" >&2
         exit 2
