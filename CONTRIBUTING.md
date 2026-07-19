@@ -162,33 +162,39 @@ is protected and integration happens through pull requests — not local merges
 **One workspace per unit of work.** Parallel agents must never share a working
 tree — sharing one is how a stray `git add -A` can sweep another agent's
 uncommitted files into the wrong commit. Each branch (each PR) gets its own
-workspace, allocated deterministically by `just claim-workspace <area>/<slug>`:
-the first agent claims the **main checkout** (no worktree, no extra `uv sync`),
-and each *additional* concurrent agent gets its own **linked worktree** beside
-the repo. The command creates the branch, bootstraps the environment (`uv sync`
-plus a copy of git-ignored local config), and prints `WORKSPACE=<path>` — **work
-only there**. Release it after the PR merges with
-`just release-workspace <area>/<slug>`.
+**linked worktree**, allocated by `just claim-workspace <area>/<slug>`, always —
+there is no shared "first agent gets the bare checkout" slot to race for, so any
+number of agents can claim in parallel with nothing to coordinate here. The
+command creates the branch, bootstraps the environment (`uv sync` plus a copy of
+git-ignored local config), and prints `WORKSPACE=<path>` — **work only there**.
+Release it after the PR merges with `just release-workspace <area>/<slug>`.
+
+Running several agents at once: `just claim-workspaces <area>/<slug> ...`
+claims multiple branches concurrently in one command (each still runs its own
+`uv sync`, which may serialise a little on uv's package-cache lock — this
+parallelises the git side, not necessarily the bootstrap side). `just
+workspaces` lists what's currently claimed (branch, clean/dirty, last commit,
+path); `just prune-workspaces` reports worktrees whose PR has since merged or
+closed (`FORCE=1` to actually remove them) so parallel claims don't
+silently accumulate on disk.
 
 - **Fetch before you claim.** Run `git fetch origin` first — *not*
   `git checkout master`, which would switch branches in the shared main checkout
-  and stomp another agent that has claimed it. `fetch` updates `origin/master`
-  without touching any working tree, and the claim branches new work from
-  `origin/master`, so your branch starts from the latest merged state.
-- The claim on the main checkout is an atomic lock, so two agents racing cannot
-  both take it; the loser deterministically gets a worktree.
-- Release a workspace only *after* its PR merges — never one that is still being
-  claimed. Concurrent claim/release of the *same* branch is unsupported; parallel
-  operations otherwise target distinct branches (the normal flow). A claim that
-  is revoked mid-setup fails loudly rather than reporting a phantom workspace.
-- When unclaimed, the main checkout is integration-only: `master` stays checked
-  out there, and the `no-commit-to-branch` pre-commit hook refuses direct commits
-  to it — so a solo agent working in the main checkout cannot forget to branch.
+  and stomp whatever the main checkout's `master` state is being used for
+  elsewhere. `fetch` updates `origin/master` without touching any working tree,
+  and the claim branches new work from `origin/master`, so your branch starts
+  from the latest merged state.
+- The main checkout is never claimed — it stays on `master` permanently, as a
+  read-only integration copy. The `no-commit-to-branch` pre-commit hook refuses
+  direct commits to it, so nothing can accidentally treat it as a workspace.
 - A worktree shares the repo's object store and refs (not its working tree), so
   branches still integrate through the PR flow unchanged. Its `.venv` and
   git-ignored files are per-directory, which is why claiming re-bootstraps (uv's
   cache keeps this cheap; a shared venv is not an option — the editable install
   is path-specific).
+- `git worktree add` for a fresh branch name is safe under concurrency on its
+  own (git serialises its own worktree-administration writes), so claiming many
+  workspaces at once needs no additional locking.
 
 The subsystem split keeps most work in non-overlapping folders, but two places
 are shared surfaces that the gate cannot referee — a collision there is a valid
