@@ -168,6 +168,12 @@ number of agents can claim in parallel with nothing to coordinate here. The
 command creates the branch, bootstraps the environment (`uv sync` plus a copy of
 git-ignored local config), and prints `WORKSPACE=<path>` — **work only there**.
 Release it after the PR merges with `just release-workspace <area>/<slug>`.
+Release removes the worktree but **deliberately leaves the branch name
+claimed** — `require_new_branch` refuses to reuse it — until
+`just prune-workspaces` confirms via GitHub that its PR actually merged or
+closed and frees it. That is what lets `prune-workspaces` trust a
+branch-name-to-PR match at all: reusing a name immediately on release would
+let a brand-new claim collide with an old, already-merged PR of the same name.
 
 Running several agents at once: `just claim-workspaces <area>/<slug> ...`
 claims multiple branches concurrently in one command (each still runs its own

@@ -21,6 +21,19 @@ force=0
 
 main_root="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -1)"
 
+# Deliberately does NOT delete the local branch — only the worktree. That
+# leaves the branch name permanently claimed (claim-workspace.sh's
+# require_new_branch refuses to reuse it), which is intentional: it is what
+# lets prune-workspaces.sh trust a branch-name-to-PR match at all. If release
+# freed the name for reuse, a brand-new claim could reuse an old, merged PR's
+# branch name before that PR's branch is pruned, and prune-workspaces.sh's
+# `gh pr list --head <branch>` would find the *old* PR under the *new* claim.
+# (It still cannot be force-deleted in that case — prune-workspaces.sh guards
+# on an exact HEAD match, not name alone — but avoiding the ambiguity here is
+# simpler than relying on that second guard to catch it.) Branch names freed
+# by prune-workspaces.sh (after it confirms via `gh` the PR actually merged or
+# closed) are the only ones safe to reuse.
+
 # Path of the worktree actually checked out to this branch — asked of git, so it
 # is collision-free regardless of how the branch name slugs to a directory.
 wt_path="$(git worktree list --porcelain | awk -v ref="refs/heads/${branch}" '
