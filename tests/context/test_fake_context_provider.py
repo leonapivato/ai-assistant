@@ -122,6 +122,18 @@ async def test_the_default_context_cannot_be_corrupted_between_instances() -> No
     assert fresh.time_of_day is TimeOfDay.MORNING
 
 
+async def test_a_supplied_context_is_revalidated_on_the_way_in() -> None:
+    # CurrentContext does not validate on assignment, so a caller can mutate one
+    # into an invalid state and hand it over. Normalising a naive `now` back to UTC
+    # here is what keeps the fake passing the tz-aware assertion in its own suite.
+    corrupted = _saturday_night()
+    corrupted.now = datetime(2026, 6, 6, 23, 0)  # noqa: DTZ001  deliberately naive
+
+    context = await FakeContextProvider(corrupted).assemble()
+
+    assert context.now == datetime(2026, 6, 6, 23, 0, tzinfo=UTC)
+
+
 async def test_counts_calls() -> None:
     provider = FakeContextProvider()
     assert provider.call_count == 0
