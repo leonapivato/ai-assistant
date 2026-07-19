@@ -186,11 +186,17 @@ def test_prune_without_gh_fails_loudly(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _claim(repo, "area/a")
     assert _GIT is not None
-    # A PATH with only git's directory hides `gh` without breaking anything —
-    # the script's gh check runs before any git call.
-    stub_path = str(Path(_GIT).parent)
+    # A PATH pointing at git's own directory would usually hide `gh`, but not
+    # reliably — some environments (e.g. the CI runner) install both in the
+    # same bin directory. A synthetic directory containing only a `git` shim
+    # hides `gh` regardless of how the real filesystem is laid out.
+    stub_bin = tmp_path / "stub-bin"
+    stub_bin.mkdir()
+    git_shim = stub_bin / "git"
+    git_shim.write_text(f"#!/usr/bin/env bash\nexec '{_GIT}' \"$@\"\n")
+    git_shim.chmod(0o755)
 
-    result = _run(_PRUNE, repo, env_extra={"PATH": stub_path})
+    result = _run(_PRUNE, repo, env_extra={"PATH": str(stub_bin)})
 
     assert result.returncode == 1
     assert "gh cli not found" in result.stderr.lower()
