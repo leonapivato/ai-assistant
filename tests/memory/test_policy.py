@@ -1,10 +1,18 @@
-"""Tests for the default memory policy."""
+"""Tests for the default memory policy.
+
+The universal ``MemoryPolicy`` obligations live in ``memory_policy_contract.py``
+and are run against this policy by :class:`TestDefaultMemoryPolicyContract`. What
+remains here is what makes *this* policy the default one: its specific rules.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from ai_assistant.core.protocols import MemoryPolicy
+import pytest
+from memory_policy_contract import MemoryPolicyContract
+
 from ai_assistant.core.types import (
     DataTier,
     MemoryDecisionKind,
@@ -15,6 +23,9 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import MemoryPolicy
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -41,8 +52,12 @@ def _proposal(
     return MemoryUpdateProposal(proposed=record, rationale="because", sensitivity=sensitivity)
 
 
-def test_policy_conforms_to_protocol() -> None:
-    assert isinstance(DefaultMemoryPolicy(), MemoryPolicy)
+class TestDefaultMemoryPolicyContract(MemoryPolicyContract):
+    """Runs DefaultMemoryPolicy through the shared MemoryPolicy conformance suite."""
+
+    @pytest.fixture
+    def policy(self) -> MemoryPolicy:
+        return DefaultMemoryPolicy()
 
 
 async def test_secret_tier_defers_to_user() -> None:
