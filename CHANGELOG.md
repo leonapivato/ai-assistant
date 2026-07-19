@@ -8,6 +8,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `models`/`core`: routing and fallback across several providers.
+  `RoutingProvider` holds an ordered list of `Route`s and tries them until one
+  succeeds, so the system is no longer only as reliable as its most fragile
+  provider. Fallback is driven by a new `routable` flag on `ModelError`, added
+  alongside `retryable` because the two answer different questions: `retryable`
+  asks whether the *same* provider could succeed on a second try, `routable`
+  whether a *different* one could succeed at all. The cases where they disagree
+  are the point — an expired key is not retryable but is routable (credentials
+  are per provider), while a content-policy refusal is neither, since shopping a
+  refused prompt around until one provider accepts is not resilience and would
+  widen who sees a prompt already flagged sensitive (ADR-0004). An explicit
+  per-call `model=` override disables routing rather than silently answering
+  from a different model, and exhausting every route re-raises the last failure
+  untouched — so its identity, type and message survive routing — while every
+  every *routable* candidate failure is logged by class — including one a later
+  route papers over, which is the case that would otherwise be invisible, since
+  the call goes on to succeed. A non-routable failure is not logged: it is
+  raised to the caller, so it is not invisible to begin with. Diagnostics name a route by *position* (`route[1]`) and a failure
+  by the nearest class in this project's own taxonomy, so neither a caller's
+  string nor a provider's class name reaches a Tier 2 log; and they are emitted
+  best-effort, because a broken log sink was able to abort the fallback
+  entirely. Messages are deliberately kept
+  out of the log: provider errors routinely quote the offending request, which
+  would put Tier 1 data in a Tier 2 log (ADR-0004 §5). The key-based redaction
+  net cannot catch that anyway — an `error` key looks innocuous — so the call
+  site has to. (Three earlier
+  attempts were wrong: rebuilding the error as `type(exc)(msg)` assumed a
+  one-argument constructor an arbitrary `ModelProvider`'s errors need not have;
+  attaching a PEP 678 note mutated an object the router does not own, growing
+  without bound when a provider raises a cached instance; and logging
+  `str(exc)` leaked the message. All found by the Codex adversarial reviewer.) Preference order is static; health
+  tracking, circuit breaking, and cost/latency ranking are deferred. Retry
+  belongs inside routing — the cheap correction first — which composes on the
+  ADR-0011 seam with no Protocol change. Recorded in ADR-0013.
 - `core`: the ADR-0004 §5 log redaction safety net, which the ADR has described
   as configured since it was ratified but which did not exist — there was no
   `structlog.configure` call anywhere in the tree. `core/logging.py` adds
@@ -37,9 +71,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it, so an embedding application keeps its own (possibly stricter) processors
   and gains ours. It fails
   closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
-  dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
-  `content_type`) keeps type and enum names readable, and each entry is pinned by
-  a test since every exemption is a hole in the net.
+  dropped rather than emitted unscrubbed. There is deliberately **no
+  allow-list**: an exemption is a permanent hole justified by an assumption
+  about the value, and the assumption is what fails — `content_type` looks
+  inert until a MIME string carries a `name=` parameter. Over-matching is fixed
+  locally by renaming the key.
 
 ### Fixed
 
