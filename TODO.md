@@ -12,10 +12,11 @@ for `FeedbackProcessor` and `MemoryStore`; the rest still assert
 `isinstance(impl, Protocol)` plus implementation-specific tests, which only
 proves an attribute exists.
 
-**Missing suites for:** `ModelProvider`, `Embedder`, `MemoryPolicy`,
-`ContextProvider`. (`MemoryStore` done — `tests/memory/memory_store_contract.py`,
-run against `InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared
-`FakeMemoryStore`.)
+**Missing suites for:** `Embedder`, `MemoryPolicy`, `ContextProvider`.
+(`MemoryStore` done — `tests/memory/memory_store_contract.py`, run against
+`InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared `FakeMemoryStore`.
+`ModelProvider` done — `tests/models/model_provider_contract.py`, run against
+`PydanticAIProvider` and the shared `FakeModelProvider`.)
 
 **Pattern to follow:** `tests/memory/memory_store_contract.py` or
 `tests/learning/feedback_processor_contract.py` — an abstract `…Contract` base
@@ -49,29 +50,26 @@ private mock that drifts from the contract. The home now exists —
 `ai_assistant.testing` (test-only, enforced by `lint-imports`) — with the first
 fake in place.
 
-**Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`), which passes the
-shared `MemoryStore` conformance suite (item 1).
+**Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`) and
+`FakeModelProvider` (`ai_assistant/testing/models.py`), each passing its
+Protocol's shared conformance suite (item 1).
 
-**Still needed:** `FakeModelProvider`, `FakeContextProvider`, `FakeEmbedder`,
-`FakeMemoryPolicy` — each paired with, and validated by, its Protocol's
-conformance suite so the fake cannot drift. `orchestration` will need most of
-these; add them as it is built (or ahead of it).
+**Still needed:** `FakeContextProvider`, `FakeEmbedder`, `FakeMemoryPolicy` —
+each paired with, and validated by, its Protocol's conformance suite so the fake
+cannot drift. `orchestration` will need most of these; add them as it is built
+(or ahead of it).
 
 **Origin:** review of AI-agent scalability — the biggest cross-subsystem gap for
 parallel development.
 
-## 4. Single generated project-status view
+## 4. Single generated project-status view — DONE
 
-**What:** onboarding to "what exists, what's claimed, what's next" currently
-requires stitching together four files — `docs/roadmap.md`, `WORKING.md`,
-`core/protocols.py`, and the ADR statuses. The seams already show (e.g. ADR-0011
-is on a contributor branch, so the accepted-ADR sequence has a hole with no index
-explaining it). Every agent pays this assembly cost on every pickup.
-
-**Direction:** one status view — capability → Protocol → implementation status →
-owning ADR → lane owner — ideally *generated* (e.g. a `just status` recipe that
-derives it from the tree and ADR front-matter) so it cannot go stale. Collapses
-agent onboarding into a single read.
+**Done:** `just status` (`scripts/project_status.py`) derives packages
+(built/stub), Protocols, and ADRs (status + numbering gaps) fresh from the repo
+on each run, so it cannot go stale. It replaces stitching together the source
+tree, `core/protocols.py`, and every ADR header. Human-declared state (lane
+owners, ADR numbers in flight) intentionally stays in `WORKING.md`, which the
+view points to rather than re-parsing.
 
 **Origin:** review of AI-agent scalability — onboarding-context cost.
 

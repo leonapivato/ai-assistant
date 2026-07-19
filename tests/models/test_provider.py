@@ -7,7 +7,11 @@ tests are deterministic and never touch the network.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
 import pytest
+from model_provider_contract import ModelProviderContract
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -20,17 +24,26 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.protocols import ModelProvider
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.models.provider import (
     _to_model_messages,  # pyright: ignore[reportPrivateUsage]
 )
 
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import ModelProvider
 
-def test_provider_conforms_to_protocol() -> None:
-    provider = PydanticAIProvider(default_model=TestModel())
-    assert isinstance(provider, ModelProvider)
+
+class TestPydanticAIProviderContract(ModelProviderContract):
+    """Runs PydanticAIProvider through the shared ModelProvider conformance suite.
+
+    ``TestModel`` supplies a deterministic, offline default model so the contract
+    never touches the network.
+    """
+
+    @pytest.fixture
+    def provider(self) -> ModelProvider:
+        return PydanticAIProvider(default_model=TestModel())
 
 
 async def test_complete_returns_assistant_message() -> None:
@@ -92,6 +105,28 @@ async def test_empty_messages_raise() -> None:
 
     with pytest.raises(ModelError, match="at least one message"):
         await provider.complete([])
+
+
+async def test_model_override_is_forwarded_to_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-None ``"provider:model"`` override cannot be resolved offline, so the
+    # shared contract only checks the keyword is accepted. Here we prove the
+    # override is actually threaded to the underlying agent by capturing what
+    # ``run`` receives — closing the gap the contract cannot cover universally.
+    provider = PydanticAIProvider(default_model=TestModel())
+    captured: dict[str, object] = {}
+
+    async def fake_run(**kwargs: object) -> SimpleNamespace:
+        captured["model"] = kwargs.get("model")
+        return SimpleNamespace(output="routed")
+
+    monkeypatch.setattr(provider._agent, "run", fake_run)  # pyright: ignore[reportPrivateUsage]
+
+    reply = await provider.complete([Message(role=Role.USER, content="hi")], model="prov:model")
+
+    assert reply.content == "routed"
+    assert captured["model"] == "prov:model"
 
 
 async def test_provider_failure_is_wrapped() -> None:
