@@ -158,6 +158,29 @@ require_new_branch() {
         echo "branch '${branch}' already exists; pick a new name (a task gets a fresh branch)" >&2
         exit 2
     fi
+    # git's ref storage cannot have a branch that is both a leaf and a
+    # path-prefix of another at the same time — 'area/task' and
+    # 'area/task/subtask' can never coexist, with or without this tooling
+    # (confirmed: plain `git branch area/task/subtask` fails identically once
+    # `area/task` exists, no worktrees involved). `git worktree add -b`
+    # already refuses this safely on its own — nothing destructive happens,
+    # verified directly (PR #17 review) — but its raw error doesn't name the
+    # conflicting branch. This does, so the failure is clear up front rather
+    # than surfacing as a generic git ref-locking message.
+    local prefix="$branch"
+    while [[ "$prefix" == */* ]]; do
+        prefix="${prefix%/*}"
+        if git show-ref --verify --quiet "refs/heads/${prefix}"; then
+            echo "branch '${branch}' conflicts with existing branch '${prefix}' (git cannot have one as a path-prefix of the other); pick a different name" >&2
+            exit 2
+        fi
+    done
+    local nested
+    nested="$(git for-each-ref --format='%(refname:short)' "refs/heads/${branch}/*" | head -1)"
+    if [[ -n "$nested" ]]; then
+        echo "branch '${branch}' conflicts with existing branch '${nested}' (git cannot have one as a path-prefix of the other); pick a different name" >&2
+        exit 2
+    fi
     # A stale marker can only exist here if a branch of this name was deleted
     # outside this tooling (release-workspace.sh keeps the branch; a
     # successful prune-workspaces.sh deletes the marker before the branch —
