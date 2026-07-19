@@ -234,9 +234,15 @@ Protocol change is a breaking change: call it out and add an ADR first.
 - `pytest`; tests mirror the package path (`tests/<pkg>/test_*.py`); name tests
   `test_<unit>_<behavior>`; structure them Arrange–Act–Assert.
 - **Protocol conformance suites:** each Protocol gets a shared test suite that
-  every implementation must pass.
+  every implementation must pass — an abstract `…Contract` base (not
+  `Test`-prefixed) with a subject fixture overridden per implementation. See
+  `tests/memory/memory_store_contract.py` and
+  `tests/learning/feedback_processor_contract.py`.
 - **Fakes over mocks.** A test never imports another subsystem's internals; use
-  the Protocol and a fake.
+  the Protocol and a fake. Canonical shared fakes live in `ai_assistant.testing`
+  (e.g. `FakeMemoryStore`) — import those rather than hand-rolling a mock, and
+  make each fake pass its Protocol's conformance suite. `ai_assistant.testing` is
+  test-only; production code importing it fails `lint-imports`.
 - No network or filesystem in unit tests. Anything that needs them is marked
   `@pytest.mark.integration`.
 - Tests are deterministic — inject clock/randomness.

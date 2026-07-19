@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from memory_store_contract import MemoryStoreContract
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
@@ -470,3 +471,15 @@ def test_database_file_is_owner_only(
     make_store()
     mode = (tmp_path / "memory.db").stat().st_mode & 0o777
     assert mode == 0o600
+
+
+class TestSqliteMemoryStoreContract(MemoryStoreContract):
+    """Runs SqliteMemoryStore through the shared MemoryStore conformance suite.
+
+    Inherits this module's ``integration`` mark (native sqlite-vec + filesystem);
+    ``make_store`` closes the store on teardown.
+    """
+
+    @pytest.fixture
+    def store(self, make_store: Callable[..., SqliteMemoryStore]) -> MemoryStore:
+        return make_store()

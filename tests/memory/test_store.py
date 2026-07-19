@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+from memory_store_contract import MemoryStoreContract
+
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
     MemoryKind,
@@ -221,3 +224,11 @@ async def test_purge_expired_removes_only_expired_and_returns_count() -> None:
     assert removed == 1
     assert await store.get("live") is not None
     assert await store.purge_expired() == 0  # nothing left to purge
+
+
+class TestInMemoryMemoryStoreContract(MemoryStoreContract):
+    """Runs InMemoryMemoryStore through the shared MemoryStore conformance suite."""
+
+    @pytest.fixture
+    def store(self) -> MemoryStore:
+        return InMemoryMemoryStore(now=_fixed_now)

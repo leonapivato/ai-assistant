@@ -208,3 +208,20 @@ source_modules = [
     "ai_assistant.interfaces",
 ]
 forbidden_modules = ["pydantic_ai", "anthropic", "openai", "fastembed"]
+
+[[tool.importlinter.contracts]]
+name = "testing doubles are imported only by tests, never by production code"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+]
+forbidden_modules = ["ai_assistant.testing"]

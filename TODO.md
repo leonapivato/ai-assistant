@@ -7,19 +7,20 @@ turning a substantial item into an ADR or a scoped slice when picked up.
 ## 1. Backfill shared Protocol conformance suites
 
 **What:** `CONTRIBUTING.md` ("Protocol conformance suites") requires *each*
-Protocol to have a shared test suite that every implementation must pass. Only
-`FeedbackProcessor` has one so far; the rest assert `isinstance(impl, Protocol)`
-plus implementation-specific tests, which the reviewer noted only proves an
-attribute exists.
+Protocol to have a shared test suite that every implementation must pass. Done
+for `FeedbackProcessor` and `MemoryStore`; the rest still assert
+`isinstance(impl, Protocol)` plus implementation-specific tests, which only
+proves an attribute exists.
 
-**Missing suites for:** `ModelProvider`, `Embedder`, `MemoryStore` (two
-implementations — `InMemoryMemoryStore` + `SqliteMemoryStore` — so this one has
-the most value), `MemoryPolicy`, `ContextProvider`.
+**Missing suites for:** `ModelProvider`, `Embedder`, `MemoryPolicy`,
+`ContextProvider`. (`MemoryStore` done — `tests/memory/memory_store_contract.py`,
+run against `InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared
+`FakeMemoryStore`.)
 
-**Pattern to follow:** `tests/learning/feedback_processor_contract.py` — an
-abstract `…Contract` base class (not `Test`-prefixed, so pytest does not collect
-it directly) with a `subject` fixture overridden by a `Test…`-prefixed subclass
-per implementation.
+**Pattern to follow:** `tests/memory/memory_store_contract.py` or
+`tests/learning/feedback_processor_contract.py` — an abstract `…Contract` base
+class (not `Test`-prefixed, so pytest does not collect it directly) with a
+subject fixture overridden by a `Test…`-prefixed subclass per implementation.
 
 **Origin:** adversarial review of the `learning` slice (ADR-0009).
 
@@ -42,21 +43,19 @@ follow-up to ADR-0005, likely its own ADR.
 
 ## 3. Canonical shared test doubles for every Protocol
 
-**What:** there is no single, shared fake for each Protocol. The golden rule
-tells a subsystem to depend on *fakes* of its collaborators and never reach into
-their internals, but with no canonical fake to import, each subsystem hand-rolls
-its own (`learning` already has one; `orchestration` will need `MemoryStore`,
-`ModelProvider`, `ContextProvider`, etc.). Hand-rolled fakes drift — each encodes
-slightly different assumptions about the contract — and the drift surfaces as an
-integration surprise that no subsystem's unit tests caught.
+**What:** canonical shared fakes so a subsystem depends on a *shared* stand-in
+for its collaborators, never reaching into their internals or hand-rolling a
+private mock that drifts from the contract. The home now exists —
+`ai_assistant.testing` (test-only, enforced by `lint-imports`) — with the first
+fake in place.
 
-**Direction:** one canonical in-memory fake per Protocol in a shared location
-(e.g. `ai_assistant/testing/` or `tests/fakes/`) — `FakeModelProvider`,
-`FakeMemoryStore`, `FakeContextProvider`, … — imported by any subsystem that
-needs that collaborator. Each fake must itself pass its Protocol's conformance
-suite (see item 1), so the fake cannot drift from the contract either. Highest
-leverage for parallel, multi-agent work: it is the shared definition of "how a
-compliant dependency behaves."
+**Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`), which passes the
+shared `MemoryStore` conformance suite (item 1).
+
+**Still needed:** `FakeModelProvider`, `FakeContextProvider`, `FakeEmbedder`,
+`FakeMemoryPolicy` — each paired with, and validated by, its Protocol's
+conformance suite so the fake cannot drift. `orchestration` will need most of
+these; add them as it is built (or ahead of it).
 
 **Origin:** review of AI-agent scalability — the biggest cross-subsystem gap for
 parallel development.
