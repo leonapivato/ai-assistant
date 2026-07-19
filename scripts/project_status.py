@@ -24,6 +24,10 @@ _STATUS_RE = re.compile(r"^\s*-\s*Status:\s*(.+?)\s*$", re.IGNORECASE | re.MULTI
 _HEADING_RE = re.compile(r"^#\s*\d+\.\s*(.+?)\s*$", re.MULTILINE)
 _ADR_FILE_RE = re.compile(r"^(\d+)-.*\.md$")
 
+# Modules that export the ``Protocol`` marker; a base is only a Protocol if it
+# resolves to one of these (not any class merely spelled ``Protocol``).
+_TYPING_MODULES = frozenset({"typing", "typing_extensions"})
+
 
 @dataclass(frozen=True)
 class Package:
@@ -61,13 +65,61 @@ def discover_packages(pkg_root: Path) -> list[Package]:
     for child in sorted(pkg_root.iterdir()):
         if not child.is_dir() or not (child / "__init__.py").exists():
             continue
-        modules = sum(1 for p in child.glob("*.py") if p.name != "__init__.py")
+        # Recurse, so implementation in a nested subpackage still counts.
+        modules = sum(1 for p in child.rglob("*.py") if p.name != "__init__.py")
         packages.append(Package(name=child.name, modules=modules))
     return packages
 
 
+@dataclass(frozen=True)
+class _ProtocolBindings:
+    """The local names that resolve to ``typing.Protocol`` in one module.
+
+    Attributes:
+        direct: Names bound to ``Protocol`` itself (``from typing import
+            Protocol`` → ``Protocol``; ``... as P`` → ``P``).
+        modules: Names bound to a typing module (``import typing`` → ``typing``;
+            ``import typing as t`` → ``t``), for ``<module>.Protocol`` bases.
+    """
+
+    direct: frozenset[str]
+    modules: frozenset[str]
+
+
+def _protocol_bindings(tree: ast.Module) -> _ProtocolBindings:
+    """Resolve which local names refer to ``Protocol`` from the module's imports."""
+    direct: set[str] = set()
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _TYPING_MODULES:
+            direct.update(a.asname or a.name for a in node.names if a.name == "Protocol")
+        elif isinstance(node, ast.Import):
+            modules.update(a.asname or a.name for a in node.names if a.name in _TYPING_MODULES)
+    return _ProtocolBindings(direct=frozenset(direct), modules=frozenset(modules))
+
+
+def _base_is_protocol(base: ast.expr, bound: _ProtocolBindings) -> bool:
+    """Whether a class base resolves to ``typing.Protocol`` under ``bound``.
+
+    Matches an alias (``class X(P)``) and a qualified base (``typing.Protocol``),
+    and rejects an unrelated class merely spelled ``Protocol`` (e.g.
+    ``vendor.Protocol``).
+    """
+    if isinstance(base, ast.Name):
+        return base.id in bound.direct
+    return (
+        isinstance(base, ast.Attribute)
+        and base.attr == "Protocol"
+        and isinstance(base.value, ast.Name)
+        and base.value.id in bound.modules
+    )
+
+
 def protocol_names(protocols_path: Path) -> list[str]:
     """Return the names of the ``Protocol`` classes defined in ``protocols_path``.
+
+    Import bindings are resolved first, so an aliased import is found and an
+    unrelated ``*.Protocol`` base is not misreported.
 
     Args:
         protocols_path: Path to ``core/protocols.py``.
@@ -76,18 +128,12 @@ def protocol_names(protocols_path: Path) -> list[str]:
         Protocol class names, in source order.
     """
     tree = ast.parse(protocols_path.read_text(encoding="utf-8"))
-    names: list[str] = []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and any(_is_protocol_base(b) for b in node.bases):
-            names.append(node.name)
-    return names
-
-
-def _is_protocol_base(base: ast.expr) -> bool:
-    """Whether a class base refers to ``Protocol`` (bare or ``typing.Protocol``)."""
-    if isinstance(base, ast.Name):
-        return base.id == "Protocol"
-    return isinstance(base, ast.Attribute) and base.attr == "Protocol"
+    bound = _protocol_bindings(tree)
+    return [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and any(_base_is_protocol(b, bound) for b in node.bases)
+    ]
 
 
 def adr_entries(adr_dir: Path) -> list[Adr]:
