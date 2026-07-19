@@ -147,6 +147,15 @@ async def test_failure_repeats_on_every_call() -> None:
             await provider.assemble()
 
 
+def test_an_out_of_contract_failure_type_is_rejected() -> None:
+    # ContextError is the subsystem's failure boundary, so the canonical fake must
+    # not be configurable to raise anything else — a consumer that correctly
+    # catches ContextError would then fail only under test. The annotation catches
+    # typed callers; this guard catches the Any-typed and untyped ones.
+    with pytest.raises(TypeError, match="must be a ContextError"):
+        FakeContextProvider(failure=ValueError("boom"))  # type: ignore[arg-type]
+
+
 def test_context_and_failure_together_is_rejected() -> None:
     with pytest.raises(ValueError, match="not both"):
         FakeContextProvider(_saturday_night(), failure=ContextError("boom"))
