@@ -174,6 +174,53 @@ def test_bootstrap_failure_rolls_back_the_main_claim(tmp_path: Path) -> None:
     assert "area/x" not in branches  # partial branch cleaned up
 
 
+def test_bootstrap_failure_rolls_back_a_worktree(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # claims main, so the next claim uses a worktree
+
+    result = _run(_CLAIM, repo, "area/b", bootstrap="false")  # worktree bootstrap fails
+
+    assert result.returncode != 0
+    assert not (tmp_path / "repo-worktrees" / "area" / "b").exists()  # worktree dir gone
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/b" not in branches  # partial branch cleaned up
+    worktrees = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "worktree", "list", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "area/b" not in worktrees  # no dangling worktree metadata
+
+
+def test_forced_main_release_removes_untracked_nested_repo(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")
+    nested = repo / "vendored"
+    nested.mkdir()
+    _git(nested, "init", "-q")  # an untracked *nested* git repo (needs clean -ff)
+
+    result = _run(_RELEASE, repo, "area/a", force="1")
+
+    assert result.returncode == 0, result.stderr
+    assert not nested.exists()  # -ff removed the nested repo
+    assert not _lock(repo).exists()
+    assert _GIT is not None
+    status = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert status == ""
+
+
 def test_force_zero_does_not_remove_a_dirty_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _run(_CLAIM, repo, "area/a")  # main
