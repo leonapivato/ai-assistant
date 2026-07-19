@@ -18,5 +18,12 @@ from __future__ import annotations
 from ai_assistant.models.embeddings import HashingEmbedder
 from ai_assistant.models.provider import PydanticAIProvider
 from ai_assistant.models.retry import RetryingProvider
+from ai_assistant.models.routing import Route, RoutingProvider
 
-__all__ = ["HashingEmbedder", "PydanticAIProvider", "RetryingProvider"]
+__all__ = [
+    "HashingEmbedder",
+    "PydanticAIProvider",
+    "RetryingProvider",
+    "Route",
+    "RoutingProvider",
+]
