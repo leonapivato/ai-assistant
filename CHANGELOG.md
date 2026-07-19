@@ -66,6 +66,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wires proposals to the ingestor — so no subsystem writes memory directly. An
   integration test proves the vertical end to end (feedback → proposal → ingest
   → retrieve). `RATING`/implicit signals are deferred to a follow-up ADR.
+- `models`/`core`: per-attempt timeouts and retry for model calls.
+  `RetryingProvider` *wraps* any `ModelProvider` (it implements the same
+  Protocol and delegates), so resilience composes with any implementation
+  without either side knowing about the other — and needs no Protocol change.
+  It is the first consumer of the `retryable` flag: a transient failure is
+  retried with full-jitter exponential backoff, while one that would fail
+  identically every time is re-raised immediately instead of burning quota.
+  The deadline is per attempt, so a hung call can be abandoned and retried;
+  outer cancellation still propagates rather than being mistaken for a timeout.
+  Tunables live in a `RetryPolicy` dataclass, mirrored by validated
+  `model_timeout_seconds`/`model_max_attempts`/`model_backoff_*` `Settings`,
+  with `RetryPolicy.from_settings` owning the mapping. Both layers reject
+  non-finite values — NaN and infinity slip past ordinary bounds checks and then
+  degrade silently — and backoff clamps its exponent and saturates through
+  division, so an extreme attempt count or base cannot overflow to infinity and
+  defeat the cap. (Non-finite config, the overflow, and the unmapped settings
+  were found by the Codex adversarial reviewer.) Recorded in ADR-0011.
+- `models`/`core`: a model-failure taxonomy. `ModelError` gains specific
+  subclasses — `ModelAuthError`, `ModelRateLimitError`, `ModelTimeoutError`,
+  `ModelUnavailableError`, `ModelContentFilterError`, `ModelResponseError` —
+  each carrying a `retryable` class attribute, so a caller can distinguish a
+  transient fault from one that would fail identically on every attempt.
+  `PydanticAIProvider` now maps pydantic-ai's exceptions (and HTTP status
+  codes) onto that taxonomy. Purely additive: `complete` still raises only
+  `ModelError`, so existing callers are unaffected and no Protocol changed.
+  Unrecognised failures stay a bare, non-retryable `ModelError` — a wrong
+  "retryable" is worse than none. Deferred: distinguishing context-length
+  overflow, which needs provider-specific response-body sniffing.
 - `context` + `core`: the situational-context step of the pipeline (ADR-0008).
   Adds a temporal `CurrentContext` (`now`, `time_of_day`, `is_weekend`,
   `within_working_hours`) and a `ContextProvider` Protocol.

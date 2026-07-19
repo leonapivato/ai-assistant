@@ -9,9 +9,15 @@ translate the result (and any failure) back into our own types.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from pydantic_ai import Agent, models
+from pydantic_ai.exceptions import (
+    ContentFilterError,
+    ModelAPIError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+)
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -20,8 +26,22 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import (
+    ModelAuthError,
+    ModelContentFilterError,
+    ModelError,
+    ModelRateLimitError,
+    ModelResponseError,
+    ModelTimeoutError,
+    ModelUnavailableError,
+)
 from ai_assistant.core.types import Message, Role
+
+_HTTP_UNAUTHORIZED: Final = 401
+_HTTP_FORBIDDEN: Final = 403
+_HTTP_REQUEST_TIMEOUT: Final = 408
+_HTTP_TOO_MANY_REQUESTS: Final = 429
+_HTTP_SERVER_ERROR: Final = 500
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -70,6 +90,72 @@ def _to_model_messages(messages: Sequence[Message]) -> list[ModelMessage]:
     return history
 
 
+def _classify_status(status_code: int, message: str) -> ModelError:
+    """Map an HTTP status from the provider onto the error taxonomy.
+
+    Args:
+        status_code: The status code the provider returned.
+        message: The already-formatted message for the resulting error.
+
+    Returns:
+        The most specific :class:`ModelError` subclass for ``status_code``.
+    """
+    if status_code in (_HTTP_UNAUTHORIZED, _HTTP_FORBIDDEN):
+        return ModelAuthError(message)
+    if status_code == _HTTP_TOO_MANY_REQUESTS:
+        return ModelRateLimitError(message)
+    if status_code == _HTTP_REQUEST_TIMEOUT:
+        return ModelTimeoutError(message)
+    if status_code >= _HTTP_SERVER_ERROR:
+        return ModelUnavailableError(message)
+    # Any other 4xx is a malformed request on our side: retrying is pointless.
+    return ModelError(message)
+
+
+def _classify(exc: Exception) -> ModelError:
+    """Translate a pydantic-ai failure into our own error taxonomy.
+
+    Every failure is still wrapped as a :class:`ModelError`, so the contract
+    that ``complete`` raises only ``ModelError`` is unchanged; this only narrows
+    the subclass. Unrecognised failures stay a bare, non-retryable
+    ``ModelError`` — misclassifying something as retryable is worse than not
+    classifying it at all.
+
+    Args:
+        exc: The exception pydantic-ai raised during a completion.
+
+    Returns:
+        The most specific :class:`ModelError` subclass for ``exc``.
+    """
+    message = f"model completion failed: {exc}"
+    # Ordering matters: each pattern must precede its own base class.
+    match exc:
+        case ModelHTTPError():
+            return _classify_status(exc.status_code, message)
+        case ContentFilterError():
+            return ModelContentFilterError(message)
+        case UnexpectedModelBehavior():
+            return ModelResponseError(message)
+        case ModelAPIError():
+            # Reached the provider layer but never got a status code — i.e. a
+            # connection-level failure. A transport *timeout* also lands here,
+            # not on the arm below: an SDK wraps it (e.g. anthropic's
+            # APITimeoutError, a subclass of APIConnectionError) and pydantic-ai
+            # re-raises it as ModelAPIError. Retryable either way, so the
+            # behaviour is right; only the label is coarse. Classifying it as a
+            # timeout would mean importing httpx here and depending on it
+            # directly — deferred until streaming, where pydantic-ai does let
+            # bare httpx errors escape from chunk reads.
+            return ModelUnavailableError(message)
+        case TimeoutError():
+            # Defensive: a deadline raised *inside* the call, e.g. an http
+            # client configured with its own. RetryingProvider's deadline is
+            # applied outside this adapter, so it never reaches here.
+            return ModelTimeoutError(message)
+        case _:
+            return ModelError(message)
+
+
 class PydanticAIProvider:
     """Model-agnostic completion client implemented on top of pydantic-ai.
 
@@ -109,7 +195,11 @@ class PydanticAIProvider:
             The assistant's reply as a :class:`~ai_assistant.core.types.Message`.
 
         Raises:
-            ModelError: If ``messages`` is empty or the provider call fails.
+            ModelError: If ``messages`` is empty or the provider call fails. A
+                provider failure is narrowed to the most specific subclass
+                (e.g. :class:`~ai_assistant.core.errors.ModelRateLimitError`),
+                whose ``retryable`` attribute says whether another attempt could
+                succeed.
         """
         if not messages:
             msg = "complete() requires at least one message"
@@ -124,7 +214,6 @@ class PydanticAIProvider:
                 model=model,
             )
         except Exception as exc:
-            msg = f"model completion failed: {exc}"
-            raise ModelError(msg) from exc
+            raise _classify(exc) from exc
 
         return Message(role=Role.ASSISTANT, content=result.output)
