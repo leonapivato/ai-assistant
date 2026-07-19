@@ -87,16 +87,19 @@ style. Structure:
   - Subsystem name and the roadmap artifact(s) it delivers.
   - Proposed `area/slug` for `just claim-workspace`.
   - Whether it touches `core/protocols.py`, `core/types.py`, or both, and the
-    coordination instruction if so: claim the ADR number and lane in
-    `WORKING.md` before starting; **draft the ADR and get it through
-    architecture review and ratified before implementing against the new
-    contract** (golden rule 5 — an ADR number claimed in `WORKING.md` reserves
-    the number, it is not ratification); only once ratified, push the
-    contract commit ahead of the dependent implementation and flag it in the
-    PR title, so a concurrent lane sees the new shape before building against
-    the old one.
-  - A reminder to register the lane in `WORKING.md` on pickup — this skill
-    does not do that itself.
+    coordination instruction if so, in this order: **first**
+    `just claim-workspace <area>/<slug>` (CLAUDE.md — claiming a workspace is
+    the first action of any task, before editing anything, `WORKING.md`
+    included); **then**, from inside that workspace, register the lane and
+    claim the ADR number in `WORKING.md`; **then draft the ADR and get it
+    through architecture review and ratified before implementing against the
+    new contract** (golden rule 5 — claiming the number reserves it, it is
+    not ratification); only once ratified, push the contract commit ahead of
+    the dependent implementation and flag it in the PR title, so a
+    concurrent lane sees the new shape before building against the old one.
+  - A reminder that registering the lane in `WORKING.md` (per the ordering
+    above) is the picker's job on pickup — this skill does not do that
+    itself.
 - **Out of scope**: name anything that looked tempting but got excluded in
   step 2 and why (already owned, not in the first vertical, etc.) so the
   issue doesn't get re-litigated in comments.
@@ -106,6 +109,19 @@ style. Structure:
 `gh issue create` is the one externally-visible action here — it posts to
 shared GitHub state other people see. Print the drafted body and get
 explicit confirmation before running it. Never auto-fire this step.
+
+Also run `gh issue list --state open` first and scan titles/bodies for an
+existing tracking issue already proposing one or more of the same lanes —
+two runs of this skill (by different people, or the same person re-running
+it) can otherwise both observe the same unclaimed lane and each post a
+duplicate issue, since nothing about `WORKING.md` reserves a lane just by
+being read. If a match exists, don't create a new issue for the overlapping
+lane(s) — point back to the existing one instead (in the batch's "Out of
+scope" section, or by not posting at all if the whole batch overlaps). This
+is a best-effort check, not an atomic reservation — same limitation as the
+`WORKING.md` freshness check below, for the same reason: closing it fully
+would need a real lane-reservation mechanism, out of scope for a proposal
+tool.
 
 State can go stale between step 1 and this one — someone else can claim a
 lane in `WORKING.md` while the draft sits waiting for confirmation. Re-reading
