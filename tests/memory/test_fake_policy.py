@@ -117,10 +117,10 @@ async def test_records_every_call_in_order() -> None:
 
     assert policy.call_count == 2
     assert [c.proposal for c in policy.calls] == [first, second]
-    assert policy.last_proposal is second
+    assert policy.last_proposal == second
 
 
-async def test_recorded_conflicts_are_snapshotted() -> None:
+async def test_recorded_conflicts_survive_the_caller_clearing_the_list() -> None:
     policy = FakeMemoryPolicy()
     conflicts = [_record("c")]
 
@@ -128,3 +128,19 @@ async def test_recorded_conflicts_are_snapshotted() -> None:
     conflicts.clear()
 
     assert len(policy.calls[0].conflicts) == 1
+
+
+async def test_recorded_call_survives_mutation_of_the_records_themselves() -> None:
+    # Snapshotting the containers is not enough: the records inside them are
+    # mutable models, so a caller reusing one after the call could otherwise
+    # rewrite history and make an assertion about the call silently pass.
+    policy = FakeMemoryPolicy()
+    proposal = _proposal()
+    conflict = _record("original")
+
+    await policy.decide(proposal, conflicts=[conflict])
+    conflict.id = "changed"
+    proposal.rationale = "rewritten"
+
+    assert policy.calls[0].conflicts[0].id == "original"
+    assert policy.last_proposal.rationale == "because"

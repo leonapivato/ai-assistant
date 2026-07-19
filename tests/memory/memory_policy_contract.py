@@ -146,15 +146,19 @@ class MemoryPolicyContract:
         assert decision.kind is not MemoryDecisionKind.MERGE
 
     @pytest.mark.parametrize("source", list(MemorySource))
+    @pytest.mark.parametrize("with_conflicts", [False, True])
     async def test_secret_tier_is_never_committed(
-        self, policy: MemoryPolicy, source: MemorySource
+        self, policy: MemoryPolicy, source: MemorySource, *, with_conflicts: bool
     ) -> None:
         # ADR-0004 §3: Tier 0 data belongs in the OS keyring, never the memory
         # store. No policy may route a secret-tier proposal into storage,
-        # whatever its other rules and however trusted the source.
+        # whatever its other rules and however trusted the source — and a policy
+        # that defers only when there is nothing to merge into would still leak
+        # the secret down its merge path, so both cases are swept.
+        conflicts = [_record("existing")] if with_conflicts else []
         proposal = _proposal(_record("secret", source=source), sensitivity=DataTier.SECRET)
 
-        decision = await policy.decide(proposal, conflicts=[])
+        decision = await policy.decide(proposal, conflicts=conflicts)
 
         assert decision.kind not in _COMMITTING
 
@@ -168,8 +172,9 @@ class MemoryPolicyContract:
         first = await policy.decide(proposal, conflicts=conflicts)
         second = await policy.decide(proposal, conflicts=conflicts)
 
-        assert first.kind is second.kind
-        assert first.merge_into == second.merge_into
+        # The whole decision, not just its kind: an alternating ttl changes when
+        # the record expires while leaving the kind identical.
+        assert first == second
 
     async def test_decide_does_not_mutate_its_inputs(self, policy: MemoryPolicy) -> None:
         # A policy rules on a proposal; it does not edit it. The caller still
