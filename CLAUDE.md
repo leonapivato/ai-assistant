@@ -54,6 +54,16 @@ learn/update memory.
 
 ## How to work (make changes reviewable)
 
+- **Claim a workspace first — before editing anything.** Run
+  `just claim-workspace <area>/<slug>` as the first action of any task. It puts
+  you on a fresh branch in an isolated workspace (the main checkout if free, else
+  a linked worktree) and prints `WORKSPACE=<path>`. **Work only in that path**,
+  and never commit to `master`. This is what stops parallel agents from sharing a
+  working tree and clobbering each other's uncommitted work. Release it after the
+  PR merges with `just release-workspace <area>/<slug>`. (Details:
+  `CONTRIBUTING.md` → "Coordinating parallel work".)
+- **Stage explicit paths, never `git add -A`/`git add .`.** Add the specific
+  files your change touches, so a stray sweep can't pick up unrelated work.
 - **One subsystem per change.** Scope a change to a single package plus its
   tests. Small diffs review faster and fail more clearly.
 - **Contract first.** If a subsystem needs a new capability from another, add or
