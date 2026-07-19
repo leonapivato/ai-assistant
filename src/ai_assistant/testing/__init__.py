@@ -12,8 +12,15 @@ only; production code must not import it (enforced by ``lint-imports``).
 
 from __future__ import annotations
 
+from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
 
-__all__ = ["FakeEmbedder", "FakeMemoryStore", "FakeModelProvider", "ModelCall"]
+__all__ = [
+    "FakeContextProvider",
+    "FakeEmbedder",
+    "FakeMemoryStore",
+    "FakeModelProvider",
+    "ModelCall",
+]
