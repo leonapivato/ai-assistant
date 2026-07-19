@@ -230,6 +230,23 @@ def test_claim_from_worktree_same_branch_is_idempotent(tmp_path: Path) -> None:
     assert _workspace(result) == ws_a  # returns the same workspace, no new one
 
 
+def test_claim_rejects_an_explicit_base_on_an_idempotent_reclaim(tmp_path: Path) -> None:
+    """An explicit base is meaningless once the branch already exists.
+
+    Passing one while standing on a branch that's already checked out here
+    used to be silently ignored — reporting success without ever using or
+    warning about the given base, which contradicted what the caller asked
+    for (PR #23 review finding). Refused outright instead.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = _workspace(_run(_CLAIM, repo, "area/a"))
+
+    result = _run(_CLAIM, repo, "area/a", "master", cwd=Path(ws_a))
+
+    assert result.returncode == 2
+    assert "meaningless" in result.stderr
+
+
 def test_claim_from_worktree_other_branch_creates_a_distinct_one(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     ws_a = _workspace(_run(_CLAIM, repo, "area/a"))
