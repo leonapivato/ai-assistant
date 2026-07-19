@@ -47,6 +47,29 @@ _log = structlog.get_logger(__name__)
 _SAFE_LABEL: Final = re.compile(r"[A-Za-z0-9._:-]+")
 
 
+def _classify(exc: ModelError) -> str:
+    """Name a failure using only the project's own taxonomy.
+
+    ``type(exc).__name__`` is provider-controlled: a route may be any
+    ``ModelProvider``, so the class it raises can be named anything at all,
+    and that name reaches a Tier 2 log under a key the ADR-0004 §5 redactor
+    treats as innocuous. Walking the MRO for the nearest class defined in
+    `core.errors` keeps the diagnostic value — a third-party
+    ``ProviderQuotaError(ModelRateLimitError)`` still logs as
+    ``ModelRateLimitError`` — while the emitted string can only ever be one we
+    wrote.
+
+    The threat model here is narrow, since a hostile provider already runs in
+    this process and logging would be the least of the problems. The realistic
+    version is duller: a provider that names its exception after the tenant,
+    customer, or record it failed on.
+    """
+    for cls in type(exc).__mro__:
+        if cls.__module__ == ModelError.__module__:
+            return cls.__name__
+    return ModelError.__name__
+
+
 def _warn(event: str, **fields: object) -> None:
     """Emit a diagnostic warning, never letting it break the caller.
 
@@ -79,11 +102,11 @@ class Route:
             provider, so one underlying provider can appear as several routes
             (a cheap model first, a stronger one behind it). ``None`` uses the
             provider's own default.
-        label: A short identifier used in diagnostics, so an exhausted-route
-            failure says which candidates were tried rather than listing bare
-            object reprs. Defaults to the model name, or the provider's class
-            name when the route carries no override. Constrained to
-            ``[A-Za-z0-9._:-]`` — see :meth:`__post_init__`.
+        label: An optional short identifier used in diagnostics, so an
+            exhausted-route failure names its candidates. Constrained to
+            ``[A-Za-z0-9._:-]`` (see :meth:`__post_init__`). Left unset, the
+            route is identified by position — never by its model id, which
+            cannot be vouched for (see :meth:`describe`).
     """
 
     provider: ModelProvider
@@ -122,9 +145,26 @@ class Route:
             )
             raise ConfigurationError(msg)
 
-    def describe(self) -> str:
-        """Return the label to use for this route in diagnostics."""
-        return self.label or self.model or type(self.provider).__name__
+    def describe(self, position: int) -> str:
+        """Return the identifier to use for this route in diagnostics.
+
+        Either the explicit :attr:`label` — which was validated at construction
+        — or a positional ``route[N]``. Nothing else.
+
+        The ``model`` is deliberately *not* used as a fallback any more. It
+        cannot be validated at construction, because it is functional: it is
+        handed to the provider, and legitimate ids contain characters a
+        conservative pattern rejects (``openrouter:meta-llama/llama-3``). And it
+        cannot usefully be filtered at emission either — that was tried, and
+        ``patient-SSN-123-45-6789`` passes exactly the same character check as
+        ``eu-west-1``, because they are structurally identical. A charset test
+        cannot tell a model id from a record id.
+
+        So the default is a position, which carries no data by construction. A
+        caller who wants a readable name sets ``label`` and thereby takes
+        responsibility for it — an explicit opt-in rather than an accident.
+        """
+        return self.label or f"route[{position}]"
 
 
 class RoutingProvider:
@@ -196,7 +236,7 @@ class RoutingProvider:
 
         failures: list[tuple[str, ModelError]] = []
 
-        for route in self._routes:
+        for position, route in enumerate(self._routes, start=1):
             try:
                 return await route.provider.complete(messages, model=route.model)
             except ModelError as exc:
@@ -207,12 +247,19 @@ class RoutingProvider:
                 # degrading silently is exactly what an operator needs to see
                 # *before* the fallback also fails. Class only, never the
                 # message — see the note on the exhaustion log below.
-                _warn(
-                    "route failed; trying the next one",
-                    route=route.describe(),
-                    error=type(exc).__name__,
-                )
-                failures.append((route.describe(), exc))
+                #
+                # Only when a next route actually exists. Announcing a
+                # transition that is not about to happen — then immediately
+                # logging "all routes failed" — reads as a fallback that was
+                # tried and also failed, which is a different incident from
+                # having nowhere left to go.
+                if position < len(self._routes):
+                    _warn(
+                        "route failed; trying the next one",
+                        route=route.describe(position),
+                        error=_classify(exc),
+                    )
+                failures.append((route.describe(position), exc))
 
         # Reaching here means every route failed routably, so `failures` mirrors
         # the (non-empty) route list. Reading the last failure off it — rather
@@ -244,6 +291,6 @@ class RoutingProvider:
         _warn(
             "all routes failed",
             routes=len(self._routes),
-            failures=[{"route": label, "error": type(exc).__name__} for label, exc in failures],
+            failures=[{"route": label, "error": _classify(exc)} for label, exc in failures],
         )
         raise last
