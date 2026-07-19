@@ -305,17 +305,29 @@ class PlanExecution:
             )
             raise RetriesExhaustedError(msg)
 
+        bound_tool = transition.bound_tool or step.bound_tool
+        if bound_tool is None:
+            msg = f"step {step.step_id} cannot run without a bound_tool"
+            raise IllegalTransitionError(msg)
+
+        if step.bound_tool is not None and bound_tool != step.bound_tool:
+            # Authorisation is granted for a specific action. Letting the tool
+            # change here would launder an approval for one tool into
+            # permission to run another — approve "smtp", then run
+            # "payments.delete_account" under the same reference. Re-selecting
+            # a tool is a new decision and needs a flow that seeks one.
+            msg = (
+                f"step {step.step_id} is bound to {step.bound_tool} and cannot switch "
+                f"to {bound_tool}: the approval covers the tool it was granted for"
+            )
+            raise IllegalTransitionError(msg)
+
         approval_ref = transition.approval_ref or step.approval_ref
         if approval_ref is None:
             msg = (
                 f"step {step.step_id} cannot run without an approval_ref: "
                 "every executed step must name the decision that authorised it"
             )
-            raise IllegalTransitionError(msg)
-
-        bound_tool = transition.bound_tool or step.bound_tool
-        if bound_tool is None:
-            msg = f"step {step.step_id} cannot run without a bound_tool"
             raise IllegalTransitionError(msg)
 
         return step.model_copy(

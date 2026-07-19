@@ -126,7 +126,27 @@ class FakePlanStore:
         self._sequence = 0
 
     async def save_goal(self, goal: Goal) -> str:
-        """Persist a goal, overwriting any existing one with the same id."""
+        """Persist a goal, or update the parts of one that may change.
+
+        ``status`` and ``deadline`` move over a goal's life. ``statement``,
+        ``provenance`` and ``created_at`` are its identity: rewriting them would
+        make every plan and execution already recorded against this id describe
+        an objective the user never set — the same audit hazard ``save_plan``
+        refuses, and the reason a changed objective needs a new goal.
+        """
+        existing = self._goals.get(goal.id)
+        if existing is not None:
+            identity = ("statement", "provenance", "created_at")
+            changed = [
+                field for field in identity if getattr(existing, field) != getattr(goal, field)
+            ]
+            if changed:
+                msg = (
+                    f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
+                    "change: plans and executions already recorded against it would "
+                    "silently come to describe a different objective. Use a new id."
+                )
+                raise PlanningError(msg)
         self._goals[goal.id] = goal.model_copy(deep=True)
         return goal.id
 
@@ -280,6 +300,15 @@ class FakePlanStore:
         bound_tool = transition.bound_tool or step.bound_tool
         if approval_ref is None or bound_tool is None:
             msg = f"step {step.step_id} cannot run without both an approval_ref and a bound_tool"
+            raise IllegalTransitionError(msg)
+
+        if step.bound_tool is not None and bound_tool != step.bound_tool:
+            # An approval covers the tool it was granted for; swapping the tool
+            # here would launder it into permission for a different action.
+            msg = (
+                f"step {step.step_id} is bound to {step.bound_tool} and cannot switch "
+                f"to {bound_tool}"
+            )
             raise IllegalTransitionError(msg)
 
         return step.model_copy(
