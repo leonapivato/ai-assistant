@@ -13,41 +13,62 @@ product. It **proposes** a batch; it never claims workspaces, edits
 `WORKING.md`, or spawns agents itself — a human reviews the issue and decides
 what to hand out.
 
-## 1. Gather ground truth — don't hand-roll it
+## 1. Gather ground truth — don't hand-roll it, and don't trust the checkout
 
-Run `git fetch origin` first and note `origin/master`'s resolved commit
-(`git rev-parse origin/master`) — step 4 needs it later to tell whether
-anything has changed since this survey. Then read these, in this order, and
-trust them over any stale assumption:
+`just status` and a plain file read both reflect whatever is currently
+checked out — they are not ref-aware. Running this skill from any branch
+other than an up-to-the-second `origin/master` (a workspace claimed an hour
+ago, the main checkout before its next fetch, anything) means these can
+silently report stale state even right after a `git fetch`, since fetch only
+updates the remote-tracking ref, not what's on disk. So never read them from
+"wherever this happens to be run" — always survey a disposable, freshly
+fetched `origin/master` on its own:
 
-- `just status` — the derived picture: module counts per package, the current
-  `core/protocols.py` Protocol inventory, and ADR states. This is the
-  canonical source for "what's actually built" — never guess it.
-- `WORKING.md` — the *human-declared* picture: lane ownership and ADR numbers
-  currently in flight. Any subsystem with a named owner, or any ADR number
-  claimed against it that isn't yet `Accepted`, is off the table for this
-  batch.
-- `docs/roadmap.md` — the "first vertical" seven-artifact table and the build
-  sequence checklist. A candidate lane must map to an unchecked item there;
-  don't propose work the roadmap hasn't sequenced yet.
-- `VISION.md` — pull the specific principle/section that justifies each lane,
-  so the issue reads as "why this, now" rather than a bare task list.
+1. `git fetch origin`.
+2. Materialize it: `git worktree add --detach <tmp-path> origin/master`.
+3. Note the commit it resolved to (`git rev-parse origin/master`) — step 4
+   needs it later to tell whether anything has changed since this survey.
+4. From `<tmp-path>`, read these, in this order, and trust them over any
+   stale assumption:
+   - `just status` — the derived picture: module counts per package, the
+     current `core/protocols.py` Protocol inventory, and ADR states. This is
+     the canonical source for "what's actually built" — never guess it.
+   - `WORKING.md` — the *human-declared* picture: lane ownership and ADR
+     numbers currently in flight. Any subsystem with a named owner, or any
+     ADR number claimed against it that isn't yet `Accepted`, is off the
+     table for this batch.
+   - `docs/roadmap.md` — the "first vertical" seven-artifact table and the
+     build sequence checklist. A candidate lane must map to an unchecked item
+     there; don't propose work the roadmap hasn't sequenced yet.
+   - `VISION.md` — pull the specific principle/section that justifies each
+     lane, so the issue reads as "why this, now" rather than a bare task
+     list.
+5. Remove the worktree (`git worktree remove <tmp-path>`) once the survey is
+   read — steps 2-4 don't need it kept around.
 
 ## 2. Compute candidates
 
 A subsystem is a valid candidate for this batch only if **all** of:
 
 1. It's `_unclaimed_` in `WORKING.md` (no owner, no in-flight ADR against it).
-2. `just status` shows it as not-yet-built (module count is "contract only"
-   or clearly behind the others).
-3. It maps to one of the roadmap's **first-vertical seven artifacts**
+2. It maps to one of the roadmap's **first-vertical seven artifacts**
    (`UserProfile`, `Memory`, `CurrentContext`, `Goal`, `ToolDefinition`,
    `ActionPlan`, `FeedbackEvent`) — not merely to *any* unchecked
    build-sequence item, and not to the wider per-subsystem candidate-artifact
    table. The build-sequence checklist tells you which of the seven are
    still unbuilt; an unchecked item that isn't one of the seven (e.g.
    `permissions`' `ActionPolicy`) fails this rule and belongs in "Out of
-   scope" as second-wave, not in the batch.
+   scope" as second-wave, not in the batch. **This is the authoritative
+   signal for "still needs building," not rule 3 below.**
+3. `just status`'s module count is consistent with rule 2 — "contract only"
+   or clearly behind the others, matching the roadmap's unchecked state.
+   `scripts/project_status.py` itself calls this count "a rough progress
+   proxy," not a completion test: a subsystem can be genuinely built with
+   few, dense modules, and the roadmap checkbox is what actually says so. If
+   the module count *disagrees* with the roadmap checklist — the checklist
+   says unbuilt but the count looks substantial, or vice versa — don't
+   silently trust either one: drop that lane from the batch and name the
+   discrepancy in "Out of scope" instead of guessing which source is right.
 
 For each candidate, check whether it has entries in **both**
 `core/protocols.py` and `core/types.py` yet. A subsystem can be missing
@@ -147,31 +168,21 @@ is a best-effort check, not an atomic reservation — same limitation as the
 would need a real lane-reservation mechanism, out of scope for a proposal
 tool.
 
-State can go stale between step 1 and this one — not just `WORKING.md`
-ownership, but *any* input the candidates were computed from: a lane's
-roadmap item can get checked off, its `src/ai_assistant/core/protocols.py` or
-`src/ai_assistant/core/types.py` entry can land, or its module count in
-`just status` can move, all while the draft sits waiting for confirmation.
-`just status` and a plain file read only ever reflect the *current checkout*
-— they are not ref-aware, so re-running them in place still reports the old
-state if you're standing on a branch cut before these changes landed, not
-`origin/master` as of right now.
-
-Immediately before creating the issue, run `git fetch origin` and check
-whether `origin/master`'s commit has moved at all since step 1
-(`git rev-parse origin/master`, compared against the SHA noted then). If it
-hasn't, nothing could have changed — skip the rest of this. If it has, redo
-step 1 and step 2 **against that new commit**, not the current checkout:
-materialize it in a disposable worktree (`git worktree add --detach
-<tmp-path> origin/master`) and rerun `just status` and the candidate checks
-there, then remove it (`git worktree remove <tmp-path>`) once done. Drop or
-re-flag any lane whose candidacy changed, rather than posting a batch that
-includes work someone already picked up or finished. This closes the gap for
-anything already merged to `master`; work only pushed to someone else's
-still-open feature branch is outside what any of these sources guarantee at
-any point — merged state is authoritative, not before (same reason
-`CONTRIBUTING.md`'s "stay in your lane" check is best-effort, not atomic, for
-two people claiming at once). If this recheck changes the lane list or any
-checklist content from what was already shown, **re-print the revised draft
-and get confirmation again** — never post a body different from the one
-actually approved.
+State can go stale between step 1 and this one — a lane's roadmap item can
+get checked off, its `core/` entry can land, its `WORKING.md` ownership can
+change, or its module count can move, all while the draft sits waiting for
+confirmation. Immediately before creating the issue, `git fetch origin` and
+compare `origin/master`'s commit against the one noted in step 1. If it
+hasn't moved, nothing could have changed — skip the rest of this. If it has,
+redo step 1's survey (steps 1-5 there: fetch, fresh detached worktree at the
+new commit, read, remove the worktree) and step 2's candidate computation
+against that new commit. Drop or re-flag any lane whose candidacy changed in
+any way, rather than posting a batch that includes work someone already
+picked up or finished. This closes the gap for anything already merged to
+`master`; work only pushed to someone else's still-open feature branch is
+outside what any of these sources guarantee at any point — merged state is
+authoritative, not before (same reason `CONTRIBUTING.md`'s "stay in your
+lane" check is best-effort, not atomic, for two people claiming at once). If
+this recheck changes the lane list or any checklist content from what was
+already shown, **re-print the revised draft and get confirmation again** —
+never post a body different from the one actually approved.
