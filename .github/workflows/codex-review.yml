@@ -151,6 +151,9 @@ jobs:
           # A dedicated, spend-capped review key (ADR-0012 §4), not a primary key.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PERSONA: ${{ needs.resolve.outputs.persona }}
+          # Pinned deliberately (not left to the CLI's own default) so the
+          # reviewer model only changes when someone bumps it here on purpose.
+          CODEX_REVIEW_MODEL: gpt-5.6-terra
         run: |
           set -euo pipefail
           # codex exec does not read OPENAI_API_KEY directly; authenticate first
