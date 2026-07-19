@@ -1,8 +1,10 @@
 # Task runner for common workflows. Install `just`: https://github.com/casey/just
 # Run `just` with no arguments to list recipes.
 
-# Pass recipe arguments as "$1", "$2", ... so they are shell-quoted rather than
-# interpolated as bare text (which would let a crafted argument run commands).
+# Expose recipe arguments as "$1", "$2", ... so recipes reference them
+# shell-quoted instead of interpolating {{...}} as bare text (which would let a
+# crafted argument run commands). Every recipe that forwards an argument to a
+# command below uses the quoted positional form.
 set positional-arguments
 
 # Show available recipes
@@ -35,7 +37,7 @@ imports:
 
 # Run the test suite (extra args passed through, e.g. `just test -k version`)
 test *args:
-    uv run pytest {{args}}
+    uv run pytest "$@"
 
 # Advisory dependency vulnerability audit
 audit:
@@ -48,17 +50,31 @@ status:
 # Adversarial review by Codex (a different model) vs a base branch; read-only.
 # persona is `architecture` or `adversarial`. Sends the diff to OpenAI.
 review-codex persona base="master":
-    scripts/codex-review.sh {{persona}} {{base}}
+    scripts/codex-review.sh "$1" "${2:-master}"
 
-# Claim an isolated workspace for one branch/PR: the main checkout if free, else
-# a linked worktree. Prints WORKSPACE=<path> — work only there. See CONTRIBUTING
-# "Coordinating parallel work". Example: just claim-workspace memory/add-cache
+# Claim an isolated workspace for one branch/PR: always a linked worktree, so
+# any number of agents can run in parallel with none sharing a working tree.
+# Prints WORKSPACE=<path> — work only there. See CONTRIBUTING "Coordinating
+# parallel work". Example: just claim-workspace memory/add-cache
 claim-workspace branch:
     scripts/claim-workspace.sh "$1"
+
+# Claim several workspaces at once, concurrently (one worktree per branch).
+# Example: just claim-workspaces memory/add-cache tools/registry planning/goal
+claim-workspaces *branches:
+    scripts/claim-workspaces.sh "$@"
 
 # Release a claimed workspace once its PR merges (FORCE=1 to discard changes).
 release-workspace branch:
     scripts/release-workspace.sh "$1"
+
+# List active workspaces: branch, clean/dirty, last commit, path.
+workspaces:
+    scripts/list-workspaces.sh
+
+# Report worktrees whose PR has merged or closed (dry-run; FORCE=1 to remove).
+prune-workspaces:
+    scripts/prune-workspaces.sh
 
 # First-time developer setup
 setup:
