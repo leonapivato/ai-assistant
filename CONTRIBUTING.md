@@ -356,7 +356,10 @@ A Protocol on its own is an unenforced promise. The required unit of work for a
    `core/types.py`.
 2. **A shared conformance suite** — the abstract `…Contract` base described
    under [Testing](#testing), encoding what every implementation must do.
-3. **A canonical fake** in `ai_assistant.testing`, passing that suite.
+3. **A canonical fake** in `ai_assistant.testing`, *plus* the concrete
+   `Test…Contract` subclass that runs it through the suite. The abstract base
+   collects nothing on its own — without that subclass the fake is unverified,
+   however many files exist. See `tests/memory/test_fake_store.py`.
 
 A triad spans `core/`, `ai_assistant/testing/`, and `tests/`, and that is
 deliberate: it is **one** unit of work, the standing exception to "one subsystem
