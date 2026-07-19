@@ -210,7 +210,7 @@ and rejects everything else with `PlanningError`:
 
 | From | To | Trigger | Also sets |
 | --- | --- | --- | --- |
-| `PENDING` | `RUNNING` | selection + permission cleared it | `bound_tool`, `started_at` |
+| `PENDING` | `RUNNING` | selection + permission cleared it outright | `bound_tool`, `approval_ref`, `started_at` |
 | `PENDING` | `AWAITING_APPROVAL` | permission check requires confirmation | `bound_tool` |
 | `PENDING` | `SKIPPED` | nothing can run it | `skip_reason` ∈ {`UNMET_DEPENDENCY`, `NO_CAPABLE_TOOL`, `SUPERSEDED`} |
 | `AWAITING_APPROVAL` | `RUNNING` | `permissions/` granted | `approval_ref`, `started_at` |
@@ -220,9 +220,18 @@ and rejects everything else with `PlanningError`:
 | `FAILED` | `RUNNING` | retry | `attempts += 1`, `started_at` |
 | `RUNNING` | `INDETERMINATE` | recovery found it running after a crash | `finished_at` |
 
+**Every transition into `RUNNING` carries an `approval_ref`** — including the
+common case where the permission layer cleared the step automatically, without
+prompting. ADR-0004 §7 gates *every* side-effecting call, so "no prompt was
+shown" must still mean "a decision was recorded and can be pointed at". If
+`approval_ref` were set only on the `AWAITING_APPROVAL` path, precisely the
+silent, automatic actions — the ones a user is least able to recall consenting
+to — would be the ones that could not be correlated with their authorisation.
+`PlanExecution` rejects a `→ RUNNING` transition without one.
+
 **The `→ RUNNING` transition is a claim, and must be committed before the tool
 is invoked.** This ordering is the point of the CAS in §5: two workers racing
-the same step both attempt the claim, one's `commit_execution` fails with
+the same step both attempt the claim, one's `commit_transition` fails with
 `StaleExecutionError`, and the loser has not yet acted. Committing *after*
 invocation would make CAS useless — it would reject a write only once both side
 effects had already happened.
@@ -272,7 +281,7 @@ class PlanStore(Protocol):
     async def save_plan(self, plan: ActionPlan) -> str: ...
     async def get_plan(self, plan_id: str) -> ActionPlan | None: ...
     async def start_execution(self, state: ExecutionState) -> ExecutionState: ...
-    async def commit_execution(self, state: ExecutionState) -> ExecutionState: ...
+    async def commit_transition(self, transition: StepTransition) -> ExecutionState: ...
     async def get_execution(self, execution_id: str) -> ExecutionState | None: ...
     async def active_executions(self) -> list[ExecutionState]: ...
     async def export(self) -> PlanExport: ...
@@ -280,17 +289,43 @@ class PlanStore(Protocol):
     async def clear(self) -> int: ...
 ```
 
-**Execution writes are compare-and-swap, not blind snapshot replacement.**
-`ExecutionState` carries a `version`; `commit_execution` succeeds only if the
-stored version still matches the one the caller loaded, and returns the state
-with `version` incremented. A stale write raises `StaleExecutionError`
-(a `PlanningError`). Without this, two workers can load the same `PENDING`
-snapshot, both run the same non-idempotent step, and both save — a lost update
-that also means the side effect happened twice. Optimistic concurrency turns
-that into a detectable, retryable failure, and it is the store's job because
-it is the only place with a total order over writes. Callers do not hand-build
-the states they commit: `PlanExecution` (§4) produces them, so a committed
-snapshot is always the result of a legal transition.
+**The store accepts transitions, not snapshots.** The write API takes a
+`StepTransition` — a `core` command naming the execution, the step, the target
+status, the fields it sets, and the `expected_version` it was computed against
+— rather than a caller-built `ExecutionState`:
+
+```python
+class StepTransition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    execution_id: str
+    step_id: str
+    to_status: StepStatus
+    expected_version: int
+    bound_tool: str | None = None
+    approval_ref: str | None = None
+    output: JsonValue | None = None
+    skip_reason: SkipReason | None = None
+    error: str | None = None
+```
+
+This is what makes §4's transition graph *authoritative* rather than merely
+conventional. Had the store taken a whole `ExecutionState`, any consumer of the
+Protocol could commit `PENDING → SUCCEEDED` directly and the claim that
+deterministic code owns state transitions (VISION §7) would rest on nobody
+choosing to bypass it. Implementations apply the transition against the stored
+snapshot via `PlanExecution` and reject an illegal one with `PlanningError`;
+they can, because `PlanStore` implementations live in `planning/` alongside the
+tracker, so no boundary is crossed to reuse it.
+
+**Writes are compare-and-swap.** `ExecutionState` carries a `version`;
+`commit_transition` succeeds only if the stored version still matches
+`expected_version`, and returns the state with `version` incremented. A stale
+write raises `StaleExecutionError` (a `PlanningError`). Without this, two
+workers can load the same `PENDING` snapshot, both claim the same
+non-idempotent step, and both save — a lost update that also means the side
+effect happened twice. Optimistic concurrency turns that into a detectable,
+retryable failure, and it belongs to the store because the store is the only
+place with a total order over writes.
 
 The data-rights obligations are part of the contract, not an afterthought,
 mirroring what ADR-0007 did for `MemoryStore`:
@@ -302,6 +337,23 @@ mirroring what ADR-0007 did for `MemoryStore`:
 - **Deletable.** `delete_goal` cascades to that goal's plans and their execution
   state — a goal the user deletes must not leave its plan history behind.
   `clear` empties this store's own rows (a Tier 1 erase, not a whole-system one).
+
+  **Deleting a goal with work in flight quiesces it first.** Erasing an
+  execution while a step is `RUNNING` would destroy the CAS record the executor
+  is about to commit against, so the step could neither complete nor be
+  reconciled — and a side effect already in progress would lose the only
+  evidence it happened. So deletion first drives every non-terminal step to a
+  terminal state: `PENDING`/`AWAITING_APPROVAL` steps become `SKIPPED`
+  (`SUPERSEDED`), and a `RUNNING` step becomes `INDETERMINATE` (§4) — it is
+  claimed, and planning cannot know whether the effect landed. Only then are the
+  records removed.
+
+  The user's erasure right wins over our bookkeeping (ADR-0004): we do **not**
+  retain a tombstone for an unreconciled step against their wishes. But we do
+  not delete silently either — a deletion that terminated an `INDETERMINATE`
+  step reports it, so the user learns an action may have completed before its
+  record went away. Suppressing that would be the one honest thing erasure does
+  not license us to do.
 - **Retention** follows ADR-0007's read-time model when plan records gain
   deadlines; no retention deadline is modelled in this slice (§7).
 
@@ -400,12 +452,18 @@ Protocol.
   system that silently double-books a flight or wrongly reports success.
 - **The audit record is immutable in fact, not just in annotation** — plan
   parameters are deep-frozen, so what executes is what was decided.
+- **The transition graph is enforced, not advisory:** the store's only write
+  path is a `StepTransition`, so there is no Protocol-level way to persist a
+  state `PlanExecution` would have rejected.
+- **Every executed step is correlatable with its authorisation**, including
+  silently auto-approved ones — the case ADR-0004 §7 most needs covered.
 - **Plan data is serialisable by construction.** `JsonValue` means an
   unpersistable parameter is rejected where it is built, not discovered by
   whichever store tries to write it.
 - **New `core` surface is large:** `Goal`, `GoalStatus`, `PlanStep`,
   `ActionPlan`, `StepStatus`, `SkipReason`, `StepExecution`,
-  `ExecutionState`, `PlanExport`, `PlanningError`, `StaleExecutionError`, and
+  `ExecutionState`, `StepTransition`, `PlanExport`, `PlanningError`,
+  `StaleExecutionError`, and
   the `Planner` and `PlanStore` Protocols. That is a lot at once — it is the
   smallest set that
   expresses the plan/state split *and* discharges the data-rights obligation;
