@@ -15,13 +15,14 @@ flight). For the *derived* picture — which packages are built vs stubs, the
 Protocol inventory, ADR statuses and numbering gaps — run `just status`; it is
 generated from the repo and never hand-edited.
 
-_Last updated: 2026-07-18._
+_Last updated: 2026-07-19._
 
 ## Lanes
 
 | Subsystem        | Owner        | Status            | Branch / ADR                        |
 | ---------------- | ------------ | ----------------- | ----------------------------------- |
 | `models` (resilience) | mattewolf    | in progress (WIP) | `models/error-taxonomy`, ADR-0011 (Proposed) |
+| `models` (routing)    | mattewolf    | in progress (WIP) | `models/routing` (stacked on `models/error-taxonomy`), ADR-0013 (Proposed) |
 | `orchestration`  | _unclaimed_  | not started       | —                                   |
 | `planning`       | _unclaimed_  | not started       | —                                   |
 | `tools`          | _unclaimed_  | not started       | —                                   |
@@ -35,6 +36,7 @@ Highest merged ADR is **0012**; drop your row when the ADR merges.
 | ADR  | Title                | Owner  | Branch                 |
 | ---- | -------------------- | ------ | ---------------------- |
 | 0011 | Model resilience     | mattewolf | `models/error-taxonomy` |
+| 0013 | Model routing and fallback | mattewolf | `models/routing` |
 
 ## Shared surface
 
