@@ -150,6 +150,26 @@ def test_frozen_dict_compares_equal_to_a_plain_mapping() -> None:
     assert FrozenDict({"a": 1}) == {"a": 1}
 
 
+def test_frozen_dict_has_no_mutable_backing_to_reach_for() -> None:
+    """A private dict would still be a real bypass, not merely a rude one."""
+    step = PlanStep(id="s1", intent="i", capability="c", parameters={"recipient": "a@b.c"})
+
+    with pytest.raises(AttributeError):
+        step.parameters._items = ()  # type: ignore[attr-defined]
+    assert not hasattr(step.parameters, "_data")
+    assert step.parameters["recipient"] == "a@b.c"
+
+
+def test_nested_frozen_dicts_are_equally_sealed() -> None:
+    step = PlanStep(
+        id="s1", intent="i", capability="c", parameters={"headers": {"reply_to": "a@b.c"}}
+    )
+    nested = step.parameters["headers"]
+
+    with pytest.raises(AttributeError):
+        nested._items = ()  # type: ignore[union-attr]
+
+
 def test_frozen_dict_is_hashable_because_its_values_are_frozen() -> None:
     step = PlanStep(id="s1", intent="mail", capability="send_email", parameters={"meta": {"n": 1}})
     assert hash(step.parameters) == hash(step.parameters)

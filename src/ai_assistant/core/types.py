@@ -358,46 +358,66 @@ class FrozenDict(Mapping[str, "FrozenJson"]):
     ``MappingProxyType`` is the obvious way to make a mapping read-only, but it
     can be neither pickled nor deep-copied, which would make any model holding
     one fail ``model_copy(deep=True)`` — too sharp an edge for a type this
-    widely shared. This carries a private ``dict`` instead and supports both.
+    widely shared.
+
+    The contents are held as a **tuple of pairs**, not a dict, and attribute
+    assignment is refused. A private ``dict`` would still be a mutable object
+    reachable as ``parameters._data``, which is a real bypass of an audit
+    record's immutability, not merely a rude one. Lookup is therefore a linear
+    scan; plan parameters are a handful of keys, so that is cheaper than
+    carrying a mutable index alongside the immutable truth.
     """
 
-    __slots__ = ("_data",)
+    __slots__ = ("_items",)
 
-    _data: dict[str, FrozenJson]
+    _items: tuple[tuple[str, FrozenJson], ...]
 
     def __init__(self, data: Mapping[str, FrozenJson] | None = None, /) -> None:
-        """Store a shallow copy of ``data``, so the caller cannot mutate it later."""
-        self._data = dict(data or {})
+        """Store ``data``'s pairs, detached from whatever the caller keeps."""
+        object.__setattr__(self, "_items", tuple((data or {}).items()))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Refuse attribute assignment, including rebinding the backing tuple."""
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __delattr__(self, name: str) -> None:
+        """Refuse attribute deletion, for the same reason as assignment."""
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
 
     def __getitem__(self, key: str) -> FrozenJson:
         """Return the value for ``key``, raising ``KeyError`` if absent."""
-        return self._data[key]
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
         """Iterate over the keys, in insertion order."""
-        return iter(self._data)
+        return (key for key, _ in self._items)
 
     def __len__(self) -> int:
         """Return the number of keys."""
-        return len(self._data)
+        return len(self._items)
 
     def __repr__(self) -> str:
-        """Return a representation that round-trips through ``eval`` given the type."""
-        return f"FrozenDict({self._data!r})"
+        """Return a dict-like representation of the contents."""
+        return f"FrozenDict({dict(self._items)!r})"
 
     def __eq__(self, other: object) -> bool:
         """Compare equal to any mapping with the same contents."""
         if isinstance(other, Mapping):
-            return dict(self._data) == dict(other)
+            return dict(self._items) == dict(other)
         return NotImplemented
 
     def __hash__(self) -> int:
         """Hash by contents; possible only because every value is itself frozen."""
-        return hash(frozenset(self._data.items()))
+        return hash(frozenset(self._items))
 
     def __reduce__(self) -> tuple[type[FrozenDict], tuple[dict[str, FrozenJson]]]:
         """Support pickling (and, via it, ``copy.deepcopy``)."""
-        return (FrozenDict, (self._data,))
+        return (FrozenDict, (dict(self._items),))
 
 
 def _freeze_json(value: FrozenJson) -> FrozenJson:

@@ -199,6 +199,21 @@ class PlanStoreContract:
                 )
             )
 
+    async def test_approval_cannot_be_sought_without_a_tool_to_approve(
+        self, store: PlanStore
+    ) -> None:
+        """Consent is to a specific action, not to an unspecified one."""
+        state = await self._started(store)
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.AWAITING_APPROVAL,
+                    expected_version=state.version,
+                )
+            )
+
     async def test_a_never_queued_step_cannot_be_denied_approval(self, store: PlanStore) -> None:
         """A step nobody was asked about cannot have been refused.
 
