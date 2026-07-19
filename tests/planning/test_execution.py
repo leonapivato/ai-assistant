@@ -59,6 +59,71 @@ def _claim(execution_id: str, step_id: str, version: int) -> StepTransition:
     )
 
 
+def test_a_naive_clock_cannot_leak_a_naive_timestamp() -> None:
+    """``model_copy`` skips validators, so an unnormalised clock would write through.
+
+    Every reader treats ``updated_at`` as tz-aware; a naive one would raise on
+    the first comparison against a UTC timestamp, far from the cause.
+    """
+    naive = PlanExecution(now=lambda: datetime(2026, 1, 1))  # noqa: DTZ001
+
+    state = naive.start(_plan(1), execution_id="e1")
+    assert state.updated_at.tzinfo is not None
+
+    claimed = naive.apply(state, _claim("e1", "s1", state.version))
+    assert claimed.updated_at.tzinfo is not None
+
+    recovered = naive.abandon_running(claimed)
+    assert recovered.updated_at.tzinfo is not None
+
+    cancelled = naive.cancel(naive.start(_plan(1), execution_id="e2"))
+    assert cancelled.updated_at.tzinfo is not None
+
+
+def test_a_pending_step_cannot_be_skipped_as_approval_denied() -> None:
+    tracker = _tracker()
+    state = tracker.start(_plan(1), execution_id="e1")
+    with pytest.raises(IllegalTransitionError, match="cannot be skipped"):
+        tracker.apply(
+            state,
+            StepTransition(
+                execution_id="e1",
+                step_id="s1",
+                to_status=StepStatus.SKIPPED,
+                expected_version=state.version,
+                skip_reason=SkipReason.APPROVAL_DENIED,
+                approval_ref="perm-1",
+            ),
+        )
+
+
+def test_an_awaiting_step_cannot_be_skipped_for_a_planning_reason() -> None:
+    """NO_CAPABLE_TOOL is decided before approval is sought, not after."""
+    tracker = _tracker()
+    state = tracker.start(_plan(1), execution_id="e1")
+    state = tracker.apply(
+        state,
+        StepTransition(
+            execution_id="e1",
+            step_id="s1",
+            to_status=StepStatus.AWAITING_APPROVAL,
+            expected_version=state.version,
+            bound_tool="smtp",
+        ),
+    )
+    with pytest.raises(IllegalTransitionError, match="cannot be skipped"):
+        tracker.apply(
+            state,
+            StepTransition(
+                execution_id="e1",
+                step_id="s1",
+                to_status=StepStatus.SKIPPED,
+                expected_version=state.version,
+                skip_reason=SkipReason.NO_CAPABLE_TOOL,
+            ),
+        )
+
+
 def test_start_derives_one_pending_step_per_plan_step() -> None:
     state = _tracker().start(_plan(3), execution_id="e1")
     assert [step.step_id for step in state.steps] == ["s1", "s2", "s3"]

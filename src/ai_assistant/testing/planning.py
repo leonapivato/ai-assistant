@@ -55,6 +55,14 @@ _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.INDETERMINATE: frozenset(),
 }
 
+#: Which skip reasons are truthful from which status; mirrors ADR-0014 §4.
+_LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
+    StepStatus.PENDING: frozenset(
+        {SkipReason.UNMET_DEPENDENCY, SkipReason.NO_CAPABLE_TOOL, SkipReason.SUPERSEDED}
+    ),
+    StepStatus.AWAITING_APPROVAL: frozenset({SkipReason.APPROVAL_DENIED, SkipReason.SUPERSEDED}),
+}
+
 _MAX_ATTEMPTS = 3
 
 
@@ -128,9 +136,20 @@ class FakePlanStore:
         return None if stored is None else stored.model_copy(deep=True)
 
     async def save_plan(self, plan: ActionPlan) -> str:
-        """Persist a plan, requiring its goal to exist."""
+        """Persist a plan, requiring its goal to exist and its id to be free.
+
+        Re-planning must take a new id so the previous plan stays an intact
+        audit record; an identical re-save is idempotent (ADR-0014 §2).
+        """
         if plan.goal_id not in self._goals:
             msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+            raise PlanningError(msg)
+        existing = self._plans.get(plan.id)
+        if existing is not None and existing != plan:
+            msg = (
+                f"plan {plan.id} already exists and differs; re-planning must use a new "
+                "id so the previous plan stays an intact audit record"
+            )
             raise PlanningError(msg)
         self._plans[plan.id] = plan
         return plan.id
@@ -183,14 +202,17 @@ class FakePlanStore:
             raise IllegalTransitionError(msg)
 
         updated = self._advance(current, transition)
-        state = stored.model_copy(
-            update={
-                "steps": tuple(
-                    updated if step.step_id == updated.step_id else step for step in stored.steps
-                ),
-                "version": stored.version + 1,
-                "updated_at": self._now(),
-            }
+        state = ExecutionState.model_validate(
+            stored.model_copy(
+                update={
+                    "steps": tuple(
+                        updated if step.step_id == updated.step_id else step
+                        for step in stored.steps
+                    ),
+                    "version": stored.version + 1,
+                    "updated_at": self._now(),
+                }
+            ).model_dump()
         )
         self._executions[state.id] = state
         return state.model_copy(deep=True)
@@ -207,13 +229,7 @@ class FakePlanStore:
                 }
             )
         elif transition.to_status is StepStatus.SKIPPED:
-            updated = step.model_copy(
-                update={
-                    "status": StepStatus.SKIPPED,
-                    "skip_reason": transition.skip_reason,
-                    "approval_ref": transition.approval_ref or step.approval_ref,
-                }
-            )
+            updated = self._to_skipped(step, transition)
         else:
             updated = step.model_copy(
                 update={
@@ -224,6 +240,28 @@ class FakePlanStore:
                 }
             )
         return StepExecution.model_validate(updated.model_dump())
+
+    def _to_skipped(self, step: StepExecution, transition: StepTransition) -> StepExecution:
+        """Skip the step, checking the reason is one this status could produce."""
+        if transition.skip_reason not in _LEGAL_SKIP_REASONS.get(step.status, frozenset()):
+            msg = (
+                f"step {step.step_id} cannot be skipped as {transition.skip_reason} "
+                f"from {step.status}"
+            )
+            raise IllegalTransitionError(msg)
+
+        approval_ref = transition.approval_ref or step.approval_ref
+        if transition.skip_reason is SkipReason.APPROVAL_DENIED and approval_ref is None:
+            msg = f"step {step.step_id} cannot record a denial without an approval_ref"
+            raise IllegalTransitionError(msg)
+
+        return step.model_copy(
+            update={
+                "status": StepStatus.SKIPPED,
+                "skip_reason": transition.skip_reason,
+                "approval_ref": approval_ref,
+            }
+        )
 
     def _to_running(self, step: StepExecution, transition: StepTransition) -> StepExecution:
         """Claim the step, enforcing the retry ceiling and the approval rule."""
