@@ -120,6 +120,33 @@ class PlanStoreContract:
         with pytest.raises(PlanningError):
             await store.start_execution("ghost")
 
+    async def test_a_plan_id_cannot_be_reused_for_a_different_plan(self, store: PlanStore) -> None:
+        """Replacing a plan would rewrite the record of what was decided.
+
+        Worse, an execution already under way refers to its plan by id, so the
+        swap would pair real step history with steps that were never planned.
+        Re-planning takes a new id (ADR-0014 §2).
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan(steps=1))
+        await store.start_execution("p1")
+
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan(steps=2))
+
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        assert [step.id for step in stored.steps] == ["s1"]
+
+    async def test_saving_an_identical_plan_again_is_idempotent(self, store: PlanStore) -> None:
+        """A retry must not be punished — only a *differing* plan is a conflict."""
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        await store.save_plan(_plan())
+
+        export = await store.export()
+        assert len(export.plans) == 1
+
     # --- starting an execution ------------------------------------------
 
     async def test_execution_starts_derived_from_the_plan(self, store: PlanStore) -> None:
@@ -169,6 +196,47 @@ class PlanStoreContract:
                     to_status=StepStatus.RUNNING,
                     expected_version=state.version,
                     bound_tool="smtp",
+                )
+            )
+
+    async def test_a_never_queued_step_cannot_be_denied_approval(self, store: PlanStore) -> None:
+        """A step nobody was asked about cannot have been refused.
+
+        Allowing it would manufacture a permission record for a decision that
+        never happened — a false audit trail is worse than none.
+        """
+        state = await self._started(store)
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.SKIPPED,
+                    expected_version=state.version,
+                    skip_reason=SkipReason.APPROVAL_DENIED,
+                    approval_ref="perm-1",
+                )
+            )
+
+    async def test_a_denial_must_point_at_its_decision(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.AWAITING_APPROVAL,
+                expected_version=state.version,
+                bound_tool="smtp",
+            )
+        )
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.SKIPPED,
+                    expected_version=state.version,
+                    skip_reason=SkipReason.APPROVAL_DENIED,
                 )
             )
 

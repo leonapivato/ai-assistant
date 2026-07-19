@@ -49,6 +49,18 @@ _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.INDETERMINATE: frozenset(),
 }
 
+#: Which skip reasons are truthful from which status (ADR-0014 §4).
+#:
+#: A step that was never queued for approval cannot have been denied one, so
+#: allowing ``APPROVAL_DENIED`` from ``PENDING`` would manufacture a permission
+#: record for a decision nobody made — worse than no record at all.
+_LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
+    StepStatus.PENDING: frozenset(
+        {SkipReason.UNMET_DEPENDENCY, SkipReason.NO_CAPABLE_TOOL, SkipReason.SUPERSEDED}
+    ),
+    StepStatus.AWAITING_APPROVAL: frozenset({SkipReason.APPROVAL_DENIED, SkipReason.SUPERSEDED}),
+}
+
 #: How many times a step may be claimed before its retry budget is spent.
 DEFAULT_MAX_ATTEMPTS = 3
 
@@ -66,6 +78,17 @@ def _revalidated(step: StepExecution) -> StepExecution:
     contract's teeth, every transition result is put back through them.
     """
     return StepExecution.model_validate(step.model_dump())
+
+
+def _revalidated_state(state: ExecutionState) -> ExecutionState:
+    """Re-run ``ExecutionState``'s validators over a state built by ``model_copy``.
+
+    Same reasoning as :func:`_revalidated`, and it also normalises ``updated_at``:
+    an injected clock returning a naive datetime would otherwise be written
+    straight through, leaving a state that violates the tz-aware contract every
+    reader assumes.
+    """
+    return ExecutionState.model_validate(state.model_dump())
 
 
 class PlanExecution:
@@ -148,14 +171,16 @@ class PlanExecution:
             raise IllegalTransitionError(msg)
 
         updated = _revalidated(self._advance(current, transition))
-        return state.model_copy(
-            update={
-                "steps": tuple(
-                    updated if step.step_id == updated.step_id else step for step in state.steps
-                ),
-                "version": state.version + 1,
-                "updated_at": self._now(),
-            }
+        return _revalidated_state(
+            state.model_copy(
+                update={
+                    "steps": tuple(
+                        updated if step.step_id == updated.step_id else step for step in state.steps
+                    ),
+                    "version": state.version + 1,
+                    "updated_at": self._now(),
+                }
+            )
         )
 
     def cancel(self, state: ExecutionState) -> ExecutionState:
@@ -208,8 +233,10 @@ class PlanExecution:
         """Return ``state`` carrying ``steps``, bumped a version, unless unchanged."""
         if steps == state.steps:
             return state
-        return state.model_copy(
-            update={"steps": steps, "version": state.version + 1, "updated_at": self._now()}
+        return _revalidated_state(
+            state.model_copy(
+                update={"steps": steps, "version": state.version + 1, "updated_at": self._now()}
+            )
         )
 
     def _advance(self, step: StepExecution, transition: StepTransition) -> StepExecution:
@@ -224,14 +251,34 @@ class PlanExecution:
                 }
             )
         if transition.to_status is StepStatus.SKIPPED:
-            return step.model_copy(
-                update={
-                    "status": StepStatus.SKIPPED,
-                    "skip_reason": transition.skip_reason,
-                    "approval_ref": transition.approval_ref or step.approval_ref,
-                }
-            )
+            return self._to_skipped(step, transition)
         return self._to_finished(step, transition)
+
+    def _to_skipped(self, step: StepExecution, transition: StepTransition) -> StepExecution:
+        """Skip the step, checking the reason is one this status could produce."""
+        allowed = _LEGAL_SKIP_REASONS.get(step.status, frozenset())
+        if transition.skip_reason not in allowed:
+            msg = (
+                f"step {step.step_id} cannot be skipped as {transition.skip_reason} "
+                f"from {step.status}"
+            )
+            raise IllegalTransitionError(msg)
+
+        approval_ref = transition.approval_ref or step.approval_ref
+        if transition.skip_reason is SkipReason.APPROVAL_DENIED and approval_ref is None:
+            msg = (
+                f"step {step.step_id} cannot record a denial without an approval_ref "
+                "pointing at the decision"
+            )
+            raise IllegalTransitionError(msg)
+
+        return step.model_copy(
+            update={
+                "status": StepStatus.SKIPPED,
+                "skip_reason": transition.skip_reason,
+                "approval_ref": approval_ref,
+            }
+        )
 
     def _to_running(self, step: StepExecution, transition: StepTransition) -> StepExecution:
         """Claim the step: the move that must be committed *before* a tool runs."""

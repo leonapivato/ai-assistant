@@ -70,13 +70,25 @@ class InMemoryPlanStore:
         return None if stored is None else stored.model_copy(deep=True)
 
     async def save_plan(self, plan: ActionPlan) -> str:
-        """Persist a plan, requiring its goal to exist.
+        """Persist a plan, requiring its goal to exist and its id to be free.
 
-        Rejecting an orphan here is what lets ``export`` promise referential
-        integrity without having to repair anything at read time.
+        Rejecting an orphan is what lets ``export`` promise referential
+        integrity without repairing anything at read time. Rejecting a *reused*
+        id is what keeps a plan an audit record: silently replacing plan ``p1``
+        would rewrite what the system is recorded as having decided, and leave
+        executions of the old plan pointing at steps that were never theirs.
+        Re-planning takes a new id (ADR-0014 §2). An identical re-save is
+        idempotent, so a retry is harmless.
         """
         if plan.goal_id not in self._goals:
             msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+            raise PlanningError(msg)
+        existing = self._plans.get(plan.id)
+        if existing is not None and existing != plan:
+            msg = (
+                f"plan {plan.id} already exists and differs; re-planning must use a new "
+                "id so the previous plan stays an intact audit record"
+            )
             raise PlanningError(msg)
         self._plans[plan.id] = plan
         return plan.id
