@@ -280,12 +280,12 @@ class PlanStore(Protocol):
     async def get_goal(self, goal_id: str) -> Goal | None: ...
     async def save_plan(self, plan: ActionPlan) -> str: ...
     async def get_plan(self, plan_id: str) -> ActionPlan | None: ...
-    async def start_execution(self, state: ExecutionState) -> ExecutionState: ...
+    async def start_execution(self, plan_id: str) -> ExecutionState: ...
     async def commit_transition(self, transition: StepTransition) -> ExecutionState: ...
     async def get_execution(self, execution_id: str) -> ExecutionState | None: ...
     async def active_executions(self) -> list[ExecutionState]: ...
     async def export(self) -> PlanExport: ...
-    async def delete_goal(self, goal_id: str) -> bool: ...
+    async def delete_goal(self, goal_id: str) -> GoalDeletion: ...
     async def clear(self) -> int: ...
 ```
 
@@ -307,6 +307,13 @@ class StepTransition(BaseModel):
     skip_reason: SkipReason | None = None
     error: str | None = None
 ```
+
+`start_execution` takes a `plan_id`, not a caller-built snapshot, for the same
+reason: the initial state is *derived* — one `PENDING` `StepExecution` per
+`PlanStep`, in order, at `version` 0 — and deriving it inside the store is what
+guarantees the positional correspondence with the plan that everything else
+assumes. A caller handing in an `ExecutionState` could open one already marked
+`RUNNING`, or with steps that do not match the plan it names.
 
 This is what makes §4's transition graph *authoritative* rather than merely
 conventional. Had the store taken a whole `ExecutionState`, any consumer of the
@@ -333,27 +340,68 @@ mirroring what ADR-0007 did for `MemoryStore`:
 - **Local residency.** Implementations persist locally only (ADR-0004 §1); no
   implementation may write plan state to a remote service.
 - **Exportable.** `export` returns a portable snapshot of goals, plans and
-  execution state.
+  execution state. This is how planning discharges ADR-0004 §6, so the shape is
+  part of the contract — an unspecified return type is not something an
+  independent store can conform to or an interface can consume:
+
+```python
+class PlanExport(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: int = 1
+    exported_at: datetime
+    goals: tuple[Goal, ...]
+    plans: tuple[ActionPlan, ...]
+    executions: tuple[ExecutionState, ...]
+```
+
+  Relationships are carried by the ids already on the records (`ActionPlan.
+  goal_id`, `ExecutionState.plan_id`) rather than by nesting, so the export is
+  flat, and a plan whose goal was deleted is representable instead of
+  unserialisable. The export is **complete and internally consistent**: every
+  `goal_id`/`plan_id` referenced by an included record resolves within the same
+  export. `schema_version` is explicit because an export outlives the code that
+  wrote it — that is the point of an export — and a reader must be able to tell
+  which shape it is holding. The caller serialises with
+  `model_dump(mode="json")`, matching `MemoryStore.export` (ADR-0007 §3).
 - **Deletable.** `delete_goal` cascades to that goal's plans and their execution
   state — a goal the user deletes must not leave its plan history behind.
   `clear` empties this store's own rows (a Tier 1 erase, not a whole-system one).
 
-  **Deleting a goal with work in flight quiesces it first.** Erasing an
+  **Deleting a goal with work in flight is refused, not forced.** Erasing an
   execution while a step is `RUNNING` would destroy the CAS record the executor
-  is about to commit against, so the step could neither complete nor be
-  reconciled — and a side effect already in progress would lose the only
-  evidence it happened. So deletion first drives every non-terminal step to a
-  terminal state: `PENDING`/`AWAITING_APPROVAL` steps become `SKIPPED`
-  (`SUPERSEDED`), and a `RUNNING` step becomes `INDETERMINATE` (§4) — it is
-  claimed, and planning cannot know whether the effect landed. Only then are the
-  records removed.
+  is about to commit against: the step could then neither complete nor be
+  reconciled, and a side effect already in progress would lose the only evidence
+  it happened. The store cannot prevent that by "quiescing" the execution
+  itself, because stopping a live tool call is not something a persistence layer
+  can do — only whoever owns the running execution can. So `delete_goal` refuses
+  while any step is non-terminal and names the offending executions in its
+  result. The executor cancels them (driving `PENDING`/`AWAITING_APPROVAL` to
+  `SKIPPED`/`SUPERSEDED`, and a `RUNNING` step to `INDETERMINATE` once it stops
+  chasing it), and the caller re-issues the delete, which then succeeds.
 
-  The user's erasure right wins over our bookkeeping (ADR-0004): we do **not**
-  retain a tombstone for an unreconciled step against their wishes. But we do
-  not delete silently either — a deletion that terminated an `INDETERMINATE`
-  step reports it, so the user learns an action may have completed before its
-  record went away. Suppressing that would be the one honest thing erasure does
-  not license us to do.
+  This defers the user's erasure right by one round-trip, which ADR-0004 permits
+  — it requires deletion to be *available*, not instantaneous while an action is
+  mid-flight. The alternative, deleting underneath a live tool call, would leave
+  a side effect in the world with nothing anywhere recording it.
+
+  Deletion is not silent either: `GoalDeletion` reports any `INDETERMINATE`
+  steps it erased, so the user learns an action may have completed before its
+  record went away.
+
+```python
+class GoalDeletion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    deleted: bool
+    plans_removed: int = 0
+    executions_removed: int = 0
+    blocked_by: tuple[str, ...] = ()        # active execution ids; deleted=False
+    indeterminate_steps: tuple[str, ...] = ()   # erased, possibly-completed
+```
+
+  A bare `bool` could not carry either message — an ordinary deletion and one
+  that erased a possibly-completed side effect would be indistinguishable, and
+  an interface built on this Protocol would have no way to warn the user the
+  decision above promises.
 - **Retention** follows ADR-0007's read-time model when plan records gain
   deadlines; no retention deadline is modelled in this slice (§7).
 
@@ -457,13 +505,16 @@ Protocol.
   state `PlanExecution` would have rejected.
 - **Every executed step is correlatable with its authorisation**, including
   silently auto-approved ones — the case ADR-0004 §7 most needs covered.
+- **Deleting a goal can fail and need retrying** while its execution is live.
+  That is a real ergonomic cost on the erasure path, accepted because the
+  alternative erases the only record of an action still in flight.
 - **Plan data is serialisable by construction.** `JsonValue` means an
   unpersistable parameter is rejected where it is built, not discovered by
   whichever store tries to write it.
 - **New `core` surface is large:** `Goal`, `GoalStatus`, `PlanStep`,
   `ActionPlan`, `StepStatus`, `SkipReason`, `StepExecution`,
-  `ExecutionState`, `StepTransition`, `PlanExport`, `PlanningError`,
-  `StaleExecutionError`, and
+  `ExecutionState`, `StepTransition`, `PlanExport`, `GoalDeletion`,
+  `PlanningError`, `StaleExecutionError`, and
   the `Planner` and `PlanStore` Protocols. That is a lot at once — it is the
   smallest set that
   expresses the plan/state split *and* discharges the data-rights obligation;
