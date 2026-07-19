@@ -331,13 +331,20 @@ def install_redaction() -> None:
         _configure(logging.INFO)
         return
 
-    processors = list(structlog.get_config()["processors"])
+    # Mutated **in place**, not replaced. A host using
+    # `cache_logger_on_first_use=True` (structlog's own recommendation for
+    # production) binds a logger's processor chain on first use and never
+    # consults the configuration again — so calling `structlog.configure()` with
+    # a new list installs the redactor for loggers created *later* while every
+    # already-used logger keeps emitting through its old, unredacted chain. The
+    # cached logger holds a reference to this very list, so inserting into it is
+    # what actually reaches those loggers.
+    processors = structlog.get_config()["processors"]
     if redact_sensitive in processors:
         return
     # Before the renderer, which is by convention last and turns the event dict
     # into a string — after which there is nothing structured left to scrub.
     processors.insert(max(len(processors) - 1, 0), redact_sensitive)
-    structlog.configure(processors=processors)
 
 
 install_redaction()

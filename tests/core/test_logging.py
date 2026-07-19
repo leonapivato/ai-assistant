@@ -395,6 +395,32 @@ def test_composition_applies_both_maskings(capsys: pytest.CaptureFixture[str]) -
     assert "<HOST-MASKED>" in out
 
 
+def test_a_logger_cached_before_installation_is_still_redacted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Regression (CI adversarial review): with cache_logger_on_first_use=True —
+    # structlog's own production recommendation — a host's logger binds its
+    # processor chain on first use and never consults the configuration again.
+    # Replacing the list therefore protected only loggers created afterwards,
+    # while every already-used one kept emitting unredacted. The cached logger
+    # holds a reference to the list itself, so it is mutated in place.
+    structlog.configure(
+        processors=[structlog.dev.ConsoleRenderer(colors=False)],
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+    log = structlog.get_logger("cached-host")
+    log.warning("first use binds and caches the chain")
+    capsys.readouterr()
+
+    install_redaction()
+    log.warning("after installation", api_key="sk-live-SECRET")
+
+    out = capsys.readouterr().out
+    assert "sk-live-SECRET" not in out
+    assert REDACTED in out
+
+
 def test_installing_twice_does_not_duplicate_the_processor() -> None:
     configure_logging(Settings())
     install_redaction()
