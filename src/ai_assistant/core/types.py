@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from math import isfinite
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -405,11 +406,23 @@ def _freeze_json(value: FrozenJson) -> FrozenJson:
     Mappings become :class:`FrozenDict` and lists become tuples, so the
     immutability guarantee is depth-independent rather than true only at the top
     level.
+
+    Raises:
+        ValueError: If a non-finite float is encountered. ``NaN`` and the
+            infinities satisfy ``float`` but have no JSON representation, so
+            they would silently change value on the way through the store or an
+            export — exactly the unportable-value problem this type exists to
+            prevent, just further down.
     """
     if isinstance(value, Mapping):
         return FrozenDict({key: _freeze_json(item) for key, item in value.items()})
-    if isinstance(value, tuple | list):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Sequence):
         return tuple(_freeze_json(item) for item in value)
+    if isinstance(value, float) and not isfinite(value):
+        msg = f"{value!r} has no JSON representation, so it cannot be stored or exported"
+        raise ValueError(msg)
     return value
 
 
@@ -585,8 +598,17 @@ _CLAIMED_STATUSES = frozenset(
     }
 )
 
-#: Statuses no legal transition leads out of (see ADR-0014 §4).
+#: Statuses that need nothing further — the step is done (see ADR-0014 §4).
+#: ``FAILED`` is not among them (it may still be retried) and neither is
+#: ``INDETERMINATE`` (it awaits explicit resolution).
 TERMINAL_STEP_STATUSES = frozenset({StepStatus.SUCCEEDED, StepStatus.SKIPPED})
+
+#: Statuses that mean a tool call may be in progress *right now*, so erasing the
+#: record would orphan a side effect (see ADR-0014 §5).
+_LIVE_STATUSES = frozenset({StepStatus.RUNNING})
+
+#: Statuses whose record must say when the step stopped.
+_FINISHED_STATUSES = frozenset({StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE})
 
 
 class StepExecution(BaseModel):
@@ -680,6 +702,24 @@ class StepExecution(BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def _finished_at_matches_status(self) -> StepExecution:
+        """Require a stop time on exactly the statuses that have stopped.
+
+        Both directions matter: a completed step without ``finished_at`` is an
+        incomplete audit record, and a ``PENDING`` or ``RUNNING`` step *with*
+        one claims to have finished while still outstanding.
+        """
+        if self.status in _FINISHED_STATUSES:
+            if self.finished_at is None:
+                msg = f"a {self.status} step requires finished_at"
+                raise ValueError(msg)
+        elif self.finished_at is not None:
+            msg = f"a {self.status} step has not finished, so it cannot have finished_at"
+            raise ValueError(msg)
+
+        return self
+
     @field_validator("started_at", "finished_at")
     @classmethod
     def _timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
@@ -710,8 +750,26 @@ class ExecutionState(BaseModel):
 
     @property
     def is_active(self) -> bool:
-        """Whether any step is still non-terminal, so the execution is in flight."""
+        """Whether any step still needs something done to it.
+
+        True for a ``FAILED`` step (it may be retried) and an ``INDETERMINATE``
+        one (it awaits resolution), so a restarting system finds them via
+        ``active_executions``. This is *outstanding work*, which is a wider
+        question than :attr:`has_live_step`.
+        """
         return any(step.status not in TERMINAL_STEP_STATUSES for step in self.steps)
+
+    @property
+    def has_live_step(self) -> bool:
+        """Whether a tool call may be in progress right now.
+
+        This — not :attr:`is_active` — is what makes erasure unsafe, because the
+        hazard is destroying the record a running executor is about to commit
+        against. Blocking deletion on ``is_active`` instead would be a trap: a
+        step that failed permanently, or one left ``INDETERMINATE``, is never
+        going to become inactive on its own, so the goal could never be deleted.
+        """
+        return any(step.status in _LIVE_STATUSES for step in self.steps)
 
     def step(self, step_id: str) -> StepExecution | None:
         """Return the execution record for ``step_id``, or ``None`` if absent."""
@@ -851,3 +909,39 @@ class PlanExport(BaseModel):
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def _references_resolve_within_the_export(self) -> PlanExport:
+        """Enforce the completeness this export documents rather than assuming it.
+
+        An export is the artifact a user takes elsewhere, so a dangling
+        ``goal_id`` is not a detail — it is a plan whose purpose has been lost,
+        discovered only by whoever tries to read it back. Ids must also be
+        unique, since a duplicate makes a reference ambiguous.
+        """
+        goal_ids = {goal.id for goal in self.goals}
+        plan_ids = {plan.id for plan in self.plans}
+        execution_ids = {execution.id for execution in self.executions}
+
+        for label, records, ids in (
+            ("goal", self.goals, goal_ids),
+            ("plan", self.plans, plan_ids),
+            ("execution", self.executions, execution_ids),
+        ):
+            if len(ids) != len(records):
+                msg = f"export contains duplicate {label} ids"
+                raise ValueError(msg)
+
+        dangling_plans = sorted(plan.id for plan in self.plans if plan.goal_id not in goal_ids)
+        if dangling_plans:
+            msg = f"export has plans whose goal is missing: {', '.join(dangling_plans)}"
+            raise ValueError(msg)
+
+        dangling_executions = sorted(
+            execution.id for execution in self.executions if execution.plan_id not in plan_ids
+        )
+        if dangling_executions:
+            msg = f"export has executions whose plan is missing: {', '.join(dangling_executions)}"
+            raise ValueError(msg)
+
+        return self

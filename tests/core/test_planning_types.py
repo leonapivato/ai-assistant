@@ -49,8 +49,16 @@ def _step(**overrides: object) -> StepExecution:
     return StepExecution(**(fields | overrides))  # type: ignore[arg-type]
 
 
+_FINISHED = (StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE)
+
+
 def _claimed(status: StepStatus, **overrides: object) -> StepExecution:
-    """A step carrying the full set of marks a claimed step requires."""
+    """A step carrying the full set of marks a claimed step requires.
+
+    Supplies ``finished_at`` for the statuses that require one, so a test that
+    is about something else does not have to. Pass ``finished_at=None`` to opt
+    out and exercise the invariant itself.
+    """
     fields: dict[str, object] = {
         "step_id": "s1",
         "status": status,
@@ -59,6 +67,8 @@ def _claimed(status: StepStatus, **overrides: object) -> StepExecution:
         "approval_ref": "perm-1",
         "started_at": _WHEN,
     }
+    if status in _FINISHED:
+        fields["finished_at"] = _WHEN
     return StepExecution(**(fields | overrides))  # type: ignore[arg-type]
 
 
@@ -251,6 +261,82 @@ def test_indeterminate_step_leaves_the_execution_active() -> None:
     assert _execution(_claimed(StepStatus.INDETERMINATE)).is_active
 
 
+def test_only_a_running_step_counts_as_live() -> None:
+    assert _execution(_claimed(StepStatus.RUNNING)).has_live_step
+
+
+@pytest.mark.parametrize(
+    ("status", "extra"),
+    [
+        (StepStatus.FAILED, {"error": "boom"}),
+        (StepStatus.INDETERMINATE, {}),
+    ],
+)
+def test_unfinished_but_not_running_steps_are_not_live(
+    status: StepStatus, extra: dict[str, object]
+) -> None:
+    """The bug this guards: blocking deletion on ``is_active`` voids erasure forever.
+
+    A step that failed with retries exhausted, or one left INDETERMINATE, never
+    becomes terminal on its own. If deletion keyed on ``is_active`` the goal
+    could never be erased — so the two predicates must stay distinct.
+    """
+    execution = _execution(_claimed(status, **extra))
+    assert execution.is_active
+    assert not execution.has_live_step
+
+
+# --- finished_at must match the status ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "extra"),
+    [
+        (StepStatus.SUCCEEDED, {}),
+        (StepStatus.FAILED, {"error": "boom"}),
+        (StepStatus.INDETERMINATE, {}),
+    ],
+)
+def test_finished_status_requires_finished_at(status: StepStatus, extra: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="requires finished_at"):
+        _claimed(status, finished_at=None, **extra)
+
+
+def test_running_step_cannot_claim_to_have_finished() -> None:
+    with pytest.raises(ValidationError, match="cannot have finished_at"):
+        _claimed(StepStatus.RUNNING, finished_at=_WHEN)
+
+
+def test_pending_step_cannot_claim_to_have_finished() -> None:
+    with pytest.raises(ValidationError, match="cannot have finished_at"):
+        _step(finished_at=_WHEN)
+
+
+# --- Non-finite floats have no JSON representation ----------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_parameters_are_rejected(bad: float) -> None:
+    """These satisfy ``float`` but would change value on the way through JSON."""
+    with pytest.raises(ValidationError, match="no JSON representation"):
+        PlanStep(id="s1", intent="i", capability="c", parameters={"x": bad})
+
+
+def test_non_finite_values_are_rejected_when_nested() -> None:
+    with pytest.raises(ValidationError, match="no JSON representation"):
+        PlanStep(id="s1", intent="i", capability="c", parameters={"a": {"b": [1.0, float("inf")]}})
+
+
+def test_non_finite_output_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="no JSON representation"):
+        _claimed(StepStatus.SUCCEEDED, output={"score": float("nan")})
+
+
+def test_ordinary_floats_still_round_trip() -> None:
+    step = PlanStep(id="s1", intent="i", capability="c", parameters={"x": 1.5})
+    assert TypeAdapter(PlanStep).validate_json(step.model_dump_json()) == step
+
+
 def test_execution_looks_up_a_step_by_id() -> None:
     execution = _execution(_step(step_id="s1"), _step(step_id="s2"))
     found = execution.step("s2")
@@ -337,6 +423,24 @@ def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
     assert export.schema_version == 1
     assert export.goals == ()
+
+
+def test_export_rejects_a_plan_whose_goal_is_missing() -> None:
+    """A dangling reference is a plan whose purpose was lost in transit."""
+    orphan = ActionPlan(id="p1", goal_id="gone", steps=(), created_at=_WHEN)
+    with pytest.raises(ValidationError, match="goal is missing"):
+        PlanExport(exported_at=_WHEN, plans=(orphan,))
+
+
+def test_export_rejects_an_execution_whose_plan_is_missing() -> None:
+    execution = ExecutionState(id="e1", plan_id="gone", steps=(), updated_at=_WHEN)
+    with pytest.raises(ValidationError, match="plan is missing"):
+        PlanExport(exported_at=_WHEN, executions=(execution,))
+
+
+def test_export_rejects_duplicate_ids() -> None:
+    with pytest.raises(ValidationError, match="duplicate goal ids"):
+        PlanExport(exported_at=_WHEN, goals=(_goal(), _goal()))
 
 
 def test_export_round_trips_through_json() -> None:
