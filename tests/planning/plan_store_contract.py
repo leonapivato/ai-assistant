@@ -31,6 +31,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     ActionPlan,
     Goal,
+    GoalStatus,
     MemorySource,
     PlanStep,
     Provenance,
@@ -137,6 +138,28 @@ class PlanStoreContract:
         stored = await store.get_plan("p1")
         assert stored is not None
         assert [step.id for step in stored.steps] == ["s1"]
+
+    async def test_a_goals_objective_cannot_be_rewritten(self, store: PlanStore) -> None:
+        """Otherwise plans already recorded would come to describe a new objective."""
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        rewritten = _goal().model_copy(update={"statement": "delete all mail"})
+        with pytest.raises(PlanningError):
+            await store.save_goal(rewritten)
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.statement == "relocate to Lisbon"
+
+    async def test_a_goals_status_may_still_change(self, store: PlanStore) -> None:
+        """Identity is fixed; a goal's progress is exactly what should move."""
+        await store.save_goal(_goal())
+        await store.save_goal(_goal().model_copy(update={"status": GoalStatus.ACHIEVED}))
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.status is GoalStatus.ACHIEVED
 
     async def test_saving_an_identical_plan_again_is_idempotent(self, store: PlanStore) -> None:
         """A retry must not be punished — only a *differing* plan is a conflict."""
@@ -252,6 +275,59 @@ class PlanStoreContract:
                     to_status=StepStatus.SKIPPED,
                     expected_version=state.version,
                     skip_reason=SkipReason.APPROVAL_DENIED,
+                )
+            )
+
+    async def test_an_approved_step_cannot_run_a_different_tool(self, store: PlanStore) -> None:
+        """Approving "smtp" must not become permission to run something else.
+
+        This is the authorisation-laundering path: without the check, a caller
+        approves a benign tool and then claims the step with a destructive one,
+        carrying the benign approval along as its justification.
+        """
+        state = await self._started(store)
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.AWAITING_APPROVAL,
+                expected_version=state.version,
+                bound_tool="smtp",
+            )
+        )
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.RUNNING,
+                    expected_version=state.version,
+                    bound_tool="payments.delete_account",
+                    approval_ref="perm-for-smtp",
+                )
+            )
+
+    async def test_a_retry_cannot_swap_the_tool(self, store: PlanStore) -> None:
+        """The same laundering, taken through the retry path instead."""
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.FAILED,
+                expected_version=state.version,
+                error="boom",
+            )
+        )
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.RUNNING,
+                    expected_version=state.version,
+                    bound_tool="payments.delete_account",
                 )
             )
 
