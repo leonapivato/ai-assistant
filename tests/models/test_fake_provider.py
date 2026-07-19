@@ -18,6 +18,8 @@ from ai_assistant.core.types import Message, Role
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.protocols import ModelProvider
 
 
@@ -59,6 +61,19 @@ async def test_callable_reply_sees_the_conversation() -> None:
     )
 
     assert reply.content == "got 3 messages"
+
+
+async def test_callable_reply_failure_is_wrapped_in_model_error() -> None:
+    # A failing reply simulates a model failure; mirror PydanticAIProvider so
+    # code catching ModelError recovers identically against the fake.
+    def boom(_messages: Sequence[Message]) -> str:
+        msg = "reply exploded"
+        raise RuntimeError(msg)
+
+    provider = FakeModelProvider(boom)
+
+    with pytest.raises(ModelError, match="model completion failed"):
+        await provider.complete([Message(role=Role.USER, content="hi")])
 
 
 async def test_scripted_returns_each_reply_in_order_then_raises() -> None:
