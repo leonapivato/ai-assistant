@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _STATUS_RE = re.compile(r"^\s*-\s*Status:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
-_HEADING_RE = re.compile(r"^#\s*\d+\.\s*(.+?)\s*$", re.MULTILINE)
+_HEADING_RE = re.compile(r"^#\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
 _ADR_FILE_RE = re.compile(r"^(\d+)-.*\.md$")
 
 # Modules that export the ``Protocol`` marker; a base is only a Protocol if it
@@ -44,11 +44,17 @@ class Package:
 
 @dataclass(frozen=True)
 class Adr:
-    """A decision record: its number, status, and title."""
+    """A decision record: its number, status, and title.
+
+    ``number`` comes from the filename and ``heading_number`` from the ``# N.``
+    heading; they should agree, and a mismatch is a numbering-integrity error the
+    status view surfaces.
+    """
 
     number: int
     status: str
     title: str
+    heading_number: int | None
 
 
 def discover_packages(pkg_root: Path) -> list[Package]:
@@ -152,12 +158,13 @@ def adr_entries(adr_dir: Path) -> list[Adr]:
             continue  # template.md and other non-numbered files
         text = path.read_text(encoding="utf-8")
         status = _STATUS_RE.search(text)
-        title = _HEADING_RE.search(text)
+        heading = _HEADING_RE.search(text)
         entries.append(
             Adr(
                 number=int(match.group(1)),
                 status=status.group(1) if status else "?",
-                title=title.group(1) if title else path.stem,
+                title=heading.group(2) if heading else path.stem,
+                heading_number=int(heading.group(1)) if heading else None,
             )
         )
     return sorted(entries, key=lambda a: a.number)
@@ -194,6 +201,7 @@ def render(root: Path) -> str:
     numbers = [a.number for a in adrs]
     gaps = missing_numbers(numbers, start=1)  # from 1, so a missing 0001 shows too
     duplicates = duplicate_numbers(numbers)
+    mismatched = [a for a in adrs if a.heading_number is not None and a.heading_number != a.number]
 
     lines = [
         "ai-assistant — project status",
@@ -221,6 +229,9 @@ def render(root: Path) -> str:
     if duplicates:
         pretty = ", ".join(f"{n:04d}" for n in duplicates)
         lines.append(f"  ! duplicate number(s): {pretty} — a shared-counter collision to resolve")
+    if mismatched:
+        pretty = ", ".join(f"{a.number:04d} (heading says {a.heading_number})" for a in mismatched)
+        lines.append(f"  ! number mismatch: {pretty} — filename and heading disagree")
 
     lines += [
         "",

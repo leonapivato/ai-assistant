@@ -134,6 +134,15 @@ def test_flags_duplicate_adr_numbers(tmp_path: Path) -> None:
     assert "0002" in out
 
 
+def test_flags_filename_heading_number_mismatch(tmp_path: Path) -> None:
+    # Filename says 0002 but the heading says 3 — a numbering-integrity error.
+    _make_repo(tmp_path, adrs=(("0002-example.md", "# 3. Example\n\n- Status: Accepted\n"),))
+    out = _run(tmp_path)
+
+    assert "mismatch" in out.lower()
+    assert "0002" in out
+
+
 def test_counts_modules_in_nested_subpackages(tmp_path: Path) -> None:
     # A package whose only implementation lives in a nested subpackage is still
     # counted (not mislabeled contract-only).
