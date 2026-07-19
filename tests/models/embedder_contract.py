@@ -110,13 +110,18 @@ class EmbedderContract:
         assert len(vectors) == 2
         assert all(len(vector) == embedder.dimensions for vector in vectors)
 
-    async def test_vector_components_are_floats(self, embedder: Embedder) -> None:
+    async def test_vector_components_are_finite_floats(self, embedder: Embedder) -> None:
         [vector] = await embedder.embed(["hello world"])
 
         # Likewise pin the shape: `all(...)` over an empty vector is vacuously
         # true, so an embedder returning [] would otherwise pass this check.
         assert len(vector) == embedder.dimensions
         assert all(isinstance(value, float) for value in vector)
+        # Finite, not merely float-typed: inf and NaN are floats and would slip
+        # past the check above (inf even compares close to itself), but they
+        # poison every downstream similarity computation — inf/inf is NaN, and a
+        # NaN distance makes a record unrankable against any query.
+        assert all(math.isfinite(value) for value in vector)
 
     async def test_empty_input_returns_no_vectors(self, embedder: Embedder) -> None:
         assert await embedder.embed([]) == []
