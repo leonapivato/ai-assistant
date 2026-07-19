@@ -25,20 +25,27 @@ updates the remote-tracking ref, not what's on disk. So never read them from
 fetched `origin/master` on its own:
 
 1. `git fetch origin`.
-2. Materialize it at a freshly, atomically reserved path — `tmp_dir="$(mktemp
-   -d)"` actually creates and owns a directory, unlike `mktemp -u`, which
-   only prints an unused name with no guarantee it stays unused; then `git
-   worktree add --detach "$tmp_dir/survey" origin/master` (a non-existent
-   child path `git worktree add` can create, inside the directory `mktemp -d`
-   already owns) — never a fixed literal path, so two runs of this skill (or
-   a rerun after a failed one) can't collide.
-3. Note the commit it resolved to (`git rev-parse origin/master`) — step 4
+2. Reserve a directory before touching anything else — `tmp_dir="$(mktemp
+   -d)"` actually creates and owns it, unlike `mktemp -u`, which only prints
+   an unused name with no guarantee it stays unused. From this point on, if
+   *any* later step in this list fails, remove it (`git worktree remove
+   "$tmp_dir/survey"` first if that step ran, either way `rm -rf
+   "$tmp_dir"`) before stopping — don't leave a partial survey registered.
+3. `git worktree add --detach "$tmp_dir/survey" origin/master` (a
+   non-existent child path `git worktree add` can create, inside the
+   directory `mktemp -d` already owns) — never a fixed literal path, so two
+   runs of this skill can't collide.
+4. Note the commit actually checked out — `git -C "$tmp_dir/survey"
+   rev-parse HEAD`, not a fresh `git rev-parse origin/master` — step 4 below
    needs it later to tell whether anything has changed since this survey.
-   Remove `$tmp_dir` (`rm -rf "$tmp_dir"`, after `git worktree remove
-   "$tmp_dir/survey"` if it was created) if anything from here through step 4
-   fails partway — don't leave it registered.
-4. From `$tmp_dir/survey`, read these, in this order, and trust them over any
-   stale assumption:
+   Re-resolving `origin/master` here instead would record whatever it points
+   to *now*, which can have moved again in the moments since step 3 actually
+   checked it out — recording `HEAD` of the worktree itself is the one
+   value guaranteed to match what was actually surveyed.
+5. From `$tmp_dir/survey`, read **and retain** these — don't discard the
+   worktree until every one of them has actually been read, since step 2
+   below needs the `core/protocols.py` and `core/types.py` contents
+   specifically, not just what `just status` summarizes:
    - The derived picture — module counts per package, the current
      `core/protocols.py` Protocol inventory, and ADR states — via
      `python3 scripts/project_status.py --root "$tmp_dir/survey"`, run
@@ -51,6 +58,9 @@ fetched `origin/master` on its own:
      safety issue (`git worktree remove` isn't blocked by an ignored
      directory like `.venv` either way, verified directly). This is the
      canonical source for "what's actually built" — never guess it.
+   - The actual contents of `core/protocols.py` and `core/types.py` — step 2
+     checks each candidate against both, and by the time you're in step 2
+     the worktree is already gone.
    - `WORKING.md` — the *human-declared* picture: lane ownership and ADR
      numbers currently in flight. Any subsystem with a named owner, or any
      ADR number claimed against it that isn't yet `Accepted`, is off the
@@ -61,9 +71,9 @@ fetched `origin/master` on its own:
    - `VISION.md` — pull the specific principle/section that justifies each
      lane, so the issue reads as "why this, now" rather than a bare task
      list.
-5. Remove the worktree (`git worktree remove "$tmp_dir/survey"` then `rm -rf
-   "$tmp_dir"`) once the survey is
-   read — steps 2-4 don't need it kept around.
+6. Only now, with everything above actually read and retained, remove the
+   worktree (`git worktree remove "$tmp_dir/survey"` then `rm -rf
+   "$tmp_dir"`) — step 2 onward doesn't need it kept around.
 
 ## 2. Compute candidates
 
@@ -193,9 +203,9 @@ change, or its module count can move, all while the draft sits waiting for
 confirmation. Immediately before creating the issue, `git fetch origin` and
 compare `origin/master`'s commit against the one noted in step 1. If it
 hasn't moved, nothing could have changed — skip the rest of this. If it has,
-redo step 1's survey (steps 1-5 there: fetch, fresh detached worktree at the
-new commit, read, remove the worktree) and step 2's candidate computation
-against that new commit. Drop or re-flag any lane whose candidacy changed in
+redo step 1's survey in full (fetch, reserve a fresh temp dir, fresh detached
+worktree at the new commit, read and retain everything, then remove the
+worktree) and step 2's candidate computation against that new commit. Drop or re-flag any lane whose candidacy changed in
 any way, rather than posting a batch that includes work someone already
 picked up or finished. This closes the gap for anything already merged to
 `master`; work only pushed to someone else's still-open feature branch is
