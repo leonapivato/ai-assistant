@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-07-16
+- Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
+  model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
 
 ## Context
 
@@ -37,11 +39,54 @@ is handled:
   `~/.local/share/ai-assistant/` on Linux). No cloud storage by default.
 - The **only** component permitted to send user data off-device is the
   `models/` layer, and only to the model provider the user has configured.
-  Every other egress is a bug.
+  Every other egress is a bug. (Singular here reflects the single-adapter
+  `models/` of the time; see the **Amendment** below, which reads this as the
+  configured *set*.)
 - **Telemetry is off by default and there is no data egress for
   observability.** pydantic-ai's `logfire-api` is a no-op unless Logfire is
   explicitly installed and configured; instrumentation that transmits data
   requires a documented, opt-in setting.
+
+**Amendment (2026-07-19): "the model provider" becomes the configured set.** The
+egress rule above was written when `models/` held a single adapter and no way to
+choose between providers. Its wording — "only to **the** model provider the user
+has configured" — therefore reads as *exactly one*. ADR-0013 adds routing and
+fallback, where a failure at one provider re-sends the conversation (Tier 1) to
+the next candidate, which that wording forbids.
+
+The rule is amended to: **user data may be sent only to model providers the user
+has explicitly configured.** Singular becomes a set; nothing else changes.
+
+The property this ADR is protecting is *minimal egress to endpoints the user
+chose*, and that is untouched — "explicitly configured" carries the same weight
+for the fifth provider as for the first. What the original wording additionally
+implied, accidentally, was a cardinality limit, and no argument in this ADR
+supports one: §2's rationale is about **who** receives data, never **how many**.
+
+Constraints that make the plural safe live in **ADR-0013 §6** and are binding
+here:
+
+- A route list may contain only providers the user explicitly configured;
+  fallback is not permission to reach a provider the user never chose.
+- `RoutingProvider` never acquires a provider — it receives fully-constructed
+  ones by injection, so it cannot widen the set of reachable endpoints, only
+  re-send to one already wired in. The obligation therefore falls on whoever
+  composes the pipeline (`orchestration`).
+- A configured route must require its own credential, so a provider the user has
+  not set up cannot become a silent fallback.
+
+**Accepted cost.** A user who configured a fallback and then forgot may not
+expect a prompt to reach it during an outage. Which provider answered a request
+is not currently surfaced anywhere; ADR-0013 §6 records that as an open gap to
+close once there is an interface to report it. Until then the mitigation is that
+every provider in a route list is one the user deliberately configured and
+credentialed.
+
+**Scope.** This amends the wording of §2 only. §1 (tiers), §3 (secrets), §4
+(encryption at rest), §5 (logging and redaction) and §6 (data rights) are
+unchanged, and "every other egress is a bug" still holds — the amendment widens
+*which* providers are legitimate recipients, not *which components* may transmit.
+`models/` remains the only one.
 
 ### 3. Secrets/credentials (Tier 0)
 

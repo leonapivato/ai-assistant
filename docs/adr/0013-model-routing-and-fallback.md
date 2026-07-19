@@ -200,8 +200,10 @@ to reach a provider the user never chose. Concretely:
 
 **This amends ADR-0004 §2** from one configured provider to a configured *set*.
 The privacy property that ADR intends is unchanged — user data reaches only
-providers the user chose — but the wording assumed a single one, and ADR-0013
-cannot be ratified without that amendment being accepted too.
+providers the user chose — but the wording assumed a single one. The amendment is
+drafted in ADR-0004 itself (dated 2026-07-19) and the two must be ratified
+together: accepting ADR-0013 without it would leave the codebase contradicting a
+ratified policy, and the amendment alone widens a rule nothing yet uses.
 
 Found by the Codex architecture reviewer, which raised it as a blocker on the
 grounds that "calling the route list a privacy surface does not establish
