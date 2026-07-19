@@ -473,6 +473,24 @@ type FrozenJsonMapping = Annotated[
 _EMPTY_PARAMS: Mapping[str, FrozenJson] = FrozenDict()
 
 
+def _non_blank(value: str) -> str:
+    """Reject a blank identifier, returning it stripped.
+
+    An empty ``approval_ref`` or ``bound_tool`` is worse than a missing one: it
+    satisfies "a reference is present" while identifying nothing, so a step
+    could look authorised and audited while being neither.
+    """
+    stripped = value.strip()
+    if not stripped:
+        msg = "identifier must not be blank"
+        raise ValueError(msg)
+    return stripped
+
+
+type Identifier = Annotated[str, AfterValidator(_non_blank)]
+"""A non-blank, stripped identifier."""
+
+
 class GoalStatus(StrEnum):
     """Where a goal stands (see ADR-0014 §1)."""
 
@@ -494,7 +512,7 @@ class Goal(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str
+    id: Identifier
     statement: str = Field(description="Canonical text rendering of the objective.")
     status: GoalStatus = GoalStatus.ACTIVE
     provenance: Provenance
@@ -536,9 +554,9 @@ class PlanStep(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: str
+    id: Identifier
     intent: str = Field(description="Human-readable purpose of this step.")
-    capability: str = Field(description="What must be done, e.g. 'send_email'.")
+    capability: Identifier = Field(description="What must be done, e.g. 'send_email'.")
     parameters: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
         description="Capability arguments; frozen, and validated against the tool at selection.",
@@ -556,8 +574,8 @@ class ActionPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: str
-    goal_id: str
+    id: Identifier
+    goal_id: Identifier
     steps: tuple[PlanStep, ...]
     created_at: datetime = Field(description="When the plan was produced (tz-aware).")
     rationale: str | None = Field(
@@ -643,16 +661,16 @@ class StepExecution(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    step_id: str
+    step_id: Identifier
     status: StepStatus = StepStatus.PENDING
     attempts: int = Field(default=0, ge=0, description="How many times this step has been claimed.")
-    bound_tool: str | None = Field(
+    bound_tool: Identifier | None = Field(
         default=None, description="The tool the selection stage chose, once it has."
     )
     output: FrozenJsonValue = Field(
         default=None, description="The tool's result; only meaningful once SUCCEEDED."
     )
-    approval_ref: str | None = Field(
+    approval_ref: Identifier | None = Field(
         default=None,
         description="Id of the permissions/ decision that cleared this step (ADR-0004 §7).",
     )
@@ -689,6 +707,41 @@ class StepExecution(BaseModel):
         if self.attempts < 1:
             msg = f"a {self.status} step requires at least one attempt"
             raise ValueError(msg)
+
+        return self
+
+    @model_validator(mode="after")
+    def _unclaimed_step_carries_no_history(self) -> StepExecution:
+        """Forbid the marks of a claim on a step that has not been claimed.
+
+        Without this a ``PENDING`` step could be built with ``attempts=1000``
+        and a ``started_at``, and since the retry ceiling is only consulted on
+        the way out of ``FAILED``, that fabricated history would sail past it.
+        A status that has never run must look like it.
+        """
+        if self.status in _CLAIMED_STATUSES:
+            return self
+
+        if self.attempts != 0:
+            msg = f"a {self.status} step has not run, so it cannot have attempts"
+            raise ValueError(msg)
+        if self.started_at is not None:
+            msg = f"a {self.status} step has not run, so it cannot have started_at"
+            raise ValueError(msg)
+
+        if self.status is StepStatus.PENDING and (
+            self.approval_ref is not None or self.bound_tool is not None
+        ):
+            msg = "a PENDING step predates tool selection and approval"
+            raise ValueError(msg)
+
+        if self.status is StepStatus.AWAITING_APPROVAL:
+            if self.bound_tool is None:
+                msg = "an AWAITING_APPROVAL step requires the bound_tool being approved"
+                raise ValueError(msg)
+            if self.approval_ref is not None:
+                msg = "an AWAITING_APPROVAL step is undecided, so it has no approval_ref"
+                raise ValueError(msg)
 
         return self
 
@@ -762,8 +815,8 @@ class ExecutionState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str
-    plan_id: str
+    id: Identifier
+    plan_id: Identifier
     steps: tuple[StepExecution, ...]
     version: int = Field(default=0, ge=0, description="Optimistic-concurrency token.")
     updated_at: datetime = Field(description="When this state was last written (tz-aware).")
@@ -825,12 +878,12 @@ class StepTransition(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    execution_id: str
-    step_id: str
+    execution_id: Identifier
+    step_id: Identifier
     to_status: StepStatus
     expected_version: int = Field(ge=0, description="Version the caller computed this against.")
-    bound_tool: str | None = None
-    approval_ref: str | None = None
+    bound_tool: Identifier | None = None
+    approval_ref: Identifier | None = None
     output: FrozenJsonValue = None
     skip_reason: SkipReason | None = None
     error: str | None = None
