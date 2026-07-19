@@ -101,16 +101,38 @@ if (( base_given )); then
     # would not contain that English substring) and outright suppressible
     # (`core.warnAmbiguousRefs=false`, confirmed directly — git still picks a
     # ref and succeeds silently, no warning at all). Checked in git's own
-    # documented precedence order (gitrevisions(7)): refs/, refs/tags/,
-    # refs/heads/, refs/remotes/. A base like "HEAD~2", a full SHA, or an
-    # already-qualified ref (e.g. "refs/heads/foo") simply fails to match any
-    # of these extra literal-namespace lookups, so this never false-positives
-    # on them — only a genuine short-name collision produces more than one
-    # distinct commit here (PR #23 review finding).
+    # documented precedence order (gitrevisions(7)): the pseudorefs
+    # ($GIT_DIR/<name> — HEAD and friends), then refs/, refs/tags/,
+    # refs/heads/, refs/remotes/, refs/remotes/<name>/HEAD. A base like
+    # "HEAD~2", a full SHA, or an already-qualified ref (e.g.
+    # "refs/heads/foo") simply fails to match any of these extra
+    # literal-namespace lookups, so this never false-positives on them —
+    # only a genuine short-name collision produces more than one distinct
+    # commit here (PR #23 review finding — the first version of this check
+    # only covered refs/, refs/tags/, refs/heads/, refs/remotes/, missing the
+    # pseudoref and remote-HEAD tiers; confirmed a pseudoref collision is
+    # constructible — e.g. `git reset --hard` creates a real ORIG_HEAD, and a
+    # branch or tag can then also be named ORIG_HEAD pointing elsewhere).
+    # `refs/rewritten/<any>` (used mid interactive-rebase) is the one
+    # gitrevisions(7) tier deliberately left uncovered: it exists only for
+    # the duration of a rebase this script never runs, so a name colliding
+    # with it can't arise from anything this tooling does.
+    pseudoref_match=""
+    case "$base_override" in
+        HEAD | FETCH_HEAD | ORIG_HEAD | MERGE_HEAD | CHERRY_PICK_HEAD | BISECT_HEAD | REVERT_HEAD | AUTO_MERGE)
+            pseudoref_dir="$(git rev-parse --git-dir)"
+            if [[ -f "${pseudoref_dir}/${base_override}" ]]; then
+                pseudoref_match="$(git rev-parse --verify --quiet --end-of-options \
+                    "${base_override}^{commit}" 2>/dev/null || true)"
+            fi
+            ;;
+    esac
     distinct_matches="$(
         {
+            [[ -n "$pseudoref_match" ]] && printf '%s\n' "$pseudoref_match"
             for prefix in "refs/${base_override}" "refs/tags/${base_override}" \
-                "refs/heads/${base_override}" "refs/remotes/${base_override}"; do
+                "refs/heads/${base_override}" "refs/remotes/${base_override}" \
+                "refs/remotes/${base_override}/HEAD"; do
                 git rev-parse --verify --quiet --end-of-options "${prefix}^{commit}" 2>/dev/null || true
             done
         } | sort -u | wc -l
