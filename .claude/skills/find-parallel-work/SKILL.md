@@ -58,9 +58,9 @@ fetched `origin/master` on its own:
      safety issue (`git worktree remove` isn't blocked by an ignored
      directory like `.venv` either way, verified directly). This is the
      canonical source for "what's actually built" — never guess it.
-   - The actual contents of `core/protocols.py` and `core/types.py` — step 2
-     checks each candidate against both, and by the time you're in step 2
-     the worktree is already gone.
+   - The actual contents of `src/ai_assistant/core/protocols.py` and
+     `src/ai_assistant/core/types.py` — step 2 checks each candidate against
+     both, and by the time you're in step 2 the worktree is already gone.
    - `WORKING.md` — the *human-declared* picture: lane ownership and ADR
      numbers currently in flight. Any subsystem with a named owner, or any
      ADR number claimed against it that isn't yet `Accepted`, is off the
@@ -181,37 +181,41 @@ applies, unchanged.
 shared GitHub state other people see. Print the drafted body and get
 explicit confirmation before running it. Never auto-fire this step.
 
-Also run `gh issue list --state open --limit 200 --json title,body,url` first
-— the bare command only returns titles; without `--json body` a match hiding
-in an issue's body text (a generic title, the lane named only in a checklist
-line) is invisible — and scan both the titles and bodies of the result for an
-existing tracking issue already proposing one or more of the same lanes —
-two runs of this skill (by different people, or the same person re-running
-it) can otherwise both observe the same unclaimed lane and each post a
-duplicate issue, since nothing about `WORKING.md` reserves a lane just by
-being read. If a match exists, don't create a new issue for the overlapping
-lane(s) — point back to the existing one instead (in the batch's "Out of
-scope" section, or by not posting at all if the whole batch overlaps). This
-is a best-effort check, not an atomic reservation — same limitation as the
-`WORKING.md` freshness check below, for the same reason: closing it fully
-would need a real lane-reservation mechanism, out of scope for a proposal
-tool.
+State can go stale while that confirmation is pending — not just between
+step 1 and here, but for however long the human takes to respond. Everything
+below runs **immediately before the actual `gh issue create` call**, after
+confirmation has been given, not once earlier and reused:
 
-State can go stale between step 1 and this one — a lane's roadmap item can
-get checked off, its `core/` entry can land, its `WORKING.md` ownership can
-change, or its module count can move, all while the draft sits waiting for
-confirmation. Immediately before creating the issue, `git fetch origin` and
-compare `origin/master`'s commit against the one noted in step 1. If it
-hasn't moved, nothing could have changed — skip the rest of this. If it has,
-redo step 1's survey in full (fetch, reserve a fresh temp dir, fresh detached
-worktree at the new commit, read and retain everything, then remove the
-worktree) and step 2's candidate computation against that new commit. Drop or re-flag any lane whose candidacy changed in
-any way, rather than posting a batch that includes work someone already
-picked up or finished. This closes the gap for anything already merged to
-`master`; work only pushed to someone else's still-open feature branch is
-outside what any of these sources guarantee at any point — merged state is
-authoritative, not before (same reason `CONTRIBUTING.md`'s "stay in your
-lane" check is best-effort, not atomic, for two people claiming at once). If
-this recheck changes the lane list or any checklist content from what was
-already shown, **re-print the revised draft and get confirmation again** —
-never post a body different from the one actually approved.
+1. **Re-scan for duplicates, every time, regardless of what else changed:**
+   `gh issue list --state open --limit 200 --json title,body,url` — the bare
+   command only returns titles; without `--json body` a match hiding in an
+   issue's body text (a generic title, the lane named only in a checklist
+   line) is invisible. Scan both titles and bodies for an existing tracking
+   issue already proposing one or more of the same lanes — someone else
+   (or an earlier run of this skill) can have opened one during the wait,
+   independent of whether `origin/master` moved at all. If a match exists,
+   don't create a new issue for the overlapping lane(s) — point back to the
+   existing one instead (in the batch's "Out of scope" section, or by not
+   posting at all if the whole batch overlaps).
+2. **Re-check whether `origin/master` moved:** `git fetch origin`, compare
+   against the commit noted in step 1. If it hasn't moved, skip to 3 — a
+   lane's roadmap item, `core/` entries, `WORKING.md` ownership, and module
+   count can't have changed if the commit hasn't. If it has, redo **steps
+   1 through 3 in full** against the new commit — not just 1 and 2: step 3's
+   ADR pre-assignment was computed from the old `WORKING.md` state, and an
+   ADR number that was free at the original survey can have been claimed by
+   the time `origin/master` moved, same as any other candidacy fact.
+3. If either check above changed the lane list, the ADR assignments, or any
+   other checklist content from what was already shown and approved,
+   **re-print the revised draft and get confirmation again** before
+   proceeding — never post a body different from the one actually approved.
+
+Both checks are best-effort, not an atomic reservation — closing either
+fully would need a real lane/number-reservation mechanism, out of scope for
+a proposal tool. This closes the gap for anything already merged to
+`master` or already posted as an issue; work only pushed to someone else's
+still-open feature branch, or a duplicate issue opened in the instant
+between this scan and the actual `gh issue create` call, is outside what
+any of these checks can guarantee — merged/posted state is authoritative,
+not before (same reason `CONTRIBUTING.md`'s "stay in your lane" check is
+best-effort, not atomic, for two people claiming at once).
