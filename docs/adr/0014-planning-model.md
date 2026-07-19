@@ -82,7 +82,7 @@ class PlanStep(BaseModel):
     id: str
     intent: str                             # human-readable "what this is for"
     capability: str                         # what must be done, not what does it
-    parameters: Mapping[str, object] = {}
+    parameters: Mapping[str, JsonValue] = {}
 
 class ActionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -117,9 +117,16 @@ plan an auditable record of a decision. Re-planning produces a *new*
 in-flight execution. "What did the system decide to do, and when" stays
 answerable.
 
-`parameters` is `Mapping[str, object]` because argument schemas belong to
-`ToolDefinition`; validating a step's parameters against the selected tool's
-schema happens at selection time, in Lane B.
+`parameters` is untyped-but-**serialisable**: `Mapping[str, JsonValue]`, using
+pydantic's recursive JSON type. Argument *schemas* belong to `ToolDefinition`,
+so validating a step's parameters against the selected tool's schema happens at
+selection time, in Lane B — but the value space cannot be plain `object`. Plan
+state is persisted and exported (§5), and `object` admits values that cannot
+round-trip through SQLite or `PlanExport` (a `datetime`, an open file handle),
+which would make persistence behaviour depend on which planner produced the
+plan. `JsonValue` makes "this is storable and portable" a property the type
+system checks at construction rather than a hope the store discovers at write
+time. The same reasoning applies to `StepExecution.output` (§3).
 
 ### 3. `ExecutionState` — the durable half, owned by deterministic code
 
@@ -130,21 +137,14 @@ class StepStatus(StrEnum):
 class SkipReason(StrEnum):
     APPROVAL_DENIED; UNMET_DEPENDENCY; NO_CAPABLE_TOOL; SUPERSEDED
 
-class ApprovalRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    granted: bool
-    decided_at: datetime
-    decided_by: str                    # who ruled; "user" today
-    reason: str | None = None
-
 class StepExecution(BaseModel):
     model_config = ConfigDict(extra="forbid")
     step_id: str
     status: StepStatus = StepStatus.PENDING
     attempts: int = 0
     bound_tool: str | None = None      # the tool selection actually chose
-    output: Mapping[str, object] | None = None
-    approval: ApprovalRecord | None = None
+    output: JsonValue | None = None
+    approval_ref: str | None = None    # id of the permissions/ decision
     skip_reason: SkipReason | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -155,6 +155,7 @@ class ExecutionState(BaseModel):
     id: str
     plan_id: str
     steps: tuple[StepExecution, ...]   # one per PlanStep, same order
+    version: int = 0                   # optimistic-concurrency token (§5)
     updated_at: datetime
 ```
 
@@ -172,10 +173,14 @@ restarted executor needs to *not redo work*:
   re-run the earlier step, which for a non-idempotent tool means acting twice.
   Storing the output is what makes "resume" mean resume. (How a later step
   *references* a prior output — templating, binding — is deferred; §7.)
-- **`approval`** — the permission decision, durably, so a restart neither
-  re-prompts for consent already given nor silently proceeds past a denial. This
-  is also the audit trail ADR-0004 requires for actions taken on the user's
-  behalf.
+- **`approval_ref`** — a *reference* to the permission subsystem's durable
+  decision, so a restart neither re-prompts for consent already given nor
+  silently proceeds past a denial. It is deliberately a foreign key and not a
+  copy of the decision: ADR-0004 §7 assigns the audit trail to `permissions/`,
+  and duplicating the ruling here would create a second authority that can
+  drift from it. Execution state keeps only what is execution's own business —
+  the resulting `status`, and `skip_reason=APPROVAL_DENIED` when the ruling was
+  no.
 - **`bound_tool`** — which tool the selection stage chose. The plan records the
   capability; execution records what actually ran. Both halves are needed to
   answer "what did the system do".
@@ -196,8 +201,8 @@ and rejects everything else with `PlanningError`:
 | `PENDING` | `RUNNING` | selection + permission cleared it | `bound_tool`, `started_at` |
 | `PENDING` | `AWAITING_APPROVAL` | permission check requires confirmation | `bound_tool` |
 | `PENDING` | `SKIPPED` | nothing can run it | `skip_reason` ∈ {`UNMET_DEPENDENCY`, `NO_CAPABLE_TOOL`, `SUPERSEDED`} |
-| `AWAITING_APPROVAL` | `RUNNING` | user granted | `approval` (`granted=True`), `started_at` |
-| `AWAITING_APPROVAL` | `SKIPPED` | user denied | `approval` (`granted=False`), `skip_reason=APPROVAL_DENIED` |
+| `AWAITING_APPROVAL` | `RUNNING` | `permissions/` granted | `approval_ref`, `started_at` |
+| `AWAITING_APPROVAL` | `SKIPPED` | `permissions/` denied | `approval_ref`, `skip_reason=APPROVAL_DENIED` |
 | `RUNNING` | `SUCCEEDED` | tool returned | `output`, `finished_at` |
 | `RUNNING` | `FAILED` | tool raised | `error`, `finished_at` |
 | `FAILED` | `RUNNING` | retry | `attempts += 1`, `started_at` |
@@ -228,13 +233,26 @@ class PlanStore(Protocol):
     async def get_goal(self, goal_id: str) -> Goal | None: ...
     async def save_plan(self, plan: ActionPlan) -> str: ...
     async def get_plan(self, plan_id: str) -> ActionPlan | None: ...
-    async def save_execution(self, state: ExecutionState) -> str: ...
+    async def start_execution(self, state: ExecutionState) -> ExecutionState: ...
+    async def commit_execution(self, state: ExecutionState) -> ExecutionState: ...
     async def get_execution(self, execution_id: str) -> ExecutionState | None: ...
     async def active_executions(self) -> list[ExecutionState]: ...
     async def export(self) -> PlanExport: ...
     async def delete_goal(self, goal_id: str) -> bool: ...
     async def clear(self) -> int: ...
 ```
+
+**Execution writes are compare-and-swap, not blind snapshot replacement.**
+`ExecutionState` carries a `version`; `commit_execution` succeeds only if the
+stored version still matches the one the caller loaded, and returns the state
+with `version` incremented. A stale write raises `StaleExecutionError`
+(a `PlanningError`). Without this, two workers can load the same `PENDING`
+snapshot, both run the same non-idempotent step, and both save — a lost update
+that also means the side effect happened twice. Optimistic concurrency turns
+that into a detectable, retryable failure, and it is the store's job because
+it is the only place with a total order over writes. Callers do not hand-build
+the states they commit: `PlanExecution` (§4) produces them, so a committed
+snapshot is always the result of a legal transition.
 
 The data-rights obligations are part of the contract, not an afterthought,
 mirroring what ADR-0007 did for `MemoryStore`:
@@ -303,6 +321,10 @@ Protocol.
   start so the durable vocabulary does not have to change when it lands.
 - **Retention deadlines on plan records** (§5), pending a policy on how long
   completed plan history should be kept.
+- **What `approval_ref` points at.** It is an opaque id until `permissions/`
+  lands its decision record (ADR-0004 §7); until then nothing dereferences it,
+  and the `AWAITING_APPROVAL` transitions are exercised by tests, not by a real
+  permission check.
 - **Goals in memory.** Whether goals are retrievable records, and how they
   reconcile with `PreferenceMemory`, is a follow-on (§1).
 
@@ -325,10 +347,17 @@ Protocol.
 - **`planning` owns durable state it is accountable for**, with ADR-0004's
   export/delete obligations written into the `PlanStore` contract rather than
   deferred to whoever implements it.
+- **Concurrent execution is safe by contract, not by convention:** a lost update
+  — and the duplicated side effect behind it — becomes a `StaleExecutionError`
+  rather than silent data loss.
+- **Plan data is serialisable by construction.** `JsonValue` means an
+  unpersistable parameter is rejected where it is built, not discovered by
+  whichever store tries to write it.
 - **New `core` surface is large:** `Goal`, `GoalStatus`, `PlanStep`,
-  `ActionPlan`, `StepStatus`, `SkipReason`, `ApprovalRecord`, `StepExecution`,
-  `ExecutionState`, `PlanExport`, `PlanningError`, and the `Planner` and
-  `PlanStore` Protocols. That is a lot at once — it is the smallest set that
+  `ActionPlan`, `StepStatus`, `SkipReason`, `StepExecution`,
+  `ExecutionState`, `PlanExport`, `PlanningError`, `StaleExecutionError`, and
+  the `Planner` and `PlanStore` Protocols. That is a lot at once — it is the
+  smallest set that
   expresses the plan/state split *and* discharges the data-rights obligation;
   a smaller one would have to fuse plan with state or leave durable personal
   data uncontracted.
