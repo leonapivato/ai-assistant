@@ -376,9 +376,18 @@ fake leaves every consumer hand-rolling a private mock.
 The triad is what a Protocol *change* is measured against too — extend the suite
 in the same change, so the new obligation is enforced rather than assumed.
 
-Order within the change is still contract-first: the ADR is ratified before you
-implement against the new shape (golden rule 5). The triad is about what ships
-together, not about writing tests before you know the contract.
+This does not loosen contract-first. The sequence is two stages, not one:
+
+- **Stage 1 — ratify.** The ADR proposing the Protocol goes through
+  architecture review and is ratified (golden rule 5). Nothing implements
+  against the new shape yet, the canonical fake included — a fake is an
+  implementation, and it is bound by that rule like any other.
+- **Stage 2 — land the triad.** Once the shape is agreed, all three artifacts
+  ship together.
+
+So "contract-first" governs the ADR *preceding* the triad, not the ordering of
+files inside it. The triad is about what ships together, not about writing tests
+before you know the contract.
 
 ## Documentation
 
