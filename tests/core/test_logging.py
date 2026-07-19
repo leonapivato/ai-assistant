@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from collections import ChainMap, UserDict, deque
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -44,10 +46,50 @@ def test_tier_0_keys_are_masked(key: str) -> None:
 
 @pytest.mark.parametrize(
     "key",
-    ["prompt", "message", "messages", "content", "reply", "completion", "email", "memory"],
+    [
+        # Conversation content.
+        "prompt",
+        "message",
+        "messages",
+        "content",
+        "reply",
+        "completion",
+        "answer",
+        "body",
+        "query",
+        "transcript",
+        "memory",
+        # Personal data. ADR-0004 §5 names "message bodies, PII fields"; an
+        # earlier list covered the former and barely touched the latter.
+        "email",
+        "first_name",
+        "last_name",
+        "full_name",
+        "surname",
+        "username",
+        "user_name",
+        "phone",
+        "address",
+        "postcode",
+        "dob",
+        "date_of_birth",
+        "latitude",
+        "longitude",
+        "ssn",
+    ],
 )
 def test_tier_1_keys_are_masked(key: str) -> None:
     assert _redact(**{key: "the user's private text"})[key] == REDACTED
+
+
+def test_a_bare_name_key_is_not_over_matched() -> None:
+    # Deliberate limit on the PII list: matching bare "name" would swallow
+    # model_name, source_name, field_name and every other diagnostic identifier.
+    # A net that hides the diagnostics is not safer, just less useful — so the
+    # list carries compound person-name keys instead.
+    redacted = _redact(model_name="claude-opus-4-8", source_name="clock")
+
+    assert redacted == {"model_name": "claude-opus-4-8", "source_name": "clock"}
 
 
 def test_matching_is_case_insensitive_and_substring_based() -> None:
@@ -123,12 +165,15 @@ def test_strings_are_not_walked_character_by_character() -> None:
     assert _redact(payload=b"bytes")["payload"] == b"bytes"
 
 
-def test_allow_listed_keys_survive() -> None:
-    # Each allow-list entry is a hole in the net, so the exemptions are pinned:
-    # both carry a type or enum name, never user content.
-    redacted = _redact(memory_kind="SEMANTIC", content_type="application/json")
+def test_there_is_no_allow_list_exemption() -> None:
+    # Regression (adversarial review): `content_type` was exempted as inert MIME
+    # metadata, but a MIME string carries a `name=` parameter — so the exemption
+    # leaked whatever was in it. An exemption is a permanent hole justified by an
+    # assumption about the value, and the assumption is what fails. Over-matching
+    # is fixed by renaming the key, which is local; an exemption is global.
+    redacted = _redact(content_type='text/plain; name="PATIENT SSN 123-45-6789"')
 
-    assert redacted == {"memory_kind": "SEMANTIC", "content_type": "application/json"}
+    assert redacted["content_type"] == REDACTED
 
 
 def test_redaction_failure_drops_the_event() -> None:
@@ -143,6 +188,28 @@ def test_redaction_failure_drops_the_event() -> None:
 
     with pytest.raises(structlog.DropEvent):
         redact_sensitive(None, "info", {ExplodingKey(): "value"})  # type: ignore[dict-item]
+
+
+def test_redaction_is_installed_on_import_without_any_bootstrap_call() -> None:
+    # Regression (adversarial review): redaction was installed only by the Typer
+    # callback, so every non-CLI use — a test, a script, an embedding
+    # application, orchestration wired up directly — logged through structlog's
+    # default, unredacted chain. A safety net that depends on the caller
+    # remembering to install it is not a safety net.
+    #
+    # Deliberately does NOT call configure_logging: importing the package must
+    # be sufficient. Run in a subprocess so this process's own configuration
+    # cannot mask the result.
+    script = (
+        "import structlog, ai_assistant\n"
+        "structlog.get_logger('x').warning('boom', api_key='sk-live-SECRET')\n"
+    )
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    )
+
+    assert "sk-live-SECRET" not in result.stdout
+    assert REDACTED in result.stdout
 
 
 def test_the_processor_is_installed_by_configure_logging() -> None:
