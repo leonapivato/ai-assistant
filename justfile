@@ -92,5 +92,5 @@ prune-workspaces:
 # First-time developer setup
 setup:
     uv sync
-    uv run pre-commit install --install-hooks --hook-type commit-msg
+    uv run pre-commit install --install-hooks
     git config commit.template .gitmessage
