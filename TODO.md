@@ -133,23 +133,29 @@ list then doubles as the backlog, shrinking to empty as the backfill lands.
 **Origin:** adversarial review of the item-5 change — the documented rule is a
 convention until something fails on its absence.
 
-## 7. Ratify input immutability on the MemoryPolicy contract
+## 7. Ratify the unstated MemoryPolicy expectations
 
-**What:** `MemoryPolicy.decide` says nothing about whether it may mutate the
-proposal or the conflict records it is handed. Both current implementations
-treat them as read-only, and every caller relies on that — but it is an
-assumption, not a promise.
+**What:** two things every caller relies on that the contract never states.
 
-**Why it is not just tested:** the `MemoryPolicy` conformance suite originally
-asserted it. That was wrong: a conformance suite *is* the contract, so asserting
+1. **Input immutability.** `MemoryPolicy.decide` says nothing about whether it
+   may mutate the proposal or the conflict records it is handed. Both current
+   implementations treat them as read-only.
+2. **A non-blank `reason`.** `MemoryDecision.reason` is described as a
+   "human-readable justification, for transparency", but `reason=""` passes the
+   model. A policy that explains nothing is useless to the audit trail ADR-0004
+   §4 expects, yet nothing forbids it.
+
+**Why they are not just tested:** the `MemoryPolicy` conformance suite originally
+asserted both. That was wrong: a conformance suite *is* the contract, so asserting
 an obligation the Protocol does not state widens the contract without an ADR
 (golden rule 5) and would fail an implementation that genuinely conforms. It now
 lives in each implementation's own tests, which is the honest place for an
 expectation that has not been ratified.
 
-**Direction:** decide whether immutability is part of the contract. If it is,
-state it on `MemoryPolicy.decide`, flag the Protocol change as breaking, and move
-the assertion into the shared suite. Cheap, but it is a `core/` change and a
-contract widening, so it is not a drive-by.
+**Direction:** decide whether each is part of the contract. If immutability is,
+state it on `MemoryPolicy.decide`; if a non-blank reason is, enforce it on
+`MemoryDecision` in `core/types.py` where it cannot be evaded. Then flag the
+change as breaking and move the assertions into the shared suite. Cheap, but both
+are `core/` changes and contract widenings, so neither is a drive-by.
 
 **Origin:** architecture review of the `MemoryPolicy` triad (item 1/3 backfill).

@@ -5,19 +5,21 @@ Every ``MemoryPolicy`` implementation must pass this suite (CONTRIBUTING,
 :class:`MemoryPolicyContract` and overrides the ``policy`` fixture.
 
 The suite asserts only what is universal to the contract — that ``decide`` is
-total, deterministic, returns an explained and internally coherent decision, and
-never commits secret-tier data. It deliberately does **not** encode *which*
+total, deterministic, returns an internally coherent decision, and never commits
+secret-tier data. It deliberately does **not** encode *which*
 ruling a given proposal earns: that is each policy's reasoning, and even the
 default's is expected to change (``TODO.md`` item 2). ``DefaultMemoryPolicy``'s
 specific rules are tested in ``test_policy.py``.
 
 Every obligation here traces to something already ratified — determinism to the
-``MemoryPolicy`` docstring, the secret-tier rule to ADR-0004 §3, the explanation
-to what ``MemoryDecision.reason`` is *for*. A conformance suite **is** contract:
-an obligation the Protocol does not state widens that contract without an ADR
-(golden rule 5) and would fail an implementation that actually conforms. Input
-immutability is the one that got away — a reasonable expectation, but not a
-stated one, so it is tested per-implementation instead (``TODO.md`` item 7).
+``MemoryPolicy`` docstring, the secret-tier rule to ADR-0004 §3, the coherence of
+``merge_into`` to what ``decide`` says its ``conflicts`` argument is. A
+conformance suite **is** contract: an obligation the Protocol does not state
+widens that contract without an ADR (golden rule 5) and would fail an
+implementation that actually conforms. Two reasonable-sounding expectations were
+cut for exactly that reason — that ``decide`` leaves its inputs alone, and that
+``reason`` is non-blank. Both are tested per-implementation instead, and
+``TODO.md`` item 7 tracks ratifying them properly.
 
 Two things are intentionally left unasserted because ``MemoryDecision``'s own
 validator already makes them unrepresentable: that ``MERGE`` carries a
@@ -185,12 +187,8 @@ class MemoryPolicyContract:
         decision = await policy.decide(proposal, conflicts=conflicts)
 
         assert isinstance(decision, MemoryDecision)
-        # Every ruling is explainable: `reason` exists for transparency, and a
-        # blank one satisfies the type while defeating the purpose. Asserted on
-        # every case rather than once, so a policy cannot explain itself for the
-        # common shape and go silent on secret, episodic or low-confidence input.
-        assert decision.reason.strip()
-        # Likewise the merge target, which the validator cannot check.
+        # The merge target, which the validator cannot check, holds for every
+        # input shape — not just the common one.
         if decision.kind is MemoryDecisionKind.MERGE:
             assert decision.merge_into in {c.id for c in conflicts}
 
