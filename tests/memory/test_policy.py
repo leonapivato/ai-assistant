@@ -7,7 +7,7 @@ remains here is what makes *this* policy the default one: its specific rules.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -110,3 +110,10 @@ async def test_confident_and_unconflicted_is_accepted() -> None:
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+def test_non_positive_temporary_ttl_is_rejected_at_construction() -> None:
+    # Without this guard the policy builds fine and raises later from `decide`,
+    # and only for a low-confidence proposal — a crash far from its cause.
+    with pytest.raises(ValueError, match="temporary_ttl must be positive"):
+        DefaultMemoryPolicy(temporary_ttl=timedelta(0))

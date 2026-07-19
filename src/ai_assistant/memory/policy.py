@@ -55,8 +55,19 @@ class DefaultMemoryPolicy:
         Args:
             min_confidence: Confidence below which a non-conflicting proposal is
                 stored temporarily instead of committed.
-            temporary_ttl: Retention window attached to temporary stores.
+            temporary_ttl: Retention window attached to temporary stores; must be
+                positive, since a non-positive window would produce an
+                already-expired record.
+
+        Raises:
+            ValueError: If ``temporary_ttl`` is not positive. ``MemoryDecision``
+                rejects such a window anyway, so without this guard the policy
+                constructs fine and then raises from ``decide`` — and only for
+                low-confidence proposals, far from the mistake.
         """
+        if temporary_ttl <= timedelta(0):
+            msg = f"temporary_ttl must be positive, got {temporary_ttl}"
+            raise ValueError(msg)
         self._min_confidence = min_confidence
         self._temporary_ttl = temporary_ttl
 

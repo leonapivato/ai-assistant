@@ -30,11 +30,14 @@ import pytest
 from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
     DataTier,
+    EpisodicMemory,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
+    PreferenceMemory,
+    ProceduralMemory,
     Provenance,
     SemanticMemory,
 )
@@ -52,11 +55,18 @@ _COMMITTING = frozenset(
 )
 
 
+# Every concrete `MemoryRecord` variant. A policy is handed the union, so a
+# suite that only ever builds one variant would certify a policy that crashes on
+# the other three.
+_RECORD_KINDS = ("semantic", "episodic", "preference", "procedural")
+
+
 def _record(
     record_id: str,
     *,
     source: MemorySource = MemorySource.OBSERVED,
     confidence: float = 0.6,
+    record_kind: str = "semantic",
 ) -> MemoryRecord:
     # `Provenance` pins USER_ASSERTED to full confidence, so the requested value
     # is overridden rather than allowed to build a record the domain forbids.
@@ -64,12 +74,24 @@ def _record(
     # suite exercises what a policy can actually be handed.
     if source is MemorySource.USER_ASSERTED:
         confidence = 1.0
-    return SemanticMemory(
-        id=record_id,
-        content=record_id,
-        fact=record_id,
-        provenance=Provenance(source=source, confidence=confidence, last_updated=_WHEN),
-    )
+    provenance = Provenance(source=source, confidence=confidence, last_updated=_WHEN)
+    match record_kind:
+        case "episodic":
+            return EpisodicMemory(
+                id=record_id, content=record_id, provenance=provenance, occurred_at=_WHEN
+            )
+        case "preference":
+            return PreferenceMemory(
+                id=record_id, content=record_id, provenance=provenance, preference=record_id
+            )
+        case "procedural":
+            return ProceduralMemory(
+                id=record_id, content=record_id, provenance=provenance, situation=record_id
+            )
+        case _:
+            return SemanticMemory(
+                id=record_id, content=record_id, provenance=provenance, fact=record_id
+            )
 
 
 def _proposal(
@@ -95,6 +117,7 @@ class MemoryPolicyContract:
     def test_conforms_to_protocol(self, policy: MemoryPolicy) -> None:
         assert isinstance(policy, MemoryPolicy)
 
+    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
     @pytest.mark.parametrize("source", list(MemorySource))
     @pytest.mark.parametrize("confidence", [0.0, 0.5, 1.0])
     @pytest.mark.parametrize("with_conflicts", [False, True])
@@ -103,13 +126,16 @@ class MemoryPolicyContract:
         policy: MemoryPolicy,
         source: MemorySource,
         confidence: float,
+        record_kind: str,
         *,
         with_conflicts: bool,
     ) -> None:
         # A policy is total over well-formed input: every proposal gets a ruling,
         # so the write path can never stall on an unhandled combination.
-        conflicts = [_record("existing")] if with_conflicts else []
-        proposal = _proposal(_record("new", source=source, confidence=confidence))
+        conflicts = [_record("existing", record_kind=record_kind)] if with_conflicts else []
+        proposal = _proposal(
+            _record("new", source=source, confidence=confidence, record_kind=record_kind)
+        )
 
         decision = await policy.decide(proposal, conflicts=conflicts)
 
@@ -162,12 +188,13 @@ class MemoryPolicyContract:
 
         assert decision.kind not in _COMMITTING
 
-    async def test_decide_is_deterministic(self, policy: MemoryPolicy) -> None:
+    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
+    async def test_decide_is_deterministic(self, policy: MemoryPolicy, record_kind: str) -> None:
         # The Protocol docstring makes determinism the point of the "dispose"
         # half: the same proposal must not be accepted once and deferred the
         # next time, or the write path stops being reviewable.
-        proposal = _proposal()
-        conflicts = [_record("existing")]
+        proposal = _proposal(_record("new", record_kind=record_kind))
+        conflicts = [_record("existing", record_kind=record_kind)]
 
         first = await policy.decide(proposal, conflicts=conflicts)
         second = await policy.decide(proposal, conflicts=conflicts)
@@ -176,11 +203,14 @@ class MemoryPolicyContract:
         # the record expires while leaving the kind identical.
         assert first == second
 
-    async def test_decide_does_not_mutate_its_inputs(self, policy: MemoryPolicy) -> None:
+    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
+    async def test_decide_does_not_mutate_its_inputs(
+        self, policy: MemoryPolicy, record_kind: str
+    ) -> None:
         # A policy rules on a proposal; it does not edit it. The caller still
         # owns both arguments after the call.
-        proposal = _proposal()
-        conflicts = [_record("existing")]
+        proposal = _proposal(_record("new", record_kind=record_kind))
+        conflicts = [_record("existing", record_kind=record_kind)]
         proposal_before = proposal.model_copy(deep=True)
         conflicts_before = [c.model_copy(deep=True) for c in conflicts]
 
