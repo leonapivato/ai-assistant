@@ -97,6 +97,14 @@ class RetryPolicy:
         # a NaN deadline makes asyncio.timeout behave unpredictably.
         for name in ("timeout_seconds", "backoff_base_seconds", "backoff_max_seconds"):
             value: float = getattr(self, name)
+            # Type before value: math.isfinite("60") raises TypeError, which
+            # escapes as a builtin and contradicts the ConfigurationError this
+            # class documents. bool is excluded for the same reason as in
+            # max_attempts — True is a float by inheritance, and a boolean
+            # timeout is a mistake worth naming rather than coercing to 1.0.
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                msg = f"{name} must be a real number, got {type(value).__name__} ({value!r})"
+                raise ConfigurationError(msg)
             if not math.isfinite(value):
                 msg = f"{name} must be a finite number, got {value}"
                 raise ConfigurationError(msg)
@@ -244,23 +252,37 @@ class RetryingProvider:
         attempt = 0
         while True:
             attempt += 1
+            timed_out = False
+            cause: BaseException | None = None
             try:
-                async with asyncio.timeout(self._policy.timeout_seconds):
-                    return await self._call_inner(messages, model=model)
+                async with asyncio.timeout(self._policy.timeout_seconds) as deadline:
+                    reply = await self._call_inner(messages, model=model)
+                # Expiry does not always surface as an exception. `asyncio`
+                # abandons a call by *cancelling* it, and a provider that
+                # swallows that CancelledError can still return normally — in
+                # which case the context manager exits quietly and hands back a
+                # reply produced after the deadline had already passed. Asking
+                # the deadline whether it expired is the only way to notice.
+                if not deadline.expired():
+                    return reply
+                timed_out = True
             except TimeoutError as exc:
                 # *Our* deadline. Reaching this arm means `asyncio.timeout`
                 # converted the CancelledError it raised itself on expiry — a
                 # TimeoutError the provider raised directly never gets here,
                 # because _call_inner has already translated it. Nor does an
                 # outer cancellation, which asyncio.timeout leaves alone.
-                if attempt >= self._policy.max_attempts:
-                    msg = (
-                        f"model call exceeded its {self._policy.timeout_seconds:g}s "
-                        f"deadline on attempt {attempt} of {self._policy.max_attempts}"
-                    )
-                    raise ModelTimeoutError(msg) from exc
+                timed_out = True
+                cause = exc
             except ModelError as exc:
                 if not exc.retryable or attempt >= self._policy.max_attempts:
                     raise
+
+            if timed_out and attempt >= self._policy.max_attempts:
+                msg = (
+                    f"model call exceeded its {self._policy.timeout_seconds:g}s "
+                    f"deadline on attempt {attempt} of {self._policy.max_attempts}"
+                )
+                raise ModelTimeoutError(msg) from cause
 
             await self._sleep(self._delay_for(attempt))

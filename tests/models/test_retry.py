@@ -8,6 +8,7 @@ few milliseconds.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 from typing import TYPE_CHECKING
 
@@ -233,6 +234,29 @@ async def test_a_providers_own_timeout_keeps_the_original_as_its_cause() -> None
     assert str(caught.value.__cause__) == "socket closed"
 
 
+async def test_a_provider_that_swallows_cancellation_still_times_out() -> None:
+    # Regression (CI adversarial review): asyncio abandons a call by *cancelling*
+    # it, and a provider that swallows that CancelledError returns normally — so
+    # the timeout context exited quietly and its late reply was handed back as if
+    # the deadline had held. Expiry is now checked explicitly.
+    async def swallow(*_args: object, **_kwargs: object) -> Message:
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.sleep(5)  # refuses to die
+        return Message(role=Role.ASSISTANT, content="LATE")
+
+    inner = FakeProvider(REPLY)
+    inner.complete = swallow  # type: ignore[method-assign]
+
+    provider = RetryingProvider(
+        inner,
+        policy=RetryPolicy(timeout_seconds=0.01, max_attempts=1),
+        sleep=SleepSpy(),
+    )
+
+    with pytest.raises(ModelTimeoutError, match=r"exceeded its 0\.01s deadline"):
+        await provider.complete(PROMPT)
+
+
 async def test_a_slow_but_finishing_call_is_not_cut_off() -> None:
     async def slow(*_args: object, **_kwargs: object) -> Message:
         await asyncio.sleep(0.01)
@@ -288,6 +312,18 @@ async def test_model_override_is_passed_through() -> None:
 def test_invalid_configuration_is_rejected(kwargs: dict[str, float | int]) -> None:
     with pytest.raises(ConfigurationError):
         RetryPolicy(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "field", ["timeout_seconds", "backoff_base_seconds", "backoff_max_seconds"]
+)
+@pytest.mark.parametrize("value", ["60", None, True, [1]], ids=["str", "none", "bool", "list"])
+def test_non_numeric_configuration_is_rejected(field: str, value: object) -> None:
+    # Regression (CI adversarial review): math.isfinite("60") raises TypeError,
+    # which escaped as a builtin and contradicted the ConfigurationError this
+    # class documents. Type is now checked before value.
+    with pytest.raises(ConfigurationError, match="must be a real number"):
+        RetryPolicy(**{field: value})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

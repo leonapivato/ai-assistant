@@ -104,6 +104,26 @@ do if the deadline is buried in the callee.
 `CancelledError` it raised itself, so a caller cancelling the task still sees
 `CancelledError` rather than a spurious retry or a timeout.
 
+**Providers must be cancellation-cooperative, and this is a contract
+requirement rather than something the wrapper can enforce.** `asyncio` abandons
+a call by cancelling it, so a provider that swallows `CancelledError` cannot be
+stopped by *any* wrapper — no implementation of `RetryingProvider` could make
+the deadline binding against one. Real providers are cooperative (pydantic-ai
+sits on httpx/anyio, which are), and the requirement is stated here so it is a
+known property rather than an assumption.
+
+Two things the wrapper *does* guarantee even so, both found by adversarial
+review:
+
+- A provider that swallows the cancellation and then returns normally does not
+  get its late reply handed back as if the deadline had held. Expiry does not
+  always surface as an exception — the context manager exits quietly in that
+  case — so the deadline is asked directly whether it expired.
+- A `TimeoutError` the provider raises *itself* is not reported as our deadline
+  expiring. The two are told apart by where they are caught: on expiry the inner
+  call sees a `CancelledError`, and the `TimeoutError` appears only at context
+  exit, so one caught inside can only have come from the provider.
+
 ### 4. Backoff is full jitter
 
 The delay is drawn uniformly from `[0, ceiling)`, where `ceiling` doubles per
