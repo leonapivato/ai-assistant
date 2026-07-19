@@ -17,6 +17,8 @@ from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import CurrentContext, TimeOfDay
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ai_assistant.core.protocols import ContextProvider
 
 _THU_2PM = datetime(2026, 1, 1, 14, tzinfo=UTC)
@@ -128,6 +130,12 @@ class TestAssemblingContextProviderContract(ContextProviderContract):
         # minimal wiring that assembles a valid context.
         return AssemblingContextProvider([_clock()])
 
+    def provider_with_advancing_clock(self) -> tuple[ContextProvider, Sequence[datetime]]:
+        instants = (_THU_2PM, _THU_2PM + timedelta(hours=7))  # 14:00 → 21:00
+        scripted = iter(instants)
+        provider = AssemblingContextProvider([ClockContextSource(now=lambda: next(scripted))])
+        return provider, instants
+
 
 async def test_assembles_context_from_the_clock_source() -> None:
     provider = AssemblingContextProvider([_clock()])
@@ -141,22 +149,19 @@ async def test_assembles_context_from_the_clock_source() -> None:
     assert ctx.within_working_hours is True
 
 
-async def test_each_assembly_recomputes_from_the_clock() -> None:
-    # Assembly is per-request: a provider that read its sources once and served a
-    # cached context forever would satisfy the shared contract (which asserts only
-    # a distinct object, since a wall-clock provider's facets may legitimately
-    # change between calls) while breaking ADR-0008. An advancing clock is what
-    # distinguishes the two, so it is pinned here rather than in the suite.
+async def test_the_derived_facets_recompute_not_just_the_instant() -> None:
+    # The shared suite's freshness test asserts `now` tracks the advancing clock.
+    # This pins the stronger property for this implementation: the *derived* facets
+    # are recomputed from that instant too, rather than `now` being refreshed over
+    # a set of facets cached from the first assembly.
     instants = iter([_THU_2PM, _THU_2PM + timedelta(hours=7)])  # 14:00 → 21:00
     provider = AssemblingContextProvider([ClockContextSource(now=lambda: next(instants))])
 
     first = await provider.assemble()
     second = await provider.assemble()
 
-    assert first.now == _THU_2PM
-    assert second.now == _THU_2PM + timedelta(hours=7)
     assert first.time_of_day is TimeOfDay.AFTERNOON
-    assert second.time_of_day is TimeOfDay.NIGHT  # recomputed, not cached
+    assert second.time_of_day is TimeOfDay.NIGHT
 
 
 async def test_colliding_sources_raise_context_error() -> None:

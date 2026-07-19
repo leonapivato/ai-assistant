@@ -4,10 +4,16 @@ Every ``ContextProvider`` implementation must pass this suite (CONTRIBUTING,
 "Protocol conformance suites"). A concrete test subclasses
 :class:`ContextProviderContract` and overrides the ``provider`` fixture; the
 suite asserts only behaviour *universal* to the contract — that assembly yields a
-valid, tz-aware context, that it can be asked repeatedly, and that a returned
-context is the caller's to keep — never how any one implementation derives its
-facets (composed sources vs. a fixture), which stays in the per-implementation
-test modules.
+valid, tz-aware context, that it can be asked repeatedly, that a returned context
+is the caller's to keep, and that it is recomputed per request — never how any one
+implementation derives its facets (composed sources vs. a fixture), which stays in
+the per-implementation test modules.
+
+Recomputation needs a clock the suite cannot inject itself, so it is a hook:
+override :meth:`ContextProviderContract.provider_with_advancing_clock`, or set
+``serves_a_fixed_instant`` if the implementation is a deliberately-fixed double.
+It defaults to *required*, so a provider that caches its startup context fails
+rather than passing silently.
 
 Two things this suite deliberately does **not** assert:
 
@@ -27,18 +33,45 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from ai_assistant.core.protocols import ContextProvider
 from ai_assistant.core.types import CurrentContext, TimeOfDay
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from datetime import datetime
+
 
 class ContextProviderContract:
     """The behavioural contract every ``ContextProvider`` implementation must satisfy."""
 
+    #: Whether this implementation deliberately serves a *fixed* instant, as a test
+    #: double does. Left ``False``, the suite requires the implementation to prove
+    #: it recomputes per request (ADR-0008 §5) by overriding
+    #: :meth:`provider_with_advancing_clock`. A provider that caches its startup
+    #: context would otherwise satisfy every other test here — the facets it serves
+    #: are never compared across calls, precisely so a wall-clock provider may
+    #: cross a boundary between two of them. Opting out is a visible declaration in
+    #: the subclass rather than a silent gap.
+    serves_a_fixed_instant: bool = False
+
     @pytest.fixture
     def provider(self) -> ContextProvider:
         """Override in a subclass to supply the implementation under test."""
+        raise NotImplementedError
+
+    def provider_with_advancing_clock(self) -> tuple[ContextProvider, Sequence[datetime]]:
+        """Supply a provider whose clock advances, plus the instants it will serve.
+
+        Override unless :attr:`serves_a_fixed_instant` is set. Returns the provider
+        and the successive instants its clock is scripted to return, so the suite
+        can assert each ``assemble`` reflects the next one. How the clock is
+        injected is implementation-specific, which is why this is a hook rather
+        than a fixture the suite could build itself.
+        """
         raise NotImplementedError
 
     def test_conforms_to_protocol(self, provider: ContextProvider) -> None:
@@ -88,3 +121,18 @@ class ContextProviderContract:
         second = await provider.assemble()
 
         assert second is not first
+
+    async def test_each_assembly_recomputes_from_the_clock(self) -> None:
+        # ADR-0008 §5: the context is computed fresh per request. A provider that
+        # assembled once at startup and served copies of that context forever would
+        # pass every other test in this suite while answering an evening request
+        # with "morning, within working hours" — an advancing clock is the only
+        # thing that distinguishes the two.
+        if self.serves_a_fixed_instant:
+            pytest.skip("implementation deliberately serves a fixed instant")
+
+        provider, instants = self.provider_with_advancing_clock()
+
+        assembled = [await provider.assemble() for _ in instants]
+
+        assert [context.now for context in assembled] == list(instants)

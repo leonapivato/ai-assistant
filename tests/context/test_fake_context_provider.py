@@ -7,7 +7,7 @@ as a stand-in for a real provider: it is held to the same contract as
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING
 
 import pytest
@@ -33,6 +33,11 @@ def _saturday_night() -> CurrentContext:
 class TestFakeContextProviderContract(ContextProviderContract):
     """Runs the default FakeContextProvider through the shared suite."""
 
+    # A fixed context is the fake's entire purpose — a consumer states the
+    # situational "right now" it is exercising and gets exactly that back — so it
+    # opts out of the suite's per-request recomputation requirement.
+    serves_a_fixed_instant = True
+
     @pytest.fixture
     def provider(self) -> ContextProvider:
         return FakeContextProvider()
@@ -44,6 +49,8 @@ class TestFakeContextProviderWithSuppliedContextContract(ContextProviderContract
     The default is a weekday inside working hours; a supplied weekend/out-of-hours
     context exercises the opposite value of every boolean facet.
     """
+
+    serves_a_fixed_instant = True
 
     @pytest.fixture
     def provider(self) -> ContextProvider:
@@ -132,6 +139,27 @@ async def test_a_supplied_context_is_revalidated_on_the_way_in() -> None:
     context = await FakeContextProvider(corrupted).assemble()
 
     assert context.now == datetime(2026, 6, 6, 23, 0, tzinfo=UTC)
+
+
+def test_an_indeterminate_timezone_is_rejected() -> None:
+    # CurrentContext requires only `tzinfo is not None`, which this satisfies while
+    # still having no offset — enough to fail the suite's tz-aware assertion and to
+    # raise on any downstream aware comparison.
+    class _NoOffset(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta | None:
+            return None
+
+        def dst(self, dt: datetime | None) -> timedelta | None:
+            return None
+
+        def tzname(self, dt: datetime | None) -> str | None:
+            return "indeterminate"
+
+    corrupted = _saturday_night()
+    corrupted.now = datetime(2026, 6, 6, 23, 0, tzinfo=_NoOffset())
+
+    with pytest.raises(ValueError, match="determinate UTC offset"):
+        FakeContextProvider(corrupted)
 
 
 async def test_counts_calls() -> None:
