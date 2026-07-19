@@ -19,7 +19,6 @@ shared ``ContextProvider`` conformance suite is part of the contract.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
 
 from ai_assistant.core.errors import ContextError
 from ai_assistant.core.types import CurrentContext, TimeOfDay
@@ -45,41 +44,36 @@ class FakeContextProvider:
     """
 
     def __init__(
-        self, context: CurrentContext | None = None, *, failure: ContextError | None = None
+        self, context: CurrentContext | None = None, *, failure: str | None = None
     ) -> None:
         """Create the fake provider.
 
         Args:
             context: The context every :meth:`assemble` returns. Defaults to a
                 weekday mid-morning inside working hours.
-            failure: If given, :meth:`assemble` raises this instead of returning.
-                Lets a consumer exercise its context-step failure path against the
-                shared fake rather than a bespoke mock. Narrowed to
-                ``ContextError`` on purpose: that is the subsystem's failure
-                boundary (``AssemblingContextProvider`` degrades every other
-                exception per-source rather than propagating it), so allowing an
-                arbitrary type would let the canonical fake model a provider the
-                contract does not permit — and a consumer that correctly catches
-                ``ContextError`` would fail only under test. Checked at runtime as
-                well as in the type, so an untyped or ``Any``-typed caller cannot
-                slip past the annotation.
+            failure: If given, :meth:`assemble` raises ``ContextError`` with this
+                message instead of returning. Lets a consumer exercise its
+                context-step failure path against the shared fake rather than a
+                bespoke raising mock.
+
+                A message rather than an exception instance, deliberately.
+                ``ContextError`` is the subsystem's whole failure boundary —
+                ``AssemblingContextProvider`` degrades every other exception
+                per-source rather than propagating it, and nothing subclasses
+                ``ContextError`` — so an instance parameter would add no
+                expressiveness while making it possible to configure the canonical
+                fake to raise outside the contract. It also keeps each call's
+                exception independent; a stored instance re-raised would accumulate
+                a traceback across calls.
 
         Raises:
             ValueError: If both ``context`` and ``failure`` are given. The two
                 describe incompatible outcomes, and silently letting one win
                 would hide a mis-wired test.
-            TypeError: If ``failure`` is not a ``ContextError``.
         """
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
             raise ValueError(msg)
-        # Widened to `object` before the check purely to defeat mypy's narrowing:
-        # against the declared type the isinstance is provably true, so
-        # `warn_unreachable` would reject the raise as dead code — but the check
-        # exists precisely for the callers the declared type does not cover.
-        if failure is not None and not isinstance(cast("object", failure), ContextError):
-            msg = f"failure must be a ContextError, got {type(failure).__name__}"
-            raise TypeError(msg)
         # Deep-copied on ingress as well as egress: the context is fixed *at
         # construction*, so a caller that keeps its reference and mutates it later
         # must not be able to change what assemble returns. Copying the default
@@ -96,15 +90,10 @@ class FakeContextProvider:
         reach the fake's stored context and change what a later call sees.
 
         Raises:
-            ContextError: A fresh equivalent of the ``failure`` passed at
-                construction, if any.
+            ContextError: Carrying the ``failure`` message passed at construction,
+                if one was given. A fresh instance per call.
         """
         self.call_count += 1
         if self._failure is not None:
-            # A fresh instance per call, rebuilt from the configured one's type and
-            # args (so a ContextError subclass stays itself). Re-raising the single
-            # stored instance would attach a new traceback to it every call,
-            # accumulating frames across a test and sharing mutable traceback state
-            # between concurrent callers.
-            raise type(self._failure)(*self._failure.args)
+            raise ContextError(self._failure)
         return self._context.model_copy(deep=True)

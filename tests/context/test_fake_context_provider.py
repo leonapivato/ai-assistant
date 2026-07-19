@@ -132,10 +132,10 @@ async def test_counts_calls() -> None:
     assert provider.call_count == 2
 
 
-async def test_failure_is_raised_and_still_counted() -> None:
+async def test_failure_is_raised_as_a_context_error_and_still_counted() -> None:
     # Counting the failed call too keeps `call_count` an honest record of what the
     # consumer asked for, not of what succeeded.
-    provider = FakeContextProvider(failure=ContextError("no valid context"))
+    provider = FakeContextProvider(failure="no valid context")
 
     with pytest.raises(ContextError, match="no valid context"):
         await provider.assemble()
@@ -144,9 +144,9 @@ async def test_failure_is_raised_and_still_counted() -> None:
 
 
 async def test_failure_repeats_as_a_distinct_instance_each_call() -> None:
-    # Each call raises a fresh equivalent, never the stored instance: re-raising
-    # one object would accumulate a traceback on it across calls.
-    provider = FakeContextProvider(failure=ContextError("still broken"))
+    # A fresh exception per call: one stored instance re-raised would accumulate a
+    # traceback across calls.
+    provider = FakeContextProvider(failure="still broken")
 
     raised = []
     for _ in range(2):
@@ -155,28 +155,8 @@ async def test_failure_repeats_as_a_distinct_instance_each_call() -> None:
         raised.append(caught.value)
 
     assert raised[0] is not raised[1]
-    assert all(error.__traceback__ is not None for error in raised)
-
-
-async def test_a_context_error_subclass_keeps_its_type() -> None:
-    class _NarrowerContextError(ContextError):
-        pass
-
-    provider = FakeContextProvider(failure=_NarrowerContextError("specific"))
-
-    with pytest.raises(_NarrowerContextError):
-        await provider.assemble()
-
-
-def test_an_out_of_contract_failure_type_is_rejected() -> None:
-    # ContextError is the subsystem's failure boundary, so the canonical fake must
-    # not be configurable to raise anything else — a consumer that correctly
-    # catches ContextError would then fail only under test. The annotation catches
-    # typed callers; this guard catches the Any-typed and untyped ones.
-    with pytest.raises(TypeError, match="must be a ContextError"):
-        FakeContextProvider(failure=ValueError("boom"))  # type: ignore[arg-type]
 
 
 def test_context_and_failure_together_is_rejected() -> None:
     with pytest.raises(ValueError, match="not both"):
-        FakeContextProvider(_saturday_night(), failure=ContextError("boom"))
+        FakeContextProvider(_saturday_night(), failure="boom")
