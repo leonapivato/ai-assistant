@@ -63,12 +63,35 @@ async def test_callable_reply_sees_the_conversation() -> None:
     assert reply.content == "got 3 messages"
 
 
+async def test_tool_role_message_is_rejected_like_the_real_provider() -> None:
+    # Not a shared-contract requirement (tool support is implementation-specific),
+    # but the fake mirrors PydanticAIProvider's rejection so orchestration code
+    # cannot pass against the fake and fail in production.
+    provider = FakeModelProvider()
+
+    with pytest.raises(ModelError, match="tool-role"):
+        await provider.complete([Message(role=Role.TOOL, content="result")])
+
+
 async def test_callable_reply_failure_is_wrapped_in_model_error() -> None:
     # A failing reply simulates a model failure; mirror PydanticAIProvider so
     # code catching ModelError recovers identically against the fake.
     def boom(_messages: Sequence[Message]) -> str:
         msg = "reply exploded"
         raise RuntimeError(msg)
+
+    provider = FakeModelProvider(boom)
+
+    with pytest.raises(ModelError, match="model completion failed"):
+        await provider.complete([Message(role=Role.USER, content="hi")])
+
+
+async def test_callable_reply_assertion_error_is_wrapped_not_leaked() -> None:
+    # Only scripted exhaustion is exempt; an ordinary AssertionError from a reply
+    # is wrapped like any other failure, so it cannot bypass ModelError recovery.
+    def boom(_messages: Sequence[Message]) -> str:
+        msg = "not an exhaustion"
+        raise AssertionError(msg)
 
     provider = FakeModelProvider(boom)
 

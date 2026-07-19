@@ -20,7 +20,12 @@ from ai_assistant.core.types import Message, Role
 
 
 def _conversation() -> list[Message]:
-    """A history exercising every request/response role a provider must accept."""
+    """A multi-turn history of the system/user/assistant roles.
+
+    Tool-role handling is intentionally excluded: the Protocol does not mandate
+    it and support is implementation-specific (``PydanticAIProvider`` cannot yet
+    represent a tool exchange), so it is asserted per implementation, not here.
+    """
     return [
         Message(role=Role.SYSTEM, content="be terse"),
         Message(role=Role.USER, content="hi"),
