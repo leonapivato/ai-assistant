@@ -37,11 +37,11 @@ def _git(repo: Path, *args: str) -> None:
 
 
 def _init_repo(tmp_path: Path) -> Path:
-    """A one-commit repo whose default branch is master (version-independent)."""
+    """A one-commit repo whose default branch is main (version-independent)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/master")
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "Test")
     (repo / "f.txt").write_text("x\n")
@@ -90,7 +90,7 @@ def test_list_shows_main_and_every_claimed_worktree(tmp_path: Path) -> None:
     result = _run(_LIST, repo)
 
     assert result.returncode == 0, result.stderr
-    assert "master (main, integration-only)" in result.stdout
+    assert "main (main checkout, integration-only)" in result.stdout
     assert "area/one" in result.stdout
     assert "area/two" in result.stdout
 
@@ -559,7 +559,7 @@ def test_prune_ignores_a_branch_never_claimed_by_this_tooling(tmp_path: Path) ->
     A branch created directly with `git branch` (never through this tooling)
     might coincidentally share a commit with some old closed PR — that must
     never be enough to get it force-deleted (PR #17 review finding: pruning
-    treated every non-master local branch as fair game).
+    treated every non-main local branch as fair game).
     """
     repo = _init_repo(tmp_path)
     _git(repo, "branch", "manual/branch")  # not created via claim-workspace.sh

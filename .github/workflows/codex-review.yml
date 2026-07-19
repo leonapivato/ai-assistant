@@ -27,7 +27,7 @@ name: codex-review
 #     this job's credential.
 #
 # NOTE: workflow_run/issue_comment workflows only take effect from the DEFAULT
-# branch, so this does nothing until merged to master — and it is inert until a
+# branch, so this does nothing until merged to main — and it is inert until a
 # maintainer adds the dedicated, spend-capped OPENAI_API_KEY secret (ADR-0012 §4).
 
 on:
@@ -138,7 +138,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ needs.resolve.outputs.sha }}
-          fetch-depth: 0 # need history to diff against origin/master
+          fetch-depth: 0 # need history to diff against origin/main
           persist-credentials: false # no token in .git/config for the unsandboxed review to read
 
       - name: Install the Codex CLI
@@ -159,9 +159,9 @@ jobs:
           # codex exec does not read OPENAI_API_KEY directly; authenticate first
           # (reads the key from stdin, never an argument or the log).
           printenv OPENAI_API_KEY | codex login --with-api-key
-          git fetch --no-tags origin master
+          git fetch --no-tags origin main
           # stdout is the review body; progress goes to stderr.
-          scripts/codex-review.sh "$PERSONA" origin/master >review.out
+          scripts/codex-review.sh "$PERSONA" origin/main >review.out
 
       # A `uses:` step, not a shell step — nothing runs as bash after the
       # untrusted Codex step, so a BASH_ENV/$GITHUB_ENV payload finds no target.

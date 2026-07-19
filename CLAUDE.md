@@ -55,17 +55,17 @@ learn/update memory.
 ## How to work (make changes reviewable)
 
 - **Claim a workspace first — before editing anything.** Run `git fetch origin`
-  (which updates `origin/master` without touching any working tree — never
-  `git checkout master`, which would move the shared main checkout off `master`),
+  (which updates `origin/main` without touching any working tree — never
+  `git checkout main`, which would move the shared main checkout off `main`),
   then `just claim-workspace <area>/<slug>` as the first action of any task. The
-  claim branches your new work from `origin/master`, so the fetch keeps you
+  claim branches your new work from `origin/main`, so the fetch keeps you
   current — give it a second argument (`just claim-workspace <area>/<slug>
   <base>`) to stack it on another branch instead, for a task split into
-  dependent PRs; omitted, it always defaults to `origin/master`, never
+  dependent PRs; omitted, it always defaults to `origin/main`, never
   "wherever some other worktree happens to be." It puts you on a fresh branch
   in its own linked worktree — always, so any number of agents can run in
   parallel with none sharing a working tree — and prints `WORKSPACE=<path>`.
-  **Work only in that path**, and never commit to `master`. Running several
+  **Work only in that path**, and never commit to `main`. Running several
   agents at once: `just claim-workspaces <area>/<slug> ...` claims multiple
   branches concurrently; `just workspaces` lists what's claimed; `just
   prune-workspaces` reports worktrees whose PR has merged or closed. Release a
@@ -95,7 +95,7 @@ uv run lint-imports     # architecture boundary check
 uv run pytest           # tests
 ```
 
-CI runs this same gate on every PR and push to `master` (ADR-0010) — it is the
+CI runs this same gate on every PR and push to `main` (ADR-0010) — it is the
 backstop, not the first line of defence; run it locally before pushing.
 `pre-commit` runs the fast subset on commit; `just setup` enables it once per
 machine as a standalone, version-pinned tool install, not `uv run` inside a
@@ -103,7 +103,7 @@ workspace — see `CONTRIBUTING.md` → "Setup" for why that distinction matters
 
 **Iterate against `just review-codex`, not against CI.** It runs the same
 adversarial-review engine CI does (`CONTRIBUTING.md` → "Review (pre-merge)"),
-against `origin/master` by default (fetch first). Loop locally while the PR
+against `origin/main` by default (fetch first). Loop locally while the PR
 is a **draft** — fix, **commit** (it reviews `HEAD`, the committed diff, not
 your working tree — an uncommitted fix is invisible to a re-run), re-run,
 repeat — until it's clean or only deliberately-waived findings remain; a

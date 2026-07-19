@@ -54,7 +54,7 @@ sync. The tool install is machine-global, not per-worktree: if two worktrees
 are on branches whose `uv.lock` resolves a different `pre-commit` version
 (e.g. one is mid-upgrade), whichever ran setup most recently wins for every
 worktree's hooks until the other reruns it — last-writer-wins, not
-per-worktree isolation. In the ordinary case (`master`'s pin, followed
+per-worktree isolation. In the ordinary case (`main`'s pin, followed
 consistently) this never comes up.
 
 Already set up from before this fix? Rerun the commands above — they
@@ -77,7 +77,7 @@ uv run pytest               # tests
 ```
 
 `pre-commit` runs the fast subset on every commit; CI runs the full gate on
-every pull request and push to `master` (`.github/workflows/gate.yml`, ADR-0010).
+every pull request and push to `main` (`.github/workflows/gate.yml`, ADR-0010).
 CI is the backstop now that more than one person commits — but run the gate
 locally before you push. A red PR is a wasted round-trip, not a first line of
 defence.
@@ -101,7 +101,7 @@ so it is a deliberate pre-merge step, not per-commit):
 
 ```bash
 just review-codex architecture      # or: scripts/codex-review.sh architecture
-just review-codex adversarial       # base-ref defaults to origin/master (fetch first)
+just review-codex adversarial       # base-ref defaults to origin/main (fetch first)
 ```
 
 **Iterate locally, in draft — not against CI.** `just review-codex` runs the
@@ -179,9 +179,9 @@ inconsistency with a prior ADR, a seam that will not extend). **Trivial ADRs**
 
 ## Git & commits
 
-- **Trunk-based.** `master` is always green. Do each unit of work on a
+- **Trunk-based.** `main` is always green. Do each unit of work on a
   short-lived branch named `<area>/<slug>` (e.g. `models/provider-protocol`).
-- **Linear history.** Rebase onto `master`; no merge commits. Condense a branch
+- **Linear history.** Rebase onto `main`; no merge commits. Condense a branch
   to one (or a few) logical commits before integrating.
 - **One logical change per commit.**
 - **Conventional Commits**, enforced by a `commit-msg` hook:
@@ -207,11 +207,11 @@ inconsistency with a prior ADR, a seam that will not extend). **Trivial ADRs**
 
 ### Working on GitHub (pull requests)
 
-The repository is hosted on GitHub with more than one contributor, so `master`
+The repository is hosted on GitHub with more than one contributor, so `main`
 is protected and integration happens through pull requests — not local merges
 (ADR-0010).
 
-- **Never push to `master`.** Push your `<area>/<slug>` branch and open a PR.
+- **Never push to `main`.** Push your `<area>/<slug>` branch and open a PR.
 - **Open a draft PR early — always.** As soon as you have a branch and a first
   commit, open it as a **draft**, before the work is done. CI runs on every push
   so you get the gate continuously, and the other contributor can see your
@@ -226,7 +226,7 @@ is protected and integration happens through pull requests — not local merges
 - **One approving review is required** before merge. Report the pre-merge Codex
   reviews (architecture / adversarial, above) in the PR description: the outcome,
   and any `blocker`/`major` finding you waived with its rationale.
-- **Rebase and merge.** Rebase your branch onto `master` and merge via GitHub's
+- **Rebase and merge.** Rebase your branch onto `main` and merge via GitHub's
   *Rebase and merge* so linear history holds and each commit keeps its
   `Refs: ADR-NNNN` trailer. Delete the branch after merge.
 - **Low-collision by design.** Work is split across low-overlap sections, so
@@ -262,18 +262,18 @@ closed (`FORCE=1` to actually remove them) so parallel claims don't
 silently accumulate on disk.
 
 - **Fetch before you claim.** Run `git fetch origin` first — *not*
-  `git checkout master`, which would switch branches in the shared main checkout
-  and stomp whatever the main checkout's `master` state is being used for
-  elsewhere. `fetch` updates `origin/master` without touching any working tree,
-  and the claim branches new work from `origin/master`, so your branch starts
+  `git checkout main`, which would switch branches in the shared main checkout
+  and stomp whatever the main checkout's `main` state is being used for
+  elsewhere. `fetch` updates `origin/main` without touching any working tree,
+  and the claim branches new work from `origin/main`, so your branch starts
   from the latest merged state.
 - **Stacking one branch on another** (splitting a task into dependent PRs
   before the first has merged): `just claim-workspace <area>/<slug> <base>`
   takes an optional second argument — any branch, tag, or commit — as the new
-  branch's start-point instead of `origin/master`. This is opt-in only: a
+  branch's start-point instead of `origin/main`. This is opt-in only: a
   claim never guesses at "wherever some other worktree happens to be" on its
-  own, so omitting it always means the usual `origin/master` default.
-- The main checkout is never claimed — it stays on `master` permanently, as a
+  own, so omitting it always means the usual `origin/main` default.
+- The main checkout is never claimed — it stays on `main` permanently, as a
   read-only integration copy. The `no-commit-to-branch` pre-commit hook refuses
   direct commits to it, so nothing can accidentally treat it as a workspace.
 - A worktree shares the repo's object store and refs (not its working tree), so

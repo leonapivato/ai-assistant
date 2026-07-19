@@ -20,13 +20,13 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # `master` is integration-only: it advances via GitHub rebase-and-merge,
+      # `main` is integration-only: it advances via GitHub rebase-and-merge,
       # never a local commit. Blocking direct commits keeps a solo agent working
-      # in the main checkout from accidentally committing to master (ADR-0010;
+      # in the main checkout from accidentally committing to main (ADR-0010;
       # CONTRIBUTING "Coordinating parallel work"). Bypass with --no-verify only
       # for a genuine exception.
       - id: no-commit-to-branch
-        args: [--branch, master]
+        args: [--branch, main]
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-yaml
