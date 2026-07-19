@@ -157,6 +157,18 @@ if (( base_given )); then
             done
         } | sort -u | wc -l
     )"
+    # `sort -u` deliberately dedupes by commit, not by namespace — a branch
+    # and tag sharing a name AND currently pointing at the identical commit
+    # is not flagged. This is a considered choice, not a gap: the entire
+    # purpose of every check above is preventing a claim from silently
+    # stacking on a *different* commit than the caller intended, and two
+    # namespaces agreeing on the same commit cannot produce that — every
+    # possible interpretation of the name gives the exact same start point.
+    # Counting namespaces instead of distinct commits would flag this
+    # harmless case as an error with no corresponding safety benefit, pure
+    # friction (a review round asked for exactly that; declined for this
+    # reason — CONTRIBUTING "Review (pre-merge)": resolve or waive with a
+    # written rationale).
     if (( distinct_matches > 1 )); then
         echo "base '${base_override}' is ambiguous — it matches more than one ref (e.g. both a branch and a tag) pointing to different commits. Use a fully-qualified ref instead, e.g. 'refs/heads/${base_override}' or 'refs/tags/${base_override}'." >&2
         exit 2
