@@ -18,14 +18,21 @@ uv sync   # create/refresh the environment
 # resolved — once per machine, not per workspace (see below for why).
 uv tool install "pre-commit==$(uv run python -c 'import importlib.metadata as m; print(m.version("pre-commit"))')"
 
-pre-commit install --install-hooks     # both pre-commit and commit-msg hooks
-git config commit.template .gitmessage # scaffold commit messages
+"$(uv tool dir --bin)/pre-commit" install --install-hooks # pre-commit + commit-msg hooks
+git config commit.template .gitmessage                    # scaffold commit messages
 ```
 
-(`just setup` runs all four for you. If step 2 warns that `uv`'s tool
-directory isn't on `PATH`, or step 3 then reports `pre-commit: command not
-found`, run `uv tool update-shell` and open a new shell — a one-time,
-machine-level fix, same as installing `uv` or `just` itself.)
+Step 3 calls the standalone tool by its resolved absolute path, not bare
+`pre-commit` — if a workspace's own `.venv` is active (`source
+.venv/bin/activate`), that puts a *second*, workspace-bound `pre-commit`
+earlier on `PATH` (it's a project dev dependency too, for ad hoc `uv run
+pre-commit run --all-files`); resolving explicitly is what stops that copy
+from silently winning and re-introducing the exact bug this section exists to
+avoid. (`just setup` runs all four steps for you, already using the resolved
+path.) If step 2 warns that `uv`'s tool directory isn't on `PATH` at all, run
+`uv tool update-shell` and open a new shell — needed for running `pre-commit`
+directly afterward, not for setup itself, which never depends on `PATH` for
+this step.
 
 Install pre-commit as a standalone tool (`uv tool install`), not via
 `uv run` inside a workspace. Git hooks live under the repo's shared
