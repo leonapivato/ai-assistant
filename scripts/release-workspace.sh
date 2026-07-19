@@ -34,7 +34,12 @@ wt_path="$(git worktree list --porcelain | awk -v ref="refs/heads/${branch}" '
 if [[ -f "${lock}/branch" && "$(cat "${lock}/branch")" == "$branch" ]]; then
     if [[ -n "$(git -C "$main_root" status --porcelain)" ]]; then
         if (( force )); then
-            git -C "$main_root" checkout -q -f master # discard tracked changes
+            # Deliberately discard *both* tracked changes and untracked files, so
+            # main returns to a genuinely clean master (git clean skips ignored
+            # paths, so the .venv/.env stay). Otherwise a leftover untracked file
+            # keeps main "dirty" and future claims would needlessly use worktrees.
+            git -C "$main_root" checkout -q -f master
+            git -C "$main_root" clean -qfd
         else
             echo "Main checkout has uncommitted changes; commit/stash them or set FORCE=1." >&2
             exit 1
