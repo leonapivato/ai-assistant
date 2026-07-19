@@ -21,7 +21,7 @@ from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from pathlib import PurePath
+from pathlib import PosixPath, PurePosixPath, PureWindowsPath, WindowsPath
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
@@ -37,21 +37,29 @@ REDACTED: Final = "[redacted]"
 
 # Types safe to render as-is: their repr is their own value, with no nested
 # fields that could hide user data. Anything not listed is masked (see
-# `_redact_value`), so this list is the boundary of what the net trusts.
-_SAFE_SCALARS: Final = (
-    bool,
-    int,
-    float,
-    complex,
-    Decimal,
-    Enum,
-    UUID,
-    PurePath,
-    datetime,
-    date,
-    time,
-    timedelta,
-    type(None),
+# `_redact_value`), so this set is the boundary of what the net trusts.
+#
+# Matched by *exact type*, never isinstance. A subclass can override __repr__ to
+# render anything at all, so `class Sneaky(int): __repr__ = ...` inherits from a
+# trusted type without being one. Enum is handled separately, by name.
+_SAFE_EXACT_TYPES: Final = frozenset(
+    {
+        bool,
+        int,
+        float,
+        complex,
+        Decimal,
+        UUID,
+        PurePosixPath,
+        PureWindowsPath,
+        PosixPath,
+        WindowsPath,
+        datetime,
+        date,
+        time,
+        timedelta,
+        type(None),
+    }
 )
 
 # Substrings, matched case-insensitively against the key. Substrings rather than
@@ -181,7 +189,15 @@ def _redact_value(value: object) -> object:
         # Preserve tuple-ness, since a renderer may format it differently; every
         # other sequence or set degrades to a list, which is fine for output.
         return tuple(rebuilt) if isinstance(value, tuple) else rebuilt
-    if isinstance(value, _SAFE_SCALARS):
+    # An Enum's *value* can be a secret (`ApiKey.VALUE = "sk-live-…"`), and its
+    # repr shows it. The member name is code-defined and is all a diagnostic
+    # needs, so the name is what gets rendered.
+    if isinstance(value, Enum):
+        return f"{type(value).__name__}.{value.name}"
+    # Exact types, not isinstance: an `int` subclass overriding __repr__ renders
+    # as whatever it likes, so inheriting from a safe type is not evidence of
+    # being safe.
+    if type(value) in _SAFE_EXACT_TYPES:
         return value
     # Fail closed on anything we cannot look inside. An unrecognised object goes
     # to the renderer as its repr, and a repr shows whatever the object holds —
@@ -199,12 +215,20 @@ def _key_carries_data(key: str) -> bool:
     *data* (per-user counters, a parsed query string) puts Tier 0/1 content in
     the key position, where redacting only the value achieves nothing.
 
-    The signals are ``@`` and ``=``: an email address used as a key, or a
-    ``token=secret`` fragment. Both are vanishingly rare in a deliberate field
-    name and strongly suggest data. A field name that legitimately contains one
-    should be renamed rather than exempted.
+    The test is **shape, not content**: a field name is an identifier, so
+    anything that is not one is treated as data. Listing the shapes data can
+    take is unwinnable — an earlier version looked for ``@`` and ``=`` and
+    happily emitted ``{"123-45-6789": 1}`` and ``{"Alice Smith": 1}``. Asking
+    what a *field name* looks like has one answer; asking what data looks like
+    has infinitely many.
+
+    Residual limit, stated rather than hidden: a single bare token like
+    ``"Alice"`` is a valid identifier and passes. Nothing distinguishes it from
+    a field name without knowing the value's meaning, which a key-based net by
+    definition does not. Over-matching in the other direction (``content-type``
+    as a key is masked) is fixed by renaming the key.
     """
-    return "@" in key or "=" in key
+    return not key.isidentifier()
 
 
 def redact_sensitive(
@@ -283,18 +307,37 @@ def configure_logging(settings: Settings) -> None:
     _configure(logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO))
 
 
-# Installed at import, not left to an entry point to remember.
-#
-# Configuring only from the CLI callback would leave every other way of using
-# this package — a test, a script, an embedding application, `orchestration`
-# wired up directly — on structlog's default chain, which has no redaction in
-# it. A safety net that depends on the caller invoking it is not a safety net,
-# and ADR-0004 §5 says structlog *is* configured, not that one adapter
-# configures it.
-#
-# The cost is an import side effect on global structlog state, which is a real
-# imposition on a host application. It is accepted here because the failure
-# modes are asymmetric: the worst case for configuring is that a host re-applies
-# its own configuration afterwards (and wins, since this is not idempotent-
-# guarded), while the worst case for not configuring is a silent Tier 0/1 leak.
-_configure(logging.INFO)
+def install_redaction() -> None:
+    """Ensure the redaction processor is active, without stealing a host's setup.
+
+    Called at import (below), because a safety net the caller has to remember to
+    install is not a safety net: configuring only from the CLI callback left
+    tests, scripts, and any embedding application on structlog's default chain,
+    which has no redaction in it.
+
+    But *replacing* a configuration we did not create is its own bug. An
+    embedding application that had installed a stricter processor — masking
+    ``medical_record``, say — lost it the moment it imported this package, and
+    the next such event went out unredacted. Strictly worse than doing nothing,
+    because the host had already solved the problem.
+
+    So: if structlog is unconfigured, install the full chain. If it is already
+    configured, leave every processor the host chose in place and *insert* ours
+    ahead of the renderer. Both configurations end up strictly more redacted
+    than either was alone, and the host keeps its formatting, level, and
+    factory.
+    """
+    if not structlog.is_configured():
+        _configure(logging.INFO)
+        return
+
+    processors = list(structlog.get_config()["processors"])
+    if redact_sensitive in processors:
+        return
+    # Before the renderer, which is by convention last and turns the event dict
+    # into a string — after which there is nothing structured left to scrub.
+    processors.insert(max(len(processors) - 1, 0), redact_sensitive)
+    structlog.configure(processors=processors)
+
+
+install_redaction()

@@ -8,9 +8,10 @@ from collections import ChainMap, UserDict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import Enum
 from pathlib import PurePath
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import pytest
@@ -21,11 +22,12 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.logging import (
     REDACTED,
     configure_logging,
+    install_redaction,
     redact_sensitive,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, MutableMapping
 
 
 def _redact(**event: object) -> dict[str, object]:
@@ -202,6 +204,48 @@ def test_masked_keys_do_not_collide_and_lose_entries() -> None:
     assert sorted(payload.values(), key=repr) == sorted([1, 2, "primary"], key=repr)
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["123-45-6789", "Alice Smith", "a@example.com", "token=secret", "+44 7700 900000"],
+    ids=["ssn", "full-name", "email", "query-fragment", "phone"],
+)
+def test_data_shaped_keys_are_masked(key: str) -> None:
+    # Regression (CI adversarial review): the previous test was for `@` or `=`,
+    # so an SSN or a person's name used as a key was emitted intact. Enumerating
+    # the shapes *data* can take is unwinnable; asking whether a key looks like a
+    # *field name* has one answer.
+    redacted = _redact(payload={key: 1})
+
+    assert key not in repr(redacted["payload"])
+
+
+def test_a_bare_token_key_is_a_known_limit() -> None:
+    # Stated rather than hidden: "Alice" is a valid identifier and nothing
+    # distinguishes it from a field name without knowing what the value means,
+    # which a key-based net by definition does not.
+    assert _redact(payload={"Alice": 1})["payload"] == {"Alice": 1}
+
+
+def test_an_enum_renders_by_name_never_by_value() -> None:
+    # Regression (CI adversarial review): an Enum's *value* can be a secret, and
+    # its repr shows it — `<ApiKey.VALUE: 'sk-live-...'>`.
+    class ApiKey(Enum):
+        VALUE = "sk-live-SECRET"
+
+    assert _redact(k=ApiKey.VALUE)["k"] == "ApiKey.VALUE"
+
+
+def test_a_subclass_of_a_safe_type_is_not_trusted() -> None:
+    # Regression (CI adversarial review): membership was isinstance-based, so
+    # inheriting from a trusted type was taken as evidence of being safe. A
+    # subclass can render as anything it likes.
+    class Sneaky(int):
+        def __repr__(self) -> str:
+            return "sk-live-SECRET"
+
+    assert _redact(k=Sneaky(5))["k"] == REDACTED
+
+
 def test_a_field_name_is_not_mistaken_for_data() -> None:
     # The @/= heuristic must not fire on ordinary keys, or every log turns to
     # mush.
@@ -301,6 +345,64 @@ def test_redaction_is_installed_on_import_without_any_bootstrap_call() -> None:
 
     assert "sk-live-SECRET" not in result.stdout
     assert REDACTED in result.stdout
+
+
+def test_a_hosts_existing_configuration_is_composed_with_not_replaced() -> None:
+    # Regression (CI adversarial review): importing the package replaced the
+    # whole processor chain, so an embedding application that had installed a
+    # *stricter* processor lost it on import and the next such event went out
+    # unredacted — strictly worse than doing nothing, since the host had already
+    # solved the problem.
+    def host_mask(
+        _logger: Any, _name: str, event: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        if "medical_record" in event:
+            event["medical_record"] = "<HOST-MASKED>"
+        return event
+
+    renderer = structlog.processors.KeyValueRenderer()
+    structlog.configure(processors=[host_mask, renderer])
+
+    install_redaction()
+
+    processors = structlog.get_config()["processors"]
+    assert host_mask in processors, "the host's own processor must survive"
+    assert redact_sensitive in processors, "ours must be added"
+    # Ours goes before the renderer — after it there is no structured event left.
+    assert processors.index(redact_sensitive) < processors.index(renderer)
+
+
+def test_composition_applies_both_maskings(capsys: pytest.CaptureFixture[str]) -> None:
+    def host_mask(
+        _logger: Any, _name: str, event: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        if "medical_record" in event:
+            event["medical_record"] = "<HOST-MASKED>"
+        return event
+
+    structlog.configure(
+        processors=[host_mask, structlog.dev.ConsoleRenderer(colors=False)],
+        logger_factory=structlog.PrintLoggerFactory(),
+    )
+    install_redaction()
+
+    structlog.get_logger("compose").warning("e", medical_record="PRIVATE", api_key="sk-live-X")
+
+    out = capsys.readouterr().out
+    # Strictly more redacted than either configuration was alone.
+    assert "PRIVATE" not in out
+    assert "sk-live-X" not in out
+    assert "<HOST-MASKED>" in out
+
+
+def test_installing_twice_does_not_duplicate_the_processor() -> None:
+    configure_logging(Settings())
+    install_redaction()
+    install_redaction()
+
+    processors = structlog.get_config()["processors"]
+
+    assert processors.count(redact_sensitive) == 1
 
 
 def test_the_processor_is_installed_by_configure_logging() -> None:

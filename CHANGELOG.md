@@ -27,7 +27,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are masked too when they look like data rather than field names, dataclasses
   and pydantic models are unwrapped and scrubbed rather than reaching the
   renderer as a leaky repr, and any object the net cannot look inside is masked
-  outright — "unknown" means "hidden", not "assumed harmless". It fails
+  outright — "unknown" means "hidden", not "assumed harmless". Mapping keys are
+  judged by *shape*: a field name is an identifier, so anything else is treated
+  as data and masked, which catches an SSN or a person's name used as a key.
+  Safe types are matched by exact type rather than `isinstance`, since a
+  subclass can override `__repr__` to render anything, and an `Enum` renders by
+  member name because its *value* can be a secret. Importing the package
+  **composes with** an existing structlog configuration rather than replacing
+  it, so an embedding application keeps its own (possibly stricter) processors
+  and gains ours. It fails
   closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
   dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
   `content_type`) keeps type and enum names readable, and each entry is pinned by
