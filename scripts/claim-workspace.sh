@@ -87,10 +87,24 @@ if (( base_given )); then
     # this, git parses a leading-hyphen base as a flag instead of a revision
     # and rev-parse fails, wrongly reporting a real ref as not resolving (PR
     # #23 review finding).
-    resolved_base="$(git rev-parse --verify --quiet --end-of-options \
-        "${base_override}^{commit}" 2>/dev/null || true)"
+    # No --quiet here, deliberately: it also suppresses git's own "refname
+    # ... is ambiguous" warning (confirmed directly), which is exactly the
+    # signal needed below. If, say, both a branch and a tag are named
+    # "release" (pointing at different commits), a bare rev-parse resolves
+    # per git's own precedence (tags before branches) and just warns — silent
+    # wrong-history-stacking otherwise, since nothing here would ever see
+    # that warning to act on it (a PR #23 review finding).
+    base_err_file="$(mktemp)"
+    resolved_base="$(git rev-parse --verify --end-of-options \
+        "${base_override}^{commit}" 2>"$base_err_file")" || true
+    base_err="$(cat "$base_err_file")"
+    rm -f "$base_err_file"
     if [[ -z "$resolved_base" ]]; then
         echo "base '${base_override}' does not resolve to a commit" >&2
+        exit 2
+    fi
+    if [[ "$base_err" == *"is ambiguous"* ]]; then
+        echo "base '${base_override}' is ambiguous — it matches more than one ref (e.g. both a branch and a tag). Use a fully-qualified ref instead, e.g. 'refs/heads/${base_override}' or 'refs/tags/${base_override}'." >&2
         exit 2
     fi
 fi

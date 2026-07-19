@@ -765,6 +765,40 @@ def test_claim_with_an_explicit_base_starting_with_a_hyphen(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
 
 
+def test_claim_rejects_an_ambiguous_explicit_base(tmp_path: Path) -> None:
+    """A base matching both a branch and a tag must be refused, not silently
+    resolved to whichever one git's own precedence happens to prefer.
+
+    Plain `git rev-parse` succeeds for an ambiguous short name (it just picks
+    one, per its own documented precedence — tags before branches) and only
+    warns on stderr; the warning is easy to end up suppressing entirely
+    (`--quiet`, or `2>/dev/null`) the same way any other diagnostic is, which
+    is exactly what this script used to do — silently stacking on whichever
+    ref git preferred, with no indication the caller's branch was not what
+    was actually used (PR #23 review finding).
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")  # branch "collide" candidate
+    _git(repo, "branch", "collide", "area/a")
+    _git(repo, "tag", "collide")  # tag "collide" at master's tip — a different commit
+
+    result = _run(_CLAIM, repo, "area/new", "collide")
+
+    assert result.returncode == 2
+    assert "ambiguous" in result.stderr
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/new" not in branches
+
+
 def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
     tmp_path: Path,
 ) -> None:
