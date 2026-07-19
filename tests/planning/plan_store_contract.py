@@ -482,6 +482,16 @@ class PlanStoreContract:
         assert fresh.steps[0].status is StepStatus.PENDING
         assert fresh.version == 0
 
+    async def test_active_executions_come_back_oldest_first(self, store: PlanStore) -> None:
+        """Sorting ids would interleave plans and put exec-10 before exec-2."""
+        await store.save_goal(_goal())
+        expected = []
+        for index in range(1, 13):
+            await store.save_plan(_plan(plan_id=f"p{index}"))
+            expected.append((await store.start_execution(f"p{index}")).id)
+
+        assert [state.id for state in await store.active_executions()] == expected
+
     # --- data rights (ADR-0004) -------------------------------------------
 
     async def test_export_carries_the_stored_state(self, store: PlanStore) -> None:

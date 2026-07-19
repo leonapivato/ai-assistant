@@ -791,6 +791,14 @@ class StepExecution(BaseModel):
             msg = f"a {self.status} step has not finished, so it cannot have finished_at"
             raise ValueError(msg)
 
+        if (
+            self.started_at is not None
+            and self.finished_at is not None
+            and self.finished_at < self.started_at
+        ):
+            msg = "a step cannot finish before it started"
+            raise ValueError(msg)
+
         return self
 
     @field_validator("started_at", "finished_at")
@@ -1016,5 +1024,16 @@ class PlanExport(BaseModel):
         if dangling_executions:
             msg = f"export has executions whose plan is missing: {', '.join(dangling_executions)}"
             raise ValueError(msg)
+
+        steps_by_plan = {plan.id: [step.id for step in plan.steps] for plan in self.plans}
+        for execution in self.executions:
+            expected = steps_by_plan[execution.plan_id]
+            actual = [step.step_id for step in execution.steps]
+            if actual != expected:
+                msg = (
+                    f"execution {execution.id} does not line up with plan "
+                    f"{execution.plan_id}: expected steps {expected}, found {actual}"
+                )
+                raise ValueError(msg)
 
         return self
