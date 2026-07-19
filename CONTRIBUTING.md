@@ -12,11 +12,17 @@ Requires [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/ju
 claiming and the gate itself) — install both before continuing.
 
 ```bash
-uv sync                                # create/refresh the environment
-uv tool install pre-commit             # once per machine, not per workspace
+uv sync   # create/refresh the environment
+
+# Install pre-commit as a standalone tool, pinned to the version uv.lock just
+# resolved — once per machine, not per workspace (see below for why).
+uv tool install "pre-commit==$(uv run python -c 'import importlib.metadata as m; print(m.version("pre-commit"))')"
+
 pre-commit install --install-hooks     # both pre-commit and commit-msg hooks
 git config commit.template .gitmessage # scaffold commit messages
 ```
+
+(`just setup` runs all four for you.)
 
 Install pre-commit as a standalone tool (`uv tool install`), not via
 `uv run` inside a workspace. Git hooks live under the repo's shared
@@ -28,12 +34,20 @@ later and every other worktree's commits start failing with `` `pre-commit`
 not found ``. A standalone tool install lives outside any workspace, so the
 hook keeps working no matter which workspaces come and go.
 
-Already set up from before this fix? Rerun the two lines above — they
-re-anchor the hook to the tool install instead of whatever workspace last ran
-`pre-commit install`. (An even earlier version of this command only installed
-the `commit-msg` hook; rerunning also picks up the `pre-commit` stage — ruff,
-mypy, import-linter — if you're that far behind. A stale install fails
-silently rather than erroring.)
+The version is pinned to whatever this workspace's `uv sync` just resolved
+from `uv.lock` (`pre-commit>=4.6.0` in `pyproject.toml`), not left
+unpinned — a bare `uv tool install pre-commit` would grab whatever is
+latest on the machine at install time, letting the hook runner drift from
+the locked dev dependency ADR-0003 requires. Re-run the command whenever the
+project's pinned `pre-commit` version changes so the global tool stays in
+sync.
+
+Already set up from before this fix? Rerun the commands above — they
+re-anchor the hook to the pinned tool install instead of whatever workspace
+last ran `pre-commit install`. (An even earlier version of this command only
+installed the `commit-msg` hook; rerunning also picks up the `pre-commit`
+stage — ruff, mypy, import-linter — if you're that far behind. A stale
+install fails silently rather than erroring.)
 
 ## The gate (Definition of Done)
 
