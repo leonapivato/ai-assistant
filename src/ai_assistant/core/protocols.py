@@ -26,14 +26,20 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.types import (
+        ActionPlan,
         CurrentContext,
         Embedding,
+        ExecutionState,
         FeedbackEvent,
+        Goal,
+        GoalDeletion,
         MemoryDecision,
         MemoryKind,
         MemoryRecord,
         MemoryUpdateProposal,
         Message,
+        PlanExport,
+        StepTransition,
     )
 
 
@@ -233,4 +239,143 @@ class FeedbackProcessor(Protocol):
 
     async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
         """Return the memory-update proposals implied by ``event`` (possibly none)."""
+        ...
+
+
+@runtime_checkable
+class Planner(Protocol):
+    """Turns a :class:`~ai_assistant.core.types.Goal` into a plan (ADR-0014 §6).
+
+    The pipeline's planning step. Implementations produce an ``ActionPlan`` and
+    nothing else — no model output ever sets execution status, which stays the
+    property of deterministic code (VISION §7).
+    """
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+    ) -> ActionPlan:
+        """Produce a plan for ``goal``.
+
+        ``context`` and ``memories`` are passed in rather than fetched: the
+        pipeline assembles context and retrieves memory before planning, and a
+        planner that reached for them itself would import two subsystems it has
+        no business importing. Retrieved memory is also what makes a plan
+        personal rather than generic.
+
+        Args:
+            goal: The objective to plan for.
+            context: The situational context assembled for this request.
+            memories: Records retrieved as relevant to the goal, best first.
+
+        Returns:
+            A frozen :class:`~ai_assistant.core.types.ActionPlan`.
+
+        Raises:
+            PlanningError: If no plan could be produced for the goal.
+        """
+        ...
+
+
+@runtime_checkable
+class PlanStore(Protocol):
+    """Durable planning state: goals, plans, and execution (ADR-0014 §5).
+
+    Planning owns this rather than the wiring layer, because plan state is
+    personal data and carries ADR-0004's obligations. Implementations persist
+    **locally only**; none may write plan state to a remote service.
+
+    Writes to execution state go through :meth:`commit_transition`, never by
+    handing back a whole state, so the transition graph cannot be bypassed.
+    """
+
+    async def save_goal(self, goal: Goal) -> str:
+        """Persist a goal and return its id (an upsert, keyed on ``id``)."""
+        ...
+
+    async def get_goal(self, goal_id: str) -> Goal | None:
+        """Return the goal with ``goal_id``, or ``None`` if absent."""
+        ...
+
+    async def save_plan(self, plan: ActionPlan) -> str:
+        """Persist a plan and return its id.
+
+        Raises:
+            PlanningError: If the plan's ``goal_id`` names no stored goal.
+        """
+        ...
+
+    async def get_plan(self, plan_id: str) -> ActionPlan | None:
+        """Return the plan with ``plan_id``, or ``None`` if absent."""
+        ...
+
+    async def start_execution(self, plan_id: str) -> ExecutionState:
+        """Open a fresh execution for ``plan_id`` and return it.
+
+        The initial state is *derived* — one ``PENDING`` step per plan step, in
+        order, at version 0 — rather than supplied, which is what guarantees the
+        positional correspondence with the plan that everything else assumes.
+
+        Raises:
+            PlanningError: If ``plan_id`` names no stored plan.
+        """
+        ...
+
+    async def commit_transition(self, transition: StepTransition) -> ExecutionState:
+        """Apply one step transition and return the new state.
+
+        The only write path for execution state. Implementations apply the
+        transition against the stored snapshot, so an illegal move is rejected
+        rather than persisted, and the write is compare-and-swap on
+        ``expected_version``.
+
+        Raises:
+            StaleExecutionError: If the stored version has moved on.
+            IllegalTransitionError: If the move is not legal from the step's
+                current status.
+            PlanningError: If the execution or step does not exist.
+        """
+        ...
+
+    async def get_execution(self, execution_id: str) -> ExecutionState | None:
+        """Return the execution with ``execution_id``, or ``None`` if absent."""
+        ...
+
+    async def active_executions(self) -> list[ExecutionState]:
+        """Return every execution with a non-terminal step.
+
+        This is what makes resumption possible: the query a restarting system
+        issues to find work left in flight.
+        """
+        ...
+
+    async def export(self) -> PlanExport:
+        """Return a portable snapshot of all planning state (ADR-0004 §6)."""
+        ...
+
+    async def delete_goal(self, goal_id: str) -> GoalDeletion:
+        """Delete a goal, cascading to its plans and their execution state.
+
+        Refused while any of the goal's executions is still active: erasing an
+        in-flight execution would destroy the record its executor is about to
+        commit against. The caller cancels first, then retries.
+
+        Returns:
+            A :class:`~ai_assistant.core.types.GoalDeletion` reporting what was
+            removed, or — when refused — which executions blocked it.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Delete every record in this store, returning the number removed.
+
+        Bound by the same in-flight rule as :meth:`delete_goal`: a bulk erase is
+        not a licence to orphan a side effect a goal-scoped one would refuse to.
+
+        Raises:
+            ActiveExecutionError: If any execution is still active.
+        """
         ...
