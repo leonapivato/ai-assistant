@@ -112,17 +112,36 @@ functionality-breaking — the full gate still catches everything — but it mov
 feedback from seconds to a CI round-trip, and it undercuts the claim in
 `CLAUDE.md` that "`pre-commit` runs the fast subset on commit".
 
-**Direction:** pass both hook types explicitly, in `justfile` and
-`CONTRIBUTING.md`:
+**Direction: delete the flag — do not add a second one.**
+`.pre-commit-config.yaml` line 4 *already* declares
 
-```bash
-uv run pre-commit install --install-hooks --hook-type pre-commit --hook-type commit-msg
+```yaml
+default_install_hook_types: [pre-commit, commit-msg]
 ```
 
+which is exactly right, and the explicit `--hook-type commit-msg` is what
+overrides it. So the config is not missing anything; the install command is
+fighting it. Drop the flag:
+
+```bash
+uv run pre-commit install --install-hooks
+```
+
+Verified: that bare command installs **both** `.git/hooks/pre-commit` and
+`.git/hooks/commit-msg`. Passing both hook types explicitly instead would also
+work, but it re-states in two more places what the config already says and
+leaves the same drift to happen again.
+
+**Four** places carry the broken command and all four need the edit:
+
+- `justfile:52` (`setup`)
+- `CONTRIBUTING.md:12`
+- `CLAUDE.md:81`
+- `.pre-commit-config.yaml:1` — the header comment of the very file whose
+  `default_install_hook_types` the command overrides
+
 Anyone who already ran the old command must re-run it; the missing hook is not
-repaired by `uv sync`. Worth also considering `default_install_hook_types` in
-`.pre-commit-config.yaml`, which makes a bare `pre-commit install` correct and
-removes the chance of the flags drifting out of sync with the config again.
+repaired by `uv sync`.
 
 **Origin:** found during environment setup — `.git/hooks/` contains only
 `commit-msg`, and every commit on `models/error-taxonomy` shows the
