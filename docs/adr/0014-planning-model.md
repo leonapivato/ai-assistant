@@ -380,8 +380,15 @@ class PlanExport(BaseModel):
   it happened. The store cannot prevent that by "quiescing" the execution
   itself, because stopping a live tool call is not something a persistence layer
   can do — only whoever owns the running execution can. So `delete_goal` refuses
-  while any step is non-terminal and names the offending executions in its
-  result. The executor cancels them (driving `PENDING`/`AWAITING_APPROVAL` to
+  while any step is **live** (`RUNNING`) and names the offending executions in
+  its result.
+
+  The predicate is deliberately "live", not "unfinished". Refusing while any
+  step is merely non-terminal would be a trap: `FAILED` (retries exhausted) and
+  `INDETERMINATE` (awaiting resolution) never become terminal on their own, so
+  the goal could never be deleted at all — the erasure right would be
+  permanently voided by a step that failed once. Only a step that may be
+  *acting right now* justifies refusal, which is exactly the hazard above. The executor cancels them (driving `PENDING`/`AWAITING_APPROVAL` to
   `SKIPPED`/`SUPERSEDED`, and a `RUNNING` step to `INDETERMINATE` once it stops
   chasing it), and the caller re-issues the delete, which then succeeds.
 

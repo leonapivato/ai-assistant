@@ -359,9 +359,12 @@ class PlanStore(Protocol):
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal, cascading to its plans and their execution state.
 
-        Refused while any of the goal's executions is still active: erasing an
-        in-flight execution would destroy the record its executor is about to
-        commit against. The caller cancels first, then retries.
+        Refused while any of the goal's executions has a **live** (``RUNNING``)
+        step: erasing one would destroy the record its executor is about to
+        commit against. The caller cancels first, then retries. Deliberately
+        keyed on ``has_live_step`` rather than ``is_active`` — a permanently
+        failed or unresolved step never becomes inactive, so blocking on the
+        wider predicate would make the goal undeletable for good.
 
         Returns:
             A :class:`~ai_assistant.core.types.GoalDeletion` reporting what was
@@ -376,6 +379,6 @@ class PlanStore(Protocol):
         not a licence to orphan a side effect a goal-scoped one would refuse to.
 
         Raises:
-            ActiveExecutionError: If any execution is still active.
+            ActiveExecutionError: If any execution has a live step.
         """
         ...
