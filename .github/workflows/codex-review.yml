@@ -12,6 +12,20 @@ name: codex-review
 #     a review on demand (default adversarial; "/review architecture" for the
 #     architecture lens). This path does not wait on the gate.
 #
+# Three isolated jobs, so untrusted code never shares a job with the write token
+# (ADR-0012 §4 amendment):
+#   - resolve: trusted. Decides eligibility/auth/persona from *base-branch* code;
+#     never checks out the PR head. Read-only token.
+#   - review:  UNTRUSTED. Checks out the PR head and runs Codex without its
+#     sandbox, holding only the spend-capped OpenAI key and a read-only token —
+#     no pull-requests:write. Emits the review text as an artifact. Codex is the
+#     last shell step (followed only by a `uses:` upload), so a cross-step
+#     payload (e.g. BASH_ENV via $GITHUB_ENV) has no tokened bash step to hijack.
+#   - post:    trusted. Takes only the inert review text and posts it with the
+#     write token. Runs no untrusted code and never checks out the PR head;
+#     separate jobs share no filesystem or $GITHUB_ENV, so the diff cannot reach
+#     this job's credential.
+#
 # NOTE: workflow_run/issue_comment workflows only take effect from the DEFAULT
 # branch, so this does nothing until merged to master — and it is inert until a
 # maintainer adds the dedicated, spend-capped OPENAI_API_KEY secret (ADR-0012 §4).
@@ -23,9 +37,9 @@ on:
   issue_comment:
     types: [created]
 
-permissions:
-  contents: read
-  pull-requests: write # post the review comment
+# No workflow-wide permissions: each job takes the least privilege it needs. The
+# write token lives only in `post`, which runs no untrusted code.
+permissions: {}
 
 # Supersede an in-flight auto-review when a newer commit lands on the same branch
 # (a new gate run → a new workflow_run). A manual /review is keyed by PR number
@@ -36,10 +50,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  review:
+  # Trusted decision job. Runs only base-branch code (never the PR head), so the
+  # token here is never exposed to an untrusted diff. Reads only; fails closed.
+  resolve:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     # Cheap event-shape gate; deeper eligibility (draft / auth / SHA match) is
-    # resolved in the first step, which decides run=true|false.
+    # resolved by the helper below, which decides run=true|false.
     if: >
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.event == 'pull_request' &&
@@ -47,19 +66,18 @@ jobs:
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != '' &&
        startsWith(github.event.comment.body, '/review'))
+    outputs:
+      run: ${{ steps.ctx.outputs.run }}
+      num: ${{ steps.ctx.outputs.num }}
+      sha: ${{ steps.ctx.outputs.sha }}
+      persona: ${{ steps.ctx.outputs.persona }}
     steps:
-      # Trusted base-branch code (default ref for workflow_run/issue_comment),
-      # so the decision — and its auth/fork gates — runs from reviewed code, not
-      # from the PR head. The reviewed SHA is checked out later, after the helper
-      # authorizes it.
+      # Trusted base-branch code (default ref for workflow_run/issue_comment), so
+      # the decision — and its auth/fork gates — runs from reviewed code, not the
+      # PR head. persist-credentials:false keeps the token out of .git/config.
       - name: Check out the trusted base
         uses: actions/checkout@v4
         with:
-          # Leave no git credential in .git/config. The reviewed commit is checked
-          # out over this workspace and Codex runs there without its sandbox in CI
-          # (§4 amendment), so a persisted GITHUB_TOKEN would be readable by an
-          # injected diff and carries pull-requests:write. gh uses GH_TOKEN from the
-          # step env instead; the repo is public, so fetches need no credential.
           persist-credentials: false
 
       - name: Resolve review context
@@ -84,7 +102,7 @@ jobs:
           set -euo pipefail
           pr_json='{}' perm=none
           # No key -> CI review is inert (ADR-0012 §4): the helper skips, so the
-          # install/run/post steps below never execute — no failed, comment-less run.
+          # review/post jobs below never run — no failed, comment-less run.
           has_key=false
           [[ -n "${OPENAI_API_KEY:-}" ]] && has_key=true
           # isCrossRepository lets the helper reject a fork head before checkout;
@@ -105,26 +123,34 @@ jobs:
           PR_JSON="$pr_json" COMMENT_PERM="$perm" HAS_KEY="$has_key" \
             python3 scripts/codex_review_decision.py >>"$GITHUB_OUTPUT"
 
+  # UNTRUSTED job. Checks out the PR head and runs Codex without its sandbox. It
+  # holds only the spend-capped OpenAI key and a read-only token — never
+  # pull-requests:write — so a prompt injection here has no privileged credential
+  # to reach. The review text leaves as an artifact; nothing else crosses.
+  review:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
       - name: Check out the reviewed commit
-        if: steps.ctx.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.ctx.outputs.sha }}
+          ref: ${{ needs.resolve.outputs.sha }}
           fetch-depth: 0 # need history to diff against origin/master
-          persist-credentials: false # no job token in .git/config for the bypassed-sandbox review to read
+          persist-credentials: false # no token in .git/config for the unsandboxed review to read
 
       - name: Install the Codex CLI
-        if: steps.ctx.outputs.run == 'true'
         # Pinned for reproducibility — bump deliberately after testing a new
         # version, not implicitly on every run.
         run: npm install -g @openai/codex@0.144.5
 
       - name: Run the Codex review
-        if: steps.ctx.outputs.run == 'true'
         env:
           # A dedicated, spend-capped review key (ADR-0012 §4), not a primary key.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          PERSONA: ${{ steps.ctx.outputs.persona }}
+          PERSONA: ${{ needs.resolve.outputs.persona }}
         run: |
           set -euo pipefail
           # codex exec does not read OPENAI_API_KEY directly; authenticate first
@@ -134,14 +160,37 @@ jobs:
           # stdout is the review body; progress goes to stderr.
           scripts/codex-review.sh "$PERSONA" origin/master >review.out
 
+      # A `uses:` step, not a shell step — nothing runs as bash after the
+      # untrusted Codex step, so a BASH_ENV/$GITHUB_ENV payload finds no target.
+      - name: Upload the review text
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-review-out
+          path: review.out
+          retention-days: 1
+
+  # Trusted job. Takes only the inert review text and posts it with the write
+  # token. No untrusted code, no PR-head checkout — separate job, so the diff
+  # cannot poison its environment or filesystem.
+  post:
+    needs: [resolve, review]
+    if: ${{ needs.resolve.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # post the review comment
+    steps:
+      - name: Download the review text
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-review-out
+
       - name: Post the review as a PR comment
-        if: steps.ctx.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          NUM: ${{ steps.ctx.outputs.num }}
-          SHA: ${{ steps.ctx.outputs.sha }}
-          PERSONA: ${{ steps.ctx.outputs.persona }}
+          NUM: ${{ needs.resolve.outputs.num }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          PERSONA: ${{ needs.resolve.outputs.persona }}
         run: |
           set -euo pipefail
           # GitHub rejects a comment body over 65536 chars; keep well under and

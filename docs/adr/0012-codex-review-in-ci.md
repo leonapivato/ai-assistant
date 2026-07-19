@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-07-18
-- Amended: 2026-07-18 (§4 — CI cannot run Codex's own sandbox; see the amendment)
+- Amended: 2026-07-18 (§4 — CI sandbox posture; write-token isolation via
+  three-job separation; see the amendment)
 
 ## Context
 
@@ -164,16 +165,25 @@ exactly that). `scripts/codex-review.sh` selects this only when
   dedicated, spend-capped, and rotatable; the runner is ephemeral; and both
   review paths are gated to write-access actors we already trust. A leak still
   costs a capped key we rotate in minutes, not user data or a primary credential.
-- *The job's GitHub token is kept out of the review's reach.* The OpenAI key is
-  not the only credential present: `actions/checkout` persists the job
-  `GITHUB_TOKEN` (scope `pull-requests: write`) into `.git/config` by default,
-  where the bypassed-sandbox reviewer could read and abuse or exfiltrate it. We
-  set **`persist-credentials: false`** on both checkouts, so no git credential is
-  left in the workspace the reviewer runs in. `gh` uses the token from the step
-  *environment* (never in scope during the Codex run), and the repo is public so
-  history fetches need no credential. The token is also job-scoped and expires
-  with the run. If the repo ever goes private, restore credentials for the fetch
-  by other means — not by re-persisting them into the reviewed workspace.
+- *The write token is isolated from all untrusted code — by job separation, not
+  step ordering.* The OpenAI key is not the only credential in play: the job
+  `GITHUB_TOKEN` carries `pull-requests: write`. It is not enough to keep that
+  token out of the Codex *step*, because the unsandboxed reviewer can plant state
+  that runs in a *later* step of the same job — e.g. append `BASH_ENV=<payload>`
+  to `$GITHUB_ENV`, which a subsequent non-interactive `bash` step (one that does
+  hold the token) then sources. So the workflow runs in **three isolated jobs**:
+  **resolve** (trusted — decides eligibility from base-branch code, never checks
+  out the PR head), **review** (untrusted — checks out the PR head and runs Codex
+  unsandboxed, with only the spend-capped OpenAI key and a read-only token, and
+  Codex as its last shell step), and **post** (trusted — takes only the inert
+  review text as an artifact and posts it with the write token, running no
+  untrusted code and never checking out the PR head). Separate jobs share no
+  filesystem, `$GITHUB_ENV`, or `$GITHUB_PATH`, so nothing the diff can influence
+  ever executes in a step that holds the write token. `persist-credentials: false`
+  on every checkout keeps the token out of `.git/config` as a second layer. (The
+  repo is public, so history fetches in `review` need no credential; if it ever
+  goes private, supply the fetch credential inside `review` without granting that
+  job the write scope.)
 - *Alternatives rejected.* Making bubblewrap's namespace work on the runner is
   fragile — pinned to the runner image's kernel/AppArmor and to Codex's sandbox
   internals (both change without notice), and against Codex's documented CI
