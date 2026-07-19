@@ -119,11 +119,7 @@ class _Case:
     confidence: float
     sensitivity: DataTier
     conflict_source: MemorySource | None
-
-    @property
-    def conflicts(self) -> bool:
-        """Whether this case supplies a conflicting record at all."""
-        return self.conflict_source is not None
+    """The provenance of the conflicting record, or ``None`` for no conflict."""
 
     def __str__(self) -> str:
         conflict = "clean" if self.conflict_source is None else f"vs-{self.conflict_source}"
@@ -169,6 +165,26 @@ def _proposal(
     )
 
 
+def _inputs_for(case: _Case) -> tuple[MemoryUpdateProposal, list[MemoryRecord]]:
+    """Build the ``(proposal, conflicts)`` pair one matrix case describes."""
+    conflicts = (
+        [_record("existing", source=case.conflict_source, record_kind=case.record_kind)]
+        if case.conflict_source is not None
+        else []
+    )
+    proposal = _proposal(
+        _record(
+            "new",
+            source=case.source,
+            confidence=case.confidence,
+            record_kind=case.record_kind,
+        ),
+        sensitivity=case.sensitivity,
+        conflicts=conflicts,
+    )
+    return proposal, conflicts
+
+
 class MemoryPolicyContract:
     """The behavioural contract every ``MemoryPolicy`` must satisfy."""
 
@@ -181,34 +197,39 @@ class MemoryPolicyContract:
         assert isinstance(policy, MemoryPolicy)
 
     @pytest.mark.parametrize("case", _TOTALITY_CASES, ids=str)
-    async def test_decide_rules_on_every_proposal(self, policy: MemoryPolicy, case: _Case) -> None:
-        # A policy is total over well-formed input: every proposal gets a ruling,
-        # so the write path can never stall on an unhandled combination. The
-        # sweep spans every axis a caller can vary — record variant, source,
-        # confidence, tier, and whether anything conflicts.
-        conflicts = (
-            [_record("existing", source=case.conflict_source, record_kind=case.record_kind)]
-            if case.conflict_source is not None
-            else []
-        )
-        proposal = _proposal(
-            _record(
-                "new",
-                source=case.source,
-                confidence=case.confidence,
-                record_kind=case.record_kind,
-            ),
-            sensitivity=case.sensitivity,
-            conflicts=conflicts,
-        )
+    async def test_contract_holds_for_every_proposal(
+        self, policy: MemoryPolicy, case: _Case
+    ) -> None:
+        """Check every universal obligation against one point of the input space.
 
+        The obligations are asserted together, over one matrix, rather than each
+        against its own small set of inputs. Splitting them is how a policy slips
+        through the gaps between them: deferring a secret on the first call and
+        committing it on the retry satisfies a one-call secret check *and* a
+        determinism check that never uses a secret, while leaking Tier-0 data.
+        """
+        proposal, conflicts = _inputs_for(case)
+
+        # Called twice: determinism is only observable across repeated calls, and
+        # every other obligation below then holds for the retry as well as the
+        # first attempt.
         decision = await policy.decide(proposal, conflicts=conflicts)
+        again = await policy.decide(proposal, conflicts=conflicts)
 
+        # Total: every proposal earns a ruling, so the write path can never stall
+        # on an unhandled combination.
         assert isinstance(decision, MemoryDecision)
-        # The merge target, which the validator cannot check, holds for every
-        # input shape — not just the common one.
+        # Deterministic (the `MemoryPolicy` docstring). The whole decision, not
+        # just its kind: an alternating ttl changes when the record expires.
+        assert decision == again
+        # The merge target, which the model's validator cannot check.
         if decision.kind is MemoryDecisionKind.MERGE:
             assert decision.merge_into in {c.id for c in conflicts}
+        # ADR-0004 §3: Tier 0 data belongs in the OS keyring, never the memory
+        # store — whatever the policy's other rules, however trusted the source,
+        # and on the retry as much as the first call.
+        if case.sensitivity is DataTier.SECRET:
+            assert decision.kind not in _COMMITTING
 
     async def test_merge_targets_one_of_the_supplied_conflicts(self, policy: MemoryPolicy) -> None:
         # The sweep above only ever supplies one conflict. This is the case it
@@ -227,42 +248,3 @@ class MemoryPolicyContract:
         decision = await policy.decide(_proposal(), conflicts=[])
 
         assert decision.kind is not MemoryDecisionKind.MERGE
-
-    @pytest.mark.parametrize("source", list(MemorySource))
-    @pytest.mark.parametrize("with_conflicts", [False, True])
-    async def test_secret_tier_is_never_committed(
-        self, policy: MemoryPolicy, source: MemorySource, *, with_conflicts: bool
-    ) -> None:
-        # ADR-0004 §3: Tier 0 data belongs in the OS keyring, never the memory
-        # store. No policy may route a secret-tier proposal into storage,
-        # whatever its other rules and however trusted the source — and a policy
-        # that defers only when there is nothing to merge into would still leak
-        # the secret down its merge path, so both cases are swept.
-        conflicts = [_record("existing")] if with_conflicts else []
-        proposal = _proposal(
-            _record("secret", source=source), sensitivity=DataTier.SECRET, conflicts=conflicts
-        )
-
-        decision = await policy.decide(proposal, conflicts=conflicts)
-
-        assert decision.kind not in _COMMITTING
-
-    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
-    @pytest.mark.parametrize("with_conflicts", [False, True])
-    async def test_decide_is_deterministic(
-        self, policy: MemoryPolicy, record_kind: str, *, with_conflicts: bool
-    ) -> None:
-        # The Protocol docstring makes determinism the point of the "dispose"
-        # half: the same proposal must not be accepted once and deferred the
-        # next time, or the write path stops being reviewable. Both branches are
-        # swept: the conflict-free path is a different branch in every policy
-        # written so far, and equally bound by this.
-        conflicts = [_record("existing", record_kind=record_kind)] if with_conflicts else []
-        proposal = _proposal(_record("new", record_kind=record_kind), conflicts=conflicts)
-
-        first = await policy.decide(proposal, conflicts=conflicts)
-        second = await policy.decide(proposal, conflicts=conflicts)
-
-        # The whole decision, not just its kind: an alternating ttl changes when
-        # the record expires while leaving the kind identical.
-        assert first == second
