@@ -155,11 +155,21 @@ while IFS= read -r branch; do
         verdict="PRUNE(${prune_state,,})"
         printf '%-30s %-14s %s\n' "$branch" "$verdict" "$path"
         if (( force )); then
+            # Marker deleted FIRST, deliberately. If this process is killed
+            # partway through, every remaining ordering is a *safe* leak — a
+            # leftover branch and/or worktree this tooling will no longer
+            # touch (no marker, so both claim's idempotent path and prune
+            # itself skip it) — never a *dangerous* one. Deleting the branch
+            # before the marker would risk the opposite: kill the process
+            # between the two, and a manually recreated branch of the same
+            # name later would inherit the stale marker and be silently
+            # treated as tool-owned, with no relationship to the PR that
+            # marker was originally about (PR #17 review finding).
+            git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}"
             if [[ -n "${wt_for_branch[$branch]:-}" ]]; then
                 git -C "$main_root" worktree remove "${wt_for_branch[$branch]}"
             fi
             git -C "$main_root" branch -D "$branch"
-            git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}"
             echo "  removed." >&2
         fi
     else

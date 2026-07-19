@@ -170,7 +170,7 @@ def _stub_gh(tmp_path: Path) -> Path:
     either call.
     """
     stub_bin = tmp_path / "fake-gh-bin"
-    stub_bin.mkdir()
+    stub_bin.mkdir(exist_ok=True)  # a test may call this more than once
     gh_stub = stub_bin / "gh"
     gh_stub.write_text(
         """#!/usr/bin/env bash
@@ -259,6 +259,49 @@ def test_prune_removes_a_merged_branch_whose_head_matches_the_pr(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     assert "PRUNE(merged)" in result.stdout
     assert not ws.is_dir()
+
+
+def test_prune_leaves_no_marker_that_could_wrongly_claim_a_future_branch(tmp_path: Path) -> None:
+    """A successful forced prune must remove the marker along with the branch.
+
+    If it didn't, a later, unrelated `git branch` of the same name (never
+    claimed by this tooling) would inherit the stale marker and be silently
+    treated as tool-owned by prune-workspaces.sh's next run — the failure
+    mode the marker-before-branch deletion order exists to avoid, even under
+    interruption (PR #17 review finding).
+    """
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(merged)" in result.stdout
+
+    assert _GIT is not None
+    marker = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [
+            _GIT,
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/workspace-claimed/area/a",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert marker.returncode != 0  # marker genuinely gone, not just the branch
+
+    # A later, unrelated branch reusing the name must not inherit the marker.
+    _git(repo, "branch", "area/a")
+    reused_sha = _head_sha(repo)
+    result2 = _run_with_fake_gh(repo, responses=_pr_line("MERGED", reused_sha), force=True)
+
+    assert result2.returncode == 0, result2.stderr
+    assert "area/a" not in result2.stdout  # never even listed — no marker, not ours
 
 
 def test_prune_dry_run_reports_merged_without_removing(tmp_path: Path) -> None:
