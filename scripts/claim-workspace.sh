@@ -82,18 +82,26 @@ create_worktree() {
     # (nested, so distinct branches never collide on one directory), rolling back
     # on any failure.
     local wt="${worktrees_root}/${branch}"
-    mkdir -p "$(dirname "$wt")"
-    # Branch from $base (origin/master when available), never the main checkout's
-    # current HEAD — which stays on master, but this also keeps a second worktree
-    # from ever branching off a sibling worktree's HEAD. Trap set immediately,
-    # and on INT/TERM too, so an interrupt rolls back the worktree and its
-    # branch. `git worktree add` for a fresh branch name is itself safe under
-    # concurrency (git serialises its own worktree-administration writes), so
-    # many agents can call this at once for distinct branches with no lock here.
-    git -C "$main_root" worktree add -q "$wt" -b "$branch" "$base"
+    # Trap installed BEFORE anything is created, not after `git worktree add`
+    # succeeds — every command in it already no-ops safely (`2>/dev/null ||
+    # true`) against resources that don't exist yet, so there is no cost to
+    # arming it early, only benefit: a SIGINT/SIGTERM landing in the gap
+    # between worktree creation and installing the trap would otherwise abort
+    # with no rollback at all, leaving an orphaned branch/worktree despite the
+    # header's "a failed claim never leaves debris" promise (PR #17 review
+    # finding). ERR too, so a synchronous failure anywhere below is covered
+    # the same way.
     trap 'git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
           git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
           git -C "$main_root" branch -D "$branch" 2>/dev/null || true' ERR INT TERM
+    mkdir -p "$(dirname "$wt")"
+    # Branch from $base (origin/master when available), never the main checkout's
+    # current HEAD — which stays on master, but this also keeps a second worktree
+    # from ever branching off a sibling worktree's HEAD. `git worktree add` for a
+    # fresh branch name is itself safe under concurrency (git serialises its own
+    # worktree-administration writes), so many agents can call this at once for
+    # distinct branches with no lock here.
+    git -C "$main_root" worktree add -q "$wt" -b "$branch" "$base"
     # Tag the branch as ours, in its own ref (never pushed — no `push` default
     # refspec covers refs/workspace-claimed/*, and it is not under
     # refs/heads/, so nothing here is a checkout target). This is what lets
@@ -147,11 +155,15 @@ if [[ "$git_dir" != "$common_dir" ]]; then
         # so the rollback only triggers for a marker this call itself set.
         was_already_tagged="$(git -C "$main_root" rev-parse --verify --quiet \
             "refs/workspace-claimed/${branch}" 2>/dev/null || true)"
-        git -C "$main_root" update-ref "refs/workspace-claimed/${branch}" "refs/heads/${branch}"
+        # Trap installed BEFORE update-ref, not after — same reasoning as
+        # create_worktree's trap: a signal landing in the gap between setting
+        # the marker and arming its rollback would otherwise leave it
+        # untracked by the rollback entirely.
         if [[ -z "$was_already_tagged" ]]; then
             trap 'git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true' \
                 ERR INT TERM
         fi
+        git -C "$main_root" update-ref "refs/workspace-claimed/${branch}" "refs/heads/${branch}"
         bootstrap "$toplevel"
         trap - ERR INT TERM
         echo "Already in the worktree for '${branch}'; bootstrapped." >&2
