@@ -113,10 +113,23 @@ if (( base_given )); then
     # pseudoref and remote-HEAD tiers; confirmed a pseudoref collision is
     # constructible — e.g. `git reset --hard` creates a real ORIG_HEAD, and a
     # branch or tag can then also be named ORIG_HEAD pointing elsewhere).
-    # `refs/rewritten/<any>` (used mid interactive-rebase) is the one
-    # gitrevisions(7) tier deliberately left uncovered: it exists only for
-    # the duration of a rebase this script never runs, so a name colliding
-    # with it can't arise from anything this tooling does.
+    # Two tiers are deliberately left uncovered, both waived rather than
+    # chased further (CONTRIBUTING "Review (pre-merge)": resolve or waive
+    # with a written rationale):
+    # - `refs/rewritten/<any>`, used only mid interactive-rebase — this
+    #   script never runs one, so nothing it does can construct a collision
+    #   with it.
+    # - An abbreviated object ID colliding with a same-named ref (e.g. a
+    #   branch literally named "deadbeef" that also happens to prefix-match a
+    #   real commit) — confirmed constructible (PR #23 review finding), but
+    #   unreachable through this tooling's own branches: require_new_branch
+    #   enforces the <area>/<slug> shape, which can never be a bare hex
+    #   string. The residual risk needs a raw abbreviated SHA passed as the
+    #   base *and* an unrelated ref (created outside this tooling entirely)
+    #   coincidentally colliding with it — fully closing it means
+    #   replicating git's own object-prefix disambiguation
+    #   (`--disambiguate=`), a meaningfully bigger undertaking for a risk this
+    #   narrow.
     pseudoref_match=""
     case "$base_override" in
         HEAD | FETCH_HEAD | ORIG_HEAD | MERGE_HEAD | CHERRY_PICK_HEAD | BISECT_HEAD | REVERT_HEAD | AUTO_MERGE)
