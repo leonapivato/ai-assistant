@@ -1,6 +1,10 @@
 # Task runner for common workflows. Install `just`: https://github.com/casey/just
 # Run `just` with no arguments to list recipes.
 
+# Pass recipe arguments as "$1", "$2", ... so they are shell-quoted rather than
+# interpolated as bare text (which would let a crafted argument run commands).
+set positional-arguments
+
 # Show available recipes
 default:
     @just --list
@@ -50,11 +54,11 @@ review-codex persona base="master":
 # a linked worktree. Prints WORKSPACE=<path> — work only there. See CONTRIBUTING
 # "Coordinating parallel work". Example: just claim-workspace memory/add-cache
 claim-workspace branch:
-    scripts/claim-workspace.sh {{branch}}
+    scripts/claim-workspace.sh "$1"
 
 # Release a claimed workspace once its PR merges (FORCE=1 to discard changes).
 release-workspace branch:
-    scripts/release-workspace.sh {{branch}}
+    scripts/release-workspace.sh "$1"
 
 # First-time developer setup
 setup:

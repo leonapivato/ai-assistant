@@ -76,12 +76,16 @@ def _run(
     )
 
 
-def _workspace(result: subprocess.CompletedProcess[str]) -> str:
-    for line in result.stdout.splitlines():
+def _workspace_from(stdout: str) -> str:
+    for line in stdout.splitlines():
         if line.startswith("WORKSPACE="):
             return line.removeprefix("WORKSPACE=")
-    msg = f"no WORKSPACE= line in output:\n{result.stdout}\n{result.stderr}"
+    msg = f"no WORKSPACE= line in output:\n{stdout}"
     raise AssertionError(msg)
+
+
+def _workspace(result: subprocess.CompletedProcess[str]) -> str:
+    return _workspace_from(result.stdout)
 
 
 def _lock(repo: Path) -> Path:
@@ -197,6 +201,44 @@ def test_bootstrap_failure_rolls_back_a_worktree(tmp_path: Path) -> None:
         text=True,
     ).stdout
     assert "area/b" not in worktrees  # no dangling worktree metadata
+
+
+def test_concurrent_claims_give_main_to_exactly_one(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    assert _BASH is not None
+    env = os.environ.copy()
+    env["WORKSPACE_BOOTSTRAP"] = "true"
+
+    procs = [
+        subprocess.Popen(  # noqa: S603  # resolved bash, in-repo script, test env
+            [_BASH, str(_CLAIM), f"area/{name}"],
+            cwd=str(repo),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for name in ("one", "two")
+    ]
+    outs = [proc.communicate() for proc in procs]
+
+    for proc in procs:
+        assert proc.returncode == 0
+    workspaces = [_workspace_from(stdout) for stdout, _ in outs]
+    # The atomic lock guarantees exactly one claim lands in the main checkout.
+    assert sum(w == str(repo) for w in workspaces) == 1
+
+
+def test_release_clears_an_orphaned_lock(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    orphan = _lock(repo)
+    orphan.mkdir()  # lock dir with no branch metadata — a hard-killed claim
+
+    result = _run(_RELEASE, repo, "area/whatever")
+
+    assert result.returncode == 0, result.stderr
+    assert not orphan.exists()
+    assert "orphaned" in result.stderr.lower()
 
 
 def test_forced_main_release_removes_untracked_nested_repo(tmp_path: Path) -> None:
