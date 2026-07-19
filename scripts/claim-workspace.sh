@@ -104,13 +104,22 @@ create_worktree() {
     # installing the trap would otherwise abort with no rollback at all (an
     # earlier PR #17 review finding). ERR too, so a synchronous failure
     # anywhere below is covered the same way.
+    # The trap ends with an explicit `exit 1`, not just cleanup. For ERR,
+    # `set -e` would exit afterward anyway — but INT/TERM don't work that
+    # way: bash runs the trap and then resumes execution right where the
+    # signal landed, unless the handler itself exits. Without this, a signal
+    # arriving after `bootstrap` succeeds but before `trap - ERR INT TERM`
+    # clears the trap would still fire the rollback (deleting the worktree,
+    # marker, and branch), then fall through to printing `WORKSPACE=<the now
+    # -deleted path>` and exiting 0 — reporting success for a claim that had
+    # just been torn down (a PR #17 review finding).
     local created=0
     trap '(( created )) && {
               git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
               git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
               git -C "$main_root" branch -D "$branch" 2>/dev/null || true
           }
-          true' ERR INT TERM
+          exit 1' ERR INT TERM
     mkdir -p "$(dirname "$wt")"
     # Branch from $base (origin/master when available), never the main checkout's
     # current HEAD — which stays on master, but this also keeps a second worktree
@@ -149,6 +158,20 @@ require_new_branch() {
         echo "branch '${branch}' already exists; pick a new name (a task gets a fresh branch)" >&2
         exit 2
     fi
+    # A stale marker can only exist here if a branch of this name was deleted
+    # outside this tooling (release-workspace.sh keeps the branch; a
+    # successful prune-workspaces.sh deletes the marker before the branch —
+    # see its header — so neither leaves one behind on its own; only a raw
+    # `git branch -D` bypassing both does). Drop it before create_worktree
+    # sets a fresh one for the branch actually being created here, so it can
+    # never attach itself to unrelated new work by name alone (PR #17
+    # review). This does not close the case where the *recreation* also
+    # bypasses this tooling — a branch conjured by raw git commands to
+    # deliberately match an old marker is outside what any check here can
+    # distinguish from a real claim; treat manual branch deletion as always
+    # pairable with `git update-ref -d refs/workspace-claimed/<branch>`, or
+    # simply prefer release-workspace.sh / prune-workspaces.sh over raw git.
+    git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
 }
 
 # Case 1: already inside a linked worktree.
@@ -178,10 +201,15 @@ if [[ "$git_dir" != "$common_dir" ]]; then
         # Trap installed BEFORE update-ref, not after — same reasoning as
         # create_worktree's trap: a signal landing in the gap between setting
         # the marker and arming its rollback would otherwise leave it
-        # untracked by the rollback entirely.
+        # untracked by the rollback entirely. Ends with an explicit `exit 1`
+        # for the same reason as create_worktree's trap: INT/TERM don't exit
+        # on their own after a trap runs, so without it a signal landing
+        # after bootstrap succeeds but before `trap - ERR INT TERM` clears
+        # this would roll the marker back and then still fall through to
+        # printing WORKSPACE= and exiting 0 (a PR #17 review finding).
         if [[ -z "$was_already_tagged" ]]; then
-            trap 'git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true' \
-                ERR INT TERM
+            trap 'git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
+                  exit 1' ERR INT TERM
         fi
         git -C "$main_root" update-ref "refs/workspace-claimed/${branch}" "refs/heads/${branch}"
         bootstrap "$toplevel"
