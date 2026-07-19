@@ -7,7 +7,7 @@
 
 The request pipeline (`CLAUDE.md`) runs `intent → context assembly → memory
 retrieval → planning → …`. The `context` subsystem owns the second step:
-assembling the situational "right now" that, per [VISION](../VISION.md) §4,
+assembling the situational "right now" that, per [VISION](../../VISION.md) §4,
 governs *how much* to present, *when* to interrupt, *which* tools fit, and
 **whether to act at all**. It is the first subsystem that will feed the
 first end-to-end loop (retrieve context → respond → learn).

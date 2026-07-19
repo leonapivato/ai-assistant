@@ -8,7 +8,7 @@
 The `models` layer is the seam that makes the assistant model-agnostic
 (ADR-0002), but it is the thinnest subsystem relative to its ambition: one
 Protocol method, `ModelProvider.complete`, and one adapter,
-`PydanticAIProvider`. Everything [VISION](../VISION.md) §6 promises — routing on
+`PydanticAIProvider`. Everything [VISION](../../VISION.md) §6 promises — routing on
 "capability, speed, cost, privacy, and reliability" — is still unbuilt, and
 VISION §7 names **retries** explicitly among the things deterministic services
 must own rather than leave to the model.
