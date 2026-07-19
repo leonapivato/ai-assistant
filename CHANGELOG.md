@@ -24,7 +24,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   untouched — so its identity, type and message survive routing — while every
   candidate and its failure *class* is logged — including one a later route
   papers over, so a silently degrading primary is visible before the fallback
-  also fails. Messages are deliberately kept
+  also fails. Diagnostics name a route by *position* (`route[1]`) and a failure
+  by the nearest class in this project's own taxonomy, so neither a caller's
+  string nor a provider's class name reaches a Tier 2 log; and they are emitted
+  best-effort, because a broken log sink was able to abort the fallback
+  entirely. Messages are deliberately kept
   out of the log: provider errors routinely quote the offending request, which
   would put Tier 1 data in a Tier 2 log (ADR-0004 §5). The key-based redaction
   net cannot catch that anyway — an `error` key looks innocuous — so the call

@@ -74,8 +74,16 @@ that only knows about `retryable` keeps working.
 ### 2. `RoutingProvider` — static preference order
 
 `RoutingProvider` holds an ordered list of `Route`s (a provider, an optional
-per-route `"provider:model"` override, and a diagnostic label) and tries them in
-order. A routable failure advances to the next candidate; a non-routable one
+per-route `"provider:model"` override) and tries them in order.
+
+**Routes are identified in diagnostics by position, never by a name.** Three
+versions of this were tried: the model id (which put a route's `model` value in
+a Tier 2 log), then a caller-supplied label constrained to a conservative
+charset (which still admits `sk-live-abc` and tenant names — token-shaped data
+and token-shaped names are the same string). Any rule that admits *some*
+caller-provided text into a log must decide which text, and each such rule met a
+counterexample. `route[1]` carries no data by construction. Operators map
+positions onto the order they configured, which is the part they control. A routable failure advances to the next candidate; a non-routable one
 propagates immediately.
 
 Preference order is **static**: the first healthy route always wins. There is no

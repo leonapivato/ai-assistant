@@ -26,9 +26,8 @@ the pipeline chooses deliberately.
 from __future__ import annotations
 
 import contextlib
-import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -41,10 +40,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import Message
 
 _log = structlog.get_logger(__name__)
-
-# Labels reach the log under a key the ADR-0004 §5 redactor treats as harmless,
-# so their shape is checked at construction instead. See Route.__post_init__.
-_SAFE_LABEL: Final = re.compile(r"[A-Za-z0-9._:-]+")
 
 
 def _classify(exc: ModelError) -> str:
@@ -82,6 +77,13 @@ def _warn(event: str, **fields: object) -> None:
     ``Exception`` and not ``BaseException``: ``CancelledError`` is a
     ``BaseException``, so a caller cancelling mid-log still propagates.
 
+    ``structlog.DropEvent`` is also a ``BaseException`` and so is *not* caught
+    here — deliberately, and it does not need to be: structlog raises it as its
+    own control-flow signal for "drop this event" and handles it internally, so
+    it never reaches this frame. Checked, because a review argued otherwise and
+    the redaction processor in `core/logging.py` raises exactly that on its
+    fail-closed path. A regression test pins it.
+
     The failure is swallowed rather than reported, which would normally be the
     wrong instinct — but the only channel available to report it is the thing
     that just failed.
@@ -102,69 +104,32 @@ class Route:
             provider, so one underlying provider can appear as several routes
             (a cheap model first, a stronger one behind it). ``None`` uses the
             provider's own default.
-        label: An optional short identifier used in diagnostics, so an
-            exhausted-route failure names its candidates. Constrained to
-            ``[A-Za-z0-9._:-]`` (see :meth:`__post_init__`). Left unset, the
-            route is identified by position — never by its model id, which
-            cannot be vouched for (see :meth:`describe`).
+
+    There is deliberately **no caller-supplied label**. Diagnostics identify a
+    route by its position (see :meth:`describe`), and the reasoning is worth
+    keeping because two weaker versions were tried first:
+
+    1. The route's ``model`` id was used as its diagnostic name. That put
+       ``model="patient-SSN-123-45-6789"`` straight into a Tier 2 log.
+    2. A caller-supplied ``label`` was added and constrained to
+       ``[A-Za-z0-9._:-]``. That rejects interpolated prose, but
+       ``sk-live-abc`` and a tenant name are token-shaped too — the check
+       cannot tell a route name from a credential or a person, because
+       structurally they are the same string.
+
+    Any rule that admits *some* caller-provided text into a log has to decide
+    which text, and there is no test for that which does not eventually get a
+    counterexample. A position carries no data by construction, so the question
+    does not arise. Operators map positions to the configured order, which is
+    the thing they control.
     """
 
     provider: ModelProvider
     model: str | None = None
-    label: str = ""
-
-    def __post_init__(self) -> None:
-        """Validate the label's shape.
-
-        The label is written into logs under an innocuous ``route`` key, where
-        the ADR-0004 §5 redactor — which matches on *key* names — will never
-        look at it. So its safety cannot be delegated: it has to be established
-        here.
-
-        The realistic hazard is not a developer typing a secret, it is
-        interpolation: ``label=f"route for {user_request}"`` is an easy mistake
-        that would put a prompt straight into a Tier 2 log. Requiring a short
-        token — no spaces, no punctuation beyond ``.``, ``_``, ``:`` and ``-``
-        — rejects prose and free text while still allowing the things labels
-        actually are (``primary``, ``eu-west-1``, ``anthropic:claude-haiku-4-5``).
-
-        This is a tripwire, not a guarantee: a label of ``sk-live-abc`` matches
-        the pattern and would still be logged. Nothing can stop a caller that
-        deliberately puts a secret in a diagnostic field; what this stops is the
-        accident.
-
-        Raises:
-            ConfigurationError: If the label contains anything outside
-                ``[A-Za-z0-9._:-]``.
-        """
-        if self.label and not _SAFE_LABEL.fullmatch(self.label):
-            msg = (
-                f"route label must be a short token matching [A-Za-z0-9._:-], got "
-                f"{self.label!r}; labels are written to logs, which are Tier 2 "
-                f"and must not carry user data (ADR-0004 §5)"
-            )
-            raise ConfigurationError(msg)
 
     def describe(self, position: int) -> str:
-        """Return the identifier to use for this route in diagnostics.
-
-        Either the explicit :attr:`label` — which was validated at construction
-        — or a positional ``route[N]``. Nothing else.
-
-        The ``model`` is deliberately *not* used as a fallback any more. It
-        cannot be validated at construction, because it is functional: it is
-        handed to the provider, and legitimate ids contain characters a
-        conservative pattern rejects (``openrouter:meta-llama/llama-3``). And it
-        cannot usefully be filtered at emission either — that was tried, and
-        ``patient-SSN-123-45-6789`` passes exactly the same character check as
-        ``eu-west-1``, because they are structurally identical. A charset test
-        cannot tell a model id from a record id.
-
-        So the default is a position, which carries no data by construction. A
-        caller who wants a readable name sets ``label`` and thereby takes
-        responsibility for it — an explicit opt-in rather than an accident.
-        """
-        return self.label or f"route[{position}]"
+        """Return this route's diagnostic identifier: its 1-based position."""
+        return f"route[{position}]"
 
 
 class RoutingProvider:

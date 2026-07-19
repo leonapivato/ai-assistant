@@ -161,8 +161,8 @@ async def test_routes_are_tried_in_order() -> None:
 
 async def test_exhausting_every_route_reports_all_of_them() -> None:
     routes = [
-        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="primary"),
-        Route(AlwaysFailsProvider(ModelRateLimitError("429")), label="secondary"),
+        Route(AlwaysFailsProvider(ModelUnavailableError("503"))),
+        Route(AlwaysFailsProvider(ModelRateLimitError("429"))),
     ]
 
     with capture_logs() as logs, pytest.raises(ModelError):
@@ -173,8 +173,8 @@ async def test_exhausting_every_route_reports_all_of_them() -> None:
     [event] = [e for e in logs if e["event"] == "all routes failed"]
     assert event["routes"] == 2
     assert event["failures"] == [
-        {"route": "primary", "error": "ModelUnavailableError"},
-        {"route": "secondary", "error": "ModelRateLimitError"},
+        {"route": "route[1]", "error": "ModelUnavailableError"},
+        {"route": "route[2]", "error": "ModelRateLimitError"},
     ]
 
 
@@ -183,8 +183,8 @@ async def test_a_survived_failure_is_still_logged() -> None:
     # succeeds, so nothing surfaces, and a silently degrading primary is exactly
     # what an operator needs to see *before* the fallback also fails.
     routes = [
-        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="primary"),
-        Route(RecordingProvider("backup"), label="secondary"),
+        Route(AlwaysFailsProvider(ModelUnavailableError("503"))),
+        Route(RecordingProvider("backup")),
     ]
 
     with capture_logs() as logs:
@@ -192,15 +192,15 @@ async def test_a_survived_failure_is_still_logged() -> None:
 
     assert reply.content == "backup"
     [event] = [e for e in logs if e["event"] == "route failed; trying the next one"]
-    assert event["route"] == "primary"
+    assert event["route"] == "route[1]"
     assert event["error"] == "ModelUnavailableError"
 
 
 async def test_a_survived_failure_does_not_log_the_message_either() -> None:
     sensitive = "PATIENT SSN 123-45-6789"
     routes = [
-        Route(AlwaysFailsProvider(ModelUnavailableError(sensitive)), label="primary"),
-        Route(RecordingProvider("backup"), label="secondary"),
+        Route(AlwaysFailsProvider(ModelUnavailableError(sensitive))),
+        Route(RecordingProvider("backup")),
     ]
 
     with capture_logs() as logs:
@@ -217,7 +217,7 @@ async def test_exception_messages_never_reach_the_log() -> None:
     # class is logged — fail-closed by construction rather than by redaction,
     # which matters because no redaction processor is configured yet.
     sensitive = "PATIENT SSN 123-45-6789"
-    routes = [Route(AlwaysFailsProvider(ModelUnavailableError(sensitive)), label="primary")]
+    routes = [Route(AlwaysFailsProvider(ModelUnavailableError(sensitive)))]
 
     with capture_logs() as logs, pytest.raises(ModelUnavailableError):
         await RoutingProvider(routes).complete(PROMPT)
@@ -225,7 +225,7 @@ async def test_exception_messages_never_reach_the_log() -> None:
     assert sensitive not in repr(logs)
     # ...while the caller still gets the full message on the exception.
     [event] = [e for e in logs if e["event"] == "all routes failed"]
-    assert event["failures"] == [{"route": "primary", "error": "ModelUnavailableError"}]
+    assert event["failures"] == [{"route": "route[1]", "error": "ModelUnavailableError"}]
 
 
 async def test_exhaustion_reraises_the_last_failure_untouched() -> None:
@@ -282,7 +282,7 @@ async def test_reusing_one_exception_object_does_not_accumulate_state() -> None:
     # AlwaysFailsProvider does — then grew a note per call, and concurrent
     # routers sharing that object would leak each other's route labels into it.
     shared = ModelUnavailableError("503")
-    router = RoutingProvider([Route(AlwaysFailsProvider(shared), label="a")])
+    router = RoutingProvider([Route(AlwaysFailsProvider(shared))])
 
     for _ in range(3):
         with pytest.raises(ModelUnavailableError) as caught:
@@ -446,11 +446,39 @@ async def test_a_broken_logger_does_not_abort_the_fallback() -> None:
     # exists to survive a failing dependency, and the logger is a dependency.
     backup = RecordingProvider("backup")
     routes = [
-        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="primary"),
-        Route(backup, label="secondary"),
+        Route(AlwaysFailsProvider(ModelUnavailableError("503"))),
+        Route(backup),
     ]
 
     structlog.configure(processors=[_exploding_processor])
+    try:
+        reply = await RoutingProvider(routes).complete(PROMPT)
+    finally:
+        structlog.reset_defaults()
+
+    assert reply.content == "backup"
+    assert backup.calls == 1
+
+
+async def test_a_dropping_processor_does_not_abort_the_fallback() -> None:
+    # A review argued that `structlog.DropEvent` — which is a BaseException, so
+    # `suppress(Exception)` does not catch it — would escape `_warn` and kill
+    # the fallback. It does not: structlog raises DropEvent as its own
+    # control-flow signal for "drop this event" and handles it internally, so it
+    # never reaches the caller's frame.
+    #
+    # Pinned rather than argued, because it is not obvious from the type
+    # hierarchy, and because `core/logging.py`'s redaction processor raises
+    # exactly this on its fail-closed path — so the two components do meet.
+    def dropping(
+        _logger: Any, _name: str, _event: MutableMapping[str, Any]
+    ) -> MutableMapping[str, Any]:
+        raise structlog.DropEvent
+
+    backup = RecordingProvider("backup")
+    routes = [Route(AlwaysFailsProvider(ModelUnavailableError("503"))), Route(backup)]
+
+    structlog.configure(processors=[dropping])
     try:
         reply = await RoutingProvider(routes).complete(PROMPT)
     finally:
@@ -465,8 +493,8 @@ async def test_a_broken_logger_does_not_replace_the_promised_failure() -> None:
     # logging error reached the caller instead of the ModelError this class
     # documents — silently converting a handled failure into an unhandled one.
     routes = [
-        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="a"),
-        Route(AlwaysFailsProvider(ModelRateLimitError("429")), label="b"),
+        Route(AlwaysFailsProvider(ModelUnavailableError("503"))),
+        Route(AlwaysFailsProvider(ModelRateLimitError("429"))),
     ]
 
     structlog.configure(processors=[_exploding_processor])
@@ -477,41 +505,17 @@ async def test_a_broken_logger_does_not_replace_the_promised_failure() -> None:
         structlog.reset_defaults()
 
 
-@pytest.mark.parametrize(
-    "label",
-    ["primary", "eu-west-1", "anthropic:claude-haiku-4-5", "gpt_4.1", "a-b_c.d:e"],
-)
-def test_token_shaped_labels_are_accepted(label: str) -> None:
-    assert Route(RecordingProvider(), label=label).describe(1) == label
-
-
-@pytest.mark.parametrize(
-    "label",
-    [
-        "route for what is Alice's SSN",
-        "patient Alice / sk-live-abc",
-        "primary (eu-west)",
-        "a\nb",
-    ],
-    ids=["interpolated-prose", "slash-and-secret", "parens", "newline"],
-)
-def test_prose_shaped_labels_are_rejected(label: str) -> None:
-    # Regression (CI adversarial review): labels are logged under a `route` key
-    # the redactor treats as innocuous, so nothing downstream would catch a
-    # prompt interpolated into one — `label=f"route for {user_request}"` is the
-    # realistic accident. Rejecting free text is a tripwire, not a guarantee:
-    # a label of "sk-live-abc" is token-shaped and would still be logged.
-    with pytest.raises(ConfigurationError, match="must be a short token"):
-        Route(RecordingProvider(), label=label)
-
-
-def test_a_route_describes_itself_for_diagnostics() -> None:
+def test_a_route_is_identified_by_position_only() -> None:
+    # Regression (CI adversarial review, twice). The diagnostic identifier was
+    # first the model id, then a charset-validated caller label; both leaked,
+    # because `patient-SSN-123-45-6789`, `sk-live-abc` and `eu-west-1` are the
+    # same shape. Any rule admitting *some* caller text has to say which, and
+    # every such rule eventually meets a counterexample. A position carries no
+    # data by construction, so the question does not arise.
     provider = RecordingProvider()
 
-    assert Route(provider, label="primary").describe(1) == "primary"
-    # No label: position, never the model id. See the next test for why.
-    assert Route(provider).describe(2) == "route[2]"
-    assert Route(provider, model="anthropic:claude-haiku-4-5").describe(3) == "route[3]"
+    assert Route(provider).describe(1) == "route[1]"
+    assert Route(provider, model="anthropic:claude-haiku-4-5").describe(2) == "route[2]"
 
 
 async def test_an_unlabelled_route_never_logs_its_model_id() -> None:
@@ -542,14 +546,14 @@ async def test_a_provider_defined_error_class_name_is_not_logged() -> None:
     # value by reporting its nearest known ancestor.
     leaky = type("PATIENT_SSN_123_45_6789", (ModelRateLimitError,), {})
 
-    routes = [Route(AlwaysFailsProvider(leaky("failure")), label="primary")]
+    routes = [Route(AlwaysFailsProvider(leaky("failure")))]
 
     with capture_logs() as logs, pytest.raises(ModelRateLimitError):
         await RoutingProvider(routes).complete(PROMPT)
 
     assert "PATIENT_SSN" not in repr(logs)
     [event] = [e for e in logs if e["event"] == "all routes failed"]
-    assert event["failures"] == [{"route": "primary", "error": "ModelRateLimitError"}]
+    assert event["failures"] == [{"route": "route[1]", "error": "ModelRateLimitError"}]
 
 
 async def test_no_fallback_is_announced_when_there_is_nowhere_to_fall_back_to() -> None:
@@ -557,7 +561,7 @@ async def test_no_fallback_is_announced_when_there_is_nowhere_to_fall_back_to() 
     # the next one" and then immediately "all routes failed". That reads as a
     # fallback that was tried and also failed — a different incident from
     # having nowhere left to go.
-    routes = [Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="only")]
+    routes = [Route(AlwaysFailsProvider(ModelUnavailableError("503")))]
 
     with capture_logs() as logs, pytest.raises(ModelUnavailableError):
         await RoutingProvider(routes).complete(PROMPT)
