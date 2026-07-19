@@ -67,12 +67,29 @@ class FakeContextProvider:
                 a traceback across calls.
 
         Raises:
-            ValueError: If both ``context`` and ``failure`` are given. The two
-                describe incompatible outcomes, and silently letting one win
-                would hide a mis-wired test.
+            ValueError: If both ``context`` and ``failure`` are given (they
+                describe incompatible outcomes, and silently letting one win would
+                hide a mis-wired test), or if ``context.now`` carries a timezone
+                whose offset is indeterminate.
         """
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
+            raise ValueError(msg)
+        if (
+            context is not None
+            and context.now.tzinfo is not None
+            and context.now.utcoffset() is None
+        ):
+            # A *naive* `now` is not this case — revalidation below normalises it to
+            # UTC, as constructing the model would have. This is the narrower one:
+            # `CurrentContext` requires only `tzinfo is not None`, which a custom
+            # tzinfo returning `None` from `utcoffset()` satisfies while still being
+            # indeterminate. Revalidation cannot fix that, so the fake would fail the
+            # tz-aware assertion in its own conformance suite and downstream aware
+            # comparisons would raise. Caught here so the fake cannot be the thing
+            # that breaks the contract; tightening `CurrentContext` itself is a
+            # `core/` change, left as a follow-up rather than widened into this lane.
+            msg = "context.now must have a determinate UTC offset"
             raise ValueError(msg)
         # Snapshotted on ingress as well as egress: the context is fixed *at
         # construction*, so a caller that keeps its reference and mutates it later
