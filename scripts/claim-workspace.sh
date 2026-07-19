@@ -92,7 +92,22 @@ create_worktree() {
     # many agents can call this at once for distinct branches with no lock here.
     git -C "$main_root" worktree add -q "$wt" -b "$branch" "$base"
     trap 'git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
+          git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
           git -C "$main_root" branch -D "$branch" 2>/dev/null || true' ERR INT TERM
+    # Tag the branch as ours, in its own ref (never pushed — no `push` default
+    # refspec covers refs/workspace-claimed/*, and it is not under
+    # refs/heads/, so nothing here is a checkout target). This is what lets
+    # prune-workspaces.sh trust "this branch's PR is done" at all: a branch
+    # created some other way (a plain `git branch`, never claimed here) might
+    # coincidentally share a commit with some old closed PR, and without this
+    # marker prune-workspaces.sh could not tell the two apart. Deliberately
+    # NOT `git config branch.<name>.*`: that writes the single shared
+    # .git/config file, so concurrent claims of distinct branches would
+    # serialise on its lock — exactly the contention the always-worktree
+    # model exists to avoid. A dedicated ref is its own file with its own
+    # lock, the same mechanism that already makes concurrent
+    # `git worktree add -b <branch>` calls for distinct branches safe.
+    git -C "$main_root" update-ref "refs/workspace-claimed/${branch}" "refs/heads/${branch}"
     bootstrap "$wt"
     trap - ERR INT TERM
     echo "WORKSPACE=${wt}"

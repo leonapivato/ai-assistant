@@ -160,9 +160,11 @@ def _stub_gh(tmp_path: Path) -> Path:
 
     Prepend this to PATH (never replace it) so real git/awk/sed etc. keep
     resolving normally through the rest of PATH — only `gh` itself is swapped
-    out. Behaviour is driven by FAKE_GH_STATE / FAKE_GH_HEAD_SHA / FAKE_GH_EXIT
-    env vars read at invocation time, so one script serves every
-    scenario below without needing real `gh` auth or a GitHub remote.
+    out. FAKE_GH_RESPONSES holds zero or more "STATE\\tHEAD_SHA" lines (one
+    per PR matching the queried branch — a branch can have more than one over
+    its lifetime); FAKE_GH_EXIT=1 simulates a `gh` failure. Both are read at
+    invocation time, so one script serves every scenario below without
+    needing real `gh` auth or a GitHub remote.
     """
     stub_bin = tmp_path / "fake-gh-bin"
     stub_bin.mkdir()
@@ -174,7 +176,7 @@ def _stub_gh(tmp_path: Path) -> Path:
         '        echo "simulated gh failure" >&2\n'
         "        exit 1\n"
         "    fi\n"
-        '    printf \'%s\\t%s\\n\' "${FAKE_GH_STATE:-}" "${FAKE_GH_HEAD_SHA:-}"\n'
+        '    [[ -n "${FAKE_GH_RESPONSES:-}" ]] && printf \'%s\\n\' "${FAKE_GH_RESPONSES}"\n'
         "    exit 0\n"
         "fi\n"
         'echo "unsupported fake gh invocation: $*" >&2\n'
@@ -184,19 +186,21 @@ def _stub_gh(tmp_path: Path) -> Path:
     return stub_bin
 
 
+def _pr_line(state: str, head_sha: str = "") -> str:
+    return f"{state}\t{head_sha}"
+
+
 def _run_with_fake_gh(
     repo: Path,
     *,
-    state: str = "",
-    head_sha: str = "",
+    responses: str = "",
     fail: bool = False,
     force: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     stub_bin = _stub_gh(repo.parent)
     env_extra = {
         "PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
-        "FAKE_GH_STATE": state,
-        "FAKE_GH_HEAD_SHA": head_sha,
+        "FAKE_GH_RESPONSES": responses,
         "FAKE_GH_EXIT": "1" if fail else "0",
     }
     if force:
@@ -219,7 +223,7 @@ def test_prune_reports_no_pr_when_gh_finds_no_matching_pr(tmp_path: Path) -> Non
     repo = _init_repo(tmp_path)
     ws = Path(_claim(repo, "area/a"))
 
-    result = _run_with_fake_gh(repo, state="")  # gh succeeds; empty result
+    result = _run_with_fake_gh(repo, responses="")  # gh succeeds; empty result
 
     assert result.returncode == 0, result.stderr
     assert "no-pr" in result.stdout
@@ -231,7 +235,7 @@ def test_prune_removes_a_merged_branch_whose_head_matches_the_pr(tmp_path: Path)
     ws = Path(_claim(repo, "area/a"))
     sha = _head_sha(ws)
 
-    result = _run_with_fake_gh(repo, state="MERGED", head_sha=sha, force=True)
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
 
     assert result.returncode == 0, result.stderr
     assert "PRUNE(merged)" in result.stdout
@@ -243,7 +247,7 @@ def test_prune_dry_run_reports_merged_without_removing(tmp_path: Path) -> None:
     ws = Path(_claim(repo, "area/a"))
     sha = _head_sha(ws)
 
-    result = _run_with_fake_gh(repo, state="MERGED", head_sha=sha)  # no FORCE
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha))  # no FORCE
 
     assert result.returncode == 0, result.stderr
     assert "PRUNE(merged)" in result.stdout
@@ -266,7 +270,7 @@ def test_prune_keeps_a_reused_branch_name_whose_head_has_moved_on(tmp_path: Path
 
     stale_sha = "0" * 40  # the old, merged PR's head — not this worktree's
 
-    result = _run_with_fake_gh(repo, state="MERGED", head_sha=stale_sha, force=True)
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", stale_sha), force=True)
 
     assert result.returncode == 0, result.stderr
     assert "head-changed" in result.stdout
@@ -278,11 +282,59 @@ def test_prune_treats_closed_the_same_as_merged(tmp_path: Path) -> None:
     ws = Path(_claim(repo, "area/a"))
     sha = _head_sha(ws)
 
-    result = _run_with_fake_gh(repo, state="CLOSED", head_sha=sha, force=True)
+    result = _run_with_fake_gh(repo, responses=_pr_line("CLOSED", sha), force=True)
 
     assert result.returncode == 0, result.stderr
     assert "PRUNE(closed)" in result.stdout
     assert not ws.is_dir()
+
+
+def test_prune_keeps_a_branch_when_any_matching_pr_is_open(tmp_path: Path) -> None:
+    """A branch can have more than one PR over its lifetime.
+
+    If an older CLOSED PR happens to match the branch's current head commit
+    but there is *also* a currently OPEN PR for the same branch, the branch
+    must never be pruned — an OPEN PR always wins, regardless of what else is
+    in the branch's PR history (PR #17 review finding: taking only one PR via
+    `--limit 1` could pick the closed one and delete an actively-reviewed
+    branch).
+    """
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+    responses = "\n".join([_pr_line("CLOSED", sha), _pr_line("OPEN", sha)])
+
+    result = _run_with_fake_gh(repo, responses=responses, force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "keep" in result.stdout
+    assert ws.is_dir()
+
+
+def test_prune_ignores_a_branch_never_claimed_by_this_tooling(tmp_path: Path) -> None:
+    """Only branches tagged by claim-workspace.sh are ever prune candidates.
+
+    A branch created directly with `git branch` (never through this tooling)
+    might coincidentally share a commit with some old closed PR — that must
+    never be enough to get it force-deleted (PR #17 review finding: pruning
+    treated every non-master local branch as fair game).
+    """
+    repo = _init_repo(tmp_path)
+    _git(repo, "branch", "manual/branch")  # not created via claim-workspace.sh
+    sha = _head_sha(repo)
+
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "manual/branch" not in result.stdout  # never even listed
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "manual/branch" in branches  # untouched
 
 
 def test_prune_frees_a_released_branch_whose_head_matches_the_pr(tmp_path: Path) -> None:
@@ -302,7 +354,7 @@ def test_prune_frees_a_released_branch_whose_head_matches_the_pr(tmp_path: Path)
     assert released.returncode == 0, released.stderr
     assert not ws.is_dir()
 
-    result = _run_with_fake_gh(repo, state="MERGED", head_sha=sha, force=True)
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
 
     assert result.returncode == 0, result.stderr
     assert "PRUNE(merged)" in result.stdout
@@ -323,7 +375,7 @@ def test_prune_keeps_an_open_pr_even_with_force(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     ws = Path(_claim(repo, "area/a"))
 
-    result = _run_with_fake_gh(repo, state="OPEN", force=True)
+    result = _run_with_fake_gh(repo, responses=_pr_line("OPEN"), force=True)
 
     assert result.returncode == 0, result.stderr
     assert "keep" in result.stdout
