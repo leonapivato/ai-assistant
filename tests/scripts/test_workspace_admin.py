@@ -20,6 +20,7 @@ import pytest
 
 _SCRIPTS = Path(__file__).parents[2] / "scripts"
 _CLAIM = _SCRIPTS / "claim-workspace.sh"
+_RELEASE = _SCRIPTS / "release-workspace.sh"
 _LIST = _SCRIPTS / "list-workspaces.sh"
 _PRUNE = _SCRIPTS / "prune-workspaces.sh"
 _CLAIM_MANY = _SCRIPTS / "claim-workspaces.sh"
@@ -282,6 +283,40 @@ def test_prune_treats_closed_the_same_as_merged(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "PRUNE(closed)" in result.stdout
     assert not ws.is_dir()
+
+
+def test_prune_frees_a_released_branch_whose_head_matches_the_pr(tmp_path: Path) -> None:
+    """The documented "release after merge, then prune" flow must actually work.
+
+    release-workspace.sh removes the worktree but keeps the branch, by design
+    (see its header) — so prune-workspaces.sh must find that branch by
+    scanning refs, not just live worktrees, or a released branch could never
+    be pruned and its name never reused (PR #17 review finding: pruning only
+    iterated `git worktree list`, so a released branch was invisible to it).
+    """
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+
+    released = _run(_RELEASE, repo, "area/a")
+    assert released.returncode == 0, released.stderr
+    assert not ws.is_dir()
+
+    result = _run_with_fake_gh(repo, state="MERGED", head_sha=sha, force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(merged)" in result.stdout
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/a" not in branches  # branch actually freed
+
+    reclaimed = _run(_CLAIM, repo, "area/a", env_extra={"WORKSPACE_BOOTSTRAP": "true"})
+    assert reclaimed.returncode == 0, reclaimed.stderr  # the name is genuinely reusable now
 
 
 def test_prune_keeps_an_open_pr_even_with_force(tmp_path: Path) -> None:
