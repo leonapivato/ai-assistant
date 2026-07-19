@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `models`/`core`: routing and fallback across several providers.
+  `RoutingProvider` holds an ordered list of `Route`s and tries them until one
+  succeeds, so the system is no longer only as reliable as its most fragile
+  provider. Fallback is driven by a new `routable` flag on `ModelError`, added
+  alongside `retryable` because the two answer different questions: `retryable`
+  asks whether the *same* provider could succeed on a second try, `routable`
+  whether a *different* one could succeed at all. The cases where they disagree
+  are the point — an expired key is not retryable but is routable (credentials
+  are per provider), while a content-policy refusal is neither, since shopping a
+  refused prompt around until one provider accepts is not resilience and would
+  widen who sees a prompt already flagged sensitive (ADR-0004). An explicit
+  per-call `model=` override disables routing rather than silently answering
+  from a different model, and exhausting every route re-raises the last
+  failure's *type* so classification survives. Preference order is static; health
+  tracking, circuit breaking, and cost/latency ranking are deferred. Retry
+  belongs inside routing — the cheap correction first — which composes on the
+  ADR-0011 seam with no Protocol change. Recorded in ADR-0013.
 - `core`: the ADR-0004 §5 log redaction safety net, which the ADR has described
   as configured since it was ratified but which did not exist — there was no
   `structlog.configure` call anywhere in the tree. `core/logging.py` adds
