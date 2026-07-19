@@ -177,6 +177,38 @@ async def test_exhausting_every_route_reports_all_of_them() -> None:
     ]
 
 
+async def test_a_survived_failure_is_still_logged() -> None:
+    # A failure a later route papers over is invisible otherwise: the call
+    # succeeds, so nothing surfaces, and a silently degrading primary is exactly
+    # what an operator needs to see *before* the fallback also fails.
+    routes = [
+        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="primary"),
+        Route(RecordingProvider("backup"), label="secondary"),
+    ]
+
+    with capture_logs() as logs:
+        reply = await RoutingProvider(routes).complete(PROMPT)
+
+    assert reply.content == "backup"
+    [event] = [e for e in logs if e["event"] == "route failed; trying the next one"]
+    assert event["route"] == "primary"
+    assert event["error"] == "ModelUnavailableError"
+
+
+async def test_a_survived_failure_does_not_log_the_message_either() -> None:
+    sensitive = "PATIENT SSN 123-45-6789"
+    routes = [
+        Route(AlwaysFailsProvider(ModelUnavailableError(sensitive)), label="primary"),
+        Route(RecordingProvider("backup"), label="secondary"),
+    ]
+
+    with capture_logs() as logs:
+        await RoutingProvider(routes).complete(PROMPT)
+
+    # The same Tier 2 constraint applies on the path that succeeds.
+    assert sensitive not in repr(logs)
+
+
 async def test_exception_messages_never_reach_the_log() -> None:
     # ADR-0004 §5: logs are Tier 2 and must never carry Tier 0/1 data. Provider
     # errors routinely quote the offending request, so str(exc) is vendor- and

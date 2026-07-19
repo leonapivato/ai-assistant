@@ -143,6 +143,16 @@ class RoutingProvider:
             except ModelError as exc:
                 if not exc.routable:
                     raise
+                # Logged here, not only on exhaustion: a failure that a later
+                # route papers over is invisible otherwise, and a primary
+                # degrading silently is exactly what an operator needs to see
+                # *before* the fallback also fails. Class only, never the
+                # message — see the note on the exhaustion log below.
+                _log.warning(
+                    "route failed; trying the next one",
+                    route=route.describe(),
+                    error=type(exc).__name__,
+                )
                 failures.append((route.describe(), exc))
 
         # Reaching here means every route failed routably, so `failures` mirrors

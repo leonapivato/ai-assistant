@@ -22,7 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-call `model=` override disables routing rather than silently answering
   from a different model, and exhausting every route re-raises the last failure
   untouched — so its identity, type and message survive routing — while every
-  candidate and its failure *class* is logged. Messages are deliberately kept
+  candidate and its failure *class* is logged — including one a later route
+  papers over, so a silently degrading primary is visible before the fallback
+  also fails. Messages are deliberately kept
   out of the log: provider errors routinely quote the offending request, which
   would put Tier 1 data in a Tier 2 log (ADR-0004 §5), and the redaction
   processor that ADR assumes is not actually configured yet. (Three earlier
