@@ -92,9 +92,22 @@ uv run lint-imports     # architecture boundary check
 uv run pytest           # tests
 ```
 
-There is no remote CI yet — this local gate is the only automated safety net.
+CI runs this same gate on every PR and push to `master` (ADR-0010) — it is the
+backstop, not the first line of defence; run it locally before pushing.
 `pre-commit` runs the fast subset on commit; enable it once with
 `uv run pre-commit install --install-hooks --hook-type commit-msg`.
+
+**Iterate against `just review-codex`, not against CI.** It runs the same
+adversarial-review engine CI does (`CONTRIBUTING.md` → "Review (pre-merge)").
+Loop locally while the PR is a **draft** — fix, re-run, repeat — until it's
+clean or only deliberately-waived findings remain; a draft is never
+auto-reviewed, so this costs nothing in CI spend. Flip to **ready for
+review** only once, as the one deliberate checkpoint that triggers the
+CI-hosted review that goes on the record — every push to an *already-ready*
+PR triggers another one, so pushing a fix per finding and letting CI
+re-review each time is the anti-pattern this exists to avoid. Budget one CI
+review at ready, plus at most one or two more for genuine feedback — more
+than that means the local loop got skipped.
 
 ## Conventions
 
