@@ -136,3 +136,12 @@ async def test_decide_does_not_mutate_its_inputs() -> None:
 
     assert proposal == proposal_before
     assert conflicts == conflicts_before
+
+
+async def test_decision_carries_a_non_blank_reason() -> None:
+    # Also not in the shared suite (TODO item 7): `reason=""` passes the model,
+    # so requiring otherwise would be the suite inventing an obligation. This
+    # implementation does explain itself, and that is worth pinning here.
+    decision = await DefaultMemoryPolicy().decide(_proposal(_semantic("new")), conflicts=[])
+
+    assert decision.reason.strip()
