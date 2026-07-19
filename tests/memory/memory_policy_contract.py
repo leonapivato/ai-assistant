@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import product
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -43,6 +44,9 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -126,11 +130,18 @@ def _proposal(
     record: MemoryRecord | None = None,
     *,
     sensitivity: DataTier = DataTier.PERSONAL,
+    conflicts: Sequence[MemoryRecord] = (),
 ) -> MemoryUpdateProposal:
+    # `decide` documents that the proposal carries the ids of the records passed
+    # alongside it. Deriving them here keeps the two arguments consistent: a
+    # proposal claiming no conflicts while conflicting records are handed over is
+    # input no caller would produce, and a policy that cross-checks the two would
+    # be failed by the suite for being right.
     return MemoryUpdateProposal(
         proposed=record if record is not None else _record("proposed"),
         rationale="because",
         sensitivity=sensitivity,
+        conflicts=[c.id for c in conflicts],
     )
 
 
@@ -160,6 +171,7 @@ class MemoryPolicyContract:
                 record_kind=case.record_kind,
             ),
             sensitivity=case.sensitivity,
+            conflicts=conflicts,
         )
 
         decision = await policy.decide(proposal, conflicts=conflicts)
@@ -174,7 +186,7 @@ class MemoryPolicyContract:
         # blank one satisfies the type while defeating the purpose.
         conflicts = [_record("existing")] if with_conflicts else []
 
-        decision = await policy.decide(_proposal(), conflicts=conflicts)
+        decision = await policy.decide(_proposal(conflicts=conflicts), conflicts=conflicts)
 
         assert decision.reason.strip()
 
@@ -184,7 +196,7 @@ class MemoryPolicyContract:
         # not resolved — or nothing at all.
         conflicts = [_record("first"), _record("second")]
 
-        decision = await policy.decide(_proposal(), conflicts=conflicts)
+        decision = await policy.decide(_proposal(conflicts=conflicts), conflicts=conflicts)
 
         if decision.kind is MemoryDecisionKind.MERGE:
             assert decision.merge_into in {c.id for c in conflicts}
@@ -207,7 +219,9 @@ class MemoryPolicyContract:
         # that defers only when there is nothing to merge into would still leak
         # the secret down its merge path, so both cases are swept.
         conflicts = [_record("existing")] if with_conflicts else []
-        proposal = _proposal(_record("secret", source=source), sensitivity=DataTier.SECRET)
+        proposal = _proposal(
+            _record("secret", source=source), sensitivity=DataTier.SECRET, conflicts=conflicts
+        )
 
         decision = await policy.decide(proposal, conflicts=conflicts)
 
@@ -223,8 +237,8 @@ class MemoryPolicyContract:
         # next time, or the write path stops being reviewable. Both branches are
         # swept: the conflict-free path is a different branch in every policy
         # written so far, and equally bound by this.
-        proposal = _proposal(_record("new", record_kind=record_kind))
         conflicts = [_record("existing", record_kind=record_kind)] if with_conflicts else []
+        proposal = _proposal(_record("new", record_kind=record_kind), conflicts=conflicts)
 
         first = await policy.decide(proposal, conflicts=conflicts)
         second = await policy.decide(proposal, conflicts=conflicts)
@@ -239,8 +253,8 @@ class MemoryPolicyContract:
     ) -> None:
         # A policy rules on a proposal; it does not edit it. The caller still
         # owns both arguments after the call.
-        proposal = _proposal(_record("new", record_kind=record_kind))
         conflicts = [_record("existing", record_kind=record_kind)]
+        proposal = _proposal(_record("new", record_kind=record_kind), conflicts=conflicts)
         proposal_before = proposal.model_copy(deep=True)
         conflicts_before = [c.model_copy(deep=True) for c in conflicts]
 

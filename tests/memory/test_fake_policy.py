@@ -103,9 +103,10 @@ async def test_store_temporary_uses_the_configured_ttl() -> None:
     assert decision.ttl == ttl
 
 
-def test_non_positive_ttl_is_rejected_at_construction() -> None:
+@pytest.mark.parametrize("ttl", [timedelta(0), timedelta(seconds=-1)])
+def test_non_positive_ttl_is_rejected_at_construction(ttl: timedelta) -> None:
     with pytest.raises(ValueError, match="ttl must be positive"):
-        FakeMemoryPolicy(ttl=timedelta(0))
+        FakeMemoryPolicy(ttl=ttl)
 
 
 async def test_records_every_call_in_order() -> None:
