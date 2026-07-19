@@ -17,6 +17,11 @@ uv run pre-commit install --install-hooks # both pre-commit and commit-msg hooks
 git config commit.template .gitmessage    # scaffold commit messages
 ```
 
+Already set up from before this fix? An earlier version of this command only
+installed the `commit-msg` hook — rerun it to pick up the `pre-commit` stage
+(ruff, mypy, import-linter) too; a stale install fails silently rather than
+erroring.
+
 ## The gate (Definition of Done)
 
 A change is done only when all of these pass locally:
