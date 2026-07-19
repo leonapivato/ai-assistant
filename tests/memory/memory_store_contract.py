@@ -30,7 +30,8 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 
-# Far in the past: expired under any real or injected clock the suite is run with.
+# Far in the past: expired under any clock at or after 2000 — every real
+# wall-clock and the fixed test clocks the subclasses inject.
 _LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
 
 
