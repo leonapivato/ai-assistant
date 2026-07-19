@@ -1,0 +1,422 @@
+"""Shared conformance suite for the PlanStore Protocol (ADR-0014).
+
+Every ``PlanStore`` implementation must pass this suite (CONTRIBUTING, "Protocol
+conformance suites"). A concrete test subclasses :class:`PlanStoreContract` and
+overrides the ``store`` fixture.
+
+This suite matters more than most: `InMemoryPlanStore` and `FakePlanStore`
+re-implement the ADR-0014 §4 transition graph independently — the fake cannot
+import the subsystem it stands in for — so this is what stops the two drifting.
+It asserts only behaviour the *contract* guarantees, never how a given store
+keys its ids.
+
+Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
+``Test``-prefixed subclass, never the abstract base directly.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pytest
+
+from ai_assistant.core.errors import (
+    ActiveExecutionError,
+    IllegalTransitionError,
+    PlanningError,
+    RetriesExhaustedError,
+    StaleExecutionError,
+)
+from ai_assistant.core.types import (
+    ActionPlan,
+    Goal,
+    MemorySource,
+    PlanStep,
+    Provenance,
+    SkipReason,
+    StepStatus,
+    StepTransition,
+)
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import PlanStore
+    from ai_assistant.core.types import ExecutionState
+
+_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _goal(goal_id: str = "g1") -> Goal:
+    return Goal(
+        id=goal_id,
+        statement="relocate to Lisbon",
+        provenance=Provenance(
+            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_WHEN
+        ),
+        created_at=_WHEN,
+    )
+
+
+def _plan(plan_id: str = "p1", goal_id: str = "g1", *, steps: int = 1) -> ActionPlan:
+    return ActionPlan(
+        id=plan_id,
+        goal_id=goal_id,
+        steps=tuple(
+            PlanStep(id=f"s{index}", intent=f"step {index}", capability="send_email")
+            for index in range(1, steps + 1)
+        ),
+        created_at=_WHEN,
+    )
+
+
+def _claim(state: ExecutionState, step_id: str = "s1") -> StepTransition:
+    """The transition that claims a step — bound tool plus authorisation."""
+    return StepTransition(
+        execution_id=state.id,
+        step_id=step_id,
+        to_status=StepStatus.RUNNING,
+        expected_version=state.version,
+        bound_tool="smtp",
+        approval_ref="perm-1",
+    )
+
+
+class PlanStoreContract:
+    """Behaviour every ``PlanStore`` implementation must exhibit."""
+
+    @pytest.fixture
+    def store(self) -> PlanStore:
+        """Return an empty store under test."""
+        raise NotImplementedError
+
+    async def _started(self, store: PlanStore, *, steps: int = 1) -> ExecutionState:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan(steps=steps))
+        return await store.start_execution("p1")
+
+    # --- goals and plans ------------------------------------------------
+
+    async def test_saves_and_reads_back_a_goal(self, store: PlanStore) -> None:
+        await store.save_goal(_goal())
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.statement == "relocate to Lisbon"
+
+    async def test_missing_goal_reads_as_none(self, store: PlanStore) -> None:
+        assert await store.get_goal("nope") is None
+
+    async def test_saving_a_goal_twice_upserts(self, store: PlanStore) -> None:
+        await store.save_goal(_goal())
+        await store.save_goal(_goal())
+        export = await store.export()
+        assert len(export.goals) == 1
+
+    async def test_a_plan_needs_its_goal_to_exist(self, store: PlanStore) -> None:
+        """Refusing the orphan here is what lets export promise integrity."""
+        with pytest.raises(PlanningError):
+            await store.save_plan(_plan(goal_id="ghost"))
+
+    async def test_execution_needs_its_plan_to_exist(self, store: PlanStore) -> None:
+        with pytest.raises(PlanningError):
+            await store.start_execution("ghost")
+
+    # --- starting an execution ------------------------------------------
+
+    async def test_execution_starts_derived_from_the_plan(self, store: PlanStore) -> None:
+        state = await self._started(store, steps=2)
+        assert state.plan_id == "p1"
+        assert [step.step_id for step in state.steps] == ["s1", "s2"]
+        assert all(step.status is StepStatus.PENDING for step in state.steps)
+        assert state.version == 0
+
+    # --- the transition graph -------------------------------------------
+
+    async def test_claiming_a_step_advances_it(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        updated = await store.commit_transition(_claim(state))
+        step = updated.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.RUNNING
+        assert step.attempts == 1
+        assert step.started_at is not None
+
+    async def test_a_write_bumps_the_version(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        updated = await store.commit_transition(_claim(state))
+        assert updated.version == state.version + 1
+
+    async def test_illegal_transition_is_rejected(self, store: PlanStore) -> None:
+        """PENDING to SUCCEEDED skips the claim, so it must not be persistable."""
+        state = await self._started(store)
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.SUCCEEDED,
+                    expected_version=state.version,
+                )
+            )
+
+    async def test_running_without_authorisation_is_rejected(self, store: PlanStore) -> None:
+        """ADR-0004 §7: nothing executes without a decision to point at."""
+        state = await self._started(store)
+        with pytest.raises(IllegalTransitionError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.RUNNING,
+                    expected_version=state.version,
+                    bound_tool="smtp",
+                )
+            )
+
+    async def test_unknown_step_is_rejected(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        with pytest.raises(PlanningError):
+            await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="ghost",
+                    to_status=StepStatus.AWAITING_APPROVAL,
+                    expected_version=state.version,
+                )
+            )
+
+    async def test_a_full_run_reaches_succeeded_with_its_output(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SUCCEEDED,
+                expected_version=state.version,
+                output={"ref": "ABC"},
+            )
+        )
+        step = state.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.SUCCEEDED
+        assert step.output == {"ref": "ABC"}
+        assert step.finished_at is not None
+        assert not state.is_active
+
+    # --- compare-and-swap -----------------------------------------------
+
+    async def test_a_stale_write_is_refused(self, store: PlanStore) -> None:
+        """The race that would otherwise run a non-idempotent tool twice."""
+        state = await self._started(store)
+        first = _claim(state)
+        second = _claim(state)  # computed against the same version
+
+        await store.commit_transition(first)
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(second)
+
+    async def test_the_loser_of_a_race_did_not_change_anything(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        await store.commit_transition(_claim(state))
+        with pytest.raises(StaleExecutionError):
+            await store.commit_transition(_claim(state))
+
+        stored = await store.get_execution(state.id)
+        assert stored is not None
+        step = stored.step("s1")
+        assert step is not None
+        assert step.attempts == 1
+
+    # --- retries ---------------------------------------------------------
+
+    async def test_a_failed_step_can_be_retried(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.FAILED,
+                expected_version=state.version,
+                error="boom",
+            )
+        )
+        state = await store.commit_transition(_claim(state))
+        step = state.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.RUNNING
+        assert step.attempts == 2
+        assert step.error is None
+
+    async def test_retries_are_bounded(self, store: PlanStore) -> None:
+        """The ceiling is deterministic code's to enforce (VISION §7)."""
+        state = await self._started(store)
+        for _ in range(3):
+            state = await store.commit_transition(_claim(state))
+            state = await store.commit_transition(
+                StepTransition(
+                    execution_id=state.id,
+                    step_id="s1",
+                    to_status=StepStatus.FAILED,
+                    expected_version=state.version,
+                    error="boom",
+                )
+            )
+        with pytest.raises(RetriesExhaustedError):
+            await store.commit_transition(_claim(state))
+
+    # --- resumption -------------------------------------------------------
+
+    async def test_active_executions_finds_outstanding_work(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        assert [found.id for found in await store.active_executions()] == [state.id]
+
+    async def test_a_finished_execution_is_not_active(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SKIPPED,
+                expected_version=state.version,
+                skip_reason=SkipReason.SUPERSEDED,
+            )
+        )
+        assert await store.active_executions() == []
+
+    # --- stored state is the store's own ----------------------------------
+
+    async def test_a_retained_goal_reference_cannot_edit_stored_state(
+        self, store: PlanStore
+    ) -> None:
+        """Otherwise a caller could rewrite a goal after the fact, unrecorded."""
+        goal = _goal()
+        await store.save_goal(goal)
+        goal.statement = "tampered"
+
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.statement == "relocate to Lisbon"
+
+    async def test_mutating_a_returned_goal_cannot_edit_stored_state(
+        self, store: PlanStore
+    ) -> None:
+        await store.save_goal(_goal())
+        got = await store.get_goal("g1")
+        assert got is not None
+        got.statement = "tampered"
+
+        fresh = await store.get_goal("g1")
+        assert fresh is not None
+        assert fresh.statement == "relocate to Lisbon"
+
+    async def test_mutating_a_returned_execution_cannot_edit_stored_state(
+        self, store: PlanStore
+    ) -> None:
+        """Execution state is the audit record; only commit_transition may move it."""
+        state = await self._started(store)
+        state.steps[0].status = StepStatus.SUCCEEDED
+        state.version = 99
+
+        fresh = await store.get_execution(state.id)
+        assert fresh is not None
+        assert fresh.steps[0].status is StepStatus.PENDING
+        assert fresh.version == 0
+
+    # --- data rights (ADR-0004) -------------------------------------------
+
+    async def test_export_carries_the_stored_state(self, store: PlanStore) -> None:
+        await self._started(store)
+        export = await store.export()
+        assert [goal.id for goal in export.goals] == ["g1"]
+        assert [plan.id for plan in export.plans] == ["p1"]
+        assert len(export.executions) == 1
+
+    async def test_export_round_trips_through_json(self, store: PlanStore) -> None:
+        await self._started(store)
+        export = await store.export()
+        assert type(export).model_validate_json(export.model_dump_json()) == export
+
+    async def test_deleting_a_goal_cascades(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        result = await store.delete_goal("g1")
+
+        assert result.deleted
+        assert result.plans_removed == 1
+        assert result.executions_removed == 1
+        assert await store.get_goal("g1") is None
+        assert await store.get_plan("p1") is None
+        assert await store.get_execution(state.id) is None
+
+    async def test_deletion_is_refused_while_a_step_is_live(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        await store.commit_transition(_claim(state))
+
+        result = await store.delete_goal("g1")
+        assert not result.deleted
+        assert result.blocked_by == (state.id,)
+        assert await store.get_goal("g1") is not None
+
+    async def test_deletion_succeeds_once_the_live_step_resolves(self, store: PlanStore) -> None:
+        """Cancel-then-delete: the round-trip the refusal above asks for."""
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.INDETERMINATE,
+                expected_version=state.version,
+            )
+        )
+        result = await store.delete_goal("g1")
+        assert result.deleted
+
+    async def test_deletion_reports_erased_indeterminate_steps(self, store: PlanStore) -> None:
+        """The user must learn an action may have completed before its record went."""
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.INDETERMINATE,
+                expected_version=state.version,
+            )
+        )
+        result = await store.delete_goal("g1")
+        assert result.indeterminate_steps == ("s1",)
+
+    async def test_a_permanently_failed_step_does_not_block_deletion(
+        self, store: PlanStore
+    ) -> None:
+        """Otherwise one failure would void the erasure right for good."""
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.FAILED,
+                expected_version=state.version,
+                error="boom",
+            )
+        )
+        assert state.is_active
+        result = await store.delete_goal("g1")
+        assert result.deleted
+
+    async def test_deleting_an_unknown_goal_reports_refusal(self, store: PlanStore) -> None:
+        result = await store.delete_goal("ghost")
+        assert not result.deleted
+
+    async def test_clear_empties_the_store(self, store: PlanStore) -> None:
+        await self._started(store)
+        assert await store.clear() > 0
+        assert await store.get_goal("g1") is None
+
+    async def test_clear_is_refused_while_a_step_is_live(self, store: PlanStore) -> None:
+        state = await self._started(store)
+        await store.commit_transition(_claim(state))
+        with pytest.raises(ActiveExecutionError):
+            await store.clear()

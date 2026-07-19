@@ -153,6 +153,15 @@ class IllegalTransitionError(PlanningError):
     """
 
 
+class RetriesExhaustedError(PlanningError):
+    """A step has used its retry budget and may not be claimed again.
+
+    Distinct from :class:`IllegalTransitionError` because the caller's response
+    differs: an illegal transition is a bug, whereas exhausted retries are an
+    expected outcome the executor should surface rather than keep hammering.
+    """
+
+
 class StaleExecutionError(PlanningError):
     """A write lost the optimistic-concurrency race (ADR-0014 §5).
 

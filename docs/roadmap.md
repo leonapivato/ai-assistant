@@ -82,7 +82,13 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       `ContextProvider`, assembled from an internal `ContextSource` seam
       (`ClockContextSource`), with graceful degradation (ADR-0008). Facets
       (calendar, tasks, ...) added as optional fields when their sources land.
-- [ ] **`planning` — `Goal`/`ActionPlan`/`ExecutionState`.**
+- [x] **`planning` — `Goal`/`ActionPlan`/`ExecutionState`.** Capability-level
+      `ActionPlan` (frozen) separated from durable `ExecutionState`, written only
+      through compare-and-swap `StepTransition`s that a deterministic
+      `PlanExecution` validates; `InMemoryPlanStore` carries the ADR-0004 data
+      rights (ADR-0014). Deferred: a model-backed planner, a SQLite `PlanStore`,
+      step dependencies, and exactly-once execution (a crash mid-effect yields an
+      `INDETERMINATE` step for explicit resolution).
 - [ ] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.
 - [ ] **`permissions` — `ActionPolicy` + audit trail** (ADR-0004).
 - [x] **`learning` — `FeedbackEvent` capture.** `FeedbackEvent` +
