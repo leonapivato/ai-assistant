@@ -101,8 +101,27 @@ ADR." The machinery that keeps implementations honest — a conformance suite
 (under Architecture boundaries) makes the required unit of work for a new
 Protocol a *triad* — Protocol definition + shared conformance suite + canonical
 fake — landing in one change. Cross-referenced from the Testing section and from
-`CLAUDE.md`'s "Contract first" rule. Prevents the backfill debt from recurring
-for the remaining subsystems.
+`CLAUDE.md`'s "Contract first" rule.
+
+**Convention, not a gate.** The rule is documented and review-enforced; nothing
+mechanical fails a new Protocol that ships without its suite and fake. That is
+item 6.
 
 **Origin:** review of AI-agent scalability — process fix that closes the loop on
 items 1 and 3.
+
+## 6. Enforce the Protocol triad mechanically
+
+**What:** item 5 made the triad the documented rule, but only review enforces
+it. A new Protocol can still land with no conformance suite and no canonical
+fake and pass the whole gate — the same way items 1 and 3 accumulated.
+
+**Direction:** a deterministic check that maps each Protocol in
+`core/protocols.py` to (a) a `…Contract` suite, (b) a canonical fake in
+`ai_assistant.testing`, and (c) a *collected* `Test…Contract` subclass binding
+the two — the abstract base alone proves nothing. Needs an explicit exemption
+list for Protocols not yet backfilled (item 1), or it fails on day one; that
+list then doubles as the backlog, shrinking to empty as the backfill lands.
+
+**Origin:** adversarial review of the item-5 change — the documented rule is a
+convention until something fails on its absence.
