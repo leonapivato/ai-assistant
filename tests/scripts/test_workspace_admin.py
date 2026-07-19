@@ -174,6 +174,28 @@ def test_claim_many_reports_a_failure_without_dropping_the_others(tmp_path: Path
     assert (tmp_path / "repo-worktrees" / "area" / "good").is_dir()
 
 
+def test_claim_many_rejects_a_duplicate_branch_without_spawning_anything(tmp_path: Path) -> None:
+    """A duplicate in one batch call is always a caller mistake, not a real
+    "N agents, N branches" scenario — reject it up front rather than racing a
+    branch against itself (claim-workspace.sh itself is safe against that
+    race, but there is no reason to invite it; PR #17 review).
+    """
+    repo = _init_repo(tmp_path)
+
+    result = _run(
+        _CLAIM_MANY,
+        repo,
+        "area/dup",
+        "area/dup",
+        env_extra={"WORKSPACE_BOOTSTRAP": "true"},
+    )
+
+    assert result.returncode == 2
+    assert "duplicate" in result.stderr.lower()
+    assert "WORKSPACE=" not in result.stdout  # nothing was ever spawned
+    assert not (tmp_path / "repo-worktrees" / "area" / "dup").exists()
+
+
 # --- prune-workspaces.sh ------------------------------------------------------
 
 _needs_gh = pytest.mark.skipif(_GH is None, reason="gh CLI not installed")

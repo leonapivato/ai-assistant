@@ -82,26 +82,46 @@ create_worktree() {
     # (nested, so distinct branches never collide on one directory), rolling back
     # on any failure.
     local wt="${worktrees_root}/${branch}"
-    # Trap installed BEFORE anything is created, not after `git worktree add`
-    # succeeds — every command in it already no-ops safely (`2>/dev/null ||
-    # true`) against resources that don't exist yet, so there is no cost to
-    # arming it early, only benefit: a SIGINT/SIGTERM landing in the gap
-    # between worktree creation and installing the trap would otherwise abort
-    # with no rollback at all, leaving an orphaned branch/worktree despite the
-    # header's "a failed claim never leaves debris" promise (PR #17 review
-    # finding). ERR too, so a synchronous failure anywhere below is covered
-    # the same way.
-    trap 'git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
-          git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
-          git -C "$main_root" branch -D "$branch" 2>/dev/null || true' ERR INT TERM
+    # `created` gates the trap's cleanup on whether THIS invocation's own
+    # `git worktree add` actually succeeded — not merely on the trap having
+    # fired. Two agents racing to claim the *same* branch name can both pass
+    # require_new_branch's pre-check and both reach `git worktree add` below;
+    # git's own ref-locking guarantees only one of the two actually creates
+    # the branch, but the loser's `git worktree add` then fails at the exact
+    # same path/branch the winner just created. An unconditional trap here
+    # would force-remove that shared path and delete that branch regardless
+    # of which process's resource it actually is — destroying the winner's
+    # worktree, and any work already started in it, out from under it (a
+    # blocker-severity PR #17 review finding). Gating on `created` (set only
+    # once `git worktree add` itself has returned success) means the loser's
+    # trap fires with `created` still 0 and does nothing: nothing to clean up
+    # is exactly correct, since this process created nothing.
+    #
+    # The trap is still installed BEFORE `git worktree add` runs, not after —
+    # every command in its body already no-ops safely (`2>/dev/null || true`)
+    # when `created` is unset, so arming it early costs nothing and closes a
+    # separate gap: a SIGINT/SIGTERM landing between worktree creation and
+    # installing the trap would otherwise abort with no rollback at all (an
+    # earlier PR #17 review finding). ERR too, so a synchronous failure
+    # anywhere below is covered the same way.
+    local created=0
+    trap '(( created )) && {
+              git -C "$main_root" worktree remove --force "$wt" 2>/dev/null || true
+              git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true
+              git -C "$main_root" branch -D "$branch" 2>/dev/null || true
+          }
+          true' ERR INT TERM
     mkdir -p "$(dirname "$wt")"
     # Branch from $base (origin/master when available), never the main checkout's
     # current HEAD — which stays on master, but this also keeps a second worktree
     # from ever branching off a sibling worktree's HEAD. `git worktree add` for a
     # fresh branch name is itself safe under concurrency (git serialises its own
     # worktree-administration writes), so many agents can call this at once for
-    # distinct branches with no lock here.
+    # distinct branches with no lock here — and for the *same* branch name, the
+    # `created` gate above means the loser backs off cleanly instead of
+    # clobbering the winner.
     git -C "$main_root" worktree add -q "$wt" -b "$branch" "$base"
+    created=1
     # Tag the branch as ours, in its own ref (never pushed — no `push` default
     # refspec covers refs/workspace-claimed/*, and it is not under
     # refs/heads/, so nothing here is a checkout target). This is what lets
