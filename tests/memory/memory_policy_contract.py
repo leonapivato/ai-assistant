@@ -118,20 +118,34 @@ class _Case:
     source: MemorySource
     confidence: float
     sensitivity: DataTier
-    conflicts: bool
+    conflict_source: MemorySource | None
+
+    @property
+    def conflicts(self) -> bool:
+        """Whether this case supplies a conflicting record at all."""
+        return self.conflict_source is not None
 
     def __str__(self) -> str:
-        conflicts = "conflicts" if self.conflicts else "clean"
-        return f"{self.record_kind}-{self.source}-{self.confidence}-{self.sensitivity}-{conflicts}"
+        conflict = "clean" if self.conflict_source is None else f"vs-{self.conflict_source}"
+        return f"{self.record_kind}-{self.source}-{self.confidence}-{self.sensitivity}-{conflict}"
 
 
 # The full cross-product of everything a caller can vary. Bundled into one
 # parameter rather than stacked `parametrize` decorators, which would push the
 # test past the argument limit.
+#
+# The conflict axis carries a *source*, not just a yes/no: a policy branching on
+# whether the record it would overwrite was user-asserted is not hypothetical —
+# `DefaultMemoryPolicy` does exactly that — so a matrix whose conflicts are
+# always OBSERVED would leave that branch uncertified.
 _TOTALITY_CASES = [
-    _Case(record_kind, source, confidence, sensitivity, conflicts=conflicts)
-    for record_kind, source, confidence, sensitivity, conflicts in product(
-        _RECORD_KINDS, MemorySource, [0.0, 0.5, 1.0], DataTier, [False, True]
+    _Case(record_kind, source, confidence, sensitivity, conflict_source)
+    for record_kind, source, confidence, sensitivity, conflict_source in product(
+        _RECORD_KINDS,
+        MemorySource,
+        [0.0, 0.5, 1.0],
+        DataTier,
+        [None, *MemorySource],
     )
 ]
 
@@ -172,7 +186,11 @@ class MemoryPolicyContract:
         # so the write path can never stall on an unhandled combination. The
         # sweep spans every axis a caller can vary — record variant, source,
         # confidence, tier, and whether anything conflicts.
-        conflicts = [_record("existing", record_kind=case.record_kind)] if case.conflicts else []
+        conflicts = (
+            [_record("existing", source=case.conflict_source, record_kind=case.record_kind)]
+            if case.conflict_source is not None
+            else []
+        )
         proposal = _proposal(
             _record(
                 "new",

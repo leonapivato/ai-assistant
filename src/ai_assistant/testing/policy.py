@@ -91,6 +91,10 @@ class FakeMemoryPolicy:
             ValueError: If ``ttl`` is not positive — the ``MemoryDecision``
                 validator would reject it later, so a fake configured this way
                 could only fail at ``decide`` time, far from the mistake.
+                Checked whatever ``kind`` is, including kinds that carry no ttl:
+                :attr:`kind` is public and reassignable, so a ttl validated only
+                when it looked relevant would go unchecked the moment a test
+                flipped the fake to ``STORE_TEMPORARY``.
         """
         if ttl <= timedelta(0):
             msg = f"ttl must be positive, got {ttl}"
