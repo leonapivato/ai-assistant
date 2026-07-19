@@ -159,6 +159,28 @@ is protected and integration happens through pull requests — not local merges
 
 ### Coordinating parallel work
 
+**One workspace per unit of work.** Parallel agents must never share a working
+tree — sharing one is how a stray `git add -A` can sweep another agent's
+uncommitted files into the wrong commit. Each branch (each PR) gets its own
+workspace, allocated deterministically by `just claim-workspace <area>/<slug>`:
+the first agent claims the **main checkout** (no worktree, no extra `uv sync`),
+and each *additional* concurrent agent gets its own **linked worktree** beside
+the repo. The command creates the branch, bootstraps the environment (`uv sync`
+plus a copy of git-ignored local config), and prints `WORKSPACE=<path>` — **work
+only there**. Release it after the PR merges with
+`just release-workspace <area>/<slug>`.
+
+- The claim on the main checkout is an atomic lock, so two agents racing cannot
+  both take it; the loser deterministically gets a worktree.
+- When unclaimed, the main checkout is integration-only: `master` stays checked
+  out there, and the `no-commit-to-branch` pre-commit hook refuses direct commits
+  to it — so a solo agent working in the main checkout cannot forget to branch.
+- A worktree shares the repo's object store and refs (not its working tree), so
+  branches still integrate through the PR flow unchanged. Its `.venv` and
+  git-ignored files are per-directory, which is why claiming re-bootstraps (uv's
+  cache keeps this cheap; a shared venv is not an option — the editable install
+  is path-specific).
+
 The subsystem split keeps most work in non-overlapping folders, but two places
 are shared surfaces that the gate cannot referee — a collision there is a valid
 diff that passes every check and only surfaces as a conflict on the second

@@ -46,6 +46,16 @@ status:
 review-codex persona base="master":
     scripts/codex-review.sh {{persona}} {{base}}
 
+# Claim an isolated workspace for one branch/PR: the main checkout if free, else
+# a linked worktree. Prints WORKSPACE=<path> — work only there. See CONTRIBUTING
+# "Coordinating parallel work". Example: just claim-workspace memory/add-cache
+claim-workspace branch:
+    scripts/claim-workspace.sh {{branch}}
+
+# Release a claimed workspace once its PR merges (FORCE=1 to discard changes).
+release-workspace branch:
+    scripts/release-workspace.sh {{branch}}
+
 # First-time developer setup
 setup:
     uv sync
