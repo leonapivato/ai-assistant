@@ -21,8 +21,6 @@ _Last updated: 2026-07-19._
 
 | Subsystem        | Owner        | Status            | Branch / ADR                        |
 | ---------------- | ------------ | ----------------- | ----------------------------------- |
-| `models` (resilience) | mattewolf    | in progress (WIP) | `models/error-taxonomy`, ADR-0011 (Proposed) |
-| `models` (routing)    | mattewolf    | in progress (WIP) | `models/routing` (stacked on `models/error-taxonomy`), ADR-0013 (Proposed) |
 | `orchestration`  | _unclaimed_  | not started       | —                                   |
 | `planning`       | _unclaimed_  | not started       | —                                   |
 | `tools`          | _unclaimed_  | not started       | —                                   |
@@ -31,12 +29,9 @@ _Last updated: 2026-07-19._
 ## ADR numbers in flight
 
 Claim a number here *before* drafting, so two branches don't grab the same one.
-Highest merged ADR is **0012**; drop your row when the ADR merges.
+Highest merged ADR is **0013**; drop your row when the ADR merges.
 
-| ADR  | Title                | Owner  | Branch                 |
-| ---- | -------------------- | ------ | ---------------------- |
-| 0011 | Model resilience     | mattewolf | `models/error-taxonomy` |
-| 0013 | Model routing and fallback | mattewolf | `models/routing` |
+_None in flight._
 
 ## Shared surface
 
@@ -47,6 +42,7 @@ most likely to conflict.
 
 ## Already built (no active owner)
 
-`core` (contracts), `models` (base adapter), `memory`, `context`, `learning`.
+`core` (contracts), `models` (base adapter, plus the ADR-0011 failure taxonomy
+and ADR-0013 routing/fallback), `memory`, `context`, `learning`.
 Touch these through their Protocols; if you need to *change* one's contract,
 that is a `core/` change — coordinate it.
