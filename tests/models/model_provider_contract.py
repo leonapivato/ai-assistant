@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.protocols import ModelProvider
 from ai_assistant.core.types import Message, Role
 
@@ -60,7 +61,16 @@ class ModelProviderContract:
     async def test_complete_accepts_the_model_keyword(self, provider: ModelProvider) -> None:
         # The ``model`` override is part of the contract's surface; passing it
         # explicitly (here as ``None``, the "use the default" value) must be
-        # accepted without resolving a real model.
+        # accepted without resolving a real model. That an override is actually
+        # *honoured* can only be checked offline per implementation (a real
+        # ``"provider:model"`` string would force network resolution), so those
+        # assertions live in the per-implementation test modules.
         reply = await provider.complete([Message(role=Role.USER, content="hi")], model=None)
 
         assert reply.role is Role.ASSISTANT
+
+    async def test_complete_rejects_an_empty_conversation(self, provider: ModelProvider) -> None:
+        # A provider needs a conversation to answer; an empty one is a caller
+        # error every implementation must reject the same way.
+        with pytest.raises(ModelError):
+            await provider.complete([])
