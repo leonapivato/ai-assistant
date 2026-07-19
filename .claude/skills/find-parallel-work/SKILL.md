@@ -40,13 +40,17 @@ A subsystem is a valid candidate for this batch only if **all** of:
 3. It maps to an item in roadmap.md's build-sequence checklist or the
    first-vertical artifact table.
 
-For each candidate, check whether it has a `core/protocols.py` entry yet. If
-not — true for any subsystem that hasn't landed its first Protocol — flag
-this explicitly. That's the one shared surface CONTRIBUTING.md calls out as
-highest-collision: two lanes both proposing a `core/` addition the same day
-is exactly the scenario "push the contract first, say so in the PR title"
-exists to defuse. Don't silently omit this risk from the issue; state it as
-an instruction to whoever picks up the lane.
+For each candidate, check whether it has entries in **both**
+`core/protocols.py` and `core/types.py` yet. A subsystem can be missing
+either independently — a new Protocol method can take/return a pydantic
+model that doesn't exist yet, and CLAUDE.md requires any public data crossing
+a subsystem boundary to live in `core/types.py`, not just the Protocol
+signature. If either is missing, flag it explicitly: that's the shared
+surface CONTRIBUTING.md calls out as highest-collision — two lanes both
+proposing a `core/` addition the same day is exactly the scenario "push the
+contract first, say so in the PR title" exists to defuse. Don't silently
+omit this risk from the issue; state it as an instruction to whoever picks up
+the lane, and name which of the two files (or both) is involved.
 
 Exclude anything not in the roadmap's *first vertical* seven artifacts even
 if the subsystem folder exists and is unclaimed — e.g. `permissions`'
@@ -66,9 +70,10 @@ style. Structure:
 - **One checklist section per lane**, each with:
   - Subsystem name and the roadmap artifact(s) it delivers.
   - Proposed `area/slug` for `just claim-workspace`.
-  - Whether it touches `core/protocols.py`, and the coordination instruction
-    if so (claim the ADR number and lane in `WORKING.md` before starting;
-    push the contract commit first and flag it in the PR title).
+  - Whether it touches `core/protocols.py`, `core/types.py`, or both, and the
+    coordination instruction if so (claim the ADR number and lane in
+    `WORKING.md` before starting; push the contract commit first and flag it
+    in the PR title).
   - A reminder to register the lane in `WORKING.md` on pickup — this skill
     does not do that itself.
 - **Out of scope**: name anything that looked tempting but got excluded in
