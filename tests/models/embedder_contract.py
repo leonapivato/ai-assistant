@@ -53,8 +53,12 @@ class EmbedderContract:
         assert isinstance(embedder.model_id, str)
         assert embedder.model_id.strip()
 
-    async def test_embed_returns_one_vector_per_input_in_order(self, embedder: Embedder) -> None:
-        vectors = await embedder.embed(["first text", "second text", "third text"])
+    async def test_embed_returns_one_vector_per_input(self, embedder: Embedder) -> None:
+        # One vector per input *occurrence*: an implementation that deduplicates
+        # repeated texts would misalign a caller's records with their vectors.
+        # (Blank input is deliberately absent — the Protocol does not say whether
+        # an embedder must accept "", so the contract must not decide it here.)
+        vectors = await embedder.embed(["zulu text", "alpha text", "zulu text"])
 
         assert len(vectors) == 3
 
@@ -77,15 +81,22 @@ class EmbedderContract:
 
         assert first == second
 
-    async def test_each_vector_is_independent_of_its_batch_neighbours(
+    async def test_each_vector_matches_its_own_text_regardless_of_batch(
         self, embedder: Embedder
     ) -> None:
-        # A text's vector must depend only on that text, not on what it was
-        # batched with — otherwise a store's vector would change with the request
-        # shape. Embedding together must match embedding each alone.
-        texts = ["coffee please", "spaceship rocket"]
+        # Pins the position-to-text mapping *and* batch independence at once: the
+        # i-th vector must be exactly what that text embeds to on its own. So an
+        # implementation that permutes the batch (or lets a text's vector depend
+        # on its neighbours) fails here — a store would otherwise file a record
+        # under another record's vector.
+        #
+        # The inputs are deliberately NOT in lexical order: with a pre-sorted
+        # batch, an implementation that sorts before embedding returns the same
+        # thing either way and slides through untested.
+        texts = ["zulu text", "alpha text", "mike text"]
+        assert texts != sorted(texts), "inputs must be unsorted for this to bite"
 
         batched = await embedder.embed(texts)
-        one_at_a_time = [(await embedder.embed([text]))[0] for text in texts]
+        alone = [(await embedder.embed([text]))[0] for text in texts]
 
-        assert batched == one_at_a_time
+        assert batched == alone
