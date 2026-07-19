@@ -45,36 +45,52 @@ _SENSITIVE_KEY_PARTS: Final = frozenset(
         "secret",
         "session",
         "token",
-        # Tier 1 — conversation content and personal data.
-        "address",
+        # Tier 1 — conversation content.
+        "answer",
+        "body",
         "completion",
         "content",
-        "email",
         "memory",
         "message",
-        "phone",
         "prompt",
+        "query",
         "reply",
+        "transcript",
+        # Tier 1 — personal data. Compound name keys rather than a bare "name":
+        # "name" would swallow model_name, source_name, field_name and every
+        # other diagnostic identifier, which is over-matching that makes logs
+        # useless rather than safe.
+        "address",
+        "birth",
+        "dob",
+        "email",
+        "first_name",
+        "full_name",
+        "last_name",
+        "latitude",
+        "longitude",
+        "phone",
+        "postcode",
+        "real_name",
         "ssn",
-    }
-)
-
-# Keys that would otherwise be caught by the list above but carry no user data.
-# Kept deliberately short: every entry is a hole in the net, so each one has to
-# earn its place.
-_ALLOWED_KEYS: Final = frozenset(
-    {
-        "content_type",
-        "memory_kind",  # an enum member name (e.g. "SEMANTIC"), never content
+        "surname",
+        "username",
+        "user_name",
     }
 )
 
 
 def _is_sensitive(key: str) -> bool:
-    """Return whether a log key should have its value masked."""
+    """Return whether a log key should have its value masked.
+
+    There is deliberately **no allow-list**. An exemption is a permanent hole in
+    the net justified by an assumption about the value, and the assumption is
+    what fails: `content_type` looks like inert MIME metadata right up until
+    someone logs ``'text/plain; name="<patient record>"'``. When an over-matched
+    key genuinely hurts a diagnostic, rename the key — that is a local fix, where
+    an exemption is a global one.
+    """
     lowered = key.lower()
-    if lowered in _ALLOWED_KEYS:
-        return False
     return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
 
 
@@ -137,17 +153,8 @@ def redact_sensitive(
         raise structlog.DropEvent from exc
 
 
-def configure_logging(settings: Settings) -> None:
-    """Configure structlog for the application.
-
-    Safe to call more than once: each call replaces the configuration outright
-    rather than adding to it, and loggers are not cached, so a later call takes
-    effect even on a logger already in use.
-
-    Args:
-        settings: Loaded application settings; supplies the log level.
-    """
-    level = logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO)
+def _configure(level: int) -> None:
+    """Install the processor chain at ``level``."""
     logging.basicConfig(format="%(message)s", level=level)
     structlog.configure(
         processors=[
@@ -171,3 +178,37 @@ def configure_logging(settings: Settings) -> None:
         # dict lookup; a leaking logger costs rather more.
         cache_logger_on_first_use=False,
     )
+
+
+def configure_logging(settings: Settings) -> None:
+    """Configure logging from application settings.
+
+    Safe to call more than once: each call replaces the configuration outright
+    rather than adding to it, and loggers are not cached, so a later call takes
+    effect even on a logger already in use.
+
+    Only the *level* is settings-dependent. The redaction processor is already
+    installed at import (see below), so calling this is about verbosity, never
+    about safety.
+
+    Args:
+        settings: Loaded application settings; supplies the log level.
+    """
+    _configure(logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO))
+
+
+# Installed at import, not left to an entry point to remember.
+#
+# Configuring only from the CLI callback would leave every other way of using
+# this package — a test, a script, an embedding application, `orchestration`
+# wired up directly — on structlog's default chain, which has no redaction in
+# it. A safety net that depends on the caller invoking it is not a safety net,
+# and ADR-0004 §5 says structlog *is* configured, not that one adapter
+# configures it.
+#
+# The cost is an import side effect on global structlog state, which is a real
+# imposition on a host application. It is accepted here because the failure
+# modes are asymmetric: the worst case for configuring is that a host re-applies
+# its own configuration afterwards (and wins, since this is not idempotent-
+# guarded), while the worst case for not configuring is a silent Tier 0/1 leak.
+_configure(logging.INFO)
