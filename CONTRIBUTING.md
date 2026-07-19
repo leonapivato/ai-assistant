@@ -7,9 +7,13 @@ detail. Decisions recorded here are ratified in `docs/adr/0003-development-stand
 
 ## Setup
 
+Requires [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/just)
+(the task runner behind every `just ...` command below, including workspace
+claiming and the gate itself) — install both before continuing.
+
 ```bash
 uv sync                                   # create/refresh the environment
-uv run pre-commit install --install-hooks --hook-type commit-msg
+uv run pre-commit install --install-hooks # both pre-commit and commit-msg hooks
 git config commit.template .gitmessage    # scaffold commit messages
 ```
 

@@ -21,6 +21,8 @@ ratified decisions.
 
 - Python **3.14+**
 - [uv](https://docs.astral.sh/uv/) for environment and dependency management
+- [just](https://github.com/casey/just) for the task runner (`just check`, workspace
+  claiming, local review — see `CONTRIBUTING.md`)
 
 ## Getting started
 
@@ -60,6 +62,7 @@ ai-assistant/
 | Concern             | Tool                         |
 | ------------------- | ---------------------------- |
 | Packaging / env     | uv + `uv_build`              |
+| Task runner         | just                         |
 | Lint + format       | ruff (maximum rule set)      |
 | Static typing       | mypy (strict)                |
 | Architecture rules  | import-linter                |

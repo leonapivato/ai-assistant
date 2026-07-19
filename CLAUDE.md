@@ -98,7 +98,7 @@ uv run pytest           # tests
 CI runs this same gate on every PR and push to `master` (ADR-0010) — it is the
 backstop, not the first line of defence; run it locally before pushing.
 `pre-commit` runs the fast subset on commit; enable it once with
-`uv run pre-commit install --install-hooks --hook-type commit-msg`.
+`uv run pre-commit install --install-hooks`.
 
 **Iterate against `just review-codex`, not against CI.** It runs the same
 adversarial-review engine CI does (`CONTRIBUTING.md` → "Review (pre-merge)"),
