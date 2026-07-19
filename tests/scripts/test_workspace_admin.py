@@ -154,18 +154,170 @@ def test_claim_many_reports_a_failure_without_dropping_the_others(tmp_path: Path
 _needs_gh = pytest.mark.skipif(_GH is None, reason="gh CLI not installed")
 
 
+def _stub_gh(tmp_path: Path) -> Path:
+    """A directory with a fake `gh` that fabricates `pr list` responses.
+
+    Prepend this to PATH (never replace it) so real git/awk/sed etc. keep
+    resolving normally through the rest of PATH — only `gh` itself is swapped
+    out. Behaviour is driven by FAKE_GH_STATE / FAKE_GH_HEAD_SHA / FAKE_GH_EXIT
+    env vars read at invocation time, so one script serves every
+    scenario below without needing real `gh` auth or a GitHub remote.
+    """
+    stub_bin = tmp_path / "fake-gh-bin"
+    stub_bin.mkdir()
+    gh_stub = stub_bin / "gh"
+    gh_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1 $2" == "pr list" ]]; then\n'
+        '    if [[ "${FAKE_GH_EXIT:-0}" != "0" ]]; then\n'
+        '        echo "simulated gh failure" >&2\n'
+        "        exit 1\n"
+        "    fi\n"
+        '    printf \'%s\\t%s\\n\' "${FAKE_GH_STATE:-}" "${FAKE_GH_HEAD_SHA:-}"\n'
+        "    exit 0\n"
+        "fi\n"
+        'echo "unsupported fake gh invocation: $*" >&2\n'
+        "exit 1\n"
+    )
+    gh_stub.chmod(0o755)
+    return stub_bin
+
+
+def _run_with_fake_gh(
+    repo: Path,
+    *,
+    state: str = "",
+    head_sha: str = "",
+    fail: bool = False,
+    force: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    stub_bin = _stub_gh(repo.parent)
+    env_extra = {
+        "PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        "FAKE_GH_STATE": state,
+        "FAKE_GH_HEAD_SHA": head_sha,
+        "FAKE_GH_EXIT": "1" if fail else "0",
+    }
+    if force:
+        env_extra["FORCE"] = "1"
+    return _run(_PRUNE, repo, env_extra=env_extra)
+
+
+def _head_sha(path: Path) -> str:
+    assert _GIT is not None
+    out = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
+def test_prune_reports_no_pr_when_gh_finds_no_matching_pr(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+
+    result = _run_with_fake_gh(repo, state="")  # gh succeeds; empty result
+
+    assert result.returncode == 0, result.stderr
+    assert "no-pr" in result.stdout
+    assert ws.is_dir()  # nothing removed
+
+
+def test_prune_removes_a_merged_branch_whose_head_matches_the_pr(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+
+    result = _run_with_fake_gh(repo, state="MERGED", head_sha=sha, force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(merged)" in result.stdout
+    assert not ws.is_dir()
+
+
+def test_prune_dry_run_reports_merged_without_removing(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+
+    result = _run_with_fake_gh(repo, state="MERGED", head_sha=sha)  # no FORCE
+
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(merged)" in result.stdout
+    assert ws.is_dir()  # dry run never removes
+
+
+def test_prune_keeps_a_reused_branch_name_whose_head_has_moved_on(tmp_path: Path) -> None:
+    """A new claim can legitimately reuse an old, already-pruned branch name.
+
+    Its worktree's HEAD will not match the old PR's recorded head commit, so
+    it must never be treated as a prune candidate from the name match alone —
+    that would force-delete unrelated, possibly unpushed, new work (PR #17
+    review finding).
+    """
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    (ws / "new-work.txt").write_text("unrelated new work\n")
+    _git(ws, "add", "new-work.txt")
+    _git(ws, "commit", "-qm", "new work on a reused branch name")
+
+    stale_sha = "0" * 40  # the old, merged PR's head — not this worktree's
+
+    result = _run_with_fake_gh(repo, state="MERGED", head_sha=stale_sha, force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "head-changed" in result.stdout
+    assert ws.is_dir()  # never removed
+
+
+def test_prune_treats_closed_the_same_as_merged(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+
+    result = _run_with_fake_gh(repo, state="CLOSED", head_sha=sha, force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(closed)" in result.stdout
+    assert not ws.is_dir()
+
+
+def test_prune_keeps_an_open_pr_even_with_force(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+
+    result = _run_with_fake_gh(repo, state="OPEN", force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "keep" in result.stdout
+    assert ws.is_dir()
+
+
+def test_prune_reports_lookup_error_and_exits_nonzero(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+
+    result = _run_with_fake_gh(repo, fail=True, force=True)
+
+    assert result.returncode == 1  # had_error propagates past the loop's subshell
+    assert "lookup-error" in result.stdout
+    assert ws.is_dir()  # never a prune candidate
+
+
 @_needs_gh
-def test_prune_reports_no_pr_for_a_branch_with_no_remote(tmp_path: Path) -> None:
-    # The throwaway repo has no GitHub remote at all, so `gh pr list` fails fast
-    # locally (no network round trip) and the branch is correctly never treated
-    # as a prune candidate.
+def test_prune_reports_lookup_error_when_gh_cannot_resolve_a_remote(tmp_path: Path) -> None:
+    # The throwaway repo has no GitHub remote at all, so the real `gh pr list`
+    # genuinely fails (not "succeeds with an empty result") — that must surface
+    # as lookup-error, not be folded into no-pr.
     repo = _init_repo(tmp_path)
     _claim(repo, "area/a")
 
     result = _run(_PRUNE, repo)
 
-    assert result.returncode == 0, result.stderr
-    assert "no-pr" in result.stdout
+    assert result.returncode == 1
+    assert "lookup-error" in result.stdout
     assert (tmp_path / "repo-worktrees" / "area" / "a").is_dir()  # nothing removed
 
 
