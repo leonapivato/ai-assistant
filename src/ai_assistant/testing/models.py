@@ -108,9 +108,12 @@ class FakeModelProvider:
             :class:`~ai_assistant.core.types.Message`.
 
         Raises:
-            ModelError: If ``messages`` is empty — matching ``PydanticAIProvider``,
-                so code exercised with this fake cannot pass on an empty
-                conversation that the real provider would reject.
+            ModelError: If ``messages`` is empty, or a callable ``reply`` fails —
+                both matching ``PydanticAIProvider``'s failure boundary, so code
+                exercised with this fake cannot pass on input (or recover from a
+                failure) differently than it would against the real provider.
+            AssertionError: If a :meth:`scripted` provider runs out of replies (a
+                test-authoring error, deliberately not a ``ModelError``).
         """
         if not messages:
             msg = "complete() requires at least one message"
@@ -119,7 +122,20 @@ class FakeModelProvider:
         snapshot = tuple(m.model_copy(deep=True) for m in messages)
         self.calls.append(ModelCall(messages=snapshot, model=model))
         reply = self._reply
-        content = reply(messages) if callable(reply) else reply
+        if callable(reply):
+            try:
+                content = reply(messages)
+            except AssertionError:
+                # Scripted-reply exhaustion is a test-authoring error, not a
+                # simulated model failure — let it surface unchanged.
+                raise
+            except Exception as exc:
+                # Mirror PydanticAIProvider: a failing reply is a model failure,
+                # so code that catches ModelError behaves the same either way.
+                msg = f"model completion failed: {exc}"
+                raise ModelError(msg) from exc
+        else:
+            content = reply
         return Message(role=Role.ASSISTANT, content=content)
 
     @property
