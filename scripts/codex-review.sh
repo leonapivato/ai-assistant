@@ -90,9 +90,18 @@ if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]
     sandbox_args=(--dangerously-bypass-approvals-and-sandbox)
 fi
 
+# Unset by default, so local runs keep using the Codex CLI's own default model.
+# CI pins this (CODEX_REVIEW_MODEL in codex-review.yml) so the reviewer model is
+# an explicit, deliberate choice there rather than whatever the pinned CLI
+# version happens to default to.
+model_args=()
+if [[ -n "${CODEX_REVIEW_MODEL:-}" ]]; then
+    model_args=(-m "$CODEX_REVIEW_MODEL")
+fi
+
 echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
 # -o captures just the final review; progress streams to stderr.
-codex exec "${sandbox_args[@]}" -o "$out" - <"$prompt" >&2
+codex exec "${sandbox_args[@]}" "${model_args[@]}" -o "$out" - <"$prompt" >&2
 
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
