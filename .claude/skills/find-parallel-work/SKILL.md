@@ -186,25 +186,27 @@ step 1 and here, but for however long the human takes to respond. Everything
 below runs **immediately before the actual `gh issue create` call**, after
 confirmation has been given, not once earlier and reused:
 
-1. **Re-scan for duplicates, every time, regardless of what else changed:**
-   `gh issue list --state open --limit 200 --json title,body,url` — the bare
-   command only returns titles; without `--json body` a match hiding in an
-   issue's body text (a generic title, the lane named only in a checklist
-   line) is invisible. Scan both titles and bodies for an existing tracking
-   issue already proposing one or more of the same lanes — someone else
-   (or an earlier run of this skill) can have opened one during the wait,
-   independent of whether `origin/master` moved at all. If a match exists,
-   don't create a new issue for the overlapping lane(s) — point back to the
-   existing one instead (in the batch's "Out of scope" section, or by not
-   posting at all if the whole batch overlaps).
-2. **Re-check whether `origin/master` moved:** `git fetch origin`, compare
-   against the commit noted in step 1. If it hasn't moved, skip to 3 — a
-   lane's roadmap item, `core/` entries, `WORKING.md` ownership, and module
-   count can't have changed if the commit hasn't. If it has, redo **steps
-   1 through 3 in full** against the new commit — not just 1 and 2: step 3's
-   ADR pre-assignment was computed from the old `WORKING.md` state, and an
-   ADR number that was free at the original survey can have been claimed by
-   the time `origin/master` moved, same as any other candidacy fact.
+1. **Re-check whether `origin/master` moved first:** `git fetch origin`,
+   compare against the commit noted in step 1. If it hasn't moved, the lane
+   list is still current — go to 2. If it has, redo **steps 1 through 3 in
+   full** against the new commit — not just 1 and 2: step 3's ADR
+   pre-assignment was computed from the old `WORKING.md` state, and an ADR
+   number that was free at the original survey can have been claimed by the
+   time `origin/master` moved, same as any other candidacy fact. This can
+   add or drop lanes, not just change ownership flags.
+2. **Re-scan for duplicates against the now-final lane list, every time,
+   regardless of whether step 1 changed anything:** `gh issue list --state
+   open --limit 200 --json title,body,url` — the bare command only returns
+   titles; without `--json body` a match hiding in an issue's body text (a
+   generic title, the lane named only in a checklist line) is invisible.
+   Scan both titles and bodies for an existing tracking issue already
+   proposing one or more of the lanes *currently in the draft* — including
+   any lane step 1 just added, not only the ones from the original survey.
+   Someone else (or an earlier run of this skill) can have opened a matching
+   issue during the wait, independent of whether `origin/master` moved at
+   all. If a match exists, don't create a new issue for the overlapping
+   lane(s) — point back to the existing one instead (in the batch's "Out of
+   scope" section, or by not posting at all if the whole batch overlaps).
 3. If either check above changed the lane list, the ADR assignments, or any
    other checklist content from what was already shown and approved,
    **re-print the revised draft and get confirmation again** before
