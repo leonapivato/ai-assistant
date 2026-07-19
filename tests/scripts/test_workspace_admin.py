@@ -307,6 +307,55 @@ def test_prune_removes_a_merged_branch_whose_head_matches_the_pr(tmp_path: Path)
     assert not ws.is_dir()
 
 
+def test_prune_skips_an_edited_ignored_file_even_with_force(tmp_path: Path) -> None:
+    """Forced pruning must not silently discard a locally-edited .env either.
+
+    `git status --porcelain` (the existing dirty-check) cannot see a
+    git-ignored file at all, edited or not — the exact same blind spot
+    release-workspace.sh had. FORCE=1 here means "yes, actually delete the
+    confirmed-merged, clean stuff" — it was never a "discard my mess" flag
+    the way release's FORCE is, so this must dirty-skip unconditionally, the
+    same as any other dirty worktree (PR #17 review, blocker).
+    """
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".env\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore .env")
+    (repo / ".env").write_text("SECRET=original\n")
+    ws = Path(_claim(repo, "area/a"))
+    assert (ws / ".env").read_text() == "SECRET=original\n"  # seeded by bootstrap
+    sha = _head_sha(ws)
+    (ws / ".env").write_text("SECRET=edited-by-user\n")  # a local edit worth keeping
+
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "dirty-skip" in result.stdout
+    assert ws.is_dir()  # never touched, forced or not
+    assert (ws / ".env").read_text() == "SECRET=edited-by-user\n"
+
+
+def test_prune_does_not_dirty_skip_for_regenerable_ignored_artifacts(tmp_path: Path) -> None:
+    """Known tooling artifacts (venvs, caches) must never block a real prune."""
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".venv/\n__pycache__/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore tooling artifacts")
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+    (ws / ".venv").mkdir()
+    (ws / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+    nested_cache = ws / "src" / "pkg" / "__pycache__"
+    nested_cache.mkdir(parents=True)
+    (nested_cache / "mod.cpython-314.pyc").write_bytes(b"\x00")
+
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(merged)" in result.stdout
+    assert not ws.is_dir()
+
+
 def test_prune_continues_past_a_worktree_with_a_missing_directory(tmp_path: Path) -> None:
     """A worktree whose directory was manually deleted must not stop the run.
 
