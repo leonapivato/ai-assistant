@@ -92,6 +92,6 @@ prune-workspaces:
 # First-time developer setup
 setup:
     uv sync
-    uv tool install pre-commit
+    uv tool install "pre-commit==$(uv run python -c 'import importlib.metadata as m; print(m.version("pre-commit"))')"
     pre-commit install --install-hooks
     git config commit.template .gitmessage
