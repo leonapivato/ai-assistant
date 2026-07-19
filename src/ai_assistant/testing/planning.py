@@ -330,11 +330,14 @@ class FakePlanStore:
         return None if stored is None else stored.model_copy(deep=True)
 
     async def active_executions(self) -> list[ExecutionState]:
-        """Return every execution with outstanding work, oldest id first."""
+        """Return every execution with outstanding work, oldest first.
+
+        Insertion order, not sorted id order: ids embed a plan prefix, so
+        sorting them would interleave plans and put ``exec-10`` before
+        ``exec-2``.
+        """
         return [
-            state.model_copy(deep=True)
-            for _, state in sorted(self._executions.items())
-            if state.is_active
+            state.model_copy(deep=True) for state in self._executions.values() if state.is_active
         ]
 
     async def export(self) -> PlanExport:

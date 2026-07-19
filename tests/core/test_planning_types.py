@@ -509,6 +509,38 @@ def test_export_rejects_duplicate_ids() -> None:
         PlanExport(exported_at=_WHEN, goals=(_goal(), _goal()))
 
 
+def test_export_rejects_an_execution_that_does_not_match_its_plan() -> None:
+    """A misaligned export is unsafe to resume — steps are positional."""
+    plan = ActionPlan(
+        id="p1",
+        goal_id="g1",
+        steps=(
+            PlanStep(id="s1", intent="a", capability="c"),
+            PlanStep(id="s2", intent="b", capability="c"),
+        ),
+        created_at=_WHEN,
+    )
+    execution = ExecutionState(
+        id="e1",
+        plan_id="p1",
+        steps=(_step(step_id="s2"), _step(step_id="ghost")),
+        updated_at=_WHEN,
+    )
+    with pytest.raises(ValidationError, match="does not line up"):
+        PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
+
+
+def test_a_step_cannot_finish_before_it_started() -> None:
+    """A clock that steps backwards would otherwise write an impossible history."""
+    with pytest.raises(ValidationError, match="cannot finish before it started"):
+        _claimed(
+            StepStatus.FAILED,
+            error="boom",
+            started_at=datetime(2026, 2, 1, tzinfo=UTC),
+            finished_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
 def test_export_round_trips_through_json() -> None:
     plan = ActionPlan(
         id="p1",
