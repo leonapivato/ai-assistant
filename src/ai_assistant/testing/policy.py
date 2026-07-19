@@ -41,10 +41,11 @@ class PolicyCall:
     """One recorded call to a :class:`FakeMemoryPolicy`.
 
     Attributes:
-        proposal: The proposal passed to ``decide``.
-        conflicts: The conflicting records passed alongside it, as an independent
-            snapshot (tupled on record, so later caller mutation cannot reach
-            it).
+        proposal: The proposal passed to ``decide``, as an independent snapshot.
+        conflicts: The conflicting records passed alongside it, likewise
+            snapshotted. Both are deep-copied on record, so neither reassigning
+            the caller's list nor mutating a record inside it can reach what was
+            recorded.
     """
 
     proposal: MemoryUpdateProposal
@@ -105,7 +106,12 @@ class FakeMemoryPolicy:
         conflicts: Sequence[MemoryRecord],
     ) -> MemoryDecision:
         """Record the call and return the configured decision."""
-        self.calls.append(PolicyCall(proposal=proposal, conflicts=tuple(conflicts)))
+        self.calls.append(
+            PolicyCall(
+                proposal=proposal.model_copy(deep=True),
+                conflicts=tuple(c.model_copy(deep=True) for c in conflicts),
+            )
+        )
 
         if proposal.sensitivity is DataTier.SECRET:
             return MemoryDecision(
@@ -139,7 +145,10 @@ class FakeMemoryPolicy:
 
     @property
     def last_proposal(self) -> MemoryUpdateProposal:
-        """The proposal from the most recent call.
+        """The recorded snapshot of the most recent call's proposal.
+
+        Equal to what the caller passed, but not the same object — compare it by
+        value, not identity.
 
         Raises:
             IndexError: If ``decide`` has not been called.
