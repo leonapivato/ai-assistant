@@ -21,6 +21,7 @@ _Last updated: 2026-07-19._
 
 | Subsystem        | Owner        | Status            | Branch / ADR                        |
 | ---------------- | ------------ | ----------------- | ----------------------------------- |
+| `ContextProvider` triad | leonapivato | in progress (WIP) | `test/context-provider-triad`, no ADR |
 | `orchestration`  | _unclaimed_  | not started       | —                                   |
 | `planning`       | _unclaimed_  | not started       | —                                   |
 | `tools`          | _unclaimed_  | not started       | —                                   |
