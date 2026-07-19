@@ -23,7 +23,7 @@ _Last updated: 2026-07-19._
 | ---------------- | ------------ | ----------------- | ----------------------------------- |
 | `ContextProvider` triad | leonapivato | in progress (WIP) | `test/context-provider-triad`, no ADR |
 | `orchestration`  | _unclaimed_  | not started       | —                                   |
-| `planning`       | leonapivato  | in progress (WIP) | `planning/goal-actionplan`, ADR-0014 (Proposed) |
+| `planning`       | leonapivato  | in review         | `planning/goal-actionplan`, ADR-0014 (Accepted) |
 | `tools`          | _unclaimed_  | not started       | —                                   |
 | `permissions`    | _unclaimed_  | not started       | —                                   |
 
