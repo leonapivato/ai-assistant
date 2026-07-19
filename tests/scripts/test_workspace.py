@@ -154,6 +154,24 @@ def test_invalid_branch_is_rejected_without_side_effects(tmp_path: Path) -> None
     assert _current_branch(repo) == "master"
 
 
+def test_claim_rejects_extra_positional_arguments(tmp_path: Path) -> None:
+    """A third argument is always a typo, not a silently-ignored extra.
+
+    Bash simply drops unreferenced positional params — without an explicit
+    count check, `claim-workspace.sh area/new valid-base typo` would create
+    a branch from `valid-base` as if `typo` had never been there, hiding
+    whatever the caller actually meant by it (PR #23 review finding).
+    """
+    repo = _init_repo(tmp_path)
+
+    result = _run(_CLAIM, repo, "area/new", "master", "typo")
+
+    assert result.returncode == 2
+    assert "usage" in result.stderr.lower()
+    assert _current_branch(repo) == "master"
+    assert not (tmp_path / "repo-worktrees" / "area" / "new").exists()
+
+
 def test_existing_branch_is_rejected(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _git(repo, "branch", "area/dup")

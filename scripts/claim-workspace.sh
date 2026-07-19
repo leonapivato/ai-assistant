@@ -38,7 +38,7 @@ set -Eeuo pipefail
 
 branch="${1:-}"
 base_override="${2:-}"
-if [[ -z "$branch" || "$branch" != */* ]]; then
+if [[ -z "$branch" || "$branch" != */* || $# -gt 2 ]]; then
     echo "usage: scripts/claim-workspace.sh <area>/<slug> [<base>]  (e.g. memory/add-cache)" >&2
     exit 2
 fi
