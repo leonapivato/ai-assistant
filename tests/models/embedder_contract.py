@@ -10,8 +10,15 @@ test modules.
 
 The suite embeds text, so it is run against the offline embedders
 (``HashingEmbedder``, ``FakeEmbedder``) in the default gate. ``FastEmbedEmbedder``
-downloads a model on first embed; its embedding behaviour is exercised at
-store-wiring integration time, not here (see ``tests/models/test_fastembed_embedder.py``).
+is deliberately **not** run through it: its ``embed`` downloads a model on first
+use, and the gate runs the whole suite — including ``integration``-marked tests —
+with no network. The two ways to include it both cost more than they buy:
+patching ``TextEmbedding`` out would assert properties of the patch rather than
+of fastembed (a green that proves nothing), and letting it download would make
+the gate network-dependent. Covering its adapter layer honestly needs an
+injection seam in ``FastEmbedEmbedder`` itself — a ``models`` change, tracked as
+a follow-up rather than smuggled into this testing slice. Its metadata is
+asserted offline in ``tests/models/test_fastembed_embedder.py``.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
@@ -39,11 +46,12 @@ class EmbedderContract:
         assert isinstance(embedder.dimensions, int)
         assert embedder.dimensions >= 1
 
-    def test_model_id_is_a_nonempty_string(self, embedder: Embedder) -> None:
+    def test_model_id_is_a_nonblank_string(self, embedder: Embedder) -> None:
         # Vectors are tagged with this so a store can detect a model change and
         # re-embed (ADR-0006 §4); a blank tag could not distinguish two spaces.
+        # Whitespace-only is as useless a tag as empty, so both are rejected.
         assert isinstance(embedder.model_id, str)
-        assert embedder.model_id
+        assert embedder.model_id.strip()
 
     async def test_embed_returns_one_vector_per_input_in_order(self, embedder: Embedder) -> None:
         vectors = await embedder.embed(["first text", "second text", "third text"])

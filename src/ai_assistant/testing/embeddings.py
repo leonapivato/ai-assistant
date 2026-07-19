@@ -46,16 +46,21 @@ class FakeEmbedder:
 
         Args:
             dimensions: The fixed length of every vector produced; must be >= 1.
-            model_id: The identifier vectors are tagged with. Defaults to one that
-                encodes the scheme and dimension, so two differently-sized fakes
-                are distinguishable (ADR-0006 §4).
+            model_id: The identifier vectors are tagged with; must not be blank.
+                Defaults to one that encodes the scheme and dimension, so two
+                differently-sized fakes are distinguishable (ADR-0006 §4).
 
         Raises:
             ValueError: If ``dimensions`` is less than one (which would make the
-                bucket modulo undefined).
+                bucket modulo undefined), or ``model_id`` is blank — a blank tag
+                cannot identify an embedding space, so allowing one would let a
+                caller configure a fake that fails its own conformance suite.
         """
         if dimensions < 1:
             msg = f"dimensions must be >= 1, got {dimensions}"
+            raise ValueError(msg)
+        if model_id is not None and not model_id.strip():
+            msg = "model_id must not be blank"
             raise ValueError(msg)
         self._dimensions = dimensions
         self._model_id = model_id if model_id is not None else f"fake-embedder-{dimensions}"
