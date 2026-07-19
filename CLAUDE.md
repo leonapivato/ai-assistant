@@ -74,7 +74,9 @@ learn/update memory.
 - **Stage explicit paths, never `git add -A`/`git add .`.** Add the specific
   files your change touches, so a stray sweep can't pick up unrelated work.
 - **One subsystem per change.** Scope a change to a single package plus its
-  tests. Small diffs review faster and fail more clearly.
+  tests. Small diffs review faster and fail more clearly. The one exception is a
+  Protocol triad (below): contract, conformance suite, and canonical fake are
+  one unit of work, not three changes.
 - **Contract first, and land the triad.** If a subsystem needs a new capability
   from another, add or extend a Protocol in `core/protocols.py` first, get it
   reviewed, then implement against it. A *new* Protocol ships as a triad —

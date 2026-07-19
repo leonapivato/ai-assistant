@@ -358,6 +358,12 @@ A Protocol on its own is an unenforced promise. The required unit of work for a
    under [Testing](#testing), encoding what every implementation must do.
 3. **A canonical fake** in `ai_assistant.testing`, passing that suite.
 
+A triad spans `core/`, `ai_assistant/testing/`, and `tests/`, and that is
+deliberate: it is **one** unit of work, the standing exception to "one subsystem
+per change" (`CLAUDE.md`). Splitting it across PRs is the failure mode this rule
+exists to prevent, not a way to satisfy the scoping rule. It stays a small diff
+because it is a contract and its guardrails, with no implementation attached.
+
 Not "Protocol now, tests when someone implements it." Deferring 2 and 3 is how
 `TODO.md` items 1 and 3 came to exist: contracts landed, the machinery that
 keeps implementations honest did not, and the backfill fell to whoever came
