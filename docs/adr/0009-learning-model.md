@@ -6,7 +6,7 @@
 ## Context
 
 The request pipeline (`CLAUDE.md`) ends with `… → execute → learn/update
-memory`. The `learning` subsystem owns that last step: per [VISION](../VISION.md)
+memory`. The `learning` subsystem owns that last step: per [VISION](../../VISION.md)
 §"Feedback and Learning Loop", it converts corrections, edits, ignored
 suggestions, repeated choices, and explicit ratings into *carefully scoped
 improvements*. It is the piece that closes the roadmap's first vertical loop —
