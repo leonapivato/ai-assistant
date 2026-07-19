@@ -16,11 +16,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _SCRIPTS = Path(__file__).parents[2] / "scripts"
 _CLAIM = _SCRIPTS / "claim-workspace.sh"
 _RELEASE = _SCRIPTS / "release-workspace.sh"
 _BASH = shutil.which("bash")
 _GIT = shutil.which("git")
+_JUST = shutil.which("just")
+_needs_just = pytest.mark.skipif(_JUST is None, reason="just CLI not installed")
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -809,3 +813,57 @@ def test_claim_rejects_an_explicit_empty_base(tmp_path: Path) -> None:
         text=True,
     ).stdout.split()
     assert "area/b" not in branches
+
+
+@_needs_just
+def test_just_claim_workspace_recipe_forwards_argument_count_faithfully(
+    tmp_path: Path,
+) -> None:
+    """The public `just claim-workspace` entry point, not just the script.
+
+    A first version of the recipe used a defaulted parameter (`base=""`),
+    which `just` always resolves to *some* value before the recipe body runs
+    — indistinguishable from an explicit empty string, so `just
+    claim-workspace <branch> ""` reached the script the same as omitting the
+    argument entirely (PR #23 review finding). Switched to a variadic
+    parameter (`*base`); this drives the *actual* justfile against a stub
+    claim-workspace.sh that records exactly what it received, proving `just`
+    itself forwards argument count faithfully — not just that the script
+    would handle it correctly if it got the arguments right.
+
+    `just` always changes into the directory containing the justfile before
+    running a recipe (verified directly), so the real justfile is copied
+    into a throwaway directory rather than run in place — running it against
+    this repo's own scripts/claim-workspace.sh would claim a real workspace.
+    """
+    assert _JUST is not None
+    real_repo_root = Path(__file__).parents[2]
+    workdir = tmp_path / "justdir"
+    workdir.mkdir()
+    shutil.copy(real_repo_root / "justfile", workdir / "justfile")
+    (workdir / "scripts").mkdir()
+    args_file = workdir / "args.txt"
+    stub = workdir / "scripts" / "claim-workspace.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "{\n"
+        "    printf '%s\\n' \"$#\"\n"
+        '    for a in "$@"; do printf \'[%s]\\n\' "$a"; done\n'
+        f'}} >"{args_file}"\n'
+    )
+    stub.chmod(0o755)
+
+    def _just(*args: str) -> None:
+        assert _JUST is not None
+        subprocess.run(  # noqa: S603  # resolved just path, test-controlled dir
+            [_JUST, *args], cwd=str(workdir), check=True, capture_output=True, text=True
+        )
+
+    _just("claim-workspace", "area/omit")
+    assert args_file.read_text().splitlines() == ["1", "[area/omit]"]
+
+    _just("claim-workspace", "area/empty", "")
+    assert args_file.read_text().splitlines() == ["2", "[area/empty]", "[]"]
+
+    _just("claim-workspace", "area/base", "master")
+    assert args_file.read_text().splitlines() == ["2", "[area/base]", "[master]"]
