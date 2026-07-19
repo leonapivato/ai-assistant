@@ -112,8 +112,11 @@ async def test_confident_and_unconflicted_is_accepted() -> None:
     assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
-def test_non_positive_temporary_ttl_is_rejected_at_construction() -> None:
+@pytest.mark.parametrize("ttl", [timedelta(0), timedelta(seconds=-1)])
+def test_non_positive_temporary_ttl_is_rejected_at_construction(ttl: timedelta) -> None:
     # Without this guard the policy builds fine and raises later from `decide`,
-    # and only for a low-confidence proposal — a crash far from its cause.
+    # and only for a low-confidence proposal — a crash far from its cause. Both
+    # zero and negative are checked: a guard narrowed to `== 0` would let a
+    # negative window through and restore exactly that delayed failure.
     with pytest.raises(ValueError, match="temporary_ttl must be positive"):
-        DefaultMemoryPolicy(temporary_ttl=timedelta(0))
+        DefaultMemoryPolicy(temporary_ttl=ttl)
