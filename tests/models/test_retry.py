@@ -205,6 +205,34 @@ async def test_deadline_surfaces_as_a_timeout_error() -> None:
     assert len(sleep.delays) == 1
 
 
+async def test_a_providers_own_timeout_is_not_reported_as_our_deadline() -> None:
+    # Regression (CI adversarial review): both arrive as TimeoutError, and
+    # conflating them produced a false report — an instant "socket closed" was
+    # re-labelled "exceeded its 30s deadline" with the provider's message
+    # discarded. They are told apart by where they are caught: on expiry
+    # asyncio.timeout cancels the inner call, so a TimeoutError seen *inside* it
+    # can only have come from the provider.
+    inner = FakeProvider(TimeoutError("socket closed"))
+    sleep = SleepSpy()
+
+    with pytest.raises(ModelTimeoutError, match="the provider raised a timeout: socket closed"):
+        await _provider(inner, sleep, timeout_seconds=30.0, max_attempts=2).complete(PROMPT)
+
+    # Still retried — a transport timeout is transient, so only the claim about
+    # whose deadline expired was wrong, not the decision to try again.
+    assert inner.calls == 2
+
+
+async def test_a_providers_own_timeout_keeps_the_original_as_its_cause() -> None:
+    inner = FakeProvider(TimeoutError("socket closed"))
+
+    with pytest.raises(ModelTimeoutError) as caught:
+        await _provider(inner, SleepSpy(), max_attempts=1).complete(PROMPT)
+
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    assert str(caught.value.__cause__) == "socket closed"
+
+
 async def test_a_slow_but_finishing_call_is_not_cut_off() -> None:
     async def slow(*_args: object, **_kwargs: object) -> Message:
         await asyncio.sleep(0.01)
