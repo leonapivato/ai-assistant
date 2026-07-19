@@ -69,9 +69,10 @@ is `gate`; a review comment never blocks merge.
   a ready PR), the adversarial review runs — but only **after `gate` is green**
   for that commit. Draft PRs are never auto-reviewed. Each comment names the
   commit it covers; a new push supersedes the old comment.
-- **On demand.** Comment **`/review`** (or **`/review architecture`**) on a PR to
-  run a review, including the architecture lens for a `Proposed` ADR. Restricted
-  to contributors with write access.
+- **On demand.** Comment **`/review`** (or **`/review architecture`**) on any PR —
+  **including a draft, and without waiting on `gate`** — to run a review; the
+  architecture lens suits a `Proposed` ADR. Restricted to contributors with write
+  access.
 
 The **local** `just review-codex` above is unchanged — use it for fast iteration
 before pushing. Local and CI run the *same* script and rubrics, so they cannot
