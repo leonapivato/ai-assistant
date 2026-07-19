@@ -10,6 +10,11 @@ short-lived state, not history; git remembers the past. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) → "Coordinating parallel work" for the
 shared-surface rules (ADR numbers and `core/` changes) this file supports.
 
+This file holds only the *human-declared* bits (lane owners, ADR numbers in
+flight). For the *derived* picture — which packages are built vs stubs, the
+Protocol inventory, ADR statuses and numbering gaps — run `just status`; it is
+generated from the repo and never hand-edited.
+
 _Last updated: 2026-07-18._
 
 ## Lanes

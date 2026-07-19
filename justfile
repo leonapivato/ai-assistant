@@ -37,6 +37,10 @@ test *args:
 audit:
     uv run pip-audit
 
+# Derived project status — packages, Protocols, ADRs + gaps (generated, never hand-edited)
+status:
+    uv run python scripts/project_status.py
+
 # Adversarial review by Codex (a different model) vs a base branch; read-only.
 # persona is `architecture` or `adversarial`. Sends the diff to OpenAI.
 review-codex persona base="master":
