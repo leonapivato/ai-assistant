@@ -41,6 +41,20 @@ def test_non_positive_dimensions_are_rejected(dimensions: int) -> None:
         HashingEmbedder(dimensions=dimensions)
 
 
+async def test_embedding_is_exactly_deterministic() -> None:
+    # The shared contract only requires repeatability within tolerance, since the
+    # Protocol does not promise bit-for-bit reproducibility. This embedder does
+    # promise it — its docstring calls it deterministic, and it is pure hashing
+    # arithmetic — so the stronger guarantee is pinned here rather than imposed
+    # on every implementation.
+    embedder = HashingEmbedder()
+
+    first = await embedder.embed(["the user likes coffee"])
+    second = await embedder.embed(["the user likes coffee"])
+
+    assert first == second
+
+
 async def test_vectors_are_unit_norm() -> None:
     embedder = HashingEmbedder()
 

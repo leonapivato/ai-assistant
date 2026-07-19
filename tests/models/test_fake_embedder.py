@@ -57,6 +57,19 @@ def test_blank_model_id_is_rejected(model_id: str) -> None:
         FakeEmbedder(model_id=model_id)
 
 
+async def test_embedding_is_exactly_deterministic() -> None:
+    # The shared contract only requires repeatability within tolerance, since the
+    # Protocol does not promise bit-for-bit reproducibility. This fake does
+    # promise it — it is pure hashing arithmetic with no backend — and tests that
+    # use it as a stand-in may rely on exact vectors, so it is pinned here.
+    embedder = FakeEmbedder()
+
+    first = await embedder.embed(["the user likes coffee"])
+    second = await embedder.embed(["the user likes coffee"])
+
+    assert first == second
+
+
 async def test_shared_tokens_are_more_similar_than_disjoint() -> None:
     embedder = FakeEmbedder()
 

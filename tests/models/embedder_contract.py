@@ -3,10 +3,12 @@
 Every ``Embedder`` implementation must pass this suite (CONTRIBUTING, "Protocol
 conformance suites"). A concrete test subclasses :class:`EmbedderContract` and
 overrides the ``embedder`` fixture; the suite asserts only behaviour *universal*
-to the contract — a fixed vector shape, one vector per input in batch order, and
-determinism — never the retrieval quality of any one scheme (hashed
-bag-of-words vs. a real semantic model), which stays in the per-implementation
-test modules.
+to the contract — a fixed vector shape, one vector per input in batch order, a
+stable ``model_id``, and repeatability within tolerance — never the retrieval
+quality of any one scheme (hashed bag-of-words vs. a real semantic model), nor
+guarantees a single implementation happens to make. Exact, bit-for-bit
+determinism is one of the latter: the Protocol does not promise it, so an
+implementation that does pins it in its own test module.
 
 The suite embeds text, so it is run against the offline embedders
 (``HashingEmbedder``, ``FakeEmbedder``) in the default gate. ``FastEmbedEmbedder``
@@ -26,9 +28,33 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
+import math
+from typing import TYPE_CHECKING
+
 import pytest
 
 from ai_assistant.core.protocols import Embedder
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+# Vectors are compared within tolerance, never bit-for-bit. The Protocol promises
+# shape, cardinality, and order — not exact reproducibility — and a real backend
+# may vary in the last bits between calls or batch shapes (batching changes the
+# kernel's matrix shapes, so the rounding differs). Requiring exact equality
+# would fail a conforming embedder. The tolerance is far tighter than any real
+# difference in *meaning*: a permuted or mismatched vector misses by orders of
+# magnitude more than this, so the checks below still bite.
+_REL_TOLERANCE = 1e-6
+_ABS_TOLERANCE = 1e-9
+
+
+def _vectors_close(actual: Sequence[float], expected: Sequence[float]) -> bool:
+    """Whether two vectors agree to within float-noise tolerance."""
+    return len(actual) == len(expected) and all(
+        math.isclose(x, y, rel_tol=_REL_TOLERANCE, abs_tol=_ABS_TOLERANCE)
+        for x, y in zip(actual, expected, strict=True)
+    )
 
 
 class EmbedderContract:
@@ -95,17 +121,23 @@ class EmbedderContract:
     async def test_empty_input_returns_no_vectors(self, embedder: Embedder) -> None:
         assert await embedder.embed([]) == []
 
-    async def test_embedding_is_deterministic(self, embedder: Embedder) -> None:
+    async def test_embedding_the_same_text_twice_is_repeatable(self, embedder: Embedder) -> None:
+        # Not bit-for-bit reproducibility, which the Protocol does not promise —
+        # but a text must land in the same place each time, or a stored vector
+        # would never match a freshly embedded query and retrieval would be
+        # meaningless. An implementation that promises exact determinism pins
+        # that in its own module.
         first = await embedder.embed(["the user likes coffee"])
         second = await embedder.embed(["the user likes coffee"])
 
-        assert first == second
+        assert len(first) == len(second) == 1
+        assert _vectors_close(first[0], second[0])
 
     async def test_each_vector_matches_its_own_text_regardless_of_batch(
         self, embedder: Embedder
     ) -> None:
         # Pins the position-to-text mapping *and* batch independence at once: the
-        # i-th vector must be exactly what that text embeds to on its own. So an
+        # i-th vector must be what that text embeds to on its own. So an
         # implementation that permutes the batch (or lets a text's vector depend
         # on its neighbours) fails here — a store would otherwise file a record
         # under another record's vector.
@@ -113,10 +145,16 @@ class EmbedderContract:
         # The inputs are deliberately NOT in lexical order: with a pre-sorted
         # batch, an implementation that sorts before embedding returns the same
         # thing either way and slides through untested.
+        #
+        # Compared within tolerance, not bit-for-bit: this is the one check that
+        # spans two different batch shapes, exactly where a real backend's
+        # rounding may legitimately differ. A permuted vector is nowhere near
+        # tolerance, so the check keeps all of its force.
         texts = ["zulu text", "alpha text", "mike text"]
         assert texts != sorted(texts), "inputs must be unsorted for this to bite"
 
         batched = await embedder.embed(texts)
         alone = [(await embedder.embed([text]))[0] for text in texts]
 
-        assert batched == alone
+        assert len(batched) == len(texts)
+        assert all(_vectors_close(b, a) for b, a in zip(batched, alone, strict=True))
