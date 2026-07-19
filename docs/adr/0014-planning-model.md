@@ -519,11 +519,16 @@ Protocol.
 - **Every executed step is correlatable with its authorisation**, including
   silently auto-approved ones — the case ADR-0004 §7 most needs covered.
 - **Immutability is enforced where state is *held*, not where it is handed out.**
-  `ActionPlan` and its parameters are frozen outright, and the store copies
-  goals and execution state in and out, so nothing a caller does to what it was
-  given can reach stored state. But `Goal` and `ExecutionState` are themselves
-  mutable models, so a caller *can* edit its own copy — including one inside a
-  `PlanExport` — and produce a snapshot whose references no longer resolve.
+  The store copies every record — goals, plans and execution state — in and out,
+  so nothing a caller does to what it was given can reach stored state. Copying
+  plans is not redundant with `frozen=True`: freezing stops
+  `plan.goal_id = ...` but not `plan.__dict__["goal_id"] = ...`, so a shared
+  instance would still let a caller rewrite the audit record in place, down to a
+  nested step's `capability`. Freezing guards against accident; the copy is what
+  makes stored state actually the store's own. But `Goal` and `ExecutionState`
+  remain mutable models, so a caller *can* edit its own copy — including one
+  inside a `PlanExport` — and produce a snapshot whose references no longer
+  resolve.
   Closing that would mean freezing the whole object graph, and `Goal` carries
   `Provenance`, which `memory` shares; freezing it is a cross-subsystem change
   belonging to its own ADR, not this lane. The guarantee this ADR makes is
