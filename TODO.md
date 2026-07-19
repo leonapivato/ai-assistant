@@ -159,3 +159,25 @@ change as breaking and move the assertions into the shared suite. Cheap, but bot
 are `core/` changes and contract widenings, so neither is a drive-by.
 
 **Origin:** architecture review of the `MemoryPolicy` triad (item 1/3 backfill).
+
+## 8. Freeze the shared record types, or accept caller-side mutability
+
+**What:** planning enforces immutability where state is *held* — `ActionPlan` is
+frozen all the way down, and `PlanStore` copies goals and execution state in and
+out — but `Goal` and `ExecutionState` are mutable pydantic models. A caller can
+therefore edit its own copy, including records inside a `PlanExport`, producing a
+snapshot whose `goal_id`/`plan_id` references no longer resolve even though the
+store only ever emits consistent ones.
+
+**Why it was not fixed in ADR-0014:** closing it means freezing the whole
+reachable graph, and `Goal` carries `Provenance`, which every `MemoryRecord`
+shares. Freezing that is a cross-subsystem change touching `memory`, so it wants
+its own ADR rather than a quiet widening of a planning slice.
+
+**Direction:** decide deliberately — either freeze `Provenance` and the record
+types across `core` (and adjust `memory` accordingly), or state in the ADRs that
+immutability is a property of stored state and not of handed-out copies, so the
+next reviewer does not re-raise it.
+
+**Origin:** adversarial review of the planning slice (ADR-0014), waived with
+reasons recorded in that ADR's consequences.

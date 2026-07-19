@@ -211,6 +211,52 @@ def test_pending_step_needs_none_of_the_claim_marks() -> None:
     assert _step().status is StepStatus.PENDING
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_approval_ref_is_not_an_approval(blank: str) -> None:
+    """An empty reference satisfies "is present" while identifying nothing."""
+    with pytest.raises(ValidationError, match="must not be blank"):
+        _claimed(StepStatus.RUNNING, approval_ref=blank)
+
+
+def test_a_blank_bound_tool_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="must not be blank"):
+        _claimed(StepStatus.RUNNING, bound_tool="  ")
+
+
+def test_identifiers_are_stored_stripped() -> None:
+    step = _claimed(StepStatus.RUNNING, approval_ref="  perm-1  ")
+    assert step.approval_ref == "perm-1"
+
+
+# --- A step that has not run must not look like it has -------------------
+
+
+def test_a_pending_step_cannot_carry_fabricated_attempts() -> None:
+    """The ceiling is only consulted from FAILED, so this would slip past it."""
+    with pytest.raises(ValidationError, match="cannot have attempts"):
+        _step(attempts=1000)
+
+
+def test_a_pending_step_cannot_claim_to_have_started() -> None:
+    with pytest.raises(ValidationError, match="cannot have started_at"):
+        _step(started_at=_WHEN)
+
+
+def test_a_pending_step_predates_selection_and_approval() -> None:
+    with pytest.raises(ValidationError, match="predates tool selection"):
+        _step(bound_tool="smtp")
+
+
+def test_an_awaiting_step_must_name_what_is_being_approved() -> None:
+    with pytest.raises(ValidationError, match="requires the bound_tool"):
+        _step(status=StepStatus.AWAITING_APPROVAL)
+
+
+def test_an_awaiting_step_has_no_decision_yet() -> None:
+    with pytest.raises(ValidationError, match="undecided"):
+        _step(status=StepStatus.AWAITING_APPROVAL, bound_tool="smtp", approval_ref="perm-1")
+
+
 def test_awaiting_approval_is_not_a_claim() -> None:
     """A step queued for approval has not run, so it needs no approval_ref yet."""
     step = _step(status=StepStatus.AWAITING_APPROVAL, bound_tool="smtp")

@@ -518,6 +518,17 @@ Protocol.
   state `PlanExecution` would have rejected.
 - **Every executed step is correlatable with its authorisation**, including
   silently auto-approved ones — the case ADR-0004 §7 most needs covered.
+- **Immutability is enforced where state is *held*, not where it is handed out.**
+  `ActionPlan` and its parameters are frozen outright, and the store copies
+  goals and execution state in and out, so nothing a caller does to what it was
+  given can reach stored state. But `Goal` and `ExecutionState` are themselves
+  mutable models, so a caller *can* edit its own copy — including one inside a
+  `PlanExport` — and produce a snapshot whose references no longer resolve.
+  Closing that would mean freezing the whole object graph, and `Goal` carries
+  `Provenance`, which `memory` shares; freezing it is a cross-subsystem change
+  belonging to its own ADR, not this lane. The guarantee this ADR makes is
+  therefore about what the store *produces*, which is validated at
+  construction — not about what a caller subsequently does to its own copy.
 - **Deleting a goal can fail and need retrying** while its execution is live.
   That is a real ergonomic cost on the erasure path, accepted because the
   alternative erases the only record of an action still in flight.
