@@ -79,6 +79,20 @@ async def test_repeated_assembly_returns_an_equal_context() -> None:
     assert await provider.assemble() == await provider.assemble()
 
 
+async def test_mutating_the_supplied_context_after_construction_has_no_effect() -> None:
+    # Ingress: the caller keeps its reference to the context it passed in. The
+    # context is fixed at construction, so a later mutation must not reach the fake.
+    supplied = _saturday_night()
+    provider = FakeContextProvider(supplied)
+
+    supplied.is_weekend = False
+    supplied.time_of_day = TimeOfDay.MORNING
+
+    context = await provider.assemble()
+    assert context.is_weekend is True
+    assert context.time_of_day is TimeOfDay.NIGHT
+
+
 async def test_mutating_a_returned_context_does_not_affect_later_calls() -> None:
     provider = FakeContextProvider(_saturday_night())
 
@@ -89,6 +103,19 @@ async def test_mutating_a_returned_context_does_not_affect_later_calls() -> None
     second = await provider.assemble()
     assert second.is_weekend is True
     assert second.time_of_day is TimeOfDay.NIGHT
+
+
+async def test_the_default_context_cannot_be_corrupted_between_instances() -> None:
+    # The default lives in a module-level constant shared by every instance, so a
+    # leak here would contaminate unrelated test modules — the worst failure mode
+    # a shared fake can have.
+    first = await FakeContextProvider().assemble()
+    first.is_weekend = True
+    first.time_of_day = TimeOfDay.NIGHT
+
+    fresh = await FakeContextProvider().assemble()
+    assert fresh.is_weekend is False
+    assert fresh.time_of_day is TimeOfDay.MORNING
 
 
 async def test_counts_calls() -> None:
