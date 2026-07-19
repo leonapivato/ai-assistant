@@ -23,7 +23,7 @@ _Last updated: 2026-07-19._
 | ---------------- | ------------ | ----------------- | ----------------------------------- |
 | `ContextProvider` triad | leonapivato | in progress (WIP) | `test/context-provider-triad`, no ADR |
 | `orchestration`  | _unclaimed_  | not started       | —                                   |
-| `planning`       | _unclaimed_  | not started       | —                                   |
+| `planning`       | leonapivato  | in progress (WIP) | `planning/goal-actionplan`, ADR-0014 (Proposed) |
 | `tools`          | _unclaimed_  | not started       | —                                   |
 | `permissions`    | _unclaimed_  | not started       | —                                   |
 
@@ -32,7 +32,9 @@ _Last updated: 2026-07-19._
 Claim a number here *before* drafting, so two branches don't grab the same one.
 Highest merged ADR is **0013**; drop your row when the ADR merges.
 
-_None in flight._
+| ADR  | Title                | Owner  | Branch                 |
+| ---- | -------------------- | ------ | ---------------------- |
+| 0014 | Planning model: `Goal`, `ActionPlan`, `ExecutionState` | leonapivato | `planning/goal-actionplan` |
 
 ## Shared surface
 
