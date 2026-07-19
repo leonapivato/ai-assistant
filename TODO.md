@@ -12,8 +12,10 @@ for `FeedbackProcessor` and `MemoryStore`; the rest still assert
 `isinstance(impl, Protocol)` plus implementation-specific tests, which only
 proves an attribute exists.
 
-**Missing suites for:** `MemoryPolicy`, `ContextProvider`.
-(`MemoryStore` done — `tests/memory/memory_store_contract.py`, run against
+**Missing suites for:** `MemoryPolicy`.
+(`ContextProvider` done — `tests/context/context_provider_contract.py`, run
+against `AssemblingContextProvider` and the shared `FakeContextProvider`.
+`MemoryStore` done — `tests/memory/memory_store_contract.py`, run against
 `InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared `FakeMemoryStore`.
 `ModelProvider` done — `tests/models/model_provider_contract.py`, run against
 `PydanticAIProvider` and the shared `FakeModelProvider`.
@@ -68,11 +70,12 @@ private mock that drifts from the contract. The home now exists —
 fake in place.
 
 **Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`),
-`FakeModelProvider` (`ai_assistant/testing/models.py`), and `FakeEmbedder`
-(`ai_assistant/testing/embeddings.py`), each passing its Protocol's shared
+`FakeModelProvider` (`ai_assistant/testing/models.py`), `FakeEmbedder`
+(`ai_assistant/testing/embeddings.py`), and `FakeContextProvider`
+(`ai_assistant/testing/context.py`), each passing its Protocol's shared
 conformance suite (item 1).
 
-**Still needed:** `FakeContextProvider`, `FakeMemoryPolicy` — each paired with,
+**Still needed:** `FakeMemoryPolicy` — paired with,
 and validated by, its Protocol's conformance suite so the fake cannot drift.
 `orchestration` will need most of these; add them as it is built (or ahead of it).
 

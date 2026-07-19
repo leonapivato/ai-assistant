@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
+from context_provider_contract import ContextProviderContract
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ContextError
 from ai_assistant.core.logging import configure_logging
-from ai_assistant.core.protocols import ContextProvider
 from ai_assistant.core.types import CurrentContext, TimeOfDay
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import ContextProvider
 
 _THU_2PM = datetime(2026, 1, 1, 14, tzinfo=UTC)
 
@@ -115,8 +119,14 @@ def _clock() -> ClockContextSource:
     return ClockContextSource(now=lambda: _THU_2PM)
 
 
-def test_conforms_to_provider_protocol() -> None:
-    assert isinstance(AssemblingContextProvider([]), ContextProvider)
+class TestAssemblingContextProviderContract(ContextProviderContract):
+    """Runs AssemblingContextProvider through the shared ContextProvider suite."""
+
+    @pytest.fixture
+    def provider(self) -> ContextProvider:
+        # The clock source alone supplies the whole required core, so this is the
+        # minimal wiring that assembles a valid context.
+        return AssemblingContextProvider([_clock()])
 
 
 async def test_assembles_context_from_the_clock_source() -> None:
