@@ -861,6 +861,40 @@ def test_claim_rejects_an_ambiguous_base_from_a_pseudoref_collision(tmp_path: Pa
     assert "ambiguous" in result.stderr
 
 
+def test_claim_rejects_an_ambiguous_base_from_any_pseudoref_generically(
+    tmp_path: Path,
+) -> None:
+    """Pseudoref detection is generic — any file under .git/, not a hardcoded
+    name list.
+
+    A first version only recognized a fixed set of well-known pseudoref
+    names and missed REBASE_HEAD (created during a conflicted rebase, not in
+    that list) — less correct than just asking the filesystem whether
+    $GIT_DIR/<name> exists at all (PR #23 review finding). Synthesises
+    REBASE_HEAD directly rather than orchestrating a real conflicting
+    rebase, since the mechanism under test no longer cares what the name is.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+    assert _GIT is not None
+    master_sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "rev-parse", "master"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / ".git" / "REBASE_HEAD").write_text(master_sha + "\n")
+    _git(repo, "branch", "REBASE_HEAD", "area/a")  # collides with the synthesised pseudoref
+
+    result = _run(_CLAIM, repo, "area/new", "REBASE_HEAD")
+
+    assert result.returncode == 2
+    assert "ambiguous" in result.stderr
+
+
 def test_claim_rejects_an_ambiguous_base_from_a_remote_head_collision(tmp_path: Path) -> None:
     """A branch can collide with a remote's symbolic HEAD of the same name.
 

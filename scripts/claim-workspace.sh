@@ -130,16 +130,23 @@ if (( base_given )); then
     #   replicating git's own object-prefix disambiguation
     #   (`--disambiguate=`), a meaningfully bigger undertaking for a risk this
     #   narrow.
+    # Checked generically — does *any* file exist at $GIT_DIR/<name> — not
+    # against a hardcoded list of known pseudoref names (HEAD, ORIG_HEAD,
+    # ...). A prior version enumerated names explicitly and missed
+    # REBASE_HEAD (created during a conflicted rebase), which is both less
+    # code and less correct than just asking the filesystem: any *other*
+    # pseudoref git adds in the future, or any tool-created file under
+    # .git/ that happens to be a valid ref, is covered the same way with no
+    # list to keep in sync (PR #23 review finding). A file that exists but
+    # isn't validly formatted as a ref (git's config, index, description,
+    # ...) simply fails the rev-parse below, so this never false-positives
+    # on those.
     pseudoref_match=""
-    case "$base_override" in
-        HEAD | FETCH_HEAD | ORIG_HEAD | MERGE_HEAD | CHERRY_PICK_HEAD | BISECT_HEAD | REVERT_HEAD | AUTO_MERGE)
-            pseudoref_dir="$(git rev-parse --git-dir)"
-            if [[ -f "${pseudoref_dir}/${base_override}" ]]; then
-                pseudoref_match="$(git rev-parse --verify --quiet --end-of-options \
-                    "${base_override}^{commit}" 2>/dev/null || true)"
-            fi
-            ;;
-    esac
+    pseudoref_dir="$(git rev-parse --git-dir)"
+    if [[ -f "${pseudoref_dir}/${base_override}" ]]; then
+        pseudoref_match="$(git rev-parse --verify --quiet --end-of-options \
+            "${base_override}^{commit}" 2>/dev/null || true)"
+    fi
     distinct_matches="$(
         {
             [[ -n "$pseudoref_match" ]] && printf '%s\n' "$pseudoref_match"
