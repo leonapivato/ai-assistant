@@ -5,11 +5,19 @@ Every ``MemoryPolicy`` implementation must pass this suite (CONTRIBUTING,
 :class:`MemoryPolicyContract` and overrides the ``policy`` fixture.
 
 The suite asserts only what is universal to the contract — that ``decide`` is
-total, deterministic, side-effect-free on its inputs, returns an internally
-coherent decision, and never commits secret-tier data. It deliberately does
-**not** encode *which* ruling a given proposal earns: that is each policy's
-reasoning, and even the default's is expected to change (``TODO.md`` item 2).
-``DefaultMemoryPolicy``'s specific rules are tested in ``test_policy.py``.
+total, deterministic, returns an explained and internally coherent decision, and
+never commits secret-tier data. It deliberately does **not** encode *which*
+ruling a given proposal earns: that is each policy's reasoning, and even the
+default's is expected to change (``TODO.md`` item 2). ``DefaultMemoryPolicy``'s
+specific rules are tested in ``test_policy.py``.
+
+Every obligation here traces to something already ratified — determinism to the
+``MemoryPolicy`` docstring, the secret-tier rule to ADR-0004 §3, the explanation
+to what ``MemoryDecision.reason`` is *for*. A conformance suite **is** contract:
+an obligation the Protocol does not state widens that contract without an ADR
+(golden rule 5) and would fail an implementation that actually conforms. Input
+immutability is the one that got away — a reasonable expectation, but not a
+stated one, so it is tested per-implementation instead (``TODO.md`` item 7).
 
 Two things are intentionally left unasserted because ``MemoryDecision``'s own
 validator already makes them unrepresentable: that ``MERGE`` carries a
@@ -177,23 +185,19 @@ class MemoryPolicyContract:
         decision = await policy.decide(proposal, conflicts=conflicts)
 
         assert isinstance(decision, MemoryDecision)
-
-    @pytest.mark.parametrize("with_conflicts", [False, True])
-    async def test_decision_carries_a_reason(
-        self, policy: MemoryPolicy, *, with_conflicts: bool
-    ) -> None:
         # Every ruling is explainable: `reason` exists for transparency, and a
-        # blank one satisfies the type while defeating the purpose.
-        conflicts = [_record("existing")] if with_conflicts else []
-
-        decision = await policy.decide(_proposal(conflicts=conflicts), conflicts=conflicts)
-
+        # blank one satisfies the type while defeating the purpose. Asserted on
+        # every case rather than once, so a policy cannot explain itself for the
+        # common shape and go silent on secret, episodic or low-confidence input.
         assert decision.reason.strip()
+        # Likewise the merge target, which the validator cannot check.
+        if decision.kind is MemoryDecisionKind.MERGE:
+            assert decision.merge_into in {c.id for c in conflicts}
 
     async def test_merge_targets_one_of_the_supplied_conflicts(self, policy: MemoryPolicy) -> None:
-        # `merge_into` is a free-form id the validator cannot check. Merging into
-        # a record the caller never offered would target something the caller has
-        # not resolved — or nothing at all.
+        # The sweep above only ever supplies one conflict. This is the case it
+        # cannot cover: with several to choose from, `merge_into` must still name
+        # one the caller actually offered, not an id of the policy's own making.
         conflicts = [_record("first"), _record("second")]
 
         decision = await policy.decide(_proposal(conflicts=conflicts), conflicts=conflicts)
@@ -246,19 +250,3 @@ class MemoryPolicyContract:
         # The whole decision, not just its kind: an alternating ttl changes when
         # the record expires while leaving the kind identical.
         assert first == second
-
-    @pytest.mark.parametrize("record_kind", _RECORD_KINDS)
-    async def test_decide_does_not_mutate_its_inputs(
-        self, policy: MemoryPolicy, record_kind: str
-    ) -> None:
-        # A policy rules on a proposal; it does not edit it. The caller still
-        # owns both arguments after the call.
-        conflicts = [_record("existing", record_kind=record_kind)]
-        proposal = _proposal(_record("new", record_kind=record_kind), conflicts=conflicts)
-        proposal_before = proposal.model_copy(deep=True)
-        conflicts_before = [c.model_copy(deep=True) for c in conflicts]
-
-        await policy.decide(proposal, conflicts=conflicts)
-
-        assert proposal == proposal_before
-        assert conflicts == conflicts_before

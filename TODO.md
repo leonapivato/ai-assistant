@@ -132,3 +132,24 @@ list then doubles as the backlog, shrinking to empty as the backfill lands.
 
 **Origin:** adversarial review of the item-5 change — the documented rule is a
 convention until something fails on its absence.
+
+## 7. Ratify input immutability on the MemoryPolicy contract
+
+**What:** `MemoryPolicy.decide` says nothing about whether it may mutate the
+proposal or the conflict records it is handed. Both current implementations
+treat them as read-only, and every caller relies on that — but it is an
+assumption, not a promise.
+
+**Why it is not just tested:** the `MemoryPolicy` conformance suite originally
+asserted it. That was wrong: a conformance suite *is* the contract, so asserting
+an obligation the Protocol does not state widens the contract without an ADR
+(golden rule 5) and would fail an implementation that genuinely conforms. It now
+lives in each implementation's own tests, which is the honest place for an
+expectation that has not been ratified.
+
+**Direction:** decide whether immutability is part of the contract. If it is,
+state it on `MemoryPolicy.decide`, flag the Protocol change as breaking, and move
+the assertion into the shared suite. Cheap, but it is a `core/` change and a
+contract widening, so it is not a drive-by.
+
+**Origin:** architecture review of the `MemoryPolicy` triad (item 1/3 backfill).

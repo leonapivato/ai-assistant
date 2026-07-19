@@ -153,3 +153,17 @@ def test_last_proposal_raises_before_any_call() -> None:
     # an assertion about "the last call" pass with no call having happened.
     with pytest.raises(IndexError):
         _ = FakeMemoryPolicy().last_proposal
+
+
+async def test_decide_does_not_mutate_its_inputs() -> None:
+    # As in test_policy.py: an expectation of this implementation, not a stated
+    # obligation of the Protocol, so it lives here rather than in the suite.
+    conflicts = [_record("existing")]
+    proposal = _proposal()
+    proposal_before = proposal.model_copy(deep=True)
+    conflicts_before = [c.model_copy(deep=True) for c in conflicts]
+
+    await FakeMemoryPolicy().decide(proposal, conflicts=conflicts)
+
+    assert proposal == proposal_before
+    assert conflicts == conflicts_before
