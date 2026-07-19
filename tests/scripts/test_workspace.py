@@ -418,6 +418,49 @@ def test_release_removes_the_worktree(tmp_path: Path) -> None:
     assert not ws_a.is_dir()
 
 
+def test_release_refuses_a_diverged_seeded_file_without_force(tmp_path: Path) -> None:
+    """A locally-edited .env must not be silently deleted by a plain release.
+
+    `git worktree remove` (no --force) refuses on tracked changes or
+    untracked-but-not-ignored files, but .env is git-ignored — git's own
+    dirty-check cannot see it at all, edited or not, so it would otherwise be
+    deleted along with the rest of the worktree even without FORCE=1 (PR #17
+    review, blocker; confirmed by direct reproduction before this fix).
+    """
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".env\n")  # mirrors this project's real .gitignore
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore .env")
+    (repo / ".env").write_text("SECRET=original\n")
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    assert (ws_a / ".env").read_text() == "SECRET=original\n"  # seeded by bootstrap
+    (ws_a / ".env").write_text("SECRET=edited-by-user\n")  # a local edit worth keeping
+
+    refused = _run(_RELEASE, repo, "area/a")
+    assert refused.returncode != 0
+    assert ws_a.is_dir()
+    assert (ws_a / ".env").read_text() == "SECRET=edited-by-user\n"  # untouched
+
+    forced = _run(_RELEASE, repo, "area/a", force="1")
+    assert forced.returncode == 0, forced.stderr
+    assert not ws_a.is_dir()
+
+
+def test_release_does_not_require_force_for_an_unedited_seeded_file(tmp_path: Path) -> None:
+    """The new check must not force FORCE=1 for the common, unedited case."""
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".env\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore .env")
+    (repo / ".env").write_text("SECRET=original\n")
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+
+    result = _run(_RELEASE, repo, "area/a")  # no FORCE, .env is exactly as seeded
+
+    assert result.returncode == 0, result.stderr
+    assert not ws_a.is_dir()
+
+
 def test_release_refuses_a_worktree_never_claimed_by_this_tooling(tmp_path: Path) -> None:
     """Only branches tagged by claim-workspace.sh are ever release targets.
 

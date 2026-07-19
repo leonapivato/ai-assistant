@@ -5,7 +5,10 @@
 # worktree that git reports is actually checked out to <branch>, looked up
 # from git rather than guessed from a slugged path, so two similar branch
 # names cannot remove each other's worktree. Refuses on a dirty worktree
-# unless FORCE=1, which *deliberately discards* the uncommitted work.
+# unless FORCE=1, which *deliberately discards* the uncommitted work — "dirty"
+# includes a locally-edited copy of a git-ignored seeded file (.env,
+# .claude/settings.local.json), which git's own `worktree remove` dirty-check
+# cannot see on its own (see the check further down).
 #
 # Only ever touches a branch carrying the `refs/workspace-claimed/<branch>`
 # marker claim-workspace.sh sets (see its header) — a worktree for some other,
@@ -66,6 +69,34 @@ if [[ -n "$wt_path" ]]; then
         echo "'${branch}' was not claimed by this tooling (no refs/workspace-claimed/${branch} marker) — refusing to remove its worktree." >&2
         exit 1
     fi
+
+    # `git worktree remove` (no --force) refuses on tracked changes or
+    # untracked-but-not-ignored files — but .env / .claude/settings.local.json
+    # (the same paths claim-workspace.sh's bootstrap() seeds from the main
+    # checkout; keep this list in sync with that function) are git-ignored,
+    # so git's own dirty-check cannot see them at all, edited or not: a
+    # locally-edited .env (e.g. real secrets set up for this workspace) is
+    # invisible to it and gets silently deleted along with everything else
+    # (verified empirically; PR #17 review, blocker). Checked here instead:
+    # refuse, without FORCE, if a seeded file's content has diverged from the
+    # main checkout's copy it started from — an unedited copy is expected and
+    # safe to discard; a diverged one is exactly what FORCE exists to gate.
+    if (( ! force )); then
+        diverged=()
+        for rel in .env .claude/settings.local.json; do
+            if [[ -f "${wt_path}/${rel}" ]]; then
+                if [[ ! -f "${main_root}/${rel}" ]] || ! cmp -s "${wt_path}/${rel}" "${main_root}/${rel}"; then
+                    diverged+=("$rel")
+                fi
+            fi
+        done
+        if (( ${#diverged[@]} > 0 )); then
+            echo "Worktree has modified git-ignored file(s) git cannot see as dirty: ${diverged[*]}." >&2
+            echo "Removing would silently discard them. Set FORCE=1 to discard anyway." >&2
+            exit 1
+        fi
+    fi
+
     if (( force )); then
         git -C "$main_root" worktree remove --force "$wt_path"
     else
