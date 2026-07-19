@@ -669,9 +669,21 @@ def test_claim_with_an_explicit_base_stacks_on_it(tmp_path: Path) -> None:
 
 
 def test_claim_with_an_explicit_base_of_a_tag_or_sha(tmp_path: Path) -> None:
-    """The base override accepts any commit-ish, not just a branch name."""
+    """The base override accepts any commit-ish, not just a branch name — and
+    actually uses it, rather than silently falling back to master's tip.
+
+    A first version of this test tagged/SHA-referenced master's own tip, so
+    an implementation that accepted the argument but ignored it would have
+    passed too (PR #23 review finding). Points the tag and the SHA at a
+    commit unreachable from master instead, so only a claim that genuinely
+    used that base ends up with its content.
+    """
     repo = _init_repo(tmp_path)
     assert _GIT is not None
+    _git(repo, "checkout", "-qb", "scratch")
+    (repo / "scratch.txt").write_text("not reachable from master\n")
+    _git(repo, "add", "scratch.txt")
+    _git(repo, "commit", "-qm", "scratch commit")
     sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
         [_GIT, "-C", str(repo), "rev-parse", "HEAD"],
         check=True,
@@ -679,12 +691,45 @@ def test_claim_with_an_explicit_base_of_a_tag_or_sha(tmp_path: Path) -> None:
         text=True,
     ).stdout.strip()
     _git(repo, "tag", "v0")
+    _git(repo, "checkout", "-q", "master")
+    _git(repo, "branch", "-D", "scratch")  # only the tag/SHA keep it reachable
 
     by_tag = _run(_CLAIM, repo, "area/from-tag", "v0")
     assert by_tag.returncode == 0, by_tag.stderr
+    assert (Path(_workspace(by_tag)) / "scratch.txt").exists()
 
     by_sha = _run(_CLAIM, repo, "area/from-sha", sha)
     assert by_sha.returncode == 0, by_sha.stderr
+    assert (Path(_workspace(by_sha)) / "scratch.txt").exists()
+
+
+def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
+    tmp_path: Path,
+) -> None:
+    """`HEAD` as an explicit base must resolve in the caller's own context.
+
+    Every git call after validation runs `-C "$main_root"` (the main
+    checkout, always on master), so a context-sensitive revision like `HEAD`
+    would otherwise mean something different there than what the caller —
+    standing inside a different worktree entirely — actually intended:
+    claiming with base `HEAD` from inside a sibling worktree would silently
+    branch from master's HEAD instead of that worktree's real one (PR #23
+    review finding). The base is resolved to an absolute commit OID up front,
+    in the caller's actual cwd, specifically to close this.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+
+    # Claim area/b with base "HEAD", invoked FROM inside area/a's worktree —
+    # HEAD there is area/a's tip, not master's.
+    result = _run(_CLAIM, repo, "area/b", "HEAD", cwd=ws_a)
+
+    assert result.returncode == 0, result.stderr
+    ws_b = Path(_workspace(result))
+    assert (ws_b / "a.txt").exists()  # inherited area/a's tip, not master's
 
 
 def test_claim_rejects_an_invalid_explicit_base(tmp_path: Path) -> None:

@@ -46,9 +46,25 @@ if ! git check-ref-format "refs/heads/${branch}"; then
     echo "invalid branch name: '${branch}'" >&2
     exit 2
 fi
-if [[ -n "$base_override" ]] && ! git rev-parse --verify --quiet "${base_override}^{commit}" >/dev/null; then
-    echo "base '${base_override}' does not resolve to a commit" >&2
-    exit 2
+# Resolved to an absolute commit OID right here, in the caller's own working
+# directory — not left as the original string to resolve again later. Every
+# git call from this point on runs `-C "$main_root"` (the main checkout,
+# always on master), so a context-sensitive revision like `HEAD` or
+# `HEAD~2` would otherwise mean something different there than what the
+# caller — likely standing inside a different worktree entirely — actually
+# intended: `just claim-workspace area/b HEAD` from inside a sibling worktree
+# would silently branch from master's HEAD instead (a PR #17-style review
+# finding, caught by the local `just review-codex` loop before this ever went
+# up for CI review). A commit OID has no directory-dependent meaning, so
+# resolving once here and using the OID everywhere after closes this
+# regardless of where main_root happens to be checked out.
+resolved_base=""
+if [[ -n "$base_override" ]]; then
+    resolved_base="$(git rev-parse --verify --quiet "${base_override}^{commit}" 2>/dev/null || true)"
+    if [[ -z "$resolved_base" ]]; then
+        echo "base '${base_override}' does not resolve to a commit" >&2
+        exit 2
+    fi
 fi
 
 git_dir="$(cd "$(git rev-parse --git-dir)" && pwd)"
@@ -67,8 +83,8 @@ base=master
 if git rev-parse --verify --quiet refs/remotes/origin/master >/dev/null 2>&1; then
     base=origin/master
 fi
-if [[ -n "$base_override" ]]; then
-    base="$base_override"
+if [[ -n "$resolved_base" ]]; then
+    base="$resolved_base"
 fi
 
 bootstrap() {
