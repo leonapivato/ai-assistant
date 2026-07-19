@@ -128,6 +128,15 @@ if [[ "$git_dir" != "$common_dir" ]]; then
     current="$(git branch --show-current)"
     toplevel="$(git rev-parse --show-toplevel)"
     if [[ "$current" == "$branch" ]]; then
+        # (Re-)tag on every idempotent re-claim, not just on first creation.
+        # Without this, calling claim-workspace.sh from inside a worktree that
+        # was never claimed through this tooling (a plain `git worktree add`)
+        # reported success and a usable WORKSPACE= path, but
+        # release-workspace.sh / prune-workspaces.sh would then refuse to
+        # touch it — claim said "claimed", release said "not ours" (PR #17
+        # review). update-ref is idempotent, so re-tagging an already-tagged
+        # branch is a no-op.
+        git -C "$main_root" update-ref "refs/workspace-claimed/${branch}" "refs/heads/${branch}"
         bootstrap "$toplevel"
         echo "Already in the worktree for '${branch}'; bootstrapped." >&2
         echo "WORKSPACE=${toplevel}"

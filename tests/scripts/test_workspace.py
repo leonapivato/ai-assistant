@@ -186,6 +186,48 @@ def test_claim_from_worktree_other_branch_creates_a_distinct_one(tmp_path: Path)
     assert Path(ws_b).is_dir()
 
 
+def test_claim_from_within_an_unclaimed_worktree_tags_it(tmp_path: Path) -> None:
+    """The idempotent same-branch path must tag, not just trust, the worktree.
+
+    A worktree created directly with `git worktree add` (never through
+    claim-workspace.sh) has no `refs/workspace-claimed/<branch>` marker.
+    Running claim-workspace.sh for that branch from inside it used to report
+    success without ever setting the marker — so claim said "claimed" but
+    release-workspace.sh / prune-workspaces.sh would then refuse to touch it
+    (PR #17 review finding). Calling claim-workspace.sh is itself an act of
+    claiming: it must leave the marker set, regardless of how the worktree
+    came to exist.
+    """
+    repo = _init_repo(tmp_path)
+    manual = tmp_path / "manual-worktree"
+    _git(repo, "worktree", "add", "-q", str(manual), "-b", "manual/branch")
+
+    result = _run(_CLAIM, repo, "manual/branch", cwd=manual)
+
+    assert result.returncode == 0, result.stderr
+    assert _workspace(result) == str(manual)
+    assert _GIT is not None
+    marker = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [
+            _GIT,
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/workspace-claimed/manual/branch",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert marker.returncode == 0, marker.stderr
+
+    # The claim/release mismatch is now closed: release succeeds too.
+    released = _run(_RELEASE, repo, "manual/branch")
+    assert released.returncode == 0, released.stderr
+
+
 def test_bootstrap_failure_rolls_back_the_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
 
