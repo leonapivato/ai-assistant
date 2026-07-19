@@ -50,7 +50,12 @@ unpinned — a bare `uv tool install pre-commit` would grab whatever is
 latest on the machine at install time, letting the hook runner drift from
 the locked dev dependency ADR-0003 requires. Re-run the command whenever the
 project's pinned `pre-commit` version changes so the global tool stays in
-sync.
+sync. The tool install is machine-global, not per-worktree: if two worktrees
+are on branches whose `uv.lock` resolves a different `pre-commit` version
+(e.g. one is mid-upgrade), whichever ran setup most recently wins for every
+worktree's hooks until the other reruns it — last-writer-wins, not
+per-worktree isolation. In the ordinary case (`master`'s pin, followed
+consistently) this never comes up.
 
 Already set up from before this fix? Rerun the commands above — they
 re-anchor the hook to the pinned tool install instead of whatever workspace
