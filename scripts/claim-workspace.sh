@@ -94,8 +94,15 @@ if (( base_given )); then
     # per git's own precedence (tags before branches) and just warns — silent
     # wrong-history-stacking otherwise, since nothing here would ever see
     # that warning to act on it (a PR #23 review finding).
+    #
+    # LC_ALL=C: the ambiguity check below matches git's own English message
+    # text — under a translated locale, git prints a localised warning that
+    # would not contain "is ambiguous", silently defeating the check (a
+    # separate PR #23 review finding). Pinning this one invocation to the C
+    # locale is scoped to just this call, not the whole script, so it cannot
+    # affect anything else that might genuinely want the caller's locale.
     base_err_file="$(mktemp)"
-    resolved_base="$(git rev-parse --verify --end-of-options \
+    resolved_base="$(LC_ALL=C git rev-parse --verify --end-of-options \
         "${base_override}^{commit}" 2>"$base_err_file")" || true
     base_err="$(cat "$base_err_file")"
     rm -f "$base_err_file"
