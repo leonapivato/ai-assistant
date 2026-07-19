@@ -832,6 +832,59 @@ def test_claim_rejects_an_ambiguous_base_even_with_git_warnings_disabled(
     assert "ambiguous" in result.stderr
 
 
+def test_claim_rejects_an_ambiguous_base_from_a_pseudoref_collision(tmp_path: Path) -> None:
+    """A branch/tag can collide with a pseudoref (HEAD, ORIG_HEAD, ...), not
+    just with each other.
+
+    `git reset --hard` creates a real `ORIG_HEAD` pseudoref (a plain file at
+    the top of .git/, not under refs/ at all — a separate git ref tier from
+    branches/tags/remotes); a branch or tag can then also be named
+    `ORIG_HEAD`, pointing anywhere. gitrevisions(7) puts pseudorefs at the
+    *highest* precedence tier, so `git rev-parse ORIG_HEAD` would silently
+    prefer the pseudoref over the branch with zero indication (PR #23 review
+    finding — the first structural-detection version only checked
+    refs/, refs/tags/, refs/heads/, refs/remotes/, missing this tier
+    entirely).
+    """
+    repo = _init_repo(tmp_path)
+    _git(repo, "commit", "--allow-empty", "-qm", "second")
+    _git(repo, "reset", "--hard", "HEAD~1")  # creates .git/ORIG_HEAD for real
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+    _git(repo, "branch", "ORIG_HEAD", "area/a")  # collides with the real pseudoref
+
+    result = _run(_CLAIM, repo, "area/new", "ORIG_HEAD")
+
+    assert result.returncode == 2
+    assert "ambiguous" in result.stderr
+
+
+def test_claim_rejects_an_ambiguous_base_from_a_remote_head_collision(tmp_path: Path) -> None:
+    """A branch can collide with a remote's symbolic HEAD of the same name.
+
+    `refs/remotes/<name>/HEAD` is its own tier in gitrevisions(7)'s
+    precedence order, distinct from `refs/heads/<name>` and
+    `refs/remotes/<name>` (a branch actually named `<name>` under that
+    remote) — synthesised directly via `update-ref`, the same way this
+    project's own `refs/workspace-claimed/*` marker is (PR #23 review
+    finding: the first structural-detection version omitted this tier too).
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+    _git(repo, "update-ref", "refs/remotes/collide/HEAD", "master")
+    _git(repo, "branch", "collide", "area/a")
+
+    result = _run(_CLAIM, repo, "area/new", "collide")
+
+    assert result.returncode == 2
+    assert "ambiguous" in result.stderr
+
+
 def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
     tmp_path: Path,
 ) -> None:
