@@ -25,9 +25,14 @@ updates the remote-tracking ref, not what's on disk. So never read them from
 fetched `origin/master` on its own:
 
 1. `git fetch origin`.
-2. Materialize it: `git worktree add --detach <tmp-path> origin/master`.
+2. Materialize it at a freshly generated, unique path — `tmp_path="$(mktemp
+   -u)"` then `git worktree add --detach "$tmp_path" origin/master` — never a
+   fixed literal path, so two runs of this skill (or a rerun after a failed
+   one) can't collide on the same worktree.
 3. Note the commit it resolved to (`git rev-parse origin/master`) — step 4
    needs it later to tell whether anything has changed since this survey.
+   Remove the worktree (`git worktree remove "$tmp_path"`) if anything from
+   here through step 4 fails partway — don't leave it registered.
 4. From `<tmp-path>`, read these, in this order, and trust them over any
    stale assumption:
    - `just status` — the derived picture: module counts per package, the
