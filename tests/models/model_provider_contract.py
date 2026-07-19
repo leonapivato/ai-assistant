@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import pytest
 
-from ai_assistant.core.errors import ModelError
 from ai_assistant.core.protocols import ModelProvider
 from ai_assistant.core.types import Message, Role
 
@@ -69,8 +68,8 @@ class ModelProviderContract:
 
         assert reply.role is Role.ASSISTANT
 
-    async def test_complete_rejects_an_empty_conversation(self, provider: ModelProvider) -> None:
-        # A provider needs a conversation to answer; an empty one is a caller
-        # error every implementation must reject the same way.
-        with pytest.raises(ModelError):
-            await provider.complete([])
+    # NOTE: empty-conversation handling is deliberately *not* asserted here. The
+    # ModelProvider Protocol says nothing about empty input, so requiring it to
+    # raise would silently widen the contract (CLAUDE.md golden rule 5 — that
+    # needs an ADR, not a test). PydanticAIProvider's own rejection is pinned in
+    # its module; the fake mirrors it in tests/models/test_fake_provider.py.
