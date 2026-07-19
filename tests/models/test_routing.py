@@ -482,7 +482,7 @@ async def test_a_broken_logger_does_not_replace_the_promised_failure() -> None:
     ["primary", "eu-west-1", "anthropic:claude-haiku-4-5", "gpt_4.1", "a-b_c.d:e"],
 )
 def test_token_shaped_labels_are_accepted(label: str) -> None:
-    assert Route(RecordingProvider(), label=label).describe() == label
+    assert Route(RecordingProvider(), label=label).describe(1) == label
 
 
 @pytest.mark.parametrize(
@@ -508,8 +508,58 @@ def test_prose_shaped_labels_are_rejected(label: str) -> None:
 def test_a_route_describes_itself_for_diagnostics() -> None:
     provider = RecordingProvider()
 
-    assert Route(provider, label="primary").describe() == "primary"
-    assert Route(provider, model="anthropic:claude-haiku-4-5").describe() == (
-        "anthropic:claude-haiku-4-5"
-    )
-    assert Route(provider).describe() == "RecordingProvider"
+    assert Route(provider, label="primary").describe(1) == "primary"
+    # No label: position, never the model id. See the next test for why.
+    assert Route(provider).describe(2) == "route[2]"
+    assert Route(provider, model="anthropic:claude-haiku-4-5").describe(3) == "route[3]"
+
+
+async def test_an_unlabelled_route_never_logs_its_model_id() -> None:
+    # Regression (CI adversarial review). `model` used to be the label fallback,
+    # so `model="patient-SSN-123-45-6789"` went straight into a Tier 2 log.
+    #
+    # Filtering it by charset was tried first and does not work: that string
+    # passes exactly the same character check as `eu-west-1`, because they are
+    # structurally identical. A charset test cannot tell a model id from a
+    # record id, so the diagnostic identifier is a position — which carries no
+    # data by construction — unless a caller opts in by setting a label.
+    routes = [Route(AlwaysFailsProvider(ModelUnavailableError("503")), model="patient-SSN-123")]
+
+    with capture_logs() as logs, pytest.raises(ModelUnavailableError):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert "patient-SSN-123" not in repr(logs)
+    [event] = [e for e in logs if e["event"] == "all routes failed"]
+    assert event["failures"] == [{"route": "route[1]", "error": "ModelUnavailableError"}]
+
+
+async def test_a_provider_defined_error_class_name_is_not_logged() -> None:
+    # Regression (CI adversarial review): `type(exc).__name__` is
+    # provider-controlled — a route may be any ModelProvider — and reached the
+    # log under an `error` key the redactor treats as innocuous. The MRO is
+    # walked for the nearest class we defined, so the emitted string can only
+    # ever be one of ours, while a third-party subclass keeps its diagnostic
+    # value by reporting its nearest known ancestor.
+    leaky = type("PATIENT_SSN_123_45_6789", (ModelRateLimitError,), {})
+
+    routes = [Route(AlwaysFailsProvider(leaky("failure")), label="primary")]
+
+    with capture_logs() as logs, pytest.raises(ModelRateLimitError):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert "PATIENT_SSN" not in repr(logs)
+    [event] = [e for e in logs if e["event"] == "all routes failed"]
+    assert event["failures"] == [{"route": "primary", "error": "ModelRateLimitError"}]
+
+
+async def test_no_fallback_is_announced_when_there_is_nowhere_to_fall_back_to() -> None:
+    # Regression (CI adversarial review): a single failing route logged "trying
+    # the next one" and then immediately "all routes failed". That reads as a
+    # fallback that was tried and also failed — a different incident from
+    # having nowhere left to go.
+    routes = [Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="only")]
+
+    with capture_logs() as logs, pytest.raises(ModelUnavailableError):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert [e["event"] for e in logs] == ["all routes failed"]
