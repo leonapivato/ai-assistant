@@ -63,7 +63,12 @@ class FakeContextProvider:
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
             raise ValueError(msg)
-        self._context = context if context is not None else _DEFAULT_CONTEXT
+        # Deep-copied on ingress as well as egress: the context is fixed *at
+        # construction*, so a caller that keeps its reference and mutates it later
+        # must not be able to change what assemble returns. Copying the default
+        # too keeps the module-level constant from being reachable at all.
+        source = context if context is not None else _DEFAULT_CONTEXT
+        self._context = source.model_copy(deep=True)
         self._failure = failure
         self.call_count = 0
 
