@@ -150,7 +150,38 @@ assumption at all and additionally preserves the message, traceback, and
 but a log line that formats only `str(exc)` will not show it. Accepted:
 correctness of the propagated type outranks convenience of one logging shape.
 
-### 6. Deferred
+### 6. Every route must be a provider the user configured
+
+ADR-0004 §2 permits off-device user data only from the `models/` layer, and only
+to "the model provider the user has configured" — **singular**. Routing makes
+that plural, so it must be squared explicitly rather than by implication.
+
+The rule: a route list may contain **only providers the user has explicitly
+configured**, on the same footing as the primary. Falling back is not permission
+to reach a provider the user never chose. Concretely:
+
+- `RoutingProvider` never acquires a provider. It receives fully-constructed
+  `ModelProvider`s by injection and cannot widen the set of endpoints reachable;
+  it can only re-send to one already wired in. Whoever composes the pipeline —
+  `orchestration` — is therefore the component that owes this obligation.
+- When route configuration lands in `Settings`, a configured route must require
+  its own credential, so a provider the user has not set up cannot become a
+  silent fallback.
+- A fallback is user-visible in principle: which provider answered is not
+  currently reported, and should be once there is an interface to report it.
+  Recorded as a gap, not a solved problem.
+
+**This amends ADR-0004 §2** from one configured provider to a configured *set*.
+The privacy property that ADR intends is unchanged — user data reaches only
+providers the user chose — but the wording assumed a single one, and ADR-0013
+cannot be ratified without that amendment being accepted too.
+
+Found by the Codex architecture reviewer, which raised it as a blocker on the
+grounds that "calling the route list a privacy surface does not establish
+consent". That is correct: §1's note that a route list *is* an ADR-0004 surface
+described the risk without constraining anything.
+
+### 7. Deferred
 
 - **Ranking by cost, latency, or capability** — the rest of VISION §6. Needs
   usage and cost data that `complete` cannot return today; ADR-0011 §6 already
@@ -173,9 +204,15 @@ correctness of the propagated type outranks convenience of one logging shape.
 - **Routing spends money in more places.** A fallback re-sends the prompt to a
   second vendor. The conservative `routable` default keeps this to failures we
   actually recognise.
-- **More providers may see a given prompt.** ADR-0004 governs what may be sent
-  where; a route list is now part of that surface, and configuring one is a
-  privacy decision, not only an availability one.
+- **More providers may see a given prompt**, and **this ADR cannot be ratified
+  alone.** §6 constrains routes to providers the user configured, but that
+  restates ADR-0004 §2 in the plural, so accepting ADR-0013 means accepting an
+  amendment to an already-Accepted ADR. Configuring a route list is a privacy
+  decision, not only an availability one.
+- **Nothing is wired yet.** No component constructs a `RoutingProvider` and
+  `Settings` has no route configuration, so this slice changes no egress in
+  practice. The obligations in §6 fall due when `orchestration` wires the
+  pipeline — which is the moment to re-read them, not merge time.
 - **A dead primary is re-tried on every request** (§2) — bounded by that route's
   own deadline, but a real per-request latency cost until circuit breaking lands.
 - **Failures are noisier to read.** An exhausted-routes error carries every
