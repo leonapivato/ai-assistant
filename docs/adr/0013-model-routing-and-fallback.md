@@ -127,15 +127,28 @@ a worse failure than an honest error, and would be undetectable downstream.
 
 ### 5. Exhaustion preserves classification
 
-When every route fails, the *last* failure's type is re-raised with a message
-naming each candidate and its error, chained via `__cause__` to the last
-underlying exception.
+When every route fails, the *last* failure is re-raised **as-is**, annotated with
+a PEP 678 note naming each candidate and why it failed.
 
-Re-raising the type — rather than a generic `ModelError` — means a caller that
-backs off on `ModelRateLimitError` still sees one after routing. Flattening would
-destroy exactly the classification ADR-0011 built. This relies on every
-`ModelError` subclass taking a single message argument, which is true by
-construction and is pinned by a test.
+Preserving the type — rather than flattening to a generic `ModelError` — means a
+caller that backs off on `ModelRateLimitError` still sees one after routing.
+Flattening would destroy exactly the classification ADR-0011 built.
+
+The obvious way to do that is to rebuild the error as `type(last)(summary)`. We
+tried it, and it is wrong: it assumes every `ModelError` subclass takes exactly
+one message argument. Ours do, but a route may be *any* `ModelProvider`, and one
+raising a richer subclass — `ProviderQuotaError(limit, message)` — turns the
+reconstruction into a `TypeError`. That is not a degraded message but a different
+exception type, which the caller's `except ModelError` does not catch, with the
+provider's real failure destroyed. An adversarial review caught this; a
+regression test now pins it.
+
+Re-raising the original object and attaching a note makes no constructor
+assumption at all and additionally preserves the message, traceback, and
+`__cause__`. The cost is that the summary is a note rather than part of `str(exc)`
+— it renders in tracebacks and in anything using `traceback.format_exception`,
+but a log line that formats only `str(exc)` will not show it. Accepted:
+correctness of the propagated type outranks convenience of one logging shape.
 
 ### 6. Deferred
 

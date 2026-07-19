@@ -20,8 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused prompt around until one provider accepts is not resilience and would
   widen who sees a prompt already flagged sensitive (ADR-0004). An explicit
   per-call `model=` override disables routing rather than silently answering
-  from a different model, and exhausting every route re-raises the last
-  failure's *type* so classification survives. Preference order is static; health
+  from a different model, and exhausting every route re-raises the last failure
+  itself — annotated with a note naming every candidate tried — so its type,
+  message and traceback all survive routing. (Rebuilding the error instead, as
+  the type plus a new message, assumed a one-argument constructor every
+  `ModelProvider`'s errors need not have; found by the Codex adversarial
+  reviewer.) Preference order is static; health
   tracking, circuit breaking, and cost/latency ranking are deferred. Retry
   belongs inside routing — the cheap correction first — which composes on the
   ADR-0011 seam with no Protocol change. Recorded in ADR-0013.
