@@ -145,3 +145,11 @@ async def test_recorded_call_survives_mutation_of_the_records_themselves() -> No
 
     assert policy.calls[0].conflicts[0].id == "original"
     assert policy.last_proposal.rationale == "because"
+
+
+def test_last_proposal_raises_before_any_call() -> None:
+    # The property is documented to raise on an unused fake rather than invent a
+    # value; a regression returning None or a stale proposal would otherwise let
+    # an assertion about "the last call" pass with no call having happened.
+    with pytest.raises(IndexError):
+        _ = FakeMemoryPolicy().last_proposal
