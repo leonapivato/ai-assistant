@@ -165,25 +165,56 @@ async def test_exhausting_every_route_reports_all_of_them() -> None:
     with pytest.raises(ModelError) as caught:
         await RoutingProvider(routes).complete(PROMPT)
 
-    message = str(caught.value)
-    assert "all 2 routes failed" in message
-    # A one-line failure naming each candidate beats re-reading the wiring.
-    assert "primary: 503" in message
-    assert "secondary: 429" in message
+    # A one-line note naming each candidate beats re-reading the wiring. It is a
+    # note rather than the message so the original failure is left untouched.
+    note = "\n".join(caught.value.__notes__)
+    assert "all 2 routes failed" in note
+    assert "primary: 503" in note
+    assert "secondary: 429" in note
 
 
-async def test_exhaustion_preserves_the_last_failure_type_and_cause() -> None:
+async def test_exhaustion_reraises_the_last_failure_itself() -> None:
+    last = ModelRateLimitError("429")
     routes = [
         Route(AlwaysFailsProvider(ModelUnavailableError("503"))),
-        Route(AlwaysFailsProvider(ModelRateLimitError("429"))),
+        Route(AlwaysFailsProvider(last)),
     ]
 
     with pytest.raises(ModelRateLimitError) as caught:
         await RoutingProvider(routes).complete(PROMPT)
 
     # Classification must survive routing: a caller that backs off on a rate
-    # limit still sees one, rather than a flattened generic failure.
-    assert isinstance(caught.value.__cause__, ModelRateLimitError)
+    # limit still sees one, rather than a flattened generic failure. The very
+    # object is re-raised, so its message and traceback survive too.
+    assert caught.value is last
+    assert str(caught.value) == "429"
+
+
+async def test_exhaustion_survives_a_subclass_with_a_richer_constructor() -> None:
+    # Regression (adversarial review): rebuilding the failure as
+    # `type(last)(msg)` assumed every ModelError takes one message argument.
+    # A route may be any ModelProvider, so a subclass carrying extra state used
+    # to raise TypeError here — which `except ModelError` does not even catch,
+    # destroying the provider's real failure.
+    class ProviderQuotaError(ModelError):
+        """A routable failure that carries more than a message."""
+
+        routable = True
+
+        def __init__(self, limit: int, message: str) -> None:
+            super().__init__(message)
+            self.limit = limit
+
+    routes = [
+        Route(AlwaysFailsProvider(ProviderQuotaError(100, "quota exhausted"))),
+        Route(AlwaysFailsProvider(ProviderQuotaError(50, "quota exhausted"))),
+    ]
+
+    with pytest.raises(ProviderQuotaError) as caught:
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert caught.value.limit == 50
+    assert "all 2 routes failed" in "\n".join(caught.value.__notes__)
 
 
 async def test_a_route_model_override_is_passed_to_its_provider() -> None:

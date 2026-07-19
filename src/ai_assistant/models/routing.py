@@ -122,9 +122,9 @@ class RoutingProvider:
 
         Raises:
             ModelError: A non-routable failure, immediately and unchanged. If
-                every route fails routably, the last failure's type is re-raised
-                with a message naming each candidate tried, chained to the last
-                underlying error.
+                every route fails routably, the last failure is re-raised as-is,
+                carrying a note (PEP 678) that names every candidate tried and
+                why each one failed.
         """
         if model is not None:
             primary = self._routes[0]
@@ -146,9 +146,15 @@ class RoutingProvider:
         # without an assert to convince the type checker.
         last = failures[-1][1]
         summary = "; ".join(f"{label}: {exc}" for label, exc in failures)
-        msg = f"all {len(self._routes)} routes failed ({summary})"
-        # Re-raise as the *last* failure's type so the classification survives
-        # routing: a caller catching ModelRateLimitError still sees one. Every
-        # ModelError subclass takes a single message argument, which is what
-        # makes reconstructing it this way safe.
-        raise type(last)(msg) from last
+        # Re-raise the last failure *itself*, annotated with what else was tried.
+        #
+        # The obvious alternative — `raise type(last)(msg) from last` — assumes
+        # every ModelError subclass takes exactly one message argument. Our own
+        # do, but a route may be any ModelProvider, and one raising a richer
+        # subclass (say `ProviderQuotaError(limit, message)`) would turn that
+        # reconstruction into a TypeError: not merely a worse message, but an
+        # exception the caller's `except ModelError` no longer catches, with the
+        # provider's real failure destroyed. A note makes no such assumption and
+        # preserves the type, the traceback, and the original __cause__ exactly.
+        last.add_note(f"routing: all {len(self._routes)} routes failed ({summary})")
+        raise last
