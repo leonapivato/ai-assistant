@@ -469,6 +469,50 @@ class PlanStoreContract:
         assert fresh is not None
         assert fresh.statement == "relocate to Lisbon"
 
+    async def test_mutating_a_returned_plan_cannot_edit_stored_state(
+        self, store: PlanStore
+    ) -> None:
+        """``frozen=True`` stops attribute assignment, not ``__dict__`` writes.
+
+        Sharing the stored instance would therefore let a caller rewrite the
+        audit record in place — including a nested step's ``capability``, which
+        is what the executor later binds a tool to.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        got = await store.get_plan("p1")
+        assert got is not None
+        got.__dict__["goal_id"] = "tampered"
+        got.steps[0].__dict__["capability"] = "payments.delete_account"
+
+        fresh = await store.get_plan("p1")
+        assert fresh is not None
+        assert fresh.goal_id == "g1"
+        assert fresh.steps[0].capability == "send_email"
+
+    async def test_a_retained_plan_reference_cannot_edit_stored_state(
+        self, store: PlanStore
+    ) -> None:
+        await store.save_goal(_goal())
+        plan = _plan()
+        await store.save_plan(plan)
+        plan.__dict__["goal_id"] = "tampered"
+
+        stored = await store.get_plan("p1")
+        assert stored is not None
+        assert stored.goal_id == "g1"
+
+    async def test_an_exported_plan_cannot_edit_stored_state(self, store: PlanStore) -> None:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        export = await store.export()
+        export.plans[0].__dict__["goal_id"] = "tampered"
+
+        again = await store.export()
+        assert again.plans[0].goal_id == "g1"
+
     async def test_mutating_a_returned_execution_cannot_edit_stored_state(
         self, store: PlanStore
     ) -> None:

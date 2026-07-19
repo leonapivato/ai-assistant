@@ -99,6 +99,12 @@ class InMemoryPlanStore:
         executions of the old plan pointing at steps that were never theirs.
         Re-planning takes a new id (ADR-0014 §2). An identical re-save is
         idempotent, so a retry is harmless.
+
+        Stored as a copy for the same reason goals and executions are:
+        ``frozen=True`` stops ``plan.goal_id = ...`` but not
+        ``plan.__dict__["goal_id"] = ...``, so sharing the instance would let a
+        caller rewrite the store's own audit record — including a nested step's
+        ``capability``.
         """
         if plan.goal_id not in self._goals:
             msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
@@ -110,12 +116,13 @@ class InMemoryPlanStore:
                 "id so the previous plan stays an intact audit record"
             )
             raise PlanningError(msg)
-        self._plans[plan.id] = plan
+        self._plans[plan.id] = plan.model_copy(deep=True)
         return plan.id
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         """Return the plan with ``plan_id``, or ``None``."""
-        return self._plans.get(plan_id)
+        stored = self._plans.get(plan_id)
+        return None if stored is None else stored.model_copy(deep=True)
 
     async def start_execution(self, plan_id: str) -> ExecutionState:
         """Open and store a fresh execution for ``plan_id``."""
@@ -166,7 +173,7 @@ class InMemoryPlanStore:
         return PlanExport(
             exported_at=self._now(),
             goals=tuple(goal.model_copy(deep=True) for goal in self._goals.values()),
-            plans=tuple(self._plans.values()),
+            plans=tuple(plan.model_copy(deep=True) for plan in self._plans.values()),
             executions=tuple(state.model_copy(deep=True) for state in self._executions.values()),
         )
 

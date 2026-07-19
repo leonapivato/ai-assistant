@@ -162,9 +162,9 @@ are `core/` changes and contract widenings, so neither is a drive-by.
 
 ## 8. Freeze the shared record types, or accept caller-side mutability
 
-**What:** planning enforces immutability where state is *held* — `ActionPlan` is
-frozen all the way down, and `PlanStore` copies goals and execution state in and
-out — but `Goal` and `ExecutionState` are mutable pydantic models. A caller can
+**What:** planning enforces immutability where state is *held* — `PlanStore`
+copies every record in and out — but `Goal` and `ExecutionState` are mutable
+pydantic models, and even `frozen=True` yields to a `__dict__` write. A caller can
 therefore edit its own copy, including records inside a `PlanExport`, producing a
 snapshot whose `goal_id`/`plan_id` references no longer resolve even though the
 store only ever emits consistent ones.

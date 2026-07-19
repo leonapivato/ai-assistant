@@ -171,12 +171,13 @@ class FakePlanStore:
                 "id so the previous plan stays an intact audit record"
             )
             raise PlanningError(msg)
-        self._plans[plan.id] = plan
+        self._plans[plan.id] = plan.model_copy(deep=True)
         return plan.id
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         """Return the plan with ``plan_id``, or ``None``."""
-        return self._plans.get(plan_id)
+        stored = self._plans.get(plan_id)
+        return None if stored is None else stored.model_copy(deep=True)
 
     async def start_execution(self, plan_id: str) -> ExecutionState:
         """Open and store a fresh execution, derived from the plan's steps."""
@@ -345,7 +346,7 @@ class FakePlanStore:
         return PlanExport(
             exported_at=self._now(),
             goals=tuple(goal.model_copy(deep=True) for goal in self._goals.values()),
-            plans=tuple(self._plans.values()),
+            plans=tuple(plan.model_copy(deep=True) for plan in self._plans.values()),
             executions=tuple(state.model_copy(deep=True) for state in self._executions.values()),
         )
 
