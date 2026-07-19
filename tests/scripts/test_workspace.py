@@ -45,6 +45,17 @@ def _current_branch(repo: Path) -> str:
     return out.stdout.strip()
 
 
+def _rev_parse(repo: Path, rev: str) -> str:
+    assert _GIT is not None
+    out = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [_GIT, "-C", str(repo), "rev-parse", rev],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
 def _init_repo(tmp_path: Path) -> Path:
     """A one-commit repo whose default branch is main (version-independent)."""
     repo = tmp_path / "repo"
@@ -680,6 +691,32 @@ def test_worktree_branches_from_main_not_a_sibling_worktree(tmp_path: Path) -> N
         text=True,
     ).stdout
     assert "commit on a" not in log  # b started from main, not a's HEAD
+
+
+def test_claim_prefers_origin_main_over_a_stale_local_main(tmp_path: Path) -> None:
+    """`origin/main` wins over the local `main` ref, which nothing keeps current.
+
+    Worktrees branch from `origin/main` and never touch local `main`, so local
+    `main` can sit arbitrarily far behind. If the preference regressed to the
+    fallback, a claim would silently start from that stale commit — work would
+    branch from an old integration point with nothing to signal it.
+
+    Local `main` is left at the first commit while `origin/main` is moved on to
+    a second, so the two genuinely diverge and only the remote-tracking ref
+    carries `remote-only.txt`.
+    """
+    repo = _init_repo(tmp_path)
+    stale = _rev_parse(repo, "HEAD")
+
+    (repo / "remote-only.txt").write_text("only reachable from origin/main\n")
+    _git(repo, "add", "remote-only.txt")
+    _git(repo, "commit", "-qm", "advance the remote")
+    _git(repo, "update-ref", "refs/remotes/origin/main", _rev_parse(repo, "HEAD"))
+    _git(repo, "reset", "-q", "--hard", stale)  # local main falls behind again
+
+    ws = Path(_workspace(_run(_CLAIM, repo, "area/x")))
+
+    assert (ws / "remote-only.txt").exists()  # started from origin/main, not local main
 
 
 def test_claim_with_an_explicit_base_stacks_on_it(tmp_path: Path) -> None:
