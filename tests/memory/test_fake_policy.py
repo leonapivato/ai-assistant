@@ -1,0 +1,130 @@
+"""The canonical FakeMemoryPolicy passes the shared MemoryPolicy conformance suite.
+
+This is what lets other subsystems trust ``ai_assistant.testing.FakeMemoryPolicy``
+as a stand-in for a real policy: it is held to the same contract as
+``DefaultMemoryPolicy``.
+
+The suite runs against *every* configured outcome, not just the default one — a
+fake that only conforms when left at its defaults would be contract-correct in
+tests and a trap in use.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
+
+import pytest
+from memory_policy_contract import MemoryPolicyContract
+
+from ai_assistant.core.types import (
+    DataTier,
+    MemoryDecisionKind,
+    MemorySource,
+    MemoryUpdateProposal,
+    Provenance,
+    SemanticMemory,
+)
+from ai_assistant.testing import FakeMemoryPolicy
+
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import MemoryPolicy
+    from ai_assistant.core.types import MemoryRecord
+
+_WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _record(record_id: str = "r") -> MemoryRecord:
+    return SemanticMemory(
+        id=record_id,
+        content=record_id,
+        fact=record_id,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
+    )
+
+
+def _proposal(*, sensitivity: DataTier = DataTier.PERSONAL) -> MemoryUpdateProposal:
+    return MemoryUpdateProposal(
+        proposed=_record("proposed"), rationale="because", sensitivity=sensitivity
+    )
+
+
+class TestFakeMemoryPolicyContract(MemoryPolicyContract):
+    """Runs the default-configured FakeMemoryPolicy through the shared suite."""
+
+    @pytest.fixture
+    def policy(self) -> MemoryPolicy:
+        return FakeMemoryPolicy()
+
+
+@pytest.mark.parametrize("kind", list(MemoryDecisionKind))
+class TestFakeMemoryPolicyContractEveryKind(MemoryPolicyContract):
+    """Runs FakeMemoryPolicy through the shared suite at every configured kind."""
+
+    @pytest.fixture
+    def policy(self, kind: MemoryDecisionKind) -> MemoryPolicy:
+        return FakeMemoryPolicy(kind)
+
+
+# Behaviour specific to FakeMemoryPolicy, beyond the shared contract.
+
+
+async def test_returns_the_configured_kind() -> None:
+    policy = FakeMemoryPolicy(MemoryDecisionKind.REJECT)
+
+    decision = await policy.decide(_proposal(), conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.REJECT
+
+
+async def test_merge_without_conflicts_falls_back_to_accept() -> None:
+    policy = FakeMemoryPolicy(MemoryDecisionKind.MERGE)
+
+    decision = await policy.decide(_proposal(), conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert "merge" in decision.reason
+
+
+async def test_secret_tier_overrides_the_configured_kind() -> None:
+    policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+
+    decision = await policy.decide(_proposal(sensitivity=DataTier.SECRET), conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+async def test_store_temporary_uses_the_configured_ttl() -> None:
+    ttl = timedelta(hours=3)
+    policy = FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY, ttl=ttl)
+
+    decision = await policy.decide(_proposal(), conflicts=[])
+
+    assert decision.ttl == ttl
+
+
+def test_non_positive_ttl_is_rejected_at_construction() -> None:
+    with pytest.raises(ValueError, match="ttl must be positive"):
+        FakeMemoryPolicy(ttl=timedelta(0))
+
+
+async def test_records_every_call_in_order() -> None:
+    policy = FakeMemoryPolicy()
+    first, second = _proposal(), _proposal(sensitivity=DataTier.OPERATIONAL)
+
+    await policy.decide(first, conflicts=[])
+    await policy.decide(second, conflicts=[_record("c")])
+
+    assert policy.call_count == 2
+    assert [c.proposal for c in policy.calls] == [first, second]
+    assert policy.last_proposal is second
+
+
+async def test_recorded_conflicts_are_snapshotted() -> None:
+    policy = FakeMemoryPolicy()
+    conflicts = [_record("c")]
+
+    await policy.decide(_proposal(), conflicts=conflicts)
+    conflicts.clear()
+
+    assert len(policy.calls[0].conflicts) == 1

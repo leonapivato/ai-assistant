@@ -16,11 +16,14 @@ from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
+from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 
 __all__ = [
     "FakeContextProvider",
     "FakeEmbedder",
+    "FakeMemoryPolicy",
     "FakeMemoryStore",
     "FakeModelProvider",
     "ModelCall",
+    "PolicyCall",
 ]

@@ -12,11 +12,14 @@ for `FeedbackProcessor` and `MemoryStore`; the rest still assert
 `isinstance(impl, Protocol)` plus implementation-specific tests, which only
 proves an attribute exists.
 
-**Missing suites for:** `MemoryPolicy`.
+**Missing suites for:** none — the backfill is complete. The `FastEmbedEmbedder`
+hole below is what keeps this item open.
 (`ContextProvider` done — `tests/context/context_provider_contract.py`, run
 against `AssemblingContextProvider` and the shared `FakeContextProvider`.
 `MemoryStore` done — `tests/memory/memory_store_contract.py`, run against
 `InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared `FakeMemoryStore`.
+`MemoryPolicy` done — `tests/memory/memory_policy_contract.py`, run against
+`DefaultMemoryPolicy` and the shared `FakeMemoryPolicy`.
 `ModelProvider` done — `tests/models/model_provider_contract.py`, run against
 `PydanticAIProvider` and the shared `FakeModelProvider`.
 `Embedder` done — `tests/models/embedder_contract.py`, run against
@@ -71,12 +74,13 @@ fake in place.
 
 **Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`),
 `FakeModelProvider` (`ai_assistant/testing/models.py`), `FakeEmbedder`
-(`ai_assistant/testing/embeddings.py`), and `FakeContextProvider`
-(`ai_assistant/testing/context.py`), each passing its Protocol's shared
+(`ai_assistant/testing/embeddings.py`), `FakeContextProvider`
+(`ai_assistant/testing/context.py`), and `FakeMemoryPolicy`
+(`ai_assistant/testing/policy.py`), each passing its Protocol's shared
 conformance suite (item 1).
 
-**Still needed:** `FakeMemoryPolicy` — paired with,
-and validated by, its Protocol's conformance suite so the fake cannot drift.
+**Still needed:** none for the Protocols that exist today. Every new Protocol
+brings its own fake as part of the triad (CONTRIBUTING, "Adding a Protocol").
 `orchestration` will need most of these; add them as it is built (or ahead of it).
 
 **Origin:** review of AI-agent scalability — the biggest cross-subsystem gap for
