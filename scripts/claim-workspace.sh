@@ -87,38 +87,36 @@ if (( base_given )); then
     # this, git parses a leading-hyphen base as a flag instead of a revision
     # and rev-parse fails, wrongly reporting a real ref as not resolving (PR
     # #23 review finding).
-    # No --quiet here, deliberately: it also suppresses git's own "refname
-    # ... is ambiguous" warning (confirmed directly), which is exactly the
-    # signal needed below. If, say, both a branch and a tag are named
-    # "release" (pointing at different commits), a bare rev-parse resolves
-    # per git's own precedence (tags before branches) and just warns — silent
-    # wrong-history-stacking otherwise, since nothing here would ever see
-    # that warning to act on it (a PR #23 review finding).
-    #
-    # LC_ALL=C: the ambiguity check below matches git's own English message
-    # text — under a translated locale, git prints a localised warning that
-    # would not contain "is ambiguous", silently defeating the check (a
-    # separate PR #23 review finding). Pinning this one invocation to the C
-    # locale is scoped to just this call, not the whole script, so it cannot
-    # affect anything else that might genuinely want the caller's locale.
-    base_err_file="$(mktemp)"
-    # Scoped cleanup: a signal between mktemp and the `rm -f` below would
-    # otherwise leave this temp file behind on every interrupted explicit-base
-    # claim (PR #23 review finding). Cleared right after use, not left
-    # installed for the rest of the script — create_worktree installs its own
-    # ERR/INT/TERM trap later and this must not linger to interfere with it.
-    trap 'rm -f "$base_err_file"' EXIT
-    resolved_base="$(LC_ALL=C git rev-parse --verify --end-of-options \
-        "${base_override}^{commit}" 2>"$base_err_file")" || true
-    base_err="$(cat "$base_err_file")"
-    rm -f "$base_err_file"
-    trap - EXIT
+    resolved_base="$(git rev-parse --verify --quiet --end-of-options \
+        "${base_override}^{commit}" 2>/dev/null || true)"
     if [[ -z "$resolved_base" ]]; then
         echo "base '${base_override}' does not resolve to a commit" >&2
         exit 2
     fi
-    if [[ "$base_err" == *"is ambiguous"* ]]; then
-        echo "base '${base_override}' is ambiguous — it matches more than one ref (e.g. both a branch and a tag). Use a fully-qualified ref instead, e.g. 'refs/heads/${base_override}' or 'refs/tags/${base_override}'." >&2
+    # Ambiguity is detected structurally — by asking git directly whether
+    # this bare name ALSO matches a different commit under another ref
+    # namespace — never by parsing git's own diagnostic text. An earlier
+    # version matched the "refname ... is ambiguous" warning, which is not a
+    # reliable signal: it is both locale-dependent (a translated warning
+    # would not contain that English substring) and outright suppressible
+    # (`core.warnAmbiguousRefs=false`, confirmed directly — git still picks a
+    # ref and succeeds silently, no warning at all). Checked in git's own
+    # documented precedence order (gitrevisions(7)): refs/, refs/tags/,
+    # refs/heads/, refs/remotes/. A base like "HEAD~2", a full SHA, or an
+    # already-qualified ref (e.g. "refs/heads/foo") simply fails to match any
+    # of these extra literal-namespace lookups, so this never false-positives
+    # on them — only a genuine short-name collision produces more than one
+    # distinct commit here (PR #23 review finding).
+    distinct_matches="$(
+        {
+            for prefix in "refs/${base_override}" "refs/tags/${base_override}" \
+                "refs/heads/${base_override}" "refs/remotes/${base_override}"; do
+                git rev-parse --verify --quiet --end-of-options "${prefix}^{commit}" 2>/dev/null || true
+            done
+        } | sort -u | wc -l
+    )"
+    if (( distinct_matches > 1 )); then
+        echo "base '${base_override}' is ambiguous — it matches more than one ref (e.g. both a branch and a tag) pointing to different commits. Use a fully-qualified ref instead, e.g. 'refs/heads/${base_override}' or 'refs/tags/${base_override}'." >&2
         exit 2
     fi
 fi

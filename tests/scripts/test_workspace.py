@@ -772,12 +772,11 @@ def test_claim_rejects_an_ambiguous_explicit_base(tmp_path: Path) -> None:
     resolved to whichever one git's own precedence happens to prefer.
 
     Plain `git rev-parse` succeeds for an ambiguous short name (it just picks
-    one, per its own documented precedence — tags before branches) and only
-    warns on stderr; the warning is easy to end up suppressing entirely
-    (`--quiet`, or `2>/dev/null`) the same way any other diagnostic is, which
-    is exactly what this script used to do — silently stacking on whichever
-    ref git preferred, with no indication the caller's branch was not what
-    was actually used (PR #23 review finding).
+    one, per its own documented precedence — tags before branches). Detected
+    structurally here — by checking each ref namespace directly, not by
+    parsing git's own (suppressible, locale-dependent) diagnostic text — see
+    `test_claim_rejects_an_ambiguous_base_even_with_git_warnings_disabled`
+    for why that mattered (PR #23 review finding).
     """
     repo = _init_repo(tmp_path)
     ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
@@ -801,56 +800,33 @@ def test_claim_rejects_an_ambiguous_explicit_base(tmp_path: Path) -> None:
     assert "area/new" not in branches
 
 
-def test_claim_rejects_an_ambiguous_base_regardless_of_caller_locale(tmp_path: Path) -> None:
-    """Ambiguity detection must not depend on inheriting an English locale.
+def test_claim_rejects_an_ambiguous_base_even_with_git_warnings_disabled(
+    tmp_path: Path,
+) -> None:
+    """Ambiguity detection must not depend on git choosing to warn at all.
 
-    The check matches git's own diagnostic text; under a translated locale
-    git would print a localised warning that does not contain "is
-    ambiguous", silently defeating the check (a PR #23 review finding). This
-    environment has no non-English locale data installed to generate real
-    translated git output, so a real branch/tag collision (as in the test
-    above) can't actually distinguish "the LC_ALL=C fix is present" from
-    "it was silently removed" — git falls back to English regardless either
-    way, and the test would pass under both.
-
-    Stubs `git` itself instead: the fake emits an English "is ambiguous"
-    warning only when invoked with LC_ALL=C exactly (what the fix forces for
-    this one call) and a different, non-matching message otherwise
-    (standing in for a translated locale) — every other git call delegates
-    to the real binary untouched. If the fix were removed, this call would
-    inherit whatever locale the *test's own* environment has (not literally
-    "C"), the fake would emit the "translated" message, and the assertion
-    below would correctly fail — unlike the real-collision test, this one
-    actually has the power to catch that regression.
+    An earlier version matched git's own "refname ... is ambiguous" text on
+    stderr. Two separate PR #23 review findings broke that assumption: the
+    warning is locale-dependent (a translated message would not contain that
+    English substring — verified by temporarily reverting an LC_ALL=C fix
+    for exactly this and confirming ambiguity detection silently failed), and
+    it is outright suppressible via `core.warnAmbiguousRefs=false` — verified
+    directly: with that config set, `git rev-parse` on a colliding name
+    still succeeds and still silently picks a ref, but prints nothing at all,
+    no matter the locale. Detection is now structural (checks each ref
+    namespace directly, never git's diagnostic output), so it cannot be
+    defeated by suppressing or translating a message that no longer matters.
     """
-    assert _GIT is not None
     repo = _init_repo(tmp_path)
-    stub_bin = tmp_path / "fake-git-bin"
-    stub_bin.mkdir()
-    fake_git = stub_bin / "git"
-    fake_git.write_text(
-        "#!/usr/bin/env bash\n"
-        f'REAL_GIT="{_GIT}"\n'
-        'if [[ "$*" == *"--end-of-options"* && "$*" == *"^{commit}"* ]]; then\n'
-        '    if [[ "${LC_ALL:-}" == "C" ]]; then\n'
-        "        echo \"warning: refname 'fake' is ambiguous.\" >&2\n"
-        "    else\n"
-        '        echo "Warnung: Referenzname ist mehrdeutig." >&2\n'
-        "    fi\n"
-        '    echo "0123456789012345678901234567890123456789"\n'
-        "    exit 0\n"
-        "fi\n"
-        'exec "$REAL_GIT" "$@"\n'
-    )
-    fake_git.chmod(0o755)
+    _git(repo, "config", "core.warnAmbiguousRefs", "false")
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / "a.txt").write_text("work from a\n")
+    _git(ws_a, "add", "a.txt")
+    _git(ws_a, "commit", "-qm", "commit on a")
+    _git(repo, "branch", "collide", "area/a")
+    _git(repo, "tag", "collide")
 
-    result = _run(
-        _CLAIM,
-        repo,
-        "area/new",
-        "whatever-the-fake-intercepts-this-call-regardless-of-value",
-        env_extra={"PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
-    )
+    result = _run(_CLAIM, repo, "area/new", "collide")
 
     assert result.returncode == 2
     assert "ambiguous" in result.stderr
