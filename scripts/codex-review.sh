@@ -10,15 +10,32 @@
 # pre-merge step, not something to run on every change.
 #
 # Usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]
-#   base-ref defaults to "master"; the review covers HEAD's changes vs base-ref.
+#   base-ref defaults to origin/master when known (else local master); the
+#   review covers HEAD's *committed* changes vs base-ref — commit a fix (even
+#   a small follow-up you'll squash later) before re-running, or the diff
+#   Codex sees will not reflect it.
 set -euo pipefail
 
 persona="${1:-}"
-base="${2:-master}"
+base="${2:-}"
 
 if [[ -z "$persona" ]]; then
     echo "usage: scripts/codex-review.sh <architecture|adversarial> [base-ref]" >&2
     exit 2
+fi
+
+if [[ -z "$base" ]]; then
+    # Prefer origin/master, same as claim-workspace.sh's own base resolution
+    # (see its header) — the local `master` branch ref is not kept current by
+    # anything in this workflow (worktrees branch from origin/master, never
+    # touching local master at all) and can sit stale indefinitely, silently
+    # reviewing a different diff than CI's merge-relative one. This script
+    # still does no network itself; run `git fetch origin` first for a fresh
+    # origin/master, same as before claiming a workspace.
+    base=master
+    if git rev-parse --verify --quiet refs/remotes/origin/master >/dev/null 2>&1; then
+        base=origin/master
+    fi
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
