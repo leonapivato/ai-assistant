@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-19
 
 ## Context
@@ -215,6 +215,7 @@ and rejects everything else with `PlanningError`:
 | `PENDING` | `SKIPPED` | nothing can run it | `skip_reason` ∈ {`UNMET_DEPENDENCY`, `NO_CAPABLE_TOOL`, `SUPERSEDED`} |
 | `AWAITING_APPROVAL` | `RUNNING` | `permissions/` granted | `approval_ref`, `started_at` |
 | `AWAITING_APPROVAL` | `SKIPPED` | `permissions/` denied | `approval_ref`, `skip_reason=APPROVAL_DENIED` |
+| `AWAITING_APPROVAL` | `SKIPPED` | cancelled while queued for approval | `skip_reason=SUPERSEDED` |
 | `RUNNING` | `SUCCEEDED` | tool returned | `output`, `finished_at` |
 | `RUNNING` | `FAILED` | tool raised | `error`, `finished_at` |
 | `FAILED` | `RUNNING` | retry | `attempts += 1`, `started_at` |
@@ -365,7 +366,12 @@ class PlanExport(BaseModel):
   `model_dump(mode="json")`, matching `MemoryStore.export` (ADR-0007 §3).
 - **Deletable.** `delete_goal` cascades to that goal's plans and their execution
   state — a goal the user deletes must not leave its plan history behind.
-  `clear` empties this store's own rows (a Tier 1 erase, not a whole-system one).
+  `clear` empties this store's own rows (a Tier 1 erase, not a whole-system
+  one). `clear` is bound by the same in-flight rule as `delete_goal` below —
+  it raises `ActiveExecutionError` (a `PlanningError`) while any execution has a
+  non-terminal step, rather than emptying the store out from under a live tool
+  call. A bulk erase is not a licence to orphan a side effect that a
+  goal-scoped one refuses to orphan.
 
   **Deleting a goal with work in flight is refused, not forced.** Erasing an
   execution while a step is `RUNNING` would destroy the CAS record the executor
@@ -514,7 +520,7 @@ Protocol.
 - **New `core` surface is large:** `Goal`, `GoalStatus`, `PlanStep`,
   `ActionPlan`, `StepStatus`, `SkipReason`, `StepExecution`,
   `ExecutionState`, `StepTransition`, `PlanExport`, `GoalDeletion`,
-  `PlanningError`, `StaleExecutionError`, and
+  `PlanningError`, `StaleExecutionError`, `ActiveExecutionError`, and
   the `Planner` and `PlanStore` Protocols. That is a lot at once — it is the
   smallest set that
   expresses the plan/state split *and* discharges the data-rights obligation;
