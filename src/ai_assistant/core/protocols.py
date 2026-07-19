@@ -106,7 +106,12 @@ class MemoryStore(Protocol):
     """
 
     async def add(self, record: MemoryRecord) -> str:
-        """Persist a record and return its id."""
+        """Persist a record and return its id.
+
+        Adding a record whose ``id`` already exists overwrites the previous one
+        (an upsert), so ``id`` is the caller's idempotency key. All backends share
+        this behaviour; the shared conformance suite enforces it.
+        """
         ...
 
     async def get(self, record_id: str) -> MemoryRecord | None:

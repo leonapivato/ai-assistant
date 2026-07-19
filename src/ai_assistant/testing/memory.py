@@ -57,8 +57,13 @@ class FakeMemoryStore:
         return record.expires_at is not None and record.expires_at <= self._now_utc()
 
     async def add(self, record: MemoryRecord) -> str:
-        """Persist ``record`` (overwriting any existing same id) and return its id."""
-        self._records[record.id] = record
+        """Persist ``record`` (overwriting any existing same id) and return its id.
+
+        Stores a deep copy, so a caller mutating the record after ``add`` cannot
+        reach into stored state — matching the isolation the persistent store gets
+        for free by serialising to the database.
+        """
+        self._records[record.id] = record.model_copy(deep=True)
         return record.id
 
     async def get(self, record_id: str) -> MemoryRecord | None:
@@ -66,8 +71,9 @@ class FakeMemoryStore:
         record = self._records.get(record_id)
         if record is None or self._is_expired(record):
             return None
-        # Copy so callers cannot mutate stored state, matching the persistent store.
-        return record.model_copy()
+        # Deep copy so callers cannot mutate stored state — including nested fields
+        # like provenance — matching the persistent store (ADR-0007).
+        return record.model_copy(deep=True)
 
     async def search(
         self,
@@ -93,7 +99,9 @@ class FakeMemoryStore:
             content = record.content.lower()
             hits = sum(1 for term in query_terms if term in content)
             if hits:
-                scored.append(record.model_copy(update={"score": hits / len(query_terms)}))
+                scored.append(
+                    record.model_copy(update={"score": hits / len(query_terms)}, deep=True)
+                )
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
         return scored[:limit]
 
@@ -109,7 +117,7 @@ class FakeMemoryStore:
 
     async def export(self) -> list[MemoryRecord]:
         """Return an independent snapshot of all live (non-expired) records."""
-        return [r.model_copy() for r in self._records.values() if not self._is_expired(r)]
+        return [r.model_copy(deep=True) for r in self._records.values() if not self._is_expired(r)]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
