@@ -251,6 +251,24 @@ def test_release_of_a_non_owning_branch_leaves_the_lock_intact(tmp_path: Path) -
     assert "area/a" in result.stdout + result.stderr
 
 
+def test_claim_fails_loudly_if_revoked_during_bootstrap(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    assert _GIT is not None
+    # Bootstrap that simulates a concurrent release: drop the lock and move HEAD
+    # back to master while the claim is still "bootstrapping".
+    sabotage = tmp_path / "sabotage.sh"
+    sabotage.write_text(
+        f"#!/usr/bin/env bash\nrm -f '{_lock(repo)}'\n{_GIT} -C '{repo}' checkout -q master\n"
+    )
+    sabotage.chmod(0o755)
+
+    result = _run(_CLAIM, repo, "area/a", bootstrap=str(sabotage))
+
+    assert result.returncode != 0
+    assert "WORKSPACE=" not in result.stdout  # no phantom success reported
+    assert "revoked" in result.stderr.lower()
+
+
 def test_forced_main_release_removes_untracked_nested_repo(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _run(_CLAIM, repo, "area/a")

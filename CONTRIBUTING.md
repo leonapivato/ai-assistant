@@ -177,6 +177,10 @@ only there**. Release it after the PR merges with
   `origin/master`, so your branch starts from the latest merged state.
 - The claim on the main checkout is an atomic lock, so two agents racing cannot
   both take it; the loser deterministically gets a worktree.
+- Release a workspace only *after* its PR merges — never one that is still being
+  claimed. Concurrent claim/release of the *same* branch is unsupported; parallel
+  operations otherwise target distinct branches (the normal flow). A claim that
+  is revoked mid-setup fails loudly rather than reporting a phantom workspace.
 - When unclaimed, the main checkout is integration-only: `master` stays checked
   out there, and the `no-commit-to-branch` pre-commit hook refuses direct commits
   to it — so a solo agent working in the main checkout cannot forget to branch.
