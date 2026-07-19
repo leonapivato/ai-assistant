@@ -15,6 +15,13 @@
 # lock, branch, and any partial worktree — a failed claim never wedges the repo.
 # Prints the resolved workspace as the final `WORKSPACE=<path>` line.
 #
+# NOTE: do not release a branch while it is still being claimed — concurrent
+# claim+release of the *same* branch is unsupported (release only after the work
+# is done). Parallel operations otherwise target distinct branches, which is
+# safe. As a backstop, a main-checkout claim verifies it still owns the lock and
+# HEAD before reporting success, and fails loudly if a concurrent release
+# revoked it rather than reporting a phantom claim.
+#
 # Usage: scripts/claim-workspace.sh <area>/<slug>   (e.g. memory/add-cache)
 # Env:   WORKSPACE_BOOTSTRAP overrides the bootstrap command (default
 #        `uv sync --quiet`); set to `true` to skip it (used by the tests).
@@ -129,6 +136,15 @@ if main_is_free && (set -o noclobber; printf '%s\n' "$branch" >"$lock") 2>/dev/n
     git -C "$main_root" checkout -q -b "$branch" "$base"
     bootstrap "$main_root"
     trap - ERR INT TERM
+    # Fail loud rather than report a revoked claim: if a concurrent release
+    # removed our lock or moved HEAD while we bootstrapped, do not claim success.
+    # (The trap is already cleared, so we do not roll back and clobber whoever
+    # holds it now.)
+    if [[ ! -f "$lock" ]] || [[ "$(cat "$lock" 2>/dev/null)" != "$branch" ]] ||
+        [[ "$(git -C "$main_root" symbolic-ref --quiet --short HEAD 2>/dev/null)" != "$branch" ]]; then
+        echo "Claim for '${branch}' was revoked mid-bootstrap (lock/HEAD changed); aborting." >&2
+        exit 1
+    fi
     echo "Claimed the MAIN checkout for '${branch}'." >&2
     echo "WORKSPACE=${main_root}"
 else
