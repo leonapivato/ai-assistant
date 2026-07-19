@@ -25,8 +25,10 @@ the pipeline chooses deliberately.
 
 from __future__ import annotations
 
+import contextlib
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -39,6 +41,30 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import Message
 
 _log = structlog.get_logger(__name__)
+
+# Labels reach the log under a key the ADR-0004 §5 redactor treats as harmless,
+# so their shape is checked at construction instead. See Route.__post_init__.
+_SAFE_LABEL: Final = re.compile(r"[A-Za-z0-9._:-]+")
+
+
+def _warn(event: str, **fields: object) -> None:
+    """Emit a diagnostic warning, never letting it break the caller.
+
+    Routing exists to survive a failing dependency, and the logger is a
+    dependency like any other: an application-installed processor or sink that
+    raises would otherwise abort the fallback before the backup route is even
+    tried, and replace the ``ModelError`` the caller was promised with a
+    logging error. Diagnostics are a side effect and must behave like one.
+
+    ``Exception`` and not ``BaseException``: ``CancelledError`` is a
+    ``BaseException``, so a caller cancelling mid-log still propagates.
+
+    The failure is swallowed rather than reported, which would normally be the
+    wrong instinct — but the only channel available to report it is the thing
+    that just failed.
+    """
+    with contextlib.suppress(Exception):
+        _log.warning(event, **fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,15 +79,48 @@ class Route:
             provider, so one underlying provider can appear as several routes
             (a cheap model first, a stronger one behind it). ``None`` uses the
             provider's own default.
-        label: A short human name used in error messages, so an exhausted-route
+        label: A short identifier used in diagnostics, so an exhausted-route
             failure says which candidates were tried rather than listing bare
             object reprs. Defaults to the model name, or the provider's class
-            name when the route carries no override.
+            name when the route carries no override. Constrained to
+            ``[A-Za-z0-9._:-]`` — see :meth:`__post_init__`.
     """
 
     provider: ModelProvider
     model: str | None = None
     label: str = ""
+
+    def __post_init__(self) -> None:
+        """Validate the label's shape.
+
+        The label is written into logs under an innocuous ``route`` key, where
+        the ADR-0004 §5 redactor — which matches on *key* names — will never
+        look at it. So its safety cannot be delegated: it has to be established
+        here.
+
+        The realistic hazard is not a developer typing a secret, it is
+        interpolation: ``label=f"route for {user_request}"`` is an easy mistake
+        that would put a prompt straight into a Tier 2 log. Requiring a short
+        token — no spaces, no punctuation beyond ``.``, ``_``, ``:`` and ``-``
+        — rejects prose and free text while still allowing the things labels
+        actually are (``primary``, ``eu-west-1``, ``anthropic:claude-haiku-4-5``).
+
+        This is a tripwire, not a guarantee: a label of ``sk-live-abc`` matches
+        the pattern and would still be logged. Nothing can stop a caller that
+        deliberately puts a secret in a diagnostic field; what this stops is the
+        accident.
+
+        Raises:
+            ConfigurationError: If the label contains anything outside
+                ``[A-Za-z0-9._:-]``.
+        """
+        if self.label and not _SAFE_LABEL.fullmatch(self.label):
+            msg = (
+                f"route label must be a short token matching [A-Za-z0-9._:-], got "
+                f"{self.label!r}; labels are written to logs, which are Tier 2 "
+                f"and must not carry user data (ADR-0004 §5)"
+            )
+            raise ConfigurationError(msg)
 
     def describe(self) -> str:
         """Return the label to use for this route in diagnostics."""
@@ -148,7 +207,7 @@ class RoutingProvider:
                 # degrading silently is exactly what an operator needs to see
                 # *before* the fallback also fails. Class only, never the
                 # message — see the note on the exhaustion log below.
-                _log.warning(
+                _warn(
                     "route failed; trying the next one",
                     route=route.describe(),
                     error=type(exc).__name__,
@@ -182,7 +241,7 @@ class RoutingProvider:
         # vendor-independent, sufficient to diagnose which route failed and why,
         # and cannot carry content by construction. The full message still
         # travels to the caller on the raised exception.
-        _log.warning(
+        _warn(
             "all routes failed",
             routes=len(self._routes),
             failures=[{"route": label, "error": type(exc).__name__} for label, exc in failures],

@@ -8,9 +8,10 @@ one routing rule.
 from __future__ import annotations
 
 import traceback
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
 from model_provider_contract import ModelProviderContract
 from structlog.testing import capture_logs
 
@@ -28,7 +29,7 @@ from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import MutableMapping, Sequence
 
     from ai_assistant.core.protocols import ModelProvider
 
@@ -428,6 +429,80 @@ async def test_a_route_that_recovers_within_its_retries_never_falls_back() -> No
     assert (await router.complete(PROMPT)).content == "primary"
     assert primary.calls == 2
     assert backup.calls == 0
+
+
+def _exploding_processor(
+    _logger: Any, _name: str, _event: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """A structlog processor that fails, standing in for a broken sink."""
+    msg = "sink is down"
+    raise RuntimeError(msg)
+
+
+async def test_a_broken_logger_does_not_abort_the_fallback() -> None:
+    # Regression (CI adversarial review): the diagnostic warning was emitted
+    # inline, so an application-installed processor that raises took the whole
+    # router down with it — the backup route was never even tried. Routing
+    # exists to survive a failing dependency, and the logger is a dependency.
+    backup = RecordingProvider("backup")
+    routes = [
+        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="primary"),
+        Route(backup, label="secondary"),
+    ]
+
+    structlog.configure(processors=[_exploding_processor])
+    try:
+        reply = await RoutingProvider(routes).complete(PROMPT)
+    finally:
+        structlog.reset_defaults()
+
+    assert reply.content == "backup"
+    assert backup.calls == 1
+
+
+async def test_a_broken_logger_does_not_replace_the_promised_failure() -> None:
+    # On exhaustion the aggregate warning ran *before* `raise last`, so a
+    # logging error reached the caller instead of the ModelError this class
+    # documents — silently converting a handled failure into an unhandled one.
+    routes = [
+        Route(AlwaysFailsProvider(ModelUnavailableError("503")), label="a"),
+        Route(AlwaysFailsProvider(ModelRateLimitError("429")), label="b"),
+    ]
+
+    structlog.configure(processors=[_exploding_processor])
+    try:
+        with pytest.raises(ModelRateLimitError, match="429"):
+            await RoutingProvider(routes).complete(PROMPT)
+    finally:
+        structlog.reset_defaults()
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["primary", "eu-west-1", "anthropic:claude-haiku-4-5", "gpt_4.1", "a-b_c.d:e"],
+)
+def test_token_shaped_labels_are_accepted(label: str) -> None:
+    assert Route(RecordingProvider(), label=label).describe() == label
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "route for what is Alice's SSN",
+        "patient Alice / sk-live-abc",
+        "primary (eu-west)",
+        "a\nb",
+    ],
+    ids=["interpolated-prose", "slash-and-secret", "parens", "newline"],
+)
+def test_prose_shaped_labels_are_rejected(label: str) -> None:
+    # Regression (CI adversarial review): labels are logged under a `route` key
+    # the redactor treats as innocuous, so nothing downstream would catch a
+    # prompt interpolated into one — `label=f"route for {user_request}"` is the
+    # realistic accident. Rejecting free text is a tripwire, not a guarantee:
+    # a label of "sk-live-abc" is token-shaped and would still be logged.
+    with pytest.raises(ConfigurationError, match="must be a short token"):
+        Route(RecordingProvider(), label=label)
 
 
 def test_a_route_describes_itself_for_diagnostics() -> None:
