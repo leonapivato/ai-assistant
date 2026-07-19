@@ -27,20 +27,23 @@ The roadmap states the design constraint directly: *separate the static plan
 from durable, resumable execution state*. This ADR is mostly about taking that
 seriously.
 
-There is also a sequencing constraint. `ToolDefinition` does not exist yet — it
-is the next lane (issue #30, Lane B). Planning must therefore be designed so it
-does not depend on the `tools` subsystem's shape, both because golden rule 1
-forbids a cross-subsystem import and because this lane must not block on that
-one.
+Two boundaries constrain the shape:
 
-This adds new `core` types and a new Protocol, so it is ADR-worthy (golden
-rule 5).
+- **Planning is not tool selection.** They are distinct pipeline stages. A plan
+  says what must be accomplished; selecting *which* tool accomplishes it is a
+  later stage that weighs the registry's risk/reversibility metadata.
+- **`ToolDefinition` does not exist yet** — it is the next lane (issue #30,
+  Lane B). Planning must not depend on the `tools` subsystem's shape, both
+  because golden rule 1 forbids the import and because this lane must not block
+  on that one.
+
+This adds new `core` types and Protocols, so it is ADR-worthy (golden rule 5).
 
 ## Decision
 
 We will model planning as three distinct artifacts — a **goal** (why), a
 **frozen plan** (what was decided), and **execution state** (what has actually
-happened) — plus one `Planner` Protocol.
+happened) — plus a `Planner` Protocol and a planning-owned `PlanStore`.
 
 ### 1. `Goal` — the durable objective, separate from the request
 
@@ -69,17 +72,17 @@ indistinguishable from one the user *stated*.
 
 `Goal` is a `core` type rather than a memory kind. A goal is planning input,
 not a retrieval record; projecting goals into memory (or the reverse) is a
-follow-on decision, not a prerequisite (§6).
+follow-on decision, not a prerequisite (§7).
 
-### 2. `ActionPlan` — frozen, versioned, and tool-agnostic
+### 2. `ActionPlan` — frozen, and expressed in capabilities, not tools
 
 ```python
 class PlanStep(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str
-    intent: str               # human-readable "what this step is for"
-    tool_name: str            # resolved against the registry at execution time
-    arguments: Mapping[str, object] = {}
+    intent: str                             # human-readable "what this is for"
+    capability: str                         # what must be done, not what does it
+    parameters: Mapping[str, object] = {}
 
 class ActionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -92,6 +95,21 @@ class ActionPlan(BaseModel):
 
 Two properties matter:
 
+**A step names a capability, not a tool.** `capability` is an abstract
+requirement — `"send_email"`, `"search_calendar"` — that one or more registered
+tools may satisfy. It is *not* a registry key. This keeps the pipeline's
+`planning → tool selection` boundary intact: the planner decides what must
+happen, and the later tool-selection stage picks the concrete tool by weighing
+the `risk_level`/`reversibility`/`cost` metadata that Lane B's `ToolDefinition`
+will carry. Baking a tool id into planner output would collapse those two
+stages and make the risk-aware selection VISION §3 calls for impossible —
+the plan would have already chosen.
+
+It also means `planning` depends on the `tools` subsystem neither by import nor
+in spirit: `capability` is a vocabulary term, and a plan referencing a
+capability nothing implements is a legitimate, detectable outcome of the
+selection stage, not a broken plan.
+
 **The plan is frozen.** `frozen=True` is not decoration — it is what makes the
 plan an auditable record of a decision. Re-planning produces a *new*
 `ActionPlan` with a new `id` (the previous one stays referenced by the
@@ -99,30 +117,35 @@ plan an auditable record of a decision. Re-planning produces a *new*
 in-flight execution. "What did the system decide to do, and when" stays
 answerable.
 
-**Steps name tools by string, not by `ToolDefinition`.** `tool_name: str` is
-resolved against the tool registry at execution time. This is the seam that
-keeps `planning` from depending on `tools` (golden rule 1) and keeps this lane
-unblocked by Lane B. The cost is honest: an unknown `tool_name` is caught at
-execution, not at plan construction. That is the correct place anyway — tool
-availability is a runtime property (a tool can be revoked, rate-limited, or
-permission-denied between planning and execution), so validating it at plan time
-would be a false guarantee.
-
-`arguments` is `Mapping[str, object]` because argument schemas belong to
-`ToolDefinition`, which does not exist yet; validating a step's arguments
-against its tool's schema is Lane B's job at registry-resolution time.
+`parameters` is `Mapping[str, object]` because argument schemas belong to
+`ToolDefinition`; validating a step's parameters against the selected tool's
+schema happens at selection time, in Lane B.
 
 ### 3. `ExecutionState` — the durable half, owned by deterministic code
 
 ```python
 class StepStatus(StrEnum):
-    PENDING; RUNNING; SUCCEEDED; FAILED; SKIPPED; AWAITING_APPROVAL
+    PENDING; AWAITING_APPROVAL; RUNNING; SUCCEEDED; FAILED; SKIPPED
+
+class SkipReason(StrEnum):
+    APPROVAL_DENIED; UNMET_DEPENDENCY; NO_CAPABLE_TOOL; SUPERSEDED
+
+class ApprovalRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    granted: bool
+    decided_at: datetime
+    decided_by: str                    # who ruled; "user" today
+    reason: str | None = None
 
 class StepExecution(BaseModel):
     model_config = ConfigDict(extra="forbid")
     step_id: str
     status: StepStatus = StepStatus.PENDING
     attempts: int = 0
+    bound_tool: str | None = None      # the tool selection actually chose
+    output: Mapping[str, object] | None = None
+    approval: ApprovalRecord | None = None
+    skip_reason: SkipReason | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
@@ -141,30 +164,101 @@ ways: the audit record mutates as execution proceeds, resuming after a crash
 means reconstructing a plan rather than loading state, and re-planning mid-run
 has nowhere to put "these three steps already ran".
 
-Concretely, this separation is what lets execution be **resumable**:
-`ExecutionState` is a complete, serialisable snapshot, so recovering after a
-restart is loading one record and continuing — not replaying or re-planning.
+For this to be genuinely resumable, the snapshot must carry everything a
+restarted executor needs to *not redo work*:
 
-`AWAITING_APPROVAL` is present from the start because the pipeline has a
-permission step before execute; a step blocked on a user confirmation is a
-first-class durable state, not an in-memory pause (VISION §3, and ADR-0004's
-audit requirement).
+- **`output`** — a succeeded step's result. Without it, a later step that needs
+  the booking reference produced by an earlier one has no way to continue but to
+  re-run the earlier step, which for a non-idempotent tool means acting twice.
+  Storing the output is what makes "resume" mean resume. (How a later step
+  *references* a prior output — templating, binding — is deferred; §7.)
+- **`approval`** — the permission decision, durably, so a restart neither
+  re-prompts for consent already given nor silently proceeds past a denial. This
+  is also the audit trail ADR-0004 requires for actions taken on the user's
+  behalf.
+- **`bound_tool`** — which tool the selection stage chose. The plan records the
+  capability; execution records what actually ran. Both halves are needed to
+  answer "what did the system do".
 
-### 4. Transitions live in `planning/`, not on the types
+`ExecutionState` has no plan-level status field: it is derivable from the steps,
+and storing it would create a second source of truth that can disagree with
+them.
 
-`core/types.py` is data-only by convention, and VISION §7 says deterministic
-code owns state transitions. So `PlanExecution` — a small deterministic tracker
-in `planning/` — owns the legal moves (`PENDING → RUNNING → SUCCEEDED | FAILED`,
-retry as `FAILED → RUNNING` with `attempts` incremented) and rejects illegal
-ones with `PlanningError`. It takes an injectable `now: Callable[[], datetime]`,
-matching `memory` and `context`, so timestamps are deterministic in tests.
+### 4. The transition graph, in full
 
-It returns a new `ExecutionState` per transition rather than mutating in place,
-so a caller cannot half-apply a transition and persist it.
+Transitions live in `planning/`, not on the types: `core/types.py` is data-only
+by convention, and VISION §7 says deterministic code owns state transitions. So
+`PlanExecution` — a deterministic tracker in `planning/` — owns the legal moves
+and rejects everything else with `PlanningError`:
+
+| From | To | Trigger | Also sets |
+| --- | --- | --- | --- |
+| `PENDING` | `RUNNING` | selection + permission cleared it | `bound_tool`, `started_at` |
+| `PENDING` | `AWAITING_APPROVAL` | permission check requires confirmation | `bound_tool` |
+| `PENDING` | `SKIPPED` | nothing can run it | `skip_reason` ∈ {`UNMET_DEPENDENCY`, `NO_CAPABLE_TOOL`, `SUPERSEDED`} |
+| `AWAITING_APPROVAL` | `RUNNING` | user granted | `approval` (`granted=True`), `started_at` |
+| `AWAITING_APPROVAL` | `SKIPPED` | user denied | `approval` (`granted=False`), `skip_reason=APPROVAL_DENIED` |
+| `RUNNING` | `SUCCEEDED` | tool returned | `output`, `finished_at` |
+| `RUNNING` | `FAILED` | tool raised | `error`, `finished_at` |
+| `FAILED` | `RUNNING` | retry | `attempts += 1`, `started_at` |
+
+`SUCCEEDED` and `SKIPPED` are terminal. `FAILED` is terminal *unless* retried,
+and the retry ceiling is enforced by the tracker, not by a model — retries are
+named in VISION §7 as deterministic state. `AWAITING_APPROVAL` is a durable
+state rather than an in-memory pause precisely so a restart preserves it.
+
+`PlanExecution` takes an injectable `now: Callable[[], datetime]`, matching
+`memory` and `context`, so timestamps are deterministic in tests. Each
+transition returns a *new* `ExecutionState` rather than mutating in place, so a
+caller cannot half-apply a transition and persist it.
 
 `core/errors.py` gains `PlanningError(AssistantError)`.
 
-### 5. One `core` Protocol
+### 5. `PlanStore` — planning owns its durable state
+
+Durable planning state belongs to `planning`, not to the wiring layer:
+`CLAUDE.md` assigns progress tracking to `planning` and limits `orchestration`
+to injecting implementations. Goals, plans, parameters, outputs and errors are
+all personal data, so this state is squarely within ADR-0004's scope.
+`core/protocols.py` therefore gains:
+
+```python
+class PlanStore(Protocol):
+    async def save_goal(self, goal: Goal) -> str: ...
+    async def get_goal(self, goal_id: str) -> Goal | None: ...
+    async def save_plan(self, plan: ActionPlan) -> str: ...
+    async def get_plan(self, plan_id: str) -> ActionPlan | None: ...
+    async def save_execution(self, state: ExecutionState) -> str: ...
+    async def get_execution(self, execution_id: str) -> ExecutionState | None: ...
+    async def active_executions(self) -> list[ExecutionState]: ...
+    async def export(self) -> PlanExport: ...
+    async def delete_goal(self, goal_id: str) -> bool: ...
+    async def clear(self) -> int: ...
+```
+
+The data-rights obligations are part of the contract, not an afterthought,
+mirroring what ADR-0007 did for `MemoryStore`:
+
+- **Local residency.** Implementations persist locally only (ADR-0004 §1); no
+  implementation may write plan state to a remote service.
+- **Exportable.** `export` returns a portable snapshot of goals, plans and
+  execution state.
+- **Deletable.** `delete_goal` cascades to that goal's plans and their execution
+  state — a goal the user deletes must not leave its plan history behind.
+  `clear` empties this store's own rows (a Tier 1 erase, not a whole-system one).
+- **Retention** follows ADR-0007's read-time model when plan records gain
+  deadlines; no retention deadline is modelled in this slice (§7).
+
+`active_executions` is what makes resumption possible at all: it is the query a
+restarting system issues to find work left in flight.
+
+This slice ships an in-memory `InMemoryPlanStore` plus the conformance suite;
+a SQLite-backed implementation follows the precedent `memory` already set
+(ADR-0006 slice 2). Until it lands, plan state does not survive a restart — the
+*contract* is resumable, one implementation is not yet, and that gap is named
+here rather than hidden.
+
+### 6. The `Planner` Protocol
 
 ```python
 class Planner(Protocol):
@@ -186,50 +280,68 @@ the product thesis, and planning is where it pays off.
 
 `plan` is `async` because real planners call a model.
 
-Per the Protocol-triad practice, this lands with a canonical `FakePlanner` in
-`testing/` and a shared `PlannerContract` conformance suite, not just the
+Per the Protocol-triad practice, `Planner` and `PlanStore` each land with a
+canonical fake in `testing/` and a shared conformance suite, not just the
 Protocol.
 
-### 6. Deferred
+### 7. Deferred
 
-- **A model-backed planner.** This slice lands the contract, the deterministic
-  execution tracker, and a fake. Decomposing a goal into steps with an LLM is a
-  follow-on, and wants its own ADR (prompt shape, validation of model output,
+- **A model-backed planner.** This slice lands the contracts, the deterministic
+  execution tracker, and fakes. Decomposing a goal into steps with an LLM is a
+  follow-on wanting its own ADR (prompt shape, validation of model output,
   failure modes).
-- **A `PlanStore` persistence Protocol.** `ExecutionState` is designed to be
-  serialisable and resumable; *where* it is persisted is `orchestration`'s
-  concern once there is a pipeline to persist it from. Deciding it now would be
-  a contract with no consumer.
+- **A SQLite-backed `PlanStore`** — the durable implementation behind the
+  contract defined in §5.
+- **Output references between steps.** Outputs are stored (§3); the mechanism by
+  which step 3 consumes step 1's output is a follow-on, because it is a
+  substitution language with real injection-safety questions and no consumer
+  until an executor exists.
 - **Step dependencies / parallel execution.** Steps are an ordered sequence.
-  A `depends_on` DAG is additive later (an optional field, defaulting to the
-  implicit "after the previous step"), and is not worth the executor complexity
-  before an executor exists.
-- **Argument-schema validation** against `ToolDefinition` — Lane B (§2).
-- **Goals in memory.** Whether goals are retrievable records, and how they are
-  reconciled with `PreferenceMemory`, is a follow-on (§1).
+  A `depends_on` DAG is additive later (an optional field defaulting to the
+  implicit "after the previous step") and is not worth the executor complexity
+  before an executor exists. `UNMET_DEPENDENCY` is in `SkipReason` from the
+  start so the durable vocabulary does not have to change when it lands.
+- **Retention deadlines on plan records** (§5), pending a policy on how long
+  completed plan history should be kept.
+- **Goals in memory.** Whether goals are retrievable records, and how they
+  reconcile with `PreferenceMemory`, is a follow-on (§1).
 
 ## Consequences
 
 - **The pipeline gets its planning step**, and `orchestration` gets the two
   first-vertical artifacts it was missing, without waiting on `tools`.
-- **The audit story holds:** a frozen `ActionPlan` records what was decided, a
-  separate `ExecutionState` records what happened, and re-planning adds a plan
-  rather than editing one. VISION §3 becomes expressible instead of aspirational.
-- **Execution is resumable by construction** — recovery is loading an
-  `ExecutionState`, not reconstructing intent.
-- **State transitions stay deterministic** (VISION §7): the model produces an
-  `ActionPlan` and nothing else; no model output ever sets a `StepStatus`.
-- **New `core` surface:** `Goal`, `GoalStatus`, `PlanStep`, `ActionPlan`,
-  `StepStatus`, `StepExecution`, `ExecutionState`, `PlanningError`, and the
-  `Planner` Protocol. That is a lot of surface at once — it is the smallest set
-  that expresses the plan/state split; a smaller one would have to fuse the two.
-- **`tool_name: str` is a deliberately loose reference.** A plan can name a tool
-  that does not exist, and only execution finds out. Lane B's registry is where
-  that resolves; until it lands, nothing validates step tools at all.
+- **The `planning → tool selection` boundary survives contact with the type
+  system.** Plans are capability-level, so tool selection remains a real stage
+  that can reason about risk and reversibility rather than ratifying a choice
+  the planner already made.
+- **The audit story holds:** a frozen `ActionPlan` records what was decided; a
+  separate `ExecutionState` records what happened, which tool ran, and what the
+  user approved; re-planning adds a plan rather than editing one.
+- **Execution is resumable by construction** — outputs and approvals are
+  durable, so recovery re-runs nothing that already succeeded.
+- **State transitions stay deterministic** (VISION §7): every legal move is
+  enumerated in §4 and enforced by `PlanExecution`; no model output ever sets a
+  `StepStatus`.
+- **`planning` owns durable state it is accountable for**, with ADR-0004's
+  export/delete obligations written into the `PlanStore` contract rather than
+  deferred to whoever implements it.
+- **New `core` surface is large:** `Goal`, `GoalStatus`, `PlanStep`,
+  `ActionPlan`, `StepStatus`, `SkipReason`, `ApprovalRecord`, `StepExecution`,
+  `ExecutionState`, `PlanExport`, `PlanningError`, and the `Planner` and
+  `PlanStore` Protocols. That is a lot at once — it is the smallest set that
+  expresses the plan/state split *and* discharges the data-rights obligation;
+  a smaller one would have to fuse plan with state or leave durable personal
+  data uncontracted.
+- **`capability: str` is an uncontrolled vocabulary.** Nothing yet enforces that
+  a planner's capability names match what tools advertise; a shared vocabulary
+  (or its rejection in favour of matching on `ToolDefinition` metadata) is
+  Lane B's to settle.
+- **Persistence is contracted but not yet durable** (§5) — until the SQLite
+  backend lands, resumption works within a process, not across a restart.
 - **Two ordered sequences must stay aligned** — `ExecutionState.steps` is
   positionally one-to-one with `ActionPlan.steps`. `PlanExecution` constructs
   state from a plan so callers do not hand-build the correspondence, and
   `plan_id` makes a mismatched pairing detectable.
 - **Revisit when** a model-backed planner lands (does `ActionPlan` need
-  confidence or alternatives?), when steps need to run in parallel (§6), or when
-  `ToolDefinition` makes argument validation possible at plan time.
+  confidence or alternatives?), when steps need to run in parallel, or when
+  Lane B settles the capability vocabulary.
