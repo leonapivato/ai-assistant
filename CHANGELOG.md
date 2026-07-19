@@ -26,8 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   papers over, so a silently degrading primary is visible before the fallback
   also fails. Messages are deliberately kept
   out of the log: provider errors routinely quote the offending request, which
-  would put Tier 1 data in a Tier 2 log (ADR-0004 §5), and the redaction
-  processor that ADR assumes is not actually configured yet. (Three earlier
+  would put Tier 1 data in a Tier 2 log (ADR-0004 §5). The key-based redaction
+  net cannot catch that anyway — an `error` key looks innocuous — so the call
+  site has to. (Three earlier
   attempts were wrong: rebuilding the error as `type(exc)(msg)` assumed a
   one-argument constructor an arbitrary `ModelProvider`'s errors need not have;
   attaching a PEP 678 note mutated an object the router does not own, growing
@@ -65,9 +66,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it, so an embedding application keeps its own (possibly stricter) processors
   and gains ours. It fails
   closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
-  dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
-  `content_type`) keeps type and enum names readable, and each entry is pinned by
-  a test since every exemption is a hole in the net.
+  dropped rather than emitted unscrubbed. There is deliberately **no
+  allow-list**: an exemption is a permanent hole justified by an assumption
+  about the value, and the assumption is what fails — `content_type` looks
+  inert until a MIME string carries a `name=` parameter. Over-matching is fixed
+  locally by renaming the key.
 
 ### Fixed
 

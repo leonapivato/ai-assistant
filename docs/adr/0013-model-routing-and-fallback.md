@@ -163,10 +163,11 @@ operator concern, and operators read logs.
 routinely quotes the offending request, so `str(exc)` is vendor- and
 attacker-controlled text that can carry a prompt — Tier 1 data that ADR-0004 §5
 forbids in a log. The class name is enough to diagnose which route failed and
-why, and cannot carry content by construction. This is fail-closed by design
-rather than by redaction, which matters because the redaction processor ADR-0004
-§5 assumes **is not actually configured yet** (see Consequences). The full
-message still reaches the caller on the raised exception, which is not a log.
+why, and cannot carry content by construction. This is fail-closed *at the call
+site* rather than relying on the redaction processor, which matters because that
+net is key-based and cannot catch this case at all — an `error` key looks
+innocuous, so nothing downstream would flag it. The full message still reaches
+the caller on the raised exception, which is not a log.
 
 What is guaranteed of the re-raised failure is its **identity, type, message and
 `__cause__`** — deliberately *not* its traceback. Propagating through the router
@@ -238,14 +239,14 @@ described the risk without constraining anything.
   restates ADR-0004 §2 in the plural, so accepting ADR-0013 means accepting an
   amendment to an already-Accepted ADR. Configuring a route list is a privacy
   decision, not only an availability one.
-- **ADR-0004 §5's redaction processor does not exist.** §5 describes structlog
-  "configured with a redaction processor that drops/masks known sensitive keys …
-  as a safety net"; there is no `structlog.configure` call anywhere in the tree.
-  Routing works around its absence by logging failure *classes* only, but the
-  safety net that would catch the next such mistake is still missing, and
-  `context/provider.py` already logs `error=str(exc)` on a degradation path.
-  Raised here because routing is the second component to depend on it; fixing it
-  belongs to whoever owns observability, not to this slice.
+- **The redaction safety net does not make this call site's discipline
+  optional.** Drafting this ADR surfaced that ADR-0004 §5's redaction processor
+  did not exist at all; it has since been implemented (`core/logging.py`) and
+  merged. But it is *key-based*, so it cannot catch a message logged under an
+  innocuous key — which is exactly this case, and was exactly the pre-existing
+  `error=str(exc)` leak in `context/provider.py`. Routing logging failure
+  *classes* only is therefore the primary defence here, not a workaround for a
+  missing net.
 - **Nothing is wired yet.** No component constructs a `RoutingProvider` and
   `Settings` has no route configuration, so this slice changes no egress in
   practice. The obligations in §6 fall due when `orchestration` wires the
