@@ -12,15 +12,28 @@ Requires [uv](https://docs.astral.sh/uv/) and [just](https://github.com/casey/ju
 claiming and the gate itself) — install both before continuing.
 
 ```bash
-uv sync                                   # create/refresh the environment
-uv run pre-commit install --install-hooks # both pre-commit and commit-msg hooks
-git config commit.template .gitmessage    # scaffold commit messages
+uv sync                                # create/refresh the environment
+uv tool install pre-commit             # once per machine, not per workspace
+pre-commit install --install-hooks     # both pre-commit and commit-msg hooks
+git config commit.template .gitmessage # scaffold commit messages
 ```
 
-Already set up from before this fix? An earlier version of this command only
-installed the `commit-msg` hook — rerun it to pick up the `pre-commit` stage
-(ruff, mypy, import-linter) too; a stale install fails silently rather than
-erroring.
+Install pre-commit as a standalone tool (`uv tool install`), not via
+`uv run` inside a workspace. Git hooks live under the repo's shared
+`.git/hooks` — one set for every worktree, not one per worktree — but
+`pre-commit install` bakes the *installing* Python's absolute path into the
+hook script. Run it with `uv run` from inside a claimed workspace and that
+path points at that workspace's `.venv`; release or prune that workspace
+later and every other worktree's commits start failing with `` `pre-commit`
+not found ``. A standalone tool install lives outside any workspace, so the
+hook keeps working no matter which workspaces come and go.
+
+Already set up from before this fix? Rerun the two lines above — they
+re-anchor the hook to the tool install instead of whatever workspace last ran
+`pre-commit install`. (An even earlier version of this command only installed
+the `commit-msg` hook; rerunning also picks up the `pre-commit` stage — ruff,
+mypy, import-linter — if you're that far behind. A stale install fails
+silently rather than erroring.)
 
 ## The gate (Definition of Done)
 
