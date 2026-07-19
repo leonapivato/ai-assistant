@@ -26,17 +26,22 @@
 # ref, no PR yet) for a merged one, which a "does the remote branch still
 # exist" heuristic would get wrong.
 #
-# ALL PRs for the branch are fetched, not just the most recent: a branch can
+# Whether the branch has an OPEN PR is checked as its own query
+# (`--state open --limit 1`), separately from the MERGED/CLOSED match below —
+# not folded into one `--state all` call with a fixed page size. A branch can
 # have more than one PR over its lifetime (e.g. closed for process reasons,
-# then reopened as a fresh PR at the same commit). Taking only the newest
-# result risks missing a currently-OPEN PR that happens to sort behind an
-# older closed one. If any matching PR is OPEN, the branch is always kept,
-# full stop — never pruned no matter what else is in its history. Only once
-# nothing is OPEN does a MERGED/CLOSED match get considered, and even then
-# only if the branch's tip commit is *exactly* that PR's recorded head commit
-# (`headRefOid`) — never on branch-name match alone, since a freed name is
-# reusable and a later, unrelated claim of the same name must never be
-# mistaken for the old PR.
+# then reopened as a fresh PR at the same commit); a single paginated query
+# risks an OPEN PR sorting behind enough MERGED/CLOSED ones to fall off the
+# page, which a fixed `--limit` could never fully rule out. An *existence*
+# check does not have that problem: "at least one OPEN PR" needs at most one
+# result to prove, so `--limit 1` there is exhaustive, not a cap. If any PR is
+# OPEN, the branch is always kept, full stop — never pruned no matter what
+# else is in its history. Only once that check comes back empty does a
+# MERGED/CLOSED match get considered (a `--limit` there is no longer
+# safety-critical — see below), and even then only if the branch's tip commit
+# is *exactly* that PR's recorded head commit (`headRefOid`) — never on
+# branch-name match alone, since a freed name is reusable and a later,
+# unrelated claim of the same name must never be mistaken for the old PR.
 #
 # `gh` failures (auth, network, rate limit, malformed response) are reported
 # as `lookup-error`, distinct from a genuine `no-pr` (the call succeeded and
@@ -103,13 +108,33 @@ while IFS= read -r branch; do
         path="(released — branch only, no worktree)"
     fi
 
-    # Every PR for this head branch, not just one: state and head commit,
-    # tab-separated, one line per PR. A non-zero exit here is a genuine `gh`
-    # failure, not "no PR" — caught by the `if !` so `set -e` does not abort
-    # the whole run over one branch's lookup failing.
+    # Existence check: does ANY PR for this branch have state OPEN? `--limit
+    # 1` is exhaustive here, not a cap — one match is all that is needed to
+    # prove "at least one exists". A non-zero exit is a genuine `gh` failure,
+    # not "no open PR" — caught by `if !` so `set -e` does not abort the run
+    # over one branch's lookup failing.
+    if ! open_count="$(gh pr list --head "$branch" --state open --limit 1 \
+        --json state --jq 'length' 2>/dev/null)"; then
+        printf '%-30s %-14s %s\n' "$branch" "lookup-error" "$path"
+        had_error=1
+        continue
+    fi
+
+    if [[ "$open_count" != "0" ]]; then
+        # An OPEN PR wins outright, regardless of what else is in the
+        # branch's history — never prune something under active review.
+        printf '%-30s %-14s %s\n' "$branch" "keep" "$path"
+        continue
+    fi
+
+    # No OPEN PR exists (just established, exhaustively). Look for a
+    # MERGED/CLOSED match to prune. `--limit 100` is not safety-critical the
+    # way the check above is: at worst, an unmatched older PR past the page
+    # just means a real prune candidate is conservatively reported as
+    # `head-changed` instead of PRUNE — never the reverse.
     if ! resp="$(gh pr list --head "$branch" --state all --limit 100 \
         --json state,headRefOid \
-        --jq '.[] | .state + "\t" + .headRefOid' 2>/dev/null)"; then
+        --jq '.[] | select(.state != "OPEN") | .state + "\t" + .headRefOid' 2>/dev/null)"; then
         printf '%-30s %-14s %s\n' "$branch" "lookup-error" "$path"
         had_error=1
         continue
@@ -121,22 +146,12 @@ while IFS= read -r branch; do
     fi
 
     local_head="$(git -C "$main_root" rev-parse "refs/heads/${branch}")"
-    has_open=0
     prune_state=""
     while IFS=$'\t' read -r pr_state pr_head_sha; do
-        if [[ "$pr_state" == "OPEN" ]]; then
-            has_open=1
-        elif [[ ( "$pr_state" == "MERGED" || "$pr_state" == "CLOSED" ) \
-            && "$pr_head_sha" == "$local_head" ]]; then
-            prune_state="$pr_state"
-        fi
+        [[ "$pr_head_sha" == "$local_head" ]] && prune_state="$pr_state"
     done <<<"$resp"
 
-    if (( has_open )); then
-        # Any OPEN PR wins outright, regardless of what else is in the
-        # branch's history — never prune something under active review.
-        printf '%-30s %-14s %s\n' "$branch" "keep" "$path"
-    elif [[ -n "$prune_state" ]]; then
+    if [[ -n "$prune_state" ]]; then
         verdict="PRUNE(${prune_state,,})"
         printf '%-30s %-14s %s\n' "$branch" "$verdict" "$path"
         if (( force )); then

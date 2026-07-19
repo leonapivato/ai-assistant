@@ -255,6 +255,37 @@ def test_release_removes_the_worktree(tmp_path: Path) -> None:
     assert not ws_a.is_dir()
 
 
+def test_release_refuses_a_worktree_never_claimed_by_this_tooling(tmp_path: Path) -> None:
+    """Only branches tagged by claim-workspace.sh are ever release targets.
+
+    A worktree created directly with `git worktree add` (never through this
+    tooling, so no `refs/workspace-claimed/<branch>` marker) must be refused,
+    not removed — including with FORCE=1, which would otherwise discard its
+    uncommitted files too (PR #17 review finding).
+    """
+    repo = _init_repo(tmp_path)
+    manual = tmp_path / "manual-worktree"
+    _git(repo, "worktree", "add", "-q", str(manual), "-b", "manual/branch")
+    (manual / "uncommitted.txt").write_text("not this tooling's to discard\n")
+
+    refused = _run(_RELEASE, repo, "manual/branch")
+    assert refused.returncode != 0
+    assert manual.is_dir()
+
+    forced = _run(_RELEASE, repo, "manual/branch", force="1")
+    assert forced.returncode != 0
+    assert manual.is_dir()  # FORCE=1 must not override the provenance check
+
+
+def test_release_refuses_master(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    result = _run(_RELEASE, repo, "master")
+
+    assert result.returncode != 0
+    assert _current_branch(repo) == "master"  # untouched
+
+
 def test_release_of_unknown_branch_reports_nothing_to_release(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
 

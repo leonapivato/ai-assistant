@@ -160,27 +160,46 @@ def _stub_gh(tmp_path: Path) -> Path:
 
     Prepend this to PATH (never replace it) so real git/awk/sed etc. keep
     resolving normally through the rest of PATH — only `gh` itself is swapped
-    out. FAKE_GH_RESPONSES holds zero or more "STATE\\tHEAD_SHA" lines (one
-    per PR matching the queried branch — a branch can have more than one over
-    its lifetime); FAKE_GH_EXIT=1 simulates a `gh` failure. Both are read at
-    invocation time, so one script serves every scenario below without
-    needing real `gh` auth or a GitHub remote.
+    out. FAKE_GH_RESPONSES is the ground truth for the queried branch: zero or
+    more "STATE\\tHEAD_SHA" lines (a branch can have more than one PR over its
+    lifetime). prune-workspaces.sh issues two distinct queries per branch —
+    an existence check (`--state open`) and the merged/closed match
+    (`--state all`, filtered to non-OPEN) — so the stub inspects its own argv
+    to answer each consistently with the same underlying PR history, the same
+    way the real two calls would. FAKE_GH_EXIT=1 simulates a `gh` failure for
+    either call.
     """
     stub_bin = tmp_path / "fake-gh-bin"
     stub_bin.mkdir()
     gh_stub = stub_bin / "gh"
     gh_stub.write_text(
-        "#!/usr/bin/env bash\n"
-        'if [[ "$1 $2" == "pr list" ]]; then\n'
-        '    if [[ "${FAKE_GH_EXIT:-0}" != "0" ]]; then\n'
-        '        echo "simulated gh failure" >&2\n'
-        "        exit 1\n"
-        "    fi\n"
-        '    [[ -n "${FAKE_GH_RESPONSES:-}" ]] && printf \'%s\\n\' "${FAKE_GH_RESPONSES}"\n'
-        "    exit 0\n"
-        "fi\n"
-        'echo "unsupported fake gh invocation: $*" >&2\n'
-        "exit 1\n"
+        """#!/usr/bin/env bash
+if [[ "$1 $2" == "pr list" ]]; then
+    if [[ "${FAKE_GH_EXIT:-0}" != "0" ]]; then
+        echo "simulated gh failure" >&2
+        exit 1
+    fi
+    all="${FAKE_GH_RESPONSES:-}"
+    if [[ "$*" == *"--state open"* ]]; then
+        count=0
+        if [[ -n "$all" ]]; then
+            while IFS=$'\\t' read -r state _; do
+                [[ "$state" == "OPEN" ]] && count=$((count + 1))
+            done <<<"$all"
+        fi
+        printf '%s\\n' "$count"
+    else
+        if [[ -n "$all" ]]; then
+            while IFS=$'\\t' read -r state sha; do
+                [[ "$state" != "OPEN" ]] && printf '%s\\t%s\\n' "$state" "$sha"
+            done <<<"$all"
+        fi
+    fi
+    exit 0
+fi
+echo "unsupported fake gh invocation: $*" >&2
+exit 1
+"""
     )
     gh_stub.chmod(0o755)
     return stub_bin
