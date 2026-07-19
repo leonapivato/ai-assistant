@@ -3,7 +3,7 @@
 # closed — the point at which a workspace has done its job. Iterates every
 # local branch tagged with a `refs/workspace-claimed/<branch>` ref by
 # claim-workspace.sh (see its header) — not just branches with a live
-# worktree, and not "every non-master branch". Both restrictions matter:
+# worktree, and not "every non-main branch". Both restrictions matter:
 #
 # - Branches, not worktrees: release-workspace.sh deliberately keeps the
 #   branch after removing the worktree, so a branch-name is only ever freed
@@ -11,7 +11,7 @@
 #   would make that unreachable — the documented "release after merge, then
 #   prune" flow would leave every released branch permanently un-prunable,
 #   since by the time you release, there is no worktree left to find it by.
-# - Tagged branches, not "every non-master branch": a branch created some
+# - Tagged branches, not "every non-main branch": a branch created some
 #   other way (a plain `git branch`, never claimed here) could coincidentally
 #   share a commit with some old closed PR of an unrelated name. Without an
 #   explicit "this is ours" marker, FORCE=1 could force-delete a branch this
@@ -20,7 +20,7 @@
 # Verdict comes from the GitHub PR's actual state via `gh`, not from local git
 # history: this project merges via "rebase and merge" (CONTRIBUTING), which
 # rewrites commit hashes, so a merged branch's tip is never an ancestor of
-# master's tip in the local ref graph even though its content landed —
+# main's tip in the local ref graph even though its content landed —
 # `git merge-base --is-ancestor` would misreport it as unmerged. Asking GitHub
 # directly also avoids mistaking an unpushed, in-progress branch (no remote
 # ref, no PR yet) for a merged one, which a "does the remote branch still
@@ -95,7 +95,7 @@ printf '%-30s %-14s %s\n' "BRANCH" "VERDICT" "PATH"
 # Process substitution (not `| while`), so the loop runs in *this* shell, not
 # a subshell — `had_error` set inside it must survive to the `exit` below.
 while IFS= read -r branch; do
-    [[ "$branch" == "master" ]] && continue  # never a prune target
+    [[ "$branch" == "main" ]] && continue  # never a prune target
 
     if ! git -C "$main_root" rev-parse --verify --quiet \
         "refs/workspace-claimed/${branch}" >/dev/null; then

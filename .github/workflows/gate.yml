@@ -11,7 +11,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [master]
+    branches: [main]
 
 # A newer push to the same ref supersedes an in-flight run.
 concurrency:

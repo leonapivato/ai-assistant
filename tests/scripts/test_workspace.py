@@ -4,7 +4,7 @@
 destructive, stateful operations — so they are exercised end to end against a
 throwaway git repo, with the bootstrap step stubbed
 (`WORKSPACE_BOOTSTRAP=true`) so no real `uv sync` runs. Every claim is a linked
-worktree; the main checkout is never claimed (it stays on `master`). Covers the
+worktree; the main checkout is never claimed (it stays on `main`). Covers the
 failure and concurrency paths the scripts introduce (adversarial review of
 PR #17, and the always-worktree simplification that followed it).
 """
@@ -46,11 +46,11 @@ def _current_branch(repo: Path) -> str:
 
 
 def _init_repo(tmp_path: Path) -> Path:
-    """A one-commit repo whose default branch is master (version-independent)."""
+    """A one-commit repo whose default branch is main (version-independent)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
-    _git(repo, "symbolic-ref", "HEAD", "refs/heads/master")
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "Test")
     (repo / "f.txt").write_text("x\n")
@@ -106,7 +106,7 @@ def test_claim_from_main_checkout_creates_a_worktree(tmp_path: Path) -> None:
     assert ws != repo  # main checkout is never claimed
     assert ws.is_dir()
     assert ws == tmp_path / "repo-worktrees" / "area" / "one"
-    assert _current_branch(repo) == "master"  # main checkout untouched
+    assert _current_branch(repo) == "main"  # main checkout untouched
 
 
 def test_claim_tags_the_branch_as_workspace_claimed(tmp_path: Path) -> None:
@@ -157,7 +157,7 @@ def test_invalid_branch_is_rejected_without_side_effects(tmp_path: Path) -> None
     assert _run(_CLAIM, repo, "no-slash").returncode == 2  # not <area>/<slug>
     assert _run(_CLAIM, repo, "bad/ name").returncode == 2  # invalid ref (space)
 
-    assert _current_branch(repo) == "master"
+    assert _current_branch(repo) == "main"
 
 
 def test_claim_rejects_extra_positional_arguments(tmp_path: Path) -> None:
@@ -170,11 +170,11 @@ def test_claim_rejects_extra_positional_arguments(tmp_path: Path) -> None:
     """
     repo = _init_repo(tmp_path)
 
-    result = _run(_CLAIM, repo, "area/new", "master", "typo")
+    result = _run(_CLAIM, repo, "area/new", "main", "typo")
 
     assert result.returncode == 2
     assert "usage" in result.stderr.lower()
-    assert _current_branch(repo) == "master"
+    assert _current_branch(repo) == "main"
     assert not (tmp_path / "repo-worktrees" / "area" / "new").exists()
 
 
@@ -247,7 +247,7 @@ def test_claim_rejects_an_explicit_base_on_an_idempotent_reclaim(tmp_path: Path)
     repo = _init_repo(tmp_path)
     ws_a = _workspace(_run(_CLAIM, repo, "area/a"))
 
-    result = _run(_CLAIM, repo, "area/a", "master", cwd=Path(ws_a))
+    result = _run(_CLAIM, repo, "area/a", "main", cwd=Path(ws_a))
 
     assert result.returncode == 2
     assert "meaningless" in result.stderr
@@ -418,7 +418,7 @@ def test_concurrent_claims_of_distinct_branches_all_succeed(tmp_path: Path) -> N
     assert len(set(workspaces)) == len(names)  # every claim got a distinct worktree
     for ws in workspaces:
         assert Path(ws).is_dir()
-    assert _current_branch(repo) == "master"  # main checkout was never touched
+    assert _current_branch(repo) == "main"  # main checkout was never touched
 
 
 def test_concurrent_claims_of_the_same_branch_leave_the_winner_intact(tmp_path: Path) -> None:
@@ -617,13 +617,13 @@ def test_release_refuses_a_worktree_never_claimed_by_this_tooling(tmp_path: Path
     assert manual.is_dir()  # FORCE=1 must not override the provenance check
 
 
-def test_release_refuses_master(tmp_path: Path) -> None:
+def test_release_refuses_main(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
 
-    result = _run(_RELEASE, repo, "master")
+    result = _run(_RELEASE, repo, "main")
 
     assert result.returncode != 0
-    assert _current_branch(repo) == "master"  # untouched
+    assert _current_branch(repo) == "main"  # untouched
 
 
 def test_release_of_unknown_branch_reports_nothing_to_release(tmp_path: Path) -> None:
@@ -663,7 +663,7 @@ def test_release_removes_the_correct_worktree_under_slug_collision(tmp_path: Pat
     assert ws1.is_dir()  # the similarly-named one survives
 
 
-def test_worktree_branches_from_master_not_a_sibling_worktree(tmp_path: Path) -> None:
+def test_worktree_branches_from_main_not_a_sibling_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
     (ws_a / "a.txt").write_text("work from a\n")  # commit on area/a in its own worktree
@@ -679,7 +679,7 @@ def test_worktree_branches_from_master_not_a_sibling_worktree(tmp_path: Path) ->
         capture_output=True,
         text=True,
     ).stdout
-    assert "commit on a" not in log  # b started from master, not a's HEAD
+    assert "commit on a" not in log  # b started from main, not a's HEAD
 
 
 def test_claim_with_an_explicit_base_stacks_on_it(tmp_path: Path) -> None:
@@ -711,18 +711,18 @@ def test_claim_with_an_explicit_base_stacks_on_it(tmp_path: Path) -> None:
 
 def test_claim_with_an_explicit_base_of_a_tag_or_sha(tmp_path: Path) -> None:
     """The base override accepts any commit-ish, not just a branch name — and
-    actually uses it, rather than silently falling back to master's tip.
+    actually uses it, rather than silently falling back to main's tip.
 
-    A first version of this test tagged/SHA-referenced master's own tip, so
+    A first version of this test tagged/SHA-referenced main's own tip, so
     an implementation that accepted the argument but ignored it would have
     passed too (PR #23 review finding). Points the tag and the SHA at a
-    commit unreachable from master instead, so only a claim that genuinely
+    commit unreachable from main instead, so only a claim that genuinely
     used that base ends up with its content.
     """
     repo = _init_repo(tmp_path)
     assert _GIT is not None
     _git(repo, "checkout", "-qb", "scratch")
-    (repo / "scratch.txt").write_text("not reachable from master\n")
+    (repo / "scratch.txt").write_text("not reachable from main\n")
     _git(repo, "add", "scratch.txt")
     _git(repo, "commit", "-qm", "scratch commit")
     sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
@@ -732,7 +732,7 @@ def test_claim_with_an_explicit_base_of_a_tag_or_sha(tmp_path: Path) -> None:
         text=True,
     ).stdout.strip()
     _git(repo, "tag", "v0")
-    _git(repo, "checkout", "-q", "master")
+    _git(repo, "checkout", "-q", "main")
     _git(repo, "branch", "-D", "scratch")  # only the tag/SHA keep it reachable
 
     by_tag = _run(_CLAIM, repo, "area/from-tag", "v0")
@@ -784,7 +784,7 @@ def test_claim_rejects_an_ambiguous_explicit_base(tmp_path: Path) -> None:
     _git(ws_a, "add", "a.txt")
     _git(ws_a, "commit", "-qm", "commit on a")  # branch "collide" candidate
     _git(repo, "branch", "collide", "area/a")
-    _git(repo, "tag", "collide")  # tag "collide" at master's tip — a different commit
+    _git(repo, "tag", "collide")  # tag "collide" at main's tip — a different commit
 
     result = _run(_CLAIM, repo, "area/new", "collide")
 
@@ -880,13 +880,13 @@ def test_claim_rejects_an_ambiguous_base_from_any_pseudoref_generically(
     _git(ws_a, "add", "a.txt")
     _git(ws_a, "commit", "-qm", "commit on a")
     assert _GIT is not None
-    master_sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
-        [_GIT, "-C", str(repo), "rev-parse", "master"],
+    main_sha = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "rev-parse", "main"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    (repo / ".git" / "REBASE_HEAD").write_text(master_sha + "\n")
+    (repo / ".git" / "REBASE_HEAD").write_text(main_sha + "\n")
     _git(repo, "branch", "REBASE_HEAD", "area/a")  # collides with the synthesised pseudoref
 
     result = _run(_CLAIM, repo, "area/new", "REBASE_HEAD")
@@ -910,7 +910,7 @@ def test_claim_rejects_an_ambiguous_base_from_a_remote_head_collision(tmp_path: 
     (ws_a / "a.txt").write_text("work from a\n")
     _git(ws_a, "add", "a.txt")
     _git(ws_a, "commit", "-qm", "commit on a")
-    _git(repo, "update-ref", "refs/remotes/collide/HEAD", "master")
+    _git(repo, "update-ref", "refs/remotes/collide/HEAD", "main")
     _git(repo, "branch", "collide", "area/a")
 
     result = _run(_CLAIM, repo, "area/new", "collide")
@@ -925,11 +925,11 @@ def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
     """`HEAD` as an explicit base must resolve in the caller's own context.
 
     Every git call after validation runs `-C "$main_root"` (the main
-    checkout, always on master), so a context-sensitive revision like `HEAD`
+    checkout, always on main), so a context-sensitive revision like `HEAD`
     would otherwise mean something different there than what the caller —
     standing inside a different worktree entirely — actually intended:
     claiming with base `HEAD` from inside a sibling worktree would silently
-    branch from master's HEAD instead of that worktree's real one (PR #23
+    branch from main's HEAD instead of that worktree's real one (PR #23
     review finding). The base is resolved to an absolute commit OID up front,
     in the caller's actual cwd, specifically to close this.
     """
@@ -940,12 +940,12 @@ def test_claim_with_explicit_head_base_resolves_in_the_callers_worktree(
     _git(ws_a, "commit", "-qm", "commit on a")
 
     # Claim area/b with base "HEAD", invoked FROM inside area/a's worktree —
-    # HEAD there is area/a's tip, not master's.
+    # HEAD there is area/a's tip, not main's.
     result = _run(_CLAIM, repo, "area/b", "HEAD", cwd=ws_a)
 
     assert result.returncode == 0, result.stderr
     ws_b = Path(_workspace(result))
-    assert (ws_b / "a.txt").exists()  # inherited area/a's tip, not master's
+    assert (ws_b / "a.txt").exists()  # inherited area/a's tip, not main's
 
 
 def test_claim_rejects_an_invalid_explicit_base(tmp_path: Path) -> None:
@@ -1042,5 +1042,5 @@ def test_just_claim_workspace_recipe_forwards_argument_count_faithfully(
     _just("claim-workspace", "area/empty", "")
     assert args_file.read_text().splitlines() == ["2", "[area/empty]", "[]"]
 
-    _just("claim-workspace", "area/base", "master")
-    assert args_file.read_text().splitlines() == ["2", "[area/base]", "[master]"]
+    _just("claim-workspace", "area/base", "main")
+    assert args_file.read_text().splitlines() == ["2", "[area/base]", "[main]"]

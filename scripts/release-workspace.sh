@@ -13,7 +13,7 @@
 # Only ever touches a branch carrying the `refs/workspace-claimed/<branch>`
 # marker claim-workspace.sh sets (see its header) — a worktree for some other,
 # unclaimed branch (created directly with `git worktree add`, never through
-# this tooling) is refused, not removed, even with FORCE=1. `master` is
+# this tooling) is refused, not removed, even with FORCE=1. `main` is
 # refused outright: it is the permanent main-checkout branch, never a claimed
 # workspace, so it is rejected before even looking for a worktree to match.
 #
@@ -26,8 +26,8 @@ if [[ -z "$branch" ]]; then
     echo "usage: scripts/release-workspace.sh <area>/<slug>" >&2
     exit 2
 fi
-if [[ "$branch" == "master" ]]; then
-    echo "refusing to release 'master' — it is the permanent main checkout, never a claimed workspace." >&2
+if [[ "$branch" == "main" ]]; then
+    echo "refusing to release 'main' — it is the permanent main checkout, never a claimed workspace." >&2
     exit 2
 fi
 force=0

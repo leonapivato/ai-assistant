@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # List active workspaces: every worktree claimed via claim-workspace.sh, plus
-# the main checkout (always on master, integration-only — never claimed, see
+# the main checkout (always on main, integration-only — never claimed, see
 # claim-workspace.sh). Shows branch, working-tree state, and how long ago the
 # last commit landed, so tracking several parallel claims doesn't mean piecing
 # it together from raw `git worktree list --porcelain` by hand.
@@ -27,7 +27,7 @@ branch=""
 print_row() {
     [[ -z "$path" ]] && return
     local label="${branch:-(detached)}"
-    [[ "$path" == "$main_root" ]] && label="${label} (main, integration-only)"
+    [[ "$path" == "$main_root" ]] && label="${label} (main checkout, integration-only)"
 
     if [[ ! -d "$path" ]]; then
         printf '%-30s %-7s %-15s %s\n' "$label" "missing" "-" "${path} (worktree dir gone)"

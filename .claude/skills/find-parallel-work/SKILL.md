@@ -17,12 +17,12 @@ what to hand out.
 
 `just status` and a plain file read both reflect whatever is currently
 checked out — they are not ref-aware. Running this skill from any branch
-other than an up-to-the-second `origin/master` (a workspace claimed an hour
+other than an up-to-the-second `origin/main` (a workspace claimed an hour
 ago, the main checkout before its next fetch, anything) means these can
 silently report stale state even right after a `git fetch`, since fetch only
 updates the remote-tracking ref, not what's on disk. So never read them from
 "wherever this happens to be run" — always survey a disposable, freshly
-fetched `origin/master` on its own:
+fetched `origin/main` on its own:
 
 1. `git fetch origin`.
 2. Reserve a directory before touching anything else — `tmp_dir="$(mktemp
@@ -31,14 +31,14 @@ fetched `origin/master` on its own:
    *any* later step in this list fails, remove it (`git worktree remove
    "$tmp_dir/survey"` first if that step ran, either way `rm -rf
    "$tmp_dir"`) before stopping — don't leave a partial survey registered.
-3. `git worktree add --detach "$tmp_dir/survey" origin/master` (a
+3. `git worktree add --detach "$tmp_dir/survey" origin/main` (a
    non-existent child path `git worktree add` can create, inside the
    directory `mktemp -d` already owns) — never a fixed literal path, so two
    runs of this skill can't collide.
 4. Note the commit actually checked out — `git -C "$tmp_dir/survey"
-   rev-parse HEAD`, not a fresh `git rev-parse origin/master` — step 4 below
+   rev-parse HEAD`, not a fresh `git rev-parse origin/main` — step 4 below
    needs it later to tell whether anything has changed since this survey.
-   Re-resolving `origin/master` here instead would record whatever it points
+   Re-resolving `origin/main` here instead would record whatever it points
    to *now*, which can have moved again in the moments since step 3 actually
    checked it out — recording `HEAD` of the worktree itself is the one
    value guaranteed to match what was actually surveyed.
@@ -186,13 +186,13 @@ step 1 and here, but for however long the human takes to respond. Everything
 below runs **immediately before the actual `gh issue create` call**, after
 confirmation has been given, not once earlier and reused:
 
-1. **Re-check whether `origin/master` moved first:** `git fetch origin`,
+1. **Re-check whether `origin/main` moved first:** `git fetch origin`,
    compare against the commit noted in step 1. If it hasn't moved, the lane
    list is still current — go to 2. If it has, redo **steps 1 through 3 in
    full** against the new commit — not just 1 and 2: step 3's ADR
    pre-assignment was computed from the old `WORKING.md` state, and an ADR
    number that was free at the original survey can have been claimed by the
-   time `origin/master` moved, same as any other candidacy fact. This can
+   time `origin/main` moved, same as any other candidacy fact. This can
    add or drop lanes, not just change ownership flags.
 2. **Re-scan for duplicates against the now-final lane list, every time,
    regardless of whether step 1 changed anything:** `gh issue list --state
@@ -203,7 +203,7 @@ confirmation has been given, not once earlier and reused:
    proposing one or more of the lanes *currently in the draft* — including
    any lane step 1 just added, not only the ones from the original survey.
    Someone else (or an earlier run of this skill) can have opened a matching
-   issue during the wait, independent of whether `origin/master` moved at
+   issue during the wait, independent of whether `origin/main` moved at
    all. If a match exists, don't create a new issue for the overlapping
    lane(s) — point back to the existing one instead (in the batch's "Out of
    scope" section, or by not posting at all if the whole batch overlaps).
@@ -215,7 +215,7 @@ confirmation has been given, not once earlier and reused:
 Both checks are best-effort, not an atomic reservation — closing either
 fully would need a real lane/number-reservation mechanism, out of scope for
 a proposal tool. This closes the gap for anything already merged to
-`master` or already posted as an issue; work only pushed to someone else's
+`main` or already posted as an issue; work only pushed to someone else's
 still-open feature branch, or a duplicate issue opened in the instant
 between this scan and the actual `gh issue create` call, is outside what
 any of these checks can guarantee — merged/posted state is authoritative,

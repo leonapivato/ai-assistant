@@ -13,7 +13,7 @@
 # creation for distinct branches is already safe under concurrency (git takes
 # care of its own worktree-administration locking), so claiming many
 # workspaces at once needs no coordination here at all. The main checkout stays
-# on `master` permanently, as a read-only integration copy nobody claims (the
+# on `main` permanently, as a read-only integration copy nobody claims (the
 # `no-commit-to-branch` pre-commit hook backs this up).
 #
 # The branch name is validated and must not already exist (a task gets a fresh
@@ -25,8 +25,8 @@
 #   <base>, if given, is the start-point for the new branch (any ref, tag, or
 #   commit `git worktree add -b` accepts) — for stacking one task's branch on
 #   another's, e.g. claiming `models/part-2` from `models/part-1` before the
-#   latter has merged. Omit it for the default: origin/master (falling back to
-#   local master), same as always. `require_new_branch` below still refuses a
+#   latter has merged. Omit it for the default: origin/main (falling back to
+#   local main), same as always. `require_new_branch` below still refuses a
 #   name collision the same way regardless of where the branch starts from.
 #   Only meaningful when the branch is actually being created: an explicit
 #   base is refused (not silently ignored) when idempotently re-claiming a
@@ -66,11 +66,11 @@ fi
 # Resolved to an absolute commit OID right here, in the caller's own working
 # directory — not left as the original string to resolve again later. Every
 # git call from this point on runs `-C "$main_root"` (the main checkout,
-# always on master), so a context-sensitive revision like `HEAD` or
+# always on main), so a context-sensitive revision like `HEAD` or
 # `HEAD~2` would otherwise mean something different there than what the
 # caller — likely standing inside a different worktree entirely — actually
 # intended: `just claim-workspace area/b HEAD` from inside a sibling worktree
-# would silently branch from master's HEAD instead (a PR #17-style review
+# would silently branch from main's HEAD instead (a PR #17-style review
 # finding, caught by the local `just review-codex` loop before this ever went
 # up for CI review). A commit OID has no directory-dependent meaning, so
 # resolving once here and using the OID everywhere after closes this
@@ -180,16 +180,16 @@ common_dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 main_root="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -1)"
 worktrees_root="${main_root}-worktrees"
 
-# New work branches from origin/master when present, so it starts at the latest
+# New work branches from origin/main when present, so it starts at the latest
 # integration point. This script does no network itself (it stays offline) — the
 # caller runs `git fetch origin` first (per CONTRIBUTING) to refresh that ref.
-# Falls back to the local master ref when there is no remote-tracking branch.
+# Falls back to the local main ref when there is no remote-tracking branch.
 # An explicit base (validated above) skips this auto-resolution entirely — the
 # caller is choosing the start-point deliberately (e.g. stacking on another
-# task's still-unmerged branch), not asking for "wherever master is".
-base=master
-if git rev-parse --verify --quiet refs/remotes/origin/master >/dev/null 2>&1; then
-    base=origin/master
+# task's still-unmerged branch), not asking for "wherever main is".
+base=main
+if git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null 2>&1; then
+    base=origin/main
 fi
 if (( base_given )); then
     base="$resolved_base"
@@ -262,9 +262,9 @@ create_worktree() {
           }
           exit 1' ERR INT TERM
     mkdir -p "$(dirname "$wt")"
-    # Branch from $base — origin/master by default, or the caller's explicit
+    # Branch from $base — origin/main by default, or the caller's explicit
     # override (validated above). Never the main checkout's current HEAD
-    # implicitly: that stays on master, and a claim never guesses at "wherever
+    # implicitly: that stays on main, and a claim never guesses at "wherever
     # a sibling worktree happens to be" on its own — stacking on another
     # branch is opt-in via the explicit base, not a side effect of where this
     # command happens to be run from. `git worktree add` for a fresh branch
@@ -403,7 +403,7 @@ if [[ "$git_dir" != "$common_dir" ]]; then
 fi
 
 # Case 2: in the main checkout. The main checkout is never claimed — it stays on
-# master as a read-only integration copy — so every claim from here creates its
+# main as a read-only integration copy — so every claim from here creates its
 # own worktree, same as from inside another worktree.
 require_new_branch
 create_worktree

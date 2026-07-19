@@ -49,8 +49,8 @@ status:
 
 # Adversarial review by Codex (a different model) vs a base branch; read-only.
 # persona is `architecture` or `adversarial`. Sends the diff to OpenAI. Omit
-# base-ref to let codex-review.sh pick origin/master when known (else local
-# master) — an empty default here, not a hardcoded "master", so that
+# base-ref to let codex-review.sh pick origin/main when known (else local
+# main) — an empty default here, not a hardcoded "main", so that
 # resolution actually runs instead of being short-circuited by this recipe.
 review-codex persona base="":
     scripts/codex-review.sh "$1" "$2"
@@ -59,7 +59,7 @@ review-codex persona base="":
 # any number of agents can run in parallel with none sharing a working tree.
 # Prints WORKSPACE=<path> — work only there. See CONTRIBUTING "Coordinating
 # parallel work". Example: just claim-workspace memory/add-cache
-# Omit base for the default (origin/master); give one to stack this branch on
+# Omit base for the default (origin/main); give one to stack this branch on
 # another, e.g. just claim-workspace models/part-2 models/part-1
 # `*base` (variadic), not `base=""` (a defaulted single param): a defaulted
 # param always has *some* value once just resolves it, so the recipe body can

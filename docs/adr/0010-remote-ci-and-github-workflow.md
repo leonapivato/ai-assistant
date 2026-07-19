@@ -3,6 +3,11 @@
 - Status: Accepted
 - Date: 2026-07-18
 
+> **Note (2026-07-19):** the integration branch was renamed `master` → `main`.
+> This ADR's text has been updated to the new name so it describes the live
+> configuration; the decision itself is unchanged. The rename was performed via
+> GitHub's branch-rename, which carried the protection rules over intact.
+
 ## Context
 
 ADR-0002 deferred remote CI: *"Remote CI (e.g. GitHub Actions) is deferred;
@@ -19,7 +24,7 @@ Two things have now changed:
 The safety model breaks under the second change. The local gate only protects
 what runs on the author's machine; a collaborator's "it passed" is invisible and
 unverifiable, and the current integration path (a local branch merged straight
-into `master`) has no point where a neutral party re-runs the gate. This is the
+into `main`) has no point where a neutral party re-runs the gate. This is the
 "hosting is chosen" trigger ADR-0002 named. This ADR supersedes **only** the CI
 deferral in ADR-0002; the rest of ADR-0002 stands.
 
@@ -30,16 +35,16 @@ deferral in ADR-0002; the rest of ADR-0002 stands.
 **Remote gate.** A GitHub Actions workflow (`.github/workflows/gate.yml`, job
 `gate`) runs the five Definition-of-Done steps — `ruff format --check`,
 `ruff check`, `mypy`, `lint-imports`, `pytest` — on every pull request and every
-push to `master`, against the locked environment (`uv sync --locked`). The steps
+push to `main`, against the locked environment (`uv sync --locked`). The steps
 and their order mirror the local gate exactly, so CI is the same gate on neutral
 ground, not a second, divergent one.
 
-**Pull-request integration.** `master` is no longer pushed to directly.
+**Pull-request integration.** `main` is no longer pushed to directly.
 Each unit of work lands through a PR from an `<area>/<slug>` branch. This makes
 the existing pre-merge Codex reviews (CONTRIBUTING, "Review") reportable in the
 PR rather than performed privately before a local merge.
 
-**Branch protection (pragmatic).** On `master`:
+**Branch protection (pragmatic).** On `main`:
 
 - Require the `gate` status check to pass before merging — enforced for
   **everyone, with no bypass**. The gate is the safety net; nothing crosses it
@@ -85,7 +90,7 @@ ADR records the decision and its rationale.
 ## Consequences
 
 - A collaborator's change is verified by the same gate as the author's, on
-  neutral infrastructure, before it can reach `master`.
+  neutral infrastructure, before it can reach `main`.
 - The pre-merge architecture/adversarial Codex reviews now have a natural home
   (the PR) and an audit trail.
 - Integration costs a PR round-trip and a green CI run instead of a local
