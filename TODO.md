@@ -12,10 +12,11 @@ for `FeedbackProcessor` and `MemoryStore`; the rest still assert
 `isinstance(impl, Protocol)` plus implementation-specific tests, which only
 proves an attribute exists.
 
-**Missing suites for:** `ModelProvider`, `Embedder`, `MemoryPolicy`,
-`ContextProvider`. (`MemoryStore` done — `tests/memory/memory_store_contract.py`,
-run against `InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared
-`FakeMemoryStore`.)
+**Missing suites for:** `Embedder`, `MemoryPolicy`, `ContextProvider`.
+(`MemoryStore` done — `tests/memory/memory_store_contract.py`, run against
+`InMemoryMemoryStore`, `SqliteMemoryStore`, and the shared `FakeMemoryStore`.
+`ModelProvider` done — `tests/models/model_provider_contract.py`, run against
+`PydanticAIProvider` and the shared `FakeModelProvider`.)
 
 **Pattern to follow:** `tests/memory/memory_store_contract.py` or
 `tests/learning/feedback_processor_contract.py` — an abstract `…Contract` base
@@ -49,13 +50,14 @@ private mock that drifts from the contract. The home now exists —
 `ai_assistant.testing` (test-only, enforced by `lint-imports`) — with the first
 fake in place.
 
-**Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`), which passes the
-shared `MemoryStore` conformance suite (item 1).
+**Done:** `FakeMemoryStore` (`ai_assistant/testing/memory.py`) and
+`FakeModelProvider` (`ai_assistant/testing/models.py`), each passing its
+Protocol's shared conformance suite (item 1).
 
-**Still needed:** `FakeModelProvider`, `FakeContextProvider`, `FakeEmbedder`,
-`FakeMemoryPolicy` — each paired with, and validated by, its Protocol's
-conformance suite so the fake cannot drift. `orchestration` will need most of
-these; add them as it is built (or ahead of it).
+**Still needed:** `FakeContextProvider`, `FakeEmbedder`, `FakeMemoryPolicy` —
+each paired with, and validated by, its Protocol's conformance suite so the fake
+cannot drift. `orchestration` will need most of these; add them as it is built
+(or ahead of it).
 
 **Origin:** review of AI-agent scalability — the biggest cross-subsystem gap for
 parallel development.

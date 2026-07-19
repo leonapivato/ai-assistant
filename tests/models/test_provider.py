@@ -7,7 +7,10 @@ tests are deterministic and never touch the network.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
+from model_provider_contract import ModelProviderContract
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -20,17 +23,26 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.protocols import ModelProvider
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIProvider
 from ai_assistant.models.provider import (
     _to_model_messages,  # pyright: ignore[reportPrivateUsage]
 )
 
+if TYPE_CHECKING:
+    from ai_assistant.core.protocols import ModelProvider
 
-def test_provider_conforms_to_protocol() -> None:
-    provider = PydanticAIProvider(default_model=TestModel())
-    assert isinstance(provider, ModelProvider)
+
+class TestPydanticAIProviderContract(ModelProviderContract):
+    """Runs PydanticAIProvider through the shared ModelProvider conformance suite.
+
+    ``TestModel`` supplies a deterministic, offline default model so the contract
+    never touches the network.
+    """
+
+    @pytest.fixture
+    def provider(self) -> ModelProvider:
+        return PydanticAIProvider(default_model=TestModel())
 
 
 async def test_complete_returns_assistant_message() -> None:
