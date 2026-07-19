@@ -461,6 +461,61 @@ def test_release_does_not_require_force_for_an_unedited_seeded_file(tmp_path: Pa
     assert not ws_a.is_dir()
 
 
+def test_release_refuses_an_ignored_file_never_seeded_by_bootstrap(tmp_path: Path) -> None:
+    """Any ignored file is protected, not just the two bootstrap() seeds.
+
+    A first version of this check only covered .env and
+    .claude/settings.local.json specifically; .env.local (also git-ignored by
+    this project's `.env.*` pattern, but never created by bootstrap() at all)
+    is exactly the gap the review flagged as still open (PR #17 review,
+    blocker) — nothing to compare it against in the main checkout, so its
+    mere presence must block a plain release.
+    """
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".env\n.env.*\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore .env*")
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / ".env.local").write_text("LOCAL_SECRET=1\n")  # created fresh, not seeded
+
+    refused = _run(_RELEASE, repo, "area/a")
+    assert refused.returncode != 0
+    assert ws_a.is_dir()
+
+    forced = _run(_RELEASE, repo, "area/a", force="1")
+    assert forced.returncode == 0, forced.stderr
+    assert not ws_a.is_dir()
+
+
+def test_release_does_not_require_force_for_regenerable_ignored_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Known tooling artifacts (venvs, caches) must never demand FORCE=1.
+
+    Every worktree accumulates these as a matter of routine `uv sync` /
+    pytest / mypy / ruff use; treating them the same as a real ignored file
+    would make FORCE=1 mandatory for every release, defeating the point of
+    asking at all.
+    """
+    repo = _init_repo(tmp_path)
+    (repo / ".gitignore").write_text(".venv/\n__pycache__/\n.mypy_cache/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore tooling artifacts")
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
+    (ws_a / ".venv").mkdir()
+    (ws_a / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+    nested_cache = ws_a / "src" / "pkg" / "__pycache__"
+    nested_cache.mkdir(parents=True)
+    (nested_cache / "mod.cpython-314.pyc").write_bytes(b"\x00")
+    (ws_a / ".mypy_cache").mkdir()
+    (ws_a / ".mypy_cache" / "CACHEDIR.TAG").write_text("Signature: x\n")
+
+    result = _run(_RELEASE, repo, "area/a")  # no FORCE
+
+    assert result.returncode == 0, result.stderr
+    assert not ws_a.is_dir()
+
+
 def test_release_refuses_a_worktree_never_claimed_by_this_tooling(tmp_path: Path) -> None:
     """Only branches tagged by claim-workspace.sh are ever release targets.
 

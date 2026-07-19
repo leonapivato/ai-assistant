@@ -6,9 +6,9 @@
 # from git rather than guessed from a slugged path, so two similar branch
 # names cannot remove each other's worktree. Refuses on a dirty worktree
 # unless FORCE=1, which *deliberately discards* the uncommitted work — "dirty"
-# includes a locally-edited copy of a git-ignored seeded file (.env,
-# .claude/settings.local.json), which git's own `worktree remove` dirty-check
-# cannot see on its own (see the check further down).
+# includes a valuable git-ignored file (.env, or anything else ignored that
+# isn't a known-regenerable tooling artifact), which git's own `worktree
+# remove` dirty-check cannot see on its own (see the check further down).
 #
 # Only ever touches a branch carrying the `refs/workspace-claimed/<branch>`
 # marker claim-workspace.sh sets (see its header) — a worktree for some other,
@@ -71,27 +71,52 @@ if [[ -n "$wt_path" ]]; then
     fi
 
     # `git worktree remove` (no --force) refuses on tracked changes or
-    # untracked-but-not-ignored files — but .env / .claude/settings.local.json
-    # (the same paths claim-workspace.sh's bootstrap() seeds from the main
-    # checkout; keep this list in sync with that function) are git-ignored,
-    # so git's own dirty-check cannot see them at all, edited or not: a
-    # locally-edited .env (e.g. real secrets set up for this workspace) is
-    # invisible to it and gets silently deleted along with everything else
-    # (verified empirically; PR #17 review, blocker). Checked here instead:
-    # refuse, without FORCE, if a seeded file's content has diverged from the
-    # main checkout's copy it started from — an unedited copy is expected and
-    # safe to discard; a diverged one is exactly what FORCE exists to gate.
+    # untracked-but-not-ignored files — but git-ignored files (.env, and any
+    # other ignored path a user creates in a claimed workspace: .env.local,
+    # .env.production, scratch notes, anything) are invisible to that check
+    # entirely, edited or freshly created. A first version of this check only
+    # covered the two specific paths claim-workspace.sh's bootstrap() seeds
+    # (.env, .claude/settings.local.json), which review correctly flagged as
+    # incomplete: the same blind spot applies to *any* ignored file, not just
+    # those two (PR #17 review, blocker; the narrower version was itself
+    # verified empirically before being generalised here).
+    #
+    # Every ignored path is inspected (`--ignored=matching`, not the default
+    # `--ignored`, so a directory with its own nested .gitignore — e.g. this
+    # project's .import_linter_cache/ — is reported file-by-file rather than
+    # collapsed to one line, which the pattern matching below relies on).
+    # Known-regenerable tooling artifacts (venvs, __pycache__, build output,
+    # test/type-check caches — the categories this project's own .gitignore
+    # itself groups together) are skipped: those get silently recreated by
+    # `uv sync`/pytest/mypy/ruff on every worktree as a matter of routine
+    # use, and flagging them would make FORCE=1 mandatory for every release,
+    # defeating the point of asking at all. Everything else ignored is
+    # treated as potentially valuable: blocked unless it is a file whose
+    # content exactly matches the main checkout's copy (an unedited
+    # bootstrap-seeded file, the common case).
     if (( ! force )); then
         diverged=()
-        for rel in .env .claude/settings.local.json; do
-            if [[ -f "${wt_path}/${rel}" ]]; then
-                if [[ ! -f "${main_root}/${rel}" ]] || ! cmp -s "${wt_path}/${rel}" "${main_root}/${rel}"; then
-                    diverged+=("$rel")
-                fi
+        while IFS= read -r entry; do
+            case "$entry" in
+                .venv | .venv/* | venv | venv/* | \
+                __pycache__ | __pycache__/* | */__pycache__ | */__pycache__/* | \
+                .pytest_cache | .pytest_cache/* | .ruff_cache | .ruff_cache/* | \
+                .mypy_cache | .mypy_cache/* | \
+                .import_linter_cache | .import_linter_cache/* | \
+                build | build/* | dist | dist/* | wheels | wheels/* | \
+                htmlcov | htmlcov/* | *.egg-info | *.egg-info/* | \
+                *.pyc | *.pyo | .coverage | .coverage.* | coverage.xml)
+                    continue
+                    ;;
+            esac
+            if [[ -f "${wt_path}/${entry}" && -f "${main_root}/${entry}" ]] \
+                && cmp -s "${wt_path}/${entry}" "${main_root}/${entry}"; then
+                continue
             fi
-        done
+            diverged+=("$entry")
+        done < <(git -C "$wt_path" status --porcelain --ignored=matching | sed -n 's/^!! //p')
         if (( ${#diverged[@]} > 0 )); then
-            echo "Worktree has modified git-ignored file(s) git cannot see as dirty: ${diverged[*]}." >&2
+            echo "Worktree has ignored file(s) git's dirty-check cannot see: ${diverged[*]}." >&2
             echo "Removing would silently discard them. Set FORCE=1 to discard anyway." >&2
             exit 1
         fi

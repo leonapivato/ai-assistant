@@ -54,8 +54,12 @@
 # Default is a dry-run report. FORCE=1 actually removes each PRUNE candidate
 # (worktree, if one still exists, plus the local branch always). A dirty
 # worktree is always skipped, forced or not — this never discards uncommitted
-# work. A branch with no worktree has nothing to lose, so it is never skipped
-# for dirtiness — only for its PR/HEAD verdict, same as any other branch.
+# work, and "dirty" includes a valuable git-ignored file (.env, or anything
+# else ignored that isn't a known-regenerable tooling artifact) exactly the
+# same way release-workspace.sh's dirty-check does, since `git status` cannot
+# see those on its own either way. A branch with no worktree has nothing to
+# lose, so it is never skipped for dirtiness — only for its PR/HEAD verdict,
+# same as any other branch.
 #
 # Requires the `gh` CLI, authenticated against this repo. Unlike
 # claim-workspace.sh, this DOES touch the network — it needs fresh PR state,
@@ -101,6 +105,41 @@ while IFS= read -r branch; do
     path="${wt_for_branch[$branch]:-}"
     if [[ -n "$path" && -d "$path" ]]; then
         if [[ -n "$(git -C "$path" status --porcelain)" ]]; then
+            printf '%-30s %-14s %s\n' "$branch" "dirty-skip" "$path"
+            continue
+        fi
+        # `git status --porcelain` (above) cannot see git-ignored files at
+        # all, edited or freshly created — the exact same blind spot
+        # release-workspace.sh has (see its header for the full rationale;
+        # this is the identical check, duplicated rather than shared, same
+        # as this project's other scripts). "Dirty" here is unconditional,
+        # never overridable by FORCE=1 — matching this script's existing
+        # dirty-worktree behaviour above: a claimed branch is only ever
+        # force-pruned once it is fully clean, PR-confirmed, and matching
+        # (PR #17 review, blocker — forced pruning was silently discarding
+        # an edited .env exactly like a plain release used to).
+        ignored_dirty=0
+        while IFS= read -r entry; do
+            case "$entry" in
+                .venv | .venv/* | venv | venv/* | \
+                __pycache__ | __pycache__/* | */__pycache__ | */__pycache__/* | \
+                .pytest_cache | .pytest_cache/* | .ruff_cache | .ruff_cache/* | \
+                .mypy_cache | .mypy_cache/* | \
+                .import_linter_cache | .import_linter_cache/* | \
+                build | build/* | dist | dist/* | wheels | wheels/* | \
+                htmlcov | htmlcov/* | *.egg-info | *.egg-info/* | \
+                *.pyc | *.pyo | .coverage | .coverage.* | coverage.xml)
+                    continue
+                    ;;
+            esac
+            if [[ -f "${path}/${entry}" && -f "${main_root}/${entry}" ]] \
+                && cmp -s "${path}/${entry}" "${main_root}/${entry}"; then
+                continue
+            fi
+            ignored_dirty=1
+            break
+        done < <(git -C "$path" status --porcelain --ignored=matching | sed -n 's/^!! //p')
+        if (( ignored_dirty )); then
             printf '%-30s %-14s %s\n' "$branch" "dirty-skip" "$path"
             continue
         fi
