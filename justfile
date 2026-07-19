@@ -48,9 +48,12 @@ status:
     uv run python scripts/project_status.py
 
 # Adversarial review by Codex (a different model) vs a base branch; read-only.
-# persona is `architecture` or `adversarial`. Sends the diff to OpenAI.
-review-codex persona base="master":
-    scripts/codex-review.sh "$1" "${2:-master}"
+# persona is `architecture` or `adversarial`. Sends the diff to OpenAI. Omit
+# base-ref to let codex-review.sh pick origin/master when known (else local
+# master) — an empty default here, not a hardcoded "master", so that
+# resolution actually runs instead of being short-circuited by this recipe.
+review-codex persona base="":
+    scripts/codex-review.sh "$1" "$2"
 
 # Claim an isolated workspace for one branch/PR: always a linked worktree, so
 # any number of agents can run in parallel with none sharing a working tree.

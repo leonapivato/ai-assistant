@@ -49,17 +49,21 @@ Run each against the base branch (read-only; this **sends the diff to OpenAI**,
 so it is a deliberate pre-merge step, not per-commit):
 
 ```bash
-just review-codex architecture      # or: scripts/codex-review.sh architecture master
-just review-codex adversarial
+just review-codex architecture      # or: scripts/codex-review.sh architecture
+just review-codex adversarial       # base-ref defaults to origin/master (fetch first)
 ```
 
 **Iterate locally, in draft — not against CI.** `just review-codex` runs the
-identical engine and rubrics CI uses (below), so there is no reason to meet a
-finding for the first time in a CI comment. Loop it while the PR is still a
-**draft**: fix, re-run `just review-codex`, repeat, until it comes back clean
-or only findings you're deliberately waiving remain. A draft PR is never
-auto-reviewed, so this costs nothing in CI spend and iterates faster than
-waiting on a hosted run each time.
+identical engine and rubrics CI uses (below), so looping it first substantially
+cuts the odds of meeting a finding for the first time in a CI comment — though
+not to zero, since LLM review is not deterministic (ADR-0012): a clean local
+run is a strong signal, not a guarantee. Loop it while the PR is still a
+**draft**: fix, **commit** (a small follow-up commit is fine — it reviews
+`HEAD` vs the base, i.e. the *committed* diff, not your working tree, so an
+uncommitted fix is invisible to a re-run), re-run `just review-codex`, repeat,
+until it comes back clean or only findings you're deliberately waiving remain.
+A draft PR is never auto-reviewed, so this costs nothing in CI spend and
+iterates faster than waiting on a hosted run each time.
 
 Only mark the PR **ready for review** once the change is genuinely done —
 that transition is the one deliberate checkpoint meant to trigger the
@@ -69,8 +73,8 @@ once — don't push a fix per individual finding and let CI re-review after
 every push (a ready PR is auto-reviewed on *every* push, same as the
 ready-transition itself). Budget for **one CI review at ready, plus at most
 one or two more** if genuine feedback needs incorporating; a PR that racks up
-many CI review rounds after going ready is a sign the local loop above got
-skipped, not that the code was unusually hard to get right.
+many CI review rounds after going ready is usually a sign the local loop above
+got skipped, not that the code was unusually hard to get right.
 
 Reviewers are advisory tooling, not a hard gate. Resolve `blocker`/`major`
 findings before merging, or waive them with a written rationale in the PR/commit.

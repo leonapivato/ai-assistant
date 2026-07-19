@@ -98,16 +98,20 @@ backstop, not the first line of defence; run it locally before pushing.
 `uv run pre-commit install --install-hooks --hook-type commit-msg`.
 
 **Iterate against `just review-codex`, not against CI.** It runs the same
-adversarial-review engine CI does (`CONTRIBUTING.md` → "Review (pre-merge)").
-Loop locally while the PR is a **draft** — fix, re-run, repeat — until it's
-clean or only deliberately-waived findings remain; a draft is never
-auto-reviewed, so this costs nothing in CI spend. Flip to **ready for
-review** only once, as the one deliberate checkpoint that triggers the
-CI-hosted review that goes on the record — every push to an *already-ready*
-PR triggers another one, so pushing a fix per finding and letting CI
-re-review each time is the anti-pattern this exists to avoid. Budget one CI
-review at ready, plus at most one or two more for genuine feedback — more
-than that means the local loop got skipped.
+adversarial-review engine CI does (`CONTRIBUTING.md` → "Review (pre-merge)"),
+against `origin/master` by default (fetch first). Loop locally while the PR
+is a **draft** — fix, **commit** (it reviews `HEAD`, the committed diff, not
+your working tree — an uncommitted fix is invisible to a re-run), re-run,
+repeat — until it's clean or only deliberately-waived findings remain; a
+draft is never auto-reviewed, so this costs nothing in CI spend. Flip to
+**ready for review** only once, as the one deliberate checkpoint that
+triggers the CI-hosted review that goes on the record — every push to an
+*already-ready* PR triggers another one, so pushing a fix per finding and
+letting CI re-review each time is the anti-pattern this exists to avoid.
+Budget one CI review at ready, plus at most one or two more for genuine
+feedback — more than that usually means the local loop got skipped (though a
+clean local run is a strong signal, not a guarantee: LLM review isn't
+deterministic).
 
 ## Conventions
 
