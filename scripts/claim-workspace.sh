@@ -136,8 +136,24 @@ if [[ "$git_dir" != "$common_dir" ]]; then
         # touch it — claim said "claimed", release said "not ours" (PR #17
         # review). update-ref is idempotent, so re-tagging an already-tagged
         # branch is a no-op.
+        #
+        # If this call is the one newly setting the marker (the worktree
+        # was not already tool-owned) and bootstrap then fails, roll the
+        # marker back — a claim that never completed must not confer
+        # ownership (a separate PR #17 review finding: a failed claim was
+        # still leaving the worktree tagged as tool-owned). If the marker
+        # was already there from a genuine prior claim, a transient failure
+        # on this re-bootstrap must NOT strip that pre-existing ownership,
+        # so the rollback only triggers for a marker this call itself set.
+        was_already_tagged="$(git -C "$main_root" rev-parse --verify --quiet \
+            "refs/workspace-claimed/${branch}" 2>/dev/null || true)"
         git -C "$main_root" update-ref "refs/workspace-claimed/${branch}" "refs/heads/${branch}"
+        if [[ -z "$was_already_tagged" ]]; then
+            trap 'git -C "$main_root" update-ref -d "refs/workspace-claimed/${branch}" 2>/dev/null || true' \
+                ERR INT TERM
+        fi
         bootstrap "$toplevel"
+        trap - ERR INT TERM
         echo "Already in the worktree for '${branch}'; bootstrapped." >&2
         echo "WORKSPACE=${toplevel}"
         exit 0

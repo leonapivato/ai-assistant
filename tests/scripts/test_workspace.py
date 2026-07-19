@@ -228,6 +228,61 @@ def test_claim_from_within_an_unclaimed_worktree_tags_it(tmp_path: Path) -> None
     assert released.returncode == 0, released.stderr
 
 
+def _marker_exists(repo: Path, branch: str) -> bool:
+    assert _GIT is not None
+    result = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [
+            _GIT,
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/workspace-claimed/{branch}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def test_claim_rolls_back_a_marker_it_newly_set_when_bootstrap_then_fails(
+    tmp_path: Path,
+) -> None:
+    """A claim that never completed must not confer ownership.
+
+    From a manually created (unmarked) worktree, if this call is the one that
+    newly sets the marker and bootstrap then fails, the marker must be rolled
+    back — otherwise a failed claim still leaves the worktree looking
+    tool-owned to release-workspace.sh / prune-workspaces.sh (PR #17 review
+    finding). The pre-existing worktree itself is untouched either way — it
+    did not exist because of this call, so it is not this call's to destroy.
+    """
+    repo = _init_repo(tmp_path)
+    manual = tmp_path / "manual-worktree"
+    _git(repo, "worktree", "add", "-q", str(manual), "-b", "manual/branch")
+
+    result = _run(_CLAIM, repo, "manual/branch", cwd=manual, bootstrap="false")
+
+    assert result.returncode != 0
+    assert not _marker_exists(repo, "manual/branch")  # rolled back
+    assert manual.is_dir()  # the worktree itself survives
+
+
+def test_claim_keeps_an_existing_marker_when_a_reclaim_bootstrap_fails(
+    tmp_path: Path,
+) -> None:
+    """A transient re-bootstrap failure must not strip pre-existing ownership."""
+    repo = _init_repo(tmp_path)
+    ws = Path(_workspace(_run(_CLAIM, repo, "area/a")))  # a genuine successful claim
+
+    result = _run(_CLAIM, repo, "area/a", cwd=ws, bootstrap="false")  # re-claim fails
+
+    assert result.returncode != 0
+    assert _marker_exists(repo, "area/a")  # still tagged — this call didn't set it
+
+
 def test_bootstrap_failure_rolls_back_the_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
 

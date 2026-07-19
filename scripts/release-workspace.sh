@@ -47,6 +47,15 @@ main_root="$(git worktree list --porcelain | sed -n 's/^worktree //p' | head -1)
 
 # Path of the worktree actually checked out to this branch — asked of git, so it
 # is collision-free regardless of how the branch name slugs to a directory.
+#
+# `awk -v` processes backslash escapes in its value (POSIX-mandated, not a
+# gawk quirk), which could in principle corrupt `ref` for a branch name
+# containing a literal backslash (a PR #17 review finding). Verified this is
+# not reachable: `git check-ref-format` rejects any ref name containing a
+# backslash outright (confirmed empirically — every position tried), and
+# claim-workspace.sh already runs that same check before a branch is ever
+# created, so no branch this tooling could have claimed can reach this line
+# with one.
 wt_path="$(git worktree list --porcelain | awk -v ref="refs/heads/${branch}" '
     /^worktree /{path = substr($0, 10)}
     /^branch /{if ($2 == ref) print path}')"
