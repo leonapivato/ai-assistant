@@ -19,12 +19,10 @@ shared ``ContextProvider`` conformance suite is part of the contract.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import cast
 
+from ai_assistant.core.errors import ContextError
 from ai_assistant.core.types import CurrentContext, TimeOfDay
-
-if TYPE_CHECKING:
-    from ai_assistant.core.errors import ContextError
 
 # A weekday mid-morning, inside a 9-17 working window: the unremarkable default,
 # so a test that does not care about the situation does not have to describe one.
@@ -62,19 +60,26 @@ class FakeContextProvider:
                 exception per-source rather than propagating it), so allowing an
                 arbitrary type would let the canonical fake model a provider the
                 contract does not permit — and a consumer that correctly catches
-                ``ContextError`` would fail only under test. The annotation is the
-                whole enforcement: the gate type-checks tests too, so a wider
-                exception is rejected before it can run, and ``warn_unreachable``
-                proves an additional runtime guard would be dead code.
+                ``ContextError`` would fail only under test. Checked at runtime as
+                well as in the type, so an untyped or ``Any``-typed caller cannot
+                slip past the annotation.
 
         Raises:
             ValueError: If both ``context`` and ``failure`` are given. The two
                 describe incompatible outcomes, and silently letting one win
                 would hide a mis-wired test.
+            TypeError: If ``failure`` is not a ``ContextError``.
         """
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
             raise ValueError(msg)
+        # Widened to `object` before the check purely to defeat mypy's narrowing:
+        # against the declared type the isinstance is provably true, so
+        # `warn_unreachable` would reject the raise as dead code — but the check
+        # exists precisely for the callers the declared type does not cover.
+        if failure is not None and not isinstance(cast("object", failure), ContextError):
+            msg = f"failure must be a ContextError, got {type(failure).__name__}"
+            raise TypeError(msg)
         # Deep-copied on ingress as well as egress: the context is fixed *at
         # construction*, so a caller that keeps its reference and mutates it later
         # must not be able to change what assemble returns. Copying the default
