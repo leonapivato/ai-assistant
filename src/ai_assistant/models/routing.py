@@ -28,6 +28,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import structlog
+
 from ai_assistant.core.errors import ConfigurationError, ModelError
 
 if TYPE_CHECKING:
@@ -35,6 +37,8 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import Message
+
+_log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,9 +126,10 @@ class RoutingProvider:
 
         Raises:
             ModelError: A non-routable failure, immediately and unchanged. If
-                every route fails routably, the last failure is re-raised as-is,
-                carrying a note (PEP 678) that names every candidate tried and
-                why each one failed.
+                every route fails routably, the last failure is re-raised
+                untouched; what every candidate was and why each failed is
+                logged rather than attached to the exception, which the router
+                does not own.
         """
         if model is not None:
             primary = self._routes[0]
@@ -145,16 +150,23 @@ class RoutingProvider:
         # than tracking a separate `ModelError | None` — keeps the type honest
         # without an assert to convince the type checker.
         last = failures[-1][1]
-        summary = "; ".join(f"{label}: {exc}" for label, exc in failures)
-        # Re-raise the last failure *itself*, annotated with what else was tried.
+        # Aggregate diagnostics are logged, not attached to the exception, and
+        # the last failure is re-raised untouched. Two tempting alternatives are
+        # both wrong, each found by adversarial review:
         #
-        # The obvious alternative — `raise type(last)(msg) from last` — assumes
-        # every ModelError subclass takes exactly one message argument. Our own
-        # do, but a route may be any ModelProvider, and one raising a richer
-        # subclass (say `ProviderQuotaError(limit, message)`) would turn that
-        # reconstruction into a TypeError: not merely a worse message, but an
-        # exception the caller's `except ModelError` no longer catches, with the
-        # provider's real failure destroyed. A note makes no such assumption and
-        # preserves the type, the traceback, and the original __cause__ exactly.
-        last.add_note(f"routing: all {len(self._routes)} routes failed ({summary})")
+        # - `raise type(last)(summary) from last` assumes every ModelError
+        #   subclass takes one message argument. A route may be any
+        #   ModelProvider, so one raising a richer subclass turns that into a
+        #   TypeError — which `except ModelError` does not even catch.
+        # - `last.add_note(...)` mutates an exception the router does not own. A
+        #   provider that raises a cached instance accumulates a note per call,
+        #   and concurrent routers sharing it leak each other's route labels.
+        #
+        # Logging keeps the diagnostics richer *and* router-owned, and leaves the
+        # caller a correctly-typed failure with its own message and traceback.
+        _log.warning(
+            "all routes failed",
+            routes=len(self._routes),
+            failures=[{"route": label, "error": str(exc)} for label, exc in failures],
+        )
         raise last

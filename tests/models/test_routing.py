@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from model_provider_contract import ModelProviderContract
+from structlog.testing import capture_logs
 
 from ai_assistant.core.errors import (
     ConfigurationError,
@@ -162,18 +163,20 @@ async def test_exhausting_every_route_reports_all_of_them() -> None:
         Route(AlwaysFailsProvider(ModelRateLimitError("429")), label="secondary"),
     ]
 
-    with pytest.raises(ModelError) as caught:
+    with capture_logs() as logs, pytest.raises(ModelError):
         await RoutingProvider(routes).complete(PROMPT)
 
-    # A one-line note naming each candidate beats re-reading the wiring. It is a
-    # note rather than the message so the original failure is left untouched.
-    note = "\n".join(caught.value.__notes__)
-    assert "all 2 routes failed" in note
-    assert "primary: 503" in note
-    assert "secondary: 429" in note
+    # Naming each candidate beats re-reading the wiring, but it is logged rather
+    # than attached to the exception, which the router does not own.
+    [event] = [e for e in logs if e["event"] == "all routes failed"]
+    assert event["routes"] == 2
+    assert event["failures"] == [
+        {"route": "primary", "error": "503"},
+        {"route": "secondary", "error": "429"},
+    ]
 
 
-async def test_exhaustion_reraises_the_last_failure_itself() -> None:
+async def test_exhaustion_reraises_the_last_failure_untouched() -> None:
     last = ModelRateLimitError("429")
     routes = [
         Route(AlwaysFailsProvider(ModelUnavailableError("503"))),
@@ -185,9 +188,10 @@ async def test_exhaustion_reraises_the_last_failure_itself() -> None:
 
     # Classification must survive routing: a caller that backs off on a rate
     # limit still sees one, rather than a flattened generic failure. The very
-    # object is re-raised, so its message and traceback survive too.
+    # object comes back, with its own message and nothing bolted on.
     assert caught.value is last
     assert str(caught.value) == "429"
+    assert getattr(caught.value, "__notes__", []) == []
 
 
 async def test_exhaustion_survives_a_subclass_with_a_richer_constructor() -> None:
@@ -214,7 +218,25 @@ async def test_exhaustion_survives_a_subclass_with_a_richer_constructor() -> Non
         await RoutingProvider(routes).complete(PROMPT)
 
     assert caught.value.limit == 50
-    assert "all 2 routes failed" in "\n".join(caught.value.__notes__)
+
+
+async def test_reusing_one_exception_object_does_not_accumulate_state() -> None:
+    # Regression (adversarial review): the first fix attached a PEP 678 note to
+    # the caught exception. A provider that raises a cached instance — which
+    # AlwaysFailsProvider does — then grew a note per call, and concurrent
+    # routers sharing that object would leak each other's route labels into it.
+    shared = ModelUnavailableError("503")
+    router = RoutingProvider([Route(AlwaysFailsProvider(shared), label="a")])
+
+    for _ in range(3):
+        with pytest.raises(ModelUnavailableError) as caught:
+            await router.complete(PROMPT)
+        assert caught.value is shared
+
+    # The router owns no state on someone else's exception, so repetition is
+    # idempotent no matter how many times it is re-raised.
+    assert getattr(shared, "__notes__", []) == []
+    assert str(shared) == "503"
 
 
 async def test_a_route_model_override_is_passed_to_its_provider() -> None:

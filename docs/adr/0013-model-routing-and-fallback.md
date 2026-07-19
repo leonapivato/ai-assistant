@@ -127,28 +127,39 @@ a worse failure than an honest error, and would be undetectable downstream.
 
 ### 5. Exhaustion preserves classification
 
-When every route fails, the *last* failure is re-raised **as-is**, annotated with
-a PEP 678 note naming each candidate and why it failed.
+When every route fails, the *last* failure is re-raised **untouched**, and the
+aggregate picture — every candidate and why it failed — is **logged**, not
+attached to the exception.
 
 Preserving the type — rather than flattening to a generic `ModelError` — means a
 caller that backs off on `ModelRateLimitError` still sees one after routing.
 Flattening would destroy exactly the classification ADR-0011 built.
 
-The obvious way to do that is to rebuild the error as `type(last)(summary)`. We
-tried it, and it is wrong: it assumes every `ModelError` subclass takes exactly
-one message argument. Ours do, but a route may be *any* `ModelProvider`, and one
-raising a richer subclass — `ProviderQuotaError(limit, message)` — turns the
-reconstruction into a `TypeError`. That is not a degraded message but a different
-exception type, which the caller's `except ModelError` does not catch, with the
-provider's real failure destroyed. An adversarial review caught this; a
-regression test now pins it.
+Getting there took two wrong turns, both found by adversarial review, and both
+worth recording because each looks obviously correct:
 
-Re-raising the original object and attaching a note makes no constructor
-assumption at all and additionally preserves the message, traceback, and
-`__cause__`. The cost is that the summary is a note rather than part of `str(exc)`
-— it renders in tracebacks and in anything using `traceback.format_exception`,
-but a log line that formats only `str(exc)` will not show it. Accepted:
-correctness of the propagated type outranks convenience of one logging shape.
+1. **Rebuild it: `raise type(last)(summary) from last`.** This assumes every
+   `ModelError` subclass takes exactly one message argument. Ours do, but a route
+   may be *any* `ModelProvider`, and one raising a richer subclass —
+   `ProviderQuotaError(limit, message)` — turns the reconstruction into a
+   `TypeError`. Not a degraded message: a different exception type, which the
+   caller's `except ModelError` does not catch, with the provider's real failure
+   destroyed.
+2. **Annotate it: `last.add_note(summary)`.** This makes no constructor
+   assumption, but mutates an exception the router does not own. A provider that
+   raises a cached instance accumulates one note per call, unbounded, and
+   concurrent routers sharing that object leak each other's route labels into it.
+
+The through-line is that both treat the caught exception as the router's to
+modify. It is not: it belongs to the provider that raised it, and may be shared,
+cached, or concurrently in flight elsewhere.
+
+So the diagnostics go where the router *does* own the state — a structured log
+warning, following the precedent in `context/`. That is strictly richer than a
+flattened message (structured fields, per-route detail) while leaving the caller
+a correctly-typed failure with its own message and traceback intact. The cost is
+that a caller inspecting only the exception sees just the last failure; the full
+picture is an operator concern, and operators read logs.
 
 ### 6. Every route must be a provider the user configured
 
