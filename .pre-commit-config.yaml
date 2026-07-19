@@ -1,4 +1,7 @@
-# Enable once:  uv run pre-commit install --install-hooks
+# Enable once per machine: `just setup`, or see CONTRIBUTING.md -> "Setup".
+# Install via a standalone `uv tool install pre-commit`, not `uv run` inside
+# a workspace — the latter bakes that workspace's venv path into the shared
+# .git/hooks/pre-commit script, which breaks once the workspace is released.
 # (no --hook-type: that flag REPLACES default_install_hook_types below rather
 # than adding to it, so pre-commit would silently install only commit-msg and
 # never run ruff/mypy/import-linter on commit)
