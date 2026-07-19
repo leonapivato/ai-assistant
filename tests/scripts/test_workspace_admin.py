@@ -106,6 +106,30 @@ def test_list_marks_a_dirty_worktree(tmp_path: Path) -> None:
     assert "dirty" in lines["area/a"]
 
 
+def test_list_reports_a_missing_worktree_without_skipping_the_rest(tmp_path: Path) -> None:
+    """A worktree whose directory was manually `rm -rf`'d must not stop the listing.
+
+    `git worktree list` still carries its administrative metadata (marked
+    "prunable"), so it is still in the porcelain output — but `git -C
+    "$path" branch --show-current` as a bare assignment fails there under
+    `set -e` and used to abort the whole script before later entries were
+    ever reached (PR #17 review finding). Branch names now come from the
+    porcelain listing itself, never from a `git -C "$path"` call.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_claim(repo, "area/a"))
+    _claim(repo, "area/b")
+    shutil.rmtree(ws_a)  # git's metadata still references it; the dir is gone
+
+    result = _run(_LIST, repo)
+
+    assert result.returncode == 0, result.stderr
+    a_lines = [line for line in result.stdout.splitlines() if line.startswith("area/a")]
+    assert len(a_lines) == 1
+    assert "missing" in a_lines[0]
+    assert "area/b" in result.stdout  # later entry still reached and listed
+
+
 # --- claim-workspaces.sh -----------------------------------------------------
 
 
@@ -259,6 +283,46 @@ def test_prune_removes_a_merged_branch_whose_head_matches_the_pr(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     assert "PRUNE(merged)" in result.stdout
     assert not ws.is_dir()
+
+
+def test_prune_continues_past_a_worktree_with_a_missing_directory(tmp_path: Path) -> None:
+    """A worktree whose directory was manually deleted must not stop the run.
+
+    `git worktree list` still carries its administrative metadata (marked
+    "prunable"), so it is still reachable in the loop — but running `git -C
+    "$path" status` against a nonexistent directory is a real command that
+    can fail. Verified separately that this specific script does not
+    actually abort here (its first `git -C "$path"` call happens to sit
+    inside an `if [[ -n "$(...)" ]]` test, which `set -e` does not treat as
+    a top-level failure — unlike list-workspaces.sh's bare assignment, which
+    does abort; see its test). Relying on that distinction implicitly would
+    be fragile, so the missing-directory case is now detected explicitly
+    (PR #17 review finding) rather than left to depend on which git call
+    happens to run first.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_claim(repo, "area/a"))
+    sha_a = _head_sha(ws_a)
+    shutil.rmtree(ws_a)
+    ws_b = Path(_claim(repo, "area/b"))
+    (ws_b / "b-work.txt").write_text("distinct commit so area/b's HEAD != sha_a\n")
+    _git(ws_b, "add", "b-work.txt")
+    _git(ws_b, "commit", "-qm", "work on b")
+
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha_a), force=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PRUNE(merged)" in result.stdout  # area/a matched and was pruned
+    assert "area/b" in result.stdout  # later branch still reached
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/a" not in branches  # stale metadata + branch both cleaned up
+    assert ws_b.is_dir()  # untouched — its head doesn't match sha_a
 
 
 def test_prune_leaves_everything_intact_when_worktree_removal_fails(tmp_path: Path) -> None:

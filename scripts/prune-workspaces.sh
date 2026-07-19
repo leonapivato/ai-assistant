@@ -99,11 +99,23 @@ while IFS= read -r branch; do
     fi
 
     path="${wt_for_branch[$branch]:-}"
-    if [[ -n "$path" ]]; then
+    if [[ -n "$path" && -d "$path" ]]; then
         if [[ -n "$(git -C "$path" status --porcelain)" ]]; then
             printf '%-30s %-14s %s\n' "$branch" "dirty-skip" "$path"
             continue
         fi
+    elif [[ -n "$path" ]]; then
+        # git still has worktree-administration metadata for this path, but
+        # the directory itself is gone (e.g. a manual `rm -rf` rather than
+        # `git worktree remove` — `git worktree list` marks this "prunable").
+        # Nothing to lose here, so treat it like a released branch rather
+        # than running `git -C "$path" status` against a path that cannot
+        # exist (PR #17 review finding: relying on that call's failure being
+        # silently absorbed by `set -e`'s if/test-context exemption is
+        # fragile and non-obvious — this makes the case explicit instead).
+        # `git worktree remove` on this path still works below and cleans up
+        # the stale metadata (verified), so no extra removal logic is needed.
+        path="${path} (worktree dir gone — stale metadata)"
     else
         path="(released — branch only, no worktree)"
     fi
