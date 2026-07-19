@@ -229,16 +229,26 @@ def test_concurrent_claims_give_main_to_exactly_one(tmp_path: Path) -> None:
     assert sum(w == str(repo) for w in workspaces) == 1
 
 
-def test_release_clears_an_orphaned_lock(tmp_path: Path) -> None:
+def test_release_clears_a_recorded_stale_lock(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    orphan = _lock(repo)
-    orphan.mkdir()  # lock dir with no branch metadata — a hard-killed claim
+    _lock(repo).write_text("area/ghost\n")  # lock left by a dead claim (main on master)
 
-    result = _run(_RELEASE, repo, "area/whatever")
+    result = _run(_RELEASE, repo, "area/ghost")  # release by the recorded branch
 
     assert result.returncode == 0, result.stderr
-    assert not orphan.exists()
-    assert "orphaned" in result.stderr.lower()
+    assert not _lock(repo).exists()
+
+
+def test_release_of_a_non_owning_branch_leaves_the_lock_intact(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # claims main; the lock records area/a
+
+    result = _run(_RELEASE, repo, "area/other")  # a branch that owns no workspace
+
+    # Must NOT reap a lock it does not own — that was the concurrent-claim
+    # corruption path. The real owner is reported instead.
+    assert _lock(repo).exists()
+    assert "area/a" in result.stdout + result.stderr
 
 
 def test_forced_main_release_removes_untracked_nested_repo(tmp_path: Path) -> None:
