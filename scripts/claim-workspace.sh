@@ -28,6 +28,10 @@
 #   latter has merged. Omit it for the default: origin/master (falling back to
 #   local master), same as always. `require_new_branch` below still refuses a
 #   name collision the same way regardless of where the branch starts from.
+#   Only meaningful when the branch is actually being created: an explicit
+#   base is refused (not silently ignored) when idempotently re-claiming a
+#   branch you are already standing on — that branch already exists with
+#   whatever history it has, and this script has never rebased one.
 # Env:   WORKSPACE_BOOTSTRAP, if set, overrides the bootstrap step with a single
 #        command/executable run without word-splitting (e.g. `true` to skip); the
 #        default is `uv sync --quiet`. Used by the tests.
@@ -238,6 +242,17 @@ if [[ "$git_dir" != "$common_dir" ]]; then
     current="$(git branch --show-current)"
     toplevel="$(git rev-parse --show-toplevel)"
     if [[ "$current" == "$branch" ]]; then
+        # An explicit base is meaningless here and refused outright, not
+        # silently ignored: the branch already exists with whatever history
+        # it already has, and idempotent re-claim only re-tags/re-bootstraps
+        # — it has never rebased or otherwise altered an existing branch, and
+        # shouldn't start silently accepting an argument that implies it did
+        # (a PR #23 review finding — reporting success while quietly not
+        # using the given base is worse than refusing).
+        if [[ -n "$base_override" ]]; then
+            echo "'${branch}' is already checked out here; an explicit base is meaningless for an idempotent re-claim (there is nothing to re-branch) — omit it, or claim '${branch}' from elsewhere for a fresh branch." >&2
+            exit 2
+        fi
         # (Re-)tag on every idempotent re-claim, not just on first creation.
         # Without this, calling claim-workspace.sh from inside a worktree that
         # was never claimed through this tooling (a plain `git worktree add`)
