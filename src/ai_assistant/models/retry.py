@@ -104,6 +104,19 @@ class RetryPolicy:
         if self.timeout_seconds <= 0:
             msg = f"timeout_seconds must be positive, got {self.timeout_seconds}"
             raise ConfigurationError(msg)
+        # Type-checked, not just bounds-checked. The float guard above covers the
+        # three float fields; max_attempts is an int and slipped through it, so a
+        # NaN reached the retry loop where `attempt >= nan` is False forever —
+        # an unbounded retry loop against a failing provider, which is the worst
+        # outcome this class exists to prevent. A fractional value silently
+        # rounds the attempt count, and `True` is an int by inheritance.
+        # ``type(...) is not int`` rejects bool, which ``isinstance`` would not.
+        if type(self.max_attempts) is not int:
+            msg = (
+                f"max_attempts must be an int, got {type(self.max_attempts).__name__} "
+                f"({self.max_attempts!r})"
+            )
+            raise ConfigurationError(msg)
         if self.max_attempts < 1:
             msg = f"max_attempts must be at least 1, got {self.max_attempts}"
             raise ConfigurationError(msg)

@@ -273,6 +273,32 @@ def test_non_finite_configuration_is_rejected(field: str, value: float) -> None:
         RetryPolicy(**{field: value})  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf"), 1.5, True, "3", None],
+    ids=["nan", "inf", "-inf", "fractional", "bool", "str", "none"],
+)
+def test_non_integer_max_attempts_is_rejected(value: object) -> None:
+    # Regression (CI adversarial review): the non-finite guard covered the three
+    # float fields and skipped this int one, so NaN reached the retry loop —
+    # where `attempt >= nan` is False forever, i.e. an unbounded retry loop
+    # against a provider that is already failing. A fractional value silently
+    # rounded the attempt count, and True is an int by inheritance.
+    with pytest.raises(ConfigurationError, match="must be an int"):
+        RetryPolicy(max_attempts=value)  # type: ignore[arg-type]
+
+
+async def test_a_nan_attempt_count_cannot_loop_forever() -> None:
+    # The failure this prevents, stated as behaviour rather than as validation:
+    # without the type check the loop below never terminates.
+    inner, sleep = FakeProvider(ModelUnavailableError("503")), SleepSpy()
+
+    with pytest.raises(ConfigurationError):
+        await _provider(inner, sleep, max_attempts=float("nan")).complete(PROMPT)
+
+    assert inner.calls == 0
+
+
 async def test_backoff_does_not_overflow_at_extreme_attempt_counts() -> None:
     # 2.0 ** 1024 raises OverflowError; without clamping, a persistent failure
     # would surface that instead of the underlying ModelError.
