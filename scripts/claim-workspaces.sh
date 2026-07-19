@@ -21,6 +21,23 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
+# Reject a duplicate branch name up front. claim-workspace.sh itself is safe
+# against two concurrent claims of the same branch (the loser's `git worktree
+# add` fails and it backs off without touching the winner's resources — a
+# blocker-severity PR #17 review finding), but there is still no reason to
+# actually race a branch against itself: it is always a mistake in the
+# caller's input, not a real "N agents claiming N workspaces" scenario, so
+# fail fast with a clear message instead of spawning both and letting one
+# report a confusing git error.
+declare -A seen
+for branch in "$@"; do
+    if [[ -n "${seen[$branch]:-}" ]]; then
+        echo "duplicate branch '${branch}' in one claim-workspaces.sh call" >&2
+        exit 2
+    fi
+    seen[$branch]=1
+done
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT

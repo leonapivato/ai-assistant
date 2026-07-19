@@ -342,6 +342,72 @@ def test_concurrent_claims_of_distinct_branches_all_succeed(tmp_path: Path) -> N
     assert _current_branch(repo) == "master"  # main checkout was never touched
 
 
+def test_concurrent_claims_of_the_same_branch_leave_the_winner_intact(tmp_path: Path) -> None:
+    """Exactly one of two racing same-branch claims wins; the loser must never
+    touch what the winner created.
+
+    A blocker-severity PR #17 review finding: an earlier version installed an
+    unconditional rollback trap before `git worktree add`. Two processes
+    racing to claim the *same* branch both pass the pre-check and both reach
+    `git worktree add`; git's own ref-locking lets only one actually create
+    the branch, but the loser's call then fails at that exact shared
+    path/branch — and an unconditional trap force-removed it and deleted the
+    branch/marker regardless of which process actually owned it, destroying
+    the winner's worktree out from under it. The trap now only cleans up
+    resources this invocation's own `git worktree add` actually created.
+    """
+    repo = _init_repo(tmp_path)
+    assert _BASH is not None
+    env = os.environ.copy()
+    env["WORKSPACE_BOOTSTRAP"] = "true"
+
+    procs = [
+        subprocess.Popen(  # noqa: S603  # resolved bash, in-repo script, test env
+            [_BASH, str(_CLAIM), "area/race"],
+            cwd=str(repo),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    outs = [proc.communicate() for proc in procs]
+
+    successes = [i for i, proc in enumerate(procs) if proc.returncode == 0]
+    assert len(successes) == 1, (
+        f"expected exactly one winner, got returncodes {[p.returncode for p in procs]}"
+    )
+    winner_stdout, _ = outs[successes[0]]
+    ws = Path(_workspace_from(winner_stdout))
+
+    # The winner's resources must be fully intact, not swept up by the loser.
+    assert ws.is_dir()
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/race" in branches
+    marker = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [
+            _GIT,
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/workspace-claimed/area/race",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert marker.returncode == 0
+
+
 def test_release_removes_the_worktree(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     ws_a = Path(_workspace(_run(_CLAIM, repo, "area/a")))
