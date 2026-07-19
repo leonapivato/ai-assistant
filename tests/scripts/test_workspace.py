@@ -1,0 +1,204 @@
+"""Integration tests for the workspace-isolation scripts.
+
+`claim-workspace.sh` / `release-workspace.sh` create branches, worktrees, and a
+lock — destructive, stateful operations — so they are exercised end to end
+against a throwaway git repo, with the bootstrap step stubbed
+(`WORKSPACE_BOOTSTRAP=true`) so no real `uv sync` runs. Covers the failure and
+concurrency paths the scripts introduce (adversarial review of PR #17).
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+_SCRIPTS = Path(__file__).parents[2] / "scripts"
+_CLAIM = _SCRIPTS / "claim-workspace.sh"
+_RELEASE = _SCRIPTS / "release-workspace.sh"
+_BASH = shutil.which("bash")
+_GIT = shutil.which("git")
+
+
+def _git(repo: Path, *args: str) -> None:
+    assert _GIT is not None
+    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [_GIT, "-C", str(repo), *args], check=True, capture_output=True, text=True
+    )
+
+
+def _current_branch(repo: Path) -> str:
+    assert _GIT is not None
+    out = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [_GIT, "-C", str(repo), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
+def _init_repo(tmp_path: Path) -> Path:
+    """A one-commit repo whose default branch is master (version-independent)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "symbolic-ref", "HEAD", "refs/heads/master")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "f.txt").write_text("x\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", "init")
+    return repo
+
+
+def _run(
+    script: Path,
+    repo: Path,
+    *args: str,
+    cwd: Path | None = None,
+    bootstrap: str = "true",
+    force: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    assert _BASH is not None
+    env = os.environ.copy()
+    env["WORKSPACE_BOOTSTRAP"] = bootstrap
+    if force is not None:
+        env["FORCE"] = force
+    return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test env
+        [_BASH, str(script), *args],
+        cwd=str(cwd or repo),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,  # tests assert on returncode, including the failure paths
+    )
+
+
+def _workspace(result: subprocess.CompletedProcess[str]) -> str:
+    for line in result.stdout.splitlines():
+        if line.startswith("WORKSPACE="):
+            return line.removeprefix("WORKSPACE=")
+    msg = f"no WORKSPACE= line in output:\n{result.stdout}\n{result.stderr}"
+    raise AssertionError(msg)
+
+
+def _lock(repo: Path) -> Path:
+    return repo / ".git" / "main-workspace.lock"
+
+
+def test_first_claim_uses_main_checkout(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    result = _run(_CLAIM, repo, "area/one")
+
+    assert result.returncode == 0, result.stderr
+    assert _workspace(result) == str(repo)
+    assert _current_branch(repo) == "area/one"
+    assert _lock(repo).exists()
+
+
+def test_second_claim_gets_a_worktree_when_main_is_locked(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/one")  # claims main
+
+    result = _run(_CLAIM, repo, "area/two")  # main locked -> worktree
+
+    assert result.returncode == 0, result.stderr
+    ws = Path(_workspace(result))
+    assert ws != repo
+    assert ws.is_dir()
+    assert ws == tmp_path / "repo-worktrees" / "area" / "two"
+
+
+def test_invalid_branch_is_rejected_without_side_effects(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    assert _run(_CLAIM, repo, "no-slash").returncode == 2  # not <area>/<slug>
+    assert _run(_CLAIM, repo, "bad/ name").returncode == 2  # invalid ref (space)
+
+    assert not _lock(repo).exists()
+    assert _current_branch(repo) == "master"
+
+
+def test_existing_branch_is_rejected(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _git(repo, "branch", "area/dup")
+
+    result = _run(_CLAIM, repo, "area/dup")
+
+    assert result.returncode == 2
+    assert "already exists" in result.stderr
+
+
+def test_claim_from_worktree_same_branch_is_idempotent(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # main
+    ws_b = _workspace(_run(_CLAIM, repo, "area/b"))  # worktree
+
+    result = _run(_CLAIM, repo, "area/b", cwd=Path(ws_b))
+
+    assert result.returncode == 0, result.stderr
+    assert _workspace(result) == ws_b  # returns the same workspace, no new one
+
+
+def test_claim_from_worktree_other_branch_creates_a_distinct_one(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # main
+    ws_b = _workspace(_run(_CLAIM, repo, "area/b"))  # worktree
+
+    result = _run(_CLAIM, repo, "area/c", cwd=Path(ws_b))  # different branch
+
+    assert result.returncode == 0, result.stderr
+    ws_c = _workspace(result)
+    assert ws_c != ws_b  # not silently reusing the current worktree
+    assert Path(ws_c).is_dir()
+
+
+def test_bootstrap_failure_rolls_back_the_main_claim(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+
+    result = _run(_CLAIM, repo, "area/x", bootstrap="false")  # bootstrap fails
+
+    assert result.returncode != 0
+    assert not _lock(repo).exists()  # lock released
+    assert _current_branch(repo) == "master"  # main restored
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/x" not in branches  # partial branch cleaned up
+
+
+def test_force_zero_does_not_remove_a_dirty_worktree(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # main
+    ws_b = Path(_workspace(_run(_CLAIM, repo, "area/b")))  # worktree
+    (ws_b / "dirty.txt").write_text("uncommitted\n")  # untracked -> dirty
+
+    refused = _run(_RELEASE, repo, "area/b", force="0")
+    assert refused.returncode != 0
+    assert ws_b.is_dir()  # FORCE=0 must not force
+
+    forced = _run(_RELEASE, repo, "area/b", force="1")
+    assert forced.returncode == 0, forced.stderr
+    assert not ws_b.is_dir()
+
+
+def test_release_removes_the_correct_worktree_under_slug_collision(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(_CLAIM, repo, "area/a")  # main
+    ws1 = Path(_workspace(_run(_CLAIM, repo, "a/b-c")))  # worktree
+    ws2 = Path(_workspace(_run(_CLAIM, repo, "a-b/c")))  # distinct worktree
+
+    assert ws1 != ws2  # collision-free paths
+
+    result = _run(_RELEASE, repo, "a-b/c")
+
+    assert result.returncode == 0, result.stderr
+    assert not ws2.is_dir()  # released the requested one
+    assert ws1.is_dir()  # the similarly-named one survives
