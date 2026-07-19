@@ -21,13 +21,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   widen who sees a prompt already flagged sensitive (ADR-0004). An explicit
   per-call `model=` override disables routing rather than silently answering
   from a different model, and exhausting every route re-raises the last failure
-  untouched — so its type, message and traceback all survive routing — while
-  every candidate and its error is logged. (Two earlier attempts treated the
-  caught exception as the router's to modify: rebuilding it as `type(exc)(msg)`
-  assumed a one-argument constructor an arbitrary `ModelProvider`'s errors need
-  not have, and attaching a note mutated an object the router does not own,
-  which a provider raising a cached instance grew without bound. Both found by
-  the Codex adversarial reviewer.) Preference order is static; health
+  untouched — so its identity, type and message survive routing — while every
+  candidate and its failure *class* is logged. Messages are deliberately kept
+  out of the log: provider errors routinely quote the offending request, which
+  would put Tier 1 data in a Tier 2 log (ADR-0004 §5), and the redaction
+  processor that ADR assumes is not actually configured yet. (Three earlier
+  attempts were wrong: rebuilding the error as `type(exc)(msg)` assumed a
+  one-argument constructor an arbitrary `ModelProvider`'s errors need not have;
+  attaching a PEP 678 note mutated an object the router does not own, growing
+  without bound when a provider raises a cached instance; and logging
+  `str(exc)` leaked the message. All found by the Codex adversarial reviewer.) Preference order is static; health
   tracking, circuit breaking, and cost/latency ranking are deferred. Retry
   belongs inside routing — the cheap correction first — which composes on the
   ADR-0011 seam with no Protocol change. Recorded in ADR-0013.

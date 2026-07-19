@@ -155,11 +155,27 @@ modify. It is not: it belongs to the provider that raised it, and may be shared,
 cached, or concurrently in flight elsewhere.
 
 So the diagnostics go where the router *does* own the state — a structured log
-warning, following the precedent in `context/`. That is strictly richer than a
-flattened message (structured fields, per-route detail) while leaving the caller
-a correctly-typed failure with its own message and traceback intact. The cost is
-that a caller inspecting only the exception sees just the last failure; the full
-picture is an operator concern, and operators read logs.
+warning, following the precedent in `context/`. The cost is that a caller
+inspecting only the exception sees just the last failure; the full picture is an
+operator concern, and operators read logs.
+
+**The log records each failure's class, never its message.** Provider error text
+routinely quotes the offending request, so `str(exc)` is vendor- and
+attacker-controlled text that can carry a prompt — Tier 1 data that ADR-0004 §5
+forbids in a log. The class name is enough to diagnose which route failed and
+why, and cannot carry content by construction. This is fail-closed by design
+rather than by redaction, which matters because the redaction processor ADR-0004
+§5 assumes **is not actually configured yet** (see Consequences). The full
+message still reaches the caller on the raised exception, which is not a log.
+
+What is guaranteed of the re-raised failure is its **identity, type, message and
+`__cause__`** — deliberately *not* its traceback. Propagating through the router
+appends frames, as through any intermediate call. A provider that caches and
+re-raises one exception instance therefore accumulates frames across calls, but
+that is Python's behaviour for that anti-pattern (a plain function re-raising the
+same object accumulates identically) rather than something routing introduces or
+can prevent. An earlier draft of this section claimed the traceback was
+untouched; that was wrong, and a test now pins the real bound.
 
 ### 6. Every route must be a provider the user configured
 
@@ -220,6 +236,14 @@ described the risk without constraining anything.
   restates ADR-0004 §2 in the plural, so accepting ADR-0013 means accepting an
   amendment to an already-Accepted ADR. Configuring a route list is a privacy
   decision, not only an availability one.
+- **ADR-0004 §5's redaction processor does not exist.** §5 describes structlog
+  "configured with a redaction processor that drops/masks known sensitive keys …
+  as a safety net"; there is no `structlog.configure` call anywhere in the tree.
+  Routing works around its absence by logging failure *classes* only, but the
+  safety net that would catch the next such mistake is still missing, and
+  `context/provider.py` already logs `error=str(exc)` on a degradation path.
+  Raised here because routing is the second component to depend on it; fixing it
+  belongs to whoever owns observability, not to this slice.
 - **Nothing is wired yet.** No component constructs a `RoutingProvider` and
   `Settings` has no route configuration, so this slice changes no egress in
   practice. The obligations in §6 fall due when `orchestration` wires the
