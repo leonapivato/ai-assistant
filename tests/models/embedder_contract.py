@@ -53,6 +53,20 @@ class EmbedderContract:
         assert isinstance(embedder.model_id, str)
         assert embedder.model_id.strip()
 
+    async def test_model_id_is_stable(self, embedder: Embedder) -> None:
+        # ADR-0006 §4 tags stored vectors with this id to detect that the store
+        # was built with a different model. An id that varied between reads — or
+        # that changed once the model actually loaded — would make a store
+        # disown its own vectors and re-embed forever, so stability is
+        # contractual (the Protocol says "a *stable* identifier"), not incidental.
+        before = embedder.model_id
+
+        assert embedder.model_id == before  # stable across repeated reads
+
+        await embedder.embed(["some text"])
+
+        assert embedder.model_id == before  # and unchanged by doing work
+
     async def test_embed_returns_one_vector_per_input(self, embedder: Embedder) -> None:
         # One vector per input *occurrence*: an implementation that deduplicates
         # repeated texts would misalign a caller's records with their vectors.
@@ -65,11 +79,17 @@ class EmbedderContract:
     async def test_every_vector_has_the_declared_dimensions(self, embedder: Embedder) -> None:
         vectors = await embedder.embed(["alpha beta", "gamma"])
 
+        # Pin the count first: `all(...)` over an empty result is vacuously true,
+        # so without this an embedder returning nothing would pass the shape check.
+        assert len(vectors) == 2
         assert all(len(vector) == embedder.dimensions for vector in vectors)
 
     async def test_vector_components_are_floats(self, embedder: Embedder) -> None:
         [vector] = await embedder.embed(["hello world"])
 
+        # Likewise pin the shape: `all(...)` over an empty vector is vacuously
+        # true, so an embedder returning [] would otherwise pass this check.
+        assert len(vector) == embedder.dimensions
         assert all(isinstance(value, float) for value in vector)
 
     async def test_empty_input_returns_no_vectors(self, embedder: Embedder) -> None:
