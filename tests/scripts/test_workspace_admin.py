@@ -261,6 +261,51 @@ def test_prune_removes_a_merged_branch_whose_head_matches_the_pr(tmp_path: Path)
     assert not ws.is_dir()
 
 
+def test_prune_leaves_everything_intact_when_worktree_removal_fails(tmp_path: Path) -> None:
+    """A worktree-removal failure must not half-prune: no marker, no branch.
+
+    `git worktree remove` can fail on a clean worktree for reasons unrelated
+    to dirtiness (e.g. `git worktree lock`, used here as a deterministic
+    failure trigger). If the marker were deleted before attempting removal,
+    a failure here would leave the branch/worktree fully intact but now
+    unmarked — invisible to both future prune runs and release-workspace.sh
+    (PR #17 review finding). Worktree removal happens first, so a failure
+    there aborts before anything is actually deleted.
+    """
+    repo = _init_repo(tmp_path)
+    ws = Path(_claim(repo, "area/a"))
+    sha = _head_sha(ws)
+    _git(repo, "worktree", "lock", str(ws))
+
+    result = _run_with_fake_gh(repo, responses=_pr_line("MERGED", sha), force=True)
+
+    assert result.returncode != 0  # worktree remove failed, and that propagated
+    assert ws.is_dir()  # worktree untouched
+    assert _GIT is not None
+    marker = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [
+            _GIT,
+            "-C",
+            str(repo),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/workspace-claimed/area/a",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert marker.returncode == 0  # marker untouched
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/a" in branches  # branch untouched
+
+
 def test_prune_leaves_no_marker_that_could_wrongly_claim_a_future_branch(tmp_path: Path) -> None:
     """A successful forced prune must remove the marker along with the branch.
 
