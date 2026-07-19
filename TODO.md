@@ -25,6 +25,21 @@ proves an attribute exists.
 class (not `Test`-prefixed, so pytest does not collect it directly) with a
 subject fixture overridden by a `Test…`-prefixed subclass per implementation.
 
+**Known hole — `FastEmbedEmbedder` does not run its suite.** `EmbedderContract`
+runs against `HashingEmbedder` and `FakeEmbedder` only. The real embedder's
+`embed` downloads a model on first use, and the gate runs everything —
+`integration`-marked tests included — with no network, so it cannot join as
+things stand. The two cheap ways in are both worse than the hole: patching
+`TextEmbedding` out asserts properties of the patch rather than of fastembed,
+and letting it download makes the gate network-dependent. Closing it honestly
+means an injectable backend seam in `FastEmbedEmbedder` so the *adapter* layer
+(count, order, shape, finiteness — everything that could regress on a dependency
+bump) runs through the contract against a deterministic offline stub, while
+fastembed itself stays out of the gate. That is a `models` change, hence its own
+slice rather than part of the testing one. Raised on every pass of the
+adversarial review of PR #16 and waived there deliberately, with the reasoning
+recorded in `tests/models/embedder_contract.py`.
+
 **Origin:** adversarial review of the `learning` slice (ADR-0009).
 
 ## 2. Assertion-supersedes-conflict policy refinement
