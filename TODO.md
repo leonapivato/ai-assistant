@@ -87,3 +87,43 @@ Prevents the backfill debt from recurring for the remaining subsystems.
 
 **Origin:** review of AI-agent scalability — process fix that closes the loop on
 items 1 and 3.
+
+## 6. `just setup` installs only the `commit-msg` hook, silently disabling the rest
+
+**What:** `justfile` (`setup`) and `CONTRIBUTING.md` both run
+
+```bash
+uv run pre-commit install --install-hooks --hook-type commit-msg
+```
+
+`--hook-type` *replaces* the default rather than adding to it, so only
+`.git/hooks/commit-msg` is written — there is no `.git/hooks/pre-commit`.
+Everything in `.pre-commit-config.yaml` at the default `pre-commit` stage
+(ruff check, ruff format, mypy, import-linter, and the file-hygiene hooks) is
+therefore **never run on commit**. Only `conventional-pre-commit`, which
+declares `stages: [commit-msg]`, actually fires.
+
+**Impact:** the failure is silent and reads like success — committing prints
+`ruff check ... (no files to check) Skipped` and `mypy (strict) ... Skipped`,
+which looks like "nothing to do" rather than "not installed". A contributor
+following `CONTRIBUTING.md` verbatim gets no local pre-commit safety net and
+only discovers a lint/type failure from the remote `gate` workflow. Not
+functionality-breaking — the full gate still catches everything — but it moves
+feedback from seconds to a CI round-trip, and it undercuts the claim in
+`CLAUDE.md` that "`pre-commit` runs the fast subset on commit".
+
+**Direction:** pass both hook types explicitly, in `justfile` and
+`CONTRIBUTING.md`:
+
+```bash
+uv run pre-commit install --install-hooks --hook-type pre-commit --hook-type commit-msg
+```
+
+Anyone who already ran the old command must re-run it; the missing hook is not
+repaired by `uv sync`. Worth also considering `default_install_hook_types` in
+`.pre-commit-config.yaml`, which makes a bare `pre-commit install` correct and
+removes the chance of the flags drifting out of sync with the config again.
+
+**Origin:** found during environment setup — `.git/hooks/` contains only
+`commit-msg`, and every commit on `models/error-taxonomy` shows the
+`pre-commit`-stage hooks skipped.
