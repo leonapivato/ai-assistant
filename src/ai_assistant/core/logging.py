@@ -17,9 +17,16 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence, Set
+from dataclasses import fields, is_dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from enum import Enum
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Final
+from uuid import UUID
 
 import structlog
+from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
@@ -27,6 +34,25 @@ if TYPE_CHECKING:
     from ai_assistant.core.config import Settings
 
 REDACTED: Final = "[redacted]"
+
+# Types safe to render as-is: their repr is their own value, with no nested
+# fields that could hide user data. Anything not listed is masked (see
+# `_redact_value`), so this list is the boundary of what the net trusts.
+_SAFE_SCALARS: Final = (
+    bool,
+    int,
+    float,
+    complex,
+    Decimal,
+    Enum,
+    UUID,
+    PurePath,
+    datetime,
+    date,
+    time,
+    timedelta,
+    type(None),
+)
 
 # Substrings, matched case-insensitively against the key. Substrings rather than
 # exact names so `api_key`, `user_token` and `refresh_token` are all caught
@@ -94,6 +120,44 @@ def _is_sensitive(key: str) -> bool:
     return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
 
 
+def _as_mapping(value: object) -> Mapping[Any, Any] | None:
+    """Return ``value`` as a mapping of fields, or ``None`` if it is not one.
+
+    Dataclasses and pydantic models are unwrapped here so the recursion can look
+    inside them. Left alone they reach the renderer as a repr —
+    ``Cfg(api_key='sk-live-…')`` — which is the leak in its most convenient
+    form. `core/types.py` is entirely pydantic models, so this is the shape data
+    actually travels in throughout this codebase.
+    """
+    if isinstance(value, Mapping):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: getattr(value, f.name) for f in fields(value)}
+    if isinstance(value, BaseModel):
+        return dict(value)
+    return None
+
+
+def _redact_mapping(mapping: Mapping[Any, Any]) -> dict[str, object]:
+    """Redact a mapping's keys and values, without losing entries to collisions.
+
+    Masking two data-carrying keys would otherwise map both to ``[redacted]``
+    and silently drop one — a redactor that quietly discards diagnostics is its
+    own kind of failure, so masked keys are numbered.
+    """
+    redacted: dict[str, object] = {}
+    masked = 0
+    for key, value in mapping.items():
+        name = str(key)
+        scrubbed = REDACTED if _is_sensitive(name) else _redact_value(value)
+        if _key_carries_data(name):
+            masked += 1
+            redacted[REDACTED if masked == 1 else f"{REDACTED}:{masked}"] = scrubbed
+        else:
+            redacted[name] = scrubbed
+    return redacted
+
+
 def _redact_value(value: object) -> object:
     """Recursively mask sensitive keys inside nested structures.
 
@@ -106,10 +170,9 @@ def _redact_value(value: object) -> object:
     # is a perfectly ordinary thing to log and would sail through a `dict`-only
     # check with its secrets intact — which it did, until an adversarial review
     # pointed at exactly that.
-    if isinstance(value, Mapping):
-        return {
-            k: (REDACTED if _is_sensitive(str(k)) else _redact_value(v)) for k, v in value.items()
-        }
+    mapping = _as_mapping(value)
+    if mapping is not None:
+        return _redact_mapping(mapping)
     # str/bytes are Sequences and must not be walked character by character.
     if isinstance(value, (str, bytes, bytearray)):
         return value
@@ -118,7 +181,30 @@ def _redact_value(value: object) -> object:
         # Preserve tuple-ness, since a renderer may format it differently; every
         # other sequence or set degrades to a list, which is fine for output.
         return tuple(rebuilt) if isinstance(value, tuple) else rebuilt
-    return value
+    if isinstance(value, _SAFE_SCALARS):
+        return value
+    # Fail closed on anything we cannot look inside. An unrecognised object goes
+    # to the renderer as its repr, and a repr shows whatever the object holds —
+    # so "unknown" has to mean "masked", not "hope it is harmless". The cost is
+    # that logging an exotic type shows [redacted] instead of a useful value;
+    # the fix is to log a field of it, or add it to _SAFE_SCALARS deliberately.
+    return REDACTED
+
+
+def _key_carries_data(key: str) -> bool:
+    """Return whether a mapping key looks like data rather than a field name.
+
+    Keys are usually developer-chosen names, which is why they are matched
+    against the deny-list rather than masked wholesale — but a mapping keyed by
+    *data* (per-user counters, a parsed query string) puts Tier 0/1 content in
+    the key position, where redacting only the value achieves nothing.
+
+    The signals are ``@`` and ``=``: an email address used as a key, or a
+    ``token=secret`` fragment. Both are vanishingly rare in a deliberate field
+    name and strongly suggest data. A field name that legitimately contains one
+    should be renamed rather than exempted.
+    """
+    return "@" in key or "=" in key
 
 
 def redact_sensitive(

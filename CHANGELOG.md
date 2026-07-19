@@ -23,7 +23,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Loggers are deliberately not cached, so a module-level
   `structlog.get_logger(__name__)` bound at import time still picks up the
   redaction processor once the CLI configures it; caching left such a logger
-  emitting through an unredacted chain forever (same reviewer). It fails
+  emitting through an unredacted chain forever (same reviewer). Mapping *keys*
+  are masked too when they look like data rather than field names, dataclasses
+  and pydantic models are unwrapped and scrubbed rather than reaching the
+  renderer as a leaky repr, and any object the net cannot look inside is masked
+  outright — "unknown" means "hidden", not "assumed harmless". It fails
   closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
   dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
   `content_type`) keeps type and enum names readable, and each entry is pinned by
@@ -31,6 +35,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `core`: `ASSISTANT_LOG_LEVEL` is now validated. An unrecognised level (a typo
+  like `EROR`) silently fell back to INFO, so an operator who set `DEBUG` to
+  diagnose something got neither the level they asked for nor any indication
+  why. It is now rejected at load as a `ConfigurationError`, like every other
+  malformed setting, and normalised to upper case.
 - `context`: a real Tier 1 leak on the degradation path — a failing context
   source logged `error=str(exc)`, and a source wrapping calendars, tasks or email
   can quote the very personal data it was fetching. Now logs the exception's

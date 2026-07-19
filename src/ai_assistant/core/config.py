@@ -7,6 +7,7 @@ configuration knob is discoverable, typed, and validated in one place.
 
 from __future__ import annotations
 
+import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, ValidationError, field_validator, model_validator
@@ -31,6 +32,24 @@ class Settings(BaseSettings):
 
     # --- General ---------------------------------------------------------
     log_level: str = Field(default="INFO", description="Root log level.")
+
+    @field_validator("log_level")
+    @classmethod
+    def _log_level_is_known(cls, value: str) -> str:
+        """Reject an unrecognised level, and normalise case.
+
+        Without this a typo (``EROR``) silently fell back to INFO, so an
+        operator who set DEBUG to diagnose something, or WARNING to quieten a
+        service, got neither and no indication why. Validating here also keeps
+        the promise ``load_settings`` makes for every other setting: bad
+        configuration fails at load, as a ``ConfigurationError``.
+        """
+        normalised = value.upper()
+        if normalised not in logging.getLevelNamesMapping():
+            known = ", ".join(sorted(logging.getLevelNamesMapping()))
+            msg = f"unknown log level {value!r}; expected one of: {known}"
+            raise ValueError(msg)
+        return normalised
 
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the

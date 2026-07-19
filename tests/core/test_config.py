@@ -37,3 +37,16 @@ def test_load_settings_succeeds_with_valid_env(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("ASSISTANT_TIMEZONE", "America/New_York")
     settings = load_settings()
     assert settings.timezone == "America/New_York"
+
+
+@pytest.mark.parametrize("value", ["EROR", "verbose", "", "TRACE"])
+def test_unknown_log_level_is_rejected(value: str) -> None:
+    # A typo used to fall back to INFO silently, so an operator who set DEBUG to
+    # diagnose something got neither the level nor any indication why.
+    with pytest.raises(ValidationError):
+        Settings(log_level=value)
+
+
+@pytest.mark.parametrize("value", ["debug", "Warning", "critical"])
+def test_log_level_is_normalised_to_upper_case(value: str) -> None:
+    assert Settings(log_level=value).log_level == value.upper()

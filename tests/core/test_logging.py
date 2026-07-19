@@ -5,11 +5,17 @@ from __future__ import annotations
 import subprocess
 import sys
 from collections import ChainMap, UserDict, deque
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import PurePath
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 import pytest
 import structlog
+from pydantic import BaseModel
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.logging import (
@@ -174,6 +180,91 @@ def test_there_is_no_allow_list_exemption() -> None:
     redacted = _redact(content_type='text/plain; name="PATIENT SSN 123-45-6789"')
 
     assert redacted["content_type"] == REDACTED
+
+
+def test_sensitive_data_in_a_mapping_key_is_masked() -> None:
+    # Regression (adversarial review): only values were examined, so a mapping
+    # keyed by data — a parsed query string, a per-user counter — put Tier 0/1
+    # content in the key position where masking the value achieved nothing.
+    redacted = _redact(payload={"api_key=sk-live-SECRET": True})
+
+    assert "api_key=sk-live-SECRET" not in repr(redacted)
+
+
+def test_masked_keys_do_not_collide_and_lose_entries() -> None:
+    # Masking two data keys would map both to "[redacted]" and silently drop
+    # one. A redactor that quietly discards diagnostics is its own failure.
+    redacted = _redact(payload={"a@example.com": 1, "b@example.com": 2, "route": "primary"})
+
+    payload = redacted["payload"]
+    assert isinstance(payload, dict)
+    assert len(payload) == 3
+    assert sorted(payload.values(), key=repr) == sorted([1, 2, "primary"], key=repr)
+
+
+def test_a_field_name_is_not_mistaken_for_data() -> None:
+    # The @/= heuristic must not fire on ordinary keys, or every log turns to
+    # mush.
+    redacted = _redact(payload={"route": "primary", "model_name": "opus", "count": 3})
+
+    assert redacted["payload"] == {"route": "primary", "model_name": "opus", "count": 3}
+
+
+def test_dataclasses_are_unwrapped_and_scrubbed() -> None:
+    # Regression (adversarial review): an unrecognised object reached the
+    # renderer as its repr — `Cfg(api_key='sk-live-…')` — which is the leak in
+    # its most convenient form.
+    @dataclass
+    class Cfg:
+        api_key: str
+        region: str
+
+    redacted = _redact(payload=Cfg(api_key="sk-live-SECRET", region="eu"))
+
+    assert redacted["payload"] == {"api_key": REDACTED, "region": "eu"}
+
+
+def test_pydantic_models_are_unwrapped_and_scrubbed() -> None:
+    # core/types.py is entirely pydantic models, so this is the shape data
+    # actually travels in here.
+    class Person(BaseModel):
+        email: str
+        count: int
+
+    redacted = _redact(payload=Person(email="alice@example.com", count=3))
+
+    assert redacted["payload"] == {"email": REDACTED, "count": 3}
+
+
+def test_unknown_object_types_fail_closed() -> None:
+    # "Unknown" has to mean "masked", not "hope it is harmless": an object we
+    # cannot look inside reaches the renderer as a repr showing whatever it
+    # holds.
+    class Opaque:
+        def __repr__(self) -> str:
+            return "Opaque(api_key='sk-live-SECRET')"
+
+    assert _redact(payload=Opaque())["payload"] == REDACTED
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        42,
+        3.14,
+        True,
+        None,
+        Decimal("1.5"),
+        UUID("12345678-1234-5678-1234-567812345678"),
+        PurePath("/var/data/x"),
+        datetime(2026, 1, 1, tzinfo=UTC),
+    ],
+    ids=["int", "float", "bool", "none", "decimal", "uuid", "path", "datetime"],
+)
+def test_safe_scalars_render_as_themselves(value: object) -> None:
+    # The fail-closed default must not swallow ordinary diagnostic values; these
+    # types are their own value, with no nested fields to hide anything in.
+    assert _redact(measurement=value)["measurement"] == value
 
 
 def test_redaction_failure_drops_the_event() -> None:
