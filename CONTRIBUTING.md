@@ -170,6 +170,10 @@ plus a copy of git-ignored local config), and prints `WORKSPACE=<path>` — **wo
 only there**. Release it after the PR merges with
 `just release-workspace <area>/<slug>`.
 
+- **Sync `master` before you claim.** The claim branches from your *local*
+  `master` and does not fetch, so run `git checkout master && git pull --ff-only
+  origin master` first — otherwise a stale local `master` gives your branch an
+  out-of-date base that omits already-merged work.
 - The claim on the main checkout is an atomic lock, so two agents racing cannot
   both take it; the loser deterministically gets a worktree.
 - When unclaimed, the main checkout is integration-only: `master` stays checked

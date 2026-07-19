@@ -34,18 +34,23 @@ wt_path="$(git worktree list --porcelain | awk -v ref="refs/heads/${branch}" '
 if [[ -f "${lock}/branch" && "$(cat "${lock}/branch")" == "$branch" ]]; then
     if [[ -n "$(git -C "$main_root" status --porcelain)" ]]; then
         if (( force )); then
-            # Deliberately discard *both* tracked changes and untracked files, so
-            # main returns to a genuinely clean master (git clean skips ignored
-            # paths, so the .venv/.env stay). Otherwise a leftover untracked file
-            # keeps main "dirty" and future claims would needlessly use worktrees.
+            # Deliberately discard tracked changes and untracked files — including
+            # an untracked nested git repo (`-ff`) — so main returns to a genuinely
+            # clean master. No `-x`, so ignored paths (.venv/.env) survive.
             git -C "$main_root" checkout -q -f master
-            git -C "$main_root" clean -qfd
+            git -C "$main_root" clean -qffd
         else
             echo "Main checkout has uncommitted changes; commit/stash them or set FORCE=1." >&2
             exit 1
         fi
     else
         git -C "$main_root" checkout -q master
+    fi
+    # Never drop the lock while main is still dirty — that would silently push
+    # future claims onto needless worktrees. Verify the postcondition first.
+    if [[ -n "$(git -C "$main_root" status --porcelain)" ]]; then
+        echo "Main checkout is still dirty after cleanup; NOT releasing the lock — clean it by hand." >&2
+        exit 1
     fi
     rm -rf "$lock"
     echo "Released the main-checkout claim for '${branch}'; main is back on master." >&2

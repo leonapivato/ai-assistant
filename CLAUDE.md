@@ -54,11 +54,14 @@ learn/update memory.
 
 ## How to work (make changes reviewable)
 
-- **Claim a workspace first — before editing anything.** Run
-  `just claim-workspace <area>/<slug>` as the first action of any task. It puts
-  you on a fresh branch in an isolated workspace (the main checkout if free, else
-  a linked worktree) and prints `WORKSPACE=<path>`. **Work only in that path**,
-  and never commit to `master`. This is what stops parallel agents from sharing a
+- **Claim a workspace first — before editing anything.** First sync local
+  `master` (`git checkout master && git pull --ff-only origin master`), then run
+  `just claim-workspace <area>/<slug>` as the first action of any task. Syncing
+  matters because the claim branches from your *local* `master` and does not
+  fetch — start it stale and your branch omits already-merged work. The claim
+  puts you on a fresh branch in an isolated workspace (the main checkout if free,
+  else a linked worktree) and prints `WORKSPACE=<path>`. **Work only in that
+  path**, and never commit to `master`. This is what stops parallel agents from sharing a
   working tree and clobbering each other's uncommitted work. Release it after the
   PR merges with `just release-workspace <area>/<slug>`. (Details:
   `CONTRIBUTING.md` → "Coordinating parallel work".)
