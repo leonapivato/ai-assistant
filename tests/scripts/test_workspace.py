@@ -782,3 +782,30 @@ def test_claim_rejects_an_invalid_explicit_base(tmp_path: Path) -> None:
         text=True,
     ).stdout.split()
     assert "area/b" not in branches  # rejected before anything was created
+
+
+def test_claim_rejects_an_explicit_empty_base(tmp_path: Path) -> None:
+    """An explicitly-empty base ("") must be rejected, not treated as omitted.
+
+    `${2:-}` cannot distinguish a genuinely omitted argument from one
+    present-but-empty — and `just claim-workspace <branch>` (the ordinary
+    no-base invocation) resolves its own unset `base=""` just default, so
+    the *common* path forwards an explicit empty string unless the recipe
+    itself omits $2 entirely (fixed alongside this). Argument count
+    (`base_given`, from `$#`), not the value of $2, is what the script now
+    keys on (PR #23 review finding).
+    """
+    repo = _init_repo(tmp_path)
+
+    result = _run(_CLAIM, repo, "area/b", "")
+
+    assert result.returncode == 2
+    assert "empty" in result.stderr.lower()
+    assert _GIT is not None
+    branches = subprocess.run(  # noqa: S603  # resolved git path, test repo
+        [_GIT, "-C", str(repo), "branch", "--format=%(refname:short)"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "area/b" not in branches

@@ -41,7 +41,20 @@
 set -Eeuo pipefail
 
 branch="${1:-}"
-base_override="${2:-}"
+# `base_given` tracks argument *count*, not the value of $2 — an explicit
+# empty string ("") must be rejected as invalid, not quietly treated the same
+# as omitting the argument entirely. This distinction is not academic: `just
+# claim-workspace <branch>` (the ordinary no-base invocation) resolves its own
+# unset `base=""` just default and, before the fix below, forwarded that empty
+# string through as a real $2 — so the *common* path always passed an
+# explicit-but-empty base, and `${2:-}` could never tell that apart from a
+# real omission (a PR #23 review finding).
+base_given=0
+base_override=""
+if [[ $# -ge 2 ]]; then
+    base_given=1
+    base_override="$2"
+fi
 if [[ -z "$branch" || "$branch" != */* || $# -gt 2 ]]; then
     echo "usage: scripts/claim-workspace.sh <area>/<slug> [<base>]  (e.g. memory/add-cache)" >&2
     exit 2
@@ -63,7 +76,11 @@ fi
 # resolving once here and using the OID everywhere after closes this
 # regardless of where main_root happens to be checked out.
 resolved_base=""
-if [[ -n "$base_override" ]]; then
+if (( base_given )); then
+    if [[ -z "$base_override" ]]; then
+        echo "base must not be empty" >&2
+        exit 2
+    fi
     resolved_base="$(git rev-parse --verify --quiet "${base_override}^{commit}" 2>/dev/null || true)"
     if [[ -z "$resolved_base" ]]; then
         echo "base '${base_override}' does not resolve to a commit" >&2
@@ -87,7 +104,7 @@ base=master
 if git rev-parse --verify --quiet refs/remotes/origin/master >/dev/null 2>&1; then
     base=origin/master
 fi
-if [[ -n "$resolved_base" ]]; then
+if (( base_given )); then
     base="$resolved_base"
 fi
 
@@ -249,7 +266,7 @@ if [[ "$git_dir" != "$common_dir" ]]; then
         # shouldn't start silently accepting an argument that implies it did
         # (a PR #23 review finding — reporting success while quietly not
         # using the given base is worse than refusing).
-        if [[ -n "$base_override" ]]; then
+        if (( base_given )); then
             echo "'${branch}' is already checked out here; an explicit base is meaningless for an idempotent re-claim (there is nothing to re-branch) — omit it, or claim '${branch}' from elsewhere for a fresh branch." >&2
             exit 2
         fi
