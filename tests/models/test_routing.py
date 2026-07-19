@@ -460,6 +460,44 @@ async def test_a_broken_logger_does_not_abort_the_fallback() -> None:
     assert backup.calls == 1
 
 
+async def test_a_class_claiming_our_module_is_not_trusted() -> None:
+    # Regression (CI adversarial review): membership was decided by comparing
+    # `cls.__module__` to this project's errors module — and __module__ is a
+    # writable attribute, so a class can simply claim it. Membership is now by
+    # object identity against a set frozen at import, which is not forgeable.
+    spoofed = type(
+        "PATIENT_SSN_123_45_6789",
+        (ModelRateLimitError,),
+        {"__module__": "ai_assistant.core.errors"},
+    )
+
+    routes = [Route(AlwaysFailsProvider(spoofed("failure")))]
+
+    with capture_logs() as logs, pytest.raises(ModelRateLimitError):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert "PATIENT_SSN" not in repr(logs)
+    [event] = [e for e in logs if e["event"] == "all routes failed"]
+    assert event["failures"] == [{"route": "route[1]", "error": "ModelRateLimitError"}]
+
+
+async def test_a_non_routable_failure_is_deliberately_not_logged() -> None:
+    # The routable case is logged because a later route may paper over it,
+    # leaving a degrading provider invisible behind a successful call. This one
+    # is raised to the caller, so it is already visible and logging it would
+    # only duplicate. Pinned because the changelog previously overclaimed that
+    # *every* candidate failure was logged.
+    routes = [
+        Route(AlwaysFailsProvider(ModelContentFilterError("refused"))),
+        Route(RecordingProvider("backup")),
+    ]
+
+    with capture_logs() as logs, pytest.raises(ModelContentFilterError):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert logs == []
+
+
 async def test_a_dropping_processor_does_not_abort_the_fallback() -> None:
     # A review argued that `structlog.DropEvent` — which is a BaseException, so
     # `suppress(Exception)` does not catch it — would escape `_warn` and kill
