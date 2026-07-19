@@ -192,6 +192,33 @@ class RetryingProvider:
         ceiling = cap if base >= cap / growth else base * growth
         return ceiling * self._jitter()
 
+    async def _call_inner(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> Message:
+        """Delegate one attempt, translating a timeout the *provider* raised.
+
+        Both a provider's own timeout and our expired deadline arrive as
+        ``TimeoutError``, and conflating them produces a false report: an
+        instant ``TimeoutError("socket closed")`` was retried and then
+        re-labelled "exceeded its 60s deadline", with the provider's message
+        discarded. They are told apart by *where* they are caught — on expiry
+        `asyncio.timeout` cancels the inner call, so what surfaces here is a
+        ``CancelledError``, and the ``TimeoutError`` appears only at context
+        exit. Anything caught in here therefore came from the provider.
+
+        The translated error is still retryable: a transport timeout is
+        transient, so retrying is right. Only the claim about *whose* deadline
+        expired is corrected.
+        """
+        try:
+            return await self._inner.complete(messages, model=model)
+        except TimeoutError as exc:
+            msg = f"the provider raised a timeout: {exc}"
+            raise ModelTimeoutError(msg) from exc
+
     async def complete(
         self,
         messages: Sequence[Message],
@@ -219,11 +246,13 @@ class RetryingProvider:
             attempt += 1
             try:
                 async with asyncio.timeout(self._policy.timeout_seconds):
-                    return await self._inner.complete(messages, model=model)
+                    return await self._call_inner(messages, model=model)
             except TimeoutError as exc:
-                # Our deadline, not the provider's. Note this does not catch an
-                # outer cancellation: asyncio.timeout only converts the
-                # CancelledError it raised itself.
+                # *Our* deadline. Reaching this arm means `asyncio.timeout`
+                # converted the CancelledError it raised itself on expiry — a
+                # TimeoutError the provider raised directly never gets here,
+                # because _call_inner has already translated it. Nor does an
+                # outer cancellation, which asyncio.timeout leaves alone.
                 if attempt >= self._policy.max_attempts:
                     msg = (
                         f"model call exceeded its {self._policy.timeout_seconds:g}s "
