@@ -14,8 +14,14 @@ from pathlib import Path
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "project_status.py"
 
 
-def _make_repo(root: Path) -> None:
-    """Build a minimal checkout: two packages (one built, one stub), two ADRs."""
+_DEFAULT_ADRS = (
+    ("0001-first.md", "# 1. First decision\n\n- Status: Accepted\n"),
+    ("0003-third.md", "# 3. Third decision\n\n- Status: Proposed\n"),
+)
+
+
+def _make_repo(root: Path, adrs: tuple[tuple[str, str], ...] = _DEFAULT_ADRS) -> None:
+    """Build a minimal checkout: two packages (one built, one stub) and the given ADRs."""
     pkg = root / "src" / "ai_assistant"
     (pkg / "core").mkdir(parents=True)
     (pkg / "core" / "__init__.py").write_text("")
@@ -32,11 +38,11 @@ def _make_repo(root: Path) -> None:
     (pkg / "planning").mkdir()
     (pkg / "planning" / "__init__.py").write_text("")  # stub: only __init__
 
-    adr = root / "docs" / "adr"
-    adr.mkdir(parents=True)
-    (adr / "0001-first.md").write_text("# 1. First decision\n\n- Status: Accepted\n")
-    (adr / "0003-third.md").write_text("# 3. Third decision\n\n- Status: Proposed\n")
-    (adr / "template.md").write_text("# N. Template\n\n- Status: n/a\n")  # not numbered
+    adr_dir = root / "docs" / "adr"
+    adr_dir.mkdir(parents=True)
+    for name, body in adrs:
+        (adr_dir / name).write_text(body)
+    (adr_dir / "template.md").write_text("# N. Template\n\n- Status: n/a\n")  # not numbered
 
 
 def _run(root: Path) -> str:
@@ -85,3 +91,28 @@ def test_flags_gaps_in_the_adr_numbering(tmp_path: Path) -> None:
     # 0002 is absent between 0001 and 0003 — surfaced as a gap.
     assert "0002" in out
     assert "gap" in out.lower()
+
+
+def test_flags_a_leading_gap(tmp_path: Path) -> None:
+    # Only 0003 present: gap detection starts from 1, so 0001 and 0002 are flagged.
+    _make_repo(tmp_path, adrs=(("0003-third.md", "# 3. Third\n\n- Status: Accepted\n"),))
+    out = _run(tmp_path)
+
+    assert "0001" in out
+    assert "0002" in out
+    assert "gap" in out.lower()
+
+
+def test_flags_duplicate_adr_numbers(tmp_path: Path) -> None:
+    # Two files claiming 0002 — a shared-counter collision — must be surfaced.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            ("0002-a.md", "# 2. Alpha\n\n- Status: Accepted\n"),
+            ("0002-b.md", "# 2. Beta\n\n- Status: Proposed\n"),
+        ),
+    )
+    out = _run(tmp_path)
+
+    assert "duplicate" in out.lower()
+    assert "0002" in out
