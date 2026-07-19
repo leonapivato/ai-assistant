@@ -61,12 +61,16 @@ review-codex persona base="":
 # parallel work". Example: just claim-workspace memory/add-cache
 # Omit base for the default (origin/master); give one to stack this branch on
 # another, e.g. just claim-workspace models/part-2 models/part-1
-# The empty default here is just-level only: when base is genuinely omitted
-# the script gets a single argument, not an explicit-but-empty one — an
-# explicit "" is invalid (base must not be empty), so this recipe must not
-# forward it as if it were real input the caller typed.
-claim-workspace branch base="":
-    if [ -n "$2" ]; then scripts/claim-workspace.sh "$1" "$2"; else scripts/claim-workspace.sh "$1"; fi
+# `*base` (variadic), not `base=""` (a defaulted single param): a defaulted
+# param always has *some* value once just resolves it, so the recipe body can
+# never tell "caller wrote an explicit empty string" apart from "caller wrote
+# nothing at all" — both arrive as base="". Variadic captures exactly what
+# was actually typed, zero or more items, so "$@" forwards the real argument
+# count through to the script's own base_given/empty-base checks unchanged
+# (verified directly: `just claim-workspace area/b ""` reaches the script as
+# two arguments, the second genuinely empty, not collapsed to one).
+claim-workspace branch *base:
+    scripts/claim-workspace.sh "$@"
 
 # Claim several workspaces at once, concurrently (one worktree per branch).
 # Example: just claim-workspaces memory/add-cache tools/registry planning/goal
