@@ -19,8 +19,12 @@ shared ``ContextProvider`` conformance suite is part of the contract.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import CurrentContext, TimeOfDay
+
+if TYPE_CHECKING:
+    from ai_assistant.core.errors import ContextError
 
 # A weekday mid-morning, inside a 9-17 working window: the unremarkable default,
 # so a test that does not care about the situation does not have to describe one.
@@ -43,7 +47,7 @@ class FakeContextProvider:
     """
 
     def __init__(
-        self, context: CurrentContext | None = None, *, failure: Exception | None = None
+        self, context: CurrentContext | None = None, *, failure: ContextError | None = None
     ) -> None:
         """Create the fake provider.
 
@@ -51,9 +55,17 @@ class FakeContextProvider:
             context: The context every :meth:`assemble` returns. Defaults to a
                 weekday mid-morning inside working hours.
             failure: If given, :meth:`assemble` raises this instead of returning.
-                Lets a consumer exercise its context-step failure path — the
-                Protocol allows ``assemble`` to raise ``ContextError`` — against
-                the shared fake rather than a bespoke mock.
+                Lets a consumer exercise its context-step failure path against the
+                shared fake rather than a bespoke mock. Narrowed to
+                ``ContextError`` on purpose: that is the subsystem's failure
+                boundary (``AssemblingContextProvider`` degrades every other
+                exception per-source rather than propagating it), so allowing an
+                arbitrary type would let the canonical fake model a provider the
+                contract does not permit — and a consumer that correctly catches
+                ``ContextError`` would fail only under test. The annotation is the
+                whole enforcement: the gate type-checks tests too, so a wider
+                exception is rejected before it can run, and ``warn_unreachable``
+                proves an additional runtime guard would be dead code.
 
         Raises:
             ValueError: If both ``context`` and ``failure`` are given. The two
@@ -79,7 +91,7 @@ class FakeContextProvider:
         reach the fake's stored context and change what a later call sees.
 
         Raises:
-            Exception: The ``failure`` passed at construction, if any.
+            ContextError: The ``failure`` passed at construction, if any.
         """
         self.call_count += 1
         if self._failure is not None:
