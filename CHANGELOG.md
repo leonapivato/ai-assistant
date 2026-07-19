@@ -16,7 +16,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first) and a `redact_sensitive` processor masking values under known-sensitive
   keys. Matching is case-insensitive and substring-based, so `ANTHROPIC_API_KEY`
   and `chat_messages` are caught without enumerating every compound, and it
-  recurses into nested dicts and lists because structured logs nest. It fails
+  recurses through the `Mapping`/`Sequence`/`Set` protocols rather than the
+  concrete `dict`/`list` types — a `UserDict` or `MappingProxyType` is an
+  ordinary thing to log and sailed straight through an earlier `dict`-only
+  check with its secrets intact (found by the Codex adversarial reviewer).
+  Loggers are deliberately not cached, so a module-level
+  `structlog.get_logger(__name__)` bound at import time still picks up the
+  redaction processor once the CLI configures it; caching left such a logger
+  emitting through an unredacted chain forever (same reviewer). It fails
   closed in the only sense a deny-list can: an event that *cannot* be scrubbed is
   dropped rather than emitted unscrubbed. A short allow-list (`memory_kind`,
   `content_type`) keeps type and enum names readable, and each entry is pinned by

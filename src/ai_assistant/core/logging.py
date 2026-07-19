@@ -16,12 +16,13 @@ remains the convention: log identifiers, classes, and counts, never content. See
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence, Set
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, MutableMapping
+    from collections.abc import MutableMapping
 
     from ai_assistant.core.config import Settings
 
@@ -84,12 +85,22 @@ def _redact_value(value: object) -> object:
     per-route dicts, for instance — so a top-level-only pass would miss most of
     what it is meant to catch.
     """
-    if isinstance(value, dict):
+    # Match on the abstract Mapping/Sequence protocols, not the concrete dict and
+    # list/tuple types. A `UserDict`, a `MappingProxyType`, or any custom mapping
+    # is a perfectly ordinary thing to log and would sail through a `dict`-only
+    # check with its secrets intact — which it did, until an adversarial review
+    # pointed at exactly that.
+    if isinstance(value, Mapping):
         return {
             k: (REDACTED if _is_sensitive(str(k)) else _redact_value(v)) for k, v in value.items()
         }
-    if isinstance(value, (list, tuple)):
+    # str/bytes are Sequences and must not be walked character by character.
+    if isinstance(value, (str, bytes, bytearray)):
+        return value
+    if isinstance(value, (Sequence, Set)):
         rebuilt = [_redact_value(item) for item in value]
+        # Preserve tuple-ness, since a renderer may format it differently; every
+        # other sequence or set degrades to a list, which is fine for output.
         return tuple(rebuilt) if isinstance(value, tuple) else rebuilt
     return value
 
@@ -129,8 +140,9 @@ def redact_sensitive(
 def configure_logging(settings: Settings) -> None:
     """Configure structlog for the application.
 
-    Idempotent, so an adapter that calls it twice (or a test that reconfigures)
-    does not stack processors.
+    Safe to call more than once: each call replaces the configuration outright
+    rather than adding to it, and loggers are not cached, so a later call takes
+    effect even on a logger already in use.
 
     Args:
         settings: Loaded application settings; supplies the log level.
@@ -149,5 +161,13 @@ def configure_logging(settings: Settings) -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=True,
+        # Deliberately not cached. With caching on, a module-level
+        # ``structlog.get_logger(__name__)`` binds to whatever configuration
+        # existed at its first call and keeps it forever — so a later
+        # configure_logging() silently has no effect on it. That is a correctness
+        # problem for the log *level*, and a privacy problem for the redaction
+        # processor: a logger that ran before configuration would keep emitting
+        # through a chain with no redaction in it. Re-binding per call costs a
+        # dict lookup; a leaking logger costs rather more.
+        cache_logger_on_first_use=False,
     )

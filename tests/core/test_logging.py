@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections import ChainMap, UserDict, deque
+from types import MappingProxyType
+from typing import TYPE_CHECKING
+
 import pytest
 import structlog
 
@@ -11,6 +15,9 @@ from ai_assistant.core.logging import (
     configure_logging,
     redact_sensitive,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 def _redact(**event: object) -> dict[str, object]:
@@ -78,6 +85,44 @@ def test_nested_structures_are_scrubbed() -> None:
     assert redacted["request"] == {"headers": {"authorization": REDACTED}, "status": 500}
 
 
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        UserDict,
+        MappingProxyType,
+        lambda d: ChainMap(d, {}),
+    ],
+    ids=["UserDict", "MappingProxyType", "ChainMap"],
+)
+def test_non_dict_mappings_are_scrubbed(
+    wrap: Callable[[dict[str, str]], Mapping[str, str]],
+) -> None:
+    # Regression (adversarial review): matching on the concrete `dict` type let
+    # any other mapping through with its secrets intact. Custom and immutable
+    # mappings are ordinary things to log, so the check is on the Mapping
+    # protocol.
+    redacted = _redact(payload=wrap({"api_key": "sk-live-SECRET"}))
+
+    assert redacted["payload"] == {"api_key": REDACTED}
+
+
+def test_non_list_sequences_and_sets_are_scrubbed() -> None:
+    # Same defect, other half of the protocol split.
+    redacted = _redact(
+        rows=deque([{"token": "t"}]),
+        seen=frozenset({"harmless"}),
+    )
+
+    assert redacted["rows"] == [{"token": REDACTED}]
+    assert redacted["seen"] == ["harmless"]
+
+
+def test_strings_are_not_walked_character_by_character() -> None:
+    # str is a Sequence; recursing into it would shred every message.
+    assert _redact(route="primary")["route"] == "primary"
+    assert _redact(payload=b"bytes")["payload"] == b"bytes"
+
+
 def test_allow_listed_keys_survive() -> None:
     # Each allow-list entry is a hole in the net, so the exemptions are pinned:
     # both carry a type or enum name, never user content.
@@ -110,13 +155,51 @@ def test_the_processor_is_installed_by_configure_logging() -> None:
     assert redact_sensitive in processors
 
 
-def test_configure_logging_is_idempotent() -> None:
+def test_configure_logging_does_not_stack_processors() -> None:
     configure_logging(Settings())
     first = len(structlog.get_config()["processors"])
     configure_logging(Settings())
 
     # An adapter calling it twice must not stack processors.
     assert len(structlog.get_config()["processors"]) == first
+
+
+def test_reconfiguring_affects_a_logger_already_in_use(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Regression (adversarial review): with cache_logger_on_first_use=True a
+    # logger bound to the first configuration and kept it forever, so a later
+    # configure_logging() silently did nothing to it. Comparing processor-list
+    # lengths — as the previous "idempotent" test did — cannot see this.
+    #
+    # It is a privacy bug, not just a tidiness one: a module-level logger that
+    # ran before configure_logging() would keep emitting through a chain with no
+    # redaction processor in it.
+    configure_logging(Settings(log_level="INFO"))
+    log = structlog.get_logger("reconfig-demo")
+    log.info("bound at INFO")
+    capsys.readouterr()
+
+    configure_logging(Settings(log_level="ERROR"))
+    log.info("must not be emitted")
+
+    assert capsys.readouterr().out == ""
+
+
+def test_a_logger_created_before_configuration_still_gets_redacted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The realistic shape of the bug above: modules do
+    # `_log = structlog.get_logger(__name__)` at import time, long before the
+    # CLI callback configures anything.
+    log = structlog.get_logger("early-demo")
+
+    configure_logging(Settings())
+    log.warning("late configuration", api_key="sk-live-SECRET")
+
+    out = capsys.readouterr().out
+    assert "sk-live-SECRET" not in out
+    assert REDACTED in out
 
 
 def test_redaction_applies_on_the_real_emission_path(capsys: pytest.CaptureFixture[str]) -> None:

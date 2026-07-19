@@ -9,7 +9,9 @@ from datetime import UTC, datetime
 import pytest
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ContextError
+from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.protocols import ContextProvider
 from ai_assistant.core.types import CurrentContext, TimeOfDay
 
@@ -40,6 +42,22 @@ class _FailingSource:
 
     async def contribute(self) -> Mapping[str, object]:
         msg = "source down"
+        raise RuntimeError(msg)
+
+
+class _LeakySource:
+    """A source whose failure message quotes the personal data it was fetching.
+
+    The realistic shape of the ADR-0004 §5 hazard: a calendar or email source
+    raising ``RuntimeError(f"could not parse {record}")``.
+    """
+
+    @property
+    def name(self) -> str:
+        return "records"
+
+    async def contribute(self) -> Mapping[str, object]:
+        msg = "could not parse record: PATIENT SSN 123-45-6789"
         raise RuntimeError(msg)
 
 
@@ -137,6 +155,28 @@ async def test_failing_source_is_skipped_not_fatal() -> None:
     ctx = await provider.assemble()
 
     assert ctx.time_of_day is TimeOfDay.AFTERNOON  # assembled despite the failure
+
+
+async def test_degradation_log_carries_the_error_class_not_its_message(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # ADR-0004 §5: a context source wraps calendars, tasks and email, so its
+    # exception message can quote the very Tier 1 data it was fetching. The
+    # degradation log records the failure's class only.
+    #
+    # Asserted through the configured processor chain and rendered output, not
+    # structlog.testing.capture_logs — that fixture replaces the processor chain,
+    # so a test written against it would pass while production leaked. Note the
+    # key-based redaction net cannot save us here: `error` looks innocuous, which
+    # is exactly why the call site has to get this right.
+    configure_logging(Settings())
+    provider = AssemblingContextProvider([_clock(), _LeakySource()])
+
+    await provider.assemble()
+
+    out = capsys.readouterr().out
+    assert "PATIENT SSN 123-45-6789" not in out
+    assert "RuntimeError" in out
 
 
 async def test_degradation_survives_a_source_whose_name_also_raises() -> None:
