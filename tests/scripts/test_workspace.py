@@ -164,6 +164,44 @@ def test_existing_branch_is_rejected(tmp_path: Path) -> None:
     assert "already exists" in result.stderr
 
 
+def test_claim_rejects_a_branch_that_is_a_prefix_of_an_existing_one(tmp_path: Path) -> None:
+    """git's ref storage forbids a branch being both a leaf and a path-prefix.
+
+    Claiming 'area/task' when 'area/task/subtask' already exists can never
+    work, with or without this tooling — but the failure should name the
+    conflicting branch clearly rather than surface as git's generic
+    ref-locking error (PR #17 review).
+    """
+    repo = _init_repo(tmp_path)
+    _git(repo, "branch", "area/task/subtask")
+
+    result = _run(_CLAIM, repo, "area/task")
+
+    assert result.returncode == 2
+    assert "area/task/subtask" in result.stderr
+    assert "conflicts" in result.stderr
+
+
+def test_claim_rejects_a_branch_for_which_an_existing_one_is_a_prefix(tmp_path: Path) -> None:
+    """The reverse direction: 'area/task/subtask' when 'area/task' exists.
+
+    Confirmed this cannot cause any destructive side effect even without the
+    clearer pre-check message — `git worktree add -b` refuses this on its own
+    and create_worktree's `created` gate (an earlier PR #17 review fix) means
+    nothing gets touched — but this test also confirms the first claim's
+    worktree survives fully intact.
+    """
+    repo = _init_repo(tmp_path)
+    ws_a = Path(_workspace(_run(_CLAIM, repo, "area/task")))
+
+    result = _run(_CLAIM, repo, "area/task/subtask")
+
+    assert result.returncode == 2
+    assert "area/task" in result.stderr
+    assert "conflicts" in result.stderr
+    assert ws_a.is_dir()  # the existing claim is untouched
+
+
 def test_claim_from_worktree_same_branch_is_idempotent(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     ws_a = _workspace(_run(_CLAIM, repo, "area/a"))
