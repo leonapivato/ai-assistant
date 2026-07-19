@@ -138,4 +138,36 @@ class PermissionDeniedError(AssistantError):
 
 
 class PlanningError(AssistantError):
-    """A request could not be turned into an executable plan."""
+    """A request could not be turned into an executable plan.
+
+    Also the base for the plan-execution faults below, so a caller can catch the
+    whole planning family with one handler.
+    """
+
+
+class IllegalTransitionError(PlanningError):
+    """A step transition is not legal from the step's current status (ADR-0014 §4).
+
+    Raised by the execution tracker rather than tolerated, because the
+    transition graph is what keeps execution state deterministic (VISION §7).
+    """
+
+
+class StaleExecutionError(PlanningError):
+    """A write lost the optimistic-concurrency race (ADR-0014 §5).
+
+    The stored execution has advanced since the caller read it, so the write was
+    computed against a state that no longer holds. The caller should re-read and
+    retry. This is the failure that stops two workers from both claiming a step
+    and running a non-idempotent tool twice.
+    """
+
+
+class ActiveExecutionError(PlanningError):
+    """A destructive store operation was refused because work is in flight.
+
+    Erasing an execution while a step is ``RUNNING`` would destroy the record
+    the executor is about to commit against, leaving a side effect in the world
+    with nothing recording it. The caller cancels the execution first, then
+    retries (ADR-0014 §5).
+    """
