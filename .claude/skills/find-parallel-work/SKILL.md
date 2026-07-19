@@ -25,19 +25,32 @@ updates the remote-tracking ref, not what's on disk. So never read them from
 fetched `origin/master` on its own:
 
 1. `git fetch origin`.
-2. Materialize it at a freshly generated, unique path — `tmp_path="$(mktemp
-   -u)"` then `git worktree add --detach "$tmp_path" origin/master` — never a
-   fixed literal path, so two runs of this skill (or a rerun after a failed
-   one) can't collide on the same worktree.
+2. Materialize it at a freshly, atomically reserved path — `tmp_dir="$(mktemp
+   -d)"` actually creates and owns a directory, unlike `mktemp -u`, which
+   only prints an unused name with no guarantee it stays unused; then `git
+   worktree add --detach "$tmp_dir/survey" origin/master` (a non-existent
+   child path `git worktree add` can create, inside the directory `mktemp -d`
+   already owns) — never a fixed literal path, so two runs of this skill (or
+   a rerun after a failed one) can't collide.
 3. Note the commit it resolved to (`git rev-parse origin/master`) — step 4
    needs it later to tell whether anything has changed since this survey.
-   Remove the worktree (`git worktree remove "$tmp_path"`) if anything from
-   here through step 4 fails partway — don't leave it registered.
-4. From `<tmp-path>`, read these, in this order, and trust them over any
+   Remove `$tmp_dir` (`rm -rf "$tmp_dir"`, after `git worktree remove
+   "$tmp_dir/survey"` if it was created) if anything from here through step 4
+   fails partway — don't leave it registered.
+4. From `$tmp_dir/survey`, read these, in this order, and trust them over any
    stale assumption:
-   - `just status` — the derived picture: module counts per package, the
-     current `core/protocols.py` Protocol inventory, and ADR states. This is
-     the canonical source for "what's actually built" — never guess it.
+   - The derived picture — module counts per package, the current
+     `core/protocols.py` Protocol inventory, and ADR states — via
+     `python3 scripts/project_status.py --root "$tmp_dir/survey"`, run
+     directly rather than through `just status`/`uv run`: the script's own
+     docstring documents it as stdlib-only and runnable bare, and its
+     `--root` flag exists precisely so a caller doesn't have to be standing
+     inside the checkout it's inspecting. Skipping `uv run` here also means
+     skipping the `.venv` bootstrap that command would otherwise trigger on
+     a brand-new worktree — wasted disk and time for a status read, not a
+     safety issue (`git worktree remove` isn't blocked by an ignored
+     directory like `.venv` either way, verified directly). This is the
+     canonical source for "what's actually built" — never guess it.
    - `WORKING.md` — the *human-declared* picture: lane ownership and ADR
      numbers currently in flight. Any subsystem with a named owner, or any
      ADR number claimed against it that isn't yet `Accepted`, is off the
@@ -48,7 +61,8 @@ fetched `origin/master` on its own:
    - `VISION.md` — pull the specific principle/section that justifies each
      lane, so the issue reads as "why this, now" rather than a bare task
      list.
-5. Remove the worktree (`git worktree remove <tmp-path>`) once the survey is
+5. Remove the worktree (`git worktree remove "$tmp_dir/survey"` then `rm -rf
+   "$tmp_dir"`) once the survey is
    read — steps 2-4 don't need it kept around.
 
 ## 2. Compute candidates
