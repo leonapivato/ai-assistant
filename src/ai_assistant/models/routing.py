@@ -163,10 +163,18 @@ class RoutingProvider:
         #   and concurrent routers sharing it leak each other's route labels.
         #
         # Logging keeps the diagnostics richer *and* router-owned, and leaves the
-        # caller a correctly-typed failure with its own message and traceback.
+        # caller a correctly-typed failure to inspect in full.
+        #
+        # Only the *class* of each failure is logged, never `str(exc)`. Provider
+        # error messages routinely quote the offending request, so the message is
+        # attacker- and vendor-controlled text that can carry a prompt — Tier 1
+        # data that ADR-0004 §5 says must never reach a log. The class name is
+        # vendor-independent, sufficient to diagnose which route failed and why,
+        # and cannot carry content by construction. The full message still
+        # travels to the caller on the raised exception.
         _log.warning(
             "all routes failed",
             routes=len(self._routes),
-            failures=[{"route": label, "error": str(exc)} for label, exc in failures],
+            failures=[{"route": label, "error": type(exc).__name__} for label, exc in failures],
         )
         raise last

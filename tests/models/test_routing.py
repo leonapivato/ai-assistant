@@ -7,6 +7,7 @@ one routing rule.
 
 from __future__ import annotations
 
+import traceback
 from typing import TYPE_CHECKING
 
 import pytest
@@ -171,9 +172,27 @@ async def test_exhausting_every_route_reports_all_of_them() -> None:
     [event] = [e for e in logs if e["event"] == "all routes failed"]
     assert event["routes"] == 2
     assert event["failures"] == [
-        {"route": "primary", "error": "503"},
-        {"route": "secondary", "error": "429"},
+        {"route": "primary", "error": "ModelUnavailableError"},
+        {"route": "secondary", "error": "ModelRateLimitError"},
     ]
+
+
+async def test_exception_messages_never_reach_the_log() -> None:
+    # ADR-0004 §5: logs are Tier 2 and must never carry Tier 0/1 data. Provider
+    # errors routinely quote the offending request, so str(exc) is vendor- and
+    # attacker-controlled text that can carry the prompt. Only the failure's
+    # class is logged — fail-closed by construction rather than by redaction,
+    # which matters because no redaction processor is configured yet.
+    sensitive = "PATIENT SSN 123-45-6789"
+    routes = [Route(AlwaysFailsProvider(ModelUnavailableError(sensitive)), label="primary")]
+
+    with capture_logs() as logs, pytest.raises(ModelUnavailableError):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert sensitive not in repr(logs)
+    # ...while the caller still gets the full message on the exception.
+    [event] = [e for e in logs if e["event"] == "all routes failed"]
+    assert event["failures"] == [{"route": "primary", "error": "ModelUnavailableError"}]
 
 
 async def test_exhaustion_reraises_the_last_failure_untouched() -> None:
@@ -189,6 +208,10 @@ async def test_exhaustion_reraises_the_last_failure_untouched() -> None:
     # Classification must survive routing: a caller that backs off on a rate
     # limit still sees one, rather than a flattened generic failure. The very
     # object comes back, with its own message and nothing bolted on.
+    #
+    # Note this does not claim the traceback is untouched — propagating through
+    # the router appends frames to it, as it would through any intermediate
+    # call. What is guaranteed is the identity, type, message and __cause__.
     assert caught.value is last
     assert str(caught.value) == "429"
     assert getattr(caught.value, "__notes__", []) == []
@@ -237,6 +260,27 @@ async def test_reusing_one_exception_object_does_not_accumulate_state() -> None:
     # idempotent no matter how many times it is re-raised.
     assert getattr(shared, "__notes__", []) == []
     assert str(shared) == "503"
+
+    # Its traceback *does* grow across calls, but that is Python's behaviour for
+    # re-raising one cached exception instance — a plain function re-raising it
+    # accumulates frames identically — not something the router adds or can
+    # prevent. Caching an exception instance is the anti-pattern; this asserts
+    # the router does not make it materially worse.
+    baseline = ModelUnavailableError("503")
+
+    def reraise_baseline() -> None:
+        try:
+            raise baseline
+        except ModelUnavailableError:
+            raise
+
+    for _ in range(3):
+        with pytest.raises(ModelUnavailableError):
+            reraise_baseline()
+
+    assert len(traceback.extract_tb(shared.__traceback__)) <= 2 * len(
+        traceback.extract_tb(baseline.__traceback__)
+    )
 
 
 async def test_a_route_model_override_is_passed_to_its_provider() -> None:
