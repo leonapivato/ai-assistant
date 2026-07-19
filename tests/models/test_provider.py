@@ -7,6 +7,7 @@ tests are deterministic and never touch the network.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -104,6 +105,28 @@ async def test_empty_messages_raise() -> None:
 
     with pytest.raises(ModelError, match="at least one message"):
         await provider.complete([])
+
+
+async def test_model_override_is_forwarded_to_the_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-None ``"provider:model"`` override cannot be resolved offline, so the
+    # shared contract only checks the keyword is accepted. Here we prove the
+    # override is actually threaded to the underlying agent by capturing what
+    # ``run`` receives — closing the gap the contract cannot cover universally.
+    provider = PydanticAIProvider(default_model=TestModel())
+    captured: dict[str, object] = {}
+
+    async def fake_run(**kwargs: object) -> SimpleNamespace:
+        captured["model"] = kwargs.get("model")
+        return SimpleNamespace(output="routed")
+
+    monkeypatch.setattr(provider._agent, "run", fake_run)  # pyright: ignore[reportPrivateUsage]
+
+    reply = await provider.complete([Message(role=Role.USER, content="hi")], model="prov:model")
+
+    assert reply.content == "routed"
+    assert captured["model"] == "prov:model"
 
 
 async def test_provider_failure_is_wrapped() -> None:

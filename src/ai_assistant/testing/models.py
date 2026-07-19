@@ -22,6 +22,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import Message, Role
 
 if TYPE_CHECKING:
@@ -98,14 +99,23 @@ class FakeModelProvider:
         """Record the call and return the configured assistant reply.
 
         Args:
-            messages: Conversation history, oldest first.
+            messages: Conversation history, oldest first. Must be non-empty.
             model: Optional ``"provider:model"`` override; recorded but otherwise
                 ignored (the fake has no real model to switch).
 
         Returns:
             The assistant's reply as a
             :class:`~ai_assistant.core.types.Message`.
+
+        Raises:
+            ModelError: If ``messages`` is empty — matching ``PydanticAIProvider``,
+                so code exercised with this fake cannot pass on an empty
+                conversation that the real provider would reject.
         """
+        if not messages:
+            msg = "complete() requires at least one message"
+            raise ModelError(msg)
+
         snapshot = tuple(m.model_copy(deep=True) for m in messages)
         self.calls.append(ModelCall(messages=snapshot, model=model))
         reply = self._reply
