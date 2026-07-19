@@ -117,14 +117,15 @@ main_is_free() {
 }
 
 require_new_branch
-if main_is_free && mkdir "$lock" 2>/dev/null; then
-    # Install the rollback trap *immediately* after acquiring the lock (and on
-    # INT/TERM), before writing metadata or switching branches — so an interrupt
-    # in that window can never leave a lock behind.
+# Acquire the lock atomically *with* its owner metadata: `noclobber` makes `>`
+# an exclusive create (fails if the file exists), and the branch name is written
+# in that same step. So the lock never exists in a metadata-less state that a
+# concurrent release could mistake for orphaned. Rollback trap installed right
+# after, on INT/TERM too.
+if main_is_free && (set -o noclobber; printf '%s\n' "$branch" >"$lock") 2>/dev/null; then
     trap 'git -C "$main_root" checkout -q master 2>/dev/null || true
           git -C "$main_root" branch -D "$branch" 2>/dev/null || true
-          rm -rf "$lock"' ERR INT TERM
-    printf '%s\n' "$branch" >"${lock}/branch"
+          rm -f "$lock"' ERR INT TERM
     git -C "$main_root" checkout -q -b "$branch" "$base"
     bootstrap "$main_root"
     trap - ERR INT TERM

@@ -9,6 +9,12 @@
 #     similar branch names cannot remove each other's worktree). Refuses on a
 #     dirty worktree unless FORCE=1.
 #
+# Recovery: the lock is a file whose contents are the owning branch, so a lock
+# left by a hard-killed claim is cleared by releasing that branch —
+# `release-workspace "$(cat .git/main-workspace.lock)"` (FORCE=1 if main is
+# dirty). Release never auto-reaps a lock it cannot match, so it can never delete
+# a concurrent claimant's lock.
+#
 # Usage: scripts/release-workspace.sh <area>/<slug>
 #   FORCE=1  discard uncommitted changes (any other value, or unset, does not).
 set -euo pipefail
@@ -31,7 +37,7 @@ wt_path="$(git worktree list --porcelain | awk -v ref="refs/heads/${branch}" '
     /^worktree /{path = substr($0, 10)}
     /^branch /{if ($2 == ref) print path}')"
 
-if [[ -f "${lock}/branch" && "$(cat "${lock}/branch")" == "$branch" ]]; then
+if [[ -f "$lock" && "$(cat "$lock")" == "$branch" ]]; then
     if [[ -n "$(git -C "$main_root" status --porcelain)" ]]; then
         if (( force )); then
             # Deliberately discard tracked changes and untracked files — including
@@ -52,7 +58,7 @@ if [[ -f "${lock}/branch" && "$(cat "${lock}/branch")" == "$branch" ]]; then
         echo "Main checkout is still dirty after cleanup; NOT releasing the lock — clean it by hand." >&2
         exit 1
     fi
-    rm -rf "$lock"
+    rm -f "$lock"
     echo "Released the main-checkout claim for '${branch}'; main is back on master." >&2
 elif [[ -n "$wt_path" ]]; then
     if (( force )); then
@@ -61,12 +67,13 @@ elif [[ -n "$wt_path" ]]; then
         git -C "$main_root" worktree remove "$wt_path"
     fi
     echo "Removed the worktree for '${branch}' (${wt_path})." >&2
-elif [[ -d "$lock" && ! -f "${lock}/branch" ]]; then
-    # Stale-lock recovery: a claim hard-killed (SIGKILL) between acquiring the
-    # lock and writing its metadata leaves an owner-less lock that would wedge the
-    # main checkout for every future claim. It has no owner, so clear it.
-    rm -rf "$lock"
-    echo "Cleared an orphaned main-workspace lock (no owner metadata)." >&2
 else
-    echo "No workspace found for '${branch}' (already released?)." >&2
+    # No auto-reap: releasing a branch that owns no workspace never touches the
+    # lock, so it cannot delete a concurrent claimant's lock. If a lock is held
+    # by a dead claim, release its recorded branch (see the header).
+    if [[ -f "$lock" ]]; then
+        echo "No workspace for '${branch}'. Main-checkout lock is held by '$(cat "$lock")'." >&2
+    else
+        echo "No workspace found for '${branch}' (already released?)." >&2
+    fi
 fi
