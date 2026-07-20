@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import ContextError, MemoryStoreError, PlanningError
+from ai_assistant.core.errors import (
+    AssistantError,
+    ContextError,
+    MemoryStoreError,
+    PlanningError,
+)
 from ai_assistant.core.types import (
     CurrentContext,
     FeedbackEvent,
@@ -49,7 +54,7 @@ if TYPE_CHECKING:
         MemoryStore,
         Planner,
     )
-    from ai_assistant.core.types import ActionPlan, Goal, MemoryRecord
+    from ai_assistant.core.types import ActionPlan, Goal, MemoryDecision, MemoryRecord
 
 _NOW = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
 
@@ -556,6 +561,79 @@ async def test_learn_resolves_a_repeated_record_id_last_write_wins() -> None:
     assert stored.content == "prefers very short replies"
 
 
+async def test_learn_propagates_a_processor_failure_without_writing() -> None:
+    """Nothing is proposed, so nothing may be written — and the failure surfaces.
+
+    ``learn`` runs the processor before any other stage, so a failure there must
+    leave the store untouched rather than being swallowed into an empty result
+    indistinguishable from "the user said nothing worth learning".
+    """
+
+    class _FailingProcessor:
+        """A ``FeedbackProcessor`` that cannot derive proposals."""
+
+        async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
+            """Fail the way a processor with a broken model fails."""
+            msg = "fake: cannot derive proposals"
+            raise AssistantError(msg)
+
+    memory = FakeMemoryStore(now=_clock)
+    loop = _loop(memory=memory, feedback=_FailingProcessor())
+
+    with pytest.raises(AssistantError, match="cannot derive proposals"):
+        await loop.learn(_preference_feedback())
+
+    assert await memory.export() == []
+
+
+async def test_learn_propagates_a_policy_failure_without_writing() -> None:
+    """A proposal nobody ruled on is not one to write.
+
+    The policy is the gate on the write path (VISION §7), so a policy that
+    raises must stop the write rather than default the proposal into memory.
+    """
+
+    class _FailingPolicy:
+        """A ``MemoryPolicy`` that cannot rule."""
+
+        async def decide(
+            self,
+            proposal: MemoryUpdateProposal,
+            *,
+            conflicts: Sequence[MemoryRecord],
+        ) -> MemoryDecision:
+            """Fail the way a policy handed an unrepresentable proposal fails."""
+            msg = "fake: cannot rule on this"
+            raise AssistantError(msg)
+
+    memory = FakeMemoryStore(now=_clock)
+    loop = _loop(memory=memory, policy=_FailingPolicy())
+
+    with pytest.raises(AssistantError, match="cannot rule on this"):
+        await loop.learn(_preference_feedback())
+
+    assert await memory.export() == []
+
+
+async def test_learn_reports_an_unrepresentable_temporary_ttl_without_writing() -> None:
+    """A ttl past the representable date range fails loudly, not silently.
+
+    ``_expiry`` converts the ``OverflowError`` into a ``MemoryStoreError``, so
+    the caller sees a memory failure rather than an arithmetic one leaking from
+    the loop's internals — and no record is stored with a bogus expiry.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    loop = _loop(
+        memory=memory,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY, ttl=timedelta.max),
+    )
+
+    with pytest.raises(MemoryStoreError, match="overflows the representable date range"):
+        await loop.learn(_preference_feedback())
+
+    assert await memory.export() == []
+
+
 async def test_learn_leaves_earlier_proposals_applied_when_a_later_write_fails() -> None:
     """The partial application ADR-0022 §4 documents, pinned rather than assumed."""
 
@@ -663,6 +741,30 @@ def test_tuning_refuses_a_limit_that_is_not_an_integer(limit: object) -> None:
             planner=FakePlanner(now=_clock),
             feedback=FakeFeedbackProcessor(),
             retrieval_limit=limit,  # type: ignore[arg-type]  # deliberately invalid tuning
+            now=_clock,
+        )
+
+
+@pytest.mark.parametrize("threshold", [True, False])
+def test_tuning_refuses_a_boolean_threshold(threshold: bool) -> None:
+    """A flag is not a threshold, just as it is not a count (#111).
+
+    ``bool`` is an ``int`` subclass, so both values clear the finite-and-in-range
+    test and are read silently as ``1.0`` and ``0.0``. ``True`` is the one that
+    bites — it restricts conflicts to perfect-score matches while looking like
+    deliberate tuning.
+    """
+    with pytest.raises(TypeError, match="must be a real number"):
+        LearningLoop(
+            context=FakeContextProvider(),
+            memory=FakeMemoryStore(now=_clock),
+            policy=FakeMemoryPolicy(),
+            planner=FakePlanner(now=_clock),
+            feedback=FakeFeedbackProcessor(),
+            # No `type: ignore` needed, and that is the point: `bool` is a
+            # `float` to the type checker, so nothing but this runtime check
+            # stands between a flag and the threshold it would be read as.
+            conflict_threshold=threshold,
             now=_clock,
         )
 
