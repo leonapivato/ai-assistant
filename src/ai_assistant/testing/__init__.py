@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.embeddings import FakeEmbedder
+from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
@@ -22,6 +23,7 @@ from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 __all__ = [
     "FakeContextProvider",
     "FakeEmbedder",
+    "FakeFeedbackProcessor",
     "FakeMemoryPolicy",
     "FakeMemoryStore",
     "FakeModelProvider",
