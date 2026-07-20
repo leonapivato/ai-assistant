@@ -1,6 +1,6 @@
 # 16. `ToolDefinition`: declared risk metadata and a `ToolRegistry` to reason over
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-19
 - Amends: ADR-0014 §4 (the "`core/types.py` is data-only" convention; §2 below)
 
