@@ -112,16 +112,22 @@ rank existing vectors against queries from new weights — silently, the corrupt
 §4 exists to prevent. Folding the revision in closes that: an implementation
 change within the existing `Embedder.model_id` contract, not a Protocol change.
 
-For the vendored default this is a *complete* key: §3 exact-pins the whole
-behaviour-affecting stack, so no input to the embedding space can vary under a
-fixed name + revision. On `main`, by contrast, `model_id` is the bare name and
-captures no runtime-stack version, so a vector-altering dependency change is
-undetectable — a pre-existing ADR-0006 §4 gap (**issue #136**). This ADR closes
-it for the default by *pinning* rather than *detecting*; a general behavioural
-fingerprint, and the non-default fetch, stay #136. §4 needs no amendment — it
-gives a *detection* mechanism, not a perfect fingerprint, and on `main` detects
-only name and dimension — so this is a strict improvement, and gating it on
-#136's general solution inverts scope.
+The revision alone is still not a complete key, because §3 makes the
+behaviour-affecting dependency stack a *release-bound* variable: a persisted
+store that survives an upgrade bumping that stack under an unchanged weights
+revision would keep the same `model_id` while its space moved — silent mixing
+across the upgrade. So `model_id` also incorporates an identity over the audited
+behaviour-affecting versions (§3), advancing whenever any of them does, across
+installs *and* across a store's upgrade. Over-triggering a re-embed on a no-op
+patch bump is the safe direction; under-triggering is the corruption.
+
+What this still cannot self-certify — that the audit names *every*
+behaviour-affecting package (an earlier draft of §3 missed NumPy) — is the
+residual, and it is **issue #136**: a behavioural fingerprint measures outputs
+instead of enumerating inputs, and generalises to non-fastembed embedders. §4
+needs no amendment; on `main` `model_id` is the bare name and detects only name
+and dimension, so this is a strict improvement, and gating it on #136's general
+solution inverts scope.
 
 ### 3. The behaviour-affecting stack is exact-pinned, not ranged
 
@@ -131,21 +137,19 @@ contract), and fastembed's source shows a *preprocessing* change with no outward
 signal: 0.6 moved several models from CLS to mean pooling, an embedding-space
 change from a version bump alone, identical weights and digest.
 
-Pinning fastembed alone is still not enough: it ranges `tokenizers` and
-`onnxruntime`, so a *published wheel* install resolves them fresh and two installs
-can produce different vectors under the same weights and `model_id` —
-preprocessing (`tokenizers`) and inference kernels (`onnxruntime`) both affect the
-output. So the *published* specifiers exact-pin the whole behaviour-affecting
-stack — `fastembed`, `tokenizers`, `onnxruntime` — to the versions the lockfile
-already fixes for `uv sync`. The vendored default's embedding space is then fixed
-by construction: nothing in it can vary within a release, which is what makes
-`model_id` = name + revision (§2) truthful for that path. A bump to any of them
-is a reviewed, release-bound change.
+Pinning fastembed alone is still not enough: it ranges its own behaviour-affecting
+dependencies, so a *published wheel* install resolves them fresh and two installs
+can produce different vectors under the same weights and `model_id`. The audited
+set is `fastembed`, `tokenizers` (preprocessing), `onnxruntime` (inference
+kernels) and `numpy` (fastembed normalises the default model's output with
+`np.linalg.norm`) — the *published* specifiers exact-pin each to the version the
+lockfile already fixes for `uv sync`, so nothing in the space floats within a
+release, and a bump to any is a reviewed, release-bound change. This same audited
+set feeds §2's `model_id` identity, so a release that bumps it re-embeds.
 
-This is not the "pile of version strings" §2 rejects for `model_id`: that was
-about *detecting* arbitrary drift, where a version number over- and
-under-triggers; exact pins *prevent* drift for one product. Detecting it on
-unpinned paths — the non-default fetch, a general fingerprint — stays #136.
+Pinning *prevents* drift within a release; the `model_id` identity *detects* it
+across one. The residual — proving the audit is complete, and a fingerprint
+robust to version-vs-behaviour mismatch — is #136.
 
 ### 4. The artifact is not committed to git
 
