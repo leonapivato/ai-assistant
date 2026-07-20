@@ -46,10 +46,10 @@ CI is the backstop — but run the gate locally before you push. A red PR is a
 wasted round-trip, not a first line of defence.
 
 **Run the whole suite, always.** Selecting "the tests that matter for this
-change" would save a few seconds and introduce a judgment call whose failure
-mode — a cross-subsystem regression `lint-imports` cannot see — surfaces in CI
-after you have moved on. Revisit if `pytest` ever crosses a couple of minutes;
-until then the saving is not worth the class of bug it lets through.
+change" trades a shorter wait for a judgment call whose failure mode — a
+cross-subsystem regression `lint-imports` cannot see — surfaces in CI after you
+have moved on. Revisit if `pytest` ever crosses a couple of minutes; until then
+the saving is not worth the class of bug it lets through.
 
 ## Review (pre-merge)
 
