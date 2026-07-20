@@ -304,11 +304,19 @@ undesignated, and permitted no egress at all:
   Tier 1 satisfies its declaration whether it sends one selected memory record
   or the entire memory database. Tier validation, destination authorisation and
   the audit fields above would all pass in both cases. So the invocation ADR
-  must additionally bind **what** is sent: the concrete payload — or a
-  deterministic description of it — must be fixed and approved *before*
-  transmission and represented in the audit record, so that "the minimum
-  necessary" (ADR-0004 §7) is a checkable claim about a specific call rather
-  than a principle nothing tests. Issue #57.
+  must additionally bind **what** is sent: the payload must be fixed and
+  approved *before* transmission, and the audit record must describe it
+  **inspectably** — which records or fields were selected, how many, and at
+  what tiers. Binding alone is not enough. A SHA-256 of the request body is
+  perfectly deterministic and pins the payload exactly, while leaving an
+  auditor unable to tell one memory record from the whole database — which is
+  the only question the record exists to answer. "The minimum necessary"
+  (ADR-0004 §7) has to be checkable against the record, not merely fixed by it.
+  Issue #57.
+
+  That description is itself Tier 1 and belongs in the audit trail, which
+  ADR-0004 §7 already makes a Tier 1 store — so this is a storage obligation,
+  not a reason to record less.
 
   This ADR states the requirement and deliberately does not design the
   artifact: what that payload description is, and how a gate binds to it,
