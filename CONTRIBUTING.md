@@ -419,6 +419,10 @@ from — an argument, or a measurement.
 point-in-time record, so "at the time of writing, X" is exactly what belongs
 there and stays correct as history. Do not scrub snapshots out of `docs/adr/`.
 
+The date is what buys the exception, so an amendment appended later carries its
+own — `Amendment (YYYY-MM-DD):` — rather than inheriting the ADR's. A claim
+added years after the header date is undated in every way that matters.
+
 This is enforced the way style is — by reviewers, reading the diff. There is
 deliberately no linter for it: a check hunting claims in prose could not tell a
 rule from an observation, and the failure mode here is slow and cosmetic rather
