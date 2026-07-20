@@ -386,8 +386,15 @@ undesignated, and permitted no egress at all:
   perfectly deterministic and pins the payload exactly, while leaving an
   auditor unable to tell one memory record from the whole database — which is
   the only question the record exists to answer. "The minimum necessary"
-  (ADR-0004 §7) has to be checkable against the record, not merely fixed by it.
-  Issue #57.
+  has to be checkable against the record, not merely fixed by it. Issue #57.
+
+  **This is a rule this ADR states, not ADR-0004 §7 restated.** §7's
+  minimisation clause says to "send the minimum necessary context **to the
+  model provider**" — it is written about that boundary and this ADR does not
+  supersede it. Rather than quietly reading §7 as though it already covered
+  tools, the obligation above is imposed here, on `tools/`, by this ADR. The
+  effect is the same and the provenance is honest; widening someone else's
+  clause by assertion is what ADR-0001 forbids.
 
   That description is itself Tier 1 and belongs in the audit trail, which
   ADR-0004 §7 already makes a Tier 1 store — so this is a storage obligation,
@@ -409,6 +416,45 @@ undesignated, and permitted no egress at all:
   This ADR states the requirement and deliberately does not design the
   artifact: what that payload description is, and how a gate binds to it,
   depends on the invocation contract's shape and is that ADR's to settle.
+
+- the binding rules — authorisation must be bound to an **immutable
+  invocation envelope** carrying the connected account, the canonical
+  destination, the approved payload description and the authorisation
+  decision, and execution must consume exactly that envelope. Without it the
+  payload is bound (above) while the destination is not: a call can resolve and
+  authorise `alice@example.com`, then have a mutable argument re-resolved to
+  `bob@example.com` before the send, with the audit still reading Alice. This
+  is the same substitution ADR-0016 §5 refuses for tool ids, applied to the
+  recipient.
+- the canonicalisation rules — how a destination is reduced to the form a
+  standing policy is matched against, **per protocol**. This is
+  security-critical and currently unspecified: lowercasing an address whose
+  local part the protocol treats as case-sensitive lets a grant for one address
+  authorise a different one, and provider-specific aliasing produces the
+  inverse failure. The contract must default to **exact comparison wherever
+  equivalence cannot be proven**, and the audit record must carry both the
+  supplied and the canonical form.
+- the resolution rules — resolving a user-supplied name to the immutable
+  identifier the rules above require may itself need a remote call (`#team` to
+  a Slack channel id). That lookup is egress and this ADR does not exempt it:
+  it must be separately gated, scoped to the connected account, and audited,
+  and only then may the consequential call be authorised against the resolved
+  destination. Without this the preconditions are unsatisfiable for ordinary
+  integrations — a tool could not look up the id it is required to bind to
+  without transmitting first.
+- the outcome rules — a pre-transmission audit record states an intent, not a
+  result. It must carry an attempt identifier and an explicit outcome —
+  pending, succeeded, failed, indeterminate — with a stated path for
+  reconciling records left pending by a crash. Otherwise a provider timeout is
+  indistinguishable from a successful disclosure, and a crash after the service
+  accepted the request leaves nobody able to say whether the side effect
+  happened, which is precisely the transparency ADR-0004 §7's audit trail
+  exists to provide.
+- **conformance tests for every condition above**, not prose alone. In
+  particular: that a denial performs no credential read and no network I/O, and
+  that destination, payload and transport cannot change between authorisation
+  and transmission. A precondition nothing tests is a precondition nobody can
+  show holds, and §2 requires these to hold *in code*.
 
 A boundary that meets the conditions in a document but not in the code is
 approved, not designated, and an approved boundary does not transmit. If the
@@ -556,9 +602,10 @@ by whoever merges it.
 This ADR makes tool egress *permissible in principle*; it authorises no
 particular tool, destination, or payload, and by itself no transmission at all.
 Destination-level policy — which recipients are approved — remains
-parameter-level and deferred (ADR-0016 §7; issues #57, #68). Nor does it weaken
-ADR-0004 §7's minimisation rule: "send the minimum necessary" now reads against
-every approved boundary. The invocation ADR still owes the seam, the gating
+parameter-level and deferred (ADR-0016 §7; issues #57, #68). Nor does it touch
+ADR-0004 §7's minimisation rule, which is written about the model provider and
+stays exactly as scoped; the equivalent obligation on tool payloads is imposed
+by §3 of this ADR rather than read into §7. The invocation ADR still owes the seam, the gating
 contract, and the rules deciding which declared disclosures `permissions/`
 grants. What it no longer owes is a prior decision permitting the category to
 exist.
