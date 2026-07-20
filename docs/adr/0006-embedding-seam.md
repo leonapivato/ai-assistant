@@ -134,12 +134,13 @@ Semantic retrieval ranks by vector similarity. Combining it with lexical signals
   single model for its lifetime (identified by `model_id`), and `embed` takes
   only `texts`. This is a narrowing of the Protocol; both implementations already
   match it. The §1 code block above has been updated to this signature.
-- **Note (2026-07-19) — §2's "like all egress" cites a rule with a proposed
-  supersession.** §2 says cloud embedding is "like all egress, confined to the
-  `models/` layer", restating ADR-0004 §2 as it stands. **ADR-0017**
-  (`Proposed`) would replace that clause, designating a `tools/` integration
-  seam as a second egress boundary; read §2's clause as *all model-provider
-  egress* if ADR-0017 is accepted. Nothing in ADR-0006's own decision changes
-  either way: embedders live in `models/`, cloud embedding is opt-in, and
-  embedding egress happens nowhere else. §2's wording above is left exactly as
-  ratified.
+- **Note (2026-07-20) — read §2's "like all egress" as model-provider egress.**
+  §2 above says cloud embedding is "like all egress, confined to the `models/`
+  layer", restating ADR-0004 §2 as it then stood. **ADR-0017** supersedes that
+  clause: `models/` is no longer the only egress boundary, since ADR-0017 §1
+  also approves a designated integration seam inside `tools/`. ADR-0006's own
+  decision is unchanged — embedders live in `models/`, cloud embedding is
+  opt-in, and embedding egress happens nowhere else — and §2's wording is left
+  exactly as ratified; this is an appended note, not an edit. (ADR-0017 §2
+  separately records the model artifact download this ADR's default embedder
+  performs on first use — issue #89.)
