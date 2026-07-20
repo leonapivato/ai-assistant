@@ -195,18 +195,29 @@ undesignated, and permitted no egress at all. What must exist first:
 - a ratified invocation contract that gates each call through `permissions/`
   and records it in the audit trail *before* the call transmits, rather than
   relying on the definition's declared ceiling alone (§4 condition 3);
-- the destination and per-call payload rules — a tool's declared reach is a
-  *ceiling* over tiers, not proof that a given call's actual recipient and
-  actual bytes were approved. Specifically, recipient authorisation must bind
-  to the resolved destination and trace to a user decision or standing user
-  policy (§2), and the audit record must capture both the destination and that
-  basis; a `permissions/` grant alone does not satisfy §1 (ADR-0016 §3, §7;
-  issues #57, #68).
+- the destination rules — recipient authorisation must bind to the resolved
+  destination and trace to a user decision or standing user policy (§2), and
+  the audit record must capture both the destination and that basis; a
+  `permissions/` grant alone does not satisfy §1 (ADR-0016 §3, §7; issue #68).
+- the per-call payload rules. A tool's declared reach is a *ceiling over
+  tiers*, and a ceiling authorises nothing: a tool declaring it may disclose
+  Tier 1 satisfies its declaration whether it sends one selected memory record
+  or the entire memory database. Tier validation, destination authorisation and
+  the audit fields above would all pass in both cases. So the invocation ADR
+  must additionally bind **what** is sent: the concrete payload — or a
+  deterministic description of it — must be fixed and approved *before*
+  transmission and represented in the audit record, so that "the minimum
+  necessary" (ADR-0004 §7) is a checkable claim about a specific call rather
+  than a principle nothing tests. Issue #57.
+
+  This ADR states the requirement and deliberately does not design the
+  artifact: what that payload description is, and how a gate binds to it,
+  depends on the invocation contract's shape and is that ADR's to settle.
 
 A boundary that meets the conditions in a document but not in the code is
 approved, not designated, and an approved boundary does not transmit. If the
-invocation ADR cannot supply all three, `tools/` does not get to transmit on
-the strength of this ADR.
+invocation ADR cannot supply every one of them, `tools/` does not get to
+transmit on the strength of this ADR.
 
 ### 4. Why this preserves what ADR-0004 §2 protects
 
