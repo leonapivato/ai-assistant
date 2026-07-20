@@ -4,9 +4,18 @@
 #
 # Review runs locally now, so the PR record depends on someone pasting it. This
 # script is that paste, with the forgettable parts checked rather than trusted:
-# it refuses unless a review artifact exists for the *exact* commit the PR head
-# points at. The common failure under a paste-it-yourself norm is a review of a
-# stale commit — that one is now mechanical.
+# it refuses unless a review artifact exists whose recorded *base* and *tree*
+# both match the PR's current merge base and HEAD's tree (ADR-0020 §3). The
+# common failure under a paste-it-yourself norm is a review of stale content —
+# that one is mechanical.
+#
+# The anchor used to be the exact commit SHA (ADR-0015 §1). Content is the
+# stricter thing to check and the cheaper one to satisfy: a review taken against
+# different content, or a different base, still fails exactly as before, while a
+# commit that changes no reviewed byte — an amended message, a squash, an
+# in-place rebase, a revert back to a reviewed tree — no longer forces a fresh
+# round. What is *not* relaxed: an adversarial record is still required, and the
+# architecture lens is still required for a change touching the contract surface.
 #
 # Deliberately not a pre-push hook: review is a pre-merge step, not a per-push
 # one. Gating every push would force a full Codex run per WIP commit, which is
@@ -47,21 +56,6 @@ if [[ "$pr_sha" != "$sha" ]]; then
     die "PR head is ${pr_sha:0:12} but HEAD is ${sha:0:12} — push first"
 fi
 
-# Adversarial is the required lens before merge; architecture is additionally
-# required for a contract change, and is posted too whenever it was run.
-shopt -s nullglob
-artifacts=(".review/${sha}-"*.md)
-shopt -u nullglob
-
-if [[ ! -f ".review/${sha}-adversarial.md" ]]; then
-    stale=""
-    if compgen -G ".review/*.md" >/dev/null; then
-        stale=" (reviews exist for other commits — they do not cover ${sha:0:12})"
-    fi
-    die "no adversarial review for ${sha:0:12}${stale}
-     run: just review-codex adversarial"
-fi
-
 # A change to the shared contract surface needs the architecture lens too
 # (CONTRIBUTING, "Contract ADRs land before their implementation"). That was
 # documented but unenforced, which is precisely the prose-not-mechanism failure
@@ -100,37 +94,142 @@ git fetch --no-tags --quiet origin "$base_ref" ||
 # "no core change" and skip the architecture requirement entirely: a fail-open
 # on the one check that guards the shared contract surface.
 changed_files="$(git diff --name-only "FETCH_HEAD...${sha}")"
+core_change=0
 if grep -qE '^src/ai_assistant/core/(protocols|types)\.py$' <<<"$changed_files"; then
-    if [[ ! -f ".review/${sha}-architecture.md" ]]; then
-        die "this change touches core/protocols.py or core/types.py, so it needs
-     the architecture lens as well as the adversarial one
-     run: just review-codex architecture"
-    fi
+    core_change=1
 fi
 
-# Naming the right commit is not enough: a review run against a narrower base
-# (`just review-codex adversarial HEAD~1`) covers only part of the PR yet
-# produces a correctly-named artifact. Compare the range each review actually
-# covered against the PR's own merge base.
+# --- Which reviews cover this PR (ADR-0020 §3) -------------------------------
+#
+# An artifact is accepted when its recorded *base* and its recorded *tree* both
+# match this PR's current merge base and HEAD's tree — whatever commit it is
+# filed under. Two independent conditions, and both are load-bearing:
+#
+#   tree: the content reviewed. A scope cut, a fixup, any real edit changes it,
+#         so a review of different content is refused exactly as before. This is
+#         what makes the commit SHA safe to stop matching on: an amended message,
+#         a squash, an in-place rebase, or a revert back to a reviewed tree
+#         changes the commit but not one reviewed byte.
+#   base: the left edge of the range. A review run against a narrower base
+#         (`just review-codex adversarial HEAD~1`) covers only part of the PR,
+#         and a rebase onto moved origin/main genuinely changes the diff. Both
+#         still force a fresh review.
+#
+# Dropping either check would be a real loss of the guarantee, not a
+# simplification: the tree alone would accept a review of the same content
+# against a different base, and the base alone would accept a review of code
+# that has since changed.
 expected_base="$(git merge-base FETCH_HEAD "$sha")"
-for a in "${artifacts[@]}"; do
-    recorded_base="$(sed -n '1s/.*base_sha=\([0-9a-f]*\).*/\1/p' "$a")"
+head_tree="$(git rev-parse "${sha}^{tree}")"
+
+declare -A covering=()
+# Why an artifact was rejected, so the failure message can distinguish "content
+# moved" from "base moved". The ADR flags this explicitly: a single generic
+# error would be misread as the old stale-commit one.
+saw_tree_mismatch=0
+saw_base_mismatch=0
+saw_unreadable=0
+
+shopt -s nullglob
+for a in .review/*.md; do
+    provenance="$(head -n 1 "$a")"
+    recorded_base="$(sed -n 's/.*base_sha=\([0-9a-f]*\).*/\1/p' <<<"$provenance")"
+    # The leading space matters: it pins the field name to `tree=` and stops a
+    # future `<something>_tree=` field from being read as this one.
+    recorded_tree="$(sed -n 's/.* tree=\([0-9a-f]*\).*/\1/p' <<<"$provenance")"
+
+    # An artifact predating ADR-0020 records no tree, so its content cannot be
+    # verified at all. Fail closed: unverifiable is not the same as matching,
+    # and re-running a review costs one round where accepting this costs the
+    # guarantee. Same for a hand-edited or truncated provenance line.
+    if [[ -z "$recorded_base" || -z "$recorded_tree" ]]; then
+        saw_unreadable=1
+        continue
+    fi
+    if [[ "$recorded_tree" != "$head_tree" ]]; then
+        saw_tree_mismatch=1
+        continue
+    fi
     if [[ "$recorded_base" != "$expected_base" ]]; then
-        die "$(basename "$a") reviewed a different range than this PR covers
-     (recorded base ${recorded_base:-none}, PR base ${expected_base:0:12})
-     re-run the review with its default base: just review-codex <persona>"
+        saw_base_mismatch=1
+        continue
     fi
 
-    # Re-check the verdict here, not just when recording. A filename and a
-    # base_sha say where an artifact came from, not that it holds a finished
-    # review: a file truncated by an interrupt, or edited by hand, keeps valid
-    # metadata while losing its body. ship is the last point before this
-    # becomes the record, so it verifies rather than trusts.
+    # `<sha>-<persona>.md`; personas carry no dash, so the last field is it.
+    name="$(basename "$a" .md)"
+    persona="${name##*-}"
+    # Several commits can legitimately carry a review of this same tree — that
+    # is the point of the change. Prefer the one filed under the current HEAD
+    # when it exists, so the common case posts the artifact whose filename
+    # matches the PR head and a reader sees no discrepancy.
+    if [[ -z "${covering[$persona]:-}" || "$name" == "${sha}-${persona}" ]]; then
+        covering["$persona"]="$a"
+    fi
+done
+shopt -u nullglob
+
+# The reason each refusal names, appended to whichever requirement fails below.
+why=""
+if [[ "$saw_tree_mismatch" == "1" ]]; then
+    why="${why}
+     a review exists for *different content* — the change moved since it was
+     reviewed, so it needs a fresh one (this is not the old stale-commit error:
+     amending or squashing without editing content no longer costs a round)"
+fi
+if [[ "$saw_base_mismatch" == "1" ]]; then
+    why="${why}
+     a review exists against a *different base* — the branch was rebased onto a
+     moved '${base_ref}', or the review was run with a narrower base, so it does
+     not cover this PR's full diff"
+fi
+if [[ "$saw_unreadable" == "1" ]]; then
+    why="${why}
+     a review exists with no recorded base/tree — it predates ADR-0020 or was
+     edited, so its content cannot be verified"
+fi
+
+# Adversarial is the required lens before merge. ADR-0020 relaxes neither this
+# nor the architecture requirement below; it changes only what counts as a
+# review of *this* content.
+if [[ -z "${covering[adversarial]:-}" ]]; then
+    die "no adversarial review covering this PR's content
+     (HEAD tree ${head_tree:0:12}, base ${expected_base:0:12})${why}
+     run: just review-codex adversarial"
+fi
+
+# A change to the shared contract surface needs the architecture lens too
+# (CONTRIBUTING, "Contract ADRs land before their implementation").
+if [[ "$core_change" == "1" && -z "${covering[architecture]:-}" ]]; then
+    die "this change touches core/protocols.py or core/types.py, so it needs
+     the architecture lens as well as the adversarial one${why}
+     run: just review-codex architecture"
+fi
+
+# Posting order is fixed rather than glob order, so the comment reads the same
+# way every time regardless of which commits the artifacts happen to be under.
+artifacts=()
+for persona in adversarial architecture; do
+    [[ -n "${covering[$persona]:-}" ]] && artifacts+=("${covering[$persona]}")
+done
+for persona in "${!covering[@]}"; do
+    case "$persona" in
+    adversarial | architecture) ;;
+    *) artifacts+=("${covering[$persona]}") ;;
+    esac
+done
+
+# Re-check the verdict here, not just when recording. A base and a tree say what
+# an artifact covers, not that it holds a finished review: a file truncated by an
+# interrupt, or edited by hand, keeps valid metadata while losing its body. ship
+# is the last point before this becomes the record, so it verifies rather than
+# trusts.
+for a in "${artifacts[@]}"; do
     a_last="$(grep -v '^[[:space:]]*$' "$a" | tail -n 1 |
         tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     if ! grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$a_last"; then
+        name="$(basename "$a" .md)"
         die "$(basename "$a") does not end in a verdict — it is incomplete
-     re-run: just review-codex $(basename "$a" .md | sed "s/^${sha}-//")"
+     re-run: just review-codex ${name##*-}"
     fi
 done
 
@@ -145,13 +244,41 @@ trap 'rm -f "$body"' EXIT
 marker="<!-- ship:${sha} -->"
 header="🔍 **Local Codex review** — commit \`${sha:0:12}\`"
 
+# The aggregate the author saw when the review ran (ADR-0020 §2), rendered into
+# the comment rather than left in the provenance line — `tail -n +2` below strips
+# that line, so without this the merge reviewer would never see the numbers. The
+# whole point is that the human at merge holds the same aggregate view the author
+# had; in both runaway cases in issue #91 it was an outside observer holding
+# exactly this that ended the loop.
+adversarial_provenance="$(head -n 1 "${covering[adversarial]}")"
+agg_field() { sed -n "s/.* $1=\([^ ]*\).*/\1/p" <<<"$adversarial_provenance"; }
+agg_round="$(agg_field round)"
+agg_net="$(agg_field net_lines)"
+agg_churn="$(agg_field churn_lines)"
+agg_ratio="$(agg_field churn_ratio)"
+agg_commits="$(agg_field commits)"
+agg_supersedes="$(agg_field supersedes)"
+
 {
     echo "$marker"
     echo "$header"
     echo
+    # Older artifacts carry no aggregate; omit the line rather than print blanks.
+    if [[ -n "$agg_round" ]]; then
+        summary="round ${agg_round} · ${agg_net} lines net"
+        [[ -n "$agg_commits" ]] && summary="${summary} across ${agg_commits} commit(s)"
+        [[ -n "$agg_ratio" ]] && summary="${summary} · churn ${agg_ratio}× (${agg_churn} touched)"
+        if [[ -n "$agg_supersedes" ]]; then
+            # `ADR-0004:175,ADR-0012:98` → `ADR-0004 (175 lines), ADR-0012 (98 lines)`
+            pretty="$(sed 's/:\([0-9]*\)/ (\1 lines)/g; s/,/, /g' <<<"$agg_supersedes")"
+            summary="${summary} · supersedes ${pretty}"
+        fi
+        echo "_${summary}_"
+        echo
+    fi
     for a in "${artifacts[@]}"; do
-        persona="$(basename "$a" .md)"
-        persona="${persona#"${sha}-"}"
+        name="$(basename "$a" .md)"
+        persona="${name##*-}"
         echo "<details><summary><strong>${persona}</strong></summary>"
         echo
         # Drop the provenance comment; it is metadata for this script, not for

@@ -3,9 +3,16 @@
 With review no longer running in CI, `ship` is the only thing standing between
 "a review happened" and "the review on the PR covers the code being merged".
 Its refusals are the mechanism the ADR trades the CI-posted record for, so each
-one is pinned here: a review of a different commit, an unpushed HEAD, a dirty
+one is pinned here: a review of different content, an unpushed HEAD, a dirty
 tree, and a missing adversarial lens must all fail *closed* rather than post a
 misleading record.
+
+ADR-0020 §3 re-anchors acceptance from the commit SHA to the reviewed *content* —
+the recorded base and tree. That is a safety check, so the negative cases below
+are pinned harder than the positive one: a different tree and a different base
+must each still refuse, and in particular a genuine content change must refuse
+even though it is exactly the case an over-broad implementation would let
+through. The ADR is explicit that §3 covers unchanged content only.
 
 Driven as a subprocess with a fake ``gh`` on ``PATH``, so nothing reaches
 GitHub.
@@ -176,26 +183,36 @@ def _fake_gh(bin_dir: Path) -> None:
     gh.chmod(0o755)
 
 
-def _record_review(
+def _record_review(  # noqa: PLR0913  # one parameter per provenance field the real script emits
     repo: Path,
     sha: str,
     persona: str,
     body: str = f"a finding\n{_VERDICT}\n",
     *,
     base_sha: str | None = None,
+    tree: str | None = None,
 ) -> None:
-    """Write an artifact as codex-review.sh would.
+    """Write an artifact exactly as codex-review.sh would.
+
+    The provenance line reproduces what the real script emits, aggregate fields
+    and all. #45's CRLF bug shipped a no-op precisely because a fake produced a
+    form the real tool never does, and its tests passed anyway.
 
     ``base_sha`` defaults to the real merge base with ``main``; pass a different
-    commit to simulate a review run against a narrower base. A ``body`` without
-    a closing ``_VERDICT`` simulates an artifact truncated mid-write.
+    commit to simulate a review run against a narrower base. ``tree`` defaults to
+    the tree of ``sha`` itself — what a genuine review of that commit records —
+    so pass a different one to simulate a review of different content. A ``body``
+    without a closing ``_VERDICT`` simulates an artifact truncated mid-write.
     """
     if base_sha is None:
         base_sha = _git(repo, "merge-base", "main", sha)
+    if tree is None:
+        tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     review_dir = repo / ".review"
     review_dir.mkdir(exist_ok=True)
     (review_dir / f"{sha}-{persona}.md").write_text(
-        f"<!-- persona={persona} base=main base_sha={base_sha} sha={sha} -->\n{body}"
+        f"<!-- persona={persona} base=main base_sha={base_sha} sha={sha} "
+        f"tree={tree} round=1 net_lines=2 churn_lines=2 churn_ratio=1.0 commits=1 -->\n{body}"
     )
 
 
@@ -252,18 +269,24 @@ def test_posts_the_review_when_it_matches_the_pr_head(tmp_path: Path) -> None:
     assert "<!-- sha=" not in posted
 
 
-def test_refuses_when_the_review_covers_a_different_commit(tmp_path: Path) -> None:
+def test_refuses_when_the_review_covers_different_content(tmp_path: Path) -> None:
+    """The stale-paste this guards: a review of an earlier, different tree.
+
+    Under ADR-0020 §3 the anchor is content rather than the commit, so what makes
+    this stale is that ``HEAD~1`` holds different content — not merely that it is
+    a different commit. Same content under a different commit is accepted; that
+    is pinned separately below.
+    """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    # A review of the *previous* commit — the exact stale-paste this guards.
     _record_review(repo, _git(repo, "rev-parse", "HEAD~1"), "adversarial")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
     assert "no adversarial review" in result.stderr
-    assert "do not cover" in result.stderr
+    assert "different content" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 
@@ -391,7 +414,7 @@ def test_refuses_a_review_run_against_a_narrower_base(tmp_path: Path) -> None:
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
-    assert "different range" in result.stderr
+    assert "different base" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 
@@ -409,8 +432,13 @@ def test_refuses_when_the_pr_head_moves_before_posting(tmp_path: Path) -> None:
     assert not (tmp_path / "comment.md").exists()
 
 
-def test_refuses_an_artifact_with_no_recorded_base(tmp_path: Path) -> None:
-    """Artifacts predating the base recording fail closed, not open."""
+def test_refuses_an_artifact_with_no_recorded_base_or_tree(tmp_path: Path) -> None:
+    """Unverifiable is not the same as matching, so it fails closed.
+
+    An artifact predating ADR-0020 records no tree, and one predating the base
+    recording no base. Either way its content cannot be checked — and the whole
+    guarantee is that the check is mechanical rather than a matter of care.
+    """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
@@ -420,7 +448,8 @@ def test_refuses_an_artifact_with_no_recorded_base(tmp_path: Path) -> None:
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
-    assert "different range" in result.stderr
+    assert "no recorded base/tree" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
 
 
 def test_core_check_survives_a_diff_larger_than_the_pipe_buffer(tmp_path: Path) -> None:
@@ -799,3 +828,270 @@ def test_refuses_on_main(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "on main" in result.stderr
+
+
+# --- ADR-0020 §3: the anchor is the reviewed content, not the commit ---------
+#
+# The safety property must survive exactly: a review of different content, or
+# against a different base, still fails mechanically. What is removed is only the
+# forced round on a commit that changes no reviewed byte.
+
+
+def test_accepts_a_review_filed_under_a_different_commit_with_the_same_tree(
+    tmp_path: Path,
+) -> None:
+    """The case §3 exists for: an amended commit reviewed before the amend.
+
+    `git commit --amend -m` produces a new SHA over an identical tree. Under the
+    old commit anchor that cost a full review round for a message edit; the
+    content the reviewer read is byte-for-byte what is being shipped.
+    """
+    repo = tmp_path / "repo"
+    reviewed_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, reviewed_sha, "adversarial", f"reviewed this tree\n{_VERDICT}\n")
+
+    # Amend the message only; the tree is untouched.
+    _git(repo, "commit", "-q", "--amend", "-m", "change (reworded)")
+    amended_sha = _git(repo, "rev-parse", "HEAD")
+    assert amended_sha != reviewed_sha, "the amend must produce a new commit"
+    assert _git(repo, "rev-parse", f"{amended_sha}^{{tree}}") == _git(
+        repo, "rev-parse", f"{reviewed_sha}^{{tree}}"
+    ), "the amend must leave the tree identical"
+
+    result = _run_ship(repo, tmp_path, pr_sha=amended_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert "reviewed this tree" in (tmp_path / "comment.md").read_text()
+
+
+def test_refuses_when_the_tree_changed_even_under_the_same_base(tmp_path: Path) -> None:
+    """A review of different content is stale, however it is filed.
+
+    The artifact here names the current commit and the correct base — only the
+    recorded tree differs. Dropping the tree check would accept it.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", tree="0" * 40)
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "different content" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_when_the_base_moved_even_though_the_tree_matches(tmp_path: Path) -> None:
+    """Both conditions are required; the tree alone is not enough.
+
+    A rebase onto a moved base genuinely changes the diff under review, so it
+    correctly re-reviews. The artifact here records the right tree and a base
+    that is no longer this PR's merge base.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", base_sha="0" * 40)
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "different base" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_the_failure_message_distinguishes_content_moved_from_base_moved(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020's "Harder" note: a generic error reads as the old one.
+
+    The tree comparison is a second thing ship can refuse on, and an author who
+    cannot tell which condition failed cannot tell whether to re-review or to
+    rebase.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", tree="0" * 40)
+    tree_only = _run_ship(repo, tmp_path, pr_sha=sha).stderr
+
+    shutil.rmtree(repo / ".review")
+    _record_review(repo, sha, "adversarial", base_sha="0" * 40)
+    base_only = _run_ship(repo, tmp_path, pr_sha=sha).stderr
+
+    assert "different content" in tree_only
+    assert "different base" not in tree_only
+    assert "different base" in base_only
+    assert "different content" not in base_only
+
+
+def test_refuses_a_genuine_content_change_the_adr_does_not_cover(tmp_path: Path) -> None:
+    """The `05ca4fe` case ADR-0020 §3 is explicit about *not* covering.
+
+    A scope cut changes the tree, so it produces a different diff and genuinely
+    warrants a fresh review. An implementation that accepted a review across a
+    real content change would break the guarantee while appearing to work — the
+    remedy for that case is §2's terminal-state rule, not this clause.
+    """
+    repo = tmp_path / "repo"
+    reviewed_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, reviewed_sha, "adversarial")
+
+    # A real edit on top of the reviewed commit — the scope cut.
+    (repo / "f.txt").write_text("two\nplus a scope cut\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", "cut scope as asked")
+    cut_sha = _git(repo, "rev-parse", "HEAD")
+
+    result = _run_ship(repo, tmp_path, pr_sha=cut_sha)
+
+    assert result.returncode != 0
+    assert "different content" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_accepts_a_revert_that_returns_the_tree_to_a_reviewed_state(tmp_path: Path) -> None:
+    """A revert back to reviewed content costs no round: no byte differs.
+
+    Three commits, where the third undoes the second — the tree at HEAD equals
+    the tree at the reviewed first commit, so the review still covers it.
+    """
+    repo = tmp_path / "repo"
+    reviewed_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, reviewed_sha, "adversarial", f"covers this content\n{_VERDICT}\n")
+
+    (repo / "f.txt").write_text("an experiment\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", "try something")
+    _git(repo, "revert", "--no-edit", "HEAD")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+
+    assert _git(repo, "rev-parse", f"{head_sha}^{{tree}}") == _git(
+        repo, "rev-parse", f"{reviewed_sha}^{{tree}}"
+    ), "the revert must restore the reviewed tree"
+
+    result = _run_ship(repo, tmp_path, pr_sha=head_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert "covers this content" in (tmp_path / "comment.md").read_text()
+
+
+def test_a_core_change_still_needs_the_architecture_lens_under_the_tree_anchor(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020 relaxes neither required lens — only what counts as covering.
+
+    An adversarial review matching the tree is not sufficient for a contract
+    change, whatever commit it is filed under.
+    """
+    repo = tmp_path / "repo"
+    reviewed_sha = _init_repo(repo, touches_core=True)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, reviewed_sha, "adversarial")
+    _git(repo, "commit", "-q", "--amend", "-m", "reworded")
+    amended_sha = _git(repo, "rev-parse", "HEAD")
+
+    result = _run_ship(repo, tmp_path, pr_sha=amended_sha)
+
+    assert result.returncode != 0
+    assert "architecture" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_core_change_ships_when_both_lenses_cover_the_tree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    reviewed_sha = _init_repo(repo, touches_core=True)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, reviewed_sha, "adversarial")
+    _record_review(repo, reviewed_sha, "architecture")
+    _git(repo, "commit", "-q", "--amend", "-m", "reworded")
+    amended_sha = _git(repo, "rev-parse", "HEAD")
+
+    result = _run_ship(repo, tmp_path, pr_sha=amended_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "comment.md").exists()
+
+
+def test_prefers_the_artifact_filed_under_the_current_head(tmp_path: Path) -> None:
+    """Several commits can carry a review of one tree; the current one wins.
+
+    A reader comparing the posted comment against the PR head should not see a
+    discrepancy when there is a review filed under that exact commit.
+    """
+    repo = tmp_path / "repo"
+    old_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, old_sha, "adversarial", f"the older record\n{_VERDICT}\n")
+    _git(repo, "commit", "-q", "--amend", "-m", "reworded")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+    _record_review(repo, head_sha, "adversarial", f"the current record\n{_VERDICT}\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=head_sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "the current record" in posted
+    assert "the older record" not in posted
+
+
+def test_renders_the_aggregate_into_the_posted_comment(tmp_path: Path) -> None:
+    """ADR-0020 §2: the human at merge sees the aggregate the author saw.
+
+    ship strips the provenance line before posting, so without explicit
+    rendering the round count and churn ratio would never reach the PR.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    review_dir = repo / ".review"
+    review_dir.mkdir(exist_ok=True)
+    base_sha = _git(repo, "merge-base", "main", sha)
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    (review_dir / f"{sha}-adversarial.md").write_text(
+        f"<!-- persona=adversarial base=main base_sha={base_sha} sha={sha} tree={tree} "
+        f"round=7 net_lines=320 churn_lines=2560 churn_ratio=8.0 commits=58 "
+        f"supersedes=ADR-0004:175 -->\na finding\n{_VERDICT}\n"
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "round 7" in posted
+    assert "320 lines net" in posted
+    assert "58 commit(s)" in posted
+    assert "churn 8.0" in posted
+    assert "ADR-0004 (175 lines)" in posted
+    # Still no raw provenance line — the aggregate is rendered, not leaked.
+    assert "base_sha=" not in posted
+
+
+def test_posts_without_an_aggregate_when_the_artifact_predates_it(tmp_path: Path) -> None:
+    """An artifact with a base and tree but no aggregate still ships.
+
+    The aggregate is advisory; a missing one must omit the line, not print
+    blanks and not refuse.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    review_dir = repo / ".review"
+    review_dir.mkdir(exist_ok=True)
+    base_sha = _git(repo, "merge-base", "main", sha)
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    (review_dir / f"{sha}-adversarial.md").write_text(
+        f"<!-- persona=adversarial base=main base_sha={base_sha} sha={sha} tree={tree} -->\n"
+        f"a finding\n{_VERDICT}\n"
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "a finding" in posted
+    assert "round" not in posted
