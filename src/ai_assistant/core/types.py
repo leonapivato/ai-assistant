@@ -2,13 +2,21 @@
 
 These are deliberately small, immutable-ish pydantic models that flow *between*
 subsystems. They belong to no single subsystem, so they live in `core` where
-everyone can depend on them. Keep this module free of behaviour — data only.
+everyone can depend on them.
+
+This module holds no **subsystem logic**; it may hold semantics **intrinsic** to
+a type it defines — computable from the type's own declaration, independent of
+policy, configuration, context or a clock, and the same answer for every
+consumer (ADR-0016 §2, amending ADR-0014 §4). Severity ordering qualifies; a
+state-transition graph does not, which is why that one lives in ``planning``.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from math import isfinite
 from typing import Annotated, Any, Literal
@@ -1037,3 +1045,404 @@ class PlanExport(BaseModel):
                 raise ValueError(msg)
 
         return self
+
+
+class _SeverityScale(StrEnum):
+    """A ``StrEnum`` ordered by declaration, least severe first (ADR-0016 §2).
+
+    Comparison is by severity rank rather than by the member's string value.
+    This is not a convenience: ``StrEnum`` members *are* strings, so without the
+    overrides below they would compare lexicographically, and
+    ``RiskLevel.CRITICAL < RiskLevel.LOW`` would be ``True`` — a threshold
+    policy written the obvious way would invert on the most dangerous value.
+
+    All four operators are overridden. ``functools.total_ordering`` fills in
+    only the operators a class lacks, and ``str`` supplies every one of them, so
+    deriving three from ``__lt__`` would silently leave them lexicographic.
+    """
+
+    @property
+    def severity(self) -> int:
+        """Rank within the scale, least severe first.
+
+        Taken from declaration order rather than a parallel table, so a member
+        inserted in the middle cannot be given a rank contradicting where it
+        reads.
+        """
+        return list(type(self)).index(self)
+
+    def _rank_of(self, other: object) -> int:
+        """Return ``other``'s rank, refusing anything but a sibling member.
+
+        Raises:
+            TypeError: If ``other`` is not a member of the same scale. This
+                *raises* rather than returning ``NotImplemented`` on purpose:
+                these are ``str`` subclasses, so declining would send Python to
+                the reflected ``str`` comparison, which answers
+                lexicographically — the exact trap the overrides exist to
+                close, surviving in the mixed-type case that a policy reading a
+                threshold from configuration produces.
+        """
+        if not isinstance(other, _SeverityScale) or type(other) is not type(self):
+            msg = (
+                f"cannot order {type(self).__name__} against {type(other).__name__!s}: "
+                f"compare two {type(self).__name__} members"
+            )
+            raise TypeError(msg)
+        return other.severity
+
+    def __lt__(self, other: object) -> bool:
+        """Whether this member is strictly less severe than ``other``."""
+        return self.severity < self._rank_of(other)
+
+    def __le__(self, other: object) -> bool:
+        """Whether this member is no more severe than ``other``."""
+        return self.severity <= self._rank_of(other)
+
+    def __gt__(self, other: object) -> bool:
+        """Whether this member is strictly more severe than ``other``."""
+        return self.severity > self._rank_of(other)
+
+    def __ge__(self, other: object) -> bool:
+        """Whether this member is no less severe than ``other``."""
+        return self.severity >= self._rank_of(other)
+
+
+class RiskLevel(_SeverityScale):
+    """How much damage invoking a tool could do (see ADR-0016 §2).
+
+    Declared least severe first; ordered by severity, not alphabetically.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class Reversibility(_SeverityScale):
+    """Whether a tool's effect on the system it acts upon can be undone.
+
+    Deliberately *not* about the reversibility of disclosure, which
+    :attr:`ToolDefinition.discloses` tracks separately: creating an event in a
+    hosted calendar is ``REVERSIBLE`` — the tool deletes it — while the
+    provider having seen the contents is permanent. Both are true, and neither
+    implies the other, so a policy must read both fields (ADR-0016 §2).
+    """
+
+    REVERSIBLE = "reversible"
+    RECOVERABLE = "recoverable"
+    IRREVERSIBLE = "irreversible"
+
+
+class CostBasis(StrEnum):
+    """How a tool's per-invocation price is known (see ADR-0016 §4)."""
+
+    FREE = "free"
+    PER_CALL = "per_call"
+    UNKNOWN = "unknown"
+
+
+#: Unicode major categories that carry standalone visible content: letters,
+#: numbers, punctuation and symbols. Deliberately a **whitelist**. The first
+#: attempt enumerated the invisible categories instead and missed the combining
+#: marks (``Mn``/``Me``) — a variation selector or a combining grapheme joiner
+#: with no base character renders as nothing, so a description made of them
+#: passed. Listing what counts as visible cannot be defeated by a category
+#: nobody thought of; listing what does not, can.
+_VISIBLE_CATEGORIES = ("L", "N", "P", "S")
+
+#: Characters that sit in a visible category yet display as nothing, so the
+#: whitelist above would otherwise accept them (ADR-0018 §1). A short exception
+#: list layered on a whitelist is not the blocklist that failed before: the
+#: whitelist still carries the burden, and this narrows a known, enumerable gap
+#: on top of it, where being incomplete makes it weaker rather than wrong.
+#:
+#: Deliberately not deferred to a canonical identifier syntax (issue #62): that
+#: governs identifiers, and a ``description`` is free text no syntax rule will
+#: ever constrain, so parking these there would park them somewhere that never
+#: arrives.
+_BLANK_RENDERING = frozenset(
+    {
+        "\u2800",  # BRAILLE PATTERN BLANK (So)
+        "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
+        "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+        "\u3164",  # HANGUL FILLER (Lo)
+        "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    }
+)
+
+
+def _has_visible_text(value: str) -> bool:
+    """Whether ``value`` contains at least one character that renders.
+
+    Not a complete test, and cannot be: without a font and a shaping engine
+    there is no general "renders as something" oracle, so a determined author
+    can likely find a codepoint this misses. It covers the known cases.
+    """
+    return any(
+        char not in _BLANK_RENDERING and unicodedata.category(char).startswith(_VISIBLE_CATEGORIES)
+        for char in value
+    )
+
+
+def _visible_identifier(value: str) -> str:
+    """Reject an identifier with nothing visible in it, returning it stripped.
+
+    Stricter than :data:`Identifier`, which only refuses a blank. A tool's id
+    and capability are shown to the user in an approval prompt and written into
+    audit records beside the description, so an id of nothing but zero-width
+    spaces would render as blank in exactly the places
+    :meth:`ToolDefinition._description_is_present` exists to keep meaningful —
+    and would be indistinguishable from any other invisible id.
+
+    Applied to tool identifiers rather than to :data:`Identifier` itself
+    because that type is shared with ``planning`` (ADR-0014), where tightening
+    it is a cross-lane change; see issue #62.
+    """
+    stripped = value.strip()
+    if not _has_visible_text(stripped):
+        msg = "identifier must contain visible text"
+        raise ValueError(msg)
+    return stripped
+
+
+type VisibleIdentifier = Annotated[str, AfterValidator(_visible_identifier)]
+"""An identifier that renders as something — for ids a user is shown."""
+
+_CURRENCY_CODE_LENGTH = 3
+
+
+class ToolCost(BaseModel):
+    """What one invocation of a tool costs (see ADR-0016 §4).
+
+    Structured rather than an optional number because the distinction a spend
+    policy needs is *free* versus *unknown* — the first is a fact it can add to
+    a running total, the second an absence of information it must fail closed
+    on. An optional field defaulting to ``None`` collapses those two.
+
+    Frozen in its own right, and that is load-bearing:
+    :class:`ToolDefinition`'s ``frozen=True`` blocks reassigning the ``cost``
+    *field* and does nothing about mutating the object it holds, which would
+    let a registered definition and a permission decision keep pointing at one
+    instance while the number inside it changed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    basis: CostBasis
+    amount: Decimal | None = Field(
+        default=None, description="Price per invocation; required iff basis is PER_CALL."
+    )
+    currency: str | None = Field(
+        default=None, description="ISO-4217 alphabetic code; required iff basis is PER_CALL."
+    )
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_is_iso_4217_shaped(cls, value: str | None) -> str | None:
+        """Require exactly three uppercase ASCII letters, without normalising.
+
+        Shape only. Validating against the live ISO-4217 register would make a
+        definition's loading depend on a table that changes when currencies are
+        withdrawn, so a tool that loaded last year would stop; and silently
+        upcasing ``"usd"`` would treat a lowercase code and a typo'd one
+        differently for no reason a caller can see.
+        """
+        if value is None:
+            return None
+        if len(value) != _CURRENCY_CODE_LENGTH or not (value.isascii() and value.isupper()):
+            msg = f"currency must be three uppercase ASCII letters (ISO-4217), got {value!r}"
+            raise ValueError(msg)
+        if not value.isalpha():
+            msg = f"currency must be three uppercase ASCII letters (ISO-4217), got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _amount_matches_basis(self) -> ToolCost:
+        """Require a priced amount for PER_CALL and forbid one otherwise.
+
+        The finiteness check comes before the sign check deliberately:
+        ``Decimal`` admits ``Infinity`` and ``NaN``, neither of which has a JSON
+        representation or survives arithmetic in a running total, and comparing
+        ``NaN`` with ``<`` raises rather than answering.
+        """
+        if self.basis is CostBasis.PER_CALL:
+            if self.amount is None or self.currency is None:
+                msg = "a PER_CALL cost requires both amount and currency"
+                raise ValueError(msg)
+            if not self.amount.is_finite():
+                msg = f"cost amount must be finite, got {self.amount!r}"
+                raise ValueError(msg)
+            if self.amount < 0:
+                msg = f"cost amount must not be negative, got {self.amount!r}"
+                raise ValueError(msg)
+        elif self.amount is not None or self.currency is not None:
+            msg = f"a {self.basis} cost carries no amount or currency"
+            raise ValueError(msg)
+        return self
+
+
+class Idempotency(StrEnum):
+    """The retry guarantee a tool offers (see ADR-0016 §4).
+
+    A *guarantee*, not the presence of a parameter: accepting an idempotency key
+    is syntax, and a tool may accept one and ignore it. ``KEYED`` additionally
+    fixes the scope — the tool, identified by :attr:`ToolDefinition.id` — and
+    the lifetime, via :attr:`ToolDefinition.idempotency_window`.
+    """
+
+    NONE = "none"
+    NATURAL = "natural"
+    KEYED = "keyed"
+
+
+#: Data tiers whose ordering is by sensitivity (declaration order), not by value.
+_TIER_ORDER: Mapping[DataTier, int] = {tier: index for index, tier in enumerate(DataTier)}
+
+
+def _ordered_tiers(value: tuple[DataTier, ...]) -> tuple[DataTier, ...]:
+    """Sort and de-duplicate data tiers, most sensitive first.
+
+    ``sorted`` on the raw members would order by string value —
+    ``OPERATIONAL, PERSONAL, SECRET`` — which reads as though sensitivity ran
+    the other way. Declaration order is used instead, matching how
+    :class:`_SeverityScale` takes its rank, so ``core`` has one convention.
+    These tuples are serialised into permission decisions and audit records, so
+    a stable order is what makes two registries agree on the same definition.
+    """
+    return tuple(sorted(set(value), key=lambda tier: _TIER_ORDER[tier]))
+
+
+type TierReach = Annotated[tuple[DataTier, ...], AfterValidator(_ordered_tiers)]
+"""Data tiers a tool may touch: sorted most-sensitive-first, de-duplicated."""
+
+
+class ToolDefinition(BaseModel):
+    """A declaration of what a tool is and what invoking it risks (ADR-0016 §1).
+
+    Every field a permission decision depends on is **required**. A default is a
+    claim, and the natural-looking default for the reach tuples — empty — is the
+    claim "this tool touches no data", which is exactly the false statement a
+    forgetful integration author would ship. A tool that does not declare its
+    reach does not load.
+
+    Nothing here decides whether the permission gate is consulted: every
+    invocation is gated, the definition states facts, and ``permissions`` draws
+    conclusions (ADR-0016 §3).
+
+    Frozen for the same reason :class:`ActionPlan` is: a permission decision is
+    recorded against the definition in force, and one that can be edited
+    afterwards makes the audit trail a description of the present.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: VisibleIdentifier
+    capability: VisibleIdentifier = Field(
+        description="The single capability this tool satisfies, e.g. 'send_email'."
+    )
+    description: str = Field(description="What the tool does; shown to the model and the user.")
+    risk_level: RiskLevel
+    reversibility: Reversibility
+    side_effecting: bool = Field(description="Whether invoking it changes anything outside itself.")
+    reads: TierReach = Field(description="Tiers it may read; a ceiling, not a per-call measure.")
+    writes: TierReach = Field(description="Tiers it may modify; a ceiling.")
+    discloses: TierReach = Field(description="Tiers it may transmit off-device; a ceiling.")
+    cost: ToolCost
+    idempotency: Idempotency
+    idempotency_window: timedelta | None = Field(
+        default=None,
+        description="How long a repeated key is deduplicated; required iff idempotency is KEYED.",
+    )
+    latency: timedelta | None = Field(
+        default=None, description="Expected duration of a typical call; advisory, not a timeout."
+    )
+    parameters_schema: FrozenJsonMapping = Field(
+        default=_EMPTY_PARAMS,
+        description="JSON Schema for the call's arguments; carried, not yet enforced.",
+    )
+
+    @field_validator("description")
+    @classmethod
+    def _description_is_present(cls, value: str) -> str:
+        """Reject a description with nothing visible in it, returning it stripped.
+
+        A description that renders as nothing passes every other check while
+        leaving the approval prompt with nothing to say about the action — the
+        one moment this design exists to serve, and the one where a user is most
+        likely to approve out of confusion.
+
+        ``strip()`` alone is not enough. It removes whitespace, but a zero-width
+        space, a byte-order mark and a variation selector are *format* and
+        *combining-mark* characters, not whitespace, so a description made of
+        them survives stripping while rendering as nothing. The requirement is
+        therefore at least one character carrying visible content of its own —
+        a letter, number, punctuation mark or symbol.
+        """
+        stripped = value.strip()
+        if not _has_visible_text(stripped):
+            msg = "tool description must contain visible text"
+            raise ValueError(msg)
+        return stripped
+
+    @model_validator(mode="after")
+    def _effects_are_consistent(self) -> ToolDefinition:
+        """Make the self-contradictory declarations unrepresentable.
+
+        A tool that modifies stored data, or transmits any off-device, is
+        side-effecting whatever it claims — transmitting to a third party has
+        consequences outside this system even when nothing local changes, and it
+        is the class ADR-0004 §2 governs. Conversely a tool with no side effect
+        has nothing to reverse.
+
+        Disclosure says nothing about ``reversibility``: that describes the
+        effect on the system acted upon, and the two are independent (ADR-0016
+        §2).
+        """
+        if self.writes and not self.side_effecting:
+            msg = "a tool that writes is side-effecting"
+            raise ValueError(msg)
+        if self.discloses and not self.side_effecting:
+            msg = "a tool that discloses data off-device is side-effecting"
+            raise ValueError(msg)
+        if not self.side_effecting and self.reversibility is not Reversibility.REVERSIBLE:
+            msg = "a tool with no side effect has nothing to reverse, so it is REVERSIBLE"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _idempotency_window_matches_guarantee(self) -> ToolDefinition:
+        """Tie the window to ``KEYED``, and require it to be strictly positive.
+
+        Zero or negative is rejected rather than merely discouraged: no retry
+        can fall inside such a window, so the definition would advertise a
+        guarantee unsatisfiable by construction — worse than declaring ``NONE``,
+        which at least tells the executor the truth.
+        """
+        if self.idempotency is Idempotency.KEYED:
+            if self.idempotency_window is None:
+                msg = "a KEYED tool requires an idempotency_window"
+                raise ValueError(msg)
+            if self.idempotency_window <= timedelta(0):
+                msg = "idempotency_window must be strictly positive"
+                raise ValueError(msg)
+        elif self.idempotency_window is not None:
+            msg = f"idempotency_window is only valid for a KEYED tool, not {self.idempotency}"
+            raise ValueError(msg)
+        return self
+
+    @field_validator("latency")
+    @classmethod
+    def _latency_is_not_negative(cls, value: timedelta | None) -> timedelta | None:
+        """Reject a negative latency estimate.
+
+        Accuracy is advisory — nothing enforces it — but a negative duration is
+        not a wrong guess, it is a nonsense one, and it would invert any
+        selection that sorts on it.
+        """
+        if value is not None and value < timedelta(0):
+            msg = f"latency must not be negative, got {value!r}"
+            raise ValueError(msg)
+        return value

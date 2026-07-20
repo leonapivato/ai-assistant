@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         Message,
         PlanExport,
         StepTransition,
+        ToolDefinition,
     )
 
 
@@ -381,4 +382,63 @@ class PlanStore(Protocol):
         Raises:
             ActiveExecutionError: If any execution has a live step.
         """
+        ...
+
+
+@runtime_checkable
+class ToolRegistry(Protocol):
+    """What tools exist and what invoking them risks (ADR-0016 §5).
+
+    The pipeline's tool-selection stage queries this, and ``permissions`` reads
+    a candidate's declared metadata to rule on it. Both only ever *ask*, which
+    is why this contract is **query-only**: populating a registry is internal to
+    `tools`, in the way `context` keeps its ``ContextSource`` seam behind
+    ``ContextProvider`` (ADR-0008).
+
+    **The registry does not choose.** :meth:`find` returns every candidate;
+    which one runs needs the user's policy and the current context, neither of
+    which a registry has. Ranking here would collapse the
+    ``planning → tool selection`` boundary ADR-0014 §2 preserves.
+
+    Definitions carry no personal data: a :class:`ToolDefinition` is Tier 2
+    configuration declared by code (ADR-0004 §1), so unlike ``MemoryStore`` and
+    ``PlanStore`` this contract has no export/delete obligation.
+
+    **Every query returns a detached snapshot** — the list *and* the definitions
+    in it. These methods return ``list`` to match ``MemoryStore.search``, and a
+    list is mutable, so an implementation handing back its own collection would
+    let a caller's ``result.clear()`` deregister every tool through a *query*,
+    routing around the registration lifecycle this contract keeps internal.
+    """
+
+    async def get(self, tool_id: str) -> ToolDefinition | None:
+        """Return the definition registered as ``tool_id``, or ``None``."""
+        ...
+
+    async def find(self, capability: str) -> list[ToolDefinition]:
+        """Return every tool advertising ``capability``, ordered by ``id``.
+
+        Ordering is by id ascending because some total order must be specified
+        or implementations differ observably; ``id`` is the one that carries no
+        accidental meaning. Ordering by risk would be the beginning of ranking,
+        and callers would come to depend on it.
+
+        An unsatisfied capability returns an empty list rather than raising: a
+        plan naming a capability nothing implements is a legitimate, detectable
+        outcome, and ADR-0014 reserved ``SkipReason.NO_CAPABLE_TOOL`` for it.
+        """
+        ...
+
+    async def capabilities(self) -> tuple[str, ...]:
+        """Return every advertised capability, sorted and de-duplicated.
+
+        The registry is the authority on the capability vocabulary, which stays
+        an open set of strings rather than a ``core`` enum — an enum would make
+        every new integration a breaking ``core`` change and foreclose tools
+        this repository does not ship (ADR-0016 §5).
+        """
+        ...
+
+    async def all_tools(self) -> list[ToolDefinition]:
+        """Return every registered definition, ordered by ``id``."""
         ...

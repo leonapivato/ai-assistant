@@ -133,6 +133,18 @@ class ToolError(AssistantError):
     """An external tool failed to execute."""
 
 
+class ToolRegistrationError(ToolError):
+    """A tool could not be registered under the id it asked for (ADR-0016 §5).
+
+    Raised when an id is already bound to a different definition, or has been
+    deregistered. Tool metadata is a security control, so quietly overwriting
+    ``risk_level=CRITICAL`` with ``LOW`` under an id a policy already trusts
+    would be a privilege escalation with a lookup's ergonomics — and rebinding
+    between approval and execution would let a step run against a definition
+    the user never approved.
+    """
+
+
 class PermissionDeniedError(AssistantError):
     """An action was blocked by the permission/policy layer."""
 

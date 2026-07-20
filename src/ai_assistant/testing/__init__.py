@@ -19,6 +19,7 @@ from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
+from ai_assistant.testing.tools import FakeToolRegistry
 
 __all__ = [
     "FakeContextProvider",
@@ -29,6 +30,7 @@ __all__ = [
     "FakeModelProvider",
     "FakePlanStore",
     "FakePlanner",
+    "FakeToolRegistry",
     "ModelCall",
     "PolicyCall",
 ]
