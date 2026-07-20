@@ -106,23 +106,39 @@ num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
-# GitHub rejects a comment body over 65536 characters. One comment per persona
-# keeps each well clear of that in practice, and — unlike concatenating them —
-# a second lens can never push the first over the edge.
+{
+    echo "🔍 **Local Codex review** — commit \`${sha:0:12}\`"
+    echo
+    for a in "${artifacts[@]}"; do
+        persona="$(basename "$a" .md)"
+        persona="${persona#"${sha}-"}"
+        echo "<details><summary><strong>${persona}</strong></summary>"
+        echo
+        # Drop the provenance comment; it is metadata for this script, not for
+        # a reader of the PR.
+        tail -n +2 "$a"
+        echo
+        echo "</details>"
+        echo
+    done
+} >"$body"
+
+# One comment, posted once — the whole report is a single API call, so there is
+# no partial-success state to reconcile and a retry cannot duplicate what
+# already landed. (Posting per persona would avoid the shared size budget below,
+# but a transient failure on the second call would leave the first posted and
+# make re-running `ship` duplicate it.)
 #
-# Nothing is truncated. A review cut at an arbitrary byte boundary loses
-# whatever sits at the end, which is exactly where the ranked findings and the
-# verdict are: a silently-dropped "VERDICT: BLOCK" posted as a successful ship
-# is a worse outcome than no comment at all. If a single review genuinely will
-# not fit, fail closed and say so.
+# GitHub rejects a body over 65536 characters, and nothing here is truncated:
+# cutting at a byte boundary drops the tail, which is exactly where the ranked
+# findings and the verdict sit. A silently-shortened review posted as a
+# successful ship is worse than no comment, so an oversized report fails closed.
 max_bytes=60000
-for a in "${artifacts[@]}"; do
-    if [[ "$(wc -c <"$a")" -gt "$max_bytes" ]]; then
-        die "$(basename "$a") is over ${max_bytes} bytes and cannot be posted intact
+if [[ "$(wc -c <"$body")" -gt "$max_bytes" ]]; then
+    die "the review report is over ${max_bytes} bytes and cannot be posted intact
      truncating it would risk dropping the findings and the verdict
      post it by hand, or re-run the review to get a shorter one"
-    fi
-done
+fi
 
 # Re-read the PR head immediately before posting. Fetching the base and building
 # the body takes seconds, and a push landing in that window would leave a review
@@ -134,16 +150,5 @@ if [[ "$(gh pr view --json headRefOid --jq .headRefOid)" != "$sha" ]]; then
 fi
 
 echo "ship: posting ${#artifacts[@]} review(s) for ${sha:0:12} to PR #${num}…" >&2
-for a in "${artifacts[@]}"; do
-    persona="$(basename "$a" .md)"
-    persona="${persona#"${sha}-"}"
-    {
-        echo "🔍 **Local Codex ${persona} review** — commit \`${sha:0:12}\`"
-        echo
-        # Drop the provenance comment; it is metadata for this script, not for
-        # a reader of the PR.
-        tail -n +2 "$a"
-    } >"$body"
-    gh pr comment "$num" --body-file "$body"
-done
+gh pr comment "$num" --body-file "$body"
 echo "ship: done. Resolve or file issues for any blocker/major finding before merging." >&2

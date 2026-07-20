@@ -96,9 +96,12 @@ def _fake_gh(bin_dir: Path) -> None:
         'if [[ "$1" == "pr" && "$2" == "comment" ]]; then\n'
         '  prev=""\n'
         '  for a in "$@"; do\n'
-        # Appended, not copied: ship posts one comment per persona now, and a
-        # copy would leave only the last one visible to assertions.
-        '    [[ "$prev" == "--body-file" ]] && cat "$a" >>"$GH_COMMENT_OUT"\n'
+        # Appended, plus a per-call marker, so a test can assert both what was
+        # posted and how many API calls it took.
+        '    if [[ "$prev" == "--body-file" ]]; then\n'
+        '      cat "$a" >>"$GH_COMMENT_OUT"\n'
+        '      printf "call\\n" >>"$GH_COMMENT_CALLS"\n'
+        "    fi\n"
         '    prev="$a"\n'
         "  done\n"
         "  exit 0\n"
@@ -141,6 +144,7 @@ def _run_ship(
     if pr_sha_after is not None:
         env["GH_PR_SHA_2"] = pr_sha_after
     env["GH_COMMENT_OUT"] = str(tmp_path / "comment.md")
+    env["GH_COMMENT_CALLS"] = str(tmp_path / "gh-comment-calls")
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
         [_BASH, str(_SCRIPT)],
         cwd=repo,
@@ -392,21 +396,18 @@ def test_fails_closed_on_a_review_too_large_to_post_intact(tmp_path: Path) -> No
     assert not (tmp_path / "comment.md").exists()
 
 
-def test_two_ordinary_reviews_post_as_separate_comments(tmp_path: Path) -> None:
-    """Per-persona comments mean a second lens cannot push the first over."""
+def test_posts_the_whole_report_in_a_single_comment(tmp_path: Path) -> None:
+    """One API call, so a retry cannot duplicate a partially-posted report."""
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, sha, "adversarial", "x" * 40_000)
-    _record_review(repo, sha, "architecture", "y" * 40_000)
+    _record_review(repo, sha, "adversarial", "adversarial finding\n")
+    _record_review(repo, sha, "architecture", "architecture finding\n")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode == 0, result.stderr
-    posted = (tmp_path / "comment.md").read_text()
-    # Both landed, though concatenated they would have exceeded the limit.
-    assert "x" * 40_000 in posted
-    assert "y" * 40_000 in posted
+    assert (tmp_path / "gh-comment-calls").read_text().count("call") == 1
 
 
 def test_refuses_on_main(tmp_path: Path) -> None:

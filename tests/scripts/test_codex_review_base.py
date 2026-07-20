@@ -72,7 +72,9 @@ def _fake_codex(bin_dir: Path) -> None:
         "#!/usr/bin/env bash\n"
         'prev=""\n'
         'for a in "$@"; do\n'
-        '  [[ "$prev" == "-o" ]] && printf "review body\\n" >"$a"\n'
+        # A verdict is part of the rubric's output contract; codex-review.sh
+        # rejects output without one, so the fake must carry it.
+        '  [[ "$prev" == "-o" ]] && printf "review body\\nVerdict: APPROVE\\n" >"$a"\n'
         '  prev="$a"\n'
         "done\n"
     )

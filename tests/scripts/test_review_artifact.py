@@ -61,7 +61,10 @@ def _fake_codex(bin_dir: Path) -> None:
         "#!/usr/bin/env bash\n"
         'prev=""\n'
         'for a in "$@"; do\n'
-        '  [[ "$prev" == "-o" ]] && printf "finding one\\nfinding two\\n" >"$a"\n'
+        # A verdict line is part of the rubric's output contract, and the script
+        # now requires one — a fake without it would be rejected as a refusal.
+        '  [[ "$prev" == "-o" ]] && printf "finding one\\nfinding two\\n'
+        'Verdict: APPROVE\\n" >"$a"\n'
         '  prev="$a"\n'
         "done\n"
     )
@@ -107,7 +110,7 @@ def test_recorded_review_keeps_the_body_after_the_provenance_header(tmp_path: Pa
     assert lines[0].startswith("<!--")
     assert sha in lines[0]
     # ship.sh strips exactly the first line; everything after it is the review.
-    assert lines[1:] == ["finding one", "finding two"]
+    assert lines[1:] == ["finding one", "finding two", "Verdict: APPROVE"]
 
 
 def test_empty_codex_output_is_refused_rather_than_recorded(tmp_path: Path) -> None:
@@ -194,6 +197,30 @@ def test_records_nothing_when_the_checkout_moves_mid_review(tmp_path: Path) -> N
     # Neither SHA gets an artifact: the run is void, not merely misfiled.
     assert not (repo / ".review" / f"{reviewed_sha}-adversarial.md").exists()
     assert not (repo / ".review" / f"{moved_sha}-adversarial.md").exists()
+
+
+def test_a_refusal_without_a_verdict_is_not_recorded_as_a_review(tmp_path: Path) -> None:
+    """Non-empty prose is not a review; the rubric requires a closing verdict."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/usr/bin/env bash\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  [[ "$prev" == "-o" ]] && printf "I am unable to review this repository.\\n" >"$a"\n'
+        '  prev="$a"\n'
+        "done\n"
+    )
+    codex.chmod(0o755)
+
+    result = _run_review(repo, tmp_path, check=False)
+
+    assert result.returncode != 0
+    assert "no verdict" in result.stderr
+    assert not (repo / ".review").exists()
 
 
 def test_refuses_to_review_a_dirty_tree(tmp_path: Path) -> None:
