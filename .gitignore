@@ -24,6 +24,11 @@ coverage.xml
 .env.*
 !.env.example
 
+# Local Codex review artifacts, keyed by reviewed commit (ADR-0015 §1).
+# Evidence for `just ship`, not history — the review is reported by pasting it
+# into the PR, so committing it would duplicate the record and bloat the tree.
+.review/
+
 # Editors / OS
 .idea/
 .vscode/

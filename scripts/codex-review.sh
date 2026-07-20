@@ -103,6 +103,20 @@ echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
 # -o captures just the final review; progress streams to stderr.
 codex exec "${sandbox_args[@]}" "${model_args[@]}" -o "$out" - <"$prompt" >&2
 
+# Record the review against the exact commit it covers (ADR-0015 §1). `just
+# ship` refuses to report a review whose SHA does not match HEAD, which turns
+# "did you review the current code?" from a matter of care into a check. The
+# artifact is git-ignored: it is evidence for the local ship step, not history.
+sha="$(git rev-parse HEAD)"
+review_dir="${repo_root}/.review"
+mkdir -p "$review_dir"
+artifact="${review_dir}/${sha}-${persona}.md"
+{
+    echo "<!-- persona=${persona} base=${base} sha=${sha} -->"
+    cat "$out"
+} >"$artifact"
+
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
+echo "(recorded at .review/${sha}-${persona}.md)" >&2
 cat "$out"

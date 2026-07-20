@@ -55,6 +55,11 @@ status:
 review-codex persona base="":
     scripts/codex-review.sh "$1" "$2"
 
+# Report the local Codex review to the PR — the merge-readiness step (ADR-0015).
+# Refuses unless a review artifact exists for the exact commit the PR head is on.
+ship:
+    scripts/ship.sh
+
 # First-time developer setup
 setup:
     uv sync
