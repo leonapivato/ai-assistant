@@ -37,8 +37,8 @@ is never sufficient on its own:
 ```bash
 git fetch origin --prune
 git ls-tree origin/main docs/adr/ --name-only              # merged
-for b in $(git ls-remote --heads origin | awk '{sub("refs/heads/","",$2); print $2}'); do
-  git ls-tree "origin/$b" docs/adr/ --name-only            # written but unmerged
+for r in $(git for-each-ref --format='%(refname)' refs/remotes/origin); do
+  git ls-tree "$r" docs/adr/ --name-only || exit 1         # written but unmerged
 done | sort -u
 gh pr list --state open --limit 100 --json number,title,body > /tmp/prs.json
 [ "$(jq length /tmp/prs.json)" -ge 100 ] && { echo "SATURATED — paginate"; exit 1; }
@@ -145,7 +145,6 @@ time with full confidence.
   *evidence*. Update the branch, let CI run, then merge:
 
   ```bash
-  gh pr update-branch <n> --rebase
   gh pr checks <n> --watch --fail-fast && \
     gh pr merge <n> --rebase --admin --delete-branch
   ```
@@ -154,6 +153,17 @@ time with full confidence.
   immediately with status 8 while checks are *pending* — run as two separate
   commands, it reports "no checks reported yet" and the merge proceeds anyway,
   admin-bypassing the very gate this step exists to wait for.
+
+- **A rebase invalidates the review record.** `just ship` anchors a review to a
+  commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head SHA
+  nothing has reviewed — and `--admin` will merge it regardless. Branch
+  protection is `strict`, so a stale branch must be updated before it can merge:
+  the two rules pull against each other and the resolution is ordering, not a
+  shortcut. **Merge while the branch is still current.** Where an update is
+  unavoidable, the new SHA needs its own gate, `just review-codex` and
+  `just ship` before it merges — the diff usually survives a clean rebase
+  unchanged, but "usually" is not evidence, and a rebase over a conflict is
+  exactly when it does not.
 
 - **Rebase-merge only** — the repo forbids squash and merge commits, and
   requires linear history.
