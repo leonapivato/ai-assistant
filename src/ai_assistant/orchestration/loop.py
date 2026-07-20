@@ -32,6 +32,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 from typing import TYPE_CHECKING
 
 import structlog
@@ -83,6 +84,32 @@ def _utcnow() -> datetime:
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _check_tuning(*, retrieval_limit: int, conflict_threshold: float, conflict_limit: int) -> None:
+    """Reject tuning that would disable a stage while looking healthy.
+
+    Each of these is a *silent* misconfiguration, which is why it is refused at
+    construction rather than left to surface as behaviour. ``retrieval_limit=0``
+    makes ``MemoryStore.search`` return nothing by contract, so every turn would
+    be unpersonalised with ``memory_degraded`` reading ``False`` — a generic
+    answer presented as a healthy personal one, the exact failure
+    :attr:`TurnResult.memory_degraded` exists to expose. ``conflict_limit=0``
+    hands the policy no conflicts, so every proposal is ruled on as though
+    nothing contradicted it. A ``NaN`` threshold compares ``False`` against
+    every score, silently doing the same.
+
+    Raises:
+        ValueError: If a limit is not positive, or the threshold is not a finite
+            value in ``[0, 1]`` — the range a ``MemoryRecord.score`` occupies.
+    """
+    for name, limit in (("retrieval_limit", retrieval_limit), ("conflict_limit", conflict_limit)):
+        if limit < 1:
+            msg = f"{name} must be at least 1, got {limit}"
+            raise ValueError(msg)
+    if not isfinite(conflict_threshold) or not 0.0 <= conflict_threshold <= 1.0:
+        msg = f"conflict_threshold must be a finite value in [0, 1], got {conflict_threshold!r}"
+        raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +180,16 @@ class LearningLoop:
             now: Clock for goal timestamps and temporary-store expiry;
                 injectable so turns are deterministic in tests.
             id_factory: Supplies goal ids; injectable for the same reason.
+
+        Raises:
+            ValueError: If a limit is below 1, or ``conflict_threshold`` is not a
+                finite value in ``[0, 1]`` (see :func:`_check_tuning`).
         """
+        _check_tuning(
+            retrieval_limit=retrieval_limit,
+            conflict_threshold=conflict_threshold,
+            conflict_limit=conflict_limit,
+        )
         self._context = context
         self._memory = memory
         self._policy = policy
@@ -175,9 +211,10 @@ class LearningLoop:
         subsystems it has no business importing (``Planner``, ADR-0014 §6).
 
         Args:
-            utterance: What the user said, verbatim. It becomes the goal's
-                statement unchanged — no intent inference happens here, because
-                inferring one needs a model and no contract offers that yet.
+            utterance: What the user said. It becomes the goal's statement
+                unrewritten — trimmed of surrounding whitespace, and otherwise
+                untouched. No intent inference happens here, because inferring
+                one needs a model and no contract offers that yet.
 
         Returns:
             The turn's goal, context, retrieved memories and plan.
@@ -212,10 +249,17 @@ class LearningLoop:
         writes memory directly (VISION §7).
 
         Proposals are applied in order and independently; there is no
-        transaction, because ``MemoryStore`` offers none. A store failure
-        therefore propagates with the earlier proposals already applied — the
-        alternative, reporting success for a partially applied set, would be a
-        claim about memory integrity this loop cannot make.
+        transaction, because ``MemoryStore`` offers none. Two consequences, both
+        deliberate:
+
+        * A store failure propagates with the earlier proposals **already
+          applied**. Reporting success for a partially applied set would be a
+          claim about memory integrity this loop cannot make.
+        * Two proposals carrying the same record id resolve **last-write-wins**,
+          because ``MemoryStore.add`` is an upsert keyed on id — the id is the
+          caller's idempotency key, and de-duplicating here would override a
+          processor that meant to supersede its own earlier proposal. Both
+          outcomes report that id, which is what makes the collision visible.
 
         Args:
             event: The correction or stated preference the user gave.
@@ -234,9 +278,11 @@ class LearningLoop:
     def _goal_from(self, utterance: str) -> Goal:
         """Mint the turn's goal from what the user said.
 
-        Verbatim and ``USER_ASSERTED``: the statement is the user's own, so a
+        Unrewritten and ``USER_ASSERTED``: the statement is the user's own, so a
         goal built from it must not be indistinguishable from one the system
-        inferred (``Goal``, ADR-0014 §1).
+        inferred (``Goal``, ADR-0014 §1). Surrounding whitespace is stripped —
+        ``Goal``'s own validator would strip it anyway, so doing it here keeps
+        the blank check and the stored statement in agreement.
 
         Raises:
             PlanningError: If the utterance is blank. Caught here rather than

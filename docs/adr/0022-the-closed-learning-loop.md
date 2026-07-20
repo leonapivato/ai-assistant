@@ -58,9 +58,11 @@ decision, not a claim that the pipeline is complete.
 `respond` runs: **intent → context → memory retrieval → planning**, the order
 `CLAUDE.md` states. Each stage may use only what the ones before it produced.
 
-- **Intent** is the utterance taken *verbatim* as the goal's statement. No
-  inference happens: inferring intent needs a model, and no contract offers
-  intent extraction. The goal's provenance is `USER_ASSERTED` — the user said
+- **Intent** is the utterance taken *unrewritten* as the goal's statement —
+  trimmed of surrounding whitespace, as `Goal`'s own validator would trim it,
+  and otherwise untouched. No inference happens: inferring intent needs a model,
+  and no contract offers intent extraction. The goal's provenance is
+  `USER_ASSERTED` — the user said
   it — which is exactly the distinction `Goal` (ADR-0014 §1) exists to preserve.
 - **Retrieval** is scoped by the goal statement, so it depends on intent.
 - **Planning** is handed the context and the memories rather than fetching them,
@@ -119,6 +121,23 @@ Proposals are applied in order and independently. There is no transaction,
 because `MemoryStore` offers none; a store failure therefore propagates with
 earlier proposals already applied. Reporting success for a partially applied set
 would be a claim about memory integrity this loop cannot make.
+
+Ordering also settles collisions: two proposals carrying the same record id
+resolve **last-write-wins**, because `MemoryStore.add` is an upsert keyed on id.
+The loop does not de-duplicate, because the id is documented as the caller's
+idempotency key — a processor re-proposing an id may well mean to supersede its
+own earlier proposal, and both outcomes report that id, so the collision is
+visible rather than hidden.
+
+### 4a. Tuning is validated at construction
+
+`retrieval_limit`, `conflict_limit` and `conflict_threshold` are checked when the
+loop is built, because each bad value *disables a stage while the loop keeps
+reporting health*. `retrieval_limit=0` makes `search` return nothing by contract,
+so every turn is unpersonalised with `memory_degraded` reading `False` — a
+generic answer presented as a healthy personal one, which is precisely what
+`memory_degraded` exists to prevent. `conflict_limit=0`, and a `NaN` threshold,
+silently hand the policy no conflicts to rule against.
 
 ### 5. Determinism
 
