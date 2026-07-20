@@ -155,11 +155,10 @@ alternative, inconsistency with a prior ADR, a seam that will not extend).
 **Trivial ADRs** (amendments, status changes, supersedes) skip both the separate
 PR and the review — not worth the round-trip. That is a statement about *review
 cost*, and nothing else: it says such changes are cheap to review, not that a
-ratified decision may be rewritten in place. ADRs are append-only, and changing
-a past decision takes a new ADR that supersedes the old one — see
-`docs/adr/0001-record-architecture-decisions.md`, which governs what may be
-appended to an existing ADR and what needs a new one. Being small, or cheap to
-review, does not bear on which of the two you need.
+ratified decision may be rewritten in place. ADR-0001 puts it plainly: ADRs are
+append-only, and to change a past decision you write a new ADR that supersedes
+the old one and update the old one's status. Being small, or cheap to review,
+does not bear on that.
 
 **Spike first if you need to.** A contract ratified with no implementation
 contact is how a seam that does not survive first use gets blessed. Run a
