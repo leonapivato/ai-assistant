@@ -17,7 +17,9 @@ store is wired, not here.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -38,6 +40,10 @@ _BGE_SMALL_DIMENSIONS = 384
 
 _STUB_MODEL = "stub/embedding-model"
 _STUB_DIMENSIONS = 16
+
+# Long enough that a second thread reliably reaches the `_model is None` check
+# while the first is inside `load`, short enough not to weigh on the suite.
+_SLOW_LOAD_SECONDS = 0.05
 
 
 class _StubTextModel:
@@ -155,6 +161,37 @@ async def test_the_model_is_loaded_once_and_reused() -> None:
     await embedder.embed(["second"])
 
     assert backend.loads == [_STUB_MODEL]
+
+
+class _SlowLoadBackend(_StubBackend):
+    """A backend whose load is slow enough for a second caller to race it.
+
+    A barrier would be the deterministic choice, but it deadlocks the very
+    behaviour under test: the lock admits *one* thread to ``load``, so a second
+    party never arrives. Holding the load open instead leaves the window wide
+    open for the racing thread — an unlocked implementation loses reliably.
+    """
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        self.loads.append(model)
+        time.sleep(_SLOW_LOAD_SECONDS)
+        return self.model
+
+
+async def test_concurrent_first_calls_load_the_model_once() -> None:
+    # The lazy load is reached from a worker thread, so two in-flight `embed`
+    # calls can both observe `_model is None`. Unlocked, that is two model
+    # downloads; this is the test that makes the lock's removal visible.
+    backend = _SlowLoadBackend()
+    embedder = _stub_embedder(backend)
+
+    first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+
+    assert backend.loads == [_STUB_MODEL]
+    # And the race must not have crossed the two callers' results.
+    assert first == await embedder.embed(["zulu"])
+    assert second == await embedder.embed(["alpha"])
+    assert first != second
 
 
 async def test_an_empty_batch_does_not_load_the_model() -> None:
