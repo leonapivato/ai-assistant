@@ -98,7 +98,13 @@ for itself:
     the default embedder is on-device and transmits nothing (ADR-0006 §2);
   - **the provider credential** for the endpoint being called (Tier 0), sent
     as authentication and only ever to the provider it belongs to
-    (ADR-0004 §3).
+    (ADR-0004 §3);
+  - **request configuration and protocol metadata** (Tier 2) — the model
+    identifier, generation parameters such as temperature and token limits, and
+    the headers the transport requires. Every call carries some of this and it
+    is not user data: it is configuration the system chose. Bounded
+    accordingly — this class may carry no Tier 0 or Tier 1 content, so it is
+    not a lane for smuggling context into a "settings" field.
 
   That list *is* the declaration, and it is exhaustive: a payload class not
   listed here is not authorised at this boundary, and adding one — multimodal
