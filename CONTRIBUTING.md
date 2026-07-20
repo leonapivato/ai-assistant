@@ -50,6 +50,16 @@ change" trades a shorter wait for a judgment call whose failure mode — a
 cross-subsystem regression `lint-imports` cannot see — surfaces in CI after you
 have moved on. Revisit if `pytest` ever crosses a couple of minutes.
 
+**Run it against a current `main`.** A green gate is evidence about the tree you
+ran it on, so `git fetch origin && git rebase origin/main` comes first —
+otherwise you have tested a base nobody will merge. This is not the same
+judgment call as the one above: running everything is about *breadth*, and this
+is about *freshness*. A branch that predates a check added to `main` runs a full
+suite that cannot fail on it, which is how a change has been reported green
+while CI had it red. The same staleness misleads Codex, which reads the working
+tree for context and will report other branches' merged work as regressions in
+yours — so fetch before reviewing too.
+
 ## Review (pre-merge)
 
 The gate is mechanical; it cannot judge design or the adequacy of tests. Before
