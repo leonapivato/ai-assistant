@@ -110,10 +110,10 @@ continuing terms are:
 - it transmits only the payload classes declared below, which are documentation
   of what it already sends rather than a new grant;
 - its recipients for user data are the model providers the user explicitly
-  configured (ADR-0004 §2's configured-set amendment, which stands), plus one
-  narrow exception carrying no user data: the artifact repository a local
-  backend fetches its model file from, authorised below for that payload class
-  alone;
+  configured (ADR-0004 §2's configured-set amendment, which stands unamended);
+  the model artifact fetch declared below reaches a host that rule does not
+  cover, which this ADR records as an unresolved gap rather than authorising
+  (issue #89);
 - ADR-0004 §7's minimisation rule binds the content of each call;
 - the two controls it does not yet satisfy — transport pinning and
   credential-access gating — are named below, unchanged by this ADR, and
@@ -202,13 +202,16 @@ for itself:
     gap — `models/` transmits today under ADR-0004 §2, and making it a
     precondition would prohibit every model call until the work lands. Issue
     #83 covers both boundaries;
-  - **model artifact fetches** (Tier 2), **to a distinct recipient class: the
-    artifact repository serving that model**, which is *not* a configured model
-    provider and is not authorised by the configured-provider rule. It is
-    authorised here, for this payload class only, and for nothing else — no
-    user data may go to it, and no model provider traffic may go anywhere else.
-    The request for a named model file when a local backend downloads its
-    weights on first use. `fastembed`'s ONNX
+  - **model artifact fetches** (Tier 2) — the request for a named model file
+    when a local backend downloads its weights on first use. **Declared here,
+    not authorised here.** Its recipient is an artifact repository, which is
+    not a configured model provider, so ADR-0004 §2's configured-provider rule
+    does not cover it — and authorising a new recipient class would widen that
+    rule, which is outside this ADR's supersession scope (§1). So this entry
+    records an egress that already happens and that nothing had declared; it
+    does not bless it. Resolving it — preinstall the artifact, or pin and
+    verify the host, and amend ADR-0004 §2 if a recipient class is genuinely
+    needed — is issue #89. `fastembed`'s ONNX
     model (ADR-0006 §2) is the live case, and it is easy to miss: the *default*
     embedder is the on-device one, and "on-device" describes where inference
     runs, not where the model came from. No user data is in the request, but it
@@ -505,7 +508,13 @@ undesignated, and permitted no egress at all:
   authorised, immutably bound at authorisation time and consumed unchanged.
   Binding at least the connected account, the canonical destination, the
   approved payload description and the decision itself; whether that is one
-  envelope object or another construction is the invocation ADR's call. Without it the
+  envelope object or another construction is the invocation ADR's call.
+  **Credential values are excluded from what is bound**: bind a stable
+  reference to the credential, not the secret, and fetch the value only after
+  approval, sending it only over the pinned transport. Otherwise the binding
+  artifact and every audit record derived from it become Tier 0 stores, and a
+  design meant to make disclosure reviewable would put secrets in the review
+  trail. Without it the
   payload is bound (above) while the destination is not: a call can resolve and
   authorise `alice@example.com`, then have a mutable argument re-resolved to
   `bob@example.com` before the send, with the audit still reading Alice. This
