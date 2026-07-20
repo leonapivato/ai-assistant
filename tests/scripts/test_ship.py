@@ -176,6 +176,14 @@ def _fake_gh(bin_dir: Path) -> None:
         "  fi\n"
         '  if [[ "$method" == "PATCH" ]]; then\n'
         '    id="${endpoint##*/}"\n'
+        # GH_PATCH_FAIL_ID fails the update of one specific comment while
+        # leaving the others writable — the partial-failure case of issue #76,
+        # which needs a *later* write to fail after an earlier one succeeded.
+        '    if [[ "$id" == "${GH_PATCH_FAIL_ID:-}" ]]; then\n'
+        '      echo "patch failed" >&2\n'
+        '      printf "patch-failed %s\\n" "$id" >>"$GH_COMMENT_CALLS"\n'
+        "      exit 1\n"
+        "    fi\n"
         '    [[ -f "$GH_COMMENTS_DIR/$id" ]] || exit 1\n'
         '    cat "$body_file" >"$GH_COMMENTS_DIR/$id"\n'
         '    printf "patch %s\\n" "$id" >>"$GH_COMMENT_CALLS"\n'
@@ -875,6 +883,63 @@ def test_updates_every_duplicate_it_owns_for_the_commit(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     stored = _stored_comments(tmp_path)
     assert len(stored) == 2, "both duplicates are updated; no third comment is created"
+    assert all("current finding" in c for c in stored)
+    assert all("superseded finding" not in c for c in stored)
+
+
+def test_a_failed_update_still_attempts_the_rest_and_names_the_split(tmp_path: Path) -> None:
+    """Issue #76: the update loop is not failure-atomic, so it must report.
+
+    The *first* write is the one made to fail, which pins both halves of the
+    fix. Under a bare ``set -e`` the loop would abort there and leave the second
+    comment stale as well, having never tried it — so the second comment
+    carrying the current review is what shows every comment is attempted. And
+    the exit has to name which comments now disagree, because a bare ``gh``
+    error tells the operator nothing about the state left behind.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"current finding\n{_VERDICT}\n")
+    stale = _ship_comment_opening(sha) + "\nsuperseded finding\n"
+    _seed_comment(tmp_path, "901", stale, author="shipper")
+    _seed_comment(tmp_path, "902", stale, author="shipper")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"GH_PATCH_FAIL_ID": "901"})
+
+    assert result.returncode != 0
+    # The failure did not stop the loop: 902 was still attempted, and succeeded.
+    comments = tmp_path / "comments"
+    assert "superseded finding" in (comments / "901").read_text()
+    assert "current finding" in (comments / "902").read_text()
+    # And the message says exactly which comment is lying, rather than passing
+    # gh's error through.
+    assert "902" in result.stderr, "the comment now showing this review is named"
+    assert "901" in result.stderr, "the comment left superseded is named"
+    assert "superseded" in result.stderr
+    assert "just ship" in result.stderr, "the recovery is stated"
+
+
+def test_a_rerun_converges_after_a_partly_failed_update(tmp_path: Path) -> None:
+    """The divergence lasts only until the next ship — which the failure prompts.
+
+    This is why #76 is a `minor` rather than a defect that needs a transaction:
+    the state is self-healing, provided the operator is told to re-run.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"current finding\n{_VERDICT}\n")
+    stale = _ship_comment_opening(sha) + "\nsuperseded finding\n"
+    _seed_comment(tmp_path, "901", stale, author="shipper")
+    _seed_comment(tmp_path, "902", stale, author="shipper")
+
+    assert _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"GH_PATCH_FAIL_ID": "901"}).returncode != 0
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    stored = _stored_comments(tmp_path)
+    assert len(stored) == 2, "no third comment is created by the recovery"
     assert all("current finding" in c for c in stored)
     assert all("superseded finding" not in c for c in stored)
 
