@@ -54,9 +54,14 @@ so it needs no environment in the temporary checkout.
 Also check what is already claimed by open work:
 
 ```bash
-gh pr list --state open --json number,title,headRefName,body
-gh issue list --state open --limit 100 --json number,title,body
+gh pr list --state open --limit 200 --json number,title,headRefName,body
+gh issue list --state open --limit 200 --json number,title,body
 ```
+
+Set `--limit` on **both**: `gh pr list` defaults to 30 and `gh issue list` to
+30, so a subsystem claimed by an older open item silently falls off the page and
+reads as available. Raise them further if the repo ever carries more open items
+than that.
 
 Read the **bodies**, not just the titles: a PR called "First vertical follow-up"
 on a branch named `feature/next` can claim the `tools` subsystem in a checklist
@@ -122,8 +127,10 @@ Using `$surveyed` from step 1 — the commit every read actually came from —
 1. `git fetch origin` and compare against `$surveyed`. If it moved, redo steps 1–3
    against the new commit — an issue rescan alone will not catch a lane that
    merged, since a merged lane leaves no open issue behind.
-2. Re-run the `gh issue list` scan regardless, in case someone opened an
-   overlapping issue without `origin/main` moving.
+2. Re-run **both** scans from step 1 — PRs *and* issues — regardless of whether
+   the ref moved. Someone can open an overlapping PR, or an issue, while
+   `origin/main` stands still; an issues-only rescan misses the PR case
+   entirely.
 3. If either changed the draft, show the revised body and get confirmation
    again — never post a body that was not the one approved.
 
