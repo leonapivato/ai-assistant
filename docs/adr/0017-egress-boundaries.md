@@ -48,6 +48,15 @@ This replaces ADR-0004 §2's "only component" clause. Its residency clause (all
 persistent data local, no cloud storage by default) and its telemetry clause
 (off by default, no observability egress) are unaffected and remain ADR-0004's.
 
+**This is a requirement on the system, not a claim about its current state.**
+"Designated" means a boundary is permitted to transmit and is bound by the rule
+above — it does not certify that every clause of the rule is already enforced
+there. Two of them are not, at `models/`, today: nothing pins the transport
+endpoint and nothing gates credential access. §2 names both, argues why they
+are accepted rather than blocking, and points at the issues that close them.
+They are stated where the rule is stated so that no reader takes designation
+for a guarantee, and so the ADR is not quietly weaker than it sounds.
+
 ### 2. The boundaries
 
 Two boundaries are **approved** for egress by this ADR, and they are in
