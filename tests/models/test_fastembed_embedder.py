@@ -373,13 +373,21 @@ def test_a_mapping_that_raises_on_lookup_raises_model_error() -> None:
     assert isinstance(caught.value.__cause__, RuntimeError)
 
 
-@pytest.mark.parametrize("reported", ["not-a-number", object()])
-def test_a_non_numeric_dimension_raises_model_error(reported: object) -> None:
-    # Without this, `dimensions < 1` raises a bare TypeError past the
-    # constructor's documented ModelError.
+@pytest.mark.parametrize(
+    "reported",
+    [
+        "not-a-number",  # would raise TypeError from the comparison
+        object(),
+        1.5,  # `int()` would silently accept this as a 1-wide vector
+        float("inf"),  # `int()` would raise OverflowError past the boundary
+        float("nan"),
+        True,  # would otherwise pass as a one-dimensional model
+    ],
+)
+def test_a_non_integer_dimension_raises_model_error(reported: object) -> None:
     backend = _HostileMappingBackend({_STUB_MODEL: reported})  # type: ignore[dict-item]  # deliberately malformed
 
-    with pytest.raises(ModelError, match="non-numeric dimension"):
+    with pytest.raises(ModelError, match="non-integer dimension"):
         FastEmbedEmbedder(model=_STUB_MODEL, backend=backend)
 
 
