@@ -96,7 +96,9 @@ def _fake_gh(bin_dir: Path) -> None:
         'if [[ "$1" == "pr" && "$2" == "comment" ]]; then\n'
         '  prev=""\n'
         '  for a in "$@"; do\n'
-        '    [[ "$prev" == "--body-file" ]] && cp "$a" "$GH_COMMENT_OUT"\n'
+        # Appended, not copied: ship posts one comment per persona now, and a
+        # copy would leave only the last one visible to assertions.
+        '    [[ "$prev" == "--body-file" ]] && cat "$a" >>"$GH_COMMENT_OUT"\n'
         '    prev="$a"\n'
         "  done\n"
         "  exit 0\n"
@@ -372,8 +374,12 @@ def test_core_check_survives_a_diff_larger_than_the_pipe_buffer(tmp_path: Path) 
     assert not (tmp_path / "comment.md").exists()
 
 
-def test_truncates_an_oversized_review_rather_than_failing_to_post(tmp_path: Path) -> None:
-    """GitHub rejects a body over 65536 chars; a truncated review beats none."""
+def test_fails_closed_on_a_review_too_large_to_post_intact(tmp_path: Path) -> None:
+    """Truncating would drop the tail — where the findings and verdict live.
+
+    A silently-shortened review posted as a successful ship is worse than no
+    comment: it reads as the whole record while potentially missing the verdict.
+    """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
@@ -381,10 +387,26 @@ def test_truncates_an_oversized_review_rather_than_failing_to_post(tmp_path: Pat
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
+    assert result.returncode != 0
+    assert "cannot be posted intact" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_two_ordinary_reviews_post_as_separate_comments(tmp_path: Path) -> None:
+    """Per-persona comments mean a second lens cannot push the first over."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", "x" * 40_000)
+    _record_review(repo, sha, "architecture", "y" * 40_000)
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
     assert result.returncode == 0, result.stderr
-    posted = (tmp_path / "comment.md").read_bytes()
-    assert len(posted) < 65_536
-    assert b"truncated" in posted
+    posted = (tmp_path / "comment.md").read_text()
+    # Both landed, though concatenated they would have exceeded the limit.
+    assert "x" * 40_000 in posted
+    assert "y" * 40_000 in posted
 
 
 def test_refuses_on_main(tmp_path: Path) -> None:

@@ -120,6 +120,17 @@ echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
 # -o captures just the final review; progress streams to stderr.
 codex exec "${sandbox_args[@]}" "${model_args[@]}" -o "$out" - <"$prompt" >&2
 
+# Pinning the diff is not enough on its own: Codex reads files from the working
+# tree as it goes, so if the checkout moved *during* the review — another commit,
+# a stray edit — it reasoned about a tree that is not the SHA this artifact would
+# name. Re-check both, and record nothing if either changed. A missing artifact
+# costs a re-run; a false one is evidence for code nobody reviewed.
+if [[ "$(git rev-parse HEAD)" != "$sha" || -n "$(git status --porcelain)" ]]; then
+    echo "the checkout changed while the review was running; not recording it" >&2
+    echo "HEAD was ${sha}, now $(git rev-parse HEAD); re-run on a settled tree" >&2
+    exit 1
+fi
+
 # An artifact is evidence that a review happened, so an empty one is worse than
 # none: ship.sh checks that the file exists, and would post silence as though it
 # were a clean review. Codex can exit 0 having written nothing (a dropped
