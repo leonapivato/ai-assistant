@@ -178,10 +178,36 @@ strictly more than the current position where an id matched and nothing else was
 compared.
 
 **`parameters_digest`, and why the payload is bound but not stored.** The
-arguments a call proposes may carry Tier 0 or Tier 1 data. ADR-0017 §3 is
-explicit about the consequence of putting them in a durable record: bind a
-reference, *"or the binding and every audit record derived from it become Tier 0
-stores"*. So the decision binds the payload by digest and holds none of it.
+arguments a call proposes carry Tier 1 data routinely — a recipient, a message
+body, a calendar entry — and a durable record holding them verbatim would make
+the trail a second copy of the user's most sensitive material, growing forever,
+for no purpose the trail actually has. The trail needs to answer "were *these*
+arguments the ones approved", which a digest answers exactly. So the decision
+binds the payload and holds none of it.
+
+**`parameters` may not carry a Tier 0 credential value, and that is a
+pre-existing rule rather than one invented here.** ADR-0004 §3 puts secrets in
+the OS keyring and has `tools/` read them through `SecretStore`; a tool fetches
+its own credential and is not handed one. ADR-0017 §3 asks for exactly that
+shape — *"bind a reference, fetch the secret after approval, or the binding and
+every audit record derived from it become Tier 0 stores"* — and the ratified
+architecture already satisfies it in the strongest available way: the credential
+never enters the request, so there is nothing for the digest to be taken over.
+This ADR restates the prohibition rather than relying on it being obvious,
+because a digest is *not* an adequate remedy if one ever gets in. SHA-256 of a
+low-entropy secret is brute-forceable offline, so a hash of a credential is a
+weakened copy of it, not an absence of one. The rule is therefore "no Tier 0 in
+`parameters`", not "a digest makes Tier 0 safe".
+
+**The residual is a user-typed secret, and it is already a blocking condition
+elsewhere.** A user who pastes an API key into a conversation can have it reach a
+plan step's parameters, where no rule here would recognise it — issues #94
+(classification by provenance, including Tier 0 the user typed) and #75 (no
+egress-side detection for secrets in user-authored content). ADR-0017 §3 makes
+#94 a *condition* on designating the tool egress seam, so the seam stays
+undesignated while it is open. That is the right place for it: the answer is a
+classification mechanism neither this contract nor the invocation contract can
+substitute for, and it is named here rather than absorbed.
 
 **The digest is a derived property of `ActionRequest`, and no caller supplies
 it.** `ActionRequest.parameters_digest` computes it over the canonical JSON form
@@ -557,6 +583,11 @@ worse than one bounded and disclosed.
   JSON round-trip with its embedded definition intact. Implementation contact is
   not proof, and ADR-0018 was written by an implementation finding five things a
   review did not.
+- **A Tier 0 credential may not appear in a request's `parameters`** (§1). The
+  ratified architecture already implies it — credentials live in the keyring
+  behind `SecretStore` — but this contract is the first that would *durably
+  record something derived from* a parameter, so it says so explicitly. A hash
+  of a low-entropy secret is a weakened copy of it, not an absence of one.
 - **Two ADR-0017 §3 conditions are partly discharged** — a named approver able
   to refuse (`DENY` exists and a policy must be able to reach it), and the
   payload bound before transmission (§1's digest). Neither is *fully* discharged
