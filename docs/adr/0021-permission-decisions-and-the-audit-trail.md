@@ -323,6 +323,11 @@ class PermissionRuling(BaseModel):
 
 class ActionPolicy(Protocol):
     async def decide(self, request: ActionRequest) -> PermissionRuling: ...
+
+    async def resolve(
+        self, confirmed: PermissionDecision, *, approved: bool
+    ) -> PermissionRuling: ...
+
 ```
 
 The request is **self-contained**: it carries the definition rather than an id,
@@ -348,6 +353,22 @@ describing *what was ruled on* is transcribed from the request by
 true of every implementation, including one written by someone who never read
 this ADR.
 
+**`resolve` keeps every permission outcome authored inside `permissions`.**
+When a `CONFIRM` is answered, something has to turn "the user said yes" into an
+`ALLOW`. An earlier draft left that to the caller, which put the authoring of a
+permission outcome in `orchestration` or, worse, in an interface adapter — the
+business logic golden rule 3 keeps out of `interfaces/`, and the deterministic
+ownership of permissions VISION §7 asks for.
+
+So the policy performs the conversion. It takes the recorded `CONFIRM` and the
+user's answer and returns the resolving ruling, which lets it refuse a
+confirmation it no longer accepts — one answered long after it was asked, or
+answered for a request whose ruling would now be `DENY` — rather than being
+obliged to rubber-stamp any `approved=True` it is handed. The caller still
+records; it no longer decides. `resolve` raising or returning `DENY` on a
+`confirmed` whose ruling was not `CONFIRM` is a conformance obligation, so the
+method cannot be used to mint an `ALLOW` out of nothing.
+
 **`authorised_by` records where an `ALLOW` came from.** An `ALLOW` reached
 because the declaration cleared the policy's own thresholds is a different act
 from one reached because the user said so, and §5's disclosure floor turns that
@@ -356,8 +377,27 @@ permitted only when it names the user decision it rests on. The field is
 `None` for every ruling a policy reaches by itself, and may be set only on an
 `ALLOW` — a `DENY` that cites an authorisation is incoherent.
 
-Standing grants are deferred (§6), so nothing populates this field yet. It is
-present anyway for the reason ADR-0016 §4 carried `parameters_schema`
+**It is a pointer this contract does not verify, and that is bounded by two
+rules rather than left open.** A `str` field naming an authorisation is one a
+policy could fabricate, which would make §5's floor satisfiable by writing
+something in a box. There is no authorisation store to check it against, because
+standing grants are deferred — so instead:
+
+- **The conformance suite requires `authorised_by is None`** from a policy
+  constructed with no authorisation source. Today that is *every* policy, so a
+  conforming implementation cannot produce a non-`None` value at all, and the
+  floor is absolute in fact and not merely in intent. This is checkable now,
+  against any implementation.
+- **The ADR that introduces standing grants must make the pointer resolvable** —
+  to a recorded user decision that actually covers this tool — and must say
+  where those records live. That is a named precondition on it, in the way
+  ADR-0016 §7 set three constraints on the invocation ADR rather than trusting
+  it to notice them.
+
+Until both hold, an `ALLOW` for a disclosing tool is unreachable rather than
+weakly guarded.
+
+It is present anyway for the reason ADR-0016 §4 carried `parameters_schema`
 unenforced: the alternative is that the first standing grant has to *relax a
 ratified floor*, which is a breaking change to a safety rule at the moment the
 system is being taught to stop asking. ADR-0016 §5 is blunt about that shape —
@@ -408,8 +448,16 @@ the first is modelled here. The second has no settled shape — issue #74 asks
 whether §7's Tier 0 gating even applies to a model provider credential, and
 ADR-0017 §3 makes gated credential access a condition on the egress seam. Adding
 a second request shape now would mean guessing the answer to an open question and
-ratifying a union type around the guess. `ActionRequest` is therefore about
-invoking a tool, and widening it is a later, additive decision once #74 settles.
+ratifying a union type around the guess.
+
+`ActionRequest` is therefore about invoking a tool, and **extending this contract
+to cover direct data access will be a breaking change, not an additive one** — a
+union parameter on `decide`, or a second Protocol beside it. An earlier draft of
+this section called it additive, which was simply wrong: `decide` names a
+concrete parameter type, so widening it breaks every structural implementation
+under golden rule 5. Saying so is the point of deferring it honestly. Which of
+the two shapes is right depends on what #74 decides the rule is, and that is a
+reason to wait rather than to guess now.
 
 ### 4. The audit trail is append-only, and erasure is wholesale
 
@@ -600,6 +648,17 @@ nobody declared treated as free.
 
 ## Consequences
 
+- **Every permission outcome is authored inside `permissions`.** `resolve` turns
+  a user's answer into the ruling that resolves a `CONFIRM`, so no adapter or
+  wiring layer ever constructs one. The caller records; it does not decide.
+- **`authorised_by` is unverified by this contract, and unreachable because of
+  it.** A conforming policy given no authorisation source must leave it `None`,
+  which today is every policy, and the standing-grant ADR inherits the named
+  obligation to make the pointer resolve. A floor guarded by a fabricable string
+  would be worse than no floor, so the guard is that nothing may set it yet.
+- **Extending the contract to direct Tier 0/1 data access will be breaking**
+  (§3), not additive as an earlier draft claimed. `decide` names a concrete
+  parameter type. Whether it becomes a union or a second Protocol waits on #74.
 - **The floor is written against auto-granting, not against the outcome.** A
   disclosing tool may be `ALLOW`ed only by a ruling that names the user decision
   it rests on, and `PermissionRuling.authorised_by` carries that today while
