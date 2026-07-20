@@ -437,13 +437,53 @@ fi
 # per agent, one PR per branch, ADR-0015) and its outcome is cosmetic. What
 # would not be cosmetic is a duplicate that then goes stale: updating only the
 # first match would leave the second showing a superseded review forever.
+#
+# The loop is not atomic — GitHub has no multi-comment write — so a failure part
+# way through leaves the PR showing this review on one comment and a superseded
+# one on another. Two things follow, and they are what issue #76 asked for.
+#
+# First, a failed PATCH does not abort the rest. Under a bare `set -e` the first
+# failure stops the loop, so a transient error on the first of three comments
+# leaves the other two stale as well — the script gives up on comments it had
+# every chance to fix. Attempting all of them makes the divergence as small as
+# the failures actually were.
+#
+# Second, the exit names the split rather than surfacing gh's bare error. The
+# state is self-healing — a re-run finds every comment for this commit and
+# rewrites all of them — but only if the operator can see that a re-run is what
+# is needed, and which comments are currently lying. Retrying in-process was the
+# other option offered and is not taken: a retry without backoff buys almost
+# nothing against the failures that actually happen (auth, rate limit, network
+# down), and a re-run of ship is already the correct and tested recovery.
 if [[ ${#existing_ids[@]} -gt 0 ]]; then
     echo "ship: updating ${#existing_ids[@]} existing review comment(s) for" \
         "${sha:0:12} on PR #${num}…" >&2
+    updated_ids=()
+    failed_ids=()
     for id in "${existing_ids[@]}"; do
-        gh api --silent --method PATCH \
-            "repos/{owner}/{repo}/issues/comments/${id}" -F "body=@${body}"
+        if gh api --silent --method PATCH \
+            "repos/{owner}/{repo}/issues/comments/${id}" -F "body=@${body}"; then
+            updated_ids+=("$id")
+        else
+            failed_ids+=("$id")
+        fi
     done
+    if [[ ${#failed_ids[@]} -gt 0 ]]; then
+        # `${arr[*]}` rather than `${arr[@]}`: one space-joined string for the
+        # message, and both arrays are known non-empty on the branches that read
+        # them, so `set -u` has nothing to trip on.
+        updated_desc="none"
+        if [[ ${#updated_ids[@]} -gt 0 ]]; then
+            updated_desc="${updated_ids[*]}"
+        fi
+        die "could not update every review comment on PR #${num}
+     PR #${num} is now inconsistent for commit ${sha:0:12}:
+       showing this review:       comment(s) ${updated_desc}
+       showing a superseded one:  comment(s) ${failed_ids[*]}
+     nothing else is wrong with the review — the write failed, not the record
+     re-run: just ship — it rewrites every comment it owns for this commit, so
+     a re-run converges on one current review"
+    fi
 else
     echo "ship: posting ${#artifacts[@]} review(s) for ${sha:0:12} to PR #${num}…" >&2
     gh pr comment "$num" --body-file "$body"
