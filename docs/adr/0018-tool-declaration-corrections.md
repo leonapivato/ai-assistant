@@ -14,8 +14,8 @@ ADR-0016 ratified `ToolDefinition` and the `ToolRegistry` contract. It was
 ratified, as the workflow requires, **before** the registry existed: it merged
 as its own PR (#47) ahead of the implementation PR (#67) that depends on it.
 
-Writing that implementation found four places where the ratified contract was
-wrong or under-specified. **All four came from implementation contact**, and
+Writing that implementation found five places where the ratified contract was
+wrong or under-specified. **All five came from implementation contact**, and
 that provenance is the point rather than an embarrassment. CONTRIBUTING says it
 directly:
 
@@ -27,8 +27,7 @@ demonstrated by one, and its own Consequences said so: *"the metadata's fitness
 is argued from its two named consumers rather than demonstrated by one."* This
 ADR is what first use found. The lesson for the next contract ADR is to **spike
 harder before ratifying**, not to ratify faster — a throwaway branch against the
-proposed shape would have surfaced at least three of these four before #47
-merged.
+proposed shape would have surfaced most of these five before #47 merged.
 
 These corrections were initially made by editing ADR-0016 in place, on the
 implementation branch, on the argument that CONTRIBUTING's exemption for trivial
@@ -41,14 +40,14 @@ unambiguous:
 > ADRs are append-only: to change a past decision, write a new ADR that
 > supersedes the old one and update the old one's status.
 
-Three of the four changes are also substantive by any reading: one adds a new
-`core` type, one adds an obligation to a Protocol, and one **reverses** a rule
-ADR-0016 states explicitly. So this is a substantive contract ADR taking the
+Four of the five changes are also substantive by any reading: one adds a new
+`core` type, two add obligations that an ADR-0016-conforming implementation can
+fail, and one **reverses** a rule ADR-0016 states explicitly. So this is a substantive contract ADR taking the
 full path, which is the whole point of writing it.
 
 ## Decision
 
-We will supersede four clauses of ADR-0016. Everything else in that ADR — the
+We will supersede five clauses of ADR-0016. Everything else in that ADR — the
 no-defaults rule, the severity scales, the tier reach as a ceiling, the cost and
 idempotency vocabularies, the query-only registry, the deferred invocation — is
 untouched and remains in force.
@@ -58,18 +57,21 @@ untouched and remains in force.
 | §1, field list | `id`/`capability`: `Identifier` → `VisibleIdentifier` | New `core` surface |
 | §1, `description` | "non-blank" → "contains something that renders" | Tightening |
 | §5, query results | Adds: every query returns a detached snapshot | New Protocol obligation (**breaking**) |
+| §5, registration | Adds: registration re-validates rather than copies | New obligation (**breaking**) |
 | §5, spent ids | Identical re-registration under a deregistered id: idempotent → **refused**; scope corrected to per-registry | **Reverses a ratified rule** (**breaking**) |
 
 ### Compatibility
 
 **This is a breaking Protocol change** (golden rule 5), even though no method
 signature moves. A `ToolRegistry` implementation that satisfied ADR-0016 can
-fail this contract in two ways, and neither is visible to a type checker:
+fail this contract in three ways, and none is visible to a type checker:
 
 - returning its own list or its own stored definitions from `get`, `find` or
   `all_tools` — previously unspecified, now forbidden (§3);
+- storing a definition as it arrived rather than rebuilding it through
+  validation — previously unspecified, now forbidden (§4);
 - accepting an identical definition under a deregistered id — previously
-  *required* to be idempotent, now required to raise (§4).
+  *required* to be idempotent, now required to raise (§5).
 
 The `core` types change too: `ToolDefinition.id` and `.capability` narrow from
 `Identifier` to `VisibleIdentifier`, and `description` narrows. All three are
@@ -201,16 +203,40 @@ enforce half of this mechanically while doing nothing about the definitions
 inside, and would break the convention the other Protocols set for a partial
 guarantee. The conformance suite tests both halves instead.
 
-**A related obligation on the way in.** The same `__dict__` bypass exists at
-registration: a definition can arrive in a state the type would refuse to
-construct — `side_effecting` flipped to `False` while `discloses` stays
-non-empty, an *inert email tool* — and copying it would preserve that state as
-authoritative. Registration therefore re-validates rather than copies, rebuilding
-the definition under the same rules that govern construction. This is arguably
-implied by ADR-0016's threat model rather than new, but it was nowhere stated,
-and it is stated here.
+### 4. Registration re-validates rather than copies (supersedes §5)
 
-### 4. The spent-id rule: reversal and rescoping (supersedes §5)
+The same `__dict__` bypass exists on the way *in*, and ADR-0016 said nothing
+about it either.
+
+A definition can reach `register` in a state the type would refuse to construct:
+`side_effecting` flipped to `False` while `discloses` stays non-empty — an
+**inert email tool**, declaring it transmits personal data and has no side
+effect. `model_copy` preserves that state faithfully, so a registry that copies
+stores the contradiction as authoritative and serves it to every consumer.
+
+The contract therefore requires **registration to rebuild the definition through
+validation**, not to copy it — so a definition that could not have been
+constructed cannot be registered either.
+
+This is arguably implied by ADR-0016's threat model, which already treats
+`frozen=True` as insufficient. But "arguably implied" is not a contract: an
+implementation that copied satisfied every word ADR-0016 wrote, so this is a new
+obligation and is listed as one.
+
+**Scope.** Registration is internal to `tools` (ADR-0016 §5 keeps it off the
+Protocol), so this binds the registration convention the implementations share
+rather than the cross-subsystem contract. It is nonetheless enforced by the
+shared conformance suite, because both `InMemoryToolRegistry` and
+`FakeToolRegistry` must agree — a fake that accepted a tampered definition where
+the real registry refused would let a consumer's tests pass against behaviour
+production would reject.
+
+**Migration.** An existing implementation that copies must change one line; the
+suite fails it otherwise, with two cases — the invalid-state definition above,
+and the realistic variant where a tampered definition is still valid but has had
+its `risk_level` downgraded.
+
+### 5. The spent-id rule: reversal and rescoping (supersedes §5)
 
 **This clause reverses a rule ADR-0016 states.** Merged ADR-0016 §5 reads, in
 full:
@@ -277,9 +303,9 @@ line in a composition root already prevents.
   thing ADR-0016 could not demonstrate about itself.
 - **Three concrete failure paths close**, each found by writing the code rather
   than by reading the ADR: an inert-email definition is now unrepresentable
-  (registration re-validates), a query can no longer deregister (results are
-  detached), and an id cannot be rebound within a registry's life.
-- **A fourth does not close, and is named rather than implied.** A caller can
+  (§4, registration re-validates), a query can no longer deregister (§3, results
+  are detached), and an id cannot be rebound within a registry's life (§5).
+- **A fourth path does not close, and is named rather than implied.** A caller can
   still tamper with the copy a query handed it and pass that downstream (§3).
   Detachment isolates *registry state*; it does not make metadata tamper-proof,
   and no amount of copying would — that needs a pinned digest checked at
@@ -305,10 +331,10 @@ line in a composition root already prevents.
   decisions much harder to see, which is the thing a superseding ADR most needs
   to convey.
 - **The workflow lesson is the durable one.** ADR-0016 was ratified with no
-  implementation contact, exactly as the process permits, and four corrections
+  implementation contact, exactly as the process permits, and five corrections
   followed within a day. The next substantive contract ADR should be spiked
   against a throwaway implementation before ratification, not merely reviewed
-  harder. Review caught none of these four; writing the code caught all of them.
+  harder. Review caught none of these five; writing the code caught all of them.
 - **Revisit when** #62 lands a canonical identifier syntax (at which point
   `VisibleIdentifier` should collapse into `Identifier` and §1–2 here become
   redundant), or when tool invocation lands and the registration seam changes
