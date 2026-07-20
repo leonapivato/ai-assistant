@@ -4,10 +4,12 @@
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
-- Amended: 2026-07-19 (§2 — egress is permitted from *designated, declaring,
-  gated* boundaries rather than from `models/` alone, admitting the `tools/`
-  integration boundary the rest of this ADR already provisions for; see the
-  amendment. This one supersedes the closing clause of the amendment above.)
+- Superseded in part: 2026-07-19 by **ADR-0017**, which replaces §2's egress
+  clause ("the **only** component permitted…") with a designated set of egress
+  boundaries, admitting the `tools/` integration boundary the rest of this ADR
+  already provisions for. **§2's egress clause below is no longer the live
+  rule — read it with ADR-0017.** Everything else here stands: §1, §§3–7, §2's
+  residency and telemetry clauses, and the configured-set amendment above.
 
 ## Context
 
@@ -44,10 +46,10 @@ is handled:
 - The **only** component permitted to send user data off-device is the
   `models/` layer, and only to the model provider the user has configured.
   Every other egress is a bug. (Both absolutes here reflect the codebase of
-  the time — a single-adapter `models/` and no tool layer. See the
-  **Amendments** below: the first reads "the model provider" as the configured
-  *set*; the second replaces "the only component" with a designated set of
-  egress boundaries.)
+  the time — a single-adapter `models/` and no tool layer. Neither is the live
+  rule: the **Amendment** below reads "the model provider" as the configured
+  *set*, and **ADR-0017** replaces "the only component" with a designated set
+  of egress boundaries.)
 - **Telemetry is off by default and there is no data egress for
   observability.** pydantic-ai's `logfire-api` is a no-op unless Logfire is
   explicitly installed and configured; instrumentation that transmits data
@@ -93,173 +95,11 @@ credentialed.
 unchanged, and "every other egress is a bug" still holds — *this* amendment
 widens *which* providers are legitimate recipients, not *which components* may
 transmit. At this date `models/` remained the only one. [**Superseded in part**
-by the egress-boundaries amendment below, which widens exactly the axis this
-paragraph declined to touch. The sentence stands as the record of what *this*
-amendment did and did not do; only its claim about the current state of the
-rule is out of date.]
-
-**Amendment (2026-07-19): egress boundaries — `models/` is not the only one.**
-The rule above names `models/` as the *only* component permitted to transmit and
-calls "every other egress" a bug. That was written when `models/` was the only
-subsystem in the repository with a reason to open a socket. The rest of this
-same ADR already plans for a second: §3 has `tools/` reading credentials for
-external services through `SecretStore`, §7 gates "every side-effecting tool
-call" — which for an integration layer overwhelmingly means calling a remote
-service — and the Consequences provision for "the designated `tools/`
-integration boundary" importing network clients alongside `models/`. A tool
-layer that may hold a calendar token but may not reach the calendar is not a
-design; it is a contradiction the ADR has been carrying since it was ratified.
-
-The rule is amended to: **user data may leave the device only from a boundary
-this ADR designates for egress; every designated boundary must have what it
-transmits declared, and its recipients authorised by the user, before it
-transmits.** Two boundaries are designated today, and because what they send
-differs in kind, this section fixes the *granularity* at which each discharges
-those obligations. The granularity is part of the designation — not an
-implementer's choice, and not something a boundary may weaken for itself:
-
-- **`models/`** — sends conversation content (Tier 1) to model providers the
-  user has explicitly configured. Its declaration is **static and made here**:
-  the payload class is fixed by the boundary's single purpose, so it is stated
-  once in this ADR rather than per call. Its recipient authorisation is
-  **per configuration** — the explicitly-configured provider set of the
-  amendment above — not per call. §7's minimisation rule binds the content of
-  each call.
-- **the `tools/` integration boundary** — to external services the user has
-  explicitly connected. Its declaration is **per tool**, and its recipient
-  authorisation is **per call**, through `permissions/`. Both are stronger than
-  `models/`, and necessarily so: `models/` has one payload class and one
-  purpose, while tool egress is heterogeneous, so nothing about it can be
-  inferred from the boundary itself. This designates a *named module
-  seam inside* `tools/`, not the package: `tools/` also owns tool definitions
-  and the registry, and neither has any business holding a network client.
-  Which module is the seam is the integration/invocation ADR's to name, and it
-  must be named there precisely enough for the import-linter contract to pin
-  that module rather than the package (issue #66). Until it is named, the
-  designation has no concrete extent and nothing under `tools/` may transmit.
-
-Egress from anywhere else is still a bug, and adding a third designated
-boundary requires amending this section again — it is a closed list, not a
-category a subsystem can argue its way into.
-
-**This amendment is not self-executing.** It removes a categorical prohibition;
-it does not make any transmission legal. The three conditions below are
-preconditions on the *first byte* that leaves through `tools/`, not properties
-this amendment asserts are already in place — today none of them is fully
-discharged, and no egress from `tools/` is permitted. What must exist first:
-
-- the named seam and the import-linter contract pinning it (condition 1,
-  issue #66);
-- a ratified invocation contract that gates each call through `permissions/`
-  and records it in the audit trail *before* the call transmits, rather than
-  relying on the definition's declared ceiling alone (condition 3);
-- the destination and per-call payload rules — a tool's declared reach is a
-  *ceiling* over tiers, not proof that a given call's actual recipient and
-  actual bytes were approved (ADR-0016 §3, §7; issues #57, #68).
-
-A boundary that meets the conditions in a document but not in the code is not
-designated. If the invocation ADR cannot supply all three, it does not get to
-transmit on the strength of this amendment.
-
-**Why this preserves what §2 protects.** The prior amendment found that §2's
-rationale is about **who** receives data, never **how many**. The equivalent
-line for components is that §2's rationale is about egress being **accountable**
-— few, named, and answerable for what it sends — never about the number of
-places that are accountable. "One" was never argued for anywhere in this ADR; it
-was a count of the subsystems that existed. What the ADR actually argues for,
-here and in §7, is that data must not leave from somewhere nobody designated,
-in a quantity nobody declared, without a check nobody ran. A second boundary
-costs that property nothing as long as it meets all three conditions, and the
-`tools/` boundary is held to all three:
-
-1. **Designated.** The boundary is named here and enforced mechanically, not by
-   convention: the import-linter contract this ADR's Consequences already
-   provision for permits network/provider clients in `models/` and the
-   designated `tools/` integration boundary and nowhere else. Egress stays an
-   enumerable list a reader can audit by grepping one contract.
-2. **Declaring.** Every tool states, as a required and fail-closed property of
-   its definition, which data tiers a call transmits off-device (ADR-0016 §3).
-   A tool whose author does not say what leaves cannot be defined at all. This
-   is the per-tool granularity the designation fixes above, and it is strictly
-   more than `models/` owes — not because `tools/` is less trusted, but because
-   a single fixed payload class can be declared once in a document while a
-   heterogeneous one cannot be declared anywhere but at each tool.
-3. **Authorised before transmitting.** §7 already requires that every
-   side-effecting tool call pass `permissions/` and land in the audit trail,
-   and a tool that transmits is side-effecting by construction (ADR-0016 §3).
-   Every byte leaving through `tools/` is therefore approved and recorded per
-   call — again more than `models/`, whose recipients the user authorises once
-   by configuring them.
-
-Honest accounting: condition 1 is a genuine widening, and this amendment does
-not pretend otherwise — a second exit point is a second thing that can be got
-wrong, and mechanical enforcement of the contract in condition 1 is what keeps
-"designated" from decaying into "whatever imported `httpx`". Against that, the
-`tools/` boundary is held to a *stricter* granularity on conditions 2 and 3
-than the boundary §2 was written to describe. The amendment does not lower the
-bar to admit `tools/`; it writes down the bar `models/` was implicitly clearing,
-and sets a higher one where the weaker form would not be meaningful.
-
-**Why amend rather than supersede.** ADR-0001 says ADRs are append-only and
-that changing a past decision means a new ADR superseding the old one. That
-rule governs *changing a decision*. What is happening here is narrower: ADR-0004
-is internally inconsistent as ratified. §2's clause and the Consequences clause
-cannot both be true — one forbids the exact egress the other provisions network
-clients for — so there is no single past decision to overturn, only a question
-of which of the document's two incompatible readings was decided. §3, §7 and the
-Consequences all take the tool layer as transmitting; §2's clause is the outlier
-and the one written before that layer was contemplated. Resolving that in favour
-of the rest of the document determines what ADR-0004 decided; it does not
-replace it.
-
-The practical case runs the same way. Every other clause of §2 — local-first
-residency, minimal egress, telemetry off by default — is current and correct, as
-are §§1 and 3–7. A superseding ADR would either restate the whole document to
-fix one phrase, or leave the privacy policy split across two files where the
-live rule for a given clause is whichever one a reader checks second. The
-repository has already chosen this shape for exactly this situation:
-CONTRIBUTING names amendments as a first-class ADR category alongside
-supersedes, and §2 carries a ratified in-place amendment already.
-
-Recorded honestly, because it cut close: this amendment widens a boundary, which
-is more than the configured-set amendment did, and ADR-0001's blanket phrasing
-does not distinguish "reconcile an inconsistency" from "reverse a decision".
-That ADR-0001 and CONTRIBUTING describe the amendment mechanism differently is a
-real gap and not this ADR's to close — issue #65. If that reconciliation lands
-on the strict reading, this amendment is the first candidate to be reissued as
-a superseding ADR, and its argument transfers unchanged.
-
-**Reconciling the prior amendment.** The configured-set amendment closes by
-declining exactly this widening — "the amendment widens *which* providers are
-legitimate recipients, not *which components* may transmit. `models/` remains
-the only one." That sentence has been annotated in place rather than rewritten
-or deleted, because it is doing two different jobs. As a scope statement about
-what *that* amendment did, it is accurate and worth preserving: a future reader
-should be able to see that the component prohibition was examined and
-deliberately left standing on that date, not overlooked. As a statement about
-the current rule, it is now false. Rewriting it would erase the first to fix
-the second, and an ADR is an append-only record of what was decided when.
-The annotation therefore marks only the stale clause, and this amendment is
-where the decision to widen is argued and recorded.
-
-**What is not decided here.** This amendment makes tool egress *permissible in
-principle*; it authorises no particular tool, destination, or payload, and by
-itself no transmission at all. Destination-level policy — which recipients are
-approved — remains parameter-level and deferred (ADR-0016 §7; issue #57 for
-per-call reach). Nor does it weaken §7's minimisation rule: "send the minimum
-necessary" now reads against both designated boundaries. The invocation ADR
-still owes the seam, the gating contract, and the rules that decide which
-declared disclosures `permissions/` grants; what it no longer owes is a prior
-amendment permitting the category to exist. Discharging that one precondition
-(ADR-0016 §7) is this amendment's only purpose, and it is deliberately the
-smallest change that discharges it.
-
-**Scope.** This amends the wording of §2 only, and supersedes the final clause
-of the configured-set amendment above. §1 (tiers), §3 (secrets), §4 (encryption
-at rest), §5 (logging and redaction), §6 (data rights) and §7 (permissions,
-audit, minimisation) are unchanged. No component gains egress by
-implication: only the two boundaries listed above are designated, and both
-remain subject to every other rule in this ADR.
+by **ADR-0017**, which widens exactly the axis this paragraph declined to
+touch. The sentence stands as the record of what *this* amendment did and did
+not do — the component prohibition was examined here and deliberately left
+standing — and only its claim about the current state of the rule is out of
+date. ADR-0017 §6 explains why it is annotated rather than rewritten.]
 
 ### 3. Secrets/credentials (Tier 0)
 
