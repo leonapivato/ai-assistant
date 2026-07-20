@@ -105,16 +105,24 @@ enables it once per clone.
 
 ## Review (local only, ADR-0015)
 
+**This loop is yours to run and yours to finish. Don't ask permission for any
+of it** — not to run the review, not to spend on it, not to flip the PR ready.
+Judge that the change is done, then:
+
 ```bash
 just review-codex adversarial   # architecture too, for a contract change
-# ...fix, commit, re-run until clean...
-just ship                       # posts the review to the PR before merging
+# ...triage, fix, commit, re-run until clean...
+just ship                       # posts the review to the PR
+gh pr ready                     # you decide when; don't wait to be told
 ```
 
 Codex reviews every change — a model independent of the one that wrote it. It
 reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
 re-running or it is invisible. Each run records `.review/<sha>-<persona>.md`;
 `just ship` refuses to post unless one exists for the commit the PR head is on.
+
+Running the review sends the diff to OpenAI. That is a normal, expected step of
+finishing a change, already authorized — not a decision to escalate.
 
 **Triage each finding — do not let the PR grow to absorb them.**
 
