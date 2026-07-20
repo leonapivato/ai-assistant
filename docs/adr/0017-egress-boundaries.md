@@ -2,10 +2,12 @@
 
 - Status: Proposed
 - Date: 2026-07-19
-- Supersedes: ADR-0004 §2's egress clause ("The **only** component permitted to
-  send user data off-device is the `models/` layer… Every other egress is a
-  bug"), as amended 2026-07-19. The rest of ADR-0004 — §1 and §§3–7, and §2's
-  residency and telemetry clauses — stands unchanged.
+- Supersedes **on acceptance**: ADR-0004 §2's egress clause ("The **only**
+  component permitted to send user data off-device is the `models/` layer…
+  Every other egress is a bug"), as amended 2026-07-19. While this ADR is
+  `Proposed`, that clause remains the live rule. The rest of ADR-0004 — §1 and
+  §§3–7, and §2's residency and telemetry clauses — stands unchanged either
+  way.
 
 ## Context
 
@@ -167,14 +169,15 @@ ADR-0004 §2's configured-set amendment closes by declining exactly this
 widening — "the amendment widens *which* providers are legitimate recipients,
 not *which components* may transmit. `models/` remains the only one."
 
-That sentence is **annotated in place, not rewritten or deleted**, because it
-does two different jobs. As a scope statement about what *that* amendment did,
-it is accurate and worth preserving: a reader should be able to see that the
-component prohibition was examined and deliberately left standing on that date,
-not overlooked. As a statement about the current rule, it is now false.
-Rewriting it would erase the first to fix the second, and an ADR is an
-append-only record of what was decided when. The annotation therefore marks only
-the stale clause and points here, where the decision to widen is argued.
+That sentence is **left exactly as ratified**, with a dated note appended at the
+end of ADR-0004 §2 rather than any edit to the sentence itself. It does two
+different jobs. As a scope statement about what *that* amendment did, it is
+accurate and worth preserving: a reader should be able to see that the component
+prohibition was examined and deliberately left standing on that date, not
+overlooked. As a statement about the rule this ADR proposes, it would be
+out of date on acceptance. Rewriting it would erase the first to fix the second,
+and an ADR is an append-only record of what was decided when. So the note
+carries the pointer, and the accepted text carries none of it.
 
 ### 7. What is not decided here
 
@@ -190,15 +193,20 @@ exist.
 
 ## Consequences
 
-- **ADR-0004 §2's egress clause is superseded**; its header records the pointer
-  here. Everything else in ADR-0004 stands, including §2's residency and
-  telemetry clauses and the configured-set amendment.
-- **ADR-0006 §2 and ADR-0016 are corrected**, not superseded. ADR-0006 §2 said
-  cloud embedding is "like all egress, confined to the `models/` layer" — a
-  passing restatement of ADR-0004 §2, narrowed here to "all model-provider
-  egress". ADR-0016's Consequences recorded that ADR-0004 §2 "still reads as
-  forbidding all tool egress"; that is annotated as discharged. Neither ADR's
-  own decision changes.
+- **ADR-0004 §2's egress clause is superseded on acceptance**, not before. Its
+  header and the end of its §2 carry dated notes recording the proposal; no
+  text above those notes is altered, and until this ADR is accepted §2 remains
+  the live rule. Everything else in ADR-0004 stands regardless, including §2's
+  residency and telemetry clauses and the configured-set amendment.
+- **ADR-0006 §2 and ADR-0016 keep their ratified wording**; each gains a dated
+  note only. ADR-0006 §2 says cloud embedding is "like all egress, confined to
+  the `models/` layer" — a passing restatement of ADR-0004 §2 — and its note
+  records that this ADR would narrow the citation to *model-provider* egress.
+  ADR-0016's Consequences bullet recording that ADR-0004 §2 "still reads as
+  forbidding all tool egress" gains a note pointing here. Neither ADR's own
+  decision changes, and neither sentence is rewritten: ADR-0001's append-only
+  rule permits a status update and an appended note, not an edit to accepted
+  text — the same discipline §6 applies to the configured-set amendment.
 - **The import-linter contract ADR-0004's Consequences provision for is now
   load-bearing** and still unwritten. Until it exists and pins a named module,
   "designated" is a claim in a document rather than an enforced property
