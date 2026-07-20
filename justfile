@@ -56,7 +56,9 @@ review-codex persona base="":
     scripts/codex-review.sh "$1" "$2"
 
 # Report the local Codex review to the PR — the merge-readiness step (ADR-0015).
-# Refuses unless a review artifact exists for the exact commit the PR head is on.
+# Refuses unless a review artifact covers the content the PR head carries: its
+# recorded base and tree must both match the PR's merge base and HEAD's tree
+# (ADR-0020 §3), whatever commit the artifact is filed under.
 ship:
     scripts/ship.sh
 
