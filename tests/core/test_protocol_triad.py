@@ -132,8 +132,23 @@ def _protocol_names() -> list[str]:
     )
 
 
+def _declares_tests(node: ast.ClassDef) -> bool:
+    """Report whether a class body defines at least one test method."""
+    return any(
+        isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef)
+        and member.name.startswith("test_")
+        for member in node.body
+    )
+
+
 def _declared_class_names() -> set[str]:
-    """Return every class name defined anywhere under ``tests/``.
+    """Return the names of classes under ``tests/`` that declare test methods.
+
+    Requiring tests, not just a matching name, is what stops
+    ``class WidgetContract: pass`` from standing in for a conformance suite.
+    That matters most for a Protocol whose *binding* is exempted, since the
+    runtime checks that would otherwise catch an empty suite are skipped for
+    it -- exactly the ``FeedbackProcessor`` case in ``EXEMPTIONS`` today.
 
     Parsed rather than imported: the conformance suites are plain modules that
     pytest puts on ``sys.path`` per directory, and importing them here purely
@@ -142,7 +157,11 @@ def _declared_class_names() -> set[str]:
     names: set[str] = set()
     for path in _TESTS_ROOT.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        names.update(node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
+        names.update(
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and _declares_tests(node)
+        )
     return names
 
 
@@ -468,6 +487,26 @@ def test_exemptions_are_well_formed() -> None:
             f"{exemption.protocol}: exemptions must reference a tracking issue"
         )
         assert exemption.note.strip(), f"{exemption.protocol}: say why the gap exists"
+
+
+def test_a_suite_that_declares_no_tests_is_not_discovered() -> None:
+    """A `…Contract` class with an empty body does not count as a suite.
+
+    The runtime checks catch this for a Protocol with a binding; for one whose
+    binding is exempt they never run, so the static side has to catch it.
+    """
+    empty = _parse_class("class WidgetContract: pass")
+    real = _parse_class("class WidgetContract:\n    async def test_it(self): ...")
+
+    assert not _declares_tests(empty)
+    assert _declares_tests(real)
+
+
+def _parse_class(source: str) -> ast.ClassDef:
+    """Parse a single class definition out of a source snippet."""
+    node = ast.parse(source).body[0]
+    assert isinstance(node, ast.ClassDef)
+    return node
 
 
 def test_check_discovers_the_protocols_it_is_meant_to_guard() -> None:
