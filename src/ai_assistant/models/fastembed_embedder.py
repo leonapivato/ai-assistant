@@ -46,6 +46,17 @@ if TYPE_CHECKING:
 _DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
 
+class _ContractViolationError(Exception):
+    """Internal signal: the backend's result breaks the ``Embedder`` contract.
+
+    Never escapes this module. It exists to keep two failures distinguishable
+    inside one incremental loop that consumes the backend's output: an exception
+    *from* the backend becomes "failed to embed", while a result that is merely
+    wrong becomes its own specific ``ModelError``. Both surface to the caller as
+    ``ModelError``; only the message differs.
+    """
+
+
 class FastEmbedTextModel(Protocol):
     """A loaded embedding model: the half of the seam that does the work.
 
@@ -201,17 +212,17 @@ class FastEmbedEmbedder:
         # rather than being re-wrapped into a misleading "failed to embed".
         model = self._loaded()
         try:
-            vectors: list[Embedding] = [
-                [float(value) for value in vector] for vector in model.embed(documents)
-            ]
+            return self._collected(model, documents)
+        except _ContractViolationError as violation:
+            # Already the precise message; re-wrapping it as "failed to embed"
+            # would describe a backend that raised, which this one did not.
+            raise ModelError(str(violation)) from None
         except Exception as exc:
             msg = f"fastembed failed to embed a batch of {len(documents)} text(s)"
             raise ModelError(msg) from exc
-        self._check_conforms(vectors, len(documents))
-        return vectors
 
-    def _check_conforms(self, vectors: Sequence[Embedding], expected_count: int) -> None:
-        """Fail loudly if the backend's result breaks the ``Embedder`` contract.
+    def _collected(self, model: FastEmbedTextModel, documents: list[str]) -> list[Embedding]:
+        """Consume the backend's result, checking the ``Embedder`` contract as it goes.
 
         This adapter, not the backend, is what promises the contract. A count
         mismatch is the dangerous one: the caller zips these vectors against its
@@ -223,20 +234,63 @@ class FastEmbedEmbedder:
         None of these is reachable today; all three become reachable the moment
         fastembed changes behaviour under us, which is exactly when a silent
         wrong answer costs the most.
+
+        The checking is **incremental, and that is the point**: the result is
+        never fully materialised first. A backend handing back an unbounded
+        iterator of vectors would otherwise hang this worker thread and grow
+        memory without limit instead of raising. Consuming at most one item past
+        what the contract allows — one extra vector, one extra component —
+        bounds a hostile or broken injected backend to a rejection.
+
+        Raises:
+            _ContractViolationError: If the result breaks the contract.
         """
+        expected_count = len(documents)
+        vectors: list[Embedding] = []
+        for vector in model.embed(documents):
+            if len(vectors) == expected_count:
+                msg = (
+                    f"fastembed returned more than {expected_count} vectors "
+                    f"for {expected_count} text(s)"
+                )
+                raise _ContractViolationError(msg)
+            vectors.append(self._checked_vector(vector, len(vectors)))
         if len(vectors) != expected_count:
             msg = f"fastembed returned {len(vectors)} vectors for {expected_count} text(s)"
-            raise ModelError(msg)
-        for index, vector in enumerate(vectors):
-            if len(vector) != self._dimensions:
+            raise _ContractViolationError(msg)
+        return vectors
+
+    def _checked_vector(self, vector: Iterable[float], index: int) -> Embedding:
+        """One vector, coerced to floats and checked against the declared shape.
+
+        Components are checked as they arrive for the same reason vectors are: a
+        single vector backed by an unbounded component iterator is as effective a
+        denial of service as an unbounded batch.
+
+        Raises:
+            _ContractViolationError: If the vector is the wrong width or holds a
+                non-finite component.
+        """
+        values: list[float] = []
+        for value in vector:
+            if len(values) == self._dimensions:
                 msg = (
-                    f"fastembed returned a {len(vector)}-dimensional vector at index {index}, "
-                    f"expected {self._dimensions}"
+                    f"fastembed returned a vector with more than {self._dimensions} "
+                    f"components at index {index}, expected {self._dimensions}"
                 )
-                raise ModelError(msg)
-            if not all(math.isfinite(value) for value in vector):
+                raise _ContractViolationError(msg)
+            number = float(value)
+            if not math.isfinite(number):
                 msg = f"fastembed returned a non-finite component in the vector at index {index}"
-                raise ModelError(msg)
+                raise _ContractViolationError(msg)
+            values.append(number)
+        if len(values) != self._dimensions:
+            msg = (
+                f"fastembed returned a {len(values)}-dimensional vector at index {index}, "
+                f"expected {self._dimensions}"
+            )
+            raise _ContractViolationError(msg)
+        return values
 
     def _loaded(self) -> FastEmbedTextModel:
         """The model, loading it on first use and reusing it after."""

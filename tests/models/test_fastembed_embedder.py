@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -42,9 +43,11 @@ _BGE_SMALL_DIMENSIONS = 384
 _STUB_MODEL = "stub/embedding-model"
 _STUB_DIMENSIONS = 16
 
-# Long enough that a second thread reliably reaches the `_model is None` check
-# while the first is inside `load`, short enough not to weigh on the suite.
-_SLOW_LOAD_SECONDS = 0.05
+# Nothing waits this long on a passing run — every rendezvous below completes as
+# soon as the threads it is waiting for arrive. It is a bound on *failure*, so a
+# broken implementation fails the suite instead of hanging it. Generous on
+# purpose: it is never the thing being measured.
+_RENDEZVOUS_TIMEOUT_SECONDS = 10.0
 
 
 class _StubTextModel:
@@ -66,10 +69,11 @@ class _StubTextModel:
 
     def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
         self.batches.append(list(documents))
-        return (self._embed_one(document) for document in documents)
+        return (self.embed_one(document) for document in documents)
 
     @staticmethod
-    def _embed_one(text: str) -> tuple[int, ...]:
+    def embed_one(text: str) -> tuple[int, ...]:
+        """One text's vector. Public because concurrency tests reuse it directly."""
         buckets = [0] * _STUB_DIMENSIONS
         for token in text.lower().split():
             # A real digest, not a cheap character sum: distinct tokens must land
@@ -88,6 +92,27 @@ class _StubBackend:
         self._dimensions = dimensions
         self.loads: list[str] = []
         self.model = _StubTextModel()
+
+    def dimensions_by_model(self) -> Mapping[str, int]:
+        return {_STUB_MODEL: self._dimensions}
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        self.loads.append(model)
+        return self.model
+
+
+class _ModelBackend:
+    """A backend that loads one caller-supplied model, and records that it did.
+
+    The general form of `_StubBackend`: every test below that needs a *particular*
+    loaded model — malformed, unbounded, or rendezvousing — differs only in which
+    model it hands back, so they share this rather than each subclassing.
+    """
+
+    def __init__(self, model: FastEmbedTextModel, *, dimensions: int = _STUB_DIMENSIONS) -> None:
+        self.model = model
+        self._dimensions = dimensions
+        self.loads: list[str] = []
 
     def dimensions_by_model(self) -> Mapping[str, int]:
         return {_STUB_MODEL: self._dimensions}
@@ -217,34 +242,125 @@ async def test_the_model_is_loaded_once_and_reused() -> None:
     assert backend.loads == [_STUB_MODEL]
 
 
-class _SlowLoadBackend(_StubBackend):
-    """A backend whose load is slow enough for a second caller to race it.
+class _ArrivalSignallingLock:
+    """The load lock, wrapped to announce each thread *before* it contends for it.
 
-    A barrier would be the deterministic choice, but it deadlocks the very
-    behaviour under test: the lock admits *one* thread to ``load``, so a second
-    party never arrives. Holding the load open instead leaves the window wide
-    open for the racing thread — an unlocked implementation loses reliably.
+    This is the synchronisation point the race needs and the implementation
+    cannot offer. Inside ``load`` is too late: the lock admits exactly one
+    thread, so a barrier there deadlocks — the second party is stuck outside and
+    never arrives. Announcing on the way *in* is a point every racing thread
+    reaches whether it wins the lock or blocks on it, which is what makes
+    "both threads are now committed to loading" observable at all.
+
+    It has no production counterpart on purpose. The fact it publishes is only
+    meaningful to a test that wants to hold every racer there at once.
     """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._arrivals = threading.Semaphore(0)
+
+    def __enter__(self) -> None:
+        self._arrivals.release()
+        self._lock.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self._lock.release()
+
+    def wait_for_arrivals(self, count: int, timeout: float) -> bool:
+        """Block until ``count`` threads have reached the lock. False on timeout."""
+        deadline = time.monotonic() + timeout
+        return all(
+            self._arrivals.acquire(timeout=max(0.0, deadline - time.monotonic()))
+            for _ in range(count)
+        )
+
+
+class _GatedLoadBackend(_StubBackend):
+    """A backend that stays inside ``load`` until the test releases it.
+
+    Not a sleep: the first caller holds the load open for exactly as long as the
+    test needs, so the window the second caller races through is unbounded rather
+    than merely wide. Nothing here depends on how fast the machine is.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proceed = threading.Event()
 
     def load(self, model: str) -> FastEmbedTextModel:
         self.loads.append(model)
-        time.sleep(_SLOW_LOAD_SECONDS)
+        self.proceed.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
         return self.model
 
 
 async def test_concurrent_first_calls_load_the_model_once() -> None:
-    # The lazy load is reached from a worker thread, so two in-flight `embed`
-    # calls can both observe `_model is None`. Unlocked, that is two model
-    # downloads; this is the test that makes the lock's removal visible.
-    backend = _SlowLoadBackend()
+    """Two racing first calls load the model once — with the race made certain.
+
+    The lazy load is reached from a worker thread, so two in-flight `embed` calls
+    can both observe `_model is None`. Unlocked, that is two model downloads.
+
+    The previous version of this test widened the window with a `time.sleep` and
+    hoped the second thread got there. That risks a **false green**: on a loaded
+    machine the executor might not start the second worker inside the sleep, and
+    an unlocked implementation would still record one load. Here the first caller
+    is held inside `load` until the second has provably reached the lock, so the
+    contended case is the only case this test can observe.
+    """
+    lock = _ArrivalSignallingLock()
+    backend = _GatedLoadBackend()
     embedder = _stub_embedder(backend)
+    # Substituting a private attribute, deliberately: see `_ArrivalSignallingLock`
+    # for why the observation point cannot come from the backend seam instead.
+    embedder._load_lock = lock  # type: ignore[assignment]  # test-only lock instrumentation
 
-    first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+    calls = asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+    both_arrived = await asyncio.to_thread(lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS)
+    # Released unconditionally, so a failing run finishes and reports rather than
+    # leaving two workers parked inside `load`.
+    backend.proceed.set()
+    first, second = await calls
 
+    assert both_arrived, "the second caller never reached the load lock; the race did not happen"
     assert backend.loads == [_STUB_MODEL]
     # And the race must not have crossed the two callers' results.
     assert first == await embedder.embed(["zulu"])
     assert second == await embedder.embed(["alpha"])
+    assert first != second
+
+
+class _RendezvousTextModel:
+    """A loaded model that returns only once two threads are inside ``embed``.
+
+    The barrier *is* the assertion. `FastEmbedTextModel` documents that `embed`
+    must be thread-safe precisely because the embedder does not serialise
+    inference — a lock there would cap throughput at one thread for every
+    backend. Nothing exercised that. This model can only return if two `embed`
+    calls really do reach one loaded model at the same time, so an adapter that
+    quietly started serialising inference fails here instead of passing slowly.
+    """
+
+    def __init__(self, parties: int) -> None:
+        self._barrier = threading.Barrier(parties)
+
+    def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
+        self._barrier.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
+        return (_StubTextModel.embed_one(document) for document in documents)
+
+
+async def test_concurrent_embeds_reach_the_loaded_model_together() -> None:
+    # No warm-up call on purpose: the model is loaded by whichever of these two
+    # wins the lock, so this also pins that the load lock is not still held while
+    # inference runs — if it were, the second caller could never reach the
+    # barrier and this would fail rather than serialise.
+    backend = _ModelBackend(_RendezvousTextModel(parties=2))
+    embedder = _stub_embedder(backend)
+
+    first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+
+    # Un-swapped: each caller gets its own text's vector, not the other's.
+    assert first == [[float(value) for value in _StubTextModel.embed_one("zulu")]]
+    assert second == [[float(value) for value in _StubTextModel.embed_one("alpha")]]
     assert first != second
 
 
@@ -439,46 +555,45 @@ class _MalformedModel:
         return iter(self._vectors)
 
 
-class _MalformedBackend(_StubBackend):
-    """A backend whose model breaks the Embedder contract."""
-
-    def __init__(self, vectors: list[list[float]]) -> None:
-        super().__init__()
-        self._vectors = vectors
-
-    def load(self, model: str) -> FastEmbedTextModel:
-        self.loads.append(model)
-        return _MalformedModel(self._vectors)
-
-
 def _ok_vector() -> list[float]:
     return [0.0] * _STUB_DIMENSIONS
+
+
+def _malformed_embedder(vectors: list[list[float]]) -> FastEmbedEmbedder:
+    return _stub_embedder(_ModelBackend(_MalformedModel(vectors)))
 
 
 async def test_too_few_vectors_raises_rather_than_misaligning() -> None:
     # The dangerous one. A caller zips these against its own records, so a short
     # batch would file every record after the gap under another record's vector.
     # Failing loudly is the only safe answer.
-    embedder = _stub_embedder(_MalformedBackend([_ok_vector()]))
+    embedder = _malformed_embedder([_ok_vector()])
 
     with pytest.raises(ModelError, match="returned 1 vectors for 2 text"):
         await embedder.embed(["alpha", "beta"])
 
 
 async def test_too_many_vectors_raises() -> None:
-    embedder = _stub_embedder(_MalformedBackend([_ok_vector(), _ok_vector()]))
+    embedder = _malformed_embedder([_ok_vector(), _ok_vector()])
 
-    with pytest.raises(ModelError, match="returned 2 vectors for 1 text"):
+    with pytest.raises(ModelError, match="returned more than 1 vectors for 1 text"):
         await embedder.embed(["alpha"])
 
 
 async def test_a_wrong_dimension_vector_raises() -> None:
     # Would otherwise corrupt the store's vector column, which was sized from
     # `dimensions` at construction.
-    embedder = _stub_embedder(_MalformedBackend([_ok_vector(), [0.0] * (_STUB_DIMENSIONS - 1)]))
+    embedder = _malformed_embedder([_ok_vector(), [0.0] * (_STUB_DIMENSIONS - 1)])
 
     with pytest.raises(ModelError, match="15-dimensional vector at index 1"):
         await embedder.embed(["alpha", "beta"])
+
+
+async def test_an_over_wide_vector_raises() -> None:
+    embedder = _malformed_embedder([[0.0] * (_STUB_DIMENSIONS + 1)])
+
+    with pytest.raises(ModelError, match="more than 16 components at index 0"):
+        await embedder.embed(["alpha"])
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
@@ -488,10 +603,74 @@ async def test_a_non_finite_component_raises(bad: float) -> None:
     # unrankable against any query.
     vector = _ok_vector()
     vector[3] = bad
-    embedder = _stub_embedder(_MalformedBackend([vector]))
+    embedder = _malformed_embedder([vector])
 
     with pytest.raises(ModelError, match="non-finite component in the vector at index 0"):
         await embedder.embed(["alpha"])
+
+
+# A fuse, not a bound. These models stand in for an endless backend, and an
+# adapter that materialised their output before checking it would hang the suite
+# forever rather than fail it — verified by mutation. Tripping the fuse turns
+# that hang into a normal failure. What proves the adapter is *tightly* bounded
+# is the exact `yielded` count each test asserts, far below this.
+_ENDLESS_FUSE = 100_000
+
+
+class _UnboundedVectorsModel:
+    """A loaded model that yields correct vectors without ever stopping."""
+
+    def __init__(self) -> None:
+        self.yielded = 0
+
+    def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
+        while self.yielded < _ENDLESS_FUSE:
+            self.yielded += 1
+            yield _ok_vector()
+        raise AssertionError("the adapter consumed an unbounded batch instead of rejecting it")
+
+
+class _UnboundedComponentsModel:
+    """A loaded model whose one vector is an endless stream of components."""
+
+    def __init__(self) -> None:
+        self.yielded = 0
+
+    def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
+        yield self._components()
+
+    def _components(self) -> Iterator[float]:
+        while self.yielded < _ENDLESS_FUSE:
+            self.yielded += 1
+            yield 0.5
+        raise AssertionError("the adapter consumed an unbounded vector instead of rejecting it")
+
+
+async def test_an_unbounded_batch_is_rejected_without_being_materialised() -> None:
+    # A hostile or broken injected backend must not be able to hang the worker
+    # thread and grow memory without limit. Materialising the result before
+    # checking it — which is what this adapter used to do — never returns here.
+    model = _UnboundedVectorsModel()
+    embedder = _stub_embedder(_ModelBackend(model))
+
+    with pytest.raises(ModelError, match="returned more than 2 vectors for 2 text"):
+        await embedder.embed(["alpha", "beta"])
+
+    # Bounded, not merely terminating: one vector past the contract is all it
+    # took to know, and not one more was pulled.
+    assert model.yielded == 3
+
+
+async def test_an_unbounded_vector_is_rejected_without_being_materialised() -> None:
+    # The same denial of service one level down: a single vector whose component
+    # iterator never ends is as effective as an endless batch.
+    model = _UnboundedComponentsModel()
+    embedder = _stub_embedder(_ModelBackend(model))
+
+    with pytest.raises(ModelError, match="more than 16 components at index 0"):
+        await embedder.embed(["alpha"])
+
+    assert model.yielded == _STUB_DIMENSIONS + 1
 
 
 def test_the_stub_distinguishes_the_contract_inputs() -> None:
