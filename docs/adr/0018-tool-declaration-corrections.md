@@ -1,6 +1,6 @@
 # 18. Corrections to the tool declaration and registry contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-20
 - Supersedes: ADR-0016 §1 (the `id`/`capability` types and the `description`
   rule) and §5 (query results and the spent-id rule). The rest of ADR-0016
@@ -147,15 +147,40 @@ enumerating the invisible categories, and it missed the combining marks
 character renders as nothing. Listing what counts as visible cannot be defeated
 by a category nobody thought of; listing what does not, can.
 
-**A known residual gap.** Two characters in *permitted* categories still render
-blank: U+2800 BRAILLE PATTERN BLANK (`So`, a symbol) and U+3164 HANGUL FILLER
-(`Lo`, a letter). Both pass this rule. Patching in two codepoints is the same
-whack-a-mole that made the blocklist fail, and there is no general "renders as
-something" oracle without a font and a shaping engine. The gap is recorded as
-issue #62, whose canonical-identifier-syntax direction excludes them by
-construction. It is accepted here because a description is free text that must
-admit arbitrary Unicode, and because a blank-looking description is visible to
-whoever approves the tool.
+**Plus a small exception list, because some permitted characters still render
+blank.** A handful of codepoints sit in visible categories and display as
+nothing:
+
+| Codepoint | Name | Category |
+| --- | --- | --- |
+| U+2800 | BRAILLE PATTERN BLANK | `So` |
+| U+115F | HANGUL CHOSEONG FILLER | `Lo` |
+| U+1160 | HANGUL JUNGSEONG FILLER | `Lo` |
+| U+3164 | HANGUL FILLER | `Lo` |
+| U+FFA0 | HALFWIDTH HANGUL FILLER | `Lo` |
+
+These do not count toward the visible-character requirement.
+
+An earlier draft deferred this to issue #62 as acceptable whack-a-mole, on the
+grounds that a canonical identifier syntax would exclude them by construction.
+That reasoning was half right and the wrong half mattered: #62 governs
+*identifiers*, and **a description is free text that no syntax rule will ever
+constrain**. Deferring the description case there meant deferring it to
+something that would never arrive.
+
+The objection to enumerating codepoints was that a blocklist is defeated by the
+entry nobody thought of — which is why the *primary* rule is a whitelist, and
+stays one. A short exception list layered on top is a different thing: it
+narrows a known, enumerable gap rather than carrying the whole burden, and
+being incomplete makes it weaker, not wrong.
+
+**It is still incomplete, and that is accepted.** There is no general "renders
+as something" oracle without a font and a shaping engine, so a determined author
+can likely find another codepoint. The residual risk is small — an integration
+author would have to deliberately choose an obscure filler character — and the
+remaining mitigation is that a blank-looking description is visible to whoever
+approves the tool. What is no longer true is that the *known* cases were left
+open.
 
 ### 2. `id` and `capability` use `VisibleIdentifier` (supersedes §1)
 
@@ -392,9 +417,11 @@ line in a composition root already prevents.
   existence is a stopgap until #62 settles a canonical identifier syntax. Two
   types that differ in a subtlety is a real readability cost, accepted over a
   cross-lane change to `planning`'s shared type from a tools lane.
-- **A description can still be made to render blank** with U+2800 or U+3164
-  (§1). The whitelist narrows the attack from "any invisible character" to "two
-  known codepoints in visible categories", and #62 closes it properly.
+- **The known blank-rendering codepoints are refused** (§1), so the gap is
+  narrowed to codepoints nobody has enumerated rather than two that were
+  documented and permitted. It is not provably closed — no rule short of a
+  shaping engine could close it — and a description remains free text that #62's
+  identifier work will never constrain.
 - **The canonical fake's obligations stay exactly the Protocol's.** Registration
   rules bind `tools/` and are tested there, so `tools/` can change how it
   registers without breaking a fake that every subsystem imports — which is the
