@@ -8,6 +8,77 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BREAKING** `tools`/`core`: a new `ToolRegistry` Protocol and the `core`
+  types it exchanges (`ToolDefinition`, `RiskLevel`, `Reversibility`,
+  `ToolCost`, `CostBasis`, `Idempotency`, `VisibleIdentifier`) plus a
+  `ToolRegistrationError`. A
+  Protocol change is a breaking change (CLAUDE.md golden rule 5); pre-1.0 this
+  needs no deprecation cycle, but anything structurally typed against
+  `core.protocols` should be rechecked. It is additive — no existing Protocol or
+  type changes — so nothing implemented against the previous contracts breaks.
+  A `ToolDefinition` registry carrying the risk metadata the
+  permission layer and tool selection need in order to *reason* about tools
+  rather than hard-code integrations (ADR-0016, corrected in five clauses by
+  ADR-0018). A tool is a **declaration**:
+  frozen, and with no default on any field a permission decision depends on —
+  the natural-looking default for the data-reach tuples, empty, is the claim
+  "this tool touches no data", which is exactly the false statement a forgetful
+  integration author would ship, so an under-declared tool does not load.
+  `RiskLevel` and `Reversibility` are ordered by severity rather than by string
+  value, which is not a convenience but the removal of a live trap: `StrEnum`
+  members *are* strings, so `RiskLevel.CRITICAL < RiskLevel.LOW` would be `True`
+  and a threshold policy written the obvious way would invert on the most
+  dangerous value. All four comparison operators are overridden (`str` supplies
+  every one, so deriving three would leave them lexicographic) and they raise
+  against a non-member rather than returning `NotImplemented`, which would fall
+  through to the reflected `str` comparison and answer anyway. Data reach reuses
+  ADR-0004's `DataTier` — `reads`, `writes`, and `discloses` for what leaves the
+  device — as a *ceiling* on what a tool may touch, not a measurement of a given
+  call, so policy over-prompts rather than under-classifies. `ToolCost` is
+  structured (`FREE`/`PER_CALL`/`UNKNOWN`) because the distinction a spend
+  policy needs is free versus unknown, not present versus absent, and its amount
+  is a finite `Decimal` — `Infinity` and `NaN` both satisfy a non-negative bound,
+  `NaN` by making every comparison false. `Idempotency` declares a retry
+  *guarantee* with a scope and a strictly positive window, not the presence of a
+  parameter a tool may accept and ignore. Nothing on the type decides whether
+  the permission gate is consulted: every invocation is gated, the definition
+  states facts, and `permissions` draws conclusions. The `ToolRegistry` contract
+  is query-only — it returns every candidate for a capability, ordered by id,
+  and ranks nothing, since ranking needs policy and context a registry does not
+  have — while registration stays inside `tools`, so binding a callable at
+  registration when invocation lands is not a breaking contract change. A tool
+  id is spent on first use and `deregister` does not free it, because a
+  rebindable id could be substituted between a permission decision and the step
+  that executes it. Settles ADR-0014's capability vocabulary as an open,
+  registry-authoritative set rather than a `core` enum, which would make every
+  new integration a breaking change. Deferred: invocation itself, and with it
+  exactly-once execution, parameter-schema enforcement, and reconciling
+  ADR-0004 §2's egress rule with a subsystem whose job is external calls.
+
+  ADR-0018 corrected five clauses of ADR-0016, all found by writing this
+  implementation against it. `description`, `id` and `capability` must contain a
+  character that actually *renders*: `strip()` removes whitespace, but a
+  zero-width space, a byte-order mark and a variation selector are format and
+  combining-mark characters that survive it, and a handful more — the Braille
+  blank and the Hangul fillers — sit inside the visible-category whitelist while
+  displaying as nothing, so they are refused by name. Every registry query
+  returns a snapshot detached recursively, because `ToolDefinition` holds a
+  nested `ToolCost` and a shallow copy would let `result.cost.__dict__` rewrite
+  registry state through something nominally detached. What a registry stores
+  must be valid and detached, so a definition tampered past `frozen=True` into a
+  contradictory state cannot be registered — though validation answers only
+  "could this have been constructed?", never "is this what the author
+  declared?", so a *validly* tampered definition under a fresh id is still
+  accepted and nothing detects it (tracked as #54). And registering anything
+  under a deregistered id is now refused, reversing ADR-0016's rule that an
+  identical re-registration is idempotent: otherwise revocation would hold only
+  until a composition root re-ran and replayed the original registration.
+
+  The registration rules bind `tools` alone. `ToolRegistry` stays query-only, so
+  `FakeToolRegistry` — importable by every subsystem — is held to the four query
+  methods and nothing more, leaving `tools` free to change how it registers
+  without breaking a shared fake.
+
 - `models`/`core`: routing and fallback across several providers.
   `RoutingProvider` holds an ordered list of `Route`s and tries them until one
   succeeds, so the system is no longer only as reliable as its most fragile

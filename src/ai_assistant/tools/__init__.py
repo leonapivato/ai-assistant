@@ -6,6 +6,15 @@ plugin registered here; the orchestration engine selects and invokes tools
 without knowing their internals. Every tool invocation is subject to the
 `permissions` layer.
 
-Contract: TBD (a ``Tool`` / ``ToolRegistry`` Protocol lands in
-``core.protocols`` as this subsystem is designed).
+Contract: :class:`~ai_assistant.core.protocols.ToolRegistry`, implemented by
+:class:`~ai_assistant.tools.registry.InMemoryToolRegistry` (ADR-0016). The
+contract is query-only — populating a registry is internal to this subsystem, so
+binding a callable at registration, when invocation lands, is not a breaking
+change. Invocation itself is deliberately not contracted yet.
 """
+
+from __future__ import annotations
+
+from ai_assistant.tools.registry import InMemoryToolRegistry
+
+__all__ = ["InMemoryToolRegistry"]
