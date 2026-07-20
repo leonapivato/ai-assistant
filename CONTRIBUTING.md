@@ -399,9 +399,11 @@ before you know the contract.
 
 Ratified in ADR-0019, which holds the evidence and the rejected alternative.
 
-`CONTRIBUTING.md` and `CLAUDE.md` are undated and read as standing law, so they
-carry **rules and the reasoning behind them, never snapshots.** If a fact about
-the repository matters, either a check asserts it or a dated ADR records it.
+A **living document** is one that is undated and revised in place, and read as
+currently authoritative — `CONTRIBUTING.md`, `CLAUDE.md`, `README.md`,
+`VISION.md`, the rubrics in `docs/review/`. They carry **rules and the reasoning
+behind them, never snapshots.** If a fact about the repository matters, either a
+check asserts it or a dated ADR records it.
 
 - **A snapshot is anything measured or observed rather than decided** — a test
   count, a wall-clock timing, a "currently"/"today"/"so far", a claim that some

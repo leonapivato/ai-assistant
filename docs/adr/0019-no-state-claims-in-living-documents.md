@@ -55,10 +55,25 @@ this ADR is the record it asked for.
 
 ## Decision
 
-**We will keep state claims out of the living documents.** `CLAUDE.md` and
-`CONTRIBUTING.md` carry **rules and the reasoning behind them** — both durable —
-and never **snapshots**. If a fact about the repository matters, either a check
-asserts it or a dated ADR records it.
+**We will keep state claims out of the living documents.** A living document
+carries **rules and the reasoning behind them** — both durable — and never
+**snapshots**. If a fact about the repository matters, either a check asserts it
+or a dated ADR records it.
+
+**0. What makes a document "living".** Two properties together, not a fixed
+list of filenames:
+
+- **Undated and continuously revised in place**, so a sentence in it carries no
+  timestamp and no indication of when it was last true.
+- **Read as currently authoritative** — a contributor follows it to decide what
+  to do now, rather than consulting it as history.
+
+`CLAUDE.md` and `CONTRIBUTING.md` are the clearest cases and the ones that
+motivated this ADR, but the rule follows the properties: `README.md`,
+`VISION.md`, and the rubrics in `docs/review/` are living documents too, and any
+future undated standing document is governed on arrival without amending this
+ADR. `docs/adr/` fails the first property by construction, which is clause 4.
+`CHANGELOG.md` fails the second: its entries are dated releases read as history.
 
 **1. What counts as a snapshot.** Anything **measured or observed** rather than
 **decided**: a test count, a wall-clock timing, a "currently"/"today"/"so far",
@@ -124,8 +139,14 @@ supersession is how a *past decision* is changed, and it obliges updating the
 older ADR's status. This decision governs a subject ADR-0003 never addressed —
 what the living documents themselves may assert — so there is nothing in
 ADR-0003 to revise and its status is unchanged. The two sit side by side in the
-same domain, which is why this ADR is filed adjacent to it and cross-referenced
-from it rather than folded into it.
+same domain, which is why this ADR is filed adjacent to ADR-0003 rather than
+folded into it.
+
+The reference runs one way, from here to ADR-0003. ADR-0003 is not edited to
+point back: it is `Accepted`, ADR-0001 makes accepted ADRs append-only, and a
+complementary decision is not one of the grounds (amendment, supersession) for
+touching one. A reader arriving at ADR-0003 finds this ADR the way any later
+decision is found — by reading forward through `docs/adr/`.
 
 ## Consequences
 
