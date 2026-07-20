@@ -41,8 +41,9 @@ unambiguous:
 > supersedes the old one and update the old one's status.
 
 Four of the five changes are also substantive by any reading: one adds a new
-`core` type, two add obligations that an ADR-0016-conforming implementation can
-fail, and one **reverses** a rule ADR-0016 states explicitly. So this is a substantive contract ADR taking the
+`core` type, one adds an obligation an ADR-0016-conforming registry can fail,
+one **reverses** a rule ADR-0016 states explicitly, and one binds how `tools/`
+registers. So this is a substantive contract ADR taking the
 full path, which is the whole point of writing it.
 
 ## Decision
@@ -57,21 +58,23 @@ untouched and remains in force.
 | §1, field list | `id`/`capability`: `Identifier` → `VisibleIdentifier` | New `core` surface |
 | §1, `description` | "non-blank" → "contains something that renders" | Tightening |
 | §5, query results | Adds: every query returns a detached snapshot | New Protocol obligation (**breaking**) |
-| §5, registration | Adds: registration re-validates rather than copies | New obligation (**breaking**) |
+| §5, registration | Adds: registration re-validates rather than copies | New `tools/` invariant (not a Protocol change) |
 | §5, spent ids | Identical re-registration under a deregistered id: idempotent → **refused**; scope corrected to per-registry | **Reverses a ratified rule** (**breaking**) |
 
 ### Compatibility
 
 **This is a breaking Protocol change** (golden rule 5), even though no method
 signature moves. A `ToolRegistry` implementation that satisfied ADR-0016 can
-fail this contract in three ways, and none is visible to a type checker:
+fail this contract in two ways, and neither is visible to a type checker:
 
 - returning its own list or its own stored definitions from `get`, `find` or
   `all_tools` — previously unspecified, now forbidden (§3);
-- storing a definition as it arrived rather than rebuilding it through
-  validation — previously unspecified, now forbidden (§4);
 - accepting an identical definition under a deregistered id — previously
   *required* to be idempotent, now required to raise (§5).
+
+§4 (registration re-validates) is **not** in that list: registration is not on
+the Protocol, so that clause binds `tools/` internally and no consumer of
+`ToolRegistry` can be broken by it.
 
 The `core` types change too: `ToolDefinition.id` and `.capability` narrow from
 `Identifier` to `VisibleIdentifier`, and `description` narrows. All three are
@@ -223,18 +226,47 @@ This is arguably implied by ADR-0016's threat model, which already treats
 implementation that copied satisfied every word ADR-0016 wrote, so this is a new
 obligation and is listed as one.
 
-**Scope.** Registration is internal to `tools` (ADR-0016 §5 keeps it off the
-Protocol), so this binds the registration convention the implementations share
-rather than the cross-subsystem contract. It is nonetheless enforced by the
-shared conformance suite, because both `InMemoryToolRegistry` and
-`FakeToolRegistry` must agree — a fake that accepted a tampered definition where
-the real registry refused would let a consumer's tests pass against behaviour
-production would reject.
+**It catches internally inconsistent definitions, and nothing else.** An earlier
+draft of this clause claimed it also caught a tampered-but-valid definition — a
+`CRITICAL` tool downgraded to `LOW` through `__dict__`. It does not, and the
+claim was wrong in a way worth recording, because it is the kind of error that
+makes a security property look stronger than it is. Rebuilding a `LOW` definition
+through validation *succeeds*: `LOW` is a perfectly valid `risk_level`, and the
+registry holds no trusted original to compare it against. Validation can only
+ever answer "could this have been constructed?", never "is this what the author
+declared?".
 
-**Migration.** An existing implementation that copies must change one line; the
-suite fails it otherwise, with two cases — the invalid-state definition above,
-and the realistic variant where a tampered definition is still valid but has had
-its `risk_level` downgraded.
+What actually refuses that downgrade in the implementation is the **conflicting
+redefinition** rule (§5): the id is already bound to the `CRITICAL` definition,
+so a different one is rejected. That protection therefore depends on the id
+already being registered — a tampered-but-valid definition registered under a
+*fresh* id is accepted, and no mechanism in this ADR detects it.
+
+Distinguishing an authorised declaration from a validly tampered one needs a
+provenance boundary this contract does not have: a signature, or a factory that
+is the only way to mint a definition, or the pinned digest issue #54 already
+proposes for the approval path. That is out of scope here and is named so the
+gap is not mistaken for coverage.
+
+**Scope: a `tools/` invariant, not a Protocol obligation.** Registration is
+deliberately off `ToolRegistry` (ADR-0016 §5) so its lifecycle can evolve inside
+`tools/`, and this clause does not change that — it is **not** a breaking change
+to the cross-subsystem contract, and a consumer depending only on the Protocol
+is unaffected. It binds the registration convention the two implementations
+share.
+
+The shared suite tests it because `FakeToolRegistry` must not diverge from
+`InMemoryToolRegistry` on registration: a fake that accepted a definition the
+real registry refused would let a consumer's tests pass against behaviour
+production rejects. That is fidelity between two stand-ins for each other, which
+is what a canonical fake is for — not an extension of the Protocol, and if the
+registration lifecycle later changes inside `tools/`, this clause changes with
+it and no consumer contract moves.
+
+**Migration.** An implementation that copies must rebuild through validation
+instead — one line. The suite's case for it is the inert-email definition above;
+the `risk_level` case in the suite exercises the §5 conflict rule, not this
+one.
 
 ### 5. The spent-id rule: reversal and rescoping (supersedes §5)
 
@@ -305,6 +337,11 @@ line in a composition root already prevents.
   than by reading the ADR: an inert-email definition is now unrepresentable
   (§4, registration re-validates), a query can no longer deregister (§3, results
   are detached), and an id cannot be rebound within a registry's life (§5).
+- **Validation is not authentication, and the ADR now says so.** Re-validation
+  answers "could this have been constructed?", never "is this what the author
+  declared?" — so a tampered-but-valid definition under a fresh id is accepted.
+  Closing that needs a provenance boundary (signature, minting factory, or #54's
+  pinned digest) that no contract here provides.
 - **A fourth path does not close, and is named rather than implied.** A caller can
   still tamper with the copy a query handed it and pass that downstream (§3).
   Detachment isolates *registry state*; it does not make metadata tamper-proof,
