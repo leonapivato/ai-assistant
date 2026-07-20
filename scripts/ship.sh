@@ -124,10 +124,14 @@ trap 'rm -f "$body"' EXIT
 } >"$body"
 
 # One comment, posted once — the whole report is a single API call, so there is
-# no partial-success state to reconcile and a retry cannot duplicate what
-# already landed. (Posting per persona would avoid the shared size budget below,
-# but a transient failure on the second call would leave the first posted and
-# make re-running `ship` duplicate it.)
+# no partial-success state to reconcile. (Posting per persona would avoid the
+# shared size budget below, but a transient failure on the second call would
+# leave the first posted and make re-running `ship` duplicate it.)
+#
+# One call is not the same as idempotent: if GitHub creates the comment but the
+# response is lost, `gh` reports failure and a re-run posts a duplicate. That
+# window is narrow and its outcome is cosmetic — two identical reviews on a PR,
+# not a false record — so it is tracked rather than solved here.
 #
 # GitHub rejects a body over 65536 characters, and nothing here is truncated:
 # cutting at a byte boundary drops the tail, which is exactly where the ranked

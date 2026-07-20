@@ -143,14 +143,20 @@ fi
 
 # Non-empty is a weak test: a refusal or a timeout message ("I'm unable to
 # review this repository") is prose, and would be recorded and posted as though
-# it were a review. The rubric requires a closing verdict (docs/review/guide.md),
-# so demand one — it is the one token a genuine review always carries and a
-# non-review never does. Case-insensitive, since the reviewer varies between
-# "Verdict:" and "VERDICT:".
-if ! grep -qiE 'verdict.*(BLOCK|APPROVE)' "$out"; then
-    echo "codex output carries no verdict; not recording it as a review" >&2
+# it were a review. The rubric requires a closing one-line verdict
+# (docs/review/guide.md), so demand exactly that.
+#
+# Matched against the *last non-blank line*, not anywhere in the body: a
+# substring search accepts prose that merely mentions the words, e.g. "I cannot
+# provide a verdict or APPROVE this change". Markdown emphasis is stripped
+# first, since the reviewer writes "**Verdict: X**", "Verdict: X" and
+# "VERDICT: X" interchangeably.
+last_line="$(grep -v '^[[:space:]]*$' "$out" | tail -n 1 |
+    tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+if ! grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$last_line"; then
+    echo "codex output does not end in a verdict; not recording it as a review" >&2
     echo "this is usually a refusal or a timeout rather than a review" >&2
-    echo "first line was: $(head -n 1 "$out")" >&2
+    echo "last line was: ${last_line}" >&2
     exit 1
 fi
 
