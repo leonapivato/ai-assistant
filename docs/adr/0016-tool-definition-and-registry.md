@@ -253,6 +253,16 @@ They are ordered tuples, sorted and de-duplicated on validation, rather than
 processes; these values are written into permission decisions and audit records,
 so a stable serialisation matters more than set syntax at the call site.
 
+"Sorted" means **`DataTier` declaration order — `SECRET`, `PERSONAL`,
+`OPERATIONAL`, most sensitive first** — not alphabetical by value, which would
+give `OPERATIONAL, PERSONAL, SECRET` and read as though sensitivity ran the
+other way. Naming which is a one-line decision worth making explicitly: both
+are defensible readings of "sorted", so leaving it open would let two
+implementations serialise the same definition two ways and defeat the stability
+the tuple exists for. It also matches how `RiskLevel` and `Reversibility` take
+their rank from declaration order (§2), so `core` has one convention rather
+than two.
+
 `side_effecting` is declared rather than derived. Every derivation considered
 was wrong for a real tool: non-empty `writes` misses a tool that sends an email
 while storing nothing locally, and non-`REVERSIBLE` misses a tool that
