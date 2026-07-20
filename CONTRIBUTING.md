@@ -172,6 +172,33 @@ in-flight ledger tried and failed to arbitrate. If two branches still collide on
 a number, the second to merge renumbers — a file rename plus its internal
 `ADR-NNNN` references and `Refs:` trailers, no code change.
 
+## The dispatcher
+
+ADR-0015 replaced the shared coordination files with a person: the **dispatcher**
+is whoever hands work to agents. ADR-0015 §§2 and 5 give the role its powers, and
+the rest of this document assumes it exists without naming it.
+
+The dispatcher:
+
+- **assigns ADR numbers** at dispatch (above);
+- **prevents lane collisions**, since nothing mechanical detects two agents
+  working the same subsystem — ADR-0015 traded that check away deliberately;
+- **places each agent in its own clone** (ADR-0015 §2), never two in one, and
+  never in a linked worktree;
+- **decides merge order** where a contract ADR must land before the
+  implementation depending on it (golden rule 5).
+
+Two things follow for **you, the agent**. Your lane's boundaries and your ADR
+number come from your brief, not from your own reading of the repo — where the
+brief conflicts with an issue the brief is newer, and where it conflicts with a
+ratified ADR, stop and say so rather than choosing. And the report you send back
+is evidence: say what you actually verified and at which commit, because a gate
+run before a rebase is not a gate run against `main`.
+
+The mechanics of the role — clone inventory, brief contents, what to re-check
+before believing a report, merge sequencing — live in the `dispatch-agents`
+skill, alongside `find-parallel-work`, which proposes the lanes it dispatches.
+
 ## Git & commits
 
 - **Trunk-based.** `main` is always green. Do each unit of work on a
