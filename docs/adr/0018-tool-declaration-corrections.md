@@ -5,6 +5,8 @@
 - Supersedes: ADR-0016 §1 (the `id`/`capability` types and the `description`
   rule) and §5 (query results and the spent-id rule). The rest of ADR-0016
   stands unchanged.
+- **Breaking**: changes the `ToolRegistry` Protocol's contract and two `core`
+  types (golden rule 5). See "Compatibility" below.
 
 ## Context
 
@@ -55,8 +57,31 @@ untouched and remains in force.
 | --- | --- | --- |
 | §1, field list | `id`/`capability`: `Identifier` → `VisibleIdentifier` | New `core` surface |
 | §1, `description` | "non-blank" → "contains something that renders" | Tightening |
-| §5, query results | Adds: every query returns a detached snapshot | New Protocol obligation |
-| §5, spent ids | Identical re-registration under a deregistered id: idempotent → **refused**; scope corrected to per-registry | **Reverses a ratified rule** |
+| §5, query results | Adds: every query returns a detached snapshot | New Protocol obligation (**breaking**) |
+| §5, spent ids | Identical re-registration under a deregistered id: idempotent → **refused**; scope corrected to per-registry | **Reverses a ratified rule** (**breaking**) |
+
+### Compatibility
+
+**This is a breaking Protocol change** (golden rule 5), even though no method
+signature moves. A `ToolRegistry` implementation that satisfied ADR-0016 can
+fail this contract in two ways, and neither is visible to a type checker:
+
+- returning its own list or its own stored definitions from `get`, `find` or
+  `all_tools` — previously unspecified, now forbidden (§3);
+- accepting an identical definition under a deregistered id — previously
+  *required* to be idempotent, now required to raise (§4).
+
+The `core` types change too: `ToolDefinition.id` and `.capability` narrow from
+`Identifier` to `VisibleIdentifier`, and `description` narrows. All three are
+*narrowings*, so every definition that is valid after this ADR was valid before
+it; the reverse does not hold, and a tool declaring an invisible id or
+description now fails to construct where it previously loaded.
+
+**Migration cost today is nil.** The only implementations are
+`InMemoryToolRegistry` and `FakeToolRegistry`, both in the unmerged PR #67, and
+both already conform. The obligations are enforced by the shared conformance
+suite rather than the signatures, so the practical migration instruction for any
+future implementation is: run the suite.
 
 ### 1. `description` must render, not merely be non-blank (supersedes §1)
 
@@ -237,7 +262,10 @@ line in a composition root already prevents.
   signatures.** "Returns a detached snapshot" lives in the docstring and the
   conformance suite, not the types, so it holds only for implementations that
   actually run the suite. That is the same footing as every other behavioural
-  clause in these contracts, and it is why the triad is mandatory.
+  clause in these contracts, and it is why the triad is mandatory — and it is
+  why this counts as a breaking change despite no signature moving: a
+  conforming implementation can be broken by it without anything failing to
+  compile.
 - **ADR-0016 is now partially superseded**, so a reader must consult both. The
   alternative — restating ADR-0016 whole — would make the diff between the two
   decisions much harder to see, which is the thing a superseding ADR most needs
