@@ -4,12 +4,11 @@
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
-- Superseded in part: 2026-07-19 by **ADR-0017**, which replaces §2's egress
-  clause ("the **only** component permitted…") with a designated set of egress
-  boundaries, admitting the `tools/` integration boundary the rest of this ADR
-  already provisions for. **§2's egress clause below is no longer the live
-  rule — read it with ADR-0017.** Everything else here stands: §1, §§3–7, §2's
-  residency and telemetry clauses, and the configured-set amendment above.
+- Partial supersession **proposed** 2026-07-19: **ADR-0017** (`Proposed`) would
+  replace §2's egress clause ("the **only** component permitted…") with a
+  designated set of egress boundaries. **Until ADR-0017 is accepted, §2 below
+  remains the live rule and this ADR is unchanged by it.** See the dated note
+  at the end of §2.
 
 ## Context
 
@@ -45,11 +44,9 @@ is handled:
   `~/.local/share/ai-assistant/` on Linux). No cloud storage by default.
 - The **only** component permitted to send user data off-device is the
   `models/` layer, and only to the model provider the user has configured.
-  Every other egress is a bug. (Both absolutes here reflect the codebase of
-  the time — a single-adapter `models/` and no tool layer. Neither is the live
-  rule: the **Amendment** below reads "the model provider" as the configured
-  *set*, and **ADR-0017** replaces "the only component" with a designated set
-  of egress boundaries.)
+  Every other egress is a bug. (Singular here reflects the single-adapter
+  `models/` of the time; see the **Amendment** below, which reads this as the
+  configured *set*.)
 - **Telemetry is off by default and there is no data egress for
   observability.** pydantic-ai's `logfire-api` is a no-op unless Logfire is
   explicitly installed and configured; instrumentation that transmits data
@@ -92,14 +89,26 @@ credentialed.
 
 **Scope.** This amends the wording of §2 only. §1 (tiers), §3 (secrets), §4
 (encryption at rest), §5 (logging and redaction) and §6 (data rights) are
-unchanged, and "every other egress is a bug" still holds — *this* amendment
-widens *which* providers are legitimate recipients, not *which components* may
-transmit. At this date `models/` remained the only one. [**Superseded in part**
-by **ADR-0017**, which widens exactly the axis this paragraph declined to
-touch. The sentence stands as the record of what *this* amendment did and did
-not do — the component prohibition was examined here and deliberately left
-standing — and only its claim about the current state of the rule is out of
-date. ADR-0017 §6 explains why it is annotated rather than rewritten.]
+unchanged, and "every other egress is a bug" still holds — the amendment widens
+*which* providers are legitimate recipients, not *which components* may transmit.
+`models/` remains the only one.
+
+**Note (2026-07-19) — partial supersession proposed, not yet in force.**
+Appended without altering anything above it. **ADR-0017** (`Proposed`) argues
+that §2's "only component" clause contradicts the tool layer §3, §7 and this
+ADR's Consequences already provision for, and would replace it with a
+designated set of egress boundaries — `models/` and a named `tools/`
+integration seam — each declaring what it transmits and having its recipients
+authorised before it transmits.
+
+Two things this note does **not** do. It does not change §2: until ADR-0017 is
+accepted, the clause above is the live rule and `models/` is the only permitted
+egress boundary. And it does not retract the configured-set amendment's closing
+sentence ("`models/` remains the only one"), which is an accurate record of
+what *that* amendment decided and deliberately declined to decide — the
+component prohibition was examined there and left standing. If ADR-0017 is
+accepted, that sentence stays as written and this note becomes the pointer to
+the rule that replaced it; ADR-0017 §6 explains why annotating beats rewriting.
 
 ### 3. Secrets/credentials (Tier 0)
 
