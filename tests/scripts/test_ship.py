@@ -184,6 +184,15 @@ def _fake_gh(bin_dir: Path) -> None:
         '      printf "patch-failed %s\\n" "$id" >>"$GH_COMMENT_CALLS"\n'
         "      exit 1\n"
         "    fi\n"
+        # GH_PATCH_LOSE_ID applies the update and *then* reports failure — the
+        # lost-response case, where a non-zero exit is no evidence that the
+        # comment is stale. Distinct from GH_PATCH_FAIL_ID, which fails before
+        # mutating; ship cannot tell the two apart, which is the point.
+        '    if [[ "$id" == "${GH_PATCH_LOSE_ID:-}" ]]; then\n'
+        '      cat "$body_file" >"$GH_COMMENTS_DIR/$id"\n'
+        '      echo "response lost" >&2\n'
+        "      exit 1\n"
+        "    fi\n"
         '    [[ -f "$GH_COMMENTS_DIR/$id" ]] || exit 1\n'
         '    cat "$body_file" >"$GH_COMMENTS_DIR/$id"\n'
         '    printf "patch %s\\n" "$id" >>"$GH_COMMENT_CALLS"\n'
@@ -914,10 +923,34 @@ def test_a_failed_update_still_attempts_the_rest_and_names_the_split(tmp_path: P
     assert "current finding" in (comments / "902").read_text()
     # And the message says exactly which comment is lying, rather than passing
     # gh's error through.
-    assert "902" in result.stderr, "the comment now showing this review is named"
-    assert "901" in result.stderr, "the comment left superseded is named"
-    assert "superseded" in result.stderr
+    assert "902" in result.stderr, "the comment that was written is named"
+    assert "901" in result.stderr, "the comment whose write failed is named"
     assert "just ship" in result.stderr, "the recovery is stated"
+
+
+def test_a_failed_update_does_not_claim_the_comment_is_stale(tmp_path: Path) -> None:
+    """A non-zero PATCH is not evidence that the write was not applied.
+
+    The request can succeed and its response be lost — the same ambiguity ship
+    already documents for comment *creation*. Here the update lands and the call
+    still reports failure, so a message asserting the comment shows a superseded
+    review would be stating something ship cannot know. It must name the
+    uncertainty instead; the recovery is the same re-run either way.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"current finding\n{_VERDICT}\n")
+    stale = _ship_comment_opening(sha) + "\nsuperseded finding\n"
+    _seed_comment(tmp_path, "901", stale, author="shipper")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"GH_PATCH_LOSE_ID": "901"})
+
+    assert result.returncode != 0
+    # The write did land, so any claim that 901 is superseded would be false.
+    assert "current finding" in (tmp_path / "comments" / "901").read_text()
+    assert "may or may not have been updated" in result.stderr
+    assert "showing a superseded" not in result.stderr
 
 
 def test_a_rerun_converges_after_a_partly_failed_update(tmp_path: Path) -> None:
