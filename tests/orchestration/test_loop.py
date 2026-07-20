@@ -567,3 +567,64 @@ async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) 
     result = await loop.respond("hello")
 
     assert result.goal.statement == "hello"
+
+
+@pytest.mark.parametrize("limit", [1.5, float("inf"), True, "5"])
+def test_tuning_refuses_a_limit_that_is_not_an_integer(limit: object) -> None:
+    """A non-integral limit reaches the store, where slicing by it raises."""
+    with pytest.raises(TypeError, match="must be an integer"):
+        LearningLoop(
+            context=FakeContextProvider(),
+            memory=FakeMemoryStore(now=_clock),
+            policy=FakeMemoryPolicy(),
+            planner=FakePlanner(now=_clock),
+            feedback=FakeFeedbackProcessor(),
+            retrieval_limit=limit,  # type: ignore[arg-type]  # deliberately invalid tuning
+            now=_clock,
+        )
+
+
+async def test_a_naive_clock_still_produces_an_aware_expiry() -> None:
+    """``model_copy`` skips validators, so the clock is normalised at the source.
+
+    A naive ``expires_at`` would survive the copy and then raise ``TypeError``
+    against an aware "now" on every later read, deep inside the store.
+    """
+    naive_now = _NOW.replace(tzinfo=None)
+    memory = FakeMemoryStore(now=lambda: naive_now)
+    ttl = timedelta(hours=6)
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY, ttl=ttl),
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(),
+        now=lambda: naive_now,
+    )
+
+    [outcome] = await loop.learn(_preference_feedback())
+
+    assert outcome.record_id is not None
+    stored = await memory.get(outcome.record_id)  # would raise TypeError if naive
+    assert stored is not None
+    assert stored.expires_at == _NOW + ttl
+    assert stored.expires_at is not None
+    assert stored.expires_at.tzinfo is not None
+
+
+async def test_a_naive_clock_still_produces_an_aware_goal() -> None:
+    """``Provenance.last_updated`` has no normalising validator; the clock does."""
+    naive_now = _NOW.replace(tzinfo=None)
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=FakeMemoryStore(now=lambda: naive_now),
+        policy=FakeMemoryPolicy(),
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(),
+        now=lambda: naive_now,
+    )
+
+    result = await loop.respond("book the flight")
+
+    assert result.goal.created_at == _NOW
+    assert result.goal.provenance.last_updated.tzinfo is not None
