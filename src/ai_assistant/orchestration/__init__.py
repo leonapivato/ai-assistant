@@ -9,4 +9,13 @@ subsystem implementations, which are injected. That inversion is what keeps the
 engine testable and the subsystems independently replaceable.
 
 Contract: this package *consumes* contracts; it wires implementations together.
+
+``LearningLoop`` is the first working slice of that pipeline: the closed
+learning loop of ADR-0022 (intent → context → retrieval → planning, then
+feedback → proposal → policy → memory). Tool selection, permission checking and
+execution join it when those subsystems can actually invoke something.
 """
+
+from ai_assistant.orchestration.loop import LearningLoop, TurnResult
+
+__all__ = ["LearningLoop", "TurnResult"]
