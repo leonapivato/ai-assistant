@@ -1,9 +1,13 @@
 # 12. Codex review in CI: triggered, advisory, non-blocking
 
-- Status: Accepted
+- Status: Superseded by ADR-0015
 - Date: 2026-07-18
 - Amended: 2026-07-18 (§4 — CI sandbox posture; write-token isolation via
   three-job separation; see the amendment)
+- Superseded: 2026-07-19 by ADR-0015 — review returns to local-only execution
+  with a SHA-anchored artifact. The reviewer (Codex, independent of the author
+  model) is unchanged; the hosted trigger, the three-job trust split, and the
+  PR-comment record described below are retired.
 
 ## Context
 
