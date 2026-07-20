@@ -117,6 +117,23 @@ trap 'rm -f "$body"' EXIT
     done
 } >"$body"
 
+# GitHub rejects a comment body over 65536 characters. Without a budget, a long
+# review — or two ordinary ones together — fails at `gh pr comment` after every
+# check has passed, and *nothing* reaches the PR. A truncated review on the
+# record beats no review, so cut to a safe byte budget and say so. `iconv -c`
+# drops a partial multibyte character left at the boundary, which would
+# otherwise make the body invalid UTF-8 and get it rejected anyway.
+max_bytes=60000
+if [[ "$(wc -c <"$body")" -gt "$max_bytes" ]]; then
+    truncated="$(mktemp)"
+    trap 'rm -f "$body" "$truncated"' EXIT
+    head -c "$max_bytes" "$body" | iconv -f UTF-8 -t UTF-8 -c >"$truncated"
+    printf '\n\n_…truncated near %d bytes; run `just review-codex` locally for the full output._\n' \
+        "$max_bytes" >>"$truncated"
+    mv "$truncated" "$body"
+    echo "ship: review exceeded ${max_bytes} bytes; posting truncated" >&2
+fi
+
 # Re-read the PR head immediately before posting. Fetching the base and building
 # the body takes seconds, and a push landing in that window would leave a review
 # on the PR that reads as current but covers superseded code. This cannot be

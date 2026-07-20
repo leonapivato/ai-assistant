@@ -39,6 +39,10 @@ def _init_repo(repo: Path) -> str:
     _git(repo, "config", "user.name", "Test")
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
+    (repo / "docs" / "review" / "architecture.md").write_text("# rubric\n")
+    # Mirrors the real repo: .review/ is ignored, so the clean-tree check the
+    # script now makes does not trip on the artifacts it writes itself.
+    (repo / ".gitignore").write_text(".review/\n")
     (repo / "f.txt").write_text("one\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
@@ -184,11 +188,24 @@ def test_artifact_names_the_commit_reviewed_even_if_head_moves(tmp_path: Path) -
     assert not (repo / ".review" / f"{moved_sha}-adversarial.md").exists()
 
 
+def test_refuses_to_review_a_dirty_tree(tmp_path: Path) -> None:
+    """Codex reads the working tree for context, so it must match the commit."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _fake_codex(tmp_path / "bin")
+    (repo / "f.txt").write_text("uncommitted context\n")
+
+    result = _run_review(repo, tmp_path, check=False)
+
+    assert result.returncode != 0
+    assert "dirty" in result.stderr
+    assert not (repo / ".review").exists()
+
+
 def test_each_persona_records_a_separate_artifact_for_one_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_codex(tmp_path / "bin")
-    (repo / "docs" / "review" / "architecture.md").write_text("# rubric\n")
 
     _run_review(repo, tmp_path, "adversarial")
     _run_review(repo, tmp_path, "architecture")

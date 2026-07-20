@@ -51,6 +51,16 @@ if ! command -v codex >/dev/null 2>&1; then
     exit 127
 fi
 
+# Codex reads files from the working tree for context, not just the diff we hand
+# it. Reviewing with uncommitted changes present therefore reasons about a tree
+# that is not the commit the artifact will name — and once those changes are
+# stashed, ship.sh still accepts it. Same rule as ship: clean tree or nothing.
+if [[ -n "$(git status --porcelain)" ]]; then
+    echo "working tree is dirty (tracked or untracked); commit or stash first" >&2
+    echo "the review would reason about files that are not in the reviewed commit" >&2
+    exit 1
+fi
+
 # Resolve HEAD to an immutable SHA *before* diffing, and review that SHA rather
 # than the moving ref. A review can run for minutes; if HEAD advances meanwhile,
 # re-resolving afterwards would file this diff under a commit Codex never saw,
