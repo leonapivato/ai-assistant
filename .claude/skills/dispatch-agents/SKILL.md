@@ -40,9 +40,14 @@ git ls-tree origin/main docs/adr/ --name-only              # merged
 for b in $(git ls-remote --heads origin | awk '{sub("refs/heads/","",$2); print $2}'); do
   git ls-tree "origin/$b" docs/adr/ --name-only            # written but unmerged
 done | sort -u
-gh pr list --state open --limit 100 --json number,title,body \
-  | grep -oE 'ADR-[0-9]{4}' | sort -u                      # claimed in prose
+gh pr list --state open --limit 100 --json number,title,body > /tmp/prs.json
+[ "$(jq length /tmp/prs.json)" -ge 100 ] && { echo "SATURATED — paginate"; exit 1; }
+grep -oE 'ADR-[0-9]{4}' /tmp/prs.json | sort -u             # claimed in prose
 ```
+
+Abort on saturation rather than warning: a truncated scan that keeps going
+reports a free number that another lane already holds, which is the exact
+collision this preflight exists to prevent.
 
 **None of these is authoritative for a number you assigned but whose ADR is not
 yet written.** Branch names need not contain the number — `tools/tooldefinition-registry`
@@ -100,14 +105,15 @@ editing one file is invisible in either PR alone:
 
 ```bash
 prs=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
-[ "$(printf '%s\n' "$prs" | wc -l)" -ge 100 ] && echo "SATURATED — paginate" >&2
+[ "$(printf '%s\n' "$prs" | wc -l)" -ge 100 ] && { echo "SATURATED — paginate"; exit 1; }
 for p in $prs; do gh pr diff "$p" --name-only | sed "s|^|$p |"; done \
   | sort -k2 | uniq -f1 -D
 ```
 
 `gh pr list` defaults to 30 and truncates **silently**, which would report no
-collision between the lanes it never looked at. Pass an explicit limit and check
-for saturation, the same guard `find-parallel-work` uses.
+collision between the lanes it never looked at. Pass an explicit limit and
+**abort** on saturation — a partial scan that reports "collision-free" is worse
+than no scan, because it is believed. Same guard `find-parallel-work` uses.
 
 ## 4. Adjudicate escalations — do not encode the answers
 
@@ -115,8 +121,13 @@ When an agent stops on a conflict between authorities, resolve it from the
 texts, not from precedent or from this file. Read the actual lines before
 ruling; agents cite these from memory and misquote them.
 
-Authority runs: **ADRs > `CONTRIBUTING.md` > a reviewer's opinion.**
-`CONTRIBUTING.md` is itself ratified by ADR-0003, so an ADR outranks it.
+Authority runs: **ADRs and `CLAUDE.md`'s golden rules > `CONTRIBUTING.md` > a
+reviewer's opinion.** `CONTRIBUTING.md` is itself ratified by ADR-0003, so an
+ADR outranks it. The golden rules bind alongside ADRs and three of them are
+mechanically enforced by `lint-imports` — a brief that permits a cross-subsystem
+concrete import conflicts with golden rule 1 even though it contradicts no ADR
+and no line of `CONTRIBUTING.md`. **A brief never outranks either.** If your own
+brief conflicts with one, that is your error to fix, not the agent's to follow.
 
 Deliberately not encoded here: the rulings themselves. Two waivers that look
 alike can resolve opposite ways because the governing authority differs — one
