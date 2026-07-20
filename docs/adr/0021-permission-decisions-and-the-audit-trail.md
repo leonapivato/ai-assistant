@@ -371,11 +371,15 @@ may return, and the first is the one that matters most:
   control. It is stated as a rule and pinned in the suite rather than left to the
   obvious reading, because "obvious" is what an earlier draft said about several
   things this review has since corrected.
-- **`approved=True` may yield `ALLOW` or something more restrictive**, never less.
-  The policy is entitled to refuse a confirmation it no longer accepts — one
-  answered long after it was asked, or one whose request would now be `DENY` —
-  rather than being obliged to rubber-stamp any `True` it is handed. What it may
-  not do is treat consent as mandatory.
+- **`approved=True` may yield `ALLOW` or `DENY`, and nothing else.** The policy
+  is entitled to refuse a confirmation it no longer accepts — one answered long
+  after it was asked, or one whose request would now be `DENY` — rather than
+  being obliged to rubber-stamp any `True` it is handed. What it may not do is
+  treat consent as mandatory. It also may not return `CONFIRM`: a resolving
+  decision may not itself be a `CONFIRM` (§1), so re-asking would produce a
+  ruling that is conforming and unrecordable. Asking twice about one request is
+  a flow this ADR does not offer; a policy that wants to is issuing a *new*
+  request.
 - **A `confirmed` whose ruling was not `CONFIRM` must not produce an `ALLOW`**, so
   the method cannot be used to mint an authorisation out of a decision nobody was
   ever shown.
@@ -401,8 +405,12 @@ standing grants are deferred — so instead:
 - **`resolve` is the one path that may set it, and what it sets is verifiable.**
   A user answering a confirmation *is* the user decision the floor asks for, and
   it is already on the record: `resolve(confirmed, approved=True)` sets
-  `authorised_by` to `confirmed.id`. A decision with `resolves` set must carry
-  `authorised_by` equal to it, so the pointer is covered by the invariant
+  `authorised_by` to `confirmed.id`. A resolving **`ALLOW`** must carry
+  `authorised_by` equal to its `resolves`; a resolving **`DENY`** must leave it
+  unset, because a refusal rests on no authorisation and a denial citing one
+  would be incoherent — and because requiring the equality of every resolving
+  decision would have made a recorded refusal unrepresentable, which is what an
+  earlier draft did. So the pointer is covered by the invariant
   `AuditTrail.record` already enforces (§4) — the referenced record exists, its
   ruling was `CONFIRM`, it matches on tool, payload and step, and it can be spent
   only once. Nothing is taken on trust.
@@ -547,7 +555,16 @@ undoes the guarantee for all of them. Wholesale erasure is a different act: it
 destroys the trail visibly and completely, which is what a data-rights operation
 should look like. So the user may burn the book; nobody may tear out a page.
 
-`recent` is newest-first with a bounded default because the realistic query is
+`recent` is ordered by `decided_at` **descending**, ties broken by `id`
+ascending. Both halves are needed: "newest first" is ambiguous between insertion
+order and decision time, which disagree whenever records are appended out of
+order, and two stores would then answer the same query differently while each
+believed it conformed. Decision time is the right choice for an audit trail —
+the question is when something *was decided*, not when a writer got around to
+it — and an `id` tie-break makes the order total rather than merely mostly
+determined, since two decisions can share a timestamp at any clock resolution.
+
+It is bounded by default because the realistic query is
 "what has the assistant just done", and an unbounded read of a Tier 1 store by
 default is a shape worth not offering. **`limit` must be strictly positive**, and
 a non-positive value raises `ValueError` rather than being clamped or passed
@@ -618,9 +635,16 @@ threshold comparison is written the wrong way round — including, concretely, t
 `RiskLevel.CRITICAL < RiskLevel.LOW` inversion ADR-0016 §2 disarmed on the type
 but which a policy could still reproduce in its own arithmetic.
 
-**Off-device disclosure is never auto-granted.** A definition whose `discloses`
-contains `SECRET` or `PERSONAL` may not receive `ALLOW` with `authorised_by`
-unset. *Auto*-granted is the operative word: the floor is on the policy deciding
+**Off-device disclosure is never auto-granted.** A definition with a **non-empty
+`discloses`** — any tier, not merely `SECRET` or `PERSONAL` — may not receive
+`ALLOW` with `authorised_by` unset. ADR-0016 §2 states the obligation over
+non-emptiness (*"a `REVERSIBLE` tool with a non-empty `discloses` performed an
+irrevocable disclosure"*), and an earlier draft of this clause narrowed it to two
+tiers while keeping a heading that claimed otherwise. A tier exception would also
+be the wrong shape: `OPERATIONAL` is the tier a tool assigns to a disclosure it
+considers unremarkable, so exempting it would let the declaration decide whether
+it gets gated — the self-certifying fast path ADR-0016 §3 refused when it
+declined a `requires_permission` predicate. *Auto*-granted is the operative word: the floor is on the policy deciding
 by itself, not on the outcome, so an `ALLOW` naming the user decision it rests on
 is permitted and is how a standing grant will work (§3, §6). Today nothing
 populates that field, so in practice the floor is absolute — but it is written
@@ -755,6 +779,10 @@ nobody declared treated as free.
   were approved — are closed by the shape of the types rather than by a sentence
   asking implementers not to. The first draft closed none of them and asserted
   all three; architecture review is what caught it.
+- **The floor covers any non-empty `discloses`**, not a list of tiers, matching
+  the non-emptiness ADR-0016 §2 states the obligation over. A tier exemption
+  would let a declaration decide whether it gets gated, which is the
+  self-certifying fast path ADR-0016 §3 refused.
 - **A refusal is honoured.** `resolve(approved=False)` must yield `DENY`; no
   conforming policy can convert a user's "no" into an authorisation. The prompt
   is not theatre.
