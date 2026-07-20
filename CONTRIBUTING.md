@@ -333,15 +333,22 @@ fake leaves every consumer hand-rolling a private mock.
 The triad is what a Protocol *change* is measured against too — extend the suite
 in the same change, so the new obligation is enforced rather than assumed.
 
-**This is mechanically enforced.** `tests/core/test_protocol_triad.py` maps
-every Protocol in `core/protocols.py` to its suite, its canonical fake, and a
-`Test…Contract` subclass whose contract tests pytest actually *ran and passed*.
-The last part is the one that matters: an abstract suite is only worth anything
-once something runs it against a real subject, so the check demands evidence of
-execution rather than the existence of files. It lives in pytest rather than in
-a script because only pytest can answer "did these assertions run?", and
-`uv run pytest` is already in the gate and in CI. Add a Protocol without its
-triad and the gate goes red, naming what is missing.
+**The triad itself is mechanically enforced.**
+`tests/core/test_protocol_triad.py` maps every Protocol in `core/protocols.py`
+to its suite, its canonical fake, and a `Test…Contract` subclass whose contract
+tests pytest actually *ran and passed*. The last part is the one that matters:
+an abstract suite is only worth anything once something runs it against a real
+subject, so the check demands evidence of execution rather than the existence
+of files. It lives in pytest rather than in a script because only pytest can
+answer "did these assertions run?", and `uv run pytest` is already in the gate
+and in CI. Add a Protocol without its triad and the gate goes red, naming what
+is missing.
+
+What the check enforces is that the three artifacts exist and run — **not that
+a suite covers every method of its Protocol.** Add a method to an existing
+Protocol and leave its suite alone and the gate stays green. Keeping the suite
+abreast of the contract is a review concern, like the adequacy of any other
+test (ADR-0003).
 
 The check ships with an `EXEMPTIONS` list for Protocols whose backfill is still
 outstanding. That list is a backlog, not an escape hatch: each entry names the
