@@ -71,17 +71,13 @@ within graph overhead — despite the source repo being named `…-onnx-Q`) and
 deflates to only 91.1% of raw, so almost none of it compresses away. 58.4% of the
 limit is the honest figure; "thin" was wrong.
 
-**Crossing the limit is a publish-time failure — but not a harmless one, because
-a release is not atomic.** A wheel over 100 MiB is rejected by PyPI's upload API
-(remedy: a limit increase, granted routinely, or a data-only package). But files
-upload one at a time, so an sdist accepted before the wheel fails — rejected for
-size *or* lost to a transient upload error — leaves a release with no wheel, and
-`pip` falls back to the sdist and runs the build (and its fetch) on the user's
-machine, failing if they are offline. The release procedure must therefore
-size-check the wheel first *and* upload it before the sdist, so no partial
-release can resolve to a fetching sdist. With 41.6 MiB of headroom the size limit
-is a tripwire, not a live risk — but the categorical "no user-visible breakage"
-claim was wrong.
+**Crossing the limit is a publish-time failure.** A file over 100 MiB is rejected
+by PyPI's upload API (remedy: a limit increase, granted routinely, or a data-only
+package); at 58.4 MiB, with the sdist carrying the same artifact (§4), both
+published files sit well under it. The release procedure size-checks each before
+uploading. Because both files carry the model, no partial release can resolve to
+a fetching install — which is the failure the earlier categorical "no
+user-visible breakage" claim missed, now closed rather than merely mitigated.
 
 ## Decision
 
@@ -175,9 +171,13 @@ needing build scripts to `hatchling`, whose custom hook is the thin adapter
 above. That swap changes project packaging, so its blast radius is wider than the
 rest of this decision and is the part most worth challenging.
 
-§1 governs the installed runtime, not builds: a `py3-none-any` wheel unpacks and
-fetches nothing, while a from-sdist build runs the hook — and its fetch — on the
-user's own machine, under the same pin.
+**The release sdist ships the verified artifact too, so no PyPI install path
+fetches on a user's machine** — the wheel unpacks it, and a `--no-binary` sdist
+build finds it present and skips the fetch. The only build that fetches is one
+from a *git checkout* (§4 keeps the artifact out of the tree): a contributor
+building the software, whose transport metadata is the same exposure as fetching
+any build dependency — not the stored Tier 1 user data ADR-0004 §1 classifies or
+§2 governs.
 
 ### 5. The default embedder loads the packaged artifact, offline
 
@@ -194,18 +194,22 @@ wheel contains the artifact at the expected path, the real default embedder
 embeds with the network denied, and a missing artifact raises `ModelError`
 without opening a socket.
 
-### 6. A non-default model remains an opt-in that fetches
+### 6. A non-default model is opt-in, fetches, and may not be persisted
 
 Only the default is vendored. Configuring a different fastembed model re-enables
 fastembed's own unpinned download, with none of §2's guarantees — the same shape
-as ADR-0006 §2's opt-in cloud embedder, and documented as such. "Local-first by
-default" is a claim about the default.
+as ADR-0006 §2's opt-in cloud embedder. "Local-first by default" is a claim about
+the default.
 
-That opt-in path carries the identity gap in full — an unpinned download can
-serve different weights under an unchanged `model_id`, mixing vectors silently.
-This ADR does **not** introduce it: that is today's *default* behaviour, which §2
-fixes for the vendored model and cannot fix here (fastembed's API takes no
-revision). A persistent store on a non-default model is subject to #136.
+Because fastembed's API takes no revision, such a model has no establishable
+weights identity — an unpinned download can serve different weights under an
+unchanged `model_id`. Rather than defer that to #136, this ADR **closes it: an
+embedder whose embedding-space identity cannot be pinned must not back a
+persistent store.** The unpinned non-default path is ephemeral-only; a persistent
+`SqliteMemoryStore` requires a pinned-identity embedder (the vendored default, or
+a cloud embedder whose provider versions its model), enforced at composition by
+the store refusing one that cannot supply a stable `model_id`. A decision, not a
+deferral — it removes the non-default corruption path.
 
 ### 7. What this ADR does not decide
 
@@ -245,14 +249,14 @@ shows it is not needed yet.
 
 - **First run works offline, with no fetch and no second command.** This is the
   decision's main benefit and the thing #89 was ultimately asking for.
-- **The strongest case against it: the fetch is relocated, not eliminated.** A
-  wheel install fetches nothing, but a from-sdist build runs the hook on the
-  user's machine — so the honest claim is "once per build, never for a wheel
-  install", not "gone". Accepted because `py3-none-any` means every user who does
-  not opt out gets the wheel, and a build-time fetch is verified where a runtime
-  one was not.
-- **Every install pays 58.4 MiB**, including users on a cloud embedder or the
-  lexical `InMemoryMemoryStore`. Accepted deliberately.
+- **The strongest case against it: the fetch is relocated, not eliminated.** No
+  PyPI install path fetches (wheel and sdist both carry the artifact), but a build
+  from a *git checkout* does — so the honest claim is "once per source build,
+  never for an install", not "gone". Accepted because that fetch is a contributor
+  building the software, verified against a pin, where the eliminated one was an
+  unverified runtime fetch on every user's machine.
+- **Every install pays 58.4 MiB** (both wheel and sdist), including users on a
+  cloud embedder or the lexical `InMemoryMemoryStore`. Accepted deliberately.
 - **Licence attribution must be resolved before publishing.** Three sources
   disagree — upstream `BAAI/bge-small-en-v1.5` says MIT, the
   `Qdrant/bge-small-en-v1.5-onnx-Q` card says Apache-2.0, fastembed's metadata
