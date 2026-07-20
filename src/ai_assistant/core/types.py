@@ -1871,7 +1871,16 @@ class PermissionDecision(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             msg = f"decided_at must be timezone-aware, got {value!r}"
             raise ValueError(msg)
-        return value.astimezone(UTC)
+        try:
+            return value.astimezone(UTC)
+        except OverflowError as exc:
+            # A datetime within a day of `datetime.min`/`max` at a large offset
+            # is aware and still has no UTC representation. `OverflowError` is
+            # not a `ValueError`, so pydantic would let it escape as a crash
+            # instead of a validation failure -- the same "accepted, then
+            # unusable" shape the payload rules close, at the other end.
+            msg = f"decided_at has no UTC representation, got {value!r}"
+            raise ValueError(msg) from exc
 
     @model_validator(mode="after")
     def _a_resolution_is_not_itself_a_question(self) -> PermissionDecision:

@@ -471,6 +471,32 @@ def test_an_aware_timestamp_is_normalised_to_utc() -> None:
     assert made.decided_at.tzinfo is UTC
 
 
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        datetime.min.replace(tzinfo=timezone(timedelta(hours=14))),
+        datetime.max.replace(tzinfo=timezone(timedelta(hours=-12))),
+    ],
+    ids=["under year 1", "over year 9999"],
+)
+def test_a_timestamp_with_no_utc_representation_is_refused(boundary: datetime) -> None:
+    """Aware is necessary and not sufficient: normalising it must also work.
+
+    A datetime within a day of `datetime.min`/`max` at a large offset carries a
+    `tzinfo` and still has no UTC form. `astimezone` raises `OverflowError`,
+    which is not a `ValueError`, so without translation pydantic lets it escape
+    as a crash rather than a validation failure — accepted at the type and
+    unusable after it, the shape the payload rules close at the other end.
+    """
+    with pytest.raises(ValidationError, match="UTC representation"):
+        PermissionDecision.from_request(
+            ActionRequest(tool=tool()),
+            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
+            id="d-1",
+            decided_at=boundary,
+        )
+
+
 def test_a_dst_repeated_hour_orders_by_instant_not_wall_clock() -> None:
     """The trap normalisation exists to close.
 
