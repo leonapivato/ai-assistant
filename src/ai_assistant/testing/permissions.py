@@ -225,7 +225,11 @@ class FakeAuditTrail:
                 )
                 raise InvalidResolutionError(msg)
         elif authorised_by is not None:
-            # Unreachable through PermissionRuling's own validator today; kept
+            # Unreachable through validated construction — PermissionRuling
+            # permits the field only on an ALLOW — and exercised past that guard
+            # in tests/permissions/test_fake_audit_trail.py rather than in the
+            # shared suite, which should not oblige every implementation to
+            # defend against models built outside the type's contract. Kept
             # because the trail must not depend on another type's invariant to
             # hold a safety rule of its own.
             msg = f"a resolving {decision.ruling.outcome} rests on no authorisation"
