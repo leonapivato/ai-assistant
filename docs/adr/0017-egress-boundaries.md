@@ -58,14 +58,13 @@ careful to supersede narrowly. And it does not certify that either boundary
 already satisfies everything one might want of it — §2 records where `models/`
 does not.
 
-One reading of the residency clause is worth stating, since authorising tool
-egress makes it live: it governs where the assistant keeps **its own** data —
-memory, user model, audit trail — not what a user's connected service holds
-because the user asked for an action. Creating a calendar event puts data in
-Google's calendar; that is the user's account doing what they asked, not the
-assistant electing cloud storage. Read otherwise the clause would forbid every
-write-capable integration, which is plainly not what ADR-0004 — whose §3
-provisions credentials for exactly those integrations — decided.
+ADR-0004's residency clause ("all persistent data lives on the user's machine…
+no cloud storage by default") is left untouched and unread. Authorising tool
+egress does raise a question about it — a write-capable integration puts data in
+a remote service by design — but answering it here would be narrowing a ratified
+clause this ADR does not supersede, which is the move §5 exists to refuse.
+Issue #95. Nothing turns on it yet: no tool transmits, and the seam stays
+undesignated until §3 holds.
 
 ### 2. The two boundaries
 
