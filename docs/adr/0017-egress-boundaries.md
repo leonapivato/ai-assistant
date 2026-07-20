@@ -41,8 +41,15 @@ to touch the axis this ADR changes.
 ### 1. The rule
 
 **User data may leave the device only from a boundary this ADR approves for
-egress, and every approved boundary must declare what it transmits before it
-transmits.**
+egress, and every approved boundary must declare the application-layer content
+it transmits before it transmits.**
+
+"Application-layer" is the scope, and it is a real limit rather than a
+technicality: contacting any host discloses source IP, timing and request sizes
+to that host and to intermediaries, and an IP identifies the user well enough to
+be Tier 1. No declaration covers that, because the system does not choose to
+send it and cannot choose not to — §2 gives the consequence, which is that the
+only reliable control over transport metadata is not making the request.
 
 **This replaces ADR-0004 §2's "only component" clause and nothing else.** The
 rest of §2 — the residency clause (all persistent data local, no cloud storage
@@ -110,9 +117,18 @@ the controls first costs nothing and prevents the gaps `models/` now carries
 from being recreated at a second boundary. Applying the same gate retroactively
 to `models/` would prohibit every model call to close nothing (below).
 
-There is one transition and §3 is its complete condition. **On acceptance**
-`tools/` enters the approved-and-undesignated state and stays there until every
-item in §3 holds; while this ADR is `Proposed` it is neither approved nor
+There is one transition, §3 is its complete condition, and **it does not happen
+by itself.** Meeting the conditions makes `tools/` eligible; it does not make it
+designated. The flip requires a ratifying act — a later ADR, or an explicit
+status amendment to this one — that names the seam module, attests each §3 item
+is satisfied and says how, and records the transition. Designation is the moment
+user data starts leaving from a second place in the system, and something that
+consequential should not be an inference somebody draws from the state of the
+codebase. It also gives review a single artifact to check the attestation
+against, rather than asking each reader to re-derive whether the conditions hold.
+
+**On acceptance** `tools/` enters the approved-and-undesignated state and stays
+there until that act; while this ADR is `Proposed` it is neither approved nor
 designated, and ADR-0004 §2's unamended clause forbids its egress outright.
 enforcement tooling should read approved-and-undesignated as "still
 prohibited", and should read `models/` as permitted on the continuing terms
@@ -509,9 +525,10 @@ undesignated, and permitted no egress at all:
   it may not ship without it.
 
 A boundary that meets the conditions in a document but not in the code is
-approved, not designated, and an approved boundary does not transmit. If the
-invocation ADR cannot supply every one of them, `tools/` does not get to
-transmit on the strength of this ADR.
+approved, not designated, and an approved boundary does not transmit. Meeting
+them all in code makes `tools/` *eligible*; the ratifying act in §2 is what
+designates it. If the invocation ADR cannot supply every one of them, `tools/`
+does not get to transmit on the strength of this ADR.
 
 ### 4. Why this preserves what ADR-0004 §2 protects
 
