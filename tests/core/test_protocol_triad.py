@@ -230,7 +230,7 @@ def _suite_of(cls: type, protocol: str) -> type | None:
     return next((base for base in cls.__mro__[1:] if base.__name__ == f"{protocol}Contract"), None)
 
 
-def _binding_classes(protocol: str, passing: CollectedTests) -> list[type]:
+def _binding_classes(protocol: str, passing: CollectedTests, skipped: CollectedTests) -> list[type]:
     """Return the classes that really ran the canonical fake through the suite.
 
     Every condition here closes a way of satisfying the letter of the triad
@@ -238,6 +238,11 @@ def _binding_classes(protocol: str, passing: CollectedTests) -> list[type]:
 
     - at least one of the tests that *passed* on the class must come from the
       suite, which an empty ``…Contract`` cannot supply;
+    - no test the suite declares may have been skipped *by a mark* on the
+      class, so one passing test cannot vouch for nine skipped obligations
+      (a suite opting itself out at runtime, as ``ContextProviderContract``
+      does for a fixed-instant provider, is the contract's own call and
+      stays legitimate);
     - **every** passing test the suite also declares must still be the suite's
       own function object, so overriding contract tests with no-ops -- all of
       them or some of them -- does not count; and
@@ -252,6 +257,8 @@ def _binding_classes(protocol: str, passing: CollectedTests) -> list[type]:
         from_suite = {name for name in passing_tests if getattr(suite, name, None) is not None}
         if not from_suite:
             continue
+        if any(getattr(suite, name, None) is not None for name in skipped.get(cls, frozenset())):
+            continue
         if any(getattr(cls, name, None) is not getattr(suite, name) for name in from_suite):
             continue
         if _binds_fake(cls, protocol, _fixtures_requested_by(suite, from_suite)):
@@ -260,18 +267,21 @@ def _binding_classes(protocol: str, passing: CollectedTests) -> list[type]:
 
 
 def _missing_parts(
-    protocol: str, declared: set[str], passing: CollectedTests | None
+    protocol: str,
+    declared: set[str],
+    passing: CollectedTests | None,
+    skipped: CollectedTests | None = None,
 ) -> tuple[str, ...]:
     """Return the triad parts ``protocol`` is missing.
 
-    ``collected`` may be ``None`` to check only the statically visible parts.
+    ``passing`` may be ``None`` to check only the statically visible parts.
     """
     missing = []
     if f"{protocol}Contract" not in declared:
         missing.append("suite")
     if _canonical_fake(protocol) is None:
         missing.append("fake")
-    if passing is not None and not _binding_classes(protocol, passing):
+    if passing is not None and not _binding_classes(protocol, passing, skipped or {}):
         missing.append("binding")
     return tuple(missing)
 
@@ -326,6 +336,7 @@ def test_every_protocol_has_a_conformance_suite_and_canonical_fake() -> None:
 
 def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
     passing_class_tests: CollectedTests,
+    skipped_class_tests: CollectedTests,
     run_is_unfiltered: bool,
 ) -> None:
     """Part 3: a subclass really ran each fake through its suite, and passed.
@@ -344,7 +355,12 @@ def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
     failures = [
         _describe(protocol, gaps)
         for protocol in _protocol_names()
-        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, passing_class_tests)))
+        if (
+            gaps := _unexcused(
+                protocol,
+                _missing_parts(protocol, declared, passing_class_tests, skipped_class_tests),
+            )
+        )
     ]
 
     assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
@@ -352,6 +368,7 @@ def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
 
 def test_no_exemption_is_stale(
     passing_class_tests: CollectedTests,
+    skipped_class_tests: CollectedTests,
     run_is_unfiltered: bool,
 ) -> None:
     """An exemption dies with the gap it describes, so the backlog only shrinks."""
@@ -368,7 +385,9 @@ def test_no_exemption_is_stale(
                 f"core/protocols.py -- drop the entry ({exemption.issue})"
             )
             continue
-        gaps = set(_missing_parts(exemption.protocol, declared, passing_class_tests))
+        gaps = set(
+            _missing_parts(exemption.protocol, declared, passing_class_tests, skipped_class_tests)
+        )
         if closed := set(exemption.missing) - gaps:
             failures.append(
                 f"{exemption.protocol} is exempted for {sorted(closed)} but that "
@@ -518,7 +537,7 @@ def test_an_empty_suite_does_not_count_as_a_conformance_suite() -> None:
     """
     passing: CollectedTests = {_BoundToAnEmptySuite: frozenset({"test_something_of_its_own"})}
 
-    assert _binding_classes("MemoryStore", passing) == []
+    assert _binding_classes("MemoryStore", passing, {}) == []
 
 
 def test_a_suite_whose_tests_ran_does_count() -> None:
@@ -527,7 +546,7 @@ def test_a_suite_whose_tests_ran_does_count() -> None:
     passing: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
 
     assert suite.__name__ == "MemoryStoreContract"
-    assert _binding_classes("MemoryStore", passing) == [bound]
+    assert _binding_classes("MemoryStore", passing, {}) == [bound]
 
 
 @pytest.mark.parametrize(
@@ -546,7 +565,21 @@ def test_overriding_a_suite_test_does_not_count_as_running_the_suite(
     _, bound = _suite_and_binding(overridden=overridden)
     passing: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
 
-    assert _binding_classes("MemoryStore", passing) == [], f"{label} was overridden"
+    assert _binding_classes("MemoryStore", passing, {}) == [], f"{label} was overridden"
+
+
+def test_skipping_any_suite_test_does_not_count_as_running_the_suite() -> None:
+    """One passing contract test cannot vouch for a skipped one.
+
+    Skipping the obligation you cannot meet is a far likelier way to end up
+    with a hollow contract than overriding it.
+    """
+    _, bound = _suite_and_binding(overridden=())
+    passing: CollectedTests = {bound: frozenset({"test_one"})}
+    skipped: CollectedTests = {bound: frozenset({"test_two"})}
+
+    assert _binding_classes("MemoryStore", passing, {}) == [bound]  # control
+    assert _binding_classes("MemoryStore", passing, skipped) == []
 
 
 def _suite_and_binding(*, overridden: tuple[str, ...]) -> tuple[type, type]:
