@@ -31,7 +31,11 @@ _FILTERING_OPTIONS = ("keyword", "markexpr", "deselect", "lf", "failedfirst")
 class _CollectionRecord:
     """What this pytest session collected, and whether that was the whole suite."""
 
-    classes: frozenset[type] = field(default_factory=frozenset)
+    #: Collected test class -> the names of the tests collected on it. The test
+    #: names matter as well as the class: they are what shows a conformance
+    #: suite contributed real, running assertions rather than merely being
+    #: inherited from.
+    class_tests: dict[type, frozenset[str]] = field(default_factory=dict)
     unfiltered: bool = False
 
 
@@ -49,17 +53,22 @@ def _is_unfiltered(config: pytest.Config) -> bool:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Record the test classes pytest collected for this session."""
-    _RECORD.classes = frozenset(
-        cls for item in items if (cls := getattr(item, "cls", None)) is not None
-    )
+    """Record the test classes, and their tests, that pytest collected."""
+    gathered: dict[type, set[str]] = {}
+    for item in items:
+        cls = getattr(item, "cls", None)
+        if cls is None:
+            continue
+        name = getattr(item, "originalname", None) or item.name
+        gathered.setdefault(cls, set()).add(name)
+    _RECORD.class_tests = {cls: frozenset(names) for cls, names in gathered.items()}
     _RECORD.unfiltered = _is_unfiltered(config)
 
 
 @pytest.fixture(scope="session")
-def collected_test_classes() -> frozenset[type]:
-    """Every test class pytest collected in this session."""
-    return _RECORD.classes
+def collected_class_tests() -> dict[type, frozenset[str]]:
+    """Every test class pytest collected, mapped to the tests collected on it."""
+    return _RECORD.class_tests
 
 
 @pytest.fixture(scope="session")
