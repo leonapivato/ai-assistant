@@ -53,19 +53,24 @@ persistent data local, no cloud storage by default) and its telemetry clause
 Two boundaries are **approved** for egress by this ADR, and they are in
 different states. The distinction is load-bearing, so it is named:
 
-- **Approved** — this ADR permits the boundary to transmit. The list of
-  approved boundaries is closed; adding a third requires another ADR.
-- **Designated** — approved *and* concretely identified: a named module, pinned
-  by the import-linter contract, so "which code may open a socket" has a
-  mechanical answer. Only a designated boundary may actually transmit.
+- **Approved** — this ADR permits the boundary to transmit *in principle*. The
+  list of approved boundaries is closed; adding a third requires another ADR.
+  Approval alone never authorises a byte.
+- **Designated** — approved *and* every precondition in §3 discharged **in
+  code**, not merely in a document. Only a designated boundary may transmit.
 
-`models/` is **designated** on acceptance — it is an existing package and the
-contract can name it today. The `tools/` seam is **approved but not yet
-designated**: no module exists to name. It becomes designated when the
-integration ADR names the seam and the contract pins it (§3, issue #66) — a
-mechanical activation, not a further decision about whether tool egress is
-permitted. Until then `tools/` transmits nothing, and enforcement tooling
-should read the approved-but-undesignated state as "still prohibited".
+There is one transition and §3 is its complete condition. A boundary is
+designated exactly when it is approved here and every item in §3's list holds
+for it; short of that it is approved and must not transmit, whatever partial
+progress exists. Naming the seam is one precondition among several, not the
+transition itself.
+
+`models/` is **designated** on acceptance: it is an existing package the
+contract can name today, its declaration is complete in §2, and its recipients
+are authorised by configuration — §3's list is empty for it, because every
+condition is already met. The `tools/` seam is **approved and undesignated**,
+and stays that way until §3's preconditions are all discharged. Enforcement
+tooling should read approved-and-undesignated as "still prohibited".
 
 Because what the two send differs in kind, this ADR fixes the *granularity* at
 which each discharges its obligations. The granularity is part of the
@@ -169,9 +174,9 @@ for itself:
   business holding a network client. Which module is the seam is the
   integration/invocation ADR's to name, and it must be named there precisely
   enough for the import-linter contract to pin that module rather than the
-  package (issue #66). Naming it is what turns this approval into a
-  designation; until then the approval has no concrete extent and nothing
-  under `tools/` may transmit.
+  package (issue #66). Until it is named the approval has no concrete extent;
+  naming it discharges one of §3's preconditions, and the boundary becomes
+  designated only when they all hold.
 
 Egress from anywhere else is a bug, and adding a third approved boundary
 requires a further ADR — it is a closed list, not a category a subsystem can
@@ -180,10 +185,10 @@ argue its way into.
 ### 3. This ADR is not self-executing
 
 It removes a categorical prohibition; it does not make any transmission legal.
-The conditions in §4 are preconditions on the *first byte* that leaves through
-`tools/`, not properties this ADR asserts are already in place. Today none is
-fully discharged, and no egress from `tools/` is permitted. What must exist
-first:
+This list is the complete condition for `tools/` becoming **designated** (§2),
+and every item must hold **in code** — none is a property this ADR asserts is
+already in place. Today none is fully discharged, so `tools/` is approved,
+undesignated, and permitted no egress at all. What must exist first:
 
 - the named seam and the import-linter contract pinning it (§4 condition 1,
   issue #66);
