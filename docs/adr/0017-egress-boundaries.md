@@ -498,8 +498,13 @@ undesignated, and permitted no egress at all:
 
 - the binding rules — what execution transmits must be the thing that was
   authorised, immutably bound at authorisation time and consumed unchanged.
-  Binding at least the connected account, the canonical destination, the
-  approved payload description and the decision itself; whether that is one
+  Where a call has several recipients — an email to three addressees, an invite
+  to a list — they are authorised and bound as **one set**, and an unauthorised
+  member fails the whole call rather than being dropped from it. Sending to the
+  authorised subset silently would deliver a message the user never approved
+  the shape of, and partial success is the hardest failure to notice
+  afterwards. Binding at least the connected account, the canonical
+  destination set, the approved payload description and the decision itself; whether that is one
   envelope object or another construction is the invocation ADR's call.
   **Credential values are excluded from what is bound**: bind a stable
   reference to the credential, not the secret, and fetch the value only after
@@ -556,7 +561,10 @@ undesignated, and permitted no egress at all:
   - **resolution** is gated and audited on its own, and an unresolved or failed
     lookup does not fall through to a send;
   - **mutation races** — destination, payload and transport cannot change
-    between authorisation and transmission;
+    between authorisation and transmission, including a recipient added to the
+    set after the decision;
+  - **partial authorisation** — a multi-recipient call with one unauthorised
+    member fails entirely and delivers to none of them;
   - **crash and outcome reconciliation** — a record left pending by a crash is
     reconcilable, and a timeout is distinguishable from a success.
 
