@@ -20,6 +20,7 @@ git fetch origin
 git show origin/main:docs/roadmap.md
 git show origin/main:src/ai_assistant/core/protocols.py
 git show origin/main:src/ai_assistant/core/types.py
+git show origin/main:VISION.md   # step 3 cites a principle from it — read the ref, not your copy
 ```
 
 For the derived picture — module counts per package, Protocol inventory, ADR
@@ -47,9 +48,13 @@ so it needs no environment in the temporary checkout.
 Also check what is already claimed by open work:
 
 ```bash
-gh pr list --state open --json number,title,headRefName
+gh pr list --state open --json number,title,headRefName,body
 gh issue list --state open --limit 100 --json number,title,body
 ```
+
+Read the **bodies**, not just the titles: a PR called "First vertical follow-up"
+on a branch named `feature/next` can claim the `tools` subsystem in a checklist
+line and be invisible to a title scan.
 
 Open PRs and issues are where work-in-flight lives (ADR-0015). There is no
 ledger file; do not look for one.
