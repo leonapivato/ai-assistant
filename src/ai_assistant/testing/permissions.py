@@ -14,7 +14,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.errors import DuplicateDecisionError, InvalidResolutionError
+from pydantic import ValidationError
+
+from ai_assistant.core.errors import (
+    AuditError,
+    DuplicateDecisionError,
+    InvalidResolutionError,
+)
 from ai_assistant.core.types import (
     CostBasis,
     PermissionOutcome,
@@ -148,20 +154,41 @@ class FakeAuditTrail:
     async def record(self, decision: PermissionDecision) -> str:
         """Append ``decision`` and return its id.
 
+        The snapshot is taken by **revalidating** rather than by copying, which
+        is ADR-0021 §4's "detached, validated snapshot" — ADR-0018 §4's rule that
+        "what a registry stores must be valid and detached", imported. A copy
+        alone detaches without checking, so a decision corrupted past its frozen
+        model's guard — a ``decided_at`` written back as naive is the sharp
+        case — would be stored and then make every later ``recent()`` raise on
+        comparing it against the aware values beside it. A store that can be put
+        into a state where reads crash has not merely accepted bad input; it has
+        stopped being readable.
+
         Raises:
+            AuditError: If the decision does not satisfy its own model. Raised
+                as an ``AuditError`` rather than letting pydantic's
+                ``ValidationError`` escape, because CONTRIBUTING has this layer
+                raise only from the ``AssistantError`` hierarchy — a caller
+                handling "the trail would not accept this" should not need a
+                second handler for the shape of the refusal.
             DuplicateDecisionError: If the id is already recorded.
             InvalidResolutionError: If ``resolves`` fails the invariant.
         """
-        if decision.id in self._decisions:
+        try:
+            snapshot = type(decision).model_validate(decision.model_dump())
+        except ValidationError as exc:
+            msg = f"decision {decision.id!r} is not a valid record: {exc}"
+            raise AuditError(msg) from exc
+        if snapshot.id in self._decisions:
             msg = (
-                f"decision {decision.id!r} is already recorded; the trail is "
+                f"decision {snapshot.id!r} is already recorded; the trail is "
                 f"append-only, so history cannot be rewritten by replaying a write"
             )
             raise DuplicateDecisionError(msg)
-        if decision.resolves is not None:
-            self._check_resolution(decision)
-        self._decisions[decision.id] = decision.model_copy(deep=True)
-        return decision.id
+        if snapshot.resolves is not None:
+            self._check_resolution(snapshot)
+        self._decisions[snapshot.id] = snapshot
+        return snapshot.id
 
     def _check_resolution(self, decision: PermissionDecision) -> None:
         """Enforce ADR-0021 §1's invariant on a resolving decision.
@@ -225,11 +252,10 @@ class FakeAuditTrail:
                 )
                 raise InvalidResolutionError(msg)
         elif authorised_by is not None:
-            # Unreachable through validated construction — PermissionRuling
-            # permits the field only on an ALLOW — and exercised past that guard
-            # in tests/permissions/test_fake_audit_trail.py rather than in the
-            # shared suite, which should not oblige every implementation to
-            # defend against models built outside the type's contract. Kept
+            # Not reachable in this implementation: PermissionRuling permits
+            # the field only on an ALLOW, and `record` revalidates before
+            # getting here, so a corrupted ruling is refused at the model
+            # boundary first. Kept
             # because the trail must not depend on another type's invariant to
             # hold a safety rule of its own.
             msg = f"a resolving {decision.ruling.outcome} rests on no authorisation"
