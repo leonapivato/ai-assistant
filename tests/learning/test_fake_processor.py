@@ -168,6 +168,25 @@ async def test_ids_distinguish_feedback_that_differs_only_in_kind_or_subject() -
     assert len(ids) == 3
 
 
+async def test_field_boundaries_cannot_be_smuggled_into_an_id_collision() -> None:
+    # Any separator-joined derivation can be defeated by putting the separator
+    # inside a field. These two events are different feedback and must not land on
+    # one record — MemoryStore.add treats a repeated id as an upsert.
+    store = FakeMemoryStore()
+    for content, subject in [("a\x00b", "c"), ("a", "b\x00c")]:
+        [proposal] = await FakeFeedbackProcessor().process(_event(content=content, subject=subject))
+        await store.add(proposal.proposed)
+
+    assert len(await store.export()) == 2
+
+
+async def test_an_absent_subject_is_distinct_from_an_empty_one() -> None:
+    [absent] = await FakeFeedbackProcessor().process(_event(subject=None))
+    [empty] = await FakeFeedbackProcessor().process(_event(subject=""))
+
+    assert absent.proposed.id != empty.proposed.id
+
+
 async def test_id_factory_is_injectable() -> None:
     processor = FakeFeedbackProcessor(id_factory=lambda: "rec-1")
 

@@ -22,6 +22,7 @@ the contract.
 
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
@@ -59,9 +60,21 @@ def _derived_id(event: FeedbackEvent) -> str:
     Two *equivalent* events do map to one id. That is the intended reading —
     the same feedback establishes the same memory — and it is what makes the
     scheme collision-free rather than collision-prone.
+
+    The fields are JSON-serialised rather than joined by a separator, so no
+    choice of separator can be smuggled inside a field to make two different
+    events hash alike: under a NUL join, a content ending in NUL-b with subject
+    c and a content of a with subject b-NUL-c produce one string — and
+    ``MemoryStore.add`` treats a repeated id as an upsert. JSON also keeps
+    ``subject=None`` distinct
+    from ``subject=""``. The digest is truncated only for legibility; 64 bits is
+    far beyond what a test process can collide by accident.
     """
-    material = "\x00".join([event.memory_kind.value, event.content, event.subject or ""])
-    return f"fake-memory-{sha256(material.encode()).hexdigest()[:12]}"
+    material = json.dumps(
+        [event.memory_kind.value, event.content, event.subject],
+        ensure_ascii=False,
+    )
+    return f"fake-memory-{sha256(material.encode()).hexdigest()[:16]}"
 
 
 class FakeFeedbackProcessor:
