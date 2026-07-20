@@ -437,11 +437,18 @@ undesignated, and permitted no egress at all:
 - the resolution rules — resolving a user-supplied name to the immutable
   identifier the rules above require may itself need a remote call (`#team` to
   a Slack channel id). That lookup is egress and this ADR does not exempt it:
-  it must be separately gated, scoped to the connected account, and audited,
-  and only then may the consequential call be authorised against the resolved
-  destination. Without this the preconditions are unsatisfiable for ordinary
-  integrations — a tool could not look up the id it is required to bind to
-  without transmitting first.
+  a resolution lookup is **itself a tool call** and must be declared,
+  registered, gated and audited under ADR-0016 like any other — not a privileged
+  side channel the invocation contract exempts. Its own recipient is the
+  connected account's service, its declared disclosure is whatever the query
+  carries, and only once it returns may the consequential call be authorised
+  against the resolved destination. The alternative the invocation ADR may
+  prefer is to forbid remote resolution entirely and require destinations to
+  come from data already obtained through such a call. What it may not do is
+  leave resolution ungated: that would reintroduce, as a back door, exactly the
+  unauthorised egress this section exists to prevent. Without one of the two,
+  the preconditions are unsatisfiable for ordinary integrations — a tool could
+  not look up the id it is required to bind to without transmitting first.
 - the outcome rules — a pre-transmission audit record states an intent, not a
   result. It must carry an attempt identifier and an explicit outcome —
   pending, succeeded, failed, indeterminate — with a stated path for
@@ -450,11 +457,26 @@ undesignated, and permitted no egress at all:
   accepted the request leaves nobody able to say whether the side effect
   happened, which is precisely the transparency ADR-0004 §7's audit trail
   exists to provide.
-- **conformance tests for every condition above**, not prose alone. In
-  particular: that a denial performs no credential read and no network I/O, and
-  that destination, payload and transport cannot change between authorisation
-  and transmission. A precondition nothing tests is a precondition nobody can
-  show holds, and §2 requires these to hold *in code*.
+- **conformance tests for every condition above**, not prose alone, and
+  failure-path tests specifically — the happy path passing proves almost
+  nothing here. The minimum matrix:
+
+  - **denial** performs no credential read and no network I/O;
+  - **transport diversion** — a hostile base URL and a cross-host redirect are
+    both refused, and the credential does not travel with either;
+  - **canonicalisation boundaries** — addresses differing only in case or by a
+    provider alias resolve as the protocol says, not as convenience suggests,
+    and unproven equivalence compares exactly;
+  - **resolution** is gated and audited on its own, and an unresolved or failed
+    lookup does not fall through to a send;
+  - **mutation races** — destination, payload and transport cannot change
+    between authorisation and transmission;
+  - **crash and outcome reconciliation** — a record left pending by a crash is
+    reconcilable, and a timeout is distinguishable from a success.
+
+  A precondition nothing tests is a precondition nobody can show holds, and §2
+  requires these to hold *in code*. The invocation ADR may extend this matrix;
+  it may not ship without it.
 
 A boundary that meets the conditions in a document but not in the code is
 approved, not designated, and an approved boundary does not transmit. If the
