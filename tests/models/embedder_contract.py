@@ -10,17 +10,17 @@ guarantees a single implementation happens to make. Exact, bit-for-bit
 determinism is one of the latter: the Protocol does not promise it, so an
 implementation that does pins it in its own test module.
 
-The suite embeds text, so it is run against the offline embedders
-(``HashingEmbedder``, ``FakeEmbedder``) in the default gate. ``FastEmbedEmbedder``
-is deliberately **not** run through it: its ``embed`` downloads a model on first
-use, and the gate runs the whole suite — including ``integration``-marked tests —
-with no network. The two ways to include it both cost more than they buy:
-patching ``TextEmbedding`` out would assert properties of the patch rather than
-of fastembed (a green that proves nothing), and letting it download would make
-the gate network-dependent. Covering its adapter layer honestly needs an
-injection seam in ``FastEmbedEmbedder`` itself — a ``models`` change, tracked as
-a follow-up rather than smuggled into this testing slice. Its metadata is
-asserted offline in ``tests/models/test_fastembed_embedder.py``.
+The suite embeds text, so every implementation it runs against must be able to
+embed offline: the gate runs the whole suite — including ``integration``-marked
+tests — with no network. ``HashingEmbedder`` and ``FakeEmbedder`` are offline by
+construction. ``FastEmbedEmbedder`` is not, so it runs here through the
+injectable backend seam in ``ai_assistant.models.fastembed_embedder``: the
+subject is the real adapter, with a deterministic stub standing in for fastembed
+beneath it (``tests/models/test_fastembed_embedder.py``). That covers the layer
+that could regress — vector count, batch order, shape, finiteness — while
+fastembed itself, whose ``embed`` downloads a model on first use, stays out of
+the gate. Patching ``TextEmbedding`` out was rejected as the alternative: it
+would assert properties of the patch rather than of the adapter.
 
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
