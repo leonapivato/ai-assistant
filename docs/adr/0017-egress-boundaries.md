@@ -41,43 +41,39 @@ to touch the axis this ADR changes.
 ### 1. The rule
 
 **User data may leave the device only from a boundary this ADR approves for
-egress, and only on the terms §2 sets for that boundary — which state, for
-each, what it must have declared and **to what extent** the recipient it
-addresses is authorised before it transmits.**
+egress, and every approved boundary must declare what it transmits before it
+transmits.**
 
-"To what extent" is load-bearing and not hedging. The two boundaries authorise
-recipients at different strengths, and §2 states each exactly. `tools/` must
-bind authorisation to the resolved destination and validate the endpoint before
-it sends anything (§3). `models/` authorises the provider *identity* at
-configuration time and validates nothing about the endpoint actually contacted —
-so at that boundary, today, the addressed recipient is **not** guaranteed to be
-an authorised one. That is a real weakness, it is pre-existing, and §2 gives it
-in full.
+**This replaces ADR-0004 §2's "only component" clause and nothing else.** The
+rest of §2 — the residency clause (all persistent data local, no cloud storage
+by default), the telemetry clause (off by default, no observability egress), and
+the configured-set amendment governing *which recipients* `models/` may reach —
+is untouched and remains ADR-0004's.
 
-Both sets of terms are stated in full in §2; neither is implied by the sentence
-above.
+That last point is the important one, and it is why this rule says nothing about
+recipient authorisation. The obvious temptation was to restate recipient
+authorisation as a universal clause here, covering both boundaries. That would
+have been a mistake twice over: it would rewrite, by paraphrase, a rule ADR-0004
+already states and this ADR has no mandate to touch — the exact
+widening-by-assertion ADR-0001 forbids and this ADR exists to avoid — and any
+paraphrase strong enough to be worth stating would have been false at `models/`,
+where nothing validates that the endpoint contacted is the provider configured.
 
-**"The recipient it addresses", deliberately, not "every recipient that
-receives".** The rule governs the recipient the system chooses and sends to. It
-does not by itself guarantee the bytes reach only that recipient: whether a
-request can be diverted — by a hostile base URL, a cross-host redirect, a
-compromised endpoint — is a transport property, and §2 states per boundary
-which controls are in place. That is a **weaker guarantee than the wording
-might suggest**, and it is stated here rather than discovered later. The
-stronger property, that addressed and actual recipient coincide, is what
-transport pinning buys; `tools/` must have it before it transmits (§3), and
-`models/` does not have it today (§2, issue #83).
+So recipient authorisation is left where it lives:
 
-This replaces ADR-0004 §2's "only component" clause. Its residency clause (all
-persistent data local, no cloud storage by default) and its telemetry clause
-(off by default, no observability egress) are unaffected and remain ADR-0004's.
+- **For `models/`** — ADR-0004 §2 governs, exactly as written and as amended.
+  This ADR neither strengthens nor weakens it, and takes no position on how well
+  it is enforced. §2 below records, as ADR-0004's open gaps, that endpoint
+  validation and credential-access gating are missing there.
+- **For `tools/`** — this ADR imposes its own recipient, payload and transport
+  rules in §3, binding on that boundary only. They are stronger than anything
+  ADR-0004 states, deliberately: a boundary that has never transmitted can be
+  held to the standard we would want everywhere, without prohibiting the calls
+  the product already makes.
 
-"On the terms §2 sets" is not a loophole — §2 states each boundary's terms
-completely, and there are exactly two boundaries. It is there because the two
-are not in the same position: one has been transmitting since ADR-0004 was
-ratified, the other has never sent a byte, and a single status model that
-ignores that difference either grandfathers the new boundary in or retroactively
-prohibits the existing one. §2 gives each its own explicit status.
+What §1 asserts universally is therefore only what is universally true and
+universally checkable: egress happens at approved boundaries, and an approved
+boundary declares its payload.
 
 ### 2. The boundaries
 
@@ -230,17 +226,17 @@ for itself:
   feature — it is a product and safety decision, not an egress-compliance one,
   and it is issue #75.
 
-  **The credential's intended recipient satisfies §1.** Its declaration is the
-  entry above, and its authorised recipient is the provider that issued it —
-  authorised by the same act, configuring that provider, that authorises the
-  Tier 1 payloads. What is *not* settled is that the bytes reach only that
-  recipient: see the accepted limitation below.
+  **The credential is declared here; its recipient is ADR-0004's to govern.**
+  Listing it satisfies §1's declaration requirement, which is all §1 asks. Which
+  endpoint it may reach is the configured-provider rule of ADR-0004 §2, untouched
+  by this ADR — as is the fact that nothing yet validates the endpoint against
+  that rule (below).
 
-  A separate question, which this ADR does not answer, is whether ADR-0004 §7's
-  gating of "access to Tier 0/1 data" applies to `models/` reading that key
-  from the keyring before the call. That is an **internal access** question,
-  not a recipient question: §1 governs what leaves and to whom, not how a
-  subsystem obtains data it holds. §7 and §3 (`SecretStore`) are untouched and
+  A separate question, which this ADR also does not answer, is whether ADR-0004
+  §7's gating of "access to Tier 0/1 data" applies to `models/` reading that key
+  from the keyring before the call. That is an **internal access** question:
+  §1 governs what leaves a boundary, not how a subsystem obtains data it
+  holds. §7 and §3 (`SecretStore`) are untouched and
   neither is superseded here, so nothing above exempts `models/` from them.
   The tension predates this ADR — every model call has always needed a
   credential — and is merely made visible by declaring the payload. Issue #74.
