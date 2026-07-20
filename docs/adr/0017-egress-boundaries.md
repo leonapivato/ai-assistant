@@ -48,12 +48,29 @@ This replaces ADR-0004 §2's "only component" clause. Its residency clause (all
 persistent data local, no cloud storage by default) and its telemetry clause
 (off by default, no observability egress) are unaffected and remain ADR-0004's.
 
-### 2. The designated boundaries
+### 2. The boundaries
 
-Two boundaries are designated. Because what they send differs in kind, this ADR
-fixes the *granularity* at which each discharges its obligations. The
-granularity is part of the designation — not an implementer's choice, and not
-something a boundary may weaken for itself:
+Two boundaries are **approved** for egress by this ADR, and they are in
+different states. The distinction is load-bearing, so it is named:
+
+- **Approved** — this ADR permits the boundary to transmit. The list of
+  approved boundaries is closed; adding a third requires another ADR.
+- **Designated** — approved *and* concretely identified: a named module, pinned
+  by the import-linter contract, so "which code may open a socket" has a
+  mechanical answer. Only a designated boundary may actually transmit.
+
+`models/` is **designated** on acceptance — it is an existing package and the
+contract can name it today. The `tools/` seam is **approved but not yet
+designated**: no module exists to name. It becomes designated when the
+integration ADR names the seam and the contract pins it (§3, issue #66) — a
+mechanical activation, not a further decision about whether tool egress is
+permitted. Until then `tools/` transmits nothing, and enforcement tooling
+should read the approved-but-undesignated state as "still prohibited".
+
+Because what the two send differs in kind, this ADR fixes the *granularity* at
+which each discharges its obligations. The granularity is part of the
+approval — not an implementer's choice, and not something a boundary may weaken
+for itself:
 
 - **`models/`** — to model providers the user has explicitly configured. Its
   declaration is **static and made here**, because its payload classes are
@@ -71,6 +88,10 @@ something a boundary may weaken for itself:
   That list *is* the declaration, and it is exhaustive: a payload class not
   listed here is not authorised at this boundary, and adding one — multimodal
   attachments, tuning corpora, anything else — requires amending this ADR.
+
+  Recipient authorisation is **per configuration** — the explicitly-configured
+  provider set of ADR-0004 §2's configured-set amendment, which stands — not
+  per call. ADR-0004 §7's minimisation rule binds the content of each call.
 
   **The declaration constrains what the *system* discloses, not what the user
   says.** Generation input has two parts, and they are not alike:
@@ -101,23 +122,23 @@ something a boundary may weaken for itself:
   user who appears to be pasting a secret is a real question and a good
   feature — it is a product and safety decision, not an egress-compliance one,
   and it is issue #75.
-  Recipient authorisation is **per configuration** — the explicitly-configured
-  provider set of ADR-0004 §2's configured-set amendment, which stands — not
-  per call. ADR-0004 §7's minimisation rule binds the content of each call.
 
-  **The credential is listed for completeness, and this ADR makes no
-  authorisation claim about it.** Listing it is a statement that Tier 0 leaves
-  the device here, which the declaration rule requires be said out loud. How
-  `models/` may *obtain* and use that credential is ADR-0004 §3's (via
-  `SecretStore`) and §7's (Tier 0 access gating) — both untouched and neither
-  superseded here. This ADR governs egress: what leaves and to which recipient.
-  It does not govern a subsystem's internal access to Tier 0 data, and nothing
-  here should be read as exempting `models/` from §7. Whether §7's gating was
-  ever meant to apply per call to a provider credential the user deliberately
-  configured is a genuine open question in ADR-0004, older than this ADR and
-  merely made visible by declaring the payload — issue #74. It must be settled
-  before the same question arrives at `tools/`, where the credential is
-  presented to a third-party service rather than to the model provider.
+  **The credential satisfies §1 on its own terms.** Its declaration is the
+  entry above, and its recipient authorisation is direct: it goes to the
+  provider that issued it and to no one else, and the user authorised that
+  recipient by configuring that provider — the same act that authorises the
+  Tier 1 payloads. There is no open question about the credential's *egress*.
+
+  A separate question, which this ADR does not answer, is whether ADR-0004 §7's
+  gating of "access to Tier 0/1 data" applies to `models/` reading that key
+  from the keyring before the call. That is an **internal access** question,
+  not a recipient question: §1 governs what leaves and to whom, not how a
+  subsystem obtains data it holds. §7 and §3 (`SecretStore`) are untouched and
+  neither is superseded here, so nothing above exempts `models/` from them.
+  The tension predates this ADR — every model call has always needed a
+  credential — and is merely made visible by declaring the payload. Issue #74.
+  It should be settled before the same question reaches `tools/`, where the
+  credential goes to a third-party service rather than to the model provider.
 - **the `tools/` integration boundary** — to external services the user has
   explicitly connected. Its declaration is **per tool**, and its recipient
   authorisation is **per call**, through `permissions/`. Both are stronger than
@@ -125,15 +146,16 @@ something a boundary may weaken for itself:
   purpose, while tool egress is heterogeneous, so nothing about it can be
   inferred from the boundary itself.
 
-  This designates a *named module seam inside* `tools/`, not the package:
+  What is approved is a *named module seam inside* `tools/`, not the package:
   `tools/` also owns tool definitions and the registry, and neither has any
   business holding a network client. Which module is the seam is the
   integration/invocation ADR's to name, and it must be named there precisely
   enough for the import-linter contract to pin that module rather than the
-  package (issue #66). Until it is named, the designation has no concrete
-  extent and nothing under `tools/` may transmit.
+  package (issue #66). Naming it is what turns this approval into a
+  designation; until then the approval has no concrete extent and nothing
+  under `tools/` may transmit.
 
-Egress from anywhere else is a bug, and adding a third designated boundary
+Egress from anywhere else is a bug, and adding a third approved boundary
 requires a further ADR — it is a closed list, not a category a subsystem can
 argue its way into.
 
@@ -154,9 +176,10 @@ first:
   *ceiling* over tiers, not proof that a given call's actual recipient and
   actual bytes were approved (ADR-0016 §3, §7; issues #57, #68).
 
-A boundary that meets the conditions in a document but not in the code is not
-designated. If the invocation ADR cannot supply all three, it does not get to
-transmit on the strength of this ADR.
+A boundary that meets the conditions in a document but not in the code is
+approved, not designated, and an approved boundary does not transmit. If the
+invocation ADR cannot supply all three, `tools/` does not get to transmit on
+the strength of this ADR.
 
 ### 4. Why this preserves what ADR-0004 §2 protects
 
@@ -173,8 +196,8 @@ meets all three conditions, and `tools/` is held to all three:
 1. **Designated.** The boundary is named here and enforced mechanically, not by
    convention: the import-linter contract ADR-0004's Consequences already
    provision for permits network/provider clients in `models/` and the
-   designated `tools/` seam and nowhere else. Egress stays an enumerable list a
-   reader can audit by grepping one contract.
+   designated `tools/` seam once it exists, and nowhere else. Egress stays an
+   enumerable list a reader can audit by grepping one contract.
 2. **Declaring.** Every tool states, as a required and fail-closed property of
    its definition, which data tiers a call transmits off-device (ADR-0016 §3).
    A tool whose author does not say what leaves cannot be defined at all. This
@@ -267,7 +290,7 @@ particular tool, destination, or payload, and by itself no transmission at all.
 Destination-level policy — which recipients are approved — remains
 parameter-level and deferred (ADR-0016 §7; issues #57, #68). Nor does it weaken
 ADR-0004 §7's minimisation rule: "send the minimum necessary" now reads against
-both designated boundaries. The invocation ADR still owes the seam, the gating
+every approved boundary. The invocation ADR still owes the seam, the gating
 contract, and the rules deciding which declared disclosures `permissions/`
 grants. What it no longer owes is a prior decision permitting the category to
 exist.
