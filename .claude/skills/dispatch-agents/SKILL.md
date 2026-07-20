@@ -25,9 +25,16 @@ for d in ~/projects/ai-assistant-*; do
 done
 ```
 
-A clone on a non-`main` branch is occupied. A clone with no `.venv` needs
-`just setup` before its agent can run the gate — say so in the brief rather than
-letting the agent discover it.
+A clone is available only if it is on `main` **and** reports zero dirty files.
+Either condition alone is not enough: uncommitted work in a clone sitting on
+`main` is someone's in-progress change, and dispatching there either sweeps it
+into the agent's branch or loses it. The glob excludes the user's primary clone
+by construction — `ai-assistant` does not match `ai-assistant-*` — and that is
+the only thing keeping an agent out of it, so do not "fix" the glob to be
+broader.
+
+A clone with no `.venv` needs `just setup` before its agent can run the gate —
+say so in the brief rather than letting the agent discover it.
 
 **Assign ADR numbers yourself.** ADR-0015 §5 makes this the dispatcher's job
 precisely to remove the race a shared ledger could not arbitrate. A number is
@@ -159,8 +166,9 @@ time with full confidence.
   *evidence*. Update the branch, let CI run, then merge:
 
   ```bash
+  sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)
   gh pr checks <n> --watch --fail-fast && \
-    gh pr merge <n> --rebase --admin --delete-branch
+    gh pr merge <n> --rebase --admin --delete-branch --match-head-commit "$sha"
   ```
 
   The `&&` is load-bearing, and so is `--watch`. Bare `gh pr checks` exits
@@ -168,12 +176,10 @@ time with full confidence.
   commands, it reports "no checks reported yet" and the merge proceeds anyway,
   admin-bypassing the very gate this step exists to wait for.
 
-  A residual race remains and is accepted: `main` can advance between the checks
-  passing and the merge running, so `--admin` may land a branch that just became
-  stale. It is inherent to bypassing branch protection rather than fixable here —
-  the window is seconds, and the alternative is not admin-merging at all. Merge
-  the queue one PR at a time rather than firing several at once, which is what
-  widens that window from seconds to minutes.
+  `--match-head-commit` closes the window between the checks passing and the
+  merge running. Without it, an agent pushing in that gap gets its new commit
+  admin-merged unchecked and unreviewed — `--admin` will not stop for it. Bind
+  the merge to the SHA you actually verified, and it refuses instead.
 
 - **A rebase invalidates the review record.** `just ship` anchors a review to a
   commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head SHA
