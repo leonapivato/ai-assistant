@@ -201,15 +201,19 @@ contract, which is checked before any artifact-presence check.
 distribution**, so a hook that verifies the wrong bytes, requests the wrong
 revision, packages the wrong path, or configures only the wheel ships green. The
 implementation PR must add acceptance tests a hook or wiring mistake cannot pass —
-at minimum:
+at minimum, and not limited to:
 
 - the acquisition seam requests the *recorded commit*, and a moved default branch
   does not change the build; a digest mismatch fails it, leaving nothing staged;
+- an already-present but *corrupted* staged or sdist file fails the build too —
+  presence is not trust; every file is re-hashed before it is packaged;
 - the wheel **and the sdist** each carry the artifact with every file's SHA-256
   matching the recorded manifest (the verified bytes shipped, not merely *some*
   valid ONNX), and a wheel built from the sdist embeds with the network denied;
 - the wheel METADATA carries all four exact pins, and changing any audited
   version *or* any manifest digest independently moves `model_id`;
+- `FastEmbedEmbedder` rejects a non-vendored model name before any backend load
+  or socket (§6), so the prohibition cannot be bypassed;
 - a missing artifact raises `ModelError` on a non-empty batch without a socket,
   while `embed([])` returns `[]`.
 
