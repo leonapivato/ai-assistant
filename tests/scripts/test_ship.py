@@ -336,6 +336,21 @@ def test_refuses_an_artifact_with_no_recorded_base(tmp_path: Path) -> None:
     assert "different range" in result.stderr
 
 
+def test_truncates_an_oversized_review_rather_than_failing_to_post(tmp_path: Path) -> None:
+    """GitHub rejects a body over 65536 chars; a truncated review beats none."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", "x" * 80_000)
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_bytes()
+    assert len(posted) < 65_536
+    assert b"truncated" in posted
+
+
 def test_refuses_on_main(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)

@@ -97,7 +97,18 @@ in an issue that sits open for a week just recreates the stale-ledger problem.
 `gh issue create` posts to shared state. Print the drafted body and get explicit
 confirmation first — never auto-fire it.
 
-If the confirmation takes a while, re-run the `gh issue list` scan from step 1
-immediately before creating, in case someone opened an overlapping issue in the
-meantime. That is a courtesy check, not a reservation; merged and posted state
-is authoritative, nothing before it.
+State can go stale while confirmation is pending, and a lane that merged in the
+meantime is exactly the "work already done" this skill exists not to propose.
+Note the commit you surveyed (`git rev-parse origin/main` in step 1), then
+**immediately before** `gh issue create`:
+
+1. `git fetch origin` and compare. If `origin/main` moved, redo steps 1–3
+   against the new commit — an issue rescan alone will not catch a lane that
+   merged, since a merged lane leaves no open issue behind.
+2. Re-run the `gh issue list` scan regardless, in case someone opened an
+   overlapping issue without `origin/main` moving.
+3. If either changed the draft, show the revised body and get confirmation
+   again — never post a body that was not the one approved.
+
+Both are courtesy checks, not reservations; merged and posted state is
+authoritative, nothing before it.
