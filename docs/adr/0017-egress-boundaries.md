@@ -106,9 +106,25 @@ for itself:
     accordingly — this class may carry no Tier 0 or Tier 1 content, so it is
     not a lane for smuggling context into a "settings" field.
 
-  That list *is* the declaration, and it is exhaustive: a payload class not
-  listed here is not authorised at this boundary, and adding one — multimodal
-  attachments, tuning corpora, anything else — requires amending this ADR.
+  That list *is* the declaration, and it is exhaustive **over what the system
+  puts in the request**: a payload class not listed here is not authorised at
+  this boundary, and adding one — multimodal attachments, tuning corpora,
+  anything else — requires amending this ADR.
+
+  **It does not cover what the network reveals by itself.** Contacting any
+  remote host discloses the source IP address, timing, and request sizes to the
+  provider and to intermediaries, and an IP identifies the user well enough to
+  be Tier 1 under ADR-0004 §1. That is not a payload class — the system does
+  not choose to send it and cannot choose not to — so declaring it would be
+  declaring the existence of networking. The declaration covers application-
+  layer content; transport-level exposure is a property of egress as such.
+
+  **Accepted, and it is the real argument for local-first.** Every byte that
+  never leaves also never reveals that the user was awake at 3am asking
+  something. This is why ADR-0004 §2's residency rule and ADR-0006's on-device
+  default matter more than any per-payload control: the only reliable way to
+  not disclose transport metadata is to not make the request. The same holds at
+  the `tools/` boundary, and it is one more reason the approved list is closed.
 
   Recipient authorisation is **per configuration** — the explicitly-configured
   provider set of ADR-0004 §2's configured-set amendment, which stands — not
