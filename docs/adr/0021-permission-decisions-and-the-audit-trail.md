@@ -383,19 +383,32 @@ policy could fabricate, which would make §5's floor satisfiable by writing
 something in a box. There is no authorisation store to check it against, because
 standing grants are deferred — so instead:
 
-- **The conformance suite requires `authorised_by is None`** from a policy
-  constructed with no authorisation source. Today that is *every* policy, so a
-  conforming implementation cannot produce a non-`None` value at all, and the
-  floor is absolute in fact and not merely in intent. This is checkable now,
-  against any implementation.
-- **The ADR that introduces standing grants must make the pointer resolvable** —
-  to a recorded user decision that actually covers this tool — and must say
-  where those records live. That is a named precondition on it, in the way
-  ADR-0016 §7 set three constraints on the invocation ADR rather than trusting
-  it to notice them.
+- **`decide` must return `authorised_by is None`** from a policy constructed
+  with no authorisation source. Today that is *every* policy, so no conforming
+  implementation can invent an authorisation while ruling on a fresh request.
+  This is checkable now, against any implementation.
+- **`resolve` is the one path that may set it, and what it sets is verifiable.**
+  A user answering a confirmation *is* the user decision the floor asks for, and
+  it is already on the record: `resolve(confirmed, approved=True)` sets
+  `authorised_by` to `confirmed.id`. A decision with `resolves` set must carry
+  `authorised_by` equal to it, so the pointer is covered by the invariant
+  `AuditTrail.record` already enforces (§4) — the referenced record exists, its
+  ruling was `CONFIRM`, it matches on tool, payload and step, and it can be spent
+  only once. Nothing is taken on trust.
 
-Until both hold, an `ALLOW` for a disclosing tool is unreachable rather than
-weakly guarded.
+  This is the flow the floor is *for*, and an earlier draft accidentally closed
+  it: with `authorised_by` unsettable by any policy and `ALLOW` forbidden without
+  it, approving an email confirmation could never produce an `ALLOW` at all. The
+  floor would have made disclosing tools unusable rather than confirmed.
+- **The ADR that introduces standing grants must make the *other* source
+  resolvable** — to a recorded user decision that actually covers this tool —
+  and must say where those records live. That is a named precondition on it, in
+  the way ADR-0016 §7 set three constraints on the invocation ADR rather than
+  trusting it to notice them.
+
+So today a disclosing tool reaches `ALLOW` by exactly one route — the user was
+asked and answered — and that route is verified end to end. What is deferred is
+the *second* route, not the first.
 
 It is present anyway for the reason ADR-0016 §4 carried `parameters_schema`
 unenforced: the alternative is that the first standing grant has to *relax a
@@ -502,13 +515,30 @@ should look like. So the user may burn the book; nobody may tear out a page.
 
 `recent` is newest-first with a bounded default because the realistic query is
 "what has the assistant just done", and an unbounded read of a Tier 1 store by
-default is a shape worth not offering. Richer querying — by tool, by outcome, by
+default is a shape worth not offering. **`limit` must be strictly positive**, and
+a non-positive value raises `ValueError` rather than being clamped or passed
+through. This is worth stating because the natural implementation leaks: a store
+issuing `LIMIT ?` against SQLite turns `limit=-1` into *no limit at all*, so the
+one call the contract offers for a bounded read becomes the unbounded read of a
+Tier 1 store it exists to avoid. Clamping silently would be the other wrong
+answer — a caller that asked for something meaningless should learn that, not be
+served something it did not ask for. The suite covers zero and negative. Richer querying — by tool, by outcome, by
 window — is deferred until something asks for it; adding a query method is
 additive, and guessing at filters now is how a contract acquires methods nobody
 calls.
 
 `export` matches `MemoryStore.export` and `PlanStore.export` and discharges
 ADR-0004 §6's portability obligation for this store.
+
+**`decided_at` must be timezone-aware**, rejected at construction like every
+other instant in `core`. A naive datetime in an audit record is not merely
+untidy: the trail is durable and ordered, so a naive value is reinterpreted
+against whatever the host's local zone happens to be at read time, and it sorts
+incoherently against the aware values beside it. "When was this approved" is a
+question an audit trail must not answer differently on a laptop that travelled.
+The suite pins the rejection rather than assuming the annotation implies it.
+(Issue #36 tracks a known weakness in these validators — a `tzinfo` whose
+`utcoffset()` returns `None` — and applies here as it does elsewhere.)
 
 **Implementations persist locally only**, as `PlanStore` does (ADR-0014 §5): the
 trail is Tier 1 by ADR-0004 §7's own words, so ADR-0004 §2's residency clause —
@@ -651,11 +681,14 @@ nobody declared treated as free.
 - **Every permission outcome is authored inside `permissions`.** `resolve` turns
   a user's answer into the ruling that resolves a `CONFIRM`, so no adapter or
   wiring layer ever constructs one. The caller records; it does not decide.
-- **`authorised_by` is unverified by this contract, and unreachable because of
-  it.** A conforming policy given no authorisation source must leave it `None`,
-  which today is every policy, and the standing-grant ADR inherits the named
-  obligation to make the pointer resolve. A floor guarded by a fabricable string
-  would be worse than no floor, so the guard is that nothing may set it yet.
+- **A disclosing tool reaches `ALLOW` by exactly one route today**, and it is
+  verified end to end: the user was asked, answered, and `resolve` pinned the
+  answer to the recorded `CONFIRM`, which `AuditTrail.record` checks for
+  existence, ruling, subject match and single use. `decide` cannot invent an
+  authorisation, and the second route — standing grants — inherits a named
+  obligation to make its own pointer resolvable. An earlier draft made
+  `authorised_by` unsettable by anything, which closed the confirmation path
+  too and would have made disclosing tools unusable rather than confirmable.
 - **Extending the contract to direct Tier 0/1 data access will be breaking**
   (§3), not additive as an earlier draft claimed. `decide` names a concrete
   parameter type. Whether it becomes a union or a second Protocol waits on #74.
