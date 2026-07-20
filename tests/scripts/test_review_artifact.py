@@ -64,16 +64,18 @@ def _fake_codex(bin_dir: Path) -> None:
     codex.chmod(0o755)
 
 
-def _run_review(repo: Path, tmp_path: Path, persona: str = "adversarial") -> None:
+def _run_review(
+    repo: Path, tmp_path: Path, persona: str = "adversarial", *, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     assert _BASH is not None
     env = os.environ.copy()
     env.pop("GITHUB_ACTIONS", None)
     env.pop("CODEX_REVIEW_NO_SANDBOX", None)
     env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
-    subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
+    return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
         [_BASH, str(_SCRIPT), persona, "main"],
         cwd=repo,
-        check=True,
+        check=check,
         capture_output=True,
         text=True,
         env=env,
@@ -102,6 +104,84 @@ def test_recorded_review_keeps_the_body_after_the_provenance_header(tmp_path: Pa
     assert sha in lines[0]
     # ship.sh strips exactly the first line; everything after it is the review.
     assert lines[1:] == ["finding one", "finding two"]
+
+
+def test_empty_codex_output_is_refused_rather_than_recorded(tmp_path: Path) -> None:
+    """An empty artifact would read to ship.sh as a completed, clean review."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # codex exits 0 but writes nothing — a dropped connection or a refusal.
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/usr/bin/env bash\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  [[ "$prev" == "-o" ]] && : >"$a"\n'
+        '  prev="$a"\n'
+        "done\n"
+    )
+    codex.chmod(0o755)
+
+    result = _run_review(repo, tmp_path, check=False)
+
+    assert result.returncode != 0
+    assert "empty review" in result.stderr
+    assert not (repo / ".review").exists()
+
+
+def test_whitespace_only_codex_output_is_refused(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/usr/bin/env bash\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  [[ "$prev" == "-o" ]] && printf "  \\n\\n" >"$a"\n'
+        '  prev="$a"\n'
+        "done\n"
+    )
+    codex.chmod(0o755)
+
+    result = _run_review(repo, tmp_path, check=False)
+
+    assert result.returncode != 0
+    assert "empty review" in result.stderr
+
+
+def test_artifact_names_the_commit_reviewed_even_if_head_moves(tmp_path: Path) -> None:
+    """The SHA is pinned before the diff, so a commit landing mid-review cannot
+    misfile the artifact under code Codex never saw."""
+    repo = tmp_path / "repo"
+    reviewed_sha = _init_repo(repo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # A fake codex that commits to the repo while "reviewing" — the race the
+    # pinning exists to close, made deterministic.
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "later\\n" >>f.txt\n'
+        "git add f.txt\n"
+        'git commit -qm "landed mid-review"\n'
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  [[ "$prev" == "-o" ]] && printf "finding\\n" >"$a"\n'
+        '  prev="$a"\n'
+        "done\n"
+    )
+    codex.chmod(0o755)
+
+    _run_review(repo, tmp_path)
+
+    moved_sha = _git(repo, "rev-parse", "HEAD")
+    assert moved_sha != reviewed_sha, "fake codex should have advanced HEAD"
+    assert (repo / ".review" / f"{reviewed_sha}-adversarial.md").is_file()
+    assert not (repo / ".review" / f"{moved_sha}-adversarial.md").exists()
 
 
 def test_each_persona_records_a_separate_artifact_for_one_commit(tmp_path: Path) -> None:

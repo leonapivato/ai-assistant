@@ -60,6 +60,26 @@ if [[ ! -f ".review/${sha}-adversarial.md" ]]; then
      run: just review-codex adversarial"
 fi
 
+# A change to the shared contract surface needs the architecture lens too
+# (CONTRIBUTING, "Contract ADRs land before their implementation"). That was
+# documented but unenforced, which is precisely the prose-not-mechanism failure
+# ADR-0015 exists to correct — so check it here rather than trusting recall.
+base_ref="$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null || true)"
+[[ -z "$base_ref" ]] && die "could not resolve the PR's base branch"
+# Fetch the base so the comparison is against the real merge target, not a
+# possibly-stale local ref; FETCH_HEAD is that ref as of this moment.
+git fetch --no-tags --quiet origin "$base_ref" ||
+    die "could not fetch base '${base_ref}' to check for contract changes"
+
+if git diff --name-only "FETCH_HEAD...${sha}" |
+    grep -qE '^src/ai_assistant/core/(protocols|types)\.py$'; then
+    if [[ ! -f ".review/${sha}-architecture.md" ]]; then
+        die "this change touches core/protocols.py or core/types.py, so it needs
+     the architecture lens as well as the adversarial one
+     run: just review-codex architecture"
+    fi
+fi
+
 num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
