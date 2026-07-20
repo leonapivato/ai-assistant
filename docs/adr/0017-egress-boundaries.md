@@ -71,6 +71,25 @@ something a boundary may weaken for itself:
   That list *is* the declaration, and it is exhaustive: a payload class not
   listed here is not authorised at this boundary, and adding one — multimodal
   attachments, tuning corpora, anything else — requires amending this ADR.
+
+  **Classification follows the tier of the data, not the container it arrives
+  in.** "Generation inputs are Tier 1" describes what that payload class is
+  *authorised to carry*; it does not reclassify Tier 0 data that happens to sit
+  inside a message. If a user pastes a credential into a conversation, that
+  value is still Tier 0 (ADR-0004 §1), it is not one of the classes authorised
+  above, and being wrapped in an authorised container does not authorise it.
+  The only Tier 0 authorised at this boundary is the provider credential, to
+  the provider that issued it. The same reading applies to embedding inputs.
+
+  This states the rule; it does not claim the rule is enforced. **Nothing
+  currently detects a secret inside user-authored content before it is
+  transmitted** — ADR-0004 §5's redaction net is keyed on field names and
+  cannot see inside a message body. Whether egress-side detection is in scope
+  at all, and whether it would block or prompt (refusing to send is refusing to
+  answer, and the user may have pasted the key deliberately), is issue #75.
+  Stating the classification rule now is what keeps a later implementation from
+  reading "generation inputs are Tier 1" as a licence to ship whatever a
+  message contains.
   Recipient authorisation is **per configuration** — the explicitly-configured
   provider set of ADR-0004 §2's configured-set amendment, which stands — not
   per call. ADR-0004 §7's minimisation rule binds the content of each call.
