@@ -63,19 +63,30 @@ We will model a permission check as a **pure ruling on a self-contained
 request**, and the audit trail as an **append-only Tier 1 store** that holds the
 rulings verbatim.
 
-### 1. A decision records the definition it ruled on, not its name
+### 1. A decision records the request it ruled on, not a name
 
 ```python
 class PermissionDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: Identifier
-    outcome: PermissionOutcome
-    reason: str                      # must contain visible text
+    ruling: PermissionRuling         # what the policy said (§3)
     tool: ToolDefinition             # the declaration ruled on, verbatim
     parameters_digest: str           # binds the payload without storing it
     decided_at: datetime             # timezone-aware
     step_id: Identifier | None = None
     resolves: Identifier | None = None
+
+    @classmethod
+    def from_request(
+        cls,
+        request: ActionRequest,
+        ruling: PermissionRuling,
+        *,
+        id: Identifier,
+        decided_at: datetime,
+        resolves: Identifier | None = None,
+    ) -> PermissionDecision:
+        """Bind a ruling to the request it was made about."""
 ```
 
 **`tool` is the whole `ToolDefinition`, embedded by value.** This is the single
@@ -86,13 +97,44 @@ discloses `PERSONAL`, and costs nothing". A process that restarts and registers 
 different definition under the same id has not altered any decision, and the
 mismatch is a value comparison away.
 
-That comparison is offered on the type rather than left to each caller:
+**`from_request` is the only construction path a caller should use, and it exists
+so the binding is transcribed rather than asserted.** Every field describing
+*what was ruled on* — `tool`, `parameters_digest`, `step_id` — is copied from the
+request by `core`, so a decision that names a different tool than the one the
+policy saw cannot be produced by following the contract. The complementary half
+is §3's: a policy returns a `PermissionRuling` and never a `PermissionDecision`,
+so it has no field in which to name a tool at all. Between the two, "the decision
+is about the request" stops being a claim the prose makes and becomes a property
+of the types.
+
+It is a factory rather than a validator because the request is not a field of the
+decision — embedding the request whole would store the parameters this design is
+careful not to store (below). What remains open is a caller hand-constructing a
+`PermissionDecision` field by field; that is a caller falsifying its own audit
+trail, not a policy subverting a gate, and no producer can prevent it (the same
+boundary ADR-0018 §3 drew for detachment).
+
+The verification seam is offered on the type rather than left to each caller, and
+it takes a **request**, not a bare definition:
 
 ```python
-def authorises(self, definition: ToolDefinition) -> bool:
-    """Whether this decision authorises invoking ``definition``."""
-    return self.outcome is PermissionOutcome.ALLOW and definition == self.tool
+def authorises(self, request: ActionRequest) -> bool:
+    """Whether this decision authorises performing ``request``."""
+    return (
+        self.ruling.outcome is PermissionOutcome.ALLOW
+        and request.tool == self.tool
+        and request.parameters_digest == self.parameters_digest
+        and request.step_id == self.step_id
+    )
 ```
+
+Taking the request is what makes this discharge ADR-0017 §3's *"what is
+transmitted is bound to what was authorised, immutably, and consumed
+unchanged"*. A signature taking only a definition would have checked the tool
+and silently ignored the arguments — authorising an email to one recipient and
+executing it to another, with every record still reading as consistent. That is
+the same failure shape as #54, one level down, and it is worth the wider
+parameter.
 
 `ToolDefinition` is a frozen pydantic model, so `==` is field-wise and total.
 This satisfies ADR-0016 §2's three-part test for a semantic intrinsic to a type
@@ -122,8 +164,8 @@ approximately nothing, and storing it buys three things a digest does not:
 **What this does and does not close, stated plainly.** It closes the *permissions
 half* of #54: a decision can no longer be about a name. It does not by itself
 prevent a substituted execution, because nothing here invokes anything (ADR-0016
-§7). The remaining half is one call — `decision.authorises(definition)` against
-the definition the executor is about to run — and it belongs to the invocation
+§7). The remaining half is one call — `decision.authorises(request)` against the
+request the executor is about to perform — and it belongs to the invocation
 contract. #54 stays open until that call exists; what changes is that the
 verification seam is now built and typed rather than described.
 
@@ -141,13 +183,20 @@ explicit about the consequence of putting them in a durable record: bind a
 reference, *"or the binding and every audit record derived from it become Tier 0
 stores"*. So the decision binds the payload by digest and holds none of it.
 
-The digest is computed by `core`, not by callers, over the canonical JSON form
-of the request's `parameters` — `json.dumps(sort_keys=True,
-separators=(",", ":"), ensure_ascii=False)` of the mapping's JSON dump, then
-SHA-256, hex. It is well-defined because `FrozenJson` is already constrained to
-JSON-safe values and already rejects non-finite floats (ADR-0014 §2), which is
-the case that would otherwise have no encoding. Specifying it here is what stops
-two implementations recording different digests for the same call.
+**The digest is a derived property of `ActionRequest`, and no caller supplies
+it.** `ActionRequest.parameters_digest` computes it over the canonical JSON form
+of `parameters` — `json.dumps(sort_keys=True, separators=(",", ":"),
+ensure_ascii=False)` of the mapping's JSON dump, then SHA-256, hex — and
+`PermissionDecision.from_request` copies it across. Naming *where* it is computed
+matters as much as naming the encoding: a `str` field that each caller filled in
+would be a canonicalisation per caller, and two that disagreed would produce a
+false mismatch at execution, which reads as an attack rather than as a bug.
+Putting it on the request also makes it intrinsic under ADR-0016 §2's three-part
+test, so it belongs in `core` for the same reason the severity scales do.
+
+It is well-defined because `FrozenJson` is already constrained to JSON-safe
+values and already rejects non-finite floats (ADR-0014 §2), which is the case
+that would otherwise have no encoding.
 
 Two limits on what that digest is worth, both inherited rather than introduced.
 It binds; it does not *describe*. ADR-0017 §3 requires a payload "described
@@ -157,13 +206,29 @@ database. That description is issue #57's and the invocation contract's; this
 ADR discharges the binding half of the condition and none of the description
 half.
 
-**`resolves` makes the confirmation loop auditable.** A `CONFIRM` outcome is
-recorded like any other. If the user then answers, the answer is a *second*
-decision whose `resolves` names the first. Without it a confirmation the user
-declined is indistinguishable from one nobody ever answered — the same
-ambiguity ADR-0017 §3 refuses to accept on the egress side, where a timeout must
-not read as a successful disclosure. A decision that `resolves` another may not
-itself be `CONFIRM`, so the chain is one link and cannot loop.
+**`resolves` makes the confirmation loop auditable, and the trail enforces it.**
+A `CONFIRM` outcome is recorded like any other. If the user then answers, the
+answer is a *second* decision whose `resolves` names the first. Without it a
+confirmation the user declined is indistinguishable from one nobody ever
+answered — the same ambiguity ADR-0017 §3 refuses to accept on the egress side,
+where a timeout must not read as a successful disclosure.
+
+A bare pointer would be worse than none, because it would let an `ALLOW` for
+tool B claim to be the user's answer to a `CONFIRM` shown for tool A — the
+substitution §1 closes, reintroduced through the one path where a human has
+actually been consulted. So the pointer carries an invariant, and it is enforced
+where it is *checkable*: `AuditTrail.record` holds the referenced record and
+refuses a resolution that does not match it (§4). Nothing else can perform that
+check — a `PermissionDecision` in isolation cannot see the decision it names,
+which is exactly why leaving this to a model validator would have been leaving
+it undone.
+
+The invariant, in full: a decision whose `resolves` is set must name a recorded
+decision, whose ruling was `CONFIRM`, which nothing else has already resolved,
+and whose `tool`, `parameters_digest` and `step_id` are identical to the
+resolving decision's. Its own ruling may not be `CONFIRM`, so the chain is one
+link and cannot loop. A confirmation is therefore an answer to *the question that
+was asked*, and the audit trail is what says so.
 
 `reason` is required to contain visible text, by the same `_has_visible_text`
 test ADR-0018 §1 applies to a tool's description and for the same reason: it is
@@ -197,7 +262,7 @@ considered and rejected as premature: neither has a consumer until there is an
 interface to escalate *to*, and a member of an ordered scale is expensive to
 insert later precisely because the rank is positional.
 
-### 3. `ActionPolicy` decides; it does not record
+### 3. `ActionPolicy` rules; it does not name, mint, or record
 
 ```python
 class ActionRequest(BaseModel):
@@ -206,16 +271,45 @@ class ActionRequest(BaseModel):
     parameters: FrozenJsonMapping = _EMPTY_PARAMS
     step_id: Identifier | None = None
 
+    @property
+    def parameters_digest(self) -> str: ...   # §1
+
+class PermissionRuling(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    outcome: PermissionOutcome
+    reason: str                      # must contain visible text
+
 class ActionPolicy(Protocol):
-    async def decide(self, request: ActionRequest) -> PermissionDecision: ...
+    async def decide(self, request: ActionRequest) -> PermissionRuling: ...
 ```
 
 The request is **self-contained**: it carries the definition rather than an id,
-so a policy never consults a registry and cannot rule on something other than
-what it was shown. That is what makes §1's guarantee available at all — a policy
-that resolved an id would be reintroducing the rebinding hazard inside the very
-subsystem meant to close it — and it keeps `permissions` free of any dependency
-on `tools` beyond the shared `core` type (golden rule 1).
+so a policy never consults a registry. That is what makes §1's guarantee
+available at all — a policy that resolved an id would be reintroducing the
+rebinding hazard inside the very subsystem meant to close it — and it keeps
+`permissions` free of any dependency on `tools` beyond the shared `core` type
+(golden rule 1).
+
+**A policy returns a `PermissionRuling`, not a `PermissionDecision`, and the
+distinction is the security property.** The first draft had `decide` return the
+decision, and described the result as being "about the request" — but a
+`PermissionDecision` has a `tool` field, so a conforming implementation could
+have returned `ALLOW` for a *different* tool than the one it was handed, and
+`authorises` would then have approved it. The prose said the policy could not
+rule on anything other than what it was shown; nothing in the contract said so.
+
+Splitting the types removes the capability rather than forbidding it. A ruling is
+`outcome` and `reason` — the only two things a policy is entitled to author —
+and it has no field in which to name a tool, a payload, or a step. Everything
+describing *what was ruled on* is transcribed from the request by
+`from_request` (§1). A policy therefore cannot substitute a subject, and this is
+true of every implementation, including one written by someone who never read
+this ADR.
+
+It also removes two things a policy had no business doing: minting an `id`, and
+reading a clock. `decided_at` and `id` are supplied by the caller that records,
+which leaves `decide` a genuine function of its argument — which is in turn what
+makes §5's monotonicity obligations checkable at all.
 
 **The policy does not write to the audit trail, and the caller does.** The
 tempting alternative injects an `AuditTrail` into the policy so a decision
@@ -237,7 +331,7 @@ pre-existing — ADR-0014 §4 refuses to move a step into `RUNNING` without an
 `approval_ref`, so a step that executed without a decision *id* is already
 unrepresentable; what is not enforced is that the id resolves to a stored
 record. Closing that needs the invocation contract, which is where the two
-obligations meet. Issue filed.
+obligations meet. Issue #107.
 
 `parameters` is carried on the request although **no rule in this ADR reads
 it**, and that is deliberate rather than an oversight. Every decision here keys
@@ -275,6 +369,21 @@ from the house pattern: `MemoryStore.add` upserts on `id`, and that is right for
 memory, where the id is the caller's idempotency key. An audit trail that
 upserts is one where history can be rewritten by replaying a write, which is the
 one property the trail exists to deny. There is no `update`.
+
+**`record` is also where §1's resolution invariant is enforced**, because it is
+the only place both records are in hand. A decision whose `resolves` is set is
+refused with `InvalidResolutionError` unless the referenced id is present, its
+ruling was `CONFIRM`, no other recorded decision already resolves it, and its
+`tool`, `parameters_digest` and `step_id` match the incoming decision's exactly.
+
+This makes the trail an active participant rather than a filing cabinet, which is
+a real cost worth stating: a store that validates is a store that can refuse a
+write, and a caller must handle that. It is accepted because the alternative is a
+`resolves` pointer that means nothing — a `CONFIRM` shown to the user for one
+action and an `ALLOW` recorded for another, with the trail attesting that the
+user agreed. The single-resolution rule matters for the same reason: without it,
+one confirmation could be spent authorising an unbounded number of executions,
+which is how "approve once" quietly becomes "approve always".
 
 **There is no `delete(id)`; there is `clear()`.** ADR-0004 §6 gives the user the
 right to delete their data and ADR-0004 §7 makes this store Tier 1, so it must
@@ -318,13 +427,15 @@ what the trail **produces**.
 type"; this store is not a memory type, and a trail that expires records is one
 that forgets what it was built to remember. Whether an audit trail should have a
 TTL at all is a genuine question with a privacy argument on each side, and it
-does not block anything. Issue filed.
+does not block anything. Issue #108.
 
 ### 5. What every policy must satisfy: monotone, and fail-closed twice
 
 A policy is *the user's*, so the contract cannot fix a threshold — "confirm at
 or above `MEDIUM`" is a setting, not a decision this ADR gets to make. What it
-can fix is the shape of the function. The shared conformance suite requires:
+can fix is the shape of the function. The shared `ActionPolicy` conformance suite
+requires the following of `ruling.outcome`; the corresponding `AuditTrail` suite
+covers write-once, the resolution invariant, ordering, and detachment (§4).
 
 **Monotonicity in severity.** Raising `risk_level`, raising `reversibility`, or
 widening `discloses` — with everything else held equal — must never produce a
@@ -382,14 +493,15 @@ worse than one bounded and disclosed.
   need arguments interpreted per tool, which needs invocation.
 - **Gating direct Tier 0/1 data access** (§3), pending issue #74.
 - **Payload description** as opposed to binding (ADR-0017 §3, issue #57).
-- **Retention for the trail** (§4).
+- **Retention for the trail** (§4, issue #108).
 - **Richer audit queries** (§4).
 
 ## Consequences
 
-- **New `core` surface:** `PermissionOutcome`, `ActionRequest`,
-  `PermissionDecision`, the `ActionPolicy` and `AuditTrail` Protocols, and
-  `AuditError`/`DuplicateDecisionError` in `core/errors.py`. Two Protocols mean
+- **New `core` surface:** `PermissionOutcome`, `PermissionRuling`,
+  `ActionRequest`, `PermissionDecision`, the `ActionPolicy` and `AuditTrail`
+  Protocols, and `AuditError`/`DuplicateDecisionError`/`InvalidResolutionError`
+  in `core/errors.py`. Two Protocols mean
   **two triads** in the implementation PR — contract, shared conformance suite,
   and canonical fake for each — which
   `tests/core/test_protocol_triad.py` enforces mechanically and for which no
@@ -400,6 +512,19 @@ worse than one bounded and disclosed.
   `__dict__` are all a value comparison away from detection. The issue stays
   open for its invocation half — one `authorises()` call the executor must make
   — and that is now a seam rather than a description.
+- **The subject of a decision is transcribed, never authored.** A policy returns
+  a ruling with no field naming a tool; `from_request` copies the subject across;
+  `authorises` compares the whole request, arguments included. Three separate
+  substitutions — a policy ruling on A and answering about B, a caller binding a
+  decision to the wrong request, an executor running different arguments than
+  were approved — are closed by the shape of the types rather than by a sentence
+  asking implementers not to. The first draft closed none of them and asserted
+  all three; architecture review is what caught it.
+- **The audit trail validates, so it can refuse a write.** The resolution
+  invariant (§1, §4) is enforced where both records are visible, which is the
+  only place it can be. The cost is that `record` has a failure mode callers must
+  handle; the alternative was a `resolves` pointer attesting that a user agreed
+  to something they were never shown.
 - **The audit trail is a Tier 1 store with the narrowest write surface that
   satisfies ADR-0004 §6.** Append-only, no update, no selective delete. The cost
   is that a user who wants one embarrassing record gone must clear the trail, and
@@ -421,11 +546,14 @@ worse than one bounded and disclosed.
   invocation), which is the same unusual intermediate state ADR-0016 shipped in
   and drew ADR-0018's five corrections. The mitigation is the one ADR-0018
   prescribed, and it was taken: the shape above was spiked against a throwaway
-  implementation before ratification and discarded, which is what settled four
+  implementation before ratification and discarded, which is what settled six
   things this ADR would otherwise be asserting — that `PermissionOutcome` can
   subclass `_SeverityScale` and inherits its `TypeError`-on-a-bare-string
   behaviour, that the parameters digest is stable across key order, that
-  `authorises` rejects a substituted definition, and that a decision survives a
+  `PermissionRuling` has no field in which a subject could be named, that
+  `authorises` rejects a substituted tool, altered arguments and a different
+  step alike, that `from_request` transcribes the subject without the request
+  becoming a stored field, and that a decision survives a
   JSON round-trip with its embedded definition intact. Implementation contact is
   not proof, and ADR-0018 was written by an implementation finding five things a
   review did not.
