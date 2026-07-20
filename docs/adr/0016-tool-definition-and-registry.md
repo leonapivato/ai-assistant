@@ -99,6 +99,11 @@ governs.
 
 `description` is the only free text, and it has two audiences: the model, which
 is told what the tool does, and the user, who is shown what they are approving.
+It must be non-blank, and rejected at construction like `Goal.statement` is
+(ADR-0014 §1). A whitespace-only description passes every other check in this
+type while leaving the approval prompt with nothing to say about the action —
+which is the one moment the whole design exists to serve, and the moment a user
+is most likely to approve out of confusion.
 
 ### 2. Risk and reversibility are ordered scales, and the ordering lives in `core`
 
@@ -298,10 +303,20 @@ class CostBasis(StrEnum):
     UNKNOWN    # declared: the author does not know — policy must fail closed
 
 class ToolCost(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
     basis: CostBasis
     amount: Decimal | None = None      # required iff PER_CALL, ge 0
     currency: str | None = None        # required iff PER_CALL, ISO-4217
 ```
+
+`ToolCost` is frozen in its own right, and that is load-bearing rather than
+tidy. Pydantic's `frozen=True` on `ToolDefinition` blocks reassigning the
+`cost` *field*; it does nothing about `definition.cost.amount = Decimal("1000")`
+on the object that field holds. A mutable nested model would mean the registry
+and a recorded permission decision keep pointing at the same instance while the
+number inside it changes — the substitution §5 exists to prevent, reached
+through a back door instead of through an id. This is the same depth-of-freezing
+problem ADR-0014 §2 hit with plan parameters and answered by deep-freezing them.
 
 An optional `cost` defaulting to `None` was the first draft and it reproduced,
 in the one field where money is at stake, precisely the failure §1 exists to
@@ -641,8 +656,10 @@ widening of this one.
   unknown id and an unsatisfied capability both reading as empty rather than
   raising, and the §1/§3/§4 consistency rules rejected at construction —
   including the `discloses`-implies-`side_effecting` pair, a non-positive
-  `idempotency_window` on a `KEYED` tool, and a negative `latency`. With those,
-  the *lookup*
+  `idempotency_window` on a `KEYED` tool, a negative `latency`, and a blank
+  `description`. It must also prove the immutability the audit story rests on:
+  that neither a definition nor the `ToolCost` nested inside it can be mutated
+  after construction. With those, the *lookup*
   seam is exercised; the *metadata's* fitness is argued from its two named
   consumers rather than demonstrated by one.
 - **`cost` is an estimate nothing reconciles.** A tool whose declared
