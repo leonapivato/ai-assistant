@@ -216,6 +216,7 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     recorded_persona: str | None = None,
     churn_bound: str = "exact",
     binary_files: int = 0,
+    binary_churn: int = 0,
 ) -> None:
     """Write an artifact exactly as codex-review.sh would.
 
@@ -234,10 +235,12 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     empty string, to omit the field) to simulate an artifact whose filename
     claims a lens its provenance does not.
 
-    ``churn_bound`` and ``binary_files`` are the aggregate caveats ship renders
-    into the comment. ``binary_files=0`` omits the field entirely, which is what
-    the real script does when the diff has no binary path — the field's presence
-    is what marks the caveat, so a recorded zero would be wrong.
+    ``churn_bound``, ``binary_files`` and ``binary_churn`` are the aggregate
+    caveats ship renders into the comment. A zero omits its field entirely,
+    which is what the real script does when there is nothing to report — the
+    field's presence is what marks the caveat, so a recorded zero would be
+    wrong. The two binary counts are independent: work reverted within the
+    branch is in ``binary_churn`` and not in ``binary_files``.
     """
     if base_sha is None:
         base_sha = _git(repo, "merge-base", "main", sha)
@@ -249,6 +252,8 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     review_dir.mkdir(exist_ok=True)
     persona_field = f"persona={recorded_persona} " if recorded_persona else ""
     binary_field = f"binary_files={binary_files} " if binary_files else ""
+    if binary_churn:
+        binary_field = f"{binary_field}binary_churn={binary_churn} "
     (review_dir / f"{sha}-{persona}.md").write_text(
         f"<!-- {persona_field}base=main base_sha={base_sha} sha={sha} "
         f"branch=feature tree={tree} round=1 net_lines=2 churn_lines=2 "
@@ -1302,6 +1307,23 @@ def test_carries_the_unmeasured_binary_count_to_the_pr(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "3 binary file(s) unmeasured" in (tmp_path / "comment.md").read_text()
+
+
+def test_carries_binary_churn_absent_from_the_final_diff(tmp_path: Path) -> None:
+    """A binary added and reverted inside the branch is still unmeasured work.
+
+    It leaves the net diff, so only the churn count records it — and §2 is that
+    the reviewer at merge sees what the author saw.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", binary_churn=2)
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    assert "2 binary change(s) unmeasured" in (tmp_path / "comment.md").read_text()
 
 
 def test_omits_the_binary_caveat_when_the_diff_has_no_binary_path(tmp_path: Path) -> None:

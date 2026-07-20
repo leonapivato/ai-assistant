@@ -408,6 +408,59 @@ def test_another_branchs_rounds_do_not_leak_into_a_fresh_one(tmp_path: Path) -> 
     assert _field(provenance, "round") == "1", "the first branch's rounds are not this branch's"
 
 
+def test_a_detached_review_does_not_inherit_the_branchs_rounds(tmp_path: Path) -> None:
+    """`git rev-parse --abbrev-ref HEAD` yields "HEAD" when detached.
+
+    That is a placeholder, not an identity, so using it as the scope key would
+    make every detached checkout in the clone share one review loop. Keyed on
+    the commit instead. Nothing is lost by treating these as separate: ship
+    refuses a detached HEAD, so such a review cannot be reported anyway.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "f.txt", "two\n", "c1")
+    _fake_codex(tmp_path / "bin", tmp_path / "prompt.txt")
+    _run(repo, tmp_path)
+    _commit(repo, "f.txt", "three\n", "c2")
+    _run(repo, tmp_path)
+
+    # Detach onto a third state, with the branch's two rounds recorded.
+    _commit(repo, "f.txt", "four\n", "c3")
+    _git(repo, "checkout", "-q", "--detach", "HEAD")
+    _run(repo, tmp_path)
+
+    head = _git(repo, "rev-parse", "HEAD")
+    provenance = (repo / ".review" / f"{head}-adversarial.md").read_text().splitlines()[0]
+    assert _field(provenance, "round") == "1"
+    assert _field(provenance, "branch") == f"detached-{head}"
+
+
+def test_binary_work_absent_from_the_final_diff_is_still_recorded(tmp_path: Path) -> None:
+    """A binary added and then reverted is unmeasured work the branch did.
+
+    It leaves the net diff entirely, so `binary_files` is absent — but the
+    terminal reports it, and ADR-0020 §2 is that the reviewer at merge holds
+    what the author held. Recording only the net count would drop the caveat on
+    the way to the PR.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "logo.png").write_bytes(b"\x00\x01\x02binary\xff")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a binary asset")
+    _git(repo, "rm", "-q", "logo.png")
+    _git(repo, "commit", "-qm", "revert the binary asset")
+    _commit(repo, "f.txt", "two\n", "an unrelated text change")
+    _fake_codex(tmp_path / "bin", tmp_path / "prompt.txt")
+
+    result = _run(repo, tmp_path)
+
+    provenance = _provenance(repo)
+    assert _field(provenance, "binary_files") is None, "it is not in the final diff"
+    assert _field(provenance, "binary_churn") == "2", "but the branch touched it twice"
+    assert "2 binary change(s), unmeasured" in result.stderr
+
+
 def test_a_binary_change_is_reported_as_unmeasured_rather_than_zero(tmp_path: Path) -> None:
     """Issue #100: `git --numstat` reports `-` for a binary path.
 
