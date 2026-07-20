@@ -1,7 +1,4 @@
-# Enable once per machine: `just setup`, or see CONTRIBUTING.md -> "Setup".
-# Install via a standalone `uv tool install pre-commit`, not `uv run` inside
-# a workspace — the latter bakes that workspace's venv path into the shared
-# .git/hooks/pre-commit script, which breaks once the workspace is released.
+# Enable once per clone: `just setup`, or see CONTRIBUTING.md -> "Setup".
 # (no --hook-type: that flag REPLACES default_install_hook_types below rather
 # than adding to it, so pre-commit would silently install only commit-msg and
 # never run ruff/mypy/import-linter on commit)
@@ -21,10 +18,9 @@ repos:
     rev: v6.0.0
     hooks:
       # `main` is integration-only: it advances via GitHub rebase-and-merge,
-      # never a local commit. Blocking direct commits keeps a solo agent working
-      # in the main checkout from accidentally committing to main (ADR-0010;
-      # CONTRIBUTING "Coordinating parallel work"). Bypass with --no-verify only
-      # for a genuine exception.
+      # never a local commit. Blocking direct commits stops an agent from
+      # committing to its clone's main instead of a branch (ADR-0010, ADR-0015).
+      # Bypass with --no-verify only for a genuine exception.
       - id: no-commit-to-branch
         args: [--branch, main]
       - id: end-of-file-fixer
