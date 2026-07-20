@@ -55,6 +55,10 @@ class _RunRecord:
     #: xfailed, or was skipped by a mark, the obligation is not honoured however
     #: many sibling cases passed.
     unsatisfactory: dict[type, set[str]] = field(default_factory=dict)
+    #: Test class -> names of the tests on it that were honoured by opting out
+    #: rather than by passing. Tracked so a suite whose obligations are *all*
+    #: optional, and all skipped, cannot certify itself having asserted nothing.
+    opted_out: dict[type, set[str]] = field(default_factory=dict)
     unfiltered: bool = False
 
     def honoured(self) -> dict[type, frozenset[str]]:
@@ -148,12 +152,20 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
         _RECORD.unsatisfactory.setdefault(cls, set()).add(name)
     elif report.when == "call":
         _RECORD.reported.setdefault(cls, set()).add(name)
+        if report.skipped:
+            _RECORD.opted_out.setdefault(cls, set()).add(name)
 
 
 @pytest.fixture(scope="session")
 def honoured_class_tests() -> dict[type, frozenset[str]]:
     """Every test class, mapped to the tests on it whose every case was honoured."""
     return _RECORD.honoured()
+
+
+@pytest.fixture(scope="session")
+def opted_out_class_tests() -> dict[type, frozenset[str]]:
+    """Every test class, mapped to the tests honoured by opting out, not by passing."""
+    return {cls: frozenset(names) for cls, names in _RECORD.opted_out.items()}
 
 
 @pytest.fixture(scope="session")
