@@ -73,8 +73,14 @@ base_ref="$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null || true)
 git fetch --no-tags --quiet origin "$base_ref" ||
     die "could not fetch base '${base_ref}' to check for contract changes"
 
-if git diff --name-only "FETCH_HEAD...${sha}" |
-    grep -qE '^src/ai_assistant/core/(protocols|types)\.py$'; then
+# Capture the file list before matching, rather than piping git into `grep -q`.
+# `grep -q` exits at the first match and closes the pipe; on a diff large enough
+# to fill the pipe buffer, git then dies of SIGPIPE and — under `set -o
+# pipefail` — the whole pipeline reports failure. The `if` would read that as
+# "no core change" and skip the architecture requirement entirely: a fail-open
+# on the one check that guards the shared contract surface.
+changed_files="$(git diff --name-only "FETCH_HEAD...${sha}")"
+if grep -qE '^src/ai_assistant/core/(protocols|types)\.py$' <<<"$changed_files"; then
     if [[ ! -f ".review/${sha}-architecture.md" ]]; then
         die "this change touches core/protocols.py or core/types.py, so it needs
      the architecture lens as well as the adversarial one
