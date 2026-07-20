@@ -132,6 +132,40 @@ def test_a_request_with_no_parameters_still_has_a_digest() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"body": "\ud800"},
+        {"\ud800": "body"},
+        {"nested": {"body": "\udfff"}},
+        {"items": ["fine", "\ud800"]},
+    ],
+    ids=["a value", "a key", "nested in a mapping", "inside a sequence"],
+)
+def test_a_payload_with_no_utf8_encoding_is_refused(parameters: dict[str, Any]) -> None:
+    """A lone surrogate is a ``str`` with no transportable form.
+
+    The same rule ADR-0014 §2 applies to non-finite floats, one character-set
+    down. Without it the payload validates and then ``parameters_digest`` raises
+    ``UnicodeEncodeError``, so every decision about the request becomes
+    unconstructable — a crash rather than a refusal, at the gate.
+    """
+    with pytest.raises(ValidationError, match="UTF-8"):
+        ActionRequest(tool=tool(), parameters=parameters)
+
+
+def test_an_astral_character_is_still_accepted() -> None:
+    """Only *lone* surrogates are refused; a real supplementary character is fine.
+
+    Worth pinning: a check written against the surrogate *range* rather than
+    against encodability would reject emoji, which arrive in tool arguments
+    routinely.
+    """
+    request = ActionRequest(tool=tool(), parameters={"body": "\U0001f389 done"})
+
+    assert request.parameters_digest
+
+
 def test_parameters_are_frozen_all_the_way_down() -> None:
     """Inherited from ``FrozenJsonMapping``, and relied on: a mutable payload would
     let the digest a decision pinned describe something the caller has since changed.

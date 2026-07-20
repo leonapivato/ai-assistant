@@ -1470,6 +1470,54 @@ class PermissionOutcome(_SeverityScale):
     DENY = "deny"
 
 
+def _is_encodable(text: str) -> bool:
+    r"""Whether ``text`` has a UTF-8 encoding.
+
+    A lone surrogate (``"\ud800"``) is a ``str`` Python is happy to hold but
+    that no UTF-8 encoder will accept, because it is half of a character rather
+    than a character.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _encodable_json(value: FrozenJson) -> FrozenJson:
+    """Reject a payload holding text with no UTF-8 encoding, recursively.
+
+    The same rule, for the same reason, as :func:`_freeze_json`'s refusal of
+    non-finite floats (ADR-0014 §2): a value that satisfies ``str`` but has no
+    transportable representation would change or fail on the way through a
+    digest, a store, or an export. It is checked over keys as well as values,
+    since a mapping key is text the encoding has to survive too.
+
+    Applied to :attr:`ActionRequest.parameters` rather than inside
+    ``_freeze_json``, which would tighten ADR-0014's plan parameters and step
+    outputs at the same time. Those have the identical latent hole and it is
+    filed as its own issue rather than folded into this change, because that
+    type is another lane's contract.
+
+    Raises:
+        ValueError: If any string in the payload cannot be encoded as UTF-8.
+    """
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not _is_encodable(key):
+                msg = f"parameter key {key!r} has no UTF-8 encoding, so it cannot be digested"
+                raise ValueError(msg)
+            _encodable_json(item)
+    elif isinstance(value, str):
+        if not _is_encodable(value):
+            msg = f"parameter value {value!r} has no UTF-8 encoding, so it cannot be digested"
+            raise ValueError(msg)
+    elif isinstance(value, Sequence):
+        for item in value:
+            _encodable_json(item)
+    return value
+
+
 class ActionRequest(BaseModel):
     """A self-contained proposal to invoke a tool, for a policy to rule on (ADR-0021 §3).
 
@@ -1492,7 +1540,7 @@ class ActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool: ToolDefinition = Field(description="The declaration being ruled on, by value.")
-    parameters: FrozenJsonMapping = Field(
+    parameters: Annotated[FrozenJsonMapping, AfterValidator(_encodable_json)] = Field(
         default=_EMPTY_PARAMS,
         description="The arguments the call proposes; bound by digest, never stored.",
     )
@@ -1517,9 +1565,13 @@ class ActionRequest(BaseModel):
         trail actually has. "Were *these* the arguments approved" is what the
         trail must answer, and a digest answers it exactly.
 
-        Well-defined because :data:`FrozenJson` is already constrained to
-        JSON-safe values and already rejects non-finite floats (ADR-0014 §2) —
-        the one case that would otherwise have no encoding.
+        Well-defined because the payload is constrained to values that *have* an
+        encoding: :data:`FrozenJson` already rejects non-finite floats (ADR-0014
+        §2), and :func:`_encodable_json` rejects text with no UTF-8 form. The
+        ADR named only the first; the second is the same class of hole one
+        character-set down, and a digest that raised ``UnicodeEncodeError`` on a
+        payload the model had already accepted would make every decision about
+        it unconstructable.
         """
         canonical = json.dumps(
             _thaw_json(self.parameters),
