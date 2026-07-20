@@ -17,9 +17,10 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import pytest
 from permission_builders import AT, action, decision, ruling, tool
@@ -257,6 +258,38 @@ class AuditTrailContract:
         found = await trail.recent()
 
         assert [each.id for each in found] == ["d-new", "d-tie-a", "d-tie-b", "d-old"]
+
+    async def test_ordering_and_chronology_survive_a_dst_repeated_hour(
+        self, trail: AuditTrail
+    ) -> None:
+        """Ordering is by *instant*, which wall-clock ordering is not.
+
+        During a DST repeated hour, ``01:15 fold=1`` (EST) is a later instant
+        than ``01:45 fold=0`` (EDT) — and Python compares two aware datetimes
+        sharing a ``tzinfo`` by their naive values, ignoring ``fold``, so a
+        store that kept them as given would sort the pair backwards and accept
+        an answer that genuinely predates its question. ``PermissionDecision``
+        normalises to UTC so this holds for every implementation, and this test
+        is what stops one that re-parses a persisted offset from losing it
+        again.
+        """
+        ny = ZoneInfo("America/New_York")
+        earlier = datetime(2026, 11, 1, 1, 45, tzinfo=ny, fold=0)
+        later = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=1)
+
+        await trail.record(decision("d-earlier", decided_at=earlier))
+        await trail.record(decision("d-later", decided_at=later))
+
+        assert [each.id for each in await trail.recent()] == ["d-later", "d-earlier"]
+
+        answer = decision(
+            "d-answer",
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="d-later"),
+            resolves="d-later",
+            decided_at=earlier,
+        )
+        with pytest.raises(InvalidResolutionError):
+            await trail.record(answer)
 
     async def test_recent_returns_the_newest_within_the_limit(self, trail: AuditTrail) -> None:
         for index in range(5):

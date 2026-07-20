@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -391,11 +392,13 @@ def test_a_naive_decision_timestamp_is_refused() -> None:
         )
 
 
-def test_a_non_utc_timestamp_is_kept_as_given() -> None:
-    """Aware is the requirement; the offset is preserved rather than normalised.
+def test_an_aware_timestamp_is_normalised_to_utc() -> None:
+    """The instant is preserved; the offset it was expressed in is not.
 
-    Ordering is by instant, so two zones compare correctly without rewriting
-    what the recorder actually observed.
+    Normalising is what makes ``decided_at`` orderable by *instant*. Python
+    compares two aware datetimes sharing a ``tzinfo`` by wall clock, ignoring
+    ``fold``, so leaving mixed zones in the field would misorder a DST repeated
+    hour — see the fold test below.
     """
     elsewhere = datetime(2026, 7, 20, 14, 0, tzinfo=timezone(timedelta(hours=2)))
 
@@ -406,8 +409,35 @@ def test_a_non_utc_timestamp_is_kept_as_given() -> None:
         decided_at=elsewhere,
     )
 
-    assert made.decided_at == elsewhere
+    assert made.decided_at == elsewhere  # the same instant
     assert made.decided_at == AT
+    assert made.decided_at.tzinfo is UTC
+
+
+def test_a_dst_repeated_hour_orders_by_instant_not_wall_clock() -> None:
+    """The trap normalisation exists to close.
+
+    ``01:15 fold=1`` is EST and ``01:45 fold=0`` is EDT, so the first is the
+    *later* instant — but compared as stored aware values sharing a ``tzinfo``
+    Python reads only the wall clock and calls it earlier. In an audit trail
+    that is an answer timestamped before its own question, once a year.
+    """
+    ny = ZoneInfo("America/New_York")
+    question = datetime(2026, 11, 1, 1, 15, tzinfo=ny, fold=1)
+    answer = datetime(2026, 11, 1, 1, 45, tzinfo=ny, fold=0)
+    assert answer > question, "wall-clock comparison disagrees with the instants"
+
+    asked, answered = (
+        PermissionDecision.from_request(
+            ActionRequest(tool=tool()),
+            PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="?"),
+            id="d",
+            decided_at=when,
+        ).decided_at
+        for when in (question, answer)
+    )
+
+    assert answered < asked
 
 
 def test_a_resolving_decision_may_not_itself_be_a_confirmation() -> None:

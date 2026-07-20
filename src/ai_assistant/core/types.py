@@ -1776,17 +1776,27 @@ class PermissionDecision(BaseModel):
     @field_validator("decided_at")
     @classmethod
     def _decided_at_is_aware(cls, value: datetime) -> datetime:
-        """Reject a naive decision timestamp.
+        """Reject a naive decision timestamp, and normalise an aware one to UTC.
 
-        A deliberate departure from the normalise-to-UTC convention the other
-        instants in this module follow, and ADR-0021 §4 asks for the stricter
-        rule here specifically. The trail is durable *and ordered*, so a naive
-        value is reinterpreted against whatever the host's local zone happens to
-        be at read time, and it sorts incoherently against the aware values
-        beside it. "When was this approved" is a question an audit trail must
-        not answer differently on a laptop that travelled — and unlike a
-        retention deadline, there is no later comparison that would surface the
-        mistake.
+        The **rejection** is where ADR-0021 §4 departs from the other instants
+        in this module, which assume UTC for a naive value. The trail is durable
+        *and ordered*, so a naive value is reinterpreted against whatever the
+        host's local zone happens to be at read time and sorts incoherently
+        against the aware values beside it. "When was this approved" is a
+        question an audit trail must not answer differently on a laptop that
+        travelled — and unlike a retention deadline, there is no later
+        comparison that would surface the mistake.
+
+        The **normalisation** is what makes ordering mean *instant* rather than
+        wall clock, and it is load-bearing rather than tidiness. Python compares
+        two aware datetimes sharing a ``tzinfo`` by their naive values, ignoring
+        ``fold`` — so during a DST repeated hour, ``01:15 fold=1`` (the later
+        instant) compares as *earlier* than ``01:45 fold=0``. A trail holding
+        such values would accept a resolution that genuinely predates the
+        confirmation it answers, and ``recent()`` would present the pair in that
+        order: an audit record that is internally consistent and chronologically
+        false, for one hour a year. Converting here fixes it once, for every
+        implementation, rather than asking each to remember.
 
         (Issue #36 tracks a known weakness in these validators — a ``tzinfo``
         whose ``utcoffset()`` returns ``None`` — and applies here as elsewhere.)
@@ -1794,7 +1804,7 @@ class PermissionDecision(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             msg = f"decided_at must be timezone-aware, got {value!r}"
             raise ValueError(msg)
-        return value
+        return value.astimezone(UTC)
 
     @model_validator(mode="after")
     def _a_resolution_is_not_itself_a_question(self) -> PermissionDecision:
