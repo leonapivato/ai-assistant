@@ -115,11 +115,36 @@ class Reversibility(StrEnum):   # declared least severe first
     REVERSIBLE; RECOVERABLE; IRREVERSIBLE
 ```
 
+`reversibility` describes **the effect the tool has on the system it acts
+upon** — can the change it made be undone?
+
 - `REVERSIBLE` — the tool can undo it (delete the calendar event it created).
 - `RECOVERABLE` — undoable, but not by this tool (a file in the trash; a
   correction email).
 - `IRREVERSIBLE` — it cannot be taken back (money moved, a message delivered to
   a third party).
+
+**It does not describe the reversibility of *disclosure*, and the two are
+genuinely independent.** Creating an event in a hosted calendar is `REVERSIBLE`
+— the tool deletes it — while the fact that the provider has now seen the
+event's contents is permanent. Both statements are true, and neither implies the
+other.
+
+Collapsing them was considered and is wrong. Requiring any non-empty
+`discloses` to imply `IRREVERSIBLE` would make essentially every hosted
+integration `IRREVERSIBLE`, since almost all of them transmit something. The
+scale would then have one useful value, a policy keyed on it could not tell
+booking a flight apart from adding a calendar entry, and the user would be
+prompted identically for both — the "trains its user to approve everything"
+failure §5 rejects for the same reason.
+
+So disclosure is tracked by its own field, and the consequence for policy is
+explicit: **`reversibility` alone is not sufficient to auto-grant.** A
+`REVERSIBLE` tool with a non-empty `discloses` performed an irrevocable
+disclosure while making a revocable change, and a policy that reads only the
+scale would auto-grant it. Reading both fields is not an implementation detail
+left to `permissions`; it is why `discloses` exists as a peer of
+`reversibility` rather than a modifier of it.
 
 **Both are comparable, and the comparison is by severity.** The canonical
 policy sentence is a threshold — "confirm anything at or above `MEDIUM`",
@@ -235,15 +260,17 @@ reversibly creates a draft. Two consistency rules make the contradictory
 combinations unrepresentable rather than merely discouraged:
 
 - a tool that declares `writes` **is** side-effecting;
-- a tool that declares `discloses` **is** side-effecting. Sending data to a
-  third party is an act with consequences even when nothing local changes: it
-  cannot be recalled, and it is exactly the class ADR-0004 §2 governs. Without
-  this rule a definition could pair `discloses=(PERSONAL,)` with
-  `side_effecting=False` and `REVERSIBLE` — an email tool declaring itself inert
-  — and satisfy every other constraint while handing consumers safety metadata
-  that contradicts itself. It means a web search is side-effecting, because it
+- a tool that declares `discloses` **is** side-effecting. Transmitting data to a
+  third party is an act with consequences outside this system even when nothing
+  local changes, and it is exactly the class ADR-0004 §2 governs. Without this
+  rule a definition could pair `discloses=(PERSONAL,)` with
+  `side_effecting=False` — an email tool declaring itself inert — and satisfy
+  every other constraint while handing consumers safety metadata that
+  contradicts itself. It means a web search is side-effecting, because it
   discloses the query; that reads oddly for a moment and is right, since the
-  disclosure is the consequence worth gating;
+  disclosure is the consequence worth gating. Note that this rule is about
+  `side_effecting` only: disclosure says nothing about `reversibility`, for the
+  reason §2 gives;
 - a tool that is not side-effecting is `REVERSIBLE` — there is nothing to
   reverse.
 
@@ -644,6 +671,12 @@ widening of this one.
 - **A tool's off-device disclosure is a declared fact.** `discloses` gives
   ADR-0004 §2 something to police, and its required-ness means a tool that
   quietly transmits Tier 1 data has to say so in order to load.
+- **A policy must read `discloses` alongside `reversibility`**, because a
+  `REVERSIBLE` action can still be an irrevocable disclosure (§2). Keeping them
+  independent preserves a scale that can tell a flight booking from a calendar
+  entry; the cost is that a policy consulting only the reversibility scale would
+  auto-grant something it should not, so this is a two-field rule `permissions`
+  has to honour rather than a property the type enforces for it.
 - **Data reach is a ceiling, so policy will over-prompt** (§3). Every
   `send_email` call is treated as a Tier 1 disclosure whether or not it is one.
   Accepted as the safe direction and as a bound a later per-call mechanism can
@@ -687,8 +720,11 @@ widening of this one.
   definition, the `ToolCost` nested inside it, and a `parameters_schema` left at
   its default all refuse mutation after construction. And it must pin the
   severity ordering in both operand orders, across all four operators, including
-  that a comparison against a bare string raises rather than answering. With
-  those, the *lookup*
+  that a comparison against a bare string raises rather than answering. The
+  combinations that are deliberately *accepted* need pinning as well as the
+  rejected ones — in particular a `REVERSIBLE` tool with a non-empty
+  `discloses`, which §2 argues must stay legal and which a later reader would
+  otherwise be tempted to "fix". With those, the *lookup*
   seam is exercised; the *metadata's* fitness is argued from its two named
   consumers rather than demonstrated by one.
 - **`cost` is an estimate nothing reconciles.** A tool whose declared
