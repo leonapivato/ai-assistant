@@ -448,13 +448,24 @@ fi
 # every chance to fix. Attempting all of them makes the divergence as small as
 # the failures actually were.
 #
-# Second, the exit names the split rather than surfacing gh's bare error. The
-# state is self-healing — a re-run finds every comment for this commit and
-# rewrites all of them — but only if the operator can see that a re-run is what
-# is needed, and which comments are currently lying. Retrying in-process was the
-# other option offered and is not taken: a retry without backoff buys almost
-# nothing against the failures that actually happen (auth, rate limit, network
-# down), and a re-run of ship is already the correct and tested recovery.
+# Second, the exit names which comments were written and which were not, rather
+# than surfacing gh's bare error. The state is self-healing — a re-run finds
+# every comment for this commit and rewrites all of them — but only if the
+# operator can see that a re-run is what is needed, and where to look.
+#
+# What the message deliberately does *not* say is that a failed comment is
+# stale. A non-zero PATCH does not prove the write was not applied: the request
+# can succeed and its response be lost, exactly the ambiguity this script
+# already documents for comment creation below. Reporting "showing a superseded
+# review" would be a claim ship cannot support, and re-reading the comments to
+# find out would add a round of API calls to the path where the API is already
+# failing. Naming the uncertainty is both honest and sufficient, because the
+# recovery for either case is the same re-run.
+#
+# Retrying in-process was the other option the issue offered and is not taken:
+# a retry without backoff buys almost nothing against the failures that actually
+# happen (auth, rate limit, network down), and a re-run of ship is already the
+# correct and tested recovery.
 if [[ ${#existing_ids[@]} -gt 0 ]]; then
     echo "ship: updating ${#existing_ids[@]} existing review comment(s) for" \
         "${sha:0:12} on PR #${num}…" >&2
@@ -477,10 +488,13 @@ if [[ ${#existing_ids[@]} -gt 0 ]]; then
             updated_desc="${updated_ids[*]}"
         fi
         die "could not update every review comment on PR #${num}
-     PR #${num} is now inconsistent for commit ${sha:0:12}:
-       showing this review:       comment(s) ${updated_desc}
-       showing a superseded one:  comment(s) ${failed_ids[*]}
-     nothing else is wrong with the review — the write failed, not the record
+     for commit ${sha:0:12}:
+       updated:        comment(s) ${updated_desc}
+       write failed:   comment(s) ${failed_ids[*]}
+     the failed comment(s) may or may not have been updated — a lost response
+     looks the same as a rejected request — so treat the PR as inconsistent
+     until a re-run settles it
+     nothing is wrong with the review itself; the write failed, not the record
      re-run: just ship — it rewrites every comment it owns for this commit, so
      a re-run converges on one current review"
     fi
