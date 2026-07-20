@@ -93,7 +93,12 @@ fi
 
 prompt="$(mktemp -t "codex-prompt-${persona}.XXXXXX.md")"
 out="$(mktemp -t "codex-review-${persona}.XXXXXX.md")"
-trap 'rm -f "$prompt"' EXIT
+# All three temporaries, on every exit path. `$out` holds the full review text
+# and `$artifact_tmp` a half-written copy of it, so leaving either behind
+# accumulates review content in /tmp and in .review/ — the latter invisible to
+# the dirty-tree check, since .review/ is ignored. ${var:+...} expands to
+# nothing while artifact_tmp is still unset, which it is for most of this script.
+trap 'rm -f "$prompt" "$out" ${artifact_tmp:+"$artifact_tmp"}' EXIT
 
 {
     cat "$rubric"
