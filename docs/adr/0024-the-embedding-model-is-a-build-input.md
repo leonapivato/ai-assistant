@@ -2,9 +2,12 @@
 
 - Status: Proposed
 - Date: 2026-07-20
-- Supersedes: ADR-0002's build-backend choice only (`uv_build` → `hatchling`,
-  §4). ADR-0002's stack decisions are otherwise unchanged; its status note is
-  appended on acceptance.
+- Supersedes: ADR-0002's build-backend clause only (`uv_build` → `hatchling`,
+  §4); its other stack decisions are unchanged. On acceptance, following the
+  ADR-0017 §7 precedent, ADR-0002's `Status` line becomes `Accepted, partially
+  superseded by ADR-0024 (build-backend clause)` and a dated note is appended to
+  it identifying the replaced clause — the status change ADR-0001 requires, not
+  merely a note.
 
 ## Context
 
