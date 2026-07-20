@@ -22,6 +22,7 @@ the contract.
 
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
@@ -44,20 +45,23 @@ if TYPE_CHECKING:
 _FULL_CONFIDENCE = 1.0
 
 
-def _sequential_ids() -> Callable[[], str]:
-    """Return an id factory yielding ``fake-memory-1``, ``fake-memory-2``, ...
+def _derived_id(event: FeedbackEvent) -> str:
+    """Return a stable id for the record ``event`` establishes.
 
-    One counter per call, so each fake restarts at 1 (see ``id_factory`` on
-    :class:`FakeFeedbackProcessor` for why, and for the collision that implies).
+    Derived from the feedback rather than from a counter, so the id depends on
+    *what was said* and not on how many events this fake — or any other — has
+    already seen. That buys both properties a canonical fake needs at once:
+    deterministic, so a test can assert an exact id without depending on
+    execution order; and identical across instances, so two fakes writing into
+    one store cannot silently overwrite each other. ``FakePlanner``'s
+    ``f"{goal.id}-plan"`` is the same idea.
+
+    Two *equivalent* events do map to one id. That is the intended reading —
+    the same feedback establishes the same memory — and it is what makes the
+    scheme collision-free rather than collision-prone.
     """
-    issued = 0
-
-    def factory() -> str:
-        nonlocal issued
-        issued += 1
-        return f"fake-memory-{issued}"
-
-    return factory
+    material = "\x00".join([event.memory_kind.value, event.content, event.subject or ""])
+    return f"fake-memory-{sha256(material.encode()).hexdigest()[:12]}"
 
 
 class FakeFeedbackProcessor:
@@ -82,17 +86,11 @@ class FakeFeedbackProcessor:
                 synthesises one proposal per event instead; an *empty* sequence
                 is the distinct, explicit "this processor proposes nothing", which
                 a consumer needs to exercise its no-op learning path.
-            id_factory: Supplies ids for synthesised records. Defaults to a
-                counter scoped to *this instance*, so a fresh fake always issues
-                ``fake-memory-1`` first and a test can assert an exact id without
-                depending on what ran before it — which a process-global counter
-                would destroy.
-
-                The cost is that two fakes issue the *same* ids: feed both into
-                one store and the second overwrites the first. That is the
-                narrower hazard, and it has an answer — inject an ``id_factory``
-                per fake (``lambda: "b-1"``) when a test drives two processors
-                into shared state.
+            id_factory: Supplies ids for synthesised records, for a test that
+                wants to name them. Defaults to deriving the id from the event
+                (see :func:`_derived_id`) — deterministic without being
+                order-dependent, and stable across instances, so two fakes
+                feeding one store do not overwrite each other's records.
 
         Raises:
             ValueError: If any scripted proposal has blank ``proposed.content`` or
@@ -117,7 +115,7 @@ class FakeFeedbackProcessor:
         self._proposals: tuple[MemoryUpdateProposal, ...] | None = (
             None if proposals is None else tuple(p.model_copy(deep=True) for p in proposals)
         )
-        self._id_factory = id_factory if id_factory is not None else _sequential_ids()
+        self._id_factory = id_factory
         self.events: list[FeedbackEvent] = []
 
     async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
@@ -143,7 +141,7 @@ class FakeFeedbackProcessor:
         can exercise the branch it cares about rather than the two the production
         rules happen to support today.
         """
-        record_id = self._id_factory()
+        record_id = self._id_factory() if self._id_factory is not None else _derived_id(event)
         provenance = self._provenance(event)
         match event.memory_kind:
             case MemoryKind.PREFERENCE:
