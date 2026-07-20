@@ -25,7 +25,11 @@ from zoneinfo import ZoneInfo
 import pytest
 from permission_builders import AT, action, decision, ruling, tool
 
-from ai_assistant.core.errors import DuplicateDecisionError, InvalidResolutionError
+from ai_assistant.core.errors import (
+    AuditError,
+    DuplicateDecisionError,
+    InvalidResolutionError,
+)
 from ai_assistant.core.types import (
     CostBasis,
     PermissionOutcome,
@@ -66,6 +70,32 @@ async def _resolved(
     return decision(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
+async def _refuses(
+    trail: AuditTrail,
+    rejected: PermissionDecision,
+    error: type[AuditError] = InvalidResolutionError,
+) -> None:
+    """Assert ``record`` refuses ``rejected`` **and writes nothing**.
+
+    ADR-0021 §4 makes ``record`` atomic — the duplicate-id check, the resolution
+    validation and the append are one operation — so a refusal is not a partial
+    write with an exception on top. Asserting only that it raised would accept a
+    store that appended an orphan or a mismatched resolution and *then* rejected
+    it, leaving the trail holding a record the contract says is unrecordable and
+    the confirmation it named spent.
+
+    The whole trail is compared rather than just the rejected id, because a
+    write that landed under a different id, or that mutated the referenced
+    ``CONFIRM`` on its way through, is the same failure wearing a disguise.
+    """
+    before = await trail.export()
+
+    with pytest.raises(error):
+        await trail.record(rejected)
+
+    assert await trail.export() == before, "a refused write must leave no trace"
+
+
 class AuditTrailContract:
     """Behaviour every ``AuditTrail`` implementation must exhibit."""
 
@@ -98,8 +128,9 @@ class AuditTrailContract:
         """
         await trail.record(decision("d-1", ruled=ruling(PermissionOutcome.CONFIRM)))
 
-        with pytest.raises(DuplicateDecisionError):
-            await trail.record(decision("d-1", ruled=ruling(PermissionOutcome.DENY)))
+        await _refuses(
+            trail, decision("d-1", ruled=ruling(PermissionOutcome.DENY)), DuplicateDecisionError
+        )
 
         stored = await trail.get("d-1")
         assert stored is not None
@@ -119,8 +150,7 @@ class AuditTrailContract:
             resolves="d-nobody",
         )
 
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(orphan)
+        await _refuses(trail, orphan)
 
     @pytest.mark.parametrize("outcome", [PermissionOutcome.ALLOW, PermissionOutcome.DENY])
     async def test_only_a_confirmation_can_be_resolved(
@@ -134,8 +164,7 @@ class AuditTrailContract:
             resolves="d-confirm",
         )
 
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(answer)
+        await _refuses(trail, answer)
 
     async def test_a_confirmation_can_be_resolved_only_once(self, trail: AuditTrail) -> None:
         """Without this, a "no" could be followed by a "yes" until one stuck."""
@@ -146,8 +175,7 @@ class AuditTrailContract:
             resolves="d-confirm",
         )
 
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(second)
+        await _refuses(trail, second)
 
     async def test_two_racing_resolutions_settle_a_confirmation_once(
         self, trail: AuditTrail
@@ -196,8 +224,7 @@ class AuditTrailContract:
         """
         answer = await _resolved(trail, request=substituted)
 
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(answer)
+        await _refuses(trail, answer)
 
     async def test_a_resolution_may_not_predate_its_confirmation(self, trail: AuditTrail) -> None:
         """An answer timestamped before its question is chronologically false.
@@ -208,8 +235,7 @@ class AuditTrailContract:
         """
         answer = await _resolved(trail, decided_at=AT - timedelta(seconds=1))
 
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(answer)
+        await _refuses(trail, answer)
 
     async def test_a_resolution_at_the_same_instant_is_accepted(self, trail: AuditTrail) -> None:
         """A fast confirmation at a coarse clock resolution is real.
@@ -236,8 +262,7 @@ class AuditTrailContract:
         """
         unbacked = await _resolved(trail, ruled=ruling(PermissionOutcome.ALLOW))
 
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(unbacked)
+        await _refuses(trail, unbacked)
 
     # --- ordering and bounds ---------------------------------------------
 
@@ -288,8 +313,7 @@ class AuditTrailContract:
             resolves="d-later",
             decided_at=earlier,
         )
-        with pytest.raises(InvalidResolutionError):
-            await trail.record(answer)
+        await _refuses(trail, answer)
 
     async def test_recent_returns_the_newest_within_the_limit(self, trail: AuditTrail) -> None:
         for index in range(5):
