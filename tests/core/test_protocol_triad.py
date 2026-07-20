@@ -32,7 +32,6 @@ import inspect
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from textwrap import dedent
 from types import FunctionType
 from typing import TYPE_CHECKING, Final, is_protocol
 
@@ -94,6 +93,14 @@ EXEMPTIONS: Final = (
     ),
 )
 
+#: The debt that existed when this check landed, and the *only* Protocols an
+#: exemption may ever name. Without this the list would be an escape hatch:
+#: a new Protocol could ship with an exemption for all three parts and a green
+#: gate -- exactly what this check exists to prevent. It is a closed set, so
+#: the list can only shrink. Removing a name is how a backfill finishes;
+#: adding one is not a normal operation and should not survive review.
+_LEGACY_DEBT: Final = frozenset({"FeedbackProcessor"})
+
 _EXEMPT_BY_PROTOCOL: Final = {exemption.protocol: exemption for exemption in EXEMPTIONS}
 
 # ---------------------------------------------------------------------------
@@ -147,15 +154,22 @@ def _own_fixture_functions(cls: type) -> list[Callable[..., object]]:
 def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
     """Report whether calling ``func`` with only ``self`` produces a ``fake``.
 
-    Returns ``False`` if the fixture cannot be evaluated in isolation (it takes
-    other fixtures, or blows up without them); ``_fixture_constructs`` is the
-    fallback for that case.
+    Evaluation, not inspection, is the whole point: only running the fixture
+    shows what the conformance suite is actually handed. A lexical check --
+    "the fixture body mentions the fake somewhere" -- is satisfied by a
+    docstring, an unused import, or a constructor call in a branch that never
+    runs, none of which put the fake in front of a single assertion.
+
+    A subject fixture that needs other fixtures to build its subject cannot be
+    evaluated here and so cannot be proven; that is a deliberate false
+    negative. It surfaces as a loud, fixable gate failure rather than a silent
+    hole, and no canonical fake needs one today.
     """
     if list(inspect.signature(func).parameters) != ["self"]:
         return False
     try:
-        # `self` is unused by a subject fixture that just builds its subject;
-        # one that does use it simply falls through to `_fixture_constructs`.
+        # A subject fixture builds its subject and ignores `self`; one that
+        # does use it is simply unproven, per the docstring above.
         produced = func(None)
         if inspect.isgenerator(produced):
             produced = next(produced)
@@ -164,31 +178,14 @@ def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
     return isinstance(produced, fake)
 
 
-def _fixture_constructs(func: Callable[..., object], fake_name: str) -> bool:
-    """Report whether ``func``'s body actually *calls* ``fake_name``.
-
-    The fallback for a fixture that needs other fixtures to run. It matches a
-    call node, not the source text, so naming the fake in a docstring, a type
-    annotation, or an unused import does not count.
-    """
-    try:
-        tree = ast.parse(dedent(inspect.getsource(func)))
-    except OSError, SyntaxError:  # pragma: no cover - source exists under pytest
-        return False
-    return any(
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == fake_name
-        for node in ast.walk(tree)
-    )
-
-
 def _binds_fake(cls: type, protocol: str) -> bool:
     """Report whether ``cls`` supplies the canonical fake to its conformance suite.
 
-    Three things have to hold, and the first two are object identity rather
-    than text: the test module imported the canonical fake itself (not a
-    same-named local stand-in), and one of the fixtures ``cls`` defines either
-    evaluates to an instance of that fake or demonstrably constructs it. A
-    mention of the fake in a docstring or an unused import is not a binding.
+    Both conditions are object identity rather than text: the test module
+    imported the canonical fake itself (not a same-named local stand-in), and
+    one of the fixtures ``cls`` defines evaluates to an instance of it. A
+    mention of the fake in a docstring, an unused import, or a constructor call
+    on a dead branch is not a binding.
     """
     fake_name = f"Fake{protocol}"
     canonical = _canonical_fake(protocol)
@@ -198,10 +195,7 @@ def _binds_fake(cls: type, protocol: str) -> bool:
     module = sys.modules.get(cls.__module__)
     if getattr(module, fake_name, None) is not fake:
         return False
-    for func in _own_fixture_functions(cls):
-        if _fixture_yields(func, fake) or _fixture_constructs(func, fake_name):
-            return True
-    return False
+    return any(_fixture_yields(func, fake) for func in _own_fixture_functions(cls))
 
 
 def _suite_of(cls: type, protocol: str) -> type | None:
@@ -213,18 +207,26 @@ def _binding_classes(protocol: str, collected: CollectedTests) -> list[type]:
     """Return the collected classes that really run the canonical fake through the suite.
 
     A class counts only if the tests pytest collected on it include at least
-    one *inherited from the suite*. That is what separates a real conformance
-    suite from an empty ``…Contract`` class with a token test alongside it: an
-    empty suite contributes no collected tests, so it binds nothing.
+    one whose implementation *is the suite's own* -- same function object,
+    reached through inheritance. That rules out both an empty ``…Contract``
+    with a token test alongside it (it contributes no tests to inherit) and a
+    subclass that overrides every contract test with a no-op (the override is
+    a different function object, so it does not count as running the suite).
     """
     found = []
     for cls, test_names in collected.items():
         suite = _suite_of(cls, protocol)
         if suite is None or not _binds_fake(cls, protocol):
             continue
-        if any(getattr(suite, name, None) is not None for name in test_names):
+        if any(_is_inherited_from(cls, suite, name) for name in test_names):
             found.append(cls)
     return found
+
+
+def _is_inherited_from(cls: type, suite: type, name: str) -> bool:
+    """Report whether ``cls.name`` is the very function ``suite`` defines."""
+    inherited = getattr(suite, name, None)
+    return inherited is not None and getattr(cls, name, None) is inherited
 
 
 def _missing_parts(
@@ -346,6 +348,22 @@ def test_no_exemption_is_stale(
     assert not failures, "\n".join(failures)
 
 
+def test_no_new_protocol_can_be_exempted() -> None:
+    """The exemption list is closed: it can shrink, never grow.
+
+    An open list would be a bypass -- add a Protocol and an exemption for all
+    three parts in one commit and the gate stays green, which is the failure
+    this whole check exists to stop.
+    """
+    added = {exemption.protocol for exemption in EXEMPTIONS} - _LEGACY_DEBT
+
+    assert not added, (
+        f"{sorted(added)} cannot be exempted: EXEMPTIONS may only name the "
+        f"pre-existing debt in _LEGACY_DEBT. A new or changed Protocol ships "
+        f"its full triad in the same change (CONTRIBUTING.md)."
+    )
+
+
 def test_exemptions_are_well_formed() -> None:
     """Each entry names real triad parts and points at a tracking issue."""
     assert len(_EXEMPT_BY_PROTOCOL) == len(EXEMPTIONS), "duplicate protocol in EXEMPTIONS"
@@ -398,6 +416,20 @@ class _ReallyBindsTheFake:
         return FakeMemoryStore()
 
 
+#: Always false. A literal `if False:` is dead code mypy and ruff would reject,
+#: but the point of `_ConstructsTheFakeOnADeadBranch` is a constructor call the
+#: fixture never reaches.
+_NEVER: Final = bool(EXEMPTIONS) and not EXEMPTIONS
+
+
+class _ConstructsTheFakeOnADeadBranch:
+    @pytest.fixture
+    def store(self) -> object:
+        if _NEVER:
+            return FakeMemoryStore()
+        return object()
+
+
 class _EmptySuite:
     """A conformance suite in name only -- it asserts nothing."""
 
@@ -420,6 +452,11 @@ def test_naming_the_fake_without_constructing_it_is_not_a_binding() -> None:
     assert not _binds_fake(_MentionsTheFakeWithoutBindingIt, "MemoryStore")
 
 
+def test_constructing_the_fake_on_a_dead_branch_is_not_a_binding() -> None:
+    """The fixture is evaluated, so an unreachable constructor call proves nothing."""
+    assert not _binds_fake(_ConstructsTheFakeOnADeadBranch, "MemoryStore")
+
+
 def test_a_fixture_that_returns_the_fake_is_a_binding() -> None:
     """The positive half of the same predicate, so it is not failing for free."""
     assert _binds_fake(_ReallyBindsTheFake, "MemoryStore")
@@ -438,17 +475,38 @@ def test_an_empty_suite_does_not_count_as_a_conformance_suite() -> None:
 
 def test_a_suite_that_contributes_collected_tests_does_count() -> None:
     """Same input shape, but the test is inherited from the suite."""
+    suite, bound = _suite_and_binding(override=False)
+    collected: CollectedTests = {bound: frozenset({"test_from_the_suite"})}
 
-    class _RealSuite:
+    assert suite.__name__ == "MemoryStoreContract"
+    assert _binding_classes("MemoryStore", collected) == [bound]
+
+
+def test_overriding_every_suite_test_does_not_count_as_running_the_suite() -> None:
+    """A no-op override collects under the suite's name but runs none of it."""
+    _, bound = _suite_and_binding(override=True)
+    collected: CollectedTests = {bound: frozenset({"test_from_the_suite"})}
+
+    assert _binding_classes("MemoryStore", collected) == []
+
+
+def _suite_and_binding(*, override: bool) -> tuple[type, type]:
+    """Build a suite and a subclass that either inherits or overrides its test."""
+
+    class _Suite:
         def test_from_the_suite(self) -> None: ...
 
-    class _Bound(_RealSuite):
+    class _Bound(_Suite):
         @pytest.fixture
         def store(self) -> object:
             return FakeMemoryStore()
 
-    _RealSuite.__name__ = "MemoryStoreContract"
-    _Bound.__module__ = __name__
-    collected: CollectedTests = {_Bound: frozenset({"test_from_the_suite"})}
+    if override:
+        # Same name, different function object: pytest still collects it, but
+        # the suite's assertions never run.
+        _Bound.test_from_the_suite = lambda self: None  # type: ignore[method-assign]
 
-    assert _binding_classes("MemoryStore", collected) == [_Bound]
+    # Renamed rather than declared, so the literal name does not leak into
+    # `_declared_class_names()` (see `_EmptySuite`).
+    _Suite.__name__ = "MemoryStoreContract"
+    return _Suite, _Bound
