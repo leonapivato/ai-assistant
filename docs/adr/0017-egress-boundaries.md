@@ -777,10 +777,13 @@ Issue #85 carries it.
   of a permission ADR-0004 already grants. For `tools/` the module-pinning
   contract *is* a §3 precondition, because there the contract is what gives the
   approval a concrete extent in the first place.
-- **The invocation ADR inherits three obligations** it must discharge before the
-  first tool transmits: name the seam, gate per call before transmitting, and
-  constrain destination and per-call payload. It no longer inherits a
-  prohibition it would have had to overturn on its way.
+- **The invocation ADR inherits the complete §3 list**, not a summary of it,
+  and must discharge every item before the first tool transmits — then a later
+  ADR ratifies the designation (§2). The list is deliberately not abbreviated
+  here: each item exists because a review round found a concrete way to satisfy
+  the others and still leak, and a three-line précis is how one of them gets
+  quietly dropped. What the invocation ADR no longer inherits is a prohibition
+  it would have had to overturn on its way.
 - **`tools/` still transmits nothing.** No behaviour changes on ratification;
   this is a docs-only decision about what will be permitted.
 - **ADR-0004's earlier configured-set amendment remains an in-place amendment**,
