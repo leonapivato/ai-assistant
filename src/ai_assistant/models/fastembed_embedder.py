@@ -47,7 +47,20 @@ _DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 class FastEmbedTextModel(Protocol):
-    """A loaded embedding model: the half of the seam that does the work."""
+    """A loaded embedding model: the half of the seam that does the work.
+
+    ``embed`` **must be safe to call concurrently from multiple threads.**
+    :meth:`FastEmbedEmbedder.embed` dispatches to a worker thread, so two
+    in-flight calls reach one loaded model at once; an implementation that
+    reused a mutable inference buffer across calls would cross-contaminate
+    their vectors. The real backend satisfies this — ONNX Runtime's
+    ``InferenceSession.run`` is thread-safe — and the requirement is stated
+    here so an alternative backend cannot quietly fail to.
+
+    The embedder deliberately does not serialise inference on the caller's
+    behalf: a lock here would cap embedding throughput at one thread for every
+    backend, to accommodate a backend we do not have.
+    """
 
     def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
         """Embed the documents, yielding one vector per document, in order."""
