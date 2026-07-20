@@ -204,30 +204,27 @@ at minimum:
   valid ONNX), and a wheel built from the sdist embeds with the network denied;
 - the wheel METADATA carries all four exact pins, and each audited version
   independently moves `model_id`;
-- a missing artifact raises `ModelError` on a non-empty batch without a socket
-  while `embed([])` returns `[]`; and composition refuses to wire an unpinned
-  non-default model into a persistent store, allowing it only ephemerally.
+- a missing artifact raises `ModelError` on a non-empty batch without a socket,
+  while `embed([])` returns `[]`.
 
-### 6. A non-default model is opt-in, fetches, and may not be persisted
+### 6. The non-default path is out of scope, not fixed
 
-Only the default is vendored. Configuring a different fastembed model re-enables
-fastembed's own unpinned download, with none of §2's guarantees — the opt-in
-shape of ADR-0006 §2's cloud embedder. "Local-first by default" is about the
-default.
+This ADR decides the *vendored default* — the subject of #89. Configuring a
+different fastembed model re-enables fastembed's own unpinned download, with none
+of §2's guarantees — the opt-in shape of ADR-0006 §2's cloud embedder, and its
+cache resolves under the application data directory (via `Settings`, not `/tmp`),
+closing the §Context residency point for that path too.
 
-Because fastembed's API takes no revision, such a model has no establishable
-weights identity — an unpinned download can serve different weights under an
-unchanged `model_id`. Rather than defer that to #136, this ADR **closes it: an
-embedder whose embedding-space identity cannot be pinned must not back a
-persistent store.** The unpinned non-default path is ephemeral-only.
-
-This is enforced at **composition, not by the store.** `model_id` is only a
-`str`; the store, depending on the `Embedder` Protocol alone (golden rule 1),
-cannot tell a pinned identity from an unpinned one, and must not type-inspect the
-embedder to try. But the layer that wires an embedder into a `SqliteMemoryStore`
-knows the concrete configuration, and simply does not wire an unpinned non-default
-model into a persistent store. No Protocol change, no cross-boundary inspection —
-a decision the composer already has the knowledge to keep.
+Its embedding-space identity is a different matter. Because fastembed's API takes
+no revision, an unpinned model has no pinnable weights identity, so `model_id`
+cannot be made truthful for it by pinning — only by *deriving* identity from the
+downloaded content, which is exactly **issue #136**'s content/behavioural
+fingerprint. This ADR does not attempt a smaller fix here: a composition rule
+("don't persist an unpinned model") is not contract-level — another composer
+could persist it, and the store cannot tell (golden rule 1: `model_id` is just a
+`str`). So the non-default path's persistence safety is **unchanged from `main`
+and owned by #136**, neither closed nor worsened here. What this ADR guarantees
+is the default; the non-default path is flagged, not blessed.
 
 ### 7. What this ADR does not decide
 
@@ -237,7 +234,8 @@ a decision the composer already has the knowledge to keep.
   may hold a network client, making §1 mechanically rather than review-checkable.
 - **It does not resolve the licence discrepancy** — Consequences records it as
   work that must complete before publishing.
-- **It does not give `model_id` a full behavioural fingerprint** (§2, #136).
+- **It does not give `model_id` a full behavioural fingerprint, nor make the
+  non-default path safe to persist** — both are #136 (§2, §6).
 
 ## Alternatives considered
 
