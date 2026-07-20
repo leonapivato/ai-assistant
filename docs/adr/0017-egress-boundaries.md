@@ -163,16 +163,31 @@ for itself:
   - a standing user-established policy that covers that destination — the
     account the user connected, an allowlist they configured.
 
-  **"Destination" means every semantic recipient the call's arguments select,
-  not the transport endpoint.** A Gmail send resolves to the addressees in its
-  `to` field, not to `googleapis.com`; a Slack post resolves to the channel and
-  therefore its members; a calendar invite resolves to its attendees.
-  Authorising the *host* would be close to vacuous — one compromised or
-  mistaken argument sends the user's data to an address they never approved,
-  over a connection that is entirely legitimate, and every check still passes.
-  Host- or credential-scoped authorisation is sufficient only for an operation
-  that cannot disclose onward to a recipient chosen by argument — a read, or a
-  write whose effect stays inside the connected account.
+  **"Destination" means the semantic recipient the call's arguments select, not
+  the transport endpoint.** A Gmail send resolves to the addressees in its `to`
+  field, not to `googleapis.com`; a Slack post resolves to the channel; a
+  calendar invite resolves to its attendee list. Authorising the *host* would
+  be close to vacuous — one compromised or mistaken argument sends the user's
+  data to an address they never approved, over a connection that is entirely
+  legitimate, and every check still passes. Host- or credential-scoped
+  authorisation is sufficient only for an operation that cannot disclose onward
+  to a recipient chosen by argument — a read, or a write whose effect stays
+  inside the connected account.
+
+  **The destination is the stable logical recipient, not a membership
+  snapshot.** Where that recipient fans out — a channel, a distribution list, a
+  group — authorisation binds to the channel or list itself, not to an
+  enumeration of who is in it. Requiring the membership to be authorised would
+  be requiring something unimplementable: these services offer no atomic
+  "authorise this membership and send to exactly it" operation, so a member
+  joining between resolution and delivery would make every send retroactively
+  non-compliant. **Accepted cost, stated rather than hidden:** authorising a
+  post to `#team` authorises delivery to whoever is in `#team` when it lands,
+  which may not be who was in it when the user approved. That is the same trust
+  the user extends by connecting the account, and the mitigation is that the
+  channel is one the user named. An operation whose fan-out the user cannot
+  reasonably anticipate — a list the assistant selected rather than the user —
+  is not covered by this and needs the explicit per-call decision.
 
   A grant justified only by the tool's declared metadata does not qualify
   either. The audit record must capture the resolved destinations and which of
@@ -206,10 +221,11 @@ undesignated, and permitted no egress at all. What must exist first:
 - a ratified invocation contract that gates each call through `permissions/`
   and records it in the audit trail *before* the call transmits, rather than
   relying on the definition's declared ceiling alone (§4 condition 3);
-- the destination rules — recipient authorisation must bind to every semantic
-  recipient the call's arguments select, not the transport endpoint (§2), and
-  trace to a user decision or standing user policy; the audit record must
-  capture those destinations and that basis. A `permissions/` grant alone does
+- the destination rules — recipient authorisation must bind to the semantic
+  recipient the call's arguments select, not the transport endpoint, at the
+  granularity of the stable logical destination (§2), and trace to a user
+  decision or standing user policy; the audit record must capture that
+  destination and that basis. A `permissions/` grant alone does
   not satisfy §1, and neither does a credential-scoped host for an operation
   that can disclose onward (ADR-0016 §3, §7; issue #68).
 - the per-call payload rules. A tool's declared reach is a *ceiling over
