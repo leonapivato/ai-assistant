@@ -122,6 +122,16 @@ because `MemoryStore` offers none; a store failure therefore propagates with
 earlier proposals already applied. Reporting success for a partially applied set
 would be a claim about memory integrity this loop cannot make.
 
+The same absence makes `search → decide → add` non-atomic *across* calls: two
+concurrent `learn`s can both resolve conflicts before either writes, so each
+policy rules as though nothing contradicted it and both records land. We do not
+serialise on a lock held by the loop. A lock would cover one `LearningLoop`
+instance and not two of them, nor a loop sharing a store with `MemoryIngestor` —
+an atomicity guarantee that holds only when nothing else writes is worse than a
+documented absence, because it reads as protection. The fix belongs to the
+contract (issue #104); until then the loop's guarantee is exactly what is
+written here.
+
 Ordering also settles collisions: two proposals carrying the same record id
 resolve **last-write-wins**, because `MemoryStore.add` is an upsert keyed on id.
 The loop does not de-duplicate, because the id is documented as the caller's

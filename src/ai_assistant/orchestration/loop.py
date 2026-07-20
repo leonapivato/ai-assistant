@@ -100,10 +100,18 @@ def _check_tuning(*, retrieval_limit: int, conflict_threshold: float, conflict_l
     every score, silently doing the same.
 
     Raises:
+        TypeError: If a limit is not an integer.
         ValueError: If a limit is not positive, or the threshold is not a finite
             value in ``[0, 1]`` — the range a ``MemoryRecord.score`` occupies.
     """
     for name, limit in (("retrieval_limit", retrieval_limit), ("conflict_limit", conflict_limit)):
+        # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both
+        # survive — and a non-integral limit reaches `MemoryStore.search`, where
+        # a store slicing by it raises `TypeError` far from the mistake. `bool`
+        # is excluded because it is an `int` subclass and a flag is not a count.
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            msg = f"{name} must be an integer, got {limit!r}"
+            raise TypeError(msg)
         if limit < 1:
             msg = f"{name} must be at least 1, got {limit}"
             raise ValueError(msg)
@@ -293,7 +301,10 @@ class LearningLoop:
         if not statement:
             msg = "a turn needs a non-empty utterance"
             raise PlanningError(msg)
-        now = self._now()
+        # `_now_utc` rather than `_now`: `Goal.created_at` has a normalising
+        # validator but `Provenance.last_updated` does not, so a naive clock
+        # would leave the goal's timestamps disagreeing about awareness.
+        now = self._now_utc()
         return Goal(
             id=self._id_factory(),
             statement=statement,
@@ -368,12 +379,25 @@ class LearningLoop:
                 _log.info("memory_update_not_applied", decision=decision.kind.value)
                 return None
 
+    def _now_utc(self) -> datetime:
+        """The injected clock's time, normalising a naive reading to UTC.
+
+        Load-bearing for :meth:`_expiry`. ``model_copy(update=...)`` does **not**
+        re-run validators, so a naive ``expires_at`` written that way keeps the
+        naive value ``MemoryBase`` would otherwise have normalised — and every
+        later read compares it against an aware UTC now, raising ``TypeError``
+        deep inside the store. Normalising the clock at the source closes that
+        rather than trusting every caller to inject an aware one.
+        """
+        now = self._now()
+        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, failing loudly if unrepresentable."""
         if ttl is None:
             return None
         try:
-            return self._now() + ttl
+            return self._now_utc() + ttl
         except OverflowError as exc:
             msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
             raise MemoryStoreError(msg) from exc
