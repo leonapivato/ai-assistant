@@ -65,14 +65,12 @@ class ToolDefinition(BaseModel):
     side_effecting: bool             # required
     reads: tuple[DataTier, ...]      # required
     writes: tuple[DataTier, ...]     # required
+    discloses: tuple[DataTier, ...]  # required — what leaves the device (§3)
     cost: ToolCost                   # required
     idempotency: Idempotency         # required
     idempotency_window: timedelta | None = None   # required iff KEYED
     latency: timedelta | None = None
     parameters_schema: FrozenJsonMapping = {}
-
-    @property
-    def requires_permission(self) -> bool: ...    # §3
 ```
 
 **Every field that a permission decision depends on is required.** This is the
@@ -144,7 +142,7 @@ Putting behaviour in `core/types.py` is a deliberate exception to that module's
 `ExecutionState.is_active` already are: this is what the type *means*, not what
 a subsystem does with it.
 
-### 3. `reads`/`writes` reuse ADR-0004's tiers
+### 3. Data reach reuses ADR-0004's tiers, and gating stays in `permissions`
 
 `reads` and `writes` are tuples of `DataTier` — the existing Tier 0/1/2
 classification, not a new taxonomy. This answers VISION §3's "what data each
@@ -172,30 +170,57 @@ Deliberately *not* a rule: risk is unconstrained by `side_effecting`. A
 read-only tool that pulls an entire mailbox into a prompt is high risk, and a
 type that refused to let it say so would be worse than one that stayed quiet.
 
-**`side_effecting` alone does not decide whether the permission gate is
-consulted.** ADR-0004 §7 gates two things, not one: *"access to Tier 0/1 data
-**and** every side-effecting tool call"*. Treating `side_effecting` as the whole
-trigger would let exactly the tool in the paragraph above — read-only, reaching
-into Tier 1, `side_effecting=False` — run ungated and unaudited, which is a
-straightforward violation of a ratified decision and the more dangerous half of
-it, because a silent read leaves less trace than a write. `ToolDefinition`
-therefore exposes the disjunction as a derived property:
+**No field on this type decides whether the permission gate is consulted,
+because every invocation is gated.** An earlier draft derived a
+`requires_permission` predicate on `ToolDefinition` — `side_effecting` or Tier
+0/1 reach, the disjunction ADR-0004 §7 actually states. That was wrong twice
+over. It put a gating decision on a shared `core` type when ADR-0004 §7 assigns
+gating to `permissions/`, and — worse — a predicate that can return `False` is a
+documented route around the gate, so every future bug in it is an
+under-protection that looks like a fast path.
 
-```python
-@property
-def requires_permission(self) -> bool:
-    return self.side_effecting or bool(
-        {DataTier.SECRET, DataTier.PERSONAL} & set(self.reads + self.writes)
-    )
-```
+The rule is therefore unconditional and needs no predicate: **every tool
+invocation goes through `permissions/`, and the definition supplies facts rather
+than conclusions.** This is not a new burden invented here. ADR-0014 §4 already
+requires *every* transition into `RUNNING` to carry an `approval_ref`, including
+the common case where the permission layer cleared the step automatically with
+no prompt shown — precisely so that the silent, automatic actions are the ones
+that can still be correlated with their authorisation. A tool that reads the
+clock is gated too; it receives an automatic grant and a recorded decision,
+which costs a dictionary lookup and buys a complete audit trail.
 
-It is derived rather than declared because, unlike the fields it reads, it has a
-correct answer computable from them — and it lives on the type rather than in
-`permissions/` so that a second consumer (the selection stage deciding whether a
-candidate needs an approval round-trip) cannot come to a different conclusion
-about the same tool. A policy may of course require confirmation more often than
-this; what it must not do is consult the gate less often, and `requires_permission`
-is the floor that says so in code rather than in prose.
+What `permissions/` does with `risk_level`, `reversibility`, `reads`, `writes`
+and `discloses` — which combinations auto-grant, which prompt, which refuse — is
+its ADR to write, not this one's to pre-empt.
+
+**`discloses` — what leaves the device.** `reads` and `writes` describe a tool's
+reach into *stored* data; neither says whether calling it sends that data off
+the machine, and for a subsystem whose whole job is talking to external services
+that is the question ADR-0004 cares most about. `discloses` is the tiers a call
+transmits off-device, required and fail-closed like the other two, so that
+"communication limits" (VISION §3) and ADR-0004 §5's minimisation rule have a
+declared fact to police instead of an inference from the integration's name.
+
+It states the *tier* that leaves, not the *destination*. Which recipient a call
+reaches is parameter-level — the address is an argument, not a property of the
+tool — and belongs with the approved-recipients policy §7 defers.
+
+**This does not, by itself, authorise any egress.** ADR-0004 §2 says the
+`models/` layer is the only component permitted to send user data off-device and
+"every other egress is a bug", while the same ADR's §3 has `tools/` reading
+credentials for external services, its §7 gates "every side-effecting tool
+call", and its Consequences provision for "the designated `tools/` integration
+boundary" importing network clients. §2's wording predates and contradicts the
+tool layer the rest of the ADR plans for — the same kind of stale absolute its
+2026-07-19 amendment already fixed once, when "the model provider" had to become
+the configured *set*.
+
+Reconciling that is **not** this ADR's to do quietly. Nothing here is callable
+(§7), so nothing here transmits anything, and ratifying it changes no egress
+behaviour. `discloses` exists so that when the invocation ADR arrives it has
+something to write its rule against; that ADR must amend ADR-0004 §2 explicitly
+before the first tool sends a byte. That obligation is recorded as issue #52
+rather than assumed.
 
 ### 4. Cost, latency, and idempotency
 
@@ -378,9 +403,31 @@ widening of this one.
   runs. Invocation drags in an error taxonomy, timeouts and cancellation,
   idempotency-key plumbing, and credential access through a `SecretStore` that
   is itself still uncontracted — a larger decision that deserves its own ADR
-  rather than a corner of this one. Registering something callable is a strictly
-  additive change: a `Tool` Protocol pairing a definition with a call site adds
-  no field to `ToolDefinition`.
+  rather than a corner of this one.
+
+  Two constraints on that ADR are set **here**, because getting them wrong later
+  is not recoverable:
+
+  - **This registry is the only one.** A callable is registered *with* its
+    definition, through this contract; invocation must not arrive as a second
+    registry sitting beside this one. Two registries keyed by the same id could
+    be rebound independently, and the failure that produces is the worst
+    available: executing an implementation whose risk declaration is not the one
+    the user approved. The binding of a definition to the thing that runs it is
+    made once, at registration.
+  - **`register`'s parameter type will change**, from `ToolDefinition` to
+    whatever pairs it with a call site. That is a breaking Protocol change under
+    golden rule 5, and it needs its own ADR — as the invocation decision does
+    anyway. An earlier draft of this ADR called invocation "strictly additive",
+    which was an overclaim; the query methods are what stay stable, since they
+    return `ToolDefinition` either way.
+
+  Declaring the `Tool` Protocol *now*, with a lone `definition` property and no
+  method, would make the signature stable at the cost of ratifying a seam with
+  no implementation contact — the failure CONTRIBUTING explicitly warns about,
+  and one whose shape depends entirely on invocation questions this slice has
+  not answered. The naming of the hazard is what matters; paying for it with a
+  speculative Protocol is not.
 - **Exactly-once execution** (ADR-0014 §7's debt, carried forward). The
   `idempotency` vocabulary lands here; requiring a key on the call, threading it
   through a retry, and holding a tool to its declared window are all invocation's
@@ -426,10 +473,19 @@ widening of this one.
   registry-authoritative, and deliberately not an enum. Its **idempotency debt is
   not** — the guarantee is declarable here and unexercised until invocation, and
   §7 says so rather than letting a field name imply otherwise.
-- **The permission floor is on the type.** `requires_permission` is derived from
-  `side_effecting` *or* Tier 0/1 reach, so ADR-0004 §7's two-part rule cannot be
-  half-implemented by a consumer that remembers only the side-effect half — the
-  half that would silently exempt a read of the user's mailbox.
+- **Gating is unconditional, so there is no predicate to get wrong.** No field
+  or property on `ToolDefinition` exempts an invocation from `permissions/`;
+  the type states facts and the policy draws conclusions. The cost is a
+  permission round-trip for trivial reads, which ADR-0014 §4 already imposes by
+  requiring an `approval_ref` on every claimed step.
+- **A tool's off-device disclosure is a declared fact.** `discloses` gives
+  ADR-0004 §2 something to police, and its required-ness means a tool that
+  quietly transmits Tier 1 data has to say so in order to load.
+- **ADR-0004 §2 still reads as forbidding all tool egress**, and this ADR does
+  not amend it — it cannot, without inventing the invocation contract. Ratifying
+  this changes no egress behaviour because nothing is callable, but the
+  contradiction is now recorded rather than latent, and closing it is a
+  precondition on the invocation ADR.
 - **Every integration ships at least as many definitions as it has operations**
   (§5). Gmail is not one tool. This is more registration code and it is the
   point — per-operation risk is the granularity a permission decision is made at.
@@ -448,15 +504,21 @@ widening of this one.
   `PER_CALL` amount is wrong will mislead a spend policy, and no mechanism
   detects the drift. `UNKNOWN` at least makes *absence* of the information
   visible; a wrong number stays invisible.
-- **Declaring a tool is now wordy.** Eight required fields, two of them
+- **Declaring a tool is now wordy.** Nine required fields, two of them
   structured, before an integration author writes a line of behaviour. That is
   the deliberate trade of §1, and it will be felt most by the simplest tools —
-  a clock reader must still state its cost basis and its idempotency.
+  a clock reader must still state its cost basis, its idempotency, and three
+  empty data-reach tuples.
+- **`register` will break when invocation lands** (§7), and it is named here so
+  that the change is a planned, ADR-backed one rather than a surprise. What must
+  not happen — a second registry binding behaviour to an id independently of the
+  declaration that was approved — is foreclosed by decision, not by a type.
 - **New `core` surface:** `RiskLevel`, `Reversibility`, `CostBasis`,
   `ToolCost`, `Idempotency`, `ToolDefinition`, the `ToolRegistry` Protocol, and
   `ToolRegistrationError` — eight, against ADR-0014's fifteen, because execution
   state is not being modelled here.
 - **Revisit when** invocation lands (does `ToolDefinition` need a timeout, or a
-  rate limit?), when `permissions` writes its first real `ActionPolicy` against
+  rate limit? — and ADR-0004 §2 must be amended first), when `permissions`
+  writes its first real `ActionPolicy` against
   these fields (the honest test of whether the metadata is the right metadata),
   or if capability-name collisions between integrations become real.
