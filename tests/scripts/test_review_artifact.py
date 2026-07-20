@@ -157,9 +157,14 @@ def test_whitespace_only_codex_output_is_refused(tmp_path: Path) -> None:
     assert "empty review" in result.stderr
 
 
-def test_artifact_names_the_commit_reviewed_even_if_head_moves(tmp_path: Path) -> None:
-    """The SHA is pinned before the diff, so a commit landing mid-review cannot
-    misfile the artifact under code Codex never saw."""
+def test_records_nothing_when_the_checkout_moves_mid_review(tmp_path: Path) -> None:
+    """A commit landing mid-review invalidates the run, rather than being filed.
+
+    Pinning the diff is necessary but not sufficient: Codex also reads the
+    working tree, so a checkout that moves underneath it produces a review of
+    a tree that matches neither SHA. Recording that under the pinned SHA would
+    be a false record — worse than no record, since ship.sh would accept it.
+    """
     repo = tmp_path / "repo"
     reviewed_sha = _init_repo(repo)
     bin_dir = tmp_path / "bin"
@@ -180,11 +185,14 @@ def test_artifact_names_the_commit_reviewed_even_if_head_moves(tmp_path: Path) -
     )
     codex.chmod(0o755)
 
-    _run_review(repo, tmp_path)
+    result = _run_review(repo, tmp_path, check=False)
 
     moved_sha = _git(repo, "rev-parse", "HEAD")
     assert moved_sha != reviewed_sha, "fake codex should have advanced HEAD"
-    assert (repo / ".review" / f"{reviewed_sha}-adversarial.md").is_file()
+    assert result.returncode != 0
+    assert "changed while the review was running" in result.stderr
+    # Neither SHA gets an artifact: the run is void, not merely misfiled.
+    assert not (repo / ".review" / f"{reviewed_sha}-adversarial.md").exists()
     assert not (repo / ".review" / f"{moved_sha}-adversarial.md").exists()
 
 
