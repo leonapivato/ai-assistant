@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "codex-review.sh"
@@ -271,6 +272,46 @@ def test_accepts_the_verdict_forms_the_reviewer_actually_emits(tmp_path: Path) -
         result = _run_review(repo, tmp_path, check=False)
 
         assert result.returncode == 0, f"{form!r} rejected: {result.stderr}"
+
+
+def test_leaves_no_temporary_files_behind(tmp_path: Path) -> None:
+    """Review text must not accumulate in /tmp or as .partial files.
+
+    `.review/` is git-ignored, so a stray partial artifact there is invisible to
+    the dirty-tree check as well.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_codex(tmp_path / "bin")
+    before = set(Path(tempfile.gettempdir()).glob("codex-*"))
+
+    _run_review(repo, tmp_path)
+
+    assert set(Path(tempfile.gettempdir()).glob("codex-*")) == before
+    assert list((repo / ".review").iterdir()) == [repo / ".review" / f"{sha}-adversarial.md"]
+
+
+def test_leaves_no_temporary_files_behind_on_rejection(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/usr/bin/env bash\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  [[ "$prev" == "-o" ]] && printf "no verdict here\\n" >"$a"\n'
+        '  prev="$a"\n'
+        "done\n"
+    )
+    codex.chmod(0o755)
+    before = set(Path(tempfile.gettempdir()).glob("codex-*"))
+
+    result = _run_review(repo, tmp_path, check=False)
+
+    assert result.returncode != 0
+    assert set(Path(tempfile.gettempdir()).glob("codex-*")) == before
 
 
 def test_refuses_to_review_a_dirty_tree(tmp_path: Path) -> None:

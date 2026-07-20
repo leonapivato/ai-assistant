@@ -58,10 +58,14 @@ gh pr list --state open --limit 200 --json number,title,headRefName,body
 gh issue list --state open --limit 200 --json number,title,body
 ```
 
-Set `--limit` on **both**: `gh pr list` defaults to 30 and `gh issue list` to
-30, so a subsystem claimed by an older open item silently falls off the page and
-reads as available. Raise them further if the repo ever carries more open items
-than that.
+Set `--limit` on **both**: both commands default to 30, so a subsystem claimed
+by an older open item silently falls off the page and reads as available.
+
+**If either command returns exactly 200 results, stop** — the list was probably
+truncated, and a lane claimed by an item beyond it would read as unclaimed. Page
+through with `gh api --paginate` instead, or raise the limit until the count
+comes back short. A scan that might be incomplete cannot support "no PR or issue
+already covers this."
 
 Read the **bodies**, not just the titles: a PR called "First vertical follow-up"
 on a branch named `feature/next` can claim the `tools` subsystem in a checklist
