@@ -180,8 +180,8 @@ def _fixtures_requested_by(suite: type, test_names: Iterable[str]) -> set[str]:
     return requested
 
 
-def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
-    """Report whether calling ``func`` with only ``self`` produces a ``fake``.
+def _fixture_value(func: Callable[..., object]) -> object | None:
+    """Return what calling ``func`` with only ``self`` produces, or ``None``.
 
     Evaluation, not inspection, is the whole point: only running the fixture
     shows what the conformance suite is actually handed. A lexical check --
@@ -195,7 +195,7 @@ def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
     hole, and no canonical fake needs one today.
     """
     if list(inspect.signature(func).parameters) != ["self"]:
-        return False
+        return None
     try:
         # A subject fixture builds its subject and ignores `self`; one that
         # does use it is simply unproven, per the docstring above.
@@ -205,19 +205,29 @@ def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
             produced = next(generator)
             generator.close()  # do not leave the fixture's teardown pending
     except Exception:  # an unevaluable fixture is unproven here, not a failure
-        return False
-    return isinstance(produced, fake)
+        return None
+    return produced
 
 
-def _binds_fake(cls: type, protocol: str, subject_fixtures: set[str]) -> bool:
+def _binds_fake(cls: type, protocol: str, requested: set[str]) -> bool:
     """Report whether ``cls`` supplies the canonical fake to its conformance suite.
 
-    Both conditions are object identity rather than text: the test module
-    imported the canonical fake itself (not a same-named local stand-in), and
-    one of the fixtures the suite's tests actually *request* evaluates to an
-    instance of it. A mention of the fake in a docstring, an unused import, a
-    constructor call on a dead branch, or a decoy fixture no contract test
-    consumes is not a binding.
+    Two things must hold, both by object identity rather than text. The test
+    module must have imported the canonical fake itself, not a same-named local
+    stand-in. And among the fixtures ``cls`` defines that the suite's tests
+    actually request, one must evaluate to an instance of that fake -- while
+    none evaluates to a *different* implementation of the same Protocol.
+
+    That second clause is what distinguishes the two things a second fixture
+    can be. An auxiliary fixture (a limit, a clock, an expected value) does not
+    satisfy the Protocol and is none of this check's business; the suite is
+    free to declare as many as it likes. A second *subject* does satisfy it,
+    and means the assertions may have run against a real implementation
+    standing beside the fake -- which is not a binding.
+
+    A mention of the fake in a docstring, an unused import, a constructor call
+    on a dead branch, or a decoy fixture no contract test consumes is likewise
+    not a binding.
     """
     fake_name = f"Fake{protocol}"
     canonical = _canonical_fake(protocol)
@@ -227,11 +237,18 @@ def _binds_fake(cls: type, protocol: str, subject_fixtures: set[str]) -> bool:
     module = sys.modules.get(cls.__module__)
     if getattr(module, fake_name, None) is not fake:
         return False
-    supplied = {name: func for name, func in _own_fixtures(cls).items() if name in subject_fixtures}
-    # `all`, not `any`: a class that hands the suite a real implementation
-    # through one requested fixture and the fake through another has not put
-    # the fake under test, whichever one the assertions happen to use.
-    return bool(supplied) and all(_fixture_yields(func, fake) for func in supplied.values())
+
+    subject_type = getattr(protocols_module, protocol)
+    values = [
+        value
+        for name, func in _own_fixtures(cls).items()
+        if name in requested and (value := _fixture_value(func)) is not None
+    ]
+    if not any(isinstance(value, fake) for value in values):
+        return False
+    return not any(
+        isinstance(value, subject_type) and not isinstance(value, fake) for value in values
+    )
 
 
 def _suite_of(cls: type, protocol: str) -> type | None:
@@ -522,6 +539,17 @@ class _BoundToAnEmptySuite(_EmptySuite):
     def test_something_of_its_own(self) -> None: ...
 
 
+class _ARealMemoryStore:
+    """Stands in for a non-canonical MemoryStore implementation.
+
+    Only the method *names* matter: the Protocols in ``core`` are
+    ``@runtime_checkable``, so ``isinstance`` checks structure, which is
+    exactly the "is this a second subject?" question ``_binds_fake`` asks.
+    """
+
+    add = clear = delete = export = get = purge_expired = search = staticmethod(lambda *a: None)
+
+
 class _DecoyFixture:
     """Supplies a non-fake through the subject fixture, the fake through a decoy."""
 
@@ -663,10 +691,24 @@ def test_suppressing_a_suite_test_from_collection_does_not_count() -> None:
 def test_a_second_requested_fixture_supplying_a_real_subject_is_not_a_binding() -> None:
     """The fake cannot ride along beside a real implementation the suite also takes."""
     suite, bound = _suite_and_binding(overridden=())
-    setattr(bound, "probe", pytest.fixture(lambda self: object()))  # noqa: B010
+    setattr(bound, "probe", pytest.fixture(lambda self: _ARealMemoryStore()))  # noqa: B010
     requested = _fixtures_requested_by(suite, _suite_declared_tests(suite)) | {"probe"}
 
     assert not _binds_fake(bound, "MemoryStore", requested)
+
+
+def test_an_auxiliary_fixture_beside_the_subject_is_still_a_binding() -> None:
+    """A suite may request whatever else it needs; only a second *subject* is a problem.
+
+    Requiring every requested fixture to be the fake would make the seam
+    unable to carry a limit, a clock, or an expected value -- a restriction
+    CONTRIBUTING never places on a conformance suite.
+    """
+    suite, bound = _suite_and_binding(overridden=())
+    setattr(bound, "expected_limit", pytest.fixture(lambda self: 10))  # noqa: B010
+    requested = _fixtures_requested_by(suite, _suite_declared_tests(suite)) | {"expected_limit"}
+
+    assert _binds_fake(bound, "MemoryStore", requested)
 
 
 def _suite_and_binding(*, overridden: tuple[str, ...]) -> tuple[type, type]:
