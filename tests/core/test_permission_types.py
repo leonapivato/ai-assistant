@@ -327,6 +327,25 @@ def test_a_decision_is_detached_from_the_request_it_was_built_from(
     assert made.model_dump(mode="json") == before
 
 
+def test_a_request_is_detached_from_the_definition_it_was_built_from() -> None:
+    """The window between `decide()` returning and `from_request()` being called.
+
+    A caller holds the `ToolDefinition` it built the request from. If the
+    request shared it, mutating that original after the policy had ruled would
+    change what the request is *about*, and `from_request` would transcribe the
+    mutated version faithfully — recording that the policy approved a
+    declaration it never saw.
+    """
+    declared = tool()
+    request = ActionRequest(tool=declared, step_id="step-1")
+
+    object.__setattr__(declared, "risk_level", RiskLevel.CRITICAL)
+    object.__setattr__(declared.cost, "basis", CostBasis.UNKNOWN)
+
+    assert request.tool.risk_level is RiskLevel.LOW
+    assert request.tool.cost.basis is CostBasis.FREE
+
+
 def test_a_substituted_definition_stops_a_decision_authorising_the_request() -> None:
     """The detachment above is what turns tampering into a refusal.
 

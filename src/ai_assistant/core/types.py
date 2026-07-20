@@ -1513,6 +1513,25 @@ type DurableIdentifier = Annotated[Identifier, AfterValidator(_durable_identifie
 """An :data:`Identifier` that survives serialisation — for fields a record keeps."""
 
 
+def _detached_tool(value: ToolDefinition) -> ToolDefinition:
+    """Take the request's own copy of the declaration it is about.
+
+    Pydantic passes an already-valid model instance through without copying, so
+    an :class:`ActionRequest` would otherwise share the caller's
+    ``ToolDefinition`` — and ``object.__setattr__`` on that original would
+    change what the request *is about* after a policy had already ruled on it,
+    with :meth:`PermissionDecision.from_request` then transcribing the mutated
+    version faithfully.
+
+    This is the first of the three copies that make ADR-0021 §1's binding hold
+    end to end, and each closes a different window: the request takes its own
+    subject here, ``from_request`` takes the decision's, and ``AuditTrail.record``
+    revalidates what it stores. Between them no reference a caller still holds
+    reaches recorded state.
+    """
+    return value.model_copy(deep=True)
+
+
 def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
     """Render ``parameters`` in the exact form ADR-0021 §1 pins for the digest.
 
@@ -1587,7 +1606,9 @@ class ActionRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    tool: ToolDefinition = Field(description="The declaration being ruled on, by value.")
+    tool: Annotated[ToolDefinition, AfterValidator(_detached_tool)] = Field(
+        description="The declaration being ruled on, by value."
+    )
     parameters: Annotated[FrozenJsonMapping, AfterValidator(_digestible)] = Field(
         default=_EMPTY_PARAMS,
         description="The arguments the call proposes; bound by digest, never stored.",
