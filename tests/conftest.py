@@ -87,7 +87,10 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     if owner is None:
         return
     cls, name = owner
-    if report.skipped and report.when == "call":
+    # `wasxfail` marks an xfail, which also reports as skipped at the call
+    # phase. An expected *failure* is a contract assertion that did not hold --
+    # the opposite of an obligation being honoured -- so it is recorded nowhere.
+    if report.skipped and report.when == "call" and not hasattr(report, "wasxfail"):
         # The body ran and chose to bow out -- see ContextProviderContract's
         # `serves_a_fixed_instant`. A *mark* skips at setup instead, before the
         # body runs; that is imposed from outside the contract and is recorded
