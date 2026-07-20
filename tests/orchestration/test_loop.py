@@ -62,7 +62,7 @@ class _FailingSearchStore(FakeMemoryStore):
     """The canonical store with retrieval broken.
 
     ``FakeMemoryStore`` has no configured failure mode the way
-    ``FakeContextProvider`` does (issue filed), and the degradation path needs
+    ``FakeContextProvider`` does (issue #105), and the degradation path needs
     one. Narrowly overriding the single method under test keeps the rest of the
     contract-correct fake rather than hand-rolling a mock of the whole store.
     """
@@ -335,7 +335,7 @@ async def test_learn_stamps_expiry_on_a_temporary_store() -> None:
 async def test_learn_reports_a_merge_without_applying_it() -> None:
     """MERGE is memory's own semantics; this loop reports it rather than forking it.
 
-    Documented in ADR-0022 §4 and tracked as a follow-up: folding two records
+    Documented in ADR-0022 §4 and tracked as issue #103: folding two records
     lives in ``MemoryIngestor``, which golden rule 1 forbids importing here.
     """
     memory = FakeMemoryStore(now=_clock)
