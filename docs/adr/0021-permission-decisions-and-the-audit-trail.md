@@ -455,7 +455,7 @@ that forgets what it was built to remember. Whether an audit trail should have a
 TTL at all is a genuine question with a privacy argument on each side, and it
 does not block anything. Issue #108.
 
-### 5. What every policy must satisfy: monotone, and fail-closed twice
+### 5. What every policy must satisfy: monotone, and fail-closed twice over
 
 A policy is *the user's*, so the contract cannot fix a threshold — "confirm at
 or above `MEDIUM`" is a setting, not a decision this ADR gets to make. What it
@@ -473,11 +473,45 @@ threshold comparison is written the wrong way round — including, concretely, t
 `RiskLevel.CRITICAL < RiskLevel.LOW` inversion ADR-0016 §2 disarmed on the type
 but which a policy could still reproduce in its own arithmetic.
 
-**Tier 0 disclosure is never auto-granted.** A definition whose `discloses`
-contains `SECRET` may not receive `ALLOW`. Transmitting a credential off-device
-is the one action for which no configuration should be able to remove the human,
-and ADR-0004 §3's whole treatment of Tier 0 — keyring-only, never in the
-database, never in a file — makes silent egress of it incoherent.
+**Off-device disclosure is never auto-granted.** A definition whose `discloses`
+contains `SECRET` or `PERSONAL` may not receive `ALLOW`.
+
+This is the enforceable form of the two-field rule ADR-0016 §2 states as an
+obligation on this subsystem — *"`reversibility` alone is not sufficient to
+auto-grant … Reading both fields is not an implementation detail left to
+`permissions`"* — and it has to be a floor rather than something weaker, because
+nothing weaker is checkable. An earlier draft of this ADR tried monotonicity
+alone and then conceded, in writing, that a policy keyed on `reversibility`
+could ignore `discloses` entirely and still conform. That is not a gap to
+disclose; it is a ratified obligation left unmet, and disclosing it does not
+discharge it. Monotonicity cannot carry this weight in principle: a function
+that ignores an input is monotone in that input, so no monotonicity requirement
+can ever force a field to be read.
+
+The floor and monotonicity are also not independent — given monotonicity, the
+floor is the *only* form the obligation can take. If some request with
+`discloses=(PERSONAL,)` were `ALLOW`, the otherwise-identical request with
+`discloses=()` is less severe and so is `ALLOW` too, and disclosure has been
+shown to make no difference at the auto-grant boundary. Forbidding `ALLOW`
+outright is therefore not a strong reading of ADR-0016 §2; it is the reading.
+
+**The cost is over-prompting, and ADR-0016 already accepted it.** Almost every
+hosted integration transmits something, and the tuples are ceilings (ADR-0016
+§3), so this floor means most real tools reach `CONFIRM` rather than `ALLOW`.
+ADR-0016's own Consequences call that *"the safe direction"* for a bound to err
+in. The relief valve is deliberately **not** a policy quietly deciding on the
+user's behalf: it is the standing grant (§6), which ADR-0017 §3 already
+anticipates when it accepts an authorisation tracing to *"a user decision or a
+standing user policy"*. A user who wants their calendar tool to stop asking says
+so once, on the record; the difference between that and an auto-grant is the
+whole point.
+
+An earlier draft argued the floor would reproduce the "trains its user to
+approve everything" failure ADR-0016 §5 warns of. That was a misreading: §5's
+argument is about *tool granularity* — why an integration registers one
+definition per operation rather than merging read and send into one
+conservative declaration — and it says nothing about prompt volume arising from
+disclosure.
 
 **An `UNKNOWN` cost is never auto-granted.** ADR-0016 §4 ratified `UNKNOWN` as
 *"declared: the author does not know — policy must fail closed"*, and this is
@@ -485,31 +519,28 @@ where that clause acquires an enforcer. `FREE` is a fact a spend policy can add
 to a total; `UNKNOWN` is an absence of information, and an implementation that
 treated the two alike would make the enum pointless.
 
-**What these obligations deliberately do not force, so nobody reads more into
-them than is there.** They do *not* force a policy to read `discloses` for the
-`PERSONAL` tier. Monotonicity is trivially satisfied by ignoring a field —
-a constant function is monotone — so a policy keyed on `reversibility` alone
-conforms to every rule above while walking straight into the trap ADR-0016 §2
-warns of. That is a real gap and it is stated rather than papered over, because
-the alternative was worse: a fixed floor requiring confirmation for any
-`PERSONAL` disclosure would prompt on essentially every hosted integration,
-since almost all of them transmit something and the tuples are ceilings (ADR-0016
-§3). That is the "trains its user to approve everything" failure ADR-0016 §5
-rejects a merge rule for, arriving from the other side.
+**What these obligations do not force, so nobody reads more into them than is
+there.** They fix a *shape*, not a policy. Within the floors, a conforming
+implementation may be arbitrarily permissive — a policy that returns `CONFIRM`
+for everything and one that returns `ALLOW` for every non-disclosing, known-cost
+tool are both conforming, and neither is what a user would want. Choosing the
+thresholds between them is the default policy's job, not the contract's, and the
+conformance suite deliberately cannot tell a good policy from a mediocre one.
 
-What closes it instead is not a type: it is the default policy the
-implementation PR ships, which reads both fields, plus the fact that §1 records
-the declaration in the trail — so an auto-granted disclosure is *visible* to
-whoever reads it. A gap named with a mitigation is the honest position here;
-ADR-0018's durable lesson was that a security property claimed but not held is
-worse than one bounded and disclosed.
+What the contract does guarantee is that the failures which are *not* matters of
+taste cannot occur: an inverted comparison, a disclosure auto-granted, a cost
+nobody declared treated as free.
 
 ### 6. Deferred
 
-- **Standing grants and policy state.** "Always allow this tool" is the obvious
-  next feature and needs durable, per-user policy state with its own
-  data-rights obligations — a store, not a field. Nothing here forecloses it:
-  a standing grant is a source of an `ALLOW`, not a new outcome.
+- **Standing grants and policy state.** "Always allow this tool" needs durable,
+  per-user policy state with its own data-rights obligations — a store, not a
+  field. It is deferred but **load-bearing**: §5's disclosure floor sends most
+  real tools to `CONFIRM`, and the standing grant is the only sanctioned way to
+  stop asking. Until it lands, a disclosing tool prompts every time, which is
+  the correct default and a poor steady state. Nothing here forecloses it — a
+  standing grant is a recorded user decision that sources an `ALLOW`, not a new
+  outcome and not a policy deciding silently.
 - **Spend accumulation.** The declaration-level rule lands (`UNKNOWN` fails
   closed); a running total against a budget needs invocation to report what was
   actually spent, and ADR-0016 §4 already records that `cost` is an estimate
@@ -560,10 +591,16 @@ worse than one bounded and disclosed.
   shared suite possible for a subsystem whose behaviour is meant to be
   user-configurable. Two hard floors sit under it, both discharging clauses
   other ADRs already ratified rather than inventing policy here.
-- **A conforming policy can still ignore `PERSONAL` disclosure** (§5). Named,
-  with its mitigation, because the fixed floor that would close it produces the
-  approve-everything failure ADR-0016 §5 rejects. Revisit if a real integration
-  suite makes the prompt volume measurable rather than predicted.
+- **ADR-0016 §2's two-field rule is now enforceable rather than exhorted.** A
+  disclosing tool cannot be auto-granted by any conforming policy, which is what
+  that ADR asked of this subsystem and what an earlier draft of this one waived
+  in writing. The cost is over-prompting until standing grants land, and
+  ADR-0016 already accepted over-prompting as the safe direction.
+- **Monotonicity cannot force a field to be read**, and this ADR now says so
+  rather than relying on it. A function that ignores an input is monotone in
+  that input, so any obligation of the form "consider field X" has to be written
+  as a floor. That generalises beyond `discloses` and is worth remembering the
+  next time a shape-based obligation looks sufficient.
 - **`orchestration` gains an obligation the type system does not carry**: it
   must record what it decides. ADR-0014 §4 already forces the `approval_ref` to
   exist; nothing yet forces it to resolve.
