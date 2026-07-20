@@ -66,6 +66,14 @@ fenced snippets are illustrative for a human operator rather than executed code:
 judge them for whether they would mislead a reader, not for runtime correctness,
 error handling, or test coverage.
 
+**The exemption does not extend to normative snippets.** A fenced block can *be*
+the decision — ADR-0016 defines the `ToolRegistry` Protocol in one, and ADR-0015
+§5 requires exactly that class of ADR to carry the architecture lens. Where a
+snippet states a contract the repository will implement against, it is judged as
+a contract: its internal validity is the subject of the review, not scenery
+around it. The preamble distinguishes the two rather than exempting a file type
+wholesale.
+
 It goes in the invocation because the rubrics and the guide are *standing*
 contracts — they are true of every change, and both reviewers and authors read
 them as such. What this particular diff is, is per-run data, and belongs where
