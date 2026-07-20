@@ -51,9 +51,16 @@ if ! command -v codex >/dev/null 2>&1; then
     exit 127
 fi
 
-diff="$(git diff "${base}...HEAD")"
+# Resolve HEAD to an immutable SHA *before* diffing, and review that SHA rather
+# than the moving ref. A review can run for minutes; if HEAD advances meanwhile,
+# re-resolving afterwards would file this diff under a commit Codex never saw,
+# and ship.sh would accept it as evidence for that commit. Pinning here means
+# the artifact always names exactly the code that was reviewed.
+sha="$(git rev-parse HEAD)"
+
+diff="$(git diff "${base}...${sha}")"
 if [[ -z "$diff" ]]; then
-    echo "no changes between ${base} and HEAD to review" >&2
+    echo "no changes between ${base} and ${sha} to review" >&2
     exit 0
 fi
 
@@ -66,7 +73,7 @@ trap 'rm -f "$prompt"' EXIT
     echo
     echo "## Change under review"
     echo
-    echo "Review ONLY the committed diff below (HEAD vs ${base}). You may read full"
+    echo "Review ONLY the committed diff below (${sha} vs ${base}). You may read full"
     echo "files in the repo for context, but do not modify anything. Output exactly the"
     echo "ranked findings and verdict from docs/review/guide.md."
     echo
@@ -103,11 +110,20 @@ echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
 # -o captures just the final review; progress streams to stderr.
 codex exec "${sandbox_args[@]}" "${model_args[@]}" -o "$out" - <"$prompt" >&2
 
+# An artifact is evidence that a review happened, so an empty one is worse than
+# none: ship.sh checks that the file exists, and would post silence as though it
+# were a clean review. Codex can exit 0 having written nothing (a dropped
+# connection, a refusal); fail loudly instead of recording that.
+if [[ ! -s "$out" ]] || ! grep -q '[^[:space:]]' "$out"; then
+    echo "codex produced an empty review; not recording an artifact" >&2
+    echo "re-run: scripts/codex-review.sh ${persona} ${base}" >&2
+    exit 1
+fi
+
 # Record the review against the exact commit it covers (ADR-0015 §1). `just
-# ship` refuses to report a review whose SHA does not match HEAD, which turns
-# "did you review the current code?" from a matter of care into a check. The
-# artifact is git-ignored: it is evidence for the local ship step, not history.
-sha="$(git rev-parse HEAD)"
+# ship` refuses to report a review whose SHA does not match the PR head, which
+# turns "did you review the current code?" from a matter of care into a check.
+# The artifact is git-ignored: evidence for the local ship step, not history.
 review_dir="${repo_root}/.review"
 mkdir -p "$review_dir"
 artifact="${review_dir}/${sha}-${persona}.md"

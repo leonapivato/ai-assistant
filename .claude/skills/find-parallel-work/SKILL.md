@@ -23,10 +23,20 @@ git show origin/main:src/ai_assistant/core/types.py
 ```
 
 For the derived picture — module counts per package, Protocol inventory, ADR
-states — run `python3 scripts/project_status.py` (stdlib-only, runnable bare).
-It reads the working tree, so fast-forward the clone first
-(`git merge --ff-only origin/main` while on `main`) or its answer is the stale
-one you just avoided.
+states — `project_status.py` reads a *checkout*, not a ref, so point it at a
+disposable one rather than at wherever you happen to be standing (you are
+normally on a feature branch, which has neither `origin/main`'s content nor a
+fast-forward path to it):
+
+```bash
+tmp="$(mktemp -d)"
+git worktree add --detach --quiet "$tmp/survey" origin/main
+python3 scripts/project_status.py --root "$tmp/survey"   # stdlib-only, runnable bare
+git worktree remove "$tmp/survey" && rm -rf "$tmp"
+```
+
+`--root` exists for exactly this. Remove the worktree even if a step in between
+fails, so a partial survey does not stay registered.
 
 Also check what is already claimed by open work:
 

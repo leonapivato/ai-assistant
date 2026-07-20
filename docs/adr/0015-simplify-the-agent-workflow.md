@@ -50,10 +50,20 @@ manually-dispatched agent can follow correctly.
 `.github/workflows/codex-review.yml` and `scripts/codex_review_decision.py` are
 removed. `scripts/codex-review.sh` is unchanged in what it does — Codex, a model
 independent of the one writing the code, still reviews every change — but now
-also writes its output to `.review/<sha>.md`. A `pre-push` hook refuses to push
-a branch whose `HEAD` has no matching review artifact. The reviewer's
-independence is preserved; only the hosted execution is dropped. Review outcome
-is reported by pasting the local review into the PR before merge.
+also writes its output to `.review/<sha>-<persona>.md`, keyed to the commit it
+actually reviewed. The reviewer's independence is preserved; only the hosted
+execution is dropped.
+
+The review reaches the PR through `just ship` (`scripts/ship.sh`), which posts
+the recorded review(s) and **refuses unless one exists for the exact commit the
+PR head is on** — also refusing on a dirty tree, on `main`, and when the PR head
+is behind local `HEAD`. A change touching `core/protocols.py` or `core/types.py`
+must additionally carry the architecture lens.
+
+This check sits at ship, not in a `pre-push` hook. Review is a pre-merge step;
+gating every push would force a full Codex run per WIP commit — the per-push
+cost pattern this ADR exists to remove — while ship is the one point where the
+review actually has to be current.
 
 We accept that a pasted review is self-attested where a CI-posted one was not.
 The SHA anchor makes the common failure — a review of a stale commit — mechanical

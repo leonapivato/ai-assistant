@@ -30,8 +30,18 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _init_repo(repo: Path) -> str:
-    """A repo on a feature branch with one commit; returns the HEAD SHA."""
+def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
+    """A repo on a feature branch, with an `origin` holding `main`.
+
+    A real remote is needed because ship.sh fetches the PR's base branch to
+    decide whether the diff touches the shared contract surface. ``touches_core``
+    puts the change in ``core/protocols.py`` instead of an ordinary file, which
+    is what should demand the architecture lens.
+    """
+    origin = repo.parent / "origin.git"
+    subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [str(_GIT), "init", "-q", "--bare", "-b", "main", str(origin)], check=True
+    )
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
@@ -40,8 +50,16 @@ def _init_repo(repo: Path) -> str:
     (repo / "f.txt").write_text("one\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-q", "origin", "main")
+
     _git(repo, "checkout", "-qb", "feature")
-    (repo / "f.txt").write_text("two\n")
+    if touches_core:
+        core = repo / "src" / "ai_assistant" / "core"
+        core.mkdir(parents=True)
+        (core / "protocols.py").write_text("class Thing: ...\n")
+    else:
+        (repo / "f.txt").write_text("two\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "change")
     return _git(repo, "rev-parse", "HEAD")
@@ -62,6 +80,7 @@ def _fake_gh(bin_dir: Path) -> None:
         '    case "$a" in\n'
         '      headRefOid) printf "%s\\n" "$GH_PR_SHA"; exit 0 ;;\n'
         "      number) printf '42\\n'; exit 0 ;;\n"
+        "      baseRefName) printf 'main\\n'; exit 0 ;;\n"
         "    esac\n"
         "  done\n"
         "fi\n"
@@ -183,6 +202,44 @@ def test_posts_every_persona_recorded_for_the_commit(tmp_path: Path) -> None:
     posted = (tmp_path / "comment.md").read_text()
     assert "adversarial finding" in posted
     assert "architecture finding" in posted
+
+
+def test_refuses_a_core_change_without_the_architecture_lens(tmp_path: Path) -> None:
+    """A contract change needs both lenses — previously documented, not checked."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo, touches_core=True)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "architecture" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_posts_a_core_change_carrying_both_lenses(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo, touches_core=True)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+    _record_review(repo, sha, "architecture")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "comment.md").exists()
+
+
+def test_a_non_core_change_needs_only_the_adversarial_lens(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_refuses_on_main(tmp_path: Path) -> None:
