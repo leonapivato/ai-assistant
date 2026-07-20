@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `orchestration`: `LearningLoop`, the first working slice of the request
+  pipeline and the roadmap's first closed vertical (ADR-0022). `respond()` runs
+  intent → context assembly → memory retrieval → planning; `learn()` turns a
+  `FeedbackEvent` into memory-update proposals, has the policy rule on each, and
+  writes what it accepts. The two are separate calls because a correction
+  arrives whenever the user gets round to it, usually not within the turn it
+  corrects. Every collaborator is injected and seen only through its `core`
+  Protocol — the engine imports no subsystem — so the same loop runs against the
+  canonical fakes and the real subsystems. Failure behaviour follows one rule: a
+  stage aborts the turn when continuing would require inventing something,
+  and otherwise degrades and says so. A failed context assembly therefore
+  propagates (fabricating a situation the planner would treat as fact is worse
+  than stopping), while a failed retrieval yields no memories and reports
+  `TurnResult.memory_degraded` — an unpersonalised answer is the degradation a
+  user of this system most deserves to be told about, since silently answering
+  generically is the failure that looks most like success. Deliberately not
+  included: tool selection, permission checking, and execution, none of which
+  can be written honestly while `Tool.invoke` remains deferred (ADR-0016 §7). A
+  `MERGE` ruling is reported but not applied, because folding two records is
+  `memory`'s own semantics and golden rule 1 forbids importing `MemoryIngestor`;
+  ADR-0022's Consequences records that gap and the `MemoryWriter` Protocol that
+  would close it.
+
 - **BREAKING** `tools`/`core`: a new `ToolRegistry` Protocol and the `core`
   types it exchanges (`ToolDefinition`, `RiskLevel`, `Reversibility`,
   `ToolCost`, `CostBasis`, `Idempotency`, `VisibleIdentifier`) plus a

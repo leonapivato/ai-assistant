@@ -106,8 +106,16 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       (ADR-0009). The first closed loop (feedback → proposal → ingest → retrieve)
       is proven by an integration test; `orchestration` will automate the wiring.
       Deferred: `RATING`/implicit signals, a model-backed processor.
-- [ ] **`orchestration` — the pipeline** wiring the above via injected contracts,
-      then the first closed loop above.
+- [x] **`orchestration` — the closed learning loop.** `LearningLoop` wires
+      `ContextProvider`, `MemoryStore`, `MemoryPolicy`, `Planner` and
+      `FeedbackProcessor` by injection, seen only through their Protocols:
+      `respond()` runs intent → context → retrieval → planning, `learn()` runs
+      feedback → proposal → policy → memory, and a test proves a preference
+      learned from a correction is reused on the next turn (ADR-0022). Deferred:
+      tool selection, permission checking and execution — none of which can be
+      written honestly while `Tool.invoke` is deferred (ADR-0016 §7) — plus
+      applying a `MERGE` ruling, which needs a `core` Protocol for the memory
+      write path.
 - [ ] Later: `NotificationCandidate`/proactivity, `EvaluationTrace`/eval harness,
       `DecisionRecord`, `Commitment` ledger, a derived user-model projection ADR.
 
