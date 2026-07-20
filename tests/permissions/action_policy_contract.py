@@ -206,11 +206,22 @@ class ActionPolicyContract:
     async def outcomes(self, policy: ActionPolicy) -> dict[_Declaration, PermissionOutcome]:
         """Rule on every declaration in the cross-product, once.
 
-        The three obligations below are each about one axis, but "everything
-        else held equal" ranges over *every* setting of the others, not the
-        benign defaults a builder happens to start from. Deciding all of them up
-        front is what lets each test assert its own axis at full coverage
-        without three separate sweeps.
+        The three obligations below are each about one axis, and "everything
+        else held equal" has to range over more than the benign defaults a
+        builder starts from — a policy can be monotone in risk for a harmless
+        tool and inverted for a disclosing one. Deciding the product up front is
+        what lets each test assert its own axis across the others without three
+        separate sweeps.
+
+        **The product covers the four fields the obligations are stated over**
+        — risk, reversibility, disclosure reach, and cost as a held-fixed
+        context — not every field of a ``ToolDefinition``. A policy keying on
+        ``writes``, on ``reads``, or on a ``PER_CALL`` price could still invert
+        somewhere this never looks. That is a real limit and it is written down
+        rather than papered over: the alternative is a product that multiplies
+        with every field the type grows, and ADR-0021 §5 states monotonicity
+        over risk, reversibility and disclosure specifically. Widening this is
+        cheap if a policy ever keys on more.
         """
         return {
             declared: (await _ruling_for(policy, action(tool=declared.tool()))).outcome
@@ -227,16 +238,18 @@ class ActionPolicyContract:
         ``RiskLevel.CRITICAL < RiskLevel.LOW`` inversion ADR-0016 §2 disarmed on
         the type but which a policy could still reproduce in its own arithmetic.
 
-        Checked at every setting of the other fields, because a policy can be
-        monotone in risk for a benign tool and inverted for a disclosing one —
-        and it is the disclosing one that matters.
+        Checked across every combination of the other three fields in the
+        product (see the ``outcomes`` fixture for what that does and does not
+        span), because a policy can be monotone in risk for a benign tool and
+        inverted for a disclosing one — and it is the disclosing one that
+        matters.
         """
         _assert_monotone(outcomes, axis="risk")
 
     async def test_raising_irreversibility_never_relaxes_the_outcome(
         self, outcomes: dict[_Declaration, PermissionOutcome]
     ) -> None:
-        """The same, over the reversibility scale, at every setting of the rest."""
+        """The same, over the reversibility scale, across the rest of the product."""
         _assert_monotone(outcomes, axis="reversibility")
 
     async def test_widening_disclosure_never_relaxes_the_outcome(
