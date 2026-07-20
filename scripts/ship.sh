@@ -75,12 +75,18 @@ base_ref="$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null || true)
 # the range check and the core/ scan would silently validate the wrong diff.
 # Refuse rather than build fork support for a workflow nobody here runs: a loud
 # stop is recoverable, a quietly-wrong contract check is not.
-base_repo="$(gh pr view --json baseRepository --jq '.baseRepository.owner.login + "/" + .baseRepository.name' 2>/dev/null || true)"
-origin_repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
-if [[ -n "$base_repo" && -n "$origin_repo" && "$base_repo" != "$origin_repo" ]]; then
-    die "this PR targets ${base_repo} but origin is ${origin_repo}
-     ship assumes origin is the PR's base repository (ADR-0015 clone-per-agent)
-     from a fork, post the review by hand"
+#
+# `isCrossRepository` is a real `gh pr view` field, unlike the `baseRepository`
+# this first reached for — which does not exist, so the query failed, the error
+# was swallowed, and the check silently never ran. Errors are not suppressed
+# here for that reason: a check that cannot run must stop the ship, not wave it
+# through.
+cross_repo="$(gh pr view --json isCrossRepository --jq .isCrossRepository)" ||
+    die "could not determine whether this PR comes from a fork"
+if [[ "$cross_repo" == "true" ]]; then
+    die "this PR comes from a fork, so origin is not its base repository
+     ship assumes origin is the base repo (ADR-0015 clone-per-agent)
+     post the review by hand instead"
 fi
 # Fetch the base so the comparison is against the real merge target, not a
 # possibly-stale local ref; FETCH_HEAD is that ref as of this moment.
