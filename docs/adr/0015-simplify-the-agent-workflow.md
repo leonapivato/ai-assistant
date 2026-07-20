@@ -1,7 +1,10 @@
 # 15. Simplify the agent workflow: local review, clone per agent, issues over files
 
-- Status: Accepted
+- Status: Accepted, partially superseded by ADR-0020
 - Date: 2026-07-19
+- Superseded: 2026-07-20 by ADR-0020 — §1's freshness clause ("refuses unless
+  one exists for the exact commit the PR head is on") is replaced by an anchor on
+  the reviewed content rather than the commit. The rest of §1 and §§2–5 stand.
 - Supersedes: ADR-0012 (Codex review in CI)
 - Amends: ADR-0010 §"working on GitHub" (review reporting), ADR-0003
   ("Coordinating parallel work")
