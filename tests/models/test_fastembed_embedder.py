@@ -282,6 +282,71 @@ async def test_a_failed_embed_raises_model_error() -> None:
     assert isinstance(caught.value.__cause__, RuntimeError)
 
 
+class _MalformedModel:
+    """A loaded model that returns whatever it is told to."""
+
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self._vectors = vectors
+
+    def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
+        return iter(self._vectors)
+
+
+class _MalformedBackend(_StubBackend):
+    """A backend whose model breaks the Embedder contract."""
+
+    def __init__(self, vectors: list[list[float]]) -> None:
+        super().__init__()
+        self._vectors = vectors
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        self.loads.append(model)
+        return _MalformedModel(self._vectors)
+
+
+def _ok_vector() -> list[float]:
+    return [0.0] * _STUB_DIMENSIONS
+
+
+async def test_too_few_vectors_raises_rather_than_misaligning() -> None:
+    # The dangerous one. A caller zips these against its own records, so a short
+    # batch would file every record after the gap under another record's vector.
+    # Failing loudly is the only safe answer.
+    embedder = _stub_embedder(_MalformedBackend([_ok_vector()]))
+
+    with pytest.raises(ModelError, match="returned 1 vectors for 2 text"):
+        await embedder.embed(["alpha", "beta"])
+
+
+async def test_too_many_vectors_raises() -> None:
+    embedder = _stub_embedder(_MalformedBackend([_ok_vector(), _ok_vector()]))
+
+    with pytest.raises(ModelError, match="returned 2 vectors for 1 text"):
+        await embedder.embed(["alpha"])
+
+
+async def test_a_wrong_dimension_vector_raises() -> None:
+    # Would otherwise corrupt the store's vector column, which was sized from
+    # `dimensions` at construction.
+    embedder = _stub_embedder(_MalformedBackend([_ok_vector(), [0.0] * (_STUB_DIMENSIONS - 1)]))
+
+    with pytest.raises(ModelError, match="15-dimensional vector at index 1"):
+        await embedder.embed(["alpha", "beta"])
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+async def test_a_non_finite_component_raises(bad: float) -> None:
+    # inf and NaN are floats and would pass a type check, but they poison every
+    # later similarity: inf/inf is NaN, and a NaN distance makes a record
+    # unrankable against any query.
+    vector = _ok_vector()
+    vector[3] = bad
+    embedder = _stub_embedder(_MalformedBackend([vector]))
+
+    with pytest.raises(ModelError, match="non-finite component in the vector at index 0"):
+        await embedder.embed(["alpha"])
+
+
 def test_the_stub_distinguishes_the_contract_inputs() -> None:
     # Guards the guard. The contract's batch-order check compares the i-th vector
     # of a batch against that text embedded alone; if two of its inputs embedded
