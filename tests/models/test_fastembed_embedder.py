@@ -342,6 +342,54 @@ def test_a_backend_that_cannot_report_its_models_raises_model_error() -> None:
     assert isinstance(caught.value.__cause__, RuntimeError)
 
 
+class _HostileMappingBackend:
+    """A backend whose metadata mapping misbehaves when it is read."""
+
+    def __init__(self, mapping: Mapping[str, int]) -> None:
+        self._mapping = mapping
+
+    def dimensions_by_model(self) -> Mapping[str, int]:
+        return self._mapping
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        raise AssertionError("must not be reached")
+
+
+class _RaisingMapping(dict[str, int]):
+    """A mapping that raises when queried rather than when built."""
+
+    def get(self, key: str, default: object = None) -> int:
+        raise RuntimeError("lazy metadata blew up")
+
+
+def test_a_mapping_that_raises_on_lookup_raises_model_error() -> None:
+    # The failure can come from reading the mapping, not only from the call that
+    # produced it, so the exception boundary has to cover the lookup too.
+    backend = _HostileMappingBackend(_RaisingMapping())
+
+    with pytest.raises(ModelError, match="could not report its supported models") as caught:
+        FastEmbedEmbedder(model=_STUB_MODEL, backend=backend)
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+@pytest.mark.parametrize("reported", ["not-a-number", object()])
+def test_a_non_numeric_dimension_raises_model_error(reported: object) -> None:
+    # Without this, `dimensions < 1` raises a bare TypeError past the
+    # constructor's documented ModelError.
+    backend = _HostileMappingBackend({_STUB_MODEL: reported})  # type: ignore[dict-item]  # deliberately malformed
+
+    with pytest.raises(ModelError, match="non-numeric dimension"):
+        FastEmbedEmbedder(model=_STUB_MODEL, backend=backend)
+
+
+def test_a_backend_returning_no_mapping_raises_model_error() -> None:
+    backend = _HostileMappingBackend(None)  # type: ignore[arg-type]  # deliberately malformed
+
+    with pytest.raises(ModelError, match="could not report its supported models"):
+        FastEmbedEmbedder(model=_STUB_MODEL, backend=backend)
+
+
 async def test_a_failed_load_raises_model_error() -> None:
     embedder = _stub_embedder(_FailingLoadBackend())
 
