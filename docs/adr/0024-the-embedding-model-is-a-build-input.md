@@ -76,12 +76,14 @@ wrong.
 **Crossing the limit is a publish-time failure — but not a harmless one, because
 a release is not atomic.** A wheel over 100 MiB is rejected by PyPI's upload API
 (remedy: a limit increase, granted routinely, or a data-only package). But files
-upload one at a time, so an sdist accepted before the oversized wheel is rejected
-leaves a release with no wheel, and `pip` falls back to the sdist and runs the
-build — and its fetch — on the user's machine, failing if they are offline. The
-release procedure must therefore check the built wheel against the limit *before*
-uploading anything. With 41.6 MiB of headroom that is a tripwire, not a live
-risk — but the categorical "no user-visible breakage" claim was wrong.
+upload one at a time, so an sdist accepted before the wheel fails — rejected for
+size *or* lost to a transient upload error — leaves a release with no wheel, and
+`pip` falls back to the sdist and runs the build (and its fetch) on the user's
+machine, failing if they are offline. The release procedure must therefore
+size-check the wheel first *and* upload it before the sdist, so no partial
+release can resolve to a fetching sdist. With 41.6 MiB of headroom the size limit
+is a tripwire, not a live risk — but the categorical "no user-visible breakage"
+claim was wrong.
 
 ## Decision
 
@@ -107,24 +109,24 @@ The pin is a commit SHA and a SHA-256 per file, recorded as constants in the
 repository. Both are checked at build time; a mismatch fails the build. Changing
 which weights this product runs therefore requires a reviewed commit.
 
-**`model_id` incorporates the pinned revision, not just the model name.** This
-is the one identity change the pin forces, and its scope is exactly the pin.
+**`model_id` incorporates the pinned revision, not just the model name.**
 ADR-0006 §4 requires a store to detect a model change and re-embed; a `model_id`
 of `BAAI/bge-small-en-v1.5` cannot, because bumping the pin changes the weights
-while the name and the 384 dimensions stay identical, so `SqliteMemoryStore`
-would rank existing vectors against queries from new weights — silently, the
-corruption §4 exists to prevent. Folding the revision into `model_id` closes
-that. It is an implementation change within the existing `Embedder.model_id`
-contract, not a Protocol change.
+while the name and 384 dimensions stay identical, so `SqliteMemoryStore` would
+rank existing vectors against queries from new weights — silently, the corruption
+§4 exists to prevent. Folding the revision in closes that: an implementation
+change within the existing `Embedder.model_id` contract, not a Protocol change.
 
-**It does not claim to fully fingerprint the embedding space, and this ADR does
-not try to.** On `main`, `model_id` is the bare model name and captures *no*
-runtime-stack version — not the tokenizer's, not fastembed's — so a dependency
-change that alters vectors is already undetectable by the store. That is a
-pre-existing ADR-0006 §4 gap, independent of how the model is provisioned, and
-wants a behavioural fingerprint rather than a pile of version strings. Filed as
-**issue #136**; out of scope here. This ADR closes only the revision axis, and
-only for the vendored default.
+**It does not claim to fully fingerprint the embedding space.** On `main`,
+`model_id` is the bare model name and captures *no* runtime-stack version — not
+the tokenizer's, not fastembed's — so a dependency change that alters vectors is
+already undetectable, on every provisioning path. That is a pre-existing
+ADR-0006 §4 gap wanting a behavioural fingerprint, filed as **issue #136** and
+out of scope here. It needs no amendment from this ADR: §4 gives the store a
+*detection* mechanism, not a guarantee of a perfect fingerprint, and on `main`
+it already detects only name and dimension. Adding the revision is a strict
+improvement, never a regression — so there is nothing to amend, and completing
+§4's detection is #136's work.
 
 ### 3. fastembed is pinned, not ranged
 
@@ -136,11 +138,13 @@ change from a version bump alone, identical weights and digest.
 
 The defence is to **pin the dependency, not detect the change after the fact.**
 The committed lockfile already fixes `fastembed==0.8.0` (and `tokenizers`,
-`onnxruntime`) for a `uv sync` install; this ADR additionally tightens the
-published runtime specifier to a tested floor and ceiling so a wheel install
-cannot silently resolve an unreviewed version. A fastembed bump is then a
-reviewed change tied to a release — what "release-bound" means — not an open
-range. The residual preprocessing-fingerprint risk is the same #136 gap.
+`onnxruntime`) for a `uv sync` install; this ADR additionally makes the
+*published* specifier the exact pin `fastembed==0.8.0`, not a `<0.9` range — a
+range lets a resolver prefer a later 0.8.x that changes preprocessing under an
+unchanged `model_id`, which is the whole failure this section is about. A
+fastembed bump is then a reviewed change to that constant, tied to a release —
+what "release-bound" means. The residual preprocessing-fingerprint risk is the
+same #136 gap.
 
 ### 4. The artifact is not committed to git
 
@@ -169,6 +173,14 @@ user's own machine, under the same pin.
 a source build that skipped the hook — `embed` raises `ModelError` naming the
 cause. It does not fall back to fetching.
 
+**The existing tests stub the backend and never build or install a
+distribution**, so a hook that verifies the wrong bytes or packages the wrong
+path ships green. The implementation PR must add acceptance tests a hook mistake
+cannot pass: a digest mismatch fails the build leaving nothing staged, the built
+wheel contains the artifact at the expected path, the real default embedder
+embeds with the network denied, and a missing artifact raises `ModelError`
+without opening a socket.
+
 ### 6. A non-default model remains an opt-in that fetches
 
 Only the default is vendored. Configuring a different fastembed model re-enables
@@ -176,14 +188,12 @@ fastembed's own unpinned download, with none of §2's guarantees — the same sh
 as ADR-0006 §2's opt-in cloud embedder, and documented as such. "Local-first by
 default" is a claim about the default.
 
-That opt-in path carries the pre-existing identity gap in full: an unpinned
-download resolves whatever the default branch holds, and with `model_id` the
-bare name (#136), a store indexed under revision A then re-fetched at B mixes
-vectors silently. This ADR does **not** introduce that — it is today's *default*
-behaviour, which §2 fixes for the vendored model and cannot fix here, because
-fastembed's API takes no revision (§Context). The path exists because ADR-0006
-§2 contemplates model choice; a persistent store on a non-default model is
-subject to #136 until that gap closes.
+That opt-in path carries the identity gap in full: an unpinned download resolves
+whatever the default branch holds, so a store indexed under revision A then
+re-fetched at B mixes vectors silently. This ADR does **not** introduce that — it
+is today's *default* behaviour, which §2 fixes for the vendored model and cannot
+fix here because fastembed's API takes no revision (§Context). A persistent store
+on a non-default model is subject to #136 until that gap closes.
 
 ### 7. What this ADR does not decide
 
@@ -193,9 +203,8 @@ subject to #136 until that gap closes.
   may hold a network client, making §1 mechanically rather than review-checkable.
 - **It does not resolve the licence discrepancy** — Consequences records it as
   work that must complete before publishing.
-- **It does not give `model_id` a full behavioural fingerprint** (#136). It
-  closes only the revision axis, for the vendored default; the tokenizer and
-  preprocessing axes are a pre-existing ADR-0006 §4 gap.
+- **It does not give `model_id` a full behavioural fingerprint** — only the
+  revision axis, per §2; the rest is #136.
 
 ## Alternatives considered
 
