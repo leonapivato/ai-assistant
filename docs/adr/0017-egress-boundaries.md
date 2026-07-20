@@ -42,8 +42,19 @@ to touch the axis this ADR changes.
 
 **User data may leave the device only from a boundary this ADR approves for
 egress, on the terms §2 sets for that boundary; and every approved boundary
-must have what it transmits declared, and its recipients authorised by the
-user, before it transmits.**
+must have what it transmits declared, and the recipient it addresses
+authorised by the user, before it transmits.**
+
+**"The recipient it addresses", deliberately, not "every recipient that
+receives".** The rule governs the recipient the system chooses and sends to. It
+does not by itself guarantee the bytes reach only that recipient: whether a
+request can be diverted — by a hostile base URL, a cross-host redirect, a
+compromised endpoint — is a transport property, and §2 states per boundary
+which controls are in place. That is a **weaker guarantee than the wording
+might suggest**, and it is stated here rather than discovered later. The
+stronger property, that addressed and actual recipient coincide, is what
+transport pinning buys; `tools/` must have it before it transmits (§3), and
+`models/` does not have it today (§2, issue #83).
 
 This replaces ADR-0004 §2's "only component" clause. Its residency clause (all
 persistent data local, no cloud storage by default) and its telemetry clause
