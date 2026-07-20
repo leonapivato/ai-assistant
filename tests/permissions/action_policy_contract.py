@@ -143,23 +143,40 @@ def _assert_monotone(outcomes: dict[_Declaration, PermissionOutcome], *, axis: s
 async def _ruling_for(policy: ActionPolicy, request: ActionRequest) -> PermissionRuling:
     """Rule on ``request``, checking the invariants **every** ruling must satisfy.
 
-    Two obligations hold for every call rather than for a representative one,
+    Three obligations hold for every call rather than for a representative one,
     and sampling them is how a policy conforms in the cases a suite happens to
     look at and not in the ones it does not:
 
     * ``decide`` is a function of its argument, so a second call on the same
       request must produce an identical ruling — including ``reason``, which is
       what the user is shown.
-    * a fresh ruling may not name an authorisation. This is the one that matters:
-      ``authorised_by`` is a ``str`` a policy could fabricate, and the disclosure
-      floor is written as "``ALLOW`` **with ``authorised_by`` unset**" — so a
-      policy inventing a pointer for exactly the requests the floor covers would
-      auto-grant a disclosure while passing a floor test that only ever saw
-      unauthorised rulings.
+    * a fresh ruling may not name an authorisation. ``authorised_by`` is a
+      ``str`` a policy could fabricate, and the disclosure floor is written as
+      "``ALLOW`` **with ``authorised_by`` unset**" — so a policy inventing a
+      pointer for exactly the requests the floor covers would auto-grant a
+      disclosure while passing a floor test that only ever saw unauthorised
+      rulings.
+    * **``decide`` does not mutate the request it is given.** ADR-0021 §3 takes
+      away the policy's ability to substitute a subject through its *return
+      value* — a ruling has no field naming a tool. The request it was handed is
+      the other end of the same concern: ``frozen=True`` refuses
+      ``request.parameters = ...`` and not
+      ``object.__setattr__(request, "parameters", ...)``, so a policy could rule
+      on a benign payload and hand back a request describing a different one,
+      which ``from_request`` would then transcribe faithfully.
 
-    Routing every ``decide`` in the suite through here is what makes both
+      Stated as a contract obligation because that is the level it can be held
+      at. Nothing *prevents* in-process code from mutating an object it
+      legitimately holds — the same limit ADR-0018 §3 accepts when it says
+      detachment isolates store state rather than making a caller's copy
+      tamper-proof — but a policy that does it is not conforming, and an
+      accidental one is caught here rather than in an audit record.
+
+    Routing every ``decide`` in the suite through here is what makes all three
     universal instead of a spot check, at no cost in test bulk.
     """
+    untouched = request.model_dump(mode="json")
+
     ruled = await policy.decide(request)
     again = await policy.decide(request)
 
@@ -167,6 +184,10 @@ async def _ruling_for(policy: ActionPolicy, request: ActionRequest) -> Permissio
     assert ruled.authorised_by is None, (
         f"decide invented an authorisation ({ruled.authorised_by!r}); standing grants are "
         f"deferred, so no policy today has a source for one"
+    )
+    assert request.model_dump(mode="json") == untouched, (
+        "decide mutated the request it was given; the decision would then be "
+        "transcribed from an action the policy never ruled on"
     )
     return ruled
 
