@@ -295,9 +295,9 @@ for itself:
 - **the `tools/` integration boundary** — to external services the user has
   explicitly connected. Its declaration is **per tool**, and its recipient
   authorisation is **per call**. Both are stronger than `models/`, and
-  necessarily so: `models/` has one payload class and one purpose, while tool
-  egress is heterogeneous, so nothing about it can be inferred from the
-  boundary itself.
+  necessarily so: `models/` has a fixed set of payload classes and one purpose,
+  so they can be enumerated once in this ADR, while tool egress is
+  heterogeneous and nothing about it can be inferred from the boundary itself.
 
   **Passing through `permissions/` is not by itself recipient authorisation.**
   ADR-0016 §3 leaves grant policy undecided and permits auto-granting without a
@@ -615,9 +615,9 @@ meets all three conditions, and `tools/` is held to all three:
    its definition, which data tiers a call transmits off-device (ADR-0016 §3).
    A tool whose author does not say what leaves cannot be defined at all. This
    is the per-tool granularity §2 fixes, and it is strictly more than `models/`
-   owes — not because `tools/` is less trusted, but because a single fixed
-   payload class can be declared once in a document while a heterogeneous one
-   cannot be declared anywhere but at each tool.
+   owes — not because `tools/` is less trusted, but because a fixed set of
+   payload classes can be enumerated once in a document, each still distinct,
+   while a heterogeneous one cannot be declared anywhere but at each tool.
 3. **Authorised before transmitting.** ADR-0004 §7 already requires that every
    side-effecting tool call pass `permissions/` and land in the audit trail,
    and a tool that transmits is side-effecting by construction (ADR-0016 §3).
