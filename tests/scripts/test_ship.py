@@ -14,6 +14,11 @@ must each still refuse, and in particular a genuine content change must refuse
 even though it is exactly the case an over-broad implementation would let
 through. The ADR is explicit that §3 covers unchanged content only.
 
+Which *lens* an artifact represents is checked the same way, against the
+recorded ``persona=`` rather than the filename (issue #99): a renamed
+architecture review passes every content check, so the filename alone is not
+evidence that the adversarial lens ran.
+
 Driven as a subprocess with a fake ``gh`` on ``PATH``, so nothing reaches
 GitHub.
 """
@@ -191,6 +196,7 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     *,
     base_sha: str | None = None,
     tree: str | None = None,
+    recorded_persona: str | None = None,
 ) -> None:
     """Write an artifact exactly as codex-review.sh would.
 
@@ -203,15 +209,23 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     the tree of ``sha`` itself — what a genuine review of that commit records —
     so pass a different one to simulate a review of different content. A ``body``
     without a closing ``_VERDICT`` simulates an artifact truncated mid-write.
+
+    ``recorded_persona`` defaults to ``persona``, which is what a genuine run
+    records — the filename and the field agree. Pass a different value (or the
+    empty string, to omit the field) to simulate an artifact whose filename
+    claims a lens its provenance does not.
     """
     if base_sha is None:
         base_sha = _git(repo, "merge-base", "main", sha)
     if tree is None:
         tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    if recorded_persona is None:
+        recorded_persona = persona
     review_dir = repo / ".review"
     review_dir.mkdir(exist_ok=True)
+    persona_field = f"persona={recorded_persona} " if recorded_persona else ""
     (review_dir / f"{sha}-{persona}.md").write_text(
-        f"<!-- persona={persona} base=main base_sha={base_sha} sha={sha} "
+        f"<!-- {persona_field}base=main base_sha={base_sha} sha={sha} "
         f"tree={tree} round=1 net_lines=2 churn_lines=2 churn_ratio=1.0 commits=1 -->\n{body}"
     )
 
@@ -327,6 +341,67 @@ def test_refuses_when_only_the_architecture_lens_was_run(tmp_path: Path) -> None
 
     assert result.returncode != 0
     assert "no adversarial review" in result.stderr
+
+
+def test_refuses_an_artifact_whose_filename_contradicts_its_persona(tmp_path: Path) -> None:
+    """Issue #99: the filename is a label, the provenance field is the claim.
+
+    An architecture review renamed to ``<sha>-adversarial.md`` carries a matching
+    base, a matching tree and a real verdict, so every other check passes. If the
+    persona is read off the filename alone it satisfies the mandatory adversarial
+    requirement without that lens ever having run.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", recorded_persona="architecture")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "no adversarial review" in result.stderr
+    assert "recorded persona does not match its filename" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_an_artifact_with_no_recorded_persona(tmp_path: Path) -> None:
+    """A provenance line missing the field cannot corroborate the filename.
+
+    Unverifiable is not the same as matching — the same rule the base and tree
+    fields already fail closed under.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", recorded_persona="")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "no adversarial review" in result.stderr
+    assert "no recorded persona/base/tree" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_ignores_an_artifact_naming_a_lens_ship_does_not_know(tmp_path: Path) -> None:
+    """A self-consistent artifact for an undefined lens is not posted.
+
+    It satisfies no requirement, so posting it would put a heading on the PR
+    claiming a review nobody defined a rubric for. The valid adversarial record
+    alongside it still ships.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"adversarial finding\n{_VERDICT}\n")
+    _record_review(repo, sha, "vibes", f"vibes finding\n{_VERDICT}\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "adversarial finding" in posted
+    assert "vibes" not in posted
 
 
 def test_posts_every_persona_recorded_for_the_commit(tmp_path: Path) -> None:
@@ -448,7 +523,7 @@ def test_refuses_an_artifact_with_no_recorded_base_or_tree(tmp_path: Path) -> No
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
-    assert "no recorded base/tree" in result.stderr
+    assert "no recorded persona/base/tree" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 

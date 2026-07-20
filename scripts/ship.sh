@@ -129,6 +129,14 @@ declare -A covering=()
 saw_tree_mismatch=0
 saw_base_mismatch=0
 saw_unreadable=0
+saw_persona_mismatch=0
+
+# The lenses ship knows about. This is the whole set: `adversarial` is required
+# before merge and `architecture` on top of it for a contract change, and an
+# artifact naming anything else satisfies neither requirement — so rather than
+# posting it under a heading that claims a lens nobody defined, refuse it.
+# Adding a third persona means adding it here as well as writing its rubric.
+declare -A known_persona=([adversarial]=1 [architecture]=1)
 
 # Read one provenance field. The value is captured up to the next space rather
 # than as "however many hex characters happen to follow", because `[0-9a-f]*`
@@ -161,15 +169,40 @@ for a in .review/*.md; do
     provenance="$(head -n 1 "$a")"
     recorded_base="$(provenance_field base_sha "$provenance")"
     recorded_tree="$(provenance_field tree "$provenance")"
+    recorded_persona="$(provenance_field persona "$provenance")"
+
+    # `<sha>-<persona>.md`; personas carry no dash, so the last field is it.
+    name="$(basename "$a" .md)"
+    persona="${name##*-}"
 
     # An artifact predating ADR-0020 records no tree, so its content cannot be
     # verified at all. Fail closed: unverifiable is not the same as matching,
     # and re-running a review costs one round where accepting this costs the
-    # guarantee. Same for a hand-edited or truncated provenance line.
-    if [[ -z "$recorded_base" || -z "$recorded_tree" ]]; then
+    # guarantee. Same for a hand-edited or truncated provenance line. The
+    # persona field has been recorded since the artifact was introduced, so an
+    # artifact old enough to lack it lacks the tree too and fails here anyway.
+    if [[ -z "$recorded_base" || -z "$recorded_tree" || -z "$recorded_persona" ]]; then
         saw_unreadable=1
         continue
     fi
+
+    # Which lens ran is the one claim ship makes on the artifact's behalf, and
+    # until now it read that claim off the *filename* alone — so an architecture
+    # artifact renamed to `<sha>-adversarial.md` satisfied the mandatory
+    # adversarial requirement without that lens ever having run (issue #99).
+    # The field the reviewer recorded is the claim; the filename is a label
+    # anyone can retype. Require them to agree, and require the result to be a
+    # lens this script actually knows.
+    #
+    # This does not make the artifact tamper-proof and does not try to be — a
+    # forged file can set both. It closes the case where the two disagree, which
+    # is the one a rename produces, and it is nearly free because the field was
+    # already being recorded.
+    if [[ "$recorded_persona" != "$persona" || -z "${known_persona[$persona]:-}" ]]; then
+        saw_persona_mismatch=1
+        continue
+    fi
+
     if [[ "$recorded_tree" != "$head_tree" ]]; then
         saw_tree_mismatch=1
         continue
@@ -178,10 +211,6 @@ for a in .review/*.md; do
         saw_base_mismatch=1
         continue
     fi
-
-    # `<sha>-<persona>.md`; personas carry no dash, so the last field is it.
-    name="$(basename "$a" .md)"
-    persona="${name##*-}"
 
     # Several commits can legitimately carry a review of this same tree — that is
     # the point of the change — so pick between them deterministically rather
@@ -223,8 +252,14 @@ if [[ "$saw_base_mismatch" == "1" ]]; then
 fi
 if [[ "$saw_unreadable" == "1" ]]; then
     why="${why}
-     a review exists with no recorded base/tree — it predates ADR-0020 or was
-     edited, so its content cannot be verified"
+     a review exists with no recorded persona/base/tree — it predates ADR-0020
+     or was edited, so what it covers cannot be verified"
+fi
+if [[ "$saw_persona_mismatch" == "1" ]]; then
+    why="${why}
+     a review exists whose recorded persona does not match its filename, or
+     names a lens this script does not know — the filename is not evidence that
+     a lens ran, so run the review it claims rather than renaming the record"
 fi
 
 # Adversarial is the required lens before merge. ADR-0020 relaxes neither this
@@ -246,15 +281,11 @@ fi
 
 # Posting order is fixed rather than glob order, so the comment reads the same
 # way every time regardless of which commits the artifacts happen to be under.
+# Enumerating the known personas is exhaustive: the loop above rejects anything
+# outside `known_persona`, so nothing else can be in `covering` to be missed.
 artifacts=()
 for persona in adversarial architecture; do
     [[ -n "${covering[$persona]:-}" ]] && artifacts+=("${covering[$persona]}")
-done
-for persona in "${!covering[@]}"; do
-    case "$persona" in
-    adversarial | architecture) ;;
-    *) artifacts+=("${covering[$persona]}") ;;
-    esac
 done
 
 # Re-check the verdict here, not just when recording. A base and a tree say what
