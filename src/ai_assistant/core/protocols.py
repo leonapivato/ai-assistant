@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import (
         ActionPlan,
+        ActionRequest,
         CurrentContext,
         Embedding,
         ExecutionState,
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
         MemoryRecord,
         MemoryUpdateProposal,
         Message,
+        PermissionDecision,
+        PermissionRuling,
         PlanExport,
         StepTransition,
         ToolDefinition,
@@ -441,4 +444,245 @@ class ToolRegistry(Protocol):
 
     async def all_tools(self) -> list[ToolDefinition]:
         """Return every registered definition, ordered by ``id``."""
+        ...
+
+
+@runtime_checkable
+class ActionPolicy(Protocol):
+    """Rules on whether an action may be performed (ADR-0021 §3).
+
+    The gate ADR-0004 §7 requires in front of every side-effecting tool call.
+    Implementations live in `permissions` and are **the user's**: the contract
+    fixes the *shape* of the function, never a threshold — "confirm at or above
+    ``MEDIUM``" is a setting, not a decision a contract gets to make.
+
+    **A policy rules; it does not name, mint, or record.** It returns a
+    :class:`~ai_assistant.core.types.PermissionRuling`, which has no field in
+    which to name a tool, a payload or a step, so it cannot substitute the
+    subject of the decision it is answering about. It supplies neither an ``id``
+    nor a clock, which leaves :meth:`decide` a genuine function of its argument
+    — and that is what makes the obligations below checkable at all. And it does
+    not write to the audit trail; the caller does (issue #107 records the
+    accepted cost).
+
+    Three obligations every implementation must satisfy, enforced by the shared
+    conformance suite:
+
+    * **Monotone in severity.** Raising ``risk_level``, raising
+      ``reversibility``, or widening ``discloses`` — everything else held equal —
+      must never produce a *less* restrictive outcome. Checkable without knowing
+      an implementation's rules, and it rules out the whole class of accidents
+      where a threshold comparison is written the wrong way round.
+    * **Off-device disclosure is never auto-granted.** A definition with a
+      non-empty ``discloses`` — any tier, not merely ``SECRET`` or ``PERSONAL``
+      — may not receive ``ALLOW`` with ``authorised_by`` unset. This is the
+      enforceable form of the two-field rule ADR-0016 §2 states as an obligation
+      on this subsystem, and it has to be a *floor* because nothing weaker is
+      checkable: a function that ignores an input is monotone in that input, so
+      no monotonicity requirement can ever force a field to be read.
+    * **An ``UNKNOWN`` cost is never auto-granted.** ADR-0016 §4 ratified
+      ``UNKNOWN`` as "the author does not know — policy must fail closed", and
+      this is where that clause acquires an enforcer.
+
+    Within those floors an implementation may be arbitrarily permissive: a
+    policy returning ``CONFIRM`` for everything and one returning ``ALLOW`` for
+    every non-disclosing, known-cost tool both conform, and the suite
+    deliberately cannot tell a good policy from a mediocre one. What it does
+    guarantee is that the failures which are *not* matters of taste cannot
+    occur — an inverted comparison, a disclosure auto-granted, a cost nobody
+    declared treated as free.
+    """
+
+    async def decide(self, request: ActionRequest) -> PermissionRuling:
+        """Rule on ``request``.
+
+        Must return ``authorised_by is None`` from a policy constructed with no
+        authorisation source — today that is *every* policy, since standing
+        grants are deferred, so no conforming implementation can invent an
+        authorisation while ruling on a fresh request.
+
+        Args:
+            request: The self-contained action to rule on, carrying the tool
+                definition by value rather than an id.
+
+        Returns:
+            The ruling. It describes only ``outcome``, ``reason`` and an
+            optional authorisation pointer; the *subject* is transcribed from
+            the request by
+            :meth:`~ai_assistant.core.types.PermissionDecision.from_request`.
+        """
+        ...
+
+    async def resolve(self, confirmed: PermissionDecision, *, approved: bool) -> PermissionRuling:
+        """Turn a user's answer to a recorded ``CONFIRM`` into a ruling.
+
+        This keeps **every permission outcome authored inside** `permissions`.
+        Leaving the conversion to the caller would put the authoring of a
+        permission outcome in `orchestration` or, worse, in an interface adapter
+        — the business logic golden rule 3 keeps out of `interfaces/`.
+
+        Three obligations bound what may be returned, and the first matters
+        most:
+
+        * **``approved=False`` must yield ``DENY``, with ``authorised_by``
+          unset.** A user who declines has *decided*, and a policy that could
+          turn a refusal into an ``ALLOW`` would make the confirmation prompt
+          theatre — the single worst failure available to this subsystem, since
+          it is the one moment the user believes they are in control.
+        * **``approved=True`` may yield ``ALLOW`` or ``DENY``, and nothing
+          else.** A policy is entitled to refuse a confirmation it no longer
+          accepts — answered long after it was asked, or one whose request would
+          now be ``DENY`` — rather than being obliged to rubber-stamp any
+          ``True`` it is handed. What it may not do is treat consent as
+          mandatory. It also may not return ``CONFIRM``: a resolving decision
+          may not itself be a ``CONFIRM``, so re-asking would produce a ruling
+          that is conforming and unrecordable.
+        * **A ``confirmed`` whose ruling was not ``CONFIRM`` must not produce an
+          ``ALLOW``**, so this cannot mint an authorisation out of a decision
+          nobody was ever shown.
+
+        A resolving ``ALLOW`` sets ``authorised_by`` to ``confirmed.id`` — this
+        is the one path that may set it, and what it sets is verifiable, since
+        ``AuditTrail.record`` holds the referenced record and checks it.
+
+        Args:
+            confirmed: The recorded ``CONFIRM`` the user was shown.
+            approved: Whether the user approved it.
+
+        Returns:
+            The ruling that resolves ``confirmed``. The caller records it as a
+            second decision whose ``resolves`` names ``confirmed.id``.
+        """
+        ...
+
+
+@runtime_checkable
+class AuditTrail(Protocol):
+    """The append-only record of what the permission layer decided (ADR-0021 §4).
+
+    A Tier 1 store by ADR-0004 §7's own words, so ADR-0004 §2's residency clause
+    governs it: implementations persist **locally only**, and none of this may
+    be written to a remote service.
+
+    **Every query returns a detached snapshot** — the list, the decisions in it,
+    and everything mutable those reach. This is ADR-0018 §3's rule applied to a
+    second store: a ``PermissionDecision`` embeds a ``ToolDefinition`` which
+    embeds a ``ToolCost``, and ``frozen=True`` refuses ``x.outcome = ...`` but
+    not ``x.__dict__["outcome"] = ...``. A store handing back its own objects
+    would let a reader rewrite the record of what was approved. As in ADR-0018
+    §3 this isolates *store state*; it does not make a decision the caller now
+    holds tamper-proof.
+
+    **There is no ``update`` and no ``delete(id)``.** ADR-0004 §6 gives the user
+    the right to delete their data, so the trail must be erasable — but
+    *selective* erasure of an audit trail is indistinguishable from tampering
+    with it, and an affordance that removes one inconvenient record undoes the
+    guarantee for all of them. So the user may burn the book; nobody may tear
+    out a page.
+    """
+
+    async def record(self, decision: PermissionDecision) -> str:
+        """Append ``decision`` to the trail and return its id.
+
+        **Write-once**: re-recording an id already present raises rather than
+        overwriting. A deliberate departure from ``MemoryStore.add``, which
+        upserts because there ``id`` is the caller's idempotency key; an audit
+        trail that upserts is one where history can be rewritten by replaying a
+        write.
+
+        **Atomic**: the duplicate-id check, the resolution validation and the
+        append are one operation, not a read followed by a write. Without that
+        the single-use guarantee is a race — two concurrent resolutions of the
+        same ``CONFIRM`` each observe no prior resolution, each append, and one
+        user approval has authorised two executions. That is the class of
+        failure ADR-0014 §5 answered with compare-and-swap on ``PlanStore``, and
+        it deserves the same treatment: exactly one of two racing writes
+        succeeds and the other raises. "The system composes on one event loop"
+        is precisely the setting in which an ``await`` between a check and a
+        write is an interleaving point.
+
+        **Stores a detached, validated snapshot**, recursively over reachable
+        mutable state. ADR-0018 §4 made this a rule for the registry's write
+        path and the argument carries over unchanged: a store retaining the
+        caller's object would let ``decision.__dict__["ruling"] = ...`` rewrite
+        an appended entry after the fact, through a store whose entire premise
+        is that entries are not rewritten. Detachment on queries alone closes
+        the door and leaves the window open.
+
+        **Enforces the resolution invariant**, because this is the only place
+        both records are in hand. A decision whose ``resolves`` is set is
+        refused unless the referenced id is present, its ruling was ``CONFIRM``,
+        no other recorded decision already resolves it, its ``tool``,
+        ``parameters_digest`` and ``step_id`` match the incoming decision's
+        exactly, and it was not decided *after* the resolution answering it
+        (equal timestamps are fine — a fast confirmation at a coarse clock
+        resolution is real). The authorisation pointer is checked here too: a
+        resolving ``ALLOW`` must carry ``authorised_by`` equal to its
+        ``resolves``, and a resolving ``DENY`` must leave it unset. Without that
+        pair, a resolving ``ALLOW`` could name any confirmation it liked — or a
+        string naming nothing — while satisfying every other check, and the
+        disclosure floor would be satisfiable by fabrication.
+
+        This bounds **resolutions, not executions**, and the difference is worth
+        being precise about: ``authorises()`` is a pure comparison, so the same
+        resolved ``ALLOW`` answers ``True`` every time it is asked. Making an
+        approval single-*use* needs an atomic consume-on-execution step, which
+        belongs to the invocation contract. "Approve once" means the question is
+        settled once, not that the answer is spent on exactly one call.
+
+        Raises:
+            DuplicateDecisionError: If a decision with this ``id`` is already
+                recorded.
+            InvalidResolutionError: If ``resolves`` is set and the invariant
+                above does not hold.
+        """
+        ...
+
+    async def get(self, decision_id: str) -> PermissionDecision | None:
+        """Return the decision with ``decision_id``, or ``None`` if absent."""
+        ...
+
+    async def recent(self, *, limit: int = 50) -> list[PermissionDecision]:
+        """Return the most recent decisions, newest first.
+
+        Ordered by ``decided_at`` **descending**, ties broken by ``id``
+        ascending. Both halves are needed: "newest first" is ambiguous between
+        insertion order and decision time, which disagree whenever records are
+        appended out of order, and two stores would then answer the same query
+        differently while each believed it conformed. Decision time is the right
+        choice for an audit trail — the question is when something *was
+        decided*, not when a writer got around to it — and an ``id`` tie-break
+        makes the order total rather than merely mostly determined.
+
+        Bounded by default because the realistic query is "what has the
+        assistant just done", and an unbounded read of a Tier 1 store by default
+        is a shape worth not offering.
+
+        Args:
+            limit: Maximum number of decisions to return; must be strictly
+                positive.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive. Raised rather
+                than clamped or passed through, because the natural
+                implementation leaks: a store issuing ``LIMIT ?`` against SQLite
+                turns ``limit=-1`` into *no limit at all*, so the one call
+                offering a bounded read becomes the unbounded read it exists to
+                avoid. Clamping silently is the other wrong answer — a caller
+                that asked for something meaningless should learn that, not be
+                served something it did not ask for.
+        """
+        ...
+
+    async def export(self) -> list[PermissionDecision]:
+        """Return a portable snapshot of every recorded decision (ADR-0004 §6)."""
+        ...
+
+    async def clear(self) -> int:
+        """Delete every decision in the trail, returning the number removed.
+
+        Wholesale erasure is a different act from selective deletion: it
+        destroys the trail visibly and completely, which is what a data-rights
+        operation should look like (ADR-0004 §6).
+        """
         ...

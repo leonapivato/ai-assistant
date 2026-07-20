@@ -17,11 +17,14 @@ from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
+from ai_assistant.testing.permissions import FakeActionPolicy, FakeAuditTrail
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 from ai_assistant.testing.tools import FakeToolRegistry
 
 __all__ = [
+    "FakeActionPolicy",
+    "FakeAuditTrail",
     "FakeContextProvider",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
