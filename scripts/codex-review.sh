@@ -105,13 +105,24 @@ if [[ "$branch" == "HEAD" ]]; then
     branch="detached-${sha}"
 fi
 
-# One limit is left standing, deliberately. Deleting a branch and creating a new
-# one with the same name in the same clone inherits the old branch's rounds,
-# because the name is all that identifies the loop. Fixing it needs a durable
-# per-loop identifier — a ledger in `.review/`, which is state to maintain and
-# to keep consistent across the same rewrites this is trying to survive. Not
-# worth it for an advisory number whose failure here is an over-count, which
-# errs toward "look at your loop" rather than away from it.
+# One limit is left standing, deliberately, and it cuts both ways. The name is
+# all that identifies the loop, so reusing a name inherits the old branch's
+# rounds and over-counts, while *renaming* a branch mid-loop orphans every
+# artifact filed under the old name and resets the count to 1.
+#
+# The second direction is the worse of the two and is worth stating plainly: this
+# number exists to make a runaway loop legible, so under-counting hides the very
+# thing it is for, where over-counting only says "look at your loop" too loudly.
+# What keeps it acceptable is not the direction but the occasion — an open PR is
+# bound to its branch name, so a rename mid-review breaks the PR before it can
+# skew the count, and neither case arises from the rewrites this is built to
+# survive, since squash, amend and rebase all preserve the name.
+#
+# Fixing it needs a durable per-loop identifier — a ledger in `.review/`, which
+# is state to maintain and to keep consistent across those same rewrites. That
+# is a real design with failure modes of its own, and #97 lists it as a candidate
+# without mandating it. Not worth building for an advisory number until one of
+# these cases is actually observed.
 
 # `core.quotePath=false` here too, so a non-ASCII path reaches the reviewer as
 # `docs/café.md` rather than `"docs/caf\303\251.md"`. Same reason as the path
