@@ -414,17 +414,29 @@ class AuditTrailContract:
         fact, through a store whose entire premise is that entries are not
         rewritten. Detachment on queries alone closes the door and leaves the
         window open.
+
+        Recursive, like the read path: every reachable level is rewritten here —
+        the decision's own field, the embedded ``ToolDefinition``, the
+        ``ToolCost`` nested inside that, and the ``PermissionRuling``. A store
+        that copied the decision and the tool but kept the caller's ruling would
+        otherwise pass while leaving the recorded *outcome* editable, which is
+        the one field the trail exists to fix.
         """
-        held = decision("d-1", ruled=ruling(PermissionOutcome.DENY))
+        priced = tool(cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("5"), currency="USD"))
+        held = decision("d-1", request=action(tool=priced), ruled=ruling(PermissionOutcome.DENY))
         await trail.record(held)
 
-        object.__setattr__(held.tool, "risk_level", RiskLevel.CRITICAL)
         object.__setattr__(held, "parameters_digest", "rewritten")
+        object.__setattr__(held.tool, "risk_level", RiskLevel.CRITICAL)
+        object.__setattr__(held.tool.cost, "amount", Decimal("0"))
+        object.__setattr__(held.ruling, "outcome", PermissionOutcome.ALLOW)
 
         stored = await trail.get("d-1")
         assert stored is not None
-        assert stored.tool.risk_level is RiskLevel.LOW
         assert stored.parameters_digest != "rewritten"
+        assert stored.tool.risk_level is RiskLevel.LOW
+        assert stored.tool.cost.amount == Decimal("5")
+        assert stored.ruling.outcome is PermissionOutcome.DENY
 
     async def test_a_returned_list_is_a_detached_snapshot(self, trail: AuditTrail) -> None:
         """``recent`` and ``export`` return ``list``, and a list is mutable."""
