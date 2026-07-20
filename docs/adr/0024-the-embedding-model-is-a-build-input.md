@@ -50,9 +50,8 @@ recipient, but §2 governs sending **user data** off-device and this request
 carries none — only transport metadata (source IP, timing, the fact of the
 fetch). Reading §2's recipient clause onto a no-user-data fetch would widen a
 ratified clause by assertion, the move ADR-0017 §5 refuses. The counter-reading —
-that "this install fetched this model" is user-adjacent — is fair, but little
-turns on it: the default path performs no runtime fetch, and the one that still
-does (§6) is reached only by a user who asked for it.
+that "this install fetched this model" is user-adjacent — is fair, but nothing
+turns on it under this ADR: no runtime artifact fetch happens at all (§1, §6).
 
 ### What it costs to ship the model instead
 
