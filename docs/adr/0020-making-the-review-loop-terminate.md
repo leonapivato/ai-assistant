@@ -192,5 +192,8 @@ round count — rather than the hard cap rejected here.
 **Follow-on.** ADR-0015's status becomes "Accepted, partially superseded by
 ADR-0020". Implementation is a separate PR: `scripts/codex-review.sh` (§1
 preamble, §2 aggregate, §3 tree in the provenance line), `scripts/ship.sh` (§3
-acceptance rule), `docs/review/guide.md` (§1 standing statement), and the
-"exact commit" wording in `CLAUDE.md` and `CONTRIBUTING.md` (§3).
+acceptance rule, and §2 — it currently strips the provenance line with
+`tail -n +2` before posting, so the aggregate must be rendered into the comment
+body explicitly or the merge reviewer never sees it), `docs/review/guide.md` (§1
+standing statement), and the "exact commit" wording in `CLAUDE.md` and
+`CONTRIBUTING.md` (§3).
