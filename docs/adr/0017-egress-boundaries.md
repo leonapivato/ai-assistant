@@ -41,9 +41,16 @@ to touch the axis this ADR changes.
 ### 1. The rule
 
 **User data may leave the device only from a boundary this ADR approves for
-egress, on the terms §2 sets for that boundary; and every approved boundary
-must have what it transmits declared, and the recipient it addresses
-authorised by the user, before it transmits.**
+egress, and only on the terms §2 sets for that boundary — which state, for
+each, what it must have declared and how the recipient it addresses is
+authorised before it transmits.**
+
+The terms are not uniform, and §2 is the authority on each. `tools/` must
+satisfy the full set in §3 before it sends anything. `models/` continues on
+materially weaker terms: its recipients are authorised at configuration time
+and nothing validates that the endpoint actually contacted is the provider it
+claims to be. Both are stated in full in §2; neither is implied by this
+sentence.
 
 **"The recipient it addresses", deliberately, not "every recipient that
 receives".** The rule governs the recipient the system chooses and sends to. It
