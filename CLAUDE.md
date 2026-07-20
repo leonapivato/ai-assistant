@@ -27,8 +27,10 @@ testing, dependencies). This file is the short version — when in doubt, defer 
 3. **Interface adapters are thin.** No business logic in `interfaces/`.
 4. **No provider SDK outside `models/`.** `anthropic`, `openai`, etc. are
    imported only there. Everyone else uses the `ModelProvider` Protocol.
-5. **A Protocol change is a breaking change.** Flag it in your summary and add
-   an ADR before implementing against it.
+5. **A Protocol change is a breaking change.** Flag it in your summary. Its ADR
+   is ratified and **merged as its own PR** before anything implements against
+   it (ADR-0015). Your ADR number is assigned when the work is handed to you —
+   don't pick one yourself.
 
 These boundaries (rules 1, 2, 4) are enforced mechanically by
 `uv run lint-imports` — a violation fails the gate, it is not just a convention.
@@ -54,23 +56,16 @@ learn/update memory.
 
 ## How to work (make changes reviewable)
 
-- **Claim a workspace first — before editing anything.** Run `git fetch origin`
-  (which updates `origin/main` without touching any working tree — never
-  `git checkout main`, which would move the shared main checkout off `main`),
-  then `just claim-workspace <area>/<slug>` as the first action of any task. The
-  claim branches your new work from `origin/main`, so the fetch keeps you
-  current — give it a second argument (`just claim-workspace <area>/<slug>
-  <base>`) to stack it on another branch instead, for a task split into
-  dependent PRs; omitted, it always defaults to `origin/main`, never
-  "wherever some other worktree happens to be." It puts you on a fresh branch
-  in its own linked worktree — always, so any number of agents can run in
-  parallel with none sharing a working tree — and prints `WORKSPACE=<path>`.
-  **Work only in that path**, and never commit to `main`. Running several
-  agents at once: `just claim-workspaces <area>/<slug> ...` claims multiple
-  branches concurrently; `just workspaces` lists what's claimed; `just
-  prune-workspaces` reports worktrees whose PR has merged or closed. Release a
-  workspace after its PR merges with `just release-workspace <area>/<slug>`.
-  (Details: `CONTRIBUTING.md` → "Coordinating parallel work".)
+- **Branch first, before editing anything.** You are the only agent in this
+  clone, so there is nothing to claim — but never work on `main`:
+
+  ```bash
+  git fetch origin
+  git switch -c <area>/<slug> origin/main
+  ```
+
+  Branch from `origin/main` (or `origin/<branch>` to stack a dependent PR), not
+  from whatever is checked out.
 - **Stage explicit paths, never `git add -A`/`git add .`.** Add the specific
   files your change touches, so a stray sweep can't pick up unrelated work.
 - **One subsystem per change.** Scope a change to a single package plus its
@@ -78,10 +73,14 @@ learn/update memory.
   Protocol triad (below): contract, conformance suite, and canonical fake are
   one unit of work, not three changes.
 - **Contract first, and land the triad.** If a subsystem needs a new capability
-  from another, add or extend a Protocol in `core/protocols.py` first, get it
-  reviewed, then implement against it. A *new* Protocol ships as a triad —
-  Protocol + shared conformance suite + canonical fake in `ai_assistant.testing`
-  — in the same change, never deferred (`CONTRIBUTING.md` → "Adding a Protocol").
+  from another, the Protocol goes in `core/protocols.py` first — its ADR merged
+  ahead of the implementation (golden rule 5). Then the *new* Protocol ships as
+  a triad — Protocol + shared conformance suite + canonical fake in
+  `ai_assistant.testing` — in one change, never deferred (`CONTRIBUTING.md` →
+  "Adding a Protocol").
+- **Park what isn't this change.** Anything you notice but shouldn't fix here —
+  a deferred review finding, a debt, a follow-up — becomes a **GitHub issue**.
+  There is no tracked TODO file; a file would just conflict (ADR-0015).
 - **Tests are the guardrail.** Add tests under `tests/` mirroring the package
   path. Test implementations against their Protocol. Use fakes/mocks for other
   subsystems — never reach into their internals.
@@ -99,27 +98,31 @@ uv run lint-imports     # architecture boundary check
 uv run pytest           # tests
 ```
 
-CI runs this same gate on every PR and push to `main` (ADR-0010) — it is the
-backstop, not the first line of defence; run it locally before pushing.
-`pre-commit` runs the fast subset on commit; `just setup` enables it once per
-machine as a standalone, version-pinned tool install, not `uv run` inside a
-workspace — see `CONTRIBUTING.md` → "Setup" for why that distinction matters.
+Run **all** of it, every time — the whole gate is ~33 seconds. CI runs the same
+gate on every PR and push to `main` (ADR-0010) as the backstop, not the first
+line of defence. `pre-commit` runs the fast subset on commit; `just setup`
+enables it once per clone.
 
-**Iterate against `just review-codex`, not against CI.** It runs the same
-adversarial-review engine CI does (`CONTRIBUTING.md` → "Review (pre-merge)"),
-against `origin/main` by default (fetch first). Loop locally while the PR
-is a **draft** — fix, **commit** (it reviews `HEAD`, the committed diff, not
-your working tree — an uncommitted fix is invisible to a re-run), re-run,
-repeat — until it's clean or only deliberately-waived findings remain; a
-draft is never auto-reviewed, so this costs nothing in CI spend. Flip to
-**ready for review** only once, as the one deliberate checkpoint that
-triggers the CI-hosted review that goes on the record — every push to an
-*already-ready* PR triggers another one, so pushing a fix per finding and
-letting CI re-review each time is the anti-pattern this exists to avoid.
-Budget one CI review at ready, plus at most one or two more for genuine
-feedback — more than that usually means the local loop got skipped (though a
-clean local run is a strong signal, not a guarantee: LLM review isn't
-deterministic).
+## Review (local only, ADR-0015)
+
+```bash
+just review-codex adversarial   # architecture too, for a contract change
+# ...fix, commit, re-run until clean...
+just ship                       # posts the review to the PR before merging
+```
+
+Codex reviews every change — a model independent of the one that wrote it. It
+reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
+re-running or it is invisible. Each run records `.review/<sha>-<persona>.md`;
+`just ship` refuses to post unless one exists for the commit the PR head is on.
+
+**Triage each finding — do not let the PR grow to absorb them.**
+
+- `blocker`/`major` **and** about code in your diff → fix it now.
+- Anything else → **open a GitHub issue** and leave the PR alone.
+
+This is the rule that keeps PRs small. There is no size threshold to watch;
+decide at each finding.
 
 ## Conventions
 

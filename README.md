@@ -21,8 +21,8 @@ ratified decisions.
 
 - Python **3.14+**
 - [uv](https://docs.astral.sh/uv/) for environment and dependency management
-- [just](https://github.com/casey/just) for the task runner (`just check`, workspace
-  claiming, local review — see `CONTRIBUTING.md`)
+- [just](https://github.com/casey/just) for the task runner (`just check`,
+  `just review-codex`, `just ship` — see `CONTRIBUTING.md`)
 
 ## Getting started
 
