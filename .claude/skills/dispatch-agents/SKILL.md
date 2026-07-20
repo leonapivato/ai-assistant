@@ -49,11 +49,18 @@ Abort on saturation rather than warning: a truncated scan that keeps going
 reports a free number that another lane already holds, which is the exact
 collision this preflight exists to prevent.
 
+Then the clones, because an ADR written but not yet pushed appears in no remote:
+
+```bash
+ls -d ~/projects/ai-assistant-*/docs/adr/[0-9]*.md | xargs -n1 basename | sort -u
+```
+
 **None of these is authoritative for a number you assigned but whose ADR is not
 yet written.** Branch names need not contain the number — `tools/tooldefinition-registry`
 carried ADR-0016 — so a name scan alone will hand out a live number. Keep your
-own list of what you have handed out this session and treat it as the primary
-record; the commands above catch what predates you.
+own list of what you have handed out and treat it as the primary record. That
+list does not survive a restarted session, which is what the clone scan above is
+for; run all four, and prefer the highest free number when they disagree.
 
 ## 2. Write the brief
 
@@ -104,9 +111,10 @@ gh pr diff <n> --name-only              # scope claims: did it touch what it sai
 editing one file is invisible in either PR alone:
 
 ```bash
+set -o pipefail
 prs=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
 [ "$(printf '%s\n' "$prs" | wc -l)" -ge 100 ] && { echo "SATURATED — paginate"; exit 1; }
-for p in $prs; do gh pr diff "$p" --name-only | sed "s|^|$p |"; done \
+for p in $prs; do gh pr diff "$p" --name-only | sed "s|^|$p |" || exit 1; done \
   | sort -k2 | uniq -f1 -D
 ```
 
