@@ -40,9 +40,16 @@ to touch the axis this ADR changes.
 
 ### 1. The rule
 
-**User data may leave the device only from a boundary this ADR approves for
-egress, and every approved boundary must declare the application-layer content
-it transmits before it transmits.**
+**User data may leave the device only from a boundary this ADR authorises to
+transmit, and any such boundary must declare the application-layer content it
+transmits before it transmits.**
+
+Approval is not authorisation to transmit. §2 defines two authorising statuses
+and there are no others: `models/` is **continuing** — it transmits under the
+permission ADR-0004 §2 already grants — and `tools/` transmits only once it is
+**designated**, which approval alone never makes it. An approved but
+undesignated boundary sends nothing, however complete its tools' declarations
+may be.
 
 "Application-layer" is the scope, and it is a real limit rather than a
 technicality: contacting any host discloses source IP, timing and request sizes
@@ -94,8 +101,11 @@ continuing terms are:
 
 - it transmits only the payload classes declared below, which are documentation
   of what it already sends rather than a new grant;
-- its recipients are the model providers the user explicitly configured
-  (ADR-0004 §2's configured-set amendment, which stands);
+- its recipients for user data are the model providers the user explicitly
+  configured (ADR-0004 §2's configured-set amendment, which stands), plus one
+  narrow exception carrying no user data: the artifact repository a local
+  backend fetches its model file from, authorised below for that payload class
+  alone;
 - ADR-0004 §7's minimisation rule binds the content of each call;
 - the two controls it does not yet satisfy — transport pinning and
   credential-access gating — are named below, unchanged by this ADR, and
@@ -119,9 +129,12 @@ to `models/` would prohibit every model call to close nothing (below).
 
 There is one transition, §3 is its complete condition, and **it does not happen
 by itself.** Meeting the conditions makes `tools/` eligible; it does not make it
-designated. The flip requires a ratifying act — a later ADR, or an explicit
-status amendment to this one — that names the seam module, attests each §3 item
-is satisfied and says how, and records the transition. Designation is the moment
+designated. The flip requires a **later ADR** that names the seam module, attests each §3
+item is satisfied and says how, and records the transition. Not a status
+amendment to this one: moving `tools/` from transmitting nothing to being a
+second operational egress boundary changes a substantive decision, and ADR-0001
+reserves that to a new ADR. Treating it as status maintenance would be the same
+shortcut this ADR exists to correct, taken one step further along. Designation is the moment
 user data starts leaving from a second place in the system, and something that
 consequential should not be an inference somebody draws from the state of the
 codebase. It also gives review a single artifact to check the attestation
@@ -181,8 +194,13 @@ for itself:
     gap — `models/` transmits today under ADR-0004 §2, and making it a
     precondition would prohibit every model call until the work lands. Issue
     #83 covers both boundaries;
-  - **model artifact fetches** (Tier 2) — the request for a named model file
-    when a local backend downloads its weights on first use. `fastembed`'s ONNX
+  - **model artifact fetches** (Tier 2), **to a distinct recipient class: the
+    artifact repository serving that model**, which is *not* a configured model
+    provider and is not authorised by the configured-provider rule. It is
+    authorised here, for this payload class only, and for nothing else — no
+    user data may go to it, and no model provider traffic may go anywhere else.
+    The request for a named model file when a local backend downloads its
+    weights on first use. `fastembed`'s ONNX
     model (ADR-0006 §2) is the live case, and it is easy to miss: the *default*
     embedder is the on-device one, and "on-device" describes where inference
     runs, not where the model came from. No user data is in the request, but it
