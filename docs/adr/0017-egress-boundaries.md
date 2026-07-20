@@ -73,6 +73,24 @@ for it; short of that it is approved and must not transmit, whatever partial
 progress exists. Naming the seam is one precondition among several, not the
 transition itself.
 
+**Accepted limitation, stated rather than implied.** For `models/` today,
+designation does not by itself guarantee §1's recipient authorisation at the
+transport level. §1 requires recipients to be user-authorised, and the
+authorised recipient is the configured provider — but nothing yet pins the
+endpoint, so a provider SDK given a hostile base URL, or following a cross-host
+redirect, would deliver conversation and credential to a host the user never
+authorised, from a boundary this ADR calls designated.
+
+This ADR accepts that gap rather than papering over it. The alternative —
+making transport pinning a `models/` precondition — would leave the boundary
+undesignated and so prohibit every model call from the moment this ADR is
+accepted, breaking the product to close a hole that exists identically today
+under ADR-0004 §2. Accepting a known gap the ADR names is better than a rule
+nobody can comply with, and strictly better than the status quo, where the gap
+existed and was written down nowhere. It is debt with an issue (#83), not a
+property of the design; for `tools/`, which transmits nothing yet, the same
+obligation is a hard precondition (§3).
+
 `models/` is **designated** on acceptance, with an empty §3 list. Its
 declaration is complete in §2, its recipients are authorised by configuration,
 and its mechanical pin is the existing "provider SDKs are confined to the
@@ -172,11 +190,11 @@ for itself:
   feature — it is a product and safety decision, not an egress-compliance one,
   and it is issue #75.
 
-  **The credential satisfies §1 on its own terms.** Its declaration is the
-  entry above, and its recipient authorisation is direct: it goes to the
-  provider that issued it and to no one else, and the user authorised that
-  recipient by configuring that provider — the same act that authorises the
-  Tier 1 payloads. There is no open question about the credential's *egress*.
+  **The credential's intended recipient satisfies §1.** Its declaration is the
+  entry above, and its authorised recipient is the provider that issued it —
+  authorised by the same act, configuring that provider, that authorises the
+  Tier 1 payloads. What is *not* settled is that the bytes reach only that
+  recipient: see the accepted limitation below.
 
   A separate question, which this ADR does not answer, is whether ADR-0004 §7's
   gating of "access to Tier 0/1 data" applies to `models/` reading that key
