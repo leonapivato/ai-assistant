@@ -42,15 +42,20 @@ to touch the axis this ADR changes.
 
 **User data may leave the device only from a boundary this ADR approves for
 egress, and only on the terms §2 sets for that boundary — which state, for
-each, what it must have declared and how the recipient it addresses is
-authorised before it transmits.**
+each, what it must have declared and **to what extent** the recipient it
+addresses is authorised before it transmits.**
 
-The terms are not uniform, and §2 is the authority on each. `tools/` must
-satisfy the full set in §3 before it sends anything. `models/` continues on
-materially weaker terms: its recipients are authorised at configuration time
-and nothing validates that the endpoint actually contacted is the provider it
-claims to be. Both are stated in full in §2; neither is implied by this
-sentence.
+"To what extent" is load-bearing and not hedging. The two boundaries authorise
+recipients at different strengths, and §2 states each exactly. `tools/` must
+bind authorisation to the resolved destination and validate the endpoint before
+it sends anything (§3). `models/` authorises the provider *identity* at
+configuration time and validates nothing about the endpoint actually contacted —
+so at that boundary, today, the addressed recipient is **not** guaranteed to be
+an authorised one. That is a real weakness, it is pre-existing, and §2 gives it
+in full.
+
+Both sets of terms are stated in full in §2; neither is implied by the sentence
+above.
 
 **"The recipient it addresses", deliberately, not "every recipient that
 receives".** The rule governs the recipient the system chooses and sends to. It
@@ -109,8 +114,10 @@ the controls first costs nothing and prevents the gaps `models/` now carries
 from being recreated at a second boundary. Applying the same gate retroactively
 to `models/` would prohibit every model call to close nothing (below).
 
-There is one transition and §3 is its complete condition. `tools/` is approved
-and undesignated today, and stays that way until every item in §3 holds;
+There is one transition and §3 is its complete condition. **On acceptance**
+`tools/` enters the approved-and-undesignated state and stays there until every
+item in §3 holds; while this ADR is `Proposed` it is neither approved nor
+designated, and ADR-0004 §2's unamended clause forbids its egress outright.
 enforcement tooling should read approved-and-undesignated as "still
 prohibited", and should read `models/` as permitted on the continuing terms
 above.
