@@ -46,18 +46,23 @@ _TRIAD_CHECK = "tests/core/test_protocol_triad.py"
 class _RunRecord:
     """What this pytest session actually ran, and whether that was the whole suite."""
 
-    #: Test class -> names of the tests on it that ran and passed. The names
-    #: matter as well as the class: they are what shows a conformance suite
-    #: contributed assertions that really executed, rather than merely being
-    #: inherited from, overridden, or skipped.
-    class_tests: dict[type, set[str]] = field(default_factory=dict)
-    #: Test class -> names of the tests on it that the test body itself opted
-    #: out of, by calling ``pytest.skip()``. That is a contract deciding an
-    #: obligation does not apply to this implementation, which is legitimate;
-    #: it is tracked so the triad check can tell it apart from an obligation
-    #: that simply never ran.
-    opted_out_tests: dict[type, set[str]] = field(default_factory=dict)
+    #: Test class -> names of the tests on it with at least one satisfactory
+    #: call-phase report.
+    reported: dict[type, set[str]] = field(default_factory=dict)
+    #: Test class -> names of the tests on it with at least one *un*satisfactory
+    #: report. Tracked separately from `reported` because a parametrized test
+    #: reports once per case under a single name: if any case failed, was
+    #: xfailed, or was skipped by a mark, the obligation is not honoured however
+    #: many sibling cases passed.
+    unsatisfactory: dict[type, set[str]] = field(default_factory=dict)
     unfiltered: bool = False
+
+    def honoured(self) -> dict[type, frozenset[str]]:
+        """Return, per class, the tests whose every reported case was satisfactory."""
+        return {
+            cls: frozenset(names - self.unsatisfactory.get(cls, set()))
+            for cls, names in self.reported.items()
+        }
 
 
 _RECORD = _RunRecord()
@@ -91,35 +96,41 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         items[:] = [item for item in items if not item.nodeid.startswith(_TRIAD_CHECK)] + deferred
 
 
+def _is_satisfactory(report: pytest.TestReport) -> bool:
+    """Report whether one phase report is consistent with an obligation being met.
+
+    At the call phase, a pass is satisfactory and so is a skip -- the body ran
+    and chose to bow out, which is the contract deciding an obligation does not
+    apply (see ``ContextProviderContract``'s ``serves_a_fixed_instant``). A
+    *mark* skips at setup instead, before the body runs; that is imposed from
+    outside the contract, so it is not.
+
+    ``wasxfail`` is never satisfactory: an expected failure is a contract
+    assertion that did not hold, kept green by the mark.
+    """
+    if hasattr(report, "wasxfail"):
+        return False
+    if report.when == "call":
+        return bool(report.passed or report.skipped)
+    return not (report.skipped or report.failed)
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Record whether each test passed its call phase, or was skipped."""
+    """Record how each reported phase of each test turned out."""
     owner = _OWNERS.get(report.nodeid)
     if owner is None:
         return
     cls, name = owner
-    # `wasxfail` marks an xfail, which also reports as skipped at the call
-    # phase. An expected *failure* is a contract assertion that did not hold --
-    # the opposite of an obligation being honoured -- so it is recorded nowhere.
-    if report.skipped and report.when == "call" and not hasattr(report, "wasxfail"):
-        # The body ran and chose to bow out -- see ContextProviderContract's
-        # `serves_a_fixed_instant`. A *mark* skips at setup instead, before the
-        # body runs; that is imposed from outside the contract and is recorded
-        # nowhere, so the triad check sees the obligation as simply not met.
-        _RECORD.opted_out_tests.setdefault(cls, set()).add(name)
-    elif report.when == "call" and report.passed:
-        _RECORD.class_tests.setdefault(cls, set()).add(name)
+    if not _is_satisfactory(report):
+        _RECORD.unsatisfactory.setdefault(cls, set()).add(name)
+    elif report.when == "call":
+        _RECORD.reported.setdefault(cls, set()).add(name)
 
 
 @pytest.fixture(scope="session")
-def passing_class_tests() -> dict[type, frozenset[str]]:
-    """Every test class, mapped to the tests on it that ran and passed."""
-    return {cls: frozenset(names) for cls, names in _RECORD.class_tests.items()}
-
-
-@pytest.fixture(scope="session")
-def opted_out_class_tests() -> dict[type, frozenset[str]]:
-    """Every test class, mapped to the tests whose own body skipped them."""
-    return {cls: frozenset(names) for cls, names in _RECORD.opted_out_tests.items()}
+def honoured_class_tests() -> dict[type, frozenset[str]]:
+    """Every test class, mapped to the tests on it whose every case was honoured."""
+    return _RECORD.honoured()
 
 
 @pytest.fixture(scope="session")
