@@ -162,20 +162,8 @@ on three counts:
 
 - nothing pins its transport endpoint (issue #83);
 - nothing gates its Tier 0 credential read against ADR-0004 §7 (issue #74);
-- a local embedding backend fetches its model file on first use — `fastembed`'s
-  ONNX model, ADR-0006 §2 — from an artifact repository that is not a
-  configured model provider and that ADR-0004 §2's recipient rule does not
-  cover. Easy to miss, because the *default* embedder is the on-device one and
-  "on-device" describes where inference runs, not where the model came from. No
-  user data is in that request, but it is a real connection to a real host.
-  ADR-0006's claim that memory content never leaves the device to be indexed is
-  unaffected — a different request carrying different content. It is
-  deliberately **not** among the declared payload classes below: listing it in
-  an exhaustive list of authorised classes would authorise it, and authorising
-  a new recipient would widen ADR-0004 §2's recipient clause, outside this
-  ADR's supersession scope. Issue #89 — preinstall the artifact and it
-  disappears, or pin the host and amend ADR-0004 §2 properly; unpinned,
-  whoever serves that artifact chooses what the embedder computes.
+- its model artifact fetch reaches a host nothing pins (issue #89, and see the
+  payload class below).
 
 All three are **pre-existing and unchanged by this ADR** — they hold identically
 right now under ADR-0004 §2 and would remain exactly as open if this ADR were
@@ -215,6 +203,18 @@ for itself:
     gap — `models/` transmits today under ADR-0004 §2, and making it a
     precondition would prohibit every model call until the work lands. Issue
     #83 covers both boundaries;
+  - **model artifact fetches** (Tier 2) — the request for a named model file
+    when a local backend downloads its weights on first use (`fastembed`'s ONNX
+    model, ADR-0006 §2). Easy to miss, because the *default* embedder is the
+    on-device one and "on-device" describes where inference runs, not where the
+    model came from. **Its recipient is governed here**, not by ADR-0004 §2:
+    that rule limits where *user data* may go, and this request carries none,
+    so stating a rule for it widens nothing and needs no amendment. The rule is
+    that it may reach only the artifact repository serving the configured
+    model, and carry no user data — with pinning and verification of that host
+    outstanding (issue #89), which is why it appears above as a gap. ADR-0006's
+    claim that memory content never leaves the device to be indexed is
+    unaffected: a different request carrying different content;
   - **request configuration and protocol metadata** (Tier 2) — the model
     identifier, generation parameters such as temperature and token limits, and
     the headers the transport requires. Every call carries some of this and it
