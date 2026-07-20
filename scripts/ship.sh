@@ -155,11 +155,19 @@ provenance_field() {
 # accepts prose that merely mentions the words, e.g. "I cannot provide a verdict
 # or APPROVE this change". Markdown emphasis is stripped first, since the
 # reviewer writes "**Verdict: X**", "Verdict: X" and "VERDICT: X" interchangeably.
+#
+# The `Verdict:` label is optional: docs/review/guide.md asks only for "a
+# one-line verdict: BLOCK, APPROVE WITH NITS, or APPROVE", so a bare
+# `APPROVE WITH NITS` conforms and must not be read as an incomplete artifact
+# (issue #120). Kept deliberately identical to the same test in
+# codex-review.sh — one records the artifact and the other refuses to post an
+# incomplete one, so a review the recorder accepts and the shipper rejects would
+# strand a valid review with no way to ship it.
 artifact_has_verdict() {
     local last
     last="$(grep -v '^[[:space:]]*$' "$1" | tail -n 1 |
         tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$last"
+    grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' <<<"$last"
 }
 
 declare -A covering_rank=()

@@ -644,6 +644,49 @@ def test_refuses_an_artifact_truncated_before_its_verdict(tmp_path: Path) -> Non
     assert not (tmp_path / "comment.md").exists()
 
 
+def test_ships_an_artifact_whose_verdict_carries_no_label(tmp_path: Path) -> None:
+    """Issue #120: ``docs/review/guide.md`` does not ask for a ``Verdict:`` label.
+
+    It asks the reviewer to "end with a one-line verdict: ``BLOCK``,
+    ``APPROVE WITH NITS``, or ``APPROVE``", so a bare verdict is a complete
+    review and must not be refused as truncated.
+
+    This has to match ``codex-review.sh``'s test exactly. If the recorder
+    accepts a form the shipper rejects, the artifact exists, covers the right
+    content, and still cannot be posted — a valid review stranded with no re-run
+    that would help.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", "a real finding\nAPPROVE WITH NITS\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    assert "a real finding" in (tmp_path / "comment.md").read_text()
+
+
+def test_still_refuses_prose_merely_mentioning_a_verdict_word(tmp_path: Path) -> None:
+    """Dropping the label must not weaken what the check exists to catch.
+
+    A refusal or a timeout is the target, and anchoring to the whole line is what
+    does that work — the label never did.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(
+        repo, sha, "adversarial", "I am unable to review this repository or APPROVE it\n"
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "does not end in a verdict" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
 def test_refuses_a_header_only_artifact(tmp_path: Path) -> None:
     """The narrowest form of the same failure: nothing but provenance."""
     repo = tmp_path / "repo"
