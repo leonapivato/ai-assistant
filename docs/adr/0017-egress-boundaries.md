@@ -74,6 +74,20 @@ something a boundary may weaken for itself:
   Recipient authorisation is **per configuration** — the explicitly-configured
   provider set of ADR-0004 §2's configured-set amendment, which stands — not
   per call. ADR-0004 §7's minimisation rule binds the content of each call.
+
+  **The credential is listed for completeness, and this ADR makes no
+  authorisation claim about it.** Listing it is a statement that Tier 0 leaves
+  the device here, which the declaration rule requires be said out loud. How
+  `models/` may *obtain* and use that credential is ADR-0004 §3's (via
+  `SecretStore`) and §7's (Tier 0 access gating) — both untouched and neither
+  superseded here. This ADR governs egress: what leaves and to which recipient.
+  It does not govern a subsystem's internal access to Tier 0 data, and nothing
+  here should be read as exempting `models/` from §7. Whether §7's gating was
+  ever meant to apply per call to a provider credential the user deliberately
+  configured is a genuine open question in ADR-0004, older than this ADR and
+  merely made visible by declaring the payload — issue #74. It must be settled
+  before the same question arrives at `tools/`, where the credential is
+  presented to a third-party service rather than to the model provider.
 - **the `tools/` integration boundary** — to external services the user has
   explicitly connected. Its declaration is **per tool**, and its recipient
   authorisation is **per call**, through `permissions/`. Both are stronger than
