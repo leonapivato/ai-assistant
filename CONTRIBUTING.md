@@ -402,12 +402,18 @@ before you know the contract.
 carry **rules and the reasoning behind them, never snapshots.** If a fact about
 the repository matters, either a check asserts it or a dated ADR records it.
 
-A snapshot is anything that was measured or observed rather than decided: a test
+A snapshot is anything **measured or observed** rather than **decided**: a test
 count, a wall-clock timing, a "currently"/"today"/"so far", or a claim that some
 piece of work is complete. Written into an undated document it loses the
 timestamp that made it true, becomes an assertion no one owns, and decays from
 that moment — while still reading as law to everyone after you. Prefer the
 durable form: name the rule, and point at whatever actually holds the state.
+
+A decision does not become a snapshot by describing a situation. "You are the
+only agent in this clone" is a premise these documents *set* (ADR-0015), not a
+count someone took; if it stops holding, the workflow has been broken, which is
+a different problem from a fact going stale. The test is where the sentence came
+from — an argument, or a measurement.
 
 **ADRs are the exception, and the reason the rule works.** An ADR is a dated,
 point-in-time record, so "at the time of writing, X" is exactly what belongs
