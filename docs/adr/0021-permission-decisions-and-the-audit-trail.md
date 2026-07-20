@@ -137,10 +137,23 @@ the same failure shape as #54, one level down, and it is worth the wider
 parameter.
 
 `ToolDefinition` is a frozen pydantic model, so `==` is field-wise and total.
-This satisfies ADR-0016 §2's three-part test for a semantic intrinsic to a type
-— computable from the type's own declaration, independent of policy,
-configuration, context and clock, and the same answer for every consumer — which
-is the test that permits it in `core` at all.
+
+**Why this may live in `core` at all.** `authorises` compares; it does not
+decide. Whether an action *should* be allowed is `ActionPolicy`'s, in
+`permissions/`, and none of that reasoning is here — this asks only whether a
+record already in hand is a record of *this* request being allowed. It therefore
+passes ADR-0016 §2's three-part test for a semantic intrinsic to a type:
+computable from the two values alone, independent of policy, configuration,
+context and clock, and the same answer for every consumer. That is the amended
+rule — *"`core/types.py` holds no subsystem logic; it may hold semantics
+intrinsic to a type it defines"* — and it is the rule that already admits
+`FrozenDict` and `ExecutionState.is_active`.
+
+The alternative, a comparison living in `permissions/`, fails for the reason
+ADR-0016 §2 gave when it declined to put the severity ordering in a subsystem:
+both `permissions` and the future invocation path need it, golden rule 1 forbids
+either importing the other, so it would become two copies of a safety-critical
+comparison free to disagree.
 
 **Why not a digest.** Issue #54 and ADR-0018 §3 both propose "a digest or a
 version". A digest is what you reach for when the thing is too large or too
@@ -265,7 +278,9 @@ nothing leaves the prompt with nothing to say.
 
 ```python
 class PermissionOutcome(_SeverityScale):   # declared least restrictive first
-    ALLOW; CONFIRM; DENY
+    ALLOW = "allow"
+    CONFIRM = "confirm"
+    DENY = "deny"
 ```
 
 Three outcomes, ordered by restrictiveness. `ALLOW` proceeds; `CONFIRM` requires
@@ -304,6 +319,7 @@ class PermissionRuling(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     outcome: PermissionOutcome
     reason: str                      # must contain visible text
+    authorised_by: Identifier | None = None   # the user decision this ALLOW rests on
 
 class ActionPolicy(Protocol):
     async def decide(self, request: ActionRequest) -> PermissionRuling: ...
@@ -331,6 +347,23 @@ describing *what was ruled on* is transcribed from the request by
 `from_request` (§1). A policy therefore cannot substitute a subject, and this is
 true of every implementation, including one written by someone who never read
 this ADR.
+
+**`authorised_by` records where an `ALLOW` came from.** An `ALLOW` reached
+because the declaration cleared the policy's own thresholds is a different act
+from one reached because the user said so, and §5's disclosure floor turns that
+difference into a rule rather than a nicety: an `ALLOW` for a disclosing tool is
+permitted only when it names the user decision it rests on. The field is
+`None` for every ruling a policy reaches by itself, and may be set only on an
+`ALLOW` — a `DENY` that cites an authorisation is incoherent.
+
+Standing grants are deferred (§6), so nothing populates this field yet. It is
+present anyway for the reason ADR-0016 §4 carried `parameters_schema`
+unenforced: the alternative is that the first standing grant has to *relax a
+ratified floor*, which is a breaking change to a safety rule at the moment the
+system is being taught to stop asking. ADR-0016 §5 is blunt about that shape —
+*"a contract whose author expects it to break is not a contract"*. One optional
+field now makes the feature additive later, and lets the floor be written
+without an exception clause.
 
 It also removes two things a policy had no business doing: minting an `id`, and
 reading a clock. `decided_at` and `id` are supplied by the caller that records,
@@ -474,7 +507,13 @@ threshold comparison is written the wrong way round — including, concretely, t
 but which a policy could still reproduce in its own arithmetic.
 
 **Off-device disclosure is never auto-granted.** A definition whose `discloses`
-contains `SECRET` or `PERSONAL` may not receive `ALLOW`.
+contains `SECRET` or `PERSONAL` may not receive `ALLOW` with `authorised_by`
+unset. *Auto*-granted is the operative word: the floor is on the policy deciding
+by itself, not on the outcome, so an `ALLOW` naming the user decision it rests on
+is permitted and is how a standing grant will work (§3, §6). Today nothing
+populates that field, so in practice the floor is absolute — but it is written
+against the distinction that matters rather than against a proxy for it, which is
+what keeps §6's relief valve reachable without amending this clause.
 
 This is the enforceable form of the two-field rule ADR-0016 §2 states as an
 obligation on this subsystem — *"`reversibility` alone is not sufficient to
@@ -490,10 +529,14 @@ can ever force a field to be read.
 
 The floor and monotonicity are also not independent — given monotonicity, the
 floor is the *only* form the obligation can take. If some request with
-`discloses=(PERSONAL,)` were `ALLOW`, the otherwise-identical request with
-`discloses=()` is less severe and so is `ALLOW` too, and disclosure has been
-shown to make no difference at the auto-grant boundary. Forbidding `ALLOW`
+`discloses=(PERSONAL,)` drew an unauthorised `ALLOW`, the otherwise-identical
+request with `discloses=()` is less severe and so draws one too, and disclosure
+has been shown to make no difference at the auto-grant boundary. Forbidding it
 outright is therefore not a strong reading of ADR-0016 §2; it is the reading.
+
+Monotonicity is stated over the outcome and is unaffected by `authorised_by`: a
+user authorisation is an input the policy was given, not a severity axis, and the
+comparison holds requests equal in every other respect including that one.
 
 **The cost is over-prompting, and ADR-0016 already accepted it.** Almost every
 hosted integration transmits something, and the tuples are ceilings (ADR-0016
@@ -538,9 +581,11 @@ nobody declared treated as free.
   field. It is deferred but **load-bearing**: §5's disclosure floor sends most
   real tools to `CONFIRM`, and the standing grant is the only sanctioned way to
   stop asking. Until it lands, a disclosing tool prompts every time, which is
-  the correct default and a poor steady state. Nothing here forecloses it — a
-  standing grant is a recorded user decision that sources an `ALLOW`, not a new
-  outcome and not a policy deciding silently.
+  the correct default and a poor steady state. The seam it will need is already
+  here and unpopulated: `PermissionRuling.authorised_by` (§3), so the feature is
+  additive rather than a relaxation of §5's floor — a standing grant is a
+  recorded user decision that sources an `ALLOW`, not a new outcome and not a
+  policy deciding silently.
 - **Spend accumulation.** The declaration-level rule lands (`UNKNOWN` fails
   closed); a running total against a budget needs invocation to report what was
   actually spent, and ADR-0016 §4 already records that `cost` is an estimate
@@ -555,6 +600,13 @@ nobody declared treated as free.
 
 ## Consequences
 
+- **The floor is written against auto-granting, not against the outcome.** A
+  disclosing tool may be `ALLOW`ed only by a ruling that names the user decision
+  it rests on, and `PermissionRuling.authorised_by` carries that today while
+  nothing yet sets it. The first draft forbade the outcome outright and then
+  offered standing grants as the relief valve, which the floor made
+  unreachable — an inconsistency architecture review caught, and one that would
+  have cost a breaking change to a safety rule to fix later.
 - **New `core` surface:** `PermissionOutcome`, `PermissionRuling`,
   `ActionRequest`, `PermissionDecision`, the `ActionPolicy` and `AuditTrail`
   Protocols, and `AuditError`/`DuplicateDecisionError`/`InvalidResolutionError`
