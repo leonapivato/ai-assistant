@@ -130,13 +130,37 @@ saw_tree_mismatch=0
 saw_base_mismatch=0
 saw_unreadable=0
 
+# Read one provenance field. The value is captured up to the next space rather
+# than as "however many hex characters happen to follow", because `[0-9a-f]*`
+# silently *stops* at the first non-hex byte: `base_sha=<expected>junk` would
+# capture exactly the expected hash and compare equal, accepting an artifact
+# whose recorded field is not the hash at all. Capturing the whole token means a
+# malformed field mismatches and fails closed, which is what the comment below
+# promises. The leading space also pins the field name, so `base_sha=` can never
+# be read as `sha=` and a future `<x>_tree=` can never be read as `tree=`.
+provenance_field() {
+    sed -n "s/.*[[:space:]]$1=\([^[:space:]]*\).*/\1/p" <<<"$2"
+}
+
+# The closing line every genuine review carries (docs/review/guide.md). Matched
+# against the *last non-blank line*, not anywhere in the body: a substring search
+# accepts prose that merely mentions the words, e.g. "I cannot provide a verdict
+# or APPROVE this change". Markdown emphasis is stripped first, since the
+# reviewer writes "**Verdict: X**", "Verdict: X" and "VERDICT: X" interchangeably.
+artifact_has_verdict() {
+    local last
+    last="$(grep -v '^[[:space:]]*$' "$1" | tail -n 1 |
+        tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$last"
+}
+
+declare -A covering_rank=()
+
 shopt -s nullglob
 for a in .review/*.md; do
     provenance="$(head -n 1 "$a")"
-    recorded_base="$(sed -n 's/.*base_sha=\([0-9a-f]*\).*/\1/p' <<<"$provenance")"
-    # The leading space matters: it pins the field name to `tree=` and stops a
-    # future `<something>_tree=` field from being read as this one.
-    recorded_tree="$(sed -n 's/.* tree=\([0-9a-f]*\).*/\1/p' <<<"$provenance")"
+    recorded_base="$(provenance_field base_sha "$provenance")"
+    recorded_tree="$(provenance_field tree "$provenance")"
 
     # An artifact predating ADR-0020 records no tree, so its content cannot be
     # verified at all. Fail closed: unverifiable is not the same as matching,
@@ -158,12 +182,27 @@ for a in .review/*.md; do
     # `<sha>-<persona>.md`; personas carry no dash, so the last field is it.
     name="$(basename "$a" .md)"
     persona="${name##*-}"
-    # Several commits can legitimately carry a review of this same tree — that
-    # is the point of the change. Prefer the one filed under the current HEAD
-    # when it exists, so the common case posts the artifact whose filename
-    # matches the PR head and a reader sees no discrepancy.
-    if [[ -z "${covering[$persona]:-}" || "$name" == "${sha}-${persona}" ]]; then
+
+    # Several commits can legitimately carry a review of this same tree — that is
+    # the point of the change — so pick between them deterministically rather
+    # than taking whichever the glob yielded first.
+    #
+    # Completeness outranks being filed under HEAD. Selecting an incomplete
+    # artifact while a valid one covers the same tree would refuse the ship on
+    # the strength of a file the author has already superseded; the verdict check
+    # below is a test of the *review*, not a way to lose one. Among equals,
+    # prefer the artifact named for the current commit, so a reader comparing the
+    # posted comment against the PR head sees no discrepancy.
+    rank=0
+    if artifact_has_verdict "$a"; then
+        rank=2
+    fi
+    if [[ "$name" == "${sha}-${persona}" ]]; then
+        rank=$((rank + 1))
+    fi
+    if [[ -z "${covering[$persona]:-}" || "$rank" -gt "${covering_rank[$persona]}" ]]; then
         covering["$persona"]="$a"
+        covering_rank["$persona"]="$rank"
     fi
 done
 shopt -u nullglob
@@ -224,9 +263,7 @@ done
 # is the last point before this becomes the record, so it verifies rather than
 # trusts.
 for a in "${artifacts[@]}"; do
-    a_last="$(grep -v '^[[:space:]]*$' "$a" | tail -n 1 |
-        tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    if ! grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$a_last"; then
+    if ! artifact_has_verdict "$a"; then
         name="$(basename "$a" .md)"
         die "$(basename "$a") does not end in a verdict — it is incomplete
      re-run: just review-codex ${name##*-}"

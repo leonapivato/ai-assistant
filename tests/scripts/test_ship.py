@@ -1095,3 +1095,125 @@ def test_posts_without_an_aggregate_when_the_artifact_predates_it(tmp_path: Path
     posted = (tmp_path / "comment.md").read_text()
     assert "a finding" in posted
     assert "round" not in posted
+
+
+def test_refuses_a_provenance_field_with_trailing_garbage(tmp_path: Path) -> None:
+    """A malformed field must mismatch, not be silently trimmed to a valid hash.
+
+    Capturing the value as `[0-9a-f]*` stops at the first non-hex byte, so
+    `base_sha=<expected>junk` would yield exactly the expected hash and compare
+    equal — accepting an artifact whose recorded field is not that hash at all.
+    The field is read up to the next space for this reason.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+    artifact = repo / ".review" / f"{sha}-adversarial.md"
+    base_sha = _git(repo, "merge-base", "main", sha)
+    artifact.write_text(
+        artifact.read_text().replace(f"base_sha={base_sha}", f"base_sha={base_sha}junk")
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_a_tree_field_with_trailing_garbage(tmp_path: Path) -> None:
+    """Same defect on the field that carries the content anchor itself."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+    artifact = repo / ".review" / f"{sha}-adversarial.md"
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    artifact.write_text(artifact.read_text().replace(f"tree={tree}", f"tree={tree}junk"))
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_base_sha_is_never_read_as_the_sha_field(tmp_path: Path) -> None:
+    """The field name is space-anchored, so `base_sha=` cannot match `sha=`.
+
+    Without the anchor the two fields are confusable, and the base check would
+    silently compare the wrong value.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    # A correct artifact: if `sha=` were read as the base, this would refuse.
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_prefers_a_complete_artifact_over_an_incomplete_one_for_the_same_tree(
+    tmp_path: Path,
+) -> None:
+    """A superseded incomplete artifact must not refuse a ship a valid one covers.
+
+    Two commits can carry a review of one tree. Taking whichever the glob yielded
+    first meant a truncated older artifact blocked the ship even though a
+    complete review of exactly this content existed. The verdict check is a test
+    of the review, not a way to lose one.
+    """
+    repo = tmp_path / "repo"
+    old_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    # The stale artifact is the truncated one. This is the common shape of the
+    # problem; the discriminating case — where the *HEAD-named* artifact is the
+    # truncated one — is the test below, which is what actually fails if
+    # completeness stops outranking the filename.
+    _record_review(repo, old_sha, "adversarial", "half a fin\n")
+    _git(repo, "commit", "-q", "--amend", "-m", "reworded")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+    _record_review(repo, head_sha, "adversarial", f"the complete review\n{_VERDICT}\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=head_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert "the complete review" in (tmp_path / "comment.md").read_text()
+
+
+def test_completeness_outranks_being_filed_under_the_head_commit(tmp_path: Path) -> None:
+    """The HEAD-named artifact is preferred only among equally complete ones.
+
+    Here the HEAD-named one is the truncated one, so the complete review filed
+    under the pre-amend commit must win.
+    """
+    repo = tmp_path / "repo"
+    old_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, old_sha, "adversarial", f"the complete review\n{_VERDICT}\n")
+    _git(repo, "commit", "-q", "--amend", "-m", "reworded")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+    _record_review(repo, head_sha, "adversarial", "half a fin\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=head_sha)
+
+    assert result.returncode == 0, result.stderr
+    assert "the complete review" in (tmp_path / "comment.md").read_text()
+
+
+def test_still_refuses_when_every_covering_artifact_is_incomplete(tmp_path: Path) -> None:
+    """Preferring a complete artifact must not become "accept an incomplete one"."""
+    repo = tmp_path / "repo"
+    old_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, old_sha, "adversarial", "half a fin\n")
+    _git(repo, "commit", "-q", "--amend", "-m", "reworded")
+    head_sha = _git(repo, "rev-parse", "HEAD")
+    _record_review(repo, head_sha, "adversarial", "also truncated\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=head_sha)
+
+    assert result.returncode != 0
+    assert "does not end in a verdict" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
