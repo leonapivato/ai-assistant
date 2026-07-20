@@ -8,7 +8,7 @@ The suite asserts only what is universal to the contract — that ``decide`` is
 total, deterministic, returns an internally coherent decision, and never commits
 secret-tier data. It deliberately does **not** encode *which*
 ruling a given proposal earns: that is each policy's reasoning, and even the
-default's is expected to change (``TODO.md`` item 2). ``DefaultMemoryPolicy``'s
+default's is expected to change (issue #38). ``DefaultMemoryPolicy``'s
 specific rules are tested in ``test_policy.py``.
 
 Every obligation here traces to something already ratified — determinism to the
@@ -19,7 +19,7 @@ widens that contract without an ADR (golden rule 5) and would fail an
 implementation that actually conforms. Two reasonable-sounding expectations were
 cut for exactly that reason — that ``decide`` leaves its inputs alone, and that
 ``reason`` is non-blank. Both are tested per-implementation instead, and
-``TODO.md`` item 7 tracks ratifying them properly.
+Issue #40 tracks ratifying them properly.
 
 Two things are intentionally left unasserted because ``MemoryDecision``'s own
 validator already makes them unrepresentable: that ``MERGE`` carries a
