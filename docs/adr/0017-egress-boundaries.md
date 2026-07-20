@@ -181,6 +181,19 @@ for itself:
     gap — `models/` transmits today under ADR-0004 §2, and making it a
     precondition would prohibit every model call until the work lands. Issue
     #83 covers both boundaries;
+  - **model artifact fetches** (Tier 2) — the request for a named model file
+    when a local backend downloads its weights on first use. `fastembed`'s ONNX
+    model (ADR-0006 §2) is the live case, and it is easy to miss: the *default*
+    embedder is the on-device one, and "on-device" describes where inference
+    runs, not where the model came from. No user data is in the request, but it
+    is a real connection to a real host, and it discloses that this
+    installation is fetching that model. ADR-0006's claim that memory content
+    "never leaves the device just to be indexed" is unaffected and remains
+    true — this is a different request carrying different content. The
+    alternative, requiring artifacts to be preinstalled, stays open to the
+    embedding work — as does pinning and verifying the host, since an unpinned
+    model download lets whoever serves it choose what the embedder computes.
+    Issue #89;
   - **request configuration and protocol metadata** (Tier 2) — the model
     identifier, generation parameters such as temperature and token limits, and
     the headers the transport requires. Every call carries some of this and it
@@ -542,10 +555,12 @@ leave from somewhere nobody designated, in a quantity nobody declared, without a
 check nobody ran. A second boundary costs that property nothing as long as it
 meets all three conditions, and `tools/` is held to all three:
 
-1. **Designated.** The boundary is named here and backed by mechanical
-   enforcement rather than convention: the import-linter contract ADR-0004's
-   Consequences provision for permits network/provider clients in `models/` and
-   the designated `tools/` seam once it exists, and nowhere else.
+1. **Designated.** The boundary is *named*, not merely described, and backed by
+   mechanical enforcement rather than convention. This ADR approves the
+   category — a seam inside `tools/` — and does not name the module; the
+   ratifying act in §2 does that, and the import-linter contract ADR-0004's
+   Consequences provision for then permits network clients in `models/` and
+   that named module, and nowhere else.
 
    **An import contract is a net, not a proof**, and this ADR does not claim
    otherwise. It matches module names, so it cannot see a subsystem reaching
