@@ -40,18 +40,24 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import FunctionType
-from typing import TYPE_CHECKING, Final, is_protocol
+from typing import TYPE_CHECKING, Final, Literal, is_protocol
 
 import pytest
 
 import ai_assistant.testing as testing_pkg
+import conftest
 from ai_assistant.core import protocols as protocols_module
 from ai_assistant.testing import FakeMemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-#: Test class -> the tests on it that ran and passed (see tests/conftest.py).
+#: The pytest report shapes `_report` builds, spelled as pytest types them.
+type _Phase = Literal["setup", "call", "teardown"]
+type _Outcome = Literal["passed", "failed", "skipped"]
+
+#: Test class -> the tests on it whose every reported case was honoured, i.e.
+#: passed or opted out of by the contract itself (see tests/conftest.py).
 type CollectedTests = dict[type, frozenset[str]]
 
 _TESTS_ROOT: Final = Path(__file__).resolve().parent.parent
@@ -242,32 +248,26 @@ def _suite_declared_tests(suite: type) -> set[str]:
     }
 
 
-def _ran_every_obligation(
-    cls: type, suite: type, passed: frozenset[str], opted_out: frozenset[str]
-) -> bool:
+def _ran_every_obligation(cls: type, suite: type, honoured: frozenset[str]) -> bool:
     """Report whether ``cls`` honoured every test ``suite`` declares.
 
     Enumerating from the suite rather than from what got reported is what makes
     this exhaustive. A test the subclass suppressed -- overridden with a no-op,
     rebound to ``None``, hidden behind ``__test__ = False``, or skipped by a
-    mark -- produces no passing report at all, so a check that only inspects
+    mark -- produces no honoured report at all, so a check that only inspects
     reports cannot notice the obligation went missing.
 
     An obligation is honoured when it still resolves to the suite's own
-    function object *and* it either passed or the suite's own body opted out
-    of it.
+    function object *and* every case pytest reported for it passed, or was one
+    the suite's own body opted out of (see ``tests/conftest.py``).
     """
-    for name in _suite_declared_tests(suite):
-        if getattr(cls, name, None) is not getattr(suite, name):
-            return False
-        if name not in passed and name not in opted_out:
-            return False
-    return True
+    return all(
+        getattr(cls, name, None) is getattr(suite, name) and name in honoured
+        for name in _suite_declared_tests(suite)
+    )
 
 
-def _binding_classes(
-    protocol: str, passing: CollectedTests, opted_out: CollectedTests
-) -> list[type]:
+def _binding_classes(protocol: str, honoured: CollectedTests) -> list[type]:
     """Return the classes that really ran the canonical fake through the suite.
 
     Every condition closes a way of satisfying the letter of the triad while
@@ -284,14 +284,14 @@ def _binding_classes(
       beside it in a second fixture.
     """
     found = []
-    for cls, passed in passing.items():
+    for cls, honoured_tests in honoured.items():
         suite = _suite_of(cls, protocol)
         if suite is None:
             continue
         obligations = _suite_declared_tests(suite)
         if not obligations:
             continue
-        if not _ran_every_obligation(cls, suite, passed, opted_out.get(cls, frozenset())):
+        if not _ran_every_obligation(cls, suite, honoured_tests):
             continue
         if _binds_fake(cls, protocol, _fixtures_requested_by(suite, obligations)):
             found.append(cls)
@@ -299,21 +299,18 @@ def _binding_classes(
 
 
 def _missing_parts(
-    protocol: str,
-    declared: set[str],
-    passing: CollectedTests | None,
-    opted_out: CollectedTests | None = None,
+    protocol: str, declared: set[str], honoured: CollectedTests | None
 ) -> tuple[str, ...]:
     """Return the triad parts ``protocol`` is missing.
 
-    ``passing`` may be ``None`` to check only the statically visible parts.
+    ``honoured`` may be ``None`` to check only the statically visible parts.
     """
     missing = []
     if f"{protocol}Contract" not in declared:
         missing.append("suite")
     if _canonical_fake(protocol) is None:
         missing.append("fake")
-    if passing is not None and not _binding_classes(protocol, passing, opted_out or {}):
+    if honoured is not None and not _binding_classes(protocol, honoured):
         missing.append("binding")
     return tuple(missing)
 
@@ -360,15 +357,14 @@ def test_every_protocol_has_a_conformance_suite_and_canonical_fake() -> None:
     failures = [
         _describe(protocol, gaps)
         for protocol in _protocol_names()
-        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, passing=None)))
+        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, honoured=None)))
     ]
 
     assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
 
 
 def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
-    passing_class_tests: CollectedTests,
-    opted_out_class_tests: CollectedTests,
+    honoured_class_tests: CollectedTests,
     run_is_unfiltered: bool,
 ) -> None:
     """Part 3: a subclass really ran each fake through its suite, and passed.
@@ -390,7 +386,7 @@ def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
         if (
             gaps := _unexcused(
                 protocol,
-                _missing_parts(protocol, declared, passing_class_tests, opted_out_class_tests),
+                _missing_parts(protocol, declared, honoured_class_tests),
             )
         )
     ]
@@ -399,8 +395,7 @@ def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
 
 
 def test_no_exemption_is_stale(
-    passing_class_tests: CollectedTests,
-    opted_out_class_tests: CollectedTests,
+    honoured_class_tests: CollectedTests,
     run_is_unfiltered: bool,
 ) -> None:
     """An exemption dies with the gap it describes, so the backlog only shrinks."""
@@ -417,9 +412,7 @@ def test_no_exemption_is_stale(
                 f"core/protocols.py -- drop the entry ({exemption.issue})"
             )
             continue
-        gaps = set(
-            _missing_parts(exemption.protocol, declared, passing_class_tests, opted_out_class_tests)
-        )
+        gaps = set(_missing_parts(exemption.protocol, declared, honoured_class_tests))
         if closed := set(exemption.missing) - gaps:
             failures.append(
                 f"{exemption.protocol} is exempted for {sorted(closed)} but that "
@@ -470,7 +463,7 @@ def test_check_discovers_the_protocols_it_is_meant_to_guard() -> None:
 
 def test_a_protocol_without_its_triad_is_reported() -> None:
     """The check fails on a Protocol with nothing behind it -- not vacuously true."""
-    missing = _missing_parts("NonexistentThing", declared=set(), passing={})
+    missing = _missing_parts("NonexistentThing", declared=set(), honoured={})
 
     assert missing == TRIAD_PARTS
     assert "NonexistentThing" in _describe("NonexistentThing", missing)
@@ -569,7 +562,7 @@ def test_an_empty_suite_does_not_count_as_a_conformance_suite() -> None:
     """
     passing: CollectedTests = {_BoundToAnEmptySuite: frozenset({"test_something_of_its_own"})}
 
-    assert _binding_classes("MemoryStore", passing, {}) == []
+    assert _binding_classes("MemoryStore", passing) == []
 
 
 def test_a_suite_whose_tests_ran_does_count() -> None:
@@ -578,7 +571,7 @@ def test_a_suite_whose_tests_ran_does_count() -> None:
     passing: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
 
     assert suite.__name__ == "MemoryStoreContract"
-    assert _binding_classes("MemoryStore", passing, {}) == [bound]
+    assert _binding_classes("MemoryStore", passing) == [bound]
 
 
 @pytest.mark.parametrize(
@@ -597,7 +590,7 @@ def test_overriding_a_suite_test_does_not_count_as_running_the_suite(
     _, bound = _suite_and_binding(overridden=overridden)
     passing: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
 
-    assert _binding_classes("MemoryStore", passing, {}) == [], f"{label} was overridden"
+    assert _binding_classes("MemoryStore", passing) == [], f"{label} was overridden"
 
 
 def test_an_obligation_that_never_ran_does_not_count_as_running_the_suite() -> None:
@@ -611,22 +604,51 @@ def test_an_obligation_that_never_ran_does_not_count_as_running_the_suite() -> N
     both: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
     only_one: CollectedTests = {bound: frozenset({"test_one"})}
 
-    assert _binding_classes("MemoryStore", both, {}) == [bound]  # control
-    assert _binding_classes("MemoryStore", only_one, {}) == []
+    assert _binding_classes("MemoryStore", both) == [bound]  # control
+    assert _binding_classes("MemoryStore", only_one) == []
 
 
-def test_a_suite_opting_itself_out_at_runtime_stays_legitimate() -> None:
-    """A contract may decide an obligation does not apply to an implementation.
+@pytest.mark.parametrize(
+    ("when", "outcome", "wasxfail", "satisfactory", "why"),
+    [
+        ("call", "passed", False, True, "the obligation was met"),
+        ("call", "skipped", False, True, "the suite's own body opted out"),
+        ("call", "failed", False, False, "the contract assertion did not hold"),
+        ("call", "skipped", True, False, "an xfail is a failure kept green by a mark"),
+        ("call", "passed", True, False, "an xpass was still declared a failure"),
+        ("setup", "skipped", False, False, "a mark skipped it before the body ran"),
+        ("setup", "failed", False, False, "it never reached its assertions"),
+        ("setup", "passed", False, True, "setup succeeding says nothing either way"),
+    ],
+)
+def test_report_shapes_that_do_and_do_not_honour_an_obligation(
+    when: _Phase, outcome: _Outcome, wasxfail: bool, satisfactory: bool, why: str
+) -> None:
+    """Pin which pytest outcomes count as a contract obligation being met.
 
-    ``ContextProviderContract`` does exactly this for a provider that serves a
-    fixed instant. That is the suite's own call, made in its own body, and must
-    not be confused with the obligation being suppressed from outside.
+    The subtle one is the call-phase skip: ``ContextProviderContract`` opts
+    itself out for a provider that serves a fixed instant, which is the
+    contract's own call and legitimate. A *mark* skips at setup instead, from
+    outside the contract, and must not count.
     """
-    _, bound = _suite_and_binding(overridden=())
-    passing: CollectedTests = {bound: frozenset({"test_one"})}
-    opted_out: CollectedTests = {bound: frozenset({"test_two"})}
+    report = _report(when=when, outcome=outcome, wasxfail=wasxfail)
 
-    assert _binding_classes("MemoryStore", passing, opted_out) == [bound]
+    assert conftest._is_satisfactory(report) is satisfactory, why
+
+
+def _report(*, when: _Phase, outcome: _Outcome, wasxfail: bool) -> pytest.TestReport:
+    """Build a minimal pytest report with the given phase and outcome."""
+    report = pytest.TestReport(
+        nodeid="probe",
+        location=("probe.py", 0, "probe"),
+        keywords={},
+        outcome=outcome,
+        longrepr=None,
+        when=when,
+    )
+    if wasxfail:
+        report.wasxfail = ""  # pytest's own marker attribute for xfail/xpass
+    return report
 
 
 def test_suppressing_a_suite_test_from_collection_does_not_count() -> None:
@@ -635,7 +657,7 @@ def test_suppressing_a_suite_test_from_collection_does_not_count() -> None:
     setattr(bound, "test_two", None)  # noqa: B010 - rebinding to a non-function is the point
     passing: CollectedTests = {bound: frozenset({"test_one"})}
 
-    assert _binding_classes("MemoryStore", passing, {}) == []
+    assert _binding_classes("MemoryStore", passing) == []
 
 
 def test_a_second_requested_fixture_supplying_a_real_subject_is_not_a_binding() -> None:
