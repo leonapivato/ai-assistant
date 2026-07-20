@@ -333,9 +333,20 @@ fake leaves every consumer hand-rolling a private mock.
 The triad is what a Protocol *change* is measured against too — extend the suite
 in the same change, so the new obligation is enforced rather than assumed.
 
-Every Protocol that exists today has its triad; the backfill is complete. The
-rule is still only review-enforced — nothing mechanical fails a Protocol that
-ships without its suite and fake (tracked as an open issue).
+**This is mechanically enforced.** `tests/core/test_protocol_triad.py` maps
+every Protocol in `core/protocols.py` to its suite, its canonical fake, and a
+`Test…Contract` subclass that pytest actually *collects* — the last part is the
+one that matters, since an abstract suite bound by a class nobody collects runs
+zero assertions. It lives in pytest rather than in a script because only pytest
+can answer "was this collected?", and `uv run pytest` is already in the gate and
+in CI. Add a Protocol without its triad and the gate goes red, naming what is
+missing.
+
+The check ships with an `EXEMPTIONS` list for Protocols whose backfill is still
+outstanding. That list is a backlog, not configuration: each entry names the
+missing parts and the issue tracking them, and the check fails if an entry
+outlives the gap it describes — so it can only shrink. It currently holds one
+entry (`FeedbackProcessor`, missing its canonical fake).
 
 This does not loosen contract-first. The sequence is two stages, not one:
 
