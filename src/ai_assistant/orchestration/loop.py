@@ -100,7 +100,7 @@ def _check_tuning(*, retrieval_limit: int, conflict_threshold: float, conflict_l
     every score, silently doing the same.
 
     Raises:
-        TypeError: If a limit is not an integer.
+        TypeError: If a limit is not an integer, or the threshold is a ``bool``.
         ValueError: If a limit is not positive, or the threshold is not a finite
             value in ``[0, 1]`` — the range a ``MemoryRecord.score`` occupies.
     """
@@ -115,6 +115,13 @@ def _check_tuning(*, retrieval_limit: int, conflict_threshold: float, conflict_l
         if limit < 1:
             msg = f"{name} must be at least 1, got {limit}"
             raise ValueError(msg)
+    # Checked before the range test, which a `bool` silently survives: `bool` is
+    # an `int` subclass, so `isfinite(True)` holds and `0.0 <= True <= 1.0` is
+    # true — a flag would be read as the threshold 1.0, restricting conflicts to
+    # perfect-score matches. Rejected for the same reason the limits reject one.
+    if isinstance(conflict_threshold, bool):
+        msg = f"conflict_threshold must be a real number, got {conflict_threshold!r}"
+        raise TypeError(msg)
     if not isfinite(conflict_threshold) or not 0.0 <= conflict_threshold <= 1.0:
         msg = f"conflict_threshold must be a finite value in [0, 1], got {conflict_threshold!r}"
         raise ValueError(msg)
@@ -190,6 +197,8 @@ class LearningLoop:
             id_factory: Supplies goal ids; injectable for the same reason.
 
         Raises:
+            TypeError: If a limit is not an integer, or ``conflict_threshold`` is
+                a ``bool`` (see :func:`_check_tuning`).
             ValueError: If a limit is below 1, or ``conflict_threshold`` is not a
                 finite value in ``[0, 1]`` (see :func:`_check_tuning`).
         """
