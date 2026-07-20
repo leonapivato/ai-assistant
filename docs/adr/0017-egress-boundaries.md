@@ -225,7 +225,17 @@ undesignated, and permitted no egress at all. What must exist first:
   recipient the call's arguments select, not the transport endpoint, at the
   granularity of the stable logical destination (§2), and trace to a user
   decision or standing user policy; the audit record must capture that
-  destination and that basis. A `permissions/` grant alone does
+  destination and that basis.
+- the transport rules — the endpoint the seam actually opens a connection to
+  must be pinned to the service the user connected, and a redirect must not
+  carry the request or its credential to another host. Authorising a semantic
+  recipient says nothing about *which server* received the bytes: a
+  configurable API base URL or a followed cross-host redirect delivers both the
+  payload and the bearer token somewhere else while the audit record still
+  reads `alice@example.com`. Semantic recipient and transport endpoint are
+  independent, and both have to be constrained. Worse than a data leak: the
+  credential travels too, so the attacker gets durable access rather than one
+  message. Issue #83. A `permissions/` grant alone does
   not satisfy §1, and neither does a credential-scoped host for an operation
   that can disclose onward (ADR-0016 §3, §7; issue #68).
 - the per-call payload rules. A tool's declared reach is a *ceiling over
