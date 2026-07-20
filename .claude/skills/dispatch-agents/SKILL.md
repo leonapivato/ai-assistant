@@ -60,7 +60,13 @@ yet written.** Branch names need not contain the number — `tools/tooldefinitio
 carried ADR-0016 — so a name scan alone will hand out a live number. Keep your
 own list of what you have handed out and treat it as the primary record. That
 list does not survive a restarted session, which is what the clone scan above is
-for; run all four, and prefer the highest free number when they disagree.
+for.
+
+Run all four and **assign one above the highest number any source mentions**,
+merged or not. Never fill a gap: with `0018` present and `0017` absent, `0017`
+is a live claim by a lane that has not written its file yet, not a free slot.
+Gaps close when the lane merges or is abandoned, and only the dispatcher who
+opened one may reuse it.
 
 ## 2. Write the brief
 
@@ -161,6 +167,13 @@ time with full confidence.
   immediately with status 8 while checks are *pending* — run as two separate
   commands, it reports "no checks reported yet" and the merge proceeds anyway,
   admin-bypassing the very gate this step exists to wait for.
+
+  A residual race remains and is accepted: `main` can advance between the checks
+  passing and the merge running, so `--admin` may land a branch that just became
+  stale. It is inherent to bypassing branch protection rather than fixable here —
+  the window is seconds, and the alternative is not admin-merging at all. Merge
+  the queue one PR at a time rather than firing several at once, which is what
+  widens that window from seconds to minutes.
 
 - **A rebase invalidates the review record.** `just ship` anchors a review to a
   commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head SHA
