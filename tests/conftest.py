@@ -1,15 +1,16 @@
 """Session-wide pytest configuration.
 
-Its one job is to record what pytest *actually collected*, so that
-``tests/test_protocol_triad.py`` can assert the Protocol-triad rule against the
-real collection rather than against files that merely exist. A conformance
-suite bound to a fake by a class pytest never collects runs zero assertions —
-that is precisely the failure mode a file-existence check cannot see, so the
-evidence has to come from pytest itself.
+Its one job is to record which tests actually **ran and passed**, so that
+``tests/core/test_protocol_triad.py`` can assert the Protocol-triad rule
+against real executed assertions rather than against files that merely exist.
+A conformance suite bound to a fake by a class pytest never collects runs zero
+assertions; so does one whose tests are all collected and then skipped. Neither
+is visible to a file-existence check, so the evidence has to come from pytest
+itself.
 
-``pytest_collection_modifyitems`` is the earliest hook with the complete item
-list, and collection finishes before any test runs, so the record is always
-whole by the time a test reads it.
+Collection alone is not enough for the same reason, which is why the record is
+built from call-phase reports and the triad check is reordered to run last --
+it is the only test in the suite whose subject is the rest of the suite.
 """
 
 from __future__ import annotations
@@ -22,28 +23,36 @@ import pytest
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-# Options that narrow collection. If any is in play the recorded set is a
-# subset of the suite, and absence of a class proves nothing.
-_FILTERING_OPTIONS = ("keyword", "markexpr", "deselect", "lf", "failedfirst")
+# Options that narrow what is collected or run. If any is in play the record is
+# a subset of the suite, and the absence of a class proves nothing. `maxfail`
+# covers `-x`, which stops the run before later tests report.
+_FILTERING_OPTIONS = ("keyword", "markexpr", "deselect", "lf", "failedfirst", "maxfail")
+
+#: The check whose subject is every other test, so it has to run after them.
+_TRIAD_CHECK = "tests/core/test_protocol_triad.py"
 
 
 @dataclass
-class _CollectionRecord:
-    """What this pytest session collected, and whether that was the whole suite."""
+class _RunRecord:
+    """What this pytest session actually ran, and whether that was the whole suite."""
 
-    #: Collected test class -> the names of the tests collected on it. The test
-    #: names matter as well as the class: they are what shows a conformance
-    #: suite contributed real, running assertions rather than merely being
-    #: inherited from.
-    class_tests: dict[type, frozenset[str]] = field(default_factory=dict)
+    #: Test class -> names of the tests on it that ran and passed. The names
+    #: matter as well as the class: they are what shows a conformance suite
+    #: contributed assertions that really executed, rather than merely being
+    #: inherited from, overridden, or skipped.
+    class_tests: dict[type, set[str]] = field(default_factory=dict)
     unfiltered: bool = False
 
 
-_RECORD = _CollectionRecord()
+_RECORD = _RunRecord()
+
+#: nodeid -> (owning class, test name), so a report can be attributed without
+#: the report itself carrying the class.
+_OWNERS: dict[str, tuple[type, str]] = {}
 
 
 def _is_unfiltered(config: pytest.Config) -> bool:
-    """Report whether this session collected the entire configured suite."""
+    """Report whether this session is running the entire configured suite."""
     if any(config.getoption(option, default=None) for option in _FILTERING_OPTIONS):
         return False
     testpaths: Sequence[str] = config.getini("testpaths")
@@ -53,25 +62,37 @@ def _is_unfiltered(config: pytest.Config) -> bool:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Record the test classes, and their tests, that pytest collected."""
-    gathered: dict[type, set[str]] = {}
+    """Attribute each item to its class, and defer the triad check to the end."""
+    _RECORD.unfiltered = _is_unfiltered(config)
+    _OWNERS.clear()
     for item in items:
         cls = getattr(item, "cls", None)
-        if cls is None:
-            continue
-        name = getattr(item, "originalname", None) or item.name
-        gathered.setdefault(cls, set()).add(name)
-    _RECORD.class_tests = {cls: frozenset(names) for cls, names in gathered.items()}
-    _RECORD.unfiltered = _is_unfiltered(config)
+        if cls is not None:
+            _OWNERS[item.nodeid] = (cls, getattr(item, "originalname", None) or item.name)
+
+    deferred = [item for item in items if item.nodeid.startswith(_TRIAD_CHECK)]
+    if deferred:
+        items[:] = [item for item in items if not item.nodeid.startswith(_TRIAD_CHECK)] + deferred
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Record a test that got as far as calling its body, and passed."""
+    if report.when != "call" or not report.passed:
+        return
+    owner = _OWNERS.get(report.nodeid)
+    if owner is None:
+        return
+    cls, name = owner
+    _RECORD.class_tests.setdefault(cls, set()).add(name)
 
 
 @pytest.fixture(scope="session")
-def collected_class_tests() -> dict[type, frozenset[str]]:
-    """Every test class pytest collected, mapped to the tests collected on it."""
-    return _RECORD.class_tests
+def passing_class_tests() -> dict[type, frozenset[str]]:
+    """Every test class, mapped to the tests on it that ran and passed."""
+    return {cls: frozenset(names) for cls, names in _RECORD.class_tests.items()}
 
 
 @pytest.fixture(scope="session")
-def collection_is_unfiltered() -> bool:
-    """Whether this session collected the whole suite (no ``-k``, no path args)."""
+def run_is_unfiltered() -> bool:
+    """Whether this session runs the whole suite (no ``-k``, no ``-x``, no path args)."""
     return _RECORD.unfiltered
