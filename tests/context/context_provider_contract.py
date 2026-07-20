@@ -122,6 +122,7 @@ class ContextProviderContract:
 
         assert second is not first
 
+    @pytest.mark.optional_obligation
     async def test_each_assembly_recomputes_from_the_clock(self) -> None:
         # ADR-0008 §5: the context is computed fresh per request. A provider that
         # assembled once at startup and served copies of that context forever would

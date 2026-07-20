@@ -139,6 +139,11 @@ addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
 markers = [
     "integration: tests that touch the network, filesystem, or external services",
+    # On a conformance-suite test only: this obligation may not apply to every
+    # implementation, so the test's own body may `pytest.skip()` out of it. The
+    # Protocol-triad check honours a skipped obligation only when the suite
+    # declared it optional this way (tests/core/test_protocol_triad.py).
+    "optional_obligation: a contract test an implementation may legitimately skip",
 ]
 
 # -----------------------------------------------------------------------------

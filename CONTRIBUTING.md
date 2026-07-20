@@ -344,6 +344,14 @@ answer "did these assertions run?", and `uv run pytest` is already in the gate
 and in CI. Add a Protocol without its triad and the gate goes red, naming what
 is missing.
 
+Because the check wants evidence that the contract *ran*, a contract test that
+skips itself does not count — a `pytest.skip("not implemented")` in a suite is
+an obligation nobody met. Where an obligation genuinely does not apply to every
+implementation, the **suite** says so by marking that test
+`@pytest.mark.optional_obligation`; only then may an implementation's run skip
+it. See `ContextProviderContract.test_each_assembly_recomputes_from_the_clock`,
+which a provider deliberately serving a fixed instant opts out of.
+
 What the check enforces is that the three artifacts exist and run — **not that
 a suite covers every method of its Protocol.** Add a method to an existing
 Protocol and leave its suite alone and the gate stays green. Keeping the suite

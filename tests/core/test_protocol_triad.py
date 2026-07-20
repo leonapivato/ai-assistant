@@ -685,32 +685,47 @@ def test_an_obligation_that_never_ran_does_not_count_as_running_the_suite() -> N
     assert _binding_classes("MemoryStore", only_one) == []
 
 
+@dataclass(frozen=True)
+class _Shape:
+    """One pytest report shape, and whether it honours a contract obligation."""
+
+    when: _Phase
+    outcome: _Outcome
+    wasxfail: bool
+    optional: bool
+    satisfactory: bool
+    why: str
+
+
 @pytest.mark.parametrize(
-    ("when", "outcome", "wasxfail", "satisfactory", "why"),
+    "shape",
     [
-        ("call", "passed", False, True, "the obligation was met"),
-        ("call", "skipped", False, True, "the suite's own body opted out"),
-        ("call", "failed", False, False, "the contract assertion did not hold"),
-        ("call", "skipped", True, False, "an xfail is a failure kept green by a mark"),
-        ("call", "passed", True, False, "an xpass was still declared a failure"),
-        ("setup", "skipped", False, False, "a mark skipped it before the body ran"),
-        ("setup", "failed", False, False, "it never reached its assertions"),
-        ("setup", "passed", False, True, "setup succeeding says nothing either way"),
+        _Shape("call", "passed", False, False, True, "the obligation was met"),
+        _Shape("call", "skipped", False, True, True, "a declared-optional obligation opted out"),
+        _Shape("call", "skipped", False, False, False, "an undeclared skip does not meet it"),
+        _Shape("call", "failed", False, False, False, "the contract assertion did not hold"),
+        _Shape("call", "skipped", True, True, False, "an xfail is a failure kept green"),
+        _Shape("call", "passed", True, False, False, "an xpass was still declared a failure"),
+        _Shape("setup", "skipped", False, True, False, "a mark skipped it before the body ran"),
+        _Shape("setup", "failed", False, False, False, "it never reached its assertions"),
+        _Shape("setup", "passed", False, False, True, "setup succeeding says nothing either way"),
     ],
+    ids=lambda shape: f"{shape.when}-{shape.outcome}",
 )
-def test_report_shapes_that_do_and_do_not_honour_an_obligation(
-    when: _Phase, outcome: _Outcome, wasxfail: bool, satisfactory: bool, why: str
-) -> None:
+def test_report_shapes_that_do_and_do_not_honour_an_obligation(shape: _Shape) -> None:
     """Pin which pytest outcomes count as a contract obligation being met.
 
-    The subtle one is the call-phase skip: ``ContextProviderContract`` opts
-    itself out for a provider that serves a fixed instant, which is the
-    contract's own call and legitimate. A *mark* skips at setup instead, from
-    outside the contract, and must not count.
+    The subtle one is the call-phase skip. It counts only where the suite
+    marked the test ``optional_obligation`` and the body then bowed out --
+    ``ContextProviderContract`` does this for a provider serving a fixed
+    instant. An unmarked `pytest.skip("not implemented")` is an obligation that
+    did not happen, and a mark skipping at setup never ran the body at all.
     """
-    report = _report(when=when, outcome=outcome, wasxfail=wasxfail)
+    report = _report(when=shape.when, outcome=shape.outcome, wasxfail=shape.wasxfail)
 
-    assert conftest._is_satisfactory(report) is satisfactory, why
+    honoured = conftest._is_satisfactory(report, optional=shape.optional)
+
+    assert honoured is shape.satisfactory, shape.why
 
 
 def _report(*, when: _Phase, outcome: _Outcome, wasxfail: bool) -> pytest.TestReport:
