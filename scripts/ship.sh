@@ -30,9 +30,11 @@ branch="$(git rev-parse --abbrev-ref HEAD)"
 [[ "$branch" == "main" ]] && die "on main; ship reports a PR branch's review"
 
 # The review covers the committed diff, so uncommitted work is by definition
-# unreviewed — shipping here would report a review of something else.
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    die "working tree is dirty — commit (or stash) before shipping"
+# unreviewed — shipping here would report a review of something else. Use
+# `status --porcelain`, not `diff --quiet`: an untracked file is unreviewed work
+# too, and a pair of diff checks silently passes it.
+if [[ -n "$(git status --porcelain)" ]]; then
+    die "working tree is dirty (tracked or untracked) — commit or stash first"
 fi
 
 sha="$(git rev-parse HEAD)"
@@ -80,6 +82,20 @@ if git diff --name-only "FETCH_HEAD...${sha}" |
     fi
 fi
 
+# Naming the right commit is not enough: a review run against a narrower base
+# (`just review-codex adversarial HEAD~1`) covers only part of the PR yet
+# produces a correctly-named artifact. Compare the range each review actually
+# covered against the PR's own merge base.
+expected_base="$(git merge-base FETCH_HEAD "$sha")"
+for a in "${artifacts[@]}"; do
+    recorded_base="$(sed -n '1s/.*base_sha=\([0-9a-f]*\).*/\1/p' "$a")"
+    if [[ "$recorded_base" != "$expected_base" ]]; then
+        die "$(basename "$a") reviewed a different range than this PR covers
+     (recorded base ${recorded_base:-none}, PR base ${expected_base:0:12})
+     re-run the review with its default base: just review-codex <persona>"
+    fi
+done
+
 num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
@@ -100,6 +116,15 @@ trap 'rm -f "$body"' EXIT
         echo
     done
 } >"$body"
+
+# Re-read the PR head immediately before posting. Fetching the base and building
+# the body takes seconds, and a push landing in that window would leave a review
+# on the PR that reads as current but covers superseded code. This cannot be
+# atomic with comment creation — hence the SHA in the comment header as well —
+# but it closes the realistic window rather than the theoretical one.
+if [[ "$(gh pr view --json headRefOid --jq .headRefOid)" != "$sha" ]]; then
+    die "PR head moved while preparing the review — re-run ship"
+fi
 
 echo "ship: posting ${#artifacts[@]} review(s) for ${sha:0:12} to PR #${num}…" >&2
 gh pr comment "$num" --body-file "$body"

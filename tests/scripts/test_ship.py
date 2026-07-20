@@ -48,6 +48,9 @@ def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "Test")
     (repo / "f.txt").write_text("one\n")
+    # Mirrors the real repo: .review/ is ignored, so the dirty-tree check does
+    # not trip over the artifacts it is about to read.
+    (repo / ".gitignore").write_text(".review/\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
     _git(repo, "remote", "add", "origin", str(origin))
@@ -78,7 +81,13 @@ def _fake_gh(bin_dir: Path) -> None:
         'if [[ "$1" == "pr" && "$2" == "view" ]]; then\n'
         '  for a in "$@"; do\n'
         '    case "$a" in\n'
-        '      headRefOid) printf "%s\\n" "$GH_PR_SHA"; exit 0 ;;\n'
+        # GH_PR_SHA_2, when set, is returned from the *second* headRefOid call
+        # onward — the pre-post re-check sees a head that moved mid-run.
+        "      headRefOid)\n"
+        '        if [[ -n "${GH_PR_SHA_2:-}" && -f "$GH_CALL_MARK" ]]; then\n'
+        '          printf "%s\\n" "$GH_PR_SHA_2"; exit 0\n'
+        "        fi\n"
+        '        touch "$GH_CALL_MARK"; printf "%s\\n" "$GH_PR_SHA"; exit 0 ;;\n'
         "      number) printf '42\\n'; exit 0 ;;\n"
         "      baseRefName) printf 'main\\n'; exit 0 ;;\n"
         "    esac\n"
@@ -97,17 +106,38 @@ def _fake_gh(bin_dir: Path) -> None:
     gh.chmod(0o755)
 
 
-def _record_review(repo: Path, sha: str, persona: str, body: str = "a finding\n") -> None:
+def _record_review(
+    repo: Path,
+    sha: str,
+    persona: str,
+    body: str = "a finding\n",
+    *,
+    base_sha: str | None = None,
+) -> None:
+    """Write an artifact as codex-review.sh would.
+
+    ``base_sha`` defaults to the real merge base with ``main``; pass a different
+    commit to simulate a review run against a narrower base.
+    """
+    if base_sha is None:
+        base_sha = _git(repo, "merge-base", "main", sha)
     review_dir = repo / ".review"
     review_dir.mkdir(exist_ok=True)
-    (review_dir / f"{sha}-{persona}.md").write_text(f"<!-- sha={sha} -->\n{body}")
+    (review_dir / f"{sha}-{persona}.md").write_text(
+        f"<!-- persona={persona} base=main base_sha={base_sha} sha={sha} -->\n{body}"
+    )
 
 
-def _run_ship(repo: Path, tmp_path: Path, *, pr_sha: str) -> subprocess.CompletedProcess[str]:
+def _run_ship(
+    repo: Path, tmp_path: Path, *, pr_sha: str, pr_sha_after: str | None = None
+) -> subprocess.CompletedProcess[str]:
     assert _BASH is not None
     env = os.environ.copy()
     env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
     env["GH_PR_SHA"] = pr_sha
+    env["GH_CALL_MARK"] = str(tmp_path / "gh-called")
+    if pr_sha_after is not None:
+        env["GH_PR_SHA_2"] = pr_sha_after
     env["GH_COMMENT_OUT"] = str(tmp_path / "comment.md")
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
         [_BASH, str(_SCRIPT)],
@@ -240,6 +270,70 @@ def test_a_non_core_change_needs_only_the_adversarial_lens(tmp_path: Path) -> No
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_refuses_when_an_untracked_file_is_present(tmp_path: Path) -> None:
+    """An untracked file is unreviewed work; `git diff --quiet` alone misses it."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+    (repo / "sneaky.py").write_text("unreviewed = True\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "dirty" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_a_review_run_against_a_narrower_base(tmp_path: Path) -> None:
+    """Right SHA, wrong range — the artifact covers only part of the PR diff."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    # A second commit, so HEAD~1 is genuinely inside the PR rather than being
+    # the merge base itself — otherwise this asserts nothing.
+    (repo / "f.txt").write_text("three\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "second")
+    sha = _git(repo, "rev-parse", "HEAD")
+    _fake_gh(tmp_path / "bin")
+    # Reviewed only the last commit, not main...HEAD.
+    _record_review(repo, sha, "adversarial", base_sha=_git(repo, "rev-parse", "HEAD~1"))
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "different range" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_when_the_pr_head_moves_before_posting(tmp_path: Path) -> None:
+    """A push landing mid-run would leave a review that reads as current."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha, pr_sha_after="0" * 40)
+
+    assert result.returncode != 0
+    assert "moved" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_an_artifact_with_no_recorded_base(tmp_path: Path) -> None:
+    """Artifacts predating the base recording fail closed, not open."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    (repo / ".review").mkdir()
+    (repo / ".review" / f"{sha}-adversarial.md").write_text(f"<!-- sha={sha} -->\nold\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "different range" in result.stderr
 
 
 def test_refuses_on_main(tmp_path: Path) -> None:
