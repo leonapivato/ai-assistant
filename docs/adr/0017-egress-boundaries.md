@@ -371,6 +371,19 @@ undesignated, and permitted no egress at all:
   ADR-0004 §7 already makes a Tier 1 store — so this is a storage obligation,
   not a reason to record less.
 
+  **"Approved" requires a named approver and stated inputs.** Recording the
+  payload inspectably makes an overbroad send *visible*; it does not make it
+  *refused*. A tool could select the whole memory database, describe that
+  faithfully in the audit record, clear a standing recipient policy, and
+  satisfy every mechanical condition above while disclosing far more than the
+  task needed. So the precondition is not met by a record alone: a ratified
+  contract must say **who** decides a payload is minimal — `permissions/`, on
+  what policy inputs — and that decision must be able to refuse. Which
+  combinations it refuses is `permissions/`'s ADR to write (ADR-0016 §3 reserves
+  exactly this) and this ADR does not pre-empt it; what this ADR requires is
+  that the decision exist, be ratified, and be capable of saying no before
+  `tools/` is designated.
+
   This ADR states the requirement and deliberately does not design the
   artifact: what that payload description is, and how a gate binds to it,
   depends on the invocation contract's shape and is that ADR's to settle.
