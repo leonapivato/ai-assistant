@@ -47,7 +47,7 @@ tools/          tool registry + external integrations
 permissions/    policy/permission checks + audit trail
 learning/       feedback capture → memory updates
 orchestration/  the engine wiring the pipeline together (consumes contracts)
-interfaces/     adapters (cli now; api/ui later)
+interfaces/     thin adapters (cli, api, ui) — list the package for what exists
 ```
 
 Request pipeline (owned by `orchestration`): intent → context assembly →
