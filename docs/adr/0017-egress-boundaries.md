@@ -65,21 +65,18 @@ for it; short of that it is approved and must not transmit, whatever partial
 progress exists. Naming the seam is one precondition among several, not the
 transition itself.
 
-The two boundaries have different precondition lists, and §3 states each.
-
-`models/` is **designated** on acceptance. Its declaration is complete in §2,
-its recipients are authorised by configuration, and its mechanical pin is the
-existing "provider SDKs are confined to the models layer" contract. That pin is
-narrower than this ADR wants — it forbids four named SDKs rather than network
-clients generally, so nothing today stops an unrelated subsystem importing
-`httpx` — and closing that gap is §3's one outstanding item for `models/`. It
-is a strengthening, not a gate: `models/` transmits today under ADR-0004 §2,
-this ADR does not narrow that permission, and making designation wait on a
-contract that has never existed would prohibit the model calls the product is
-built on. Issue #66.
+`models/` is **designated** on acceptance, with an empty §3 list. Its
+declaration is complete in §2, its recipients are authorised by configuration,
+and its mechanical pin is the existing "provider SDKs are confined to the
+models layer" contract. That pin is narrower than this ADR would like — it
+forbids four named SDKs rather than network clients generally — but widening it
+is **debt, not a precondition** (Consequences, issue #66). The distinction is
+deliberate: `models/` transmits today under ADR-0004 §2, this ADR does not
+narrow that permission, and a precondition would mean prohibiting the model
+calls the product runs on until a contract that has never existed gets written.
 
 The `tools/` seam is **approved and undesignated**, and stays that way until
-every item in §3's `tools/` list is discharged. Enforcement tooling should read
+every item in §3 is discharged. Enforcement tooling should read
 approved-and-undesignated as "still prohibited".
 
 Because what the two send differs in kind, this ADR fixes the *granularity* at
@@ -270,17 +267,13 @@ argue its way into.
 ### 3. This ADR is not self-executing
 
 It removes a categorical prohibition; it does not make any transmission legal.
-Each boundary has its own exhaustive precondition list, and every item must
-hold **in code** — none is a property this ADR asserts is already in place.
+This section is the **complete and only** precondition list, it applies to
+`tools/`, and every item must hold **in code** — none is a property this ADR
+asserts is already in place. `models/` has no preconditions (§2); nothing below
+gates it, and nothing elsewhere in this ADR adds a condition to either boundary.
 
-**For `models/`,** one item: widen the import-linter contract from the four
-named provider SDKs it forbids today to network clients generally. `models/` is
-designated on acceptance regardless (§2) — it transmits today under ADR-0004
-§2 and this ADR does not narrow that — so this strengthens an existing pin
-rather than gating the boundary. Issue #66.
-
-**For `tools/`,** the list below, none of it discharged today, which is why
-`tools/` is approved, undesignated, and permitted no egress at all:
+None of it is discharged today, which is why `tools/` is approved,
+undesignated, and permitted no egress at all:
 
 - the named seam and the import-linter contract pinning it (§4 condition 1,
   issue #66);
@@ -479,8 +472,15 @@ exist.
   load-bearing** and only partly written. What exists forbids four named
   provider SDKs outside `models/`; what is missing is a contract over network
   clients generally, and one that can pin the `tools/` seam by module once it
-  is named. Until both land, "designated" leans on a narrower pin than the word
-  implies for `models/`, and is unreachable for `tools/` (issue #66).
+  is named (issue #66).
+
+  For `models/` this is **debt, not a precondition** — it is designated on
+  acceptance and "designated" simply leans on a narrower pin than the word
+  implies until the contract widens. For `tools/` the module-pinning contract
+  *is* a §3 precondition, because there the contract is what gives the
+  approval a concrete extent in the first place. Treating the `models/` gap as
+  a precondition instead would have prohibited every model call on acceptance,
+  which is why the two are recorded differently.
 - **The invocation ADR inherits three obligations** it must discharge before the
   first tool transmits: name the seam, gate per call before transmitting, and
   constrain destination and per-call payload. It no longer inherits a
