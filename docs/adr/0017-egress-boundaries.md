@@ -40,43 +40,62 @@ to touch the axis this ADR changes.
 
 ### 1. The rule
 
-**User data may leave the device only from a boundary designated for egress;
-every designated boundary must have what it transmits declared, and its
-recipients authorised by the user, before it transmits.**
+**User data may leave the device only from a boundary this ADR approves for
+egress, on the terms §2 sets for that boundary; and every approved boundary
+must have what it transmits declared, and its recipients authorised by the
+user, before it transmits.**
 
 This replaces ADR-0004 §2's "only component" clause. Its residency clause (all
 persistent data local, no cloud storage by default) and its telemetry clause
 (off by default, no observability egress) are unaffected and remain ADR-0004's.
 
-**This is a requirement on the system, not a certificate about any boundary.**
-It states what must hold before data leaves. Where it does not yet hold, §2 says
-so rather than letting "designated" imply otherwise.
+"On the terms §2 sets" is not a loophole — §2 states each boundary's terms
+completely, and there are exactly two boundaries. It is there because the two
+are not in the same position: one has been transmitting since ADR-0004 was
+ratified, the other has never sent a byte, and a single status model that
+ignores that difference either grandfathers the new boundary in or retroactively
+prohibits the existing one. §2 gives each its own explicit status.
 
 ### 2. The boundaries
 
-Two boundaries are **approved** for egress by this ADR, and this ADR treats them
-differently because their situations differ:
+Two boundaries are approved for egress, each with an explicit status. The list
+is closed; adding a third requires another ADR.
 
-- **`models/` continues under ADR-0004 §2's existing permission.** It has
-  transmitted since that ADR was ratified, and this ADR neither re-authorises
-  it nor certifies it. Its payload declaration below is **documentation of what
-  it already sends**, not a new grant and not a compliance finding.
-- **the `tools/` integration boundary** is the boundary this ADR actually adds,
-  and the one the new status applies to.
+**`models/` — continuing.** It transmits under the permission ADR-0004 §2
+already grants and has exercised since ratification. This ADR neither
+re-authorises it nor certifies it, and adds no precondition to it. Its complete
+continuing terms are:
 
-The list of approved boundaries is closed; adding a third requires another ADR.
+- it transmits only the payload classes declared below, which are documentation
+  of what it already sends rather than a new grant;
+- its recipients are the model providers the user explicitly configured
+  (ADR-0004 §2's configured-set amendment, which stands);
+- ADR-0004 §7's minimisation rule binds the content of each call;
+- the two controls it does not yet satisfy — transport pinning and
+  credential-access gating — are named below, unchanged by this ADR, and
+  tracked as ADR-0004's to resolve.
 
-For `tools/`, two states:
+Nothing about that status is new. It is written down here because a rule about
+egress boundaries that did not say where `models/` stands would be incomplete.
+
+**`tools/` — approved, and designated only when §3 holds.** This is the
+boundary this ADR adds, and the new status applies to it:
 
 - **Approved** — permitted to transmit *in principle*. Approval alone never
   authorises a byte.
 - **Designated** — approved *and* every precondition in §3 discharged **in
-  code**, not merely in a document. Only a designated boundary may transmit.
+  code**, not merely in a document. Only then may it transmit.
+
+The gate applies to `tools/` because `tools/` has never transmitted: requiring
+the controls first costs nothing and prevents the gaps `models/` now carries
+from being recreated at a second boundary. Applying the same gate retroactively
+to `models/` would prohibit every model call to close nothing (below).
 
 There is one transition and §3 is its complete condition. `tools/` is approved
 and undesignated today, and stays that way until every item in §3 holds;
 enforcement tooling should read approved-and-undesignated as "still
-prohibited".
+prohibited", and should read `models/` as permitted on the continuing terms
+above.
 
 This is a rule code must obey, backed by the strongest enforcement currently
 available — not a proof that undesignated code cannot reach the network. §4
@@ -84,8 +103,8 @@ condition 1 is explicit that an import contract is a net rather than a proof,
 and until outbound I/O runs through an injected capability (issue #85) a
 subsystem determined to bypass the boundary can.
 
-**Why `models/` is not put through this gate.** It would fail it today, on two
-counts: nothing pins its transport endpoint (issue #83), and nothing gates its
+**Why `models/` is not put through the `tools/` gate.** It would fail it today,
+on two counts: nothing pins its transport endpoint (issue #83), and nothing gates its
 Tier 0 credential read against ADR-0004 §7 (issue #74). Both gaps are
 **pre-existing and unchanged by this ADR** — they hold identically right now
 under ADR-0004 §2 and would remain exactly as open if this ADR were rejected.
