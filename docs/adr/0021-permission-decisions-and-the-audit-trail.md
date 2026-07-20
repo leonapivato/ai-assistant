@@ -361,13 +361,24 @@ business logic golden rule 3 keeps out of `interfaces/`, and the deterministic
 ownership of permissions VISION §7 asks for.
 
 So the policy performs the conversion. It takes the recorded `CONFIRM` and the
-user's answer and returns the resolving ruling, which lets it refuse a
-confirmation it no longer accepts — one answered long after it was asked, or
-answered for a request whose ruling would now be `DENY` — rather than being
-obliged to rubber-stamp any `approved=True` it is handed. The caller still
-records; it no longer decides. `resolve` raising or returning `DENY` on a
-`confirmed` whose ruling was not `CONFIRM` is a conformance obligation, so the
-method cannot be used to mint an `ALLOW` out of nothing.
+user's answer and returns the resolving ruling. Three obligations bound what it
+may return, and the first is the one that matters most:
+
+- **`approved=False` must yield `DENY`, with `authorised_by` unset.** A user who
+  declines has *decided*, and a policy that could turn a refusal into an `ALLOW`
+  would make the confirmation prompt theatre — the single worst failure available
+  to this subsystem, since it is the one moment the user believes they are in
+  control. It is stated as a rule and pinned in the suite rather than left to the
+  obvious reading, because "obvious" is what an earlier draft said about several
+  things this review has since corrected.
+- **`approved=True` may yield `ALLOW` or something more restrictive**, never less.
+  The policy is entitled to refuse a confirmation it no longer accepts — one
+  answered long after it was asked, or one whose request would now be `DENY` —
+  rather than being obliged to rubber-stamp any `True` it is handed. What it may
+  not do is treat consent as mandatory.
+- **A `confirmed` whose ruling was not `CONFIRM` must not produce an `ALLOW`**, so
+  the method cannot be used to mint an authorisation out of a decision nobody was
+  ever shown.
 
 **`authorised_by` records where an `ALLOW` came from.** An `ALLOW` reached
 because the declaration cleared the policy's own thresholds is a different act
@@ -489,6 +500,29 @@ from the house pattern: `MemoryStore.add` upserts on `id`, and that is right for
 memory, where the id is the caller's idempotency key. An audit trail that
 upserts is one where history can be rewritten by replaying a write, which is the
 one property the trail exists to deny. There is no `update`.
+
+**`record` is atomic**: the duplicate-id check, the resolution validation and
+the append are one operation, not a read followed by a write. Without that the
+single-use guarantee is a race — two concurrent resolutions of the same `CONFIRM`
+each observe no prior resolution, each append, and one user approval has
+authorised two executions. That is the same class of failure ADR-0014 §5 answered
+with compare-and-swap on `PlanStore`, arriving here through a validation rather
+than a version, and it deserves the same treatment: exactly one of two racing
+writes succeeds and the other raises. The conformance suite exercises concurrent
+resolution rather than assuming a single-threaded caller, because "the system
+composes on one event loop" (CONTRIBUTING) is precisely the setting in which an
+`await` between a check and a write is an interleaving point.
+
+**`record` stores a detached, validated snapshot.** ADR-0018 §4 made this a rule
+for the registry's write path — *"what a registry stores must be valid and
+detached"* — after ADR-0018 §3 had closed the read path, and the argument carries
+over unchanged: a store that retained the caller's object would let
+`decision.__dict__["ruling"] = ...` rewrite an appended audit entry after the
+fact, through a store whose entire premise is that entries are not rewritten.
+Detachment on queries alone closes the door and leaves the window open. It is
+recursive over reachable mutable state, for the reason ADR-0018 §3 gives: a
+`PermissionDecision` reaches a `ToolDefinition` which reaches a `ToolCost`, and a
+shallow copy would share the last of them.
 
 **`record` is also where §1's resolution invariant is enforced**, because it is
 the only place both records are in hand. A decision whose `resolves` is set is
@@ -721,6 +755,13 @@ nobody declared treated as free.
   were approved — are closed by the shape of the types rather than by a sentence
   asking implementers not to. The first draft closed none of them and asserted
   all three; architecture review is what caught it.
+- **A refusal is honoured.** `resolve(approved=False)` must yield `DENY`; no
+  conforming policy can convert a user's "no" into an authorisation. The prompt
+  is not theatre.
+- **`record` is atomic and stores a detached snapshot.** One approval cannot be
+  spent twice by two racing writes, and an appended entry cannot be rewritten
+  through the object the caller still holds — the write-path half of ADR-0018
+  §4's rule, which an earlier draft applied only to reads.
 - **The audit trail validates, so it can refuse a write.** The resolution
   invariant (§1, §4) is enforced where both records are visible, which is the
   only place it can be. The cost is that `record` has a failure mode callers must
