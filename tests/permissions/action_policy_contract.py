@@ -21,6 +21,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import combinations, permutations
 from typing import TYPE_CHECKING
 
@@ -34,16 +35,14 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
     ToolCost,
+    ToolDefinition,
 )
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ActionPolicy
     from ai_assistant.core.types import ActionRequest, PermissionRuling
 
-#: Severity ladders, least severe first. Monotonicity is asserted over every
-#: ordered *pair* rather than adjacent rungs only: a policy can be correct
-#: between neighbours and still invert across a gap, and the ladders are short
-#: enough that the exhaustive check costs nothing.
+#: Severity ladders, least severe first.
 _RISK_LADDER = (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL)
 
 _REVERSIBILITY_LADDER = (
@@ -53,10 +52,9 @@ _REVERSIBILITY_LADDER = (
 )
 
 #: Every reach a tool can declare — all eight subsets of the three tiers.
-#: "Widening ``discloses``" is inclusion, and inclusion is a *partial* order,
-#: not a chain: a single ladder from ``()`` to all three visits three of the
-#: nineteen strict-superset pairs and would accept a policy that relaxed on any
-#: of the other sixteen. Eight requests is cheap, so the suite takes them all.
+#: "Widening ``discloses``" is inclusion, which is a *partial* order rather than
+#: a chain, so a single ladder would visit three of the nineteen strict-superset
+#: pairs and accept a policy that relaxed on any of the other sixteen.
 _REACHES = [
     tiers
     for size in range(4)
@@ -69,10 +67,77 @@ _REACHES = [
 #: whether it gets gated — the self-certifying fast path ADR-0016 §3 refused.
 _DISCLOSING = [tiers for tiers in _REACHES if tiers]
 
+#: Cost is carried as a *context* the comparisons hold fixed, not as a severity
+#: axis. ADR-0021 §5 states monotonicity over risk, reversibility and
+#: disclosure only; ``UNKNOWN`` is an absence of information the policy must
+#: fail closed on, which is a floor rather than a rung.
+_COST_BASES = (CostBasis.FREE, CostBasis.UNKNOWN)
+
 
 def _name_tiers(tiers: tuple[DataTier, ...]) -> str:
     """Name a parametrised case after the tiers it discloses."""
     return "+".join(tiers) or "nothing"
+
+
+@dataclass(frozen=True)
+class _Declaration:
+    """One point in the declaration cross-product the monotonicity tests range over."""
+
+    risk: RiskLevel
+    reversibility: Reversibility
+    discloses: tuple[DataTier, ...]
+    cost: CostBasis
+
+    def tool(self) -> ToolDefinition:
+        """Build the definition this point describes."""
+        return tool(
+            risk_level=self.risk,
+            reversibility=self.reversibility,
+            discloses=self.discloses,
+            cost=ToolCost(basis=self.cost),
+        )
+
+    def held_equal_to(self, other: _Declaration, *, except_for: str) -> bool:
+        """Whether every field but ``except_for`` matches ``other``'s."""
+        fields = {"risk", "reversibility", "discloses", "cost"} - {except_for}
+        return all(getattr(self, name) == getattr(other, name) for name in fields)
+
+    def outranks(self, other: _Declaration, *, on: str) -> bool:
+        """Whether this declaration is strictly more severe than ``other`` on ``on``."""
+        if on == "discloses":
+            return set(self.discloses) > set(other.discloses)
+        mine, theirs = getattr(self, on), getattr(other, on)
+        return bool(mine > theirs)
+
+    def __str__(self) -> str:
+        """Describe the point in the terms the ADR uses."""
+        return (
+            f"{self.risk}/{self.reversibility}/discloses {_name_tiers(self.discloses)}"
+            f"/{self.cost} cost"
+        )
+
+
+#: The full cross-product: 4 risk levels x 3 reversibility levels x 8 reaches x
+#: 2 cost bases. Every combination is representable, because the builder
+#: declares every tool side-effecting.
+_DECLARATIONS = [
+    _Declaration(risk, reversibility, tiers, cost)
+    for risk in _RISK_LADDER
+    for reversibility in _REVERSIBILITY_LADDER
+    for tiers in _REACHES
+    for cost in _COST_BASES
+]
+
+
+def _assert_monotone(outcomes: dict[_Declaration, PermissionOutcome], *, axis: str) -> None:
+    """Assert no pair differing only on ``axis`` relaxes as that axis rises."""
+    for lower, higher in permutations(_DECLARATIONS, 2):
+        if not higher.held_equal_to(lower, except_for=axis) or not higher.outranks(lower, on=axis):
+            continue
+        assert outcomes[higher] >= outcomes[lower], (
+            f"raising {axis}: {higher} was ruled {outcomes[higher]}, less restrictive "
+            f"than {lower}'s {outcomes[lower]}"
+        )
 
 
 async def _ruling_for(policy: ActionPolicy, request: ActionRequest) -> PermissionRuling:
@@ -116,33 +181,45 @@ class ActionPolicyContract:
 
     # --- monotonicity in severity ---------------------------------------
 
-    async def test_raising_risk_never_relaxes_the_outcome(self, policy: ActionPolicy) -> None:
+    @pytest.fixture
+    async def outcomes(self, policy: ActionPolicy) -> dict[_Declaration, PermissionOutcome]:
+        """Rule on every declaration in the cross-product, once.
+
+        The three obligations below are each about one axis, but "everything
+        else held equal" ranges over *every* setting of the others, not the
+        benign defaults a builder happens to start from. Deciding all of them up
+        front is what lets each test assert its own axis at full coverage
+        without three separate sweeps.
+        """
+        return {
+            declared: (await _ruling_for(policy, action(tool=declared.tool()))).outcome
+            for declared in _DECLARATIONS
+        }
+
+    async def test_raising_risk_never_relaxes_the_outcome(
+        self, outcomes: dict[_Declaration, PermissionOutcome]
+    ) -> None:
         """A policy may not be more permissive about the more dangerous action.
 
         This is what rules out the whole class of accidents where a threshold
         comparison is written the wrong way round — including, concretely, the
         ``RiskLevel.CRITICAL < RiskLevel.LOW`` inversion ADR-0016 §2 disarmed on
         the type but which a policy could still reproduce in its own arithmetic.
-        """
-        outcomes = [
-            (await _ruling_for(policy, action(tool=tool(risk_level=level)))).outcome
-            for level in _RISK_LADDER
-        ]
 
-        _assert_never_relaxes(outcomes, _RISK_LADDER)
+        Checked at every setting of the other fields, because a policy can be
+        monotone in risk for a benign tool and inverted for a disclosing one —
+        and it is the disclosing one that matters.
+        """
+        _assert_monotone(outcomes, axis="risk")
 
     async def test_raising_irreversibility_never_relaxes_the_outcome(
-        self, policy: ActionPolicy
+        self, outcomes: dict[_Declaration, PermissionOutcome]
     ) -> None:
-        outcomes = [
-            (await _ruling_for(policy, action(tool=tool(reversibility=level)))).outcome
-            for level in _REVERSIBILITY_LADDER
-        ]
-
-        _assert_never_relaxes(outcomes, _REVERSIBILITY_LADDER)
+        """The same, over the reversibility scale, at every setting of the rest."""
+        _assert_monotone(outcomes, axis="reversibility")
 
     async def test_widening_disclosure_never_relaxes_the_outcome(
-        self, policy: ActionPolicy
+        self, outcomes: dict[_Declaration, PermissionOutcome]
     ) -> None:
         """Over the whole inclusion lattice, not one chain through it.
 
@@ -150,21 +227,9 @@ class ActionPolicyContract:
         ``()`` to all three tiers visits three of the nineteen strict-superset
         pairs, so a policy that ruled ``DENY`` for ``(SECRET,)`` and ``CONFIRM``
         for ``(SECRET, PERSONAL)`` — relaxing as disclosure widened — would pass
-        it while violating the obligation outright. Eight requests cover every
-        pair.
+        it while violating the obligation outright.
         """
-        outcomes = {
-            tiers: (await _ruling_for(policy, action(tool=tool(discloses=tiers)))).outcome
-            for tiers in _REACHES
-        }
-
-        for narrower, wider in permutations(_REACHES, 2):
-            if not set(narrower) < set(wider):
-                continue
-            assert outcomes[wider] >= outcomes[narrower], (
-                f"disclosing {_name_tiers(wider)} was ruled {outcomes[wider]}, less "
-                f"restrictive than {_name_tiers(narrower)}'s {outcomes[narrower]}"
-            )
+        _assert_monotone(outcomes, axis="discloses")
 
     async def test_deciding_the_same_request_twice_agrees_with_itself(
         self, policy: ActionPolicy
@@ -334,13 +399,3 @@ class ActionPolicyContract:
         resolved = await policy.resolve(never_asked, approved=True)
 
         assert resolved.outcome is not PermissionOutcome.ALLOW
-
-
-def _assert_never_relaxes(outcomes: list[PermissionOutcome], ladder: tuple[object, ...]) -> None:
-    """Assert ``outcomes`` never falls as the corresponding ladder rung rises."""
-    for (lower, less_severe), (higher, more_severe) in combinations(
-        zip(outcomes, ladder, strict=True), 2
-    ):
-        assert higher >= lower, (
-            f"{more_severe} was ruled {higher}, less restrictive than {less_severe}'s {lower}"
-        )
