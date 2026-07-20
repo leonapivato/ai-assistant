@@ -35,30 +35,24 @@ Verified against the installed `fastembed` 0.8.0, for the default model
   what the server just said, not agreement with a known-good value. Re-checking
   a warm cache compares size alone. No digest is pinned anywhere.
 - **One source, but not one host.** The description carries only
-  `hf="qdrant/bge-small-en-v1.5-onnx-q"` (other fastembed models also carry a
-  `storage.googleapis.com` URL and fall back to it silently; ours does not). The
-  recipient is `huggingface.co` *plus* whatever Xet content-addressed store the
-  Hub names at transfer time in an `X-Xet-Cas-Url` header, `hf-xet` being
-  installed and enabled by default.
-- **The cache is the system temp directory** — `tempfile.gettempdir()/fastembed_cache`
-  unless `FASTEMBED_CACHE_PATH` or `cache_dir` says otherwise. **So this was
-  never a first-run event.** The fetch recurs whenever `/tmp` is cleared, and it
-  puts 64 MiB outside the single application data directory ADR-0004 §2 requires.
+  `hf="qdrant/bge-small-en-v1.5-onnx-q"`, so the recipient is `huggingface.co`
+  *plus* whatever Xet content-addressed store the Hub names at transfer time in
+  an `X-Xet-Cas-Url` header (`hf-xet` is installed and enabled by default).
+- **The cache is the system temp directory** (`tempfile.gettempdir()`), not the
+  application data directory ADR-0004 §2 requires. **So this was never a
+  first-run event** — the 64 MiB fetch recurs whenever `/tmp` is cleared.
 
 ### Does ADR-0004 §2 need amending?
 
 No, and this ADR declines to amend it. Issue #89's second option proposed
 widening §2 to admit an artifact-repository recipient. §2 governs sending **user
-data** off-device; this request carries none. What it discloses is transport
-metadata — source IP, timing, and the fact that this installation fetched this
-model. Reading §2's recipient clause onto a no-user-data fetch would widen a
-ratified clause by assertion, which is precisely the move ADR-0017 §5 refuses.
-
-The counter-reading is fair and worth recording: "this install fetched this
-model" is user-adjacent, so §2's *spirit* arguably reaches it. Little turns on
-settling it, because under this ADR the default path performs no runtime fetch
-at all — and the one path that still does (§6) is reached only by a user who
-asked for it.
+data** off-device; this request carries none — only transport metadata (source
+IP, timing, the fact of the fetch). Reading §2's recipient clause onto a
+no-user-data fetch would widen a ratified clause by assertion, the move ADR-0017
+§5 refuses. The counter-reading — that "this install fetched this model" is
+user-adjacent, so §2's *spirit* reaches it — is fair, but little turns on it:
+the default path performs no runtime fetch at all, and the one path that still
+does (§6) is reached only by a user who asked for it.
 
 ### What it costs to ship the model instead
 
@@ -73,30 +67,21 @@ Measured, not estimated:
 | **headroom** | **43,595,250** | **41.6 MiB** |
 
 The wheel was built to measure this, not calculated. The artifact is fp16 ONNX
-weights and deflates to 91.1% of raw, so almost none of its size compresses away
-— 58.4% of the limit is the honest figure, and the earlier characterisation of
-the headroom as "thin" was wrong.
+weights (no quantization operators, size matching fp16 arithmetic to within
+graph overhead — 66,465,124 actual against 66,425,856 predicted, despite the
+source repo being named `…-onnx-Q`) and deflates to 91.1% of raw, so almost none
+of it compresses away. 58.4% of the limit is the honest figure; "thin" was
+wrong.
 
-(fp16 despite the source repo being named `…-onnx-Q`: the file carries no
-quantization operators and its size matches fp16 arithmetic to within graph
-overhead — 66,465,124 actual against 66,425,856 predicted, where int8 would be
-half. A second instance of that repo's metadata disagreeing with its contents;
-see the licence consequence.)
-
-**What breaks at the limit is a publish-time failure.** A wheel over 100 MiB is
-rejected by PyPI's upload API, and the remedies (request a limit increase, which
-PyPI grants routinely, or move to a data-only package) are available at that
-point.
-
-**But a release is not published atomically**, so "publish-time" does not mean
-"harmless". Files upload one at a time: an sdist accepted before an oversized
-wheel is rejected leaves a release with no wheel, and `pip` then falls back to
-the sdist and runs the build — and therefore the fetch — on the user's machine,
-which fails outright if they are offline. The release procedure must check the
-built wheel against the limit *before* uploading anything. With 41.6 MiB of
-headroom that is a tripwire rather than a live risk, but the categorical form of
-this claim was wrong and the check is what makes the failure genuinely
-publish-time.
+**Crossing the limit is a publish-time failure — but not a harmless one, because
+a release is not atomic.** A wheel over 100 MiB is rejected by PyPI's upload API
+(remedy: a limit increase, granted routinely, or a data-only package). But files
+upload one at a time, so an sdist accepted before the oversized wheel is rejected
+leaves a release with no wheel, and `pip` falls back to the sdist and runs the
+build — and its fetch — on the user's machine, failing if they are offline. The
+release procedure must therefore check the built wheel against the limit *before*
+uploading anything. With 41.6 MiB of headroom that is a tripwire, not a live
+risk — but the categorical "no user-visible breakage" claim was wrong.
 
 ## Decision
 
@@ -122,48 +107,56 @@ The pin is a commit SHA and a SHA-256 per file, recorded as constants in the
 repository. Both are checked at build time; a mismatch fails the build. Changing
 which weights this product runs therefore requires a reviewed commit.
 
-**`model_id` incorporates the pin, and not just the model name.** ADR-0006 §4
-requires a store to detect a model change and drive re-embedding. A `model_id`
-of `BAAI/bge-small-en-v1.5` cannot do that: bumping the pin changes the weights
+**`model_id` incorporates the pinned revision, not just the model name.** This
+is the one identity change the pin forces, and its scope is exactly the pin.
+ADR-0006 §4 requires a store to detect a model change and re-embed; a `model_id`
+of `BAAI/bge-small-en-v1.5` cannot, because bumping the pin changes the weights
 while the name and the 384 dimensions stay identical, so `SqliteMemoryStore`
-would accept the existing vectors and rank them against queries produced by new
-weights — silently, and exactly the corruption ADR-0006 §4 exists to prevent.
-`model_id` therefore identifies the embedding space rather than the model:
-the model name, the artifact revision, and the fastembed version (§3).
+would rank existing vectors against queries from new weights — silently, the
+corruption §4 exists to prevent. Folding the revision into `model_id` closes
+that. It is an implementation change within the existing `Embedder.model_id`
+contract, not a Protocol change.
 
-### 3. fastembed is constrained to a verified range
+**It does not claim to fully fingerprint the embedding space, and this ADR does
+not try to.** On `main`, `model_id` is the bare model name and captures *no*
+runtime-stack version — not the tokenizer's, not fastembed's — so a dependency
+change that alters vectors is already undetectable by the store. That is a
+pre-existing ADR-0006 §4 gap, independent of how the model is provisioned, and
+wants a behavioural fingerprint rather than a pile of version strings. Filed as
+**issue #136**; out of scope here. This ADR closes only the revision axis, and
+only for the vendored default.
 
-`fastembed>=0.7.0` is too loose to carry this decision. Everything §Context
-establishes was verified against 0.8.0, and the offline load in §5 depends on
-`specific_model_path` and the on-disk artifact layout — neither a stable public
-contract in a pre-1.0 dependency.
+### 3. fastembed is pinned, not ranged
 
-**Preprocessing is the sharp edge, not loading.** fastembed's own source warns
-that several models changed from CLS to mean pooling in 0.6 and advises pinning
-0.5.1 to preserve behaviour. That is an embedding-space change produced by a
-dependency bump alone, with identical weights and an unchanged digest — every
-build-time check passes and the vectors still stop being comparable. So the
-dependency becomes a range verified against, and the version participates in
-`model_id` per §2.
+`fastembed>=0.7.0` is too loose to carry this decision — the offline load in §5
+leans on `specific_model_path` and the on-disk layout (no stable pre-1.0
+contract), and fastembed's source shows a *preprocessing* change with no outward
+signal: 0.6 moved several models from CLS to mean pooling, an embedding-space
+change from a version bump alone, identical weights and digest.
+
+The defence is to **pin the dependency, not detect the change after the fact.**
+The committed lockfile already fixes `fastembed==0.8.0` (and `tokenizers`,
+`onnxruntime`) for a `uv sync` install; this ADR additionally tightens the
+published runtime specifier to a tested floor and ceiling so a wheel install
+cannot silently resolve an unreviewed version. A fastembed bump is then a
+reviewed change tied to a release — what "release-bound" means — not an open
+range. The residual preprocessing-fingerprint risk is the same #136 gap.
 
 ### 4. The artifact is not committed to git
 
 It is fetched during the build from the pinned revision and verified before
-inclusion. Git is the wrong store for a build input that is byte-identical to
-something already published and content-addressed elsewhere — we already have an
-exact name for it, and committing the bytes would duplicate that permanently, in
-every clone, forever. ADR-0015's one-clone-per-agent model makes clone cost
-recurring rather than one-off.
+inclusion. Git is the wrong store for a build input already published and
+content-addressed elsewhere: committing 58 MiB of incompressible binary would
+duplicate it permanently in every clone, and ADR-0015's one-clone-per-agent
+model makes that a recurring cost.
 
 **This requires changing the build backend.** `uv_build` supports no build hooks
 and cannot run code during a build; uv's own documentation directs projects
 needing build scripts to `hatchling`. So the backend becomes `hatchling` with a
-build hook that fetches, verifies, and stages the artifact.
-
-That is a backend swap and a hook file — deliberately *not* the release pipeline
-a separate data-only package would need. But it changes project packaging rather
-than `models/`, so its blast radius is wider than the rest of this decision, and
-it is the part most worth challenging.
+hook that fetches, verifies, and stages the artifact. That is a backend swap and
+a hook file — *not* the release pipeline a data-only package would need — but it
+changes project packaging rather than `models/`, so its blast radius is wider
+than the rest of this decision, and it is the part most worth challenging.
 
 §1 governs the installed runtime, not builds: a `py3-none-any` wheel unpacks and
 fetches nothing, while a from-sdist build runs the hook — and its fetch — on the
@@ -183,6 +176,15 @@ fastembed's own unpinned download, with none of §2's guarantees — the same sh
 as ADR-0006 §2's opt-in cloud embedder, and documented as such. "Local-first by
 default" is a claim about the default.
 
+That opt-in path carries the pre-existing identity gap in full: an unpinned
+download resolves whatever the default branch holds, and with `model_id` the
+bare name (#136), a store indexed under revision A then re-fetched at B mixes
+vectors silently. This ADR does **not** introduce that — it is today's *default*
+behaviour, which §2 fixes for the vendored model and cannot fix here, because
+fastembed's API takes no revision (§Context). The path exists because ADR-0006
+§2 contemplates model choice; a persistent store on a non-default model is
+subject to #136 until that gap closes.
+
 ### 7. What this ADR does not decide
 
 - **It does not pin transport endpoints** (#83). Not a precondition: a digest
@@ -191,6 +193,9 @@ default" is a claim about the default.
   may hold a network client, making §1 mechanically rather than review-checkable.
 - **It does not resolve the licence discrepancy** — Consequences records it as
   work that must complete before publishing.
+- **It does not give `model_id` a full behavioural fingerprint** (#136). It
+  closes only the revision axis, for the vendored default; the tokenizer and
+  preprocessing axes are a pre-existing ADR-0006 §4 gap.
 
 ## Alternatives considered
 
@@ -204,13 +209,13 @@ verify once, and it buys a 58 MiB-smaller wheel with a failure in the user's
 first session. Its one real advantage — costing nothing for users who never
 embed on-device — did not survive being weighed against a first run that works.
 
-**Commit the artifact to git.** Avoids the backend change and any network at
-build time. Rejected on §4's reasoning: 58 MiB of incompressible binary,
-permanent in history, paid by every clone.
+**Commit the artifact to git.** Avoids the backend change and build-time
+network, but rejected on §4's reasoning: 58 MiB of incompressible binary
+permanent in every clone.
 
 **Keep the fetch lazy and pin it in place.** Not available — §Context's first
 bullet. It would require forking or monkeypatching fastembed's download path,
-which is more code than §2 and less auditable.
+more code than §2 and less auditable.
 
 **A separate data-only package behind an `[local-embeddings]` extra.** The
 cleanest form, and the right answer if the wheel ever approaches the limit. It
@@ -231,21 +236,19 @@ shows it is not needed yet.
   lexical `InMemoryMemoryStore`. Accepted deliberately.
 - **Licence attribution must be resolved before publishing.** Three sources
   disagree: upstream `BAAI/bge-small-en-v1.5` declares MIT, the
-  `Qdrant/bge-small-en-v1.5-onnx-Q` card declares Apache-2.0, and fastembed's
-  own model description says `mit`. *That artifact repository* carries no
-  `LICENSE` file, only the card's front-matter field, so there is no notice to
-  vendor alongside the weights — and this project's own root `LICENSE` is
-  unrelated and does not discharge the obligation. Both licences permit
-  redistribution with attribution, so vendoring is permissible either way, but
-  shipping the weights under our package name means shipping correct notices and
-  someone must determine which governs. This obligation exists **only** because
-  we redistribute. A release blocker, not a merge blocker.
+  `Qdrant/bge-small-en-v1.5-onnx-Q` card declares Apache-2.0, fastembed's model
+  description says `mit`. That artifact repository carries no `LICENSE` file (only
+  the card field), and this project's own root `LICENSE` is unrelated and does
+  not discharge the obligation. Both permit redistribution with attribution, so
+  vendoring is permissible either way, but shipping the weights under our package
+  name means shipping correct notices and someone must determine which governs.
+  This obligation exists **only** because we redistribute. A release blocker, not
+  a merge blocker.
 - **The build gains a network dependency and a backend change** (`uv_build` →
   `hatchling`). CI has network; a contributor's first build will fetch 64 MiB
   once.
 - **Model changes become explicit and release-bound.** ADR-0006 §4 already
-  requires re-embedding the whole store when the embedding model changes, so
-  this is already a coordinated migration; tying it to a release makes it
+  requires re-embedding when the model changes; tying that to a release makes it
   visible rather than ambient.
 - **Nothing else in the stack has this shape.** Checked, per #89's last line:
   `sqlite-vec` bundles `vec0.so` in its wheel; `tokenizers`, `mmh3` and
