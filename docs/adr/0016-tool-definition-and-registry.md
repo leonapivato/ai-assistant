@@ -65,10 +65,14 @@ class ToolDefinition(BaseModel):
     side_effecting: bool             # required
     reads: tuple[DataTier, ...]      # required
     writes: tuple[DataTier, ...]     # required
-    cost: ToolCost | None = None
+    cost: ToolCost                   # required
+    idempotency: Idempotency         # required
+    idempotency_window: timedelta | None = None   # required iff KEYED
     latency: timedelta | None = None
-    accepts_idempotency_key: bool = False
     parameters_schema: FrozenJsonMapping = {}
+
+    @property
+    def requires_permission(self) -> bool: ...    # §3
 ```
 
 **Every field that a permission decision depends on is required.** This is the
@@ -77,8 +81,11 @@ A default is a claim, and for `reads`/`writes` the natural-looking default —
 the empty tuple — is the claim *"this tool touches no data"*, which is exactly
 the false statement a forgetful integration author would ship. `risk_level` has
 no defensible default either: `LOW` under-protects and `CRITICAL` would be
-routinely overridden without thought. Making the author write them down is the
-whole mechanism; a tool that does not declare its reach does not load.
+routinely overridden without thought. `cost` and `idempotency` are required for
+the same reason and are discussed in §4, where the shape each needs in order to
+be *declarable* — rather than merely omitted — is the substance of the decision.
+Making the author write them down is the whole mechanism; a tool that does not
+declare its reach does not load.
 
 The alternative — deriving risk from the integration's identity, or from
 whether the tool's name starts with `send_` — is the hard-coding this ADR
@@ -151,11 +158,10 @@ They are ordered tuples, sorted and de-duplicated on validation, rather than
 processes; these values are written into permission decisions and audit records,
 so a stable serialisation matters more than set syntax at the call site.
 
-`side_effecting` is declared rather than derived. It is the flag that decides
-whether the ADR-0004 §7 gate is consulted at all, and every derivation
-considered was wrong for a real tool: non-empty `writes` misses a tool that
-sends an email while storing nothing locally, and non-`REVERSIBLE` misses a tool
-that reversibly creates a draft. Two consistency rules make the contradictory
+`side_effecting` is declared rather than derived. Every derivation considered
+was wrong for a real tool: non-empty `writes` misses a tool that sends an email
+while storing nothing locally, and non-`REVERSIBLE` misses a tool that
+reversibly creates a draft. Two consistency rules make the contradictory
 combinations unrepresentable rather than merely discouraged:
 
 - a tool that declares `writes` **is** side-effecting;
@@ -166,13 +172,60 @@ Deliberately *not* a rule: risk is unconstrained by `side_effecting`. A
 read-only tool that pulls an entire mailbox into a prompt is high risk, and a
 type that refused to let it say so would be worse than one that stayed quiet.
 
+**`side_effecting` alone does not decide whether the permission gate is
+consulted.** ADR-0004 §7 gates two things, not one: *"access to Tier 0/1 data
+**and** every side-effecting tool call"*. Treating `side_effecting` as the whole
+trigger would let exactly the tool in the paragraph above — read-only, reaching
+into Tier 1, `side_effecting=False` — run ungated and unaudited, which is a
+straightforward violation of a ratified decision and the more dangerous half of
+it, because a silent read leaves less trace than a write. `ToolDefinition`
+therefore exposes the disjunction as a derived property:
+
+```python
+@property
+def requires_permission(self) -> bool:
+    return self.side_effecting or bool(
+        {DataTier.SECRET, DataTier.PERSONAL} & set(self.reads + self.writes)
+    )
+```
+
+It is derived rather than declared because, unlike the fields it reads, it has a
+correct answer computable from them — and it lives on the type rather than in
+`permissions/` so that a second consumer (the selection stage deciding whether a
+candidate needs an approval round-trip) cannot come to a different conclusion
+about the same tool. A policy may of course require confirmation more often than
+this; what it must not do is consult the gate less often, and `requires_permission`
+is the floor that says so in code rather than in prose.
+
 ### 4. Cost, latency, and idempotency
 
-`cost` is the estimated price of *one invocation of the tool itself* —
-`Decimal` plus an ISO-4217 currency, never a float, because it feeds spend
-limits and binary floating point is not a thing to accumulate money in. It is
-optional because most tools are free, and `None` means "no meaningful direct
-cost", not "unknown".
+`cost` is the price of *one invocation of the tool itself*, and it is
+**required**, with "free" and "nobody knows" as distinct declarations:
+
+```python
+class CostBasis(StrEnum):
+    FREE       # declared: an invocation costs nothing
+    PER_CALL   # declared: `amount` of `currency` per invocation
+    UNKNOWN    # declared: the author does not know — policy must fail closed
+
+class ToolCost(BaseModel):
+    basis: CostBasis
+    amount: Decimal | None = None      # required iff PER_CALL, ge 0
+    currency: str | None = None        # required iff PER_CALL, ISO-4217
+```
+
+An optional `cost` defaulting to `None` was the first draft and it reproduced,
+in the one field where money is at stake, precisely the failure §1 exists to
+prevent: a paid integration whose author simply forgot the field would load, and
+a spend policy reading `None` as "no meaningful cost" would approve it. The
+distinction that matters to a policy is not present/absent but *free* versus
+*unknown* — the first is a fact it can add to a running total, the second is an
+absence of information it must refuse or escalate on. A two-state field cannot
+carry that, so the enum is what makes the declaration possible rather than
+merely mandatory.
+
+`Decimal`, never a float, because this feeds spend limits and binary floating
+point is not a thing to accumulate money in.
 
 It deliberately does **not** model money the tool *moves*. The price of a flight
 lives in the call's parameters, not in the definition of the tool that books
@@ -184,12 +237,48 @@ introspection §7 defers.
 and for deciding whether an action fits an interactive turn. Advisory: it is not
 a timeout, and nothing enforces it.
 
-`accepts_idempotency_key` discharges ADR-0014's explicit debt. It is only a
-declaration in this slice — nothing passes a key yet, because nothing invokes
-tools yet (§7) — but it is on the contract from the start so that the executor
-which does can distinguish a tool it may safely retry from one where a retry
-means acting twice, without a breaking contract change at the moment it most
-matters.
+**`idempotency` declares a retry guarantee, not the presence of a parameter.**
+
+```python
+class Idempotency(StrEnum):
+    NONE       # a repeat acts again; retrying may double the effect
+    NATURAL    # the operation is idempotent by nature (a read; set-to-a-value)
+    KEYED      # repeats carrying the same key are deduplicated, per below
+```
+
+`accepts_idempotency_key: bool` was the first draft, and a boolean of that name
+answers the wrong question. *Accepting* a key is syntax; a tool may accept one
+and ignore it, scope it per-connection, or forget it in a second — and an
+executor told only that the parameter exists would conclude it "may safely
+retry" on the strength of a signature. What ADR-0014 §7 actually asks for is a
+*guarantee*, so the field names one, and `KEYED` carries the two properties that
+make the guarantee usable:
+
+- **Scope** is the tool, identified by `ToolDefinition.id`. Two calls to the
+  same tool with the same key are the same call; nothing is promised across
+  tools, and a tool whose upstream dedupes more narrowly than that (per
+  connection, per session) may not declare `KEYED`.
+- **Lifetime** is `idempotency_window`, required when and only when `KEYED`. A
+  repeat inside the window is deduplicated; outside it, the tool is free to act
+  again. A window is mandatory because every real implementation has one, and an
+  unstated one is the failure mode that looks safe in testing and doubles a
+  charge under a slow retry.
+
+`NATURAL` is not a weaker `KEYED`: it is the common case of a read, or a write
+that sets a value rather than appending one, which is safe to retry with no key
+at all. Collapsing it into `NONE` would make the executor treat re-reading a
+calendar as dangerous; collapsing it into `KEYED` would demand a window that
+means nothing.
+
+**This does not settle ADR-0014's idempotency debt, and this ADR does not claim
+it does.** Nothing here requires or exercises the guarantee, because nothing
+invokes tools yet (§7); a declaration no caller checks is a promise, and
+exactly-once execution needs the invocation contract to pass a key, the
+executor to reuse it across a retry, and a conformance test to hold a tool to
+it. What lands here is the vocabulary those need, on the contract before the
+executor exists, so that the guarantee does not have to be retrofitted as a
+breaking change at the moment it most matters. The debt is carried forward
+explicitly in §7.
 
 `parameters_schema` is a JSON Schema object carried as a `FrozenJsonMapping`,
 which is what ADR-0014 §2 promised this lane would provide ("argument *schemas*
@@ -292,6 +381,10 @@ widening of this one.
   rather than a corner of this one. Registering something callable is a strictly
   additive change: a `Tool` Protocol pairing a definition with a call site adds
   no field to `ToolDefinition`.
+- **Exactly-once execution** (ADR-0014 §7's debt, carried forward). The
+  `idempotency` vocabulary lands here; requiring a key on the call, threading it
+  through a retry, and holding a tool to its declared window are all invocation's
+  to do, and until then the declaration is unexercised.
 - **Parameter validation against `parameters_schema`.** The schema is carried
   (§4); validating a `PlanStep`'s parameters against it at selection time needs
   a JSON Schema implementation, which is a runtime dependency decision, and has
@@ -329,9 +422,14 @@ widening of this one.
   after `FrozenDict` and `ExecutionState`'s properties. The convention is now
   more accurately "no *subsystem* logic" than "no behaviour"; a future ADR may
   want to say so plainly.
-- **ADR-0014's two open debts are settled**: the capability vocabulary is open,
-  registry-authoritative, and deliberately not an enum; `accepts_idempotency_key`
-  is on the contract before the executor that will need it.
+- **ADR-0014's capability debt is settled**: the vocabulary is open,
+  registry-authoritative, and deliberately not an enum. Its **idempotency debt is
+  not** — the guarantee is declarable here and unexercised until invocation, and
+  §7 says so rather than letting a field name imply otherwise.
+- **The permission floor is on the type.** `requires_permission` is derived from
+  `side_effecting` *or* Tier 0/1 reach, so ADR-0004 §7's two-part rule cannot be
+  half-implemented by a consumer that remembers only the side-effect half — the
+  half that would silently exempt a read of the user's mailbox.
 - **Every integration ships at least as many definitions as it has operations**
   (§5). Gmail is not one tool. This is more registration code and it is the
   point — per-operation risk is the granularity a permission decision is made at.
@@ -346,12 +444,18 @@ widening of this one.
   with a real in-memory implementation and a conformance suite, so the *lookup*
   seam is exercised; the *metadata's* fitness is argued from its two named
   consumers rather than demonstrated by one.
-- **`cost` is an estimate nothing reconciles.** A tool whose declared cost is
-  wrong will mislead a spend policy, and no mechanism detects the drift.
-- **New `core` surface:** `RiskLevel`, `Reversibility`, `ToolCost`,
-  `ToolDefinition`, the `ToolRegistry` Protocol, and `ToolRegistrationError` —
-  six, against ADR-0014's fifteen, because execution state is not being modelled
-  here.
+- **`cost` is an estimate nothing reconciles.** A tool whose declared
+  `PER_CALL` amount is wrong will mislead a spend policy, and no mechanism
+  detects the drift. `UNKNOWN` at least makes *absence* of the information
+  visible; a wrong number stays invisible.
+- **Declaring a tool is now wordy.** Eight required fields, two of them
+  structured, before an integration author writes a line of behaviour. That is
+  the deliberate trade of §1, and it will be felt most by the simplest tools —
+  a clock reader must still state its cost basis and its idempotency.
+- **New `core` surface:** `RiskLevel`, `Reversibility`, `CostBasis`,
+  `ToolCost`, `Idempotency`, `ToolDefinition`, the `ToolRegistry` Protocol, and
+  `ToolRegistrationError` — eight, against ADR-0014's fifteen, because execution
+  state is not being modelled here.
 - **Revisit when** invocation lands (does `ToolDefinition` need a timeout, or a
   rate limit?), when `permissions` writes its first real `ActionPolicy` against
   these fields (the honest test of whether the metadata is the right metadata),
