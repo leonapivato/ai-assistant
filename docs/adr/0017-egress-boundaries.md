@@ -141,10 +141,28 @@ for itself:
   credential goes to a third-party service rather than to the model provider.
 - **the `tools/` integration boundary** — to external services the user has
   explicitly connected. Its declaration is **per tool**, and its recipient
-  authorisation is **per call**, through `permissions/`. Both are stronger than
-  `models/`, and necessarily so: `models/` has one payload class and one
-  purpose, while tool egress is heterogeneous, so nothing about it can be
-  inferred from the boundary itself.
+  authorisation is **per call**. Both are stronger than `models/`, and
+  necessarily so: `models/` has one payload class and one purpose, while tool
+  egress is heterogeneous, so nothing about it can be inferred from the
+  boundary itself.
+
+  **Passing through `permissions/` is not by itself recipient authorisation.**
+  ADR-0016 §3 leaves grant policy undecided and permits auto-granting without a
+  prompt, so a call can clear the gate with no user decision about *where* it
+  is sending data — and the recipient is a call argument, so it can be a
+  destination the user has never seen. To satisfy §1, the authorisation must
+  trace to one of two things, bound to the **resolved** destination and not to
+  the tool in the abstract:
+
+  - an explicit user decision for this call, or
+  - a standing user-established policy that covers this destination — the
+    account the user connected, an allowlist they configured, a
+    credential-scoped host.
+
+  A grant justified only by the tool's declared metadata does not qualify. The
+  audit record must capture the resolved destination and which of the two
+  authorised it, or after the fact nobody can tell an authorised recipient from
+  a defaulted one. Working this out is the invocation ADR's, with issue #68.
 
   What is approved is a *named module seam inside* `tools/`, not the package:
   `tools/` also owns tool definitions and the registry, and neither has any
@@ -174,7 +192,11 @@ first:
   relying on the definition's declared ceiling alone (§4 condition 3);
 - the destination and per-call payload rules — a tool's declared reach is a
   *ceiling* over tiers, not proof that a given call's actual recipient and
-  actual bytes were approved (ADR-0016 §3, §7; issues #57, #68).
+  actual bytes were approved. Specifically, recipient authorisation must bind
+  to the resolved destination and trace to a user decision or standing user
+  policy (§2), and the audit record must capture both the destination and that
+  basis; a `permissions/` grant alone does not satisfy §1 (ADR-0016 §3, §7;
+  issues #57, #68).
 
 A boundary that meets the conditions in a document but not in the code is
 approved, not designated, and an approved boundary does not transmit. If the
@@ -208,9 +230,14 @@ meets all three conditions, and `tools/` is held to all three:
 3. **Authorised before transmitting.** ADR-0004 §7 already requires that every
    side-effecting tool call pass `permissions/` and land in the audit trail,
    and a tool that transmits is side-effecting by construction (ADR-0016 §3).
-   Every byte leaving through `tools/` is therefore approved and recorded per
-   call — again more than `models/`, whose recipients the user authorises once
-   by configuring them.
+   That gate is necessary but not sufficient: §2 additionally requires the
+   authorisation to trace to a user decision or a standing user policy bound to
+   the resolved destination, because ADR-0016 permits auto-granting and an
+   auto-grant on tool metadata says nothing about where the bytes went. With
+   that constraint the granularity is finer than `models/`, whose recipients
+   the user authorises once by configuring them — but it is finer only if the
+   invocation ADR supplies it, which is why §3 lists it as a precondition
+   rather than an accomplished fact.
 
 **Honest accounting.** Condition 1 is a genuine widening, and this ADR does not
 pretend otherwise — a second exit point is a second thing that can be got wrong,
