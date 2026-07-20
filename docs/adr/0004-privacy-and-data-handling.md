@@ -1,16 +1,16 @@
 # 4. Privacy and data handling
 
-- Status: Accepted
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
-- Note (2026-07-19): a partial supersession is **proposed** — **ADR-0017**
-  (`Proposed`) would replace §2's egress clause ("the **only** component
-  permitted…") with a designated set of egress boundaries. This is a note, not
-  a status: the `Status` line above is this ADR's only status field. **Until
-  ADR-0017 is accepted, §2 below remains the live rule and this ADR is
-  unchanged by it.** See the dated note at the end of §2.
-
+- Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
+  clause named `models/` the only component permitted to send user data
+  off-device; ADR-0017 §1 replaces it with `models/` plus a designated
+  integration seam inside `tools/`. This is a note, not a status — the `Status`
+  line above is this ADR's only status field. Everything else here stands: §1,
+  §§3–7, and §2's residency and telemetry clauses. See the note at the end
+  of §2.
 ## Context
 
 The assistant's value comes from knowing its user deeply: goals, routines,
@@ -94,22 +94,21 @@ unchanged, and "every other egress is a bug" still holds — the amendment widen
 *which* providers are legitimate recipients, not *which components* may transmit.
 `models/` remains the only one.
 
-**Note (2026-07-19) — partial supersession proposed, not yet in force.**
-Appended without altering anything above it. **ADR-0017** (`Proposed`) argues
-that §2's "only component" clause contradicts the tool layer §3, §7 and this
-ADR's Consequences already provision for, and would replace it with a
-designated set of egress boundaries — `models/` and a named `tools/`
-integration seam — each declaring what it transmits and having its recipients
-authorised before it transmits.
+**Note (2026-07-20) — §2's egress clause is superseded by ADR-0017.**
+Appended without altering anything above it. The clause above is **no longer
+the live rule**: user data may leave the device from `models/` or from a
+designated integration seam inside `tools/`, per **ADR-0017 §1**. ADR-0017
+argues that the clause contradicted the tool layer §3, §7 and this ADR's
+Consequences already provision for. Read the clause above as the historical
+rule and ADR-0017 for the current one.
 
-Two things this note does **not** do. It does not change §2: until ADR-0017 is
-accepted, the clause above is the live rule and `models/` is the only permitted
-egress boundary. And it does not retract the configured-set amendment's closing
-sentence ("`models/` remains the only one"), which is an accurate record of
-what *that* amendment decided and deliberately declined to decide — the
-component prohibition was examined there and left standing. If ADR-0017 is
-accepted, that sentence stays as written and this note becomes the pointer to
-the rule that replaced it; ADR-0017 §6 explains why annotating beats rewriting.
+Two things this does not change. `tools/` transmits nothing today — its seam is
+approved in principle and stays undesignated until ADR-0017 §3's conditions
+hold in code and a later ADR ratifies that they do. And the configured-set
+amendment's closing sentence ("`models/` remains the only one") stands as
+written, an accurate record of what that amendment decided and deliberately
+declined to decide; ADR-0017 §6 explains why it is annotated rather than
+rewritten.
 
 ### 3. Secrets/credentials (Tier 0)
 

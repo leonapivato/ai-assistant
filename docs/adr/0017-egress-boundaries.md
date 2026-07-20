@@ -1,12 +1,13 @@
 # 17. Egress boundaries: `models/` is not the only one
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-19
-- Supersedes **on acceptance**: ADR-0004 §2's egress clause ("The **only**
-  component permitted to send user data off-device is the `models/` layer…
-  Every other egress is a bug"), as amended 2026-07-19. While this ADR is
-  `Proposed`, that clause remains the live rule. The rest of ADR-0004 — §1 and
-  §§3–7, and §2's residency and telemetry clauses — stands unchanged either way.
+- Accepted: 2026-07-20
+- Supersedes: ADR-0004 §2's egress clause ("The **only** component permitted to
+  send user data off-device is the `models/` layer… Every other egress is a
+  bug"), as amended 2026-07-19. That clause is no longer the live rule; §1 below
+  is. The rest of ADR-0004 — §1 and §§3–7, and §2's residency and telemetry
+  clauses — stands unchanged.
 
 ## Context
 
@@ -93,10 +94,11 @@ prohibit every model call the product runs on, to close gaps that stay open if
 this ADR is rejected. What this ADR contributes is that all three are now
 written down with issues against them.
 
-**`tools/` — approved, undesignated.** On acceptance it may transmit *in
-principle* and nothing in practice. It becomes designated when every condition
-in §3 holds in code **and** a later ADR names the seam module, attests each
-condition is satisfied and how, and records the transition. Not a status
+**`tools/` — approved, undesignated.** It may now transmit *in principle* and
+nothing in practice: acceptance of this ADR authorises no byte. It becomes
+designated — and only then transmits — when every condition in §3 holds in code
+**and** a later ADR names the seam module, attests each condition is satisfied
+and how, and records the transition. Not a status
 amendment: a second operational egress boundary is a substantive decision, and
 ADR-0001 reserves those to a new ADR.
 
@@ -230,26 +232,36 @@ end of ADR-0004 §2 rather than any edit to it. It does two jobs: as a record of
 what that amendment did and deliberately declined to do, it is accurate and
 worth preserving — a reader should see the component prohibition was examined
 and left standing on that date, not overlooked. As a statement about the rule
-this ADR proposes, it would be out of date on acceptance. Rewriting it would
-erase the first to fix the second.
+this ADR sets, it is now out of date. Rewriting it would erase the first to fix
+the second.
 
-### 7. What happens to ADR-0004 on acceptance
+### 7. What acceptance did to ADR-0004
 
 ADR-0001 requires the superseded ADR's status to change, not merely gain a note.
-While this ADR is `Proposed`, ADR-0004 is untouched and its §2 is the live rule.
-**On acceptance**:
+This records the operation performed when this ADR was accepted (2026-07-20),
+so the change is auditable rather than inferred:
 
-- **Edit exactly one line:** ADR-0004's `Status` becomes `- Status: Accepted,
-  partially superseded by ADR-0017 (§2's egress clause)`. That is the status
-  update ADR-0001 requires and the only edit it authorises. The form follows the
-  precedent ADR-0018 set for ADR-0016; a second ADR inventing a second format is
-  how a vocabulary stops being one. Its weakness — anything matching a leading
-  `Accepted` misses the qualifier — is issue #87's to settle repo-wide.
-- **Append, do not rewrite, everywhere else.** The dated notes in ADR-0004's
-  header and §2 stay as merged, still reading "proposed", because that is what
-  was true when written. Acceptance adds a new dated note beside each.
-- **Nothing else moves.** ADR-0004 §2's text, the configured-set amendment, and
-  the notes in ADR-0006 and ADR-0016 remain as written.
+- **Exactly one line of ADR-0004 was edited:** its `Status` became
+  `- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause)`.
+  That is the status update ADR-0001 requires and the only edit it authorises.
+  The form follows the precedent ADR-0018 set for ADR-0016; a second ADR
+  inventing a second format is how a vocabulary stops being one. Its weakness —
+  anything matching a leading `Accepted` misses the qualifier — is issue #87's
+  to settle repo-wide.
+- **Everything else was an appended dated note**, in ADR-0004's header and at
+  the end of its §2, and in ADR-0006 §2 and ADR-0016's Consequences, each
+  recording that §2's egress clause is superseded and what did *not* change with
+  it. No accepted text was rewritten in any of the four.
+- **Nothing else moved.** ADR-0004 §2's clause and the configured-set amendment
+  stand as ratified, as do the decision texts of ADR-0006 and ADR-0016. The
+  superseded clause is left legible rather than deleted, so a reader can see
+  what the rule was and what replaced it.
+
+Because this ADR was ratified before merging rather than merged as `Proposed`
+and accepted later, those notes are written once, in their accepted form. There
+was no intermediate state in `main` to preserve — an earlier draft of this
+section assumed there would be, and prescribed a proposal note plus a later
+acceptance note beside it.
 
 ### 8. Rejected alternative: a dedicated injected egress capability
 
@@ -284,8 +296,8 @@ merely deferred: the seam cannot be designated until it is settled.
 
 ## Consequences
 
-- **ADR-0004 §2's egress clause is superseded on acceptance**, not before, per
-  §7. Everything else in ADR-0004 stands.
+- **ADR-0004 §2's egress clause is superseded**, per §7. Everything else in
+  ADR-0004 stands.
 - **ADR-0006 §2 and ADR-0016 keep their ratified wording**; each gains a dated
   note. ADR-0006 §2 said cloud embedding is "like all egress, confined to the
   `models/` layer" — a passing restatement of ADR-0004 §2 that would otherwise
@@ -301,7 +313,9 @@ merely deferred: the seam cannot be designated until it is settled.
 - **The invocation ADR inherits the complete §3 list**, not a summary, and a
   later ADR ratifies the designation. It no longer inherits a prohibition it
   would have had to overturn on its way.
-- **`tools/` still transmits nothing.** No behaviour changes on ratification.
+- **`tools/` still transmits nothing.** Ratification changed no behaviour: the
+  seam is approved in principle and remains undesignated until §3 holds in code
+  and a later ADR says so.
 - **ADR-0004's configured-set amendment remains an in-place amendment**, which
   §5's strict reading makes retroactively irregular. Deliberately left as-is —
   the pattern is fixed forward, not retrofitted. Issue #71.

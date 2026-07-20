@@ -717,12 +717,12 @@ widening of this one.
   not amend it — it cannot, without inventing the invocation contract. Ratifying
   this changes no egress behaviour because nothing is callable, but the
   contradiction is now recorded rather than latent, and closing it is a
-  precondition on the invocation ADR. [Note (2026-07-19): **ADR-0017**
-  (`Proposed`, issue #52) takes this up — it would supersede that clause and
-  designate the `tools/` integration boundary. It authorises no transmission by
-  itself, so the seam, the per-call gating contract and the recipient rules
-  remain preconditions on the first byte and remain the invocation ADR's to
-  supply. Until ADR-0017 is accepted, the bullet above stands as written.]
+  precondition on the invocation ADR. [Note (2026-07-20): **ADR-0017 supersedes that clause**, so the bullet above
+  no longer states the live rule — tool egress is permitted in principle. The
+  preconditions it names survive unchanged: the seam, per-call gating and the
+  recipient rules are ADR-0017 §3's conditions on designating the boundary, and
+  `tools/` transmits nothing until they hold in code and a later ADR ratifies
+  that they do. Issue #52.]
 - **Every integration ships at least as many definitions as it has operations**
   (§5). Gmail is not one tool. This is more registration code and it is the
   point — per-operation risk is the granularity a permission decision is made at.
