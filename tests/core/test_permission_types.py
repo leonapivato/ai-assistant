@@ -595,6 +595,59 @@ def test_a_decision_survives_a_json_round_trip_with_its_definition_intact() -> N
     assert reloaded.authorises(request)
 
 
+@pytest.mark.parametrize(
+    "digest",
+    ["", "x", "abc", "A" * 64, "g" * 64, "0" * 63, "0" * 65, "0" * 63 + chr(0xD800)],
+    ids=[
+        "empty",
+        "too short",
+        "not a digest",
+        "uppercase",
+        "not hex",
+        "one short",
+        "one long",
+        "an unencodable character",
+    ],
+)
+def test_a_decision_rejects_a_digest_that_is_not_one(digest: str) -> None:
+    """The last field of a decision that could break the reload guarantee.
+
+    `from_request` always fills it correctly, but the field is a plain string,
+    so a hand-built decision could carry anything — including text with no UTF-8
+    encoding, which would make the record unserialisable. Uppercase is rejected
+    too: `hexdigest()` emits lowercase, so admitting a second spelling of the
+    same digest would compare unequal and read as tampering.
+    """
+    with pytest.raises(ValidationError, match="parameters_digest"):
+        PermissionDecision(
+            id="d-1",
+            ruling=PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
+            tool=tool(),
+            parameters_digest=digest,
+            decided_at=AT,
+        )
+
+
+@pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
+def test_a_request_rebuilds_a_corrupted_definition_rather_than_carrying_it() -> None:
+    """A policy should be able to trust the declaration it is handed.
+
+    `frozen=True` refuses `tool.risk_level = ...` and not
+    `object.__setattr__`, so a corrupted definition could otherwise reach a
+    policy — which compares that field on a severity scale and would raise
+    `TypeError` mid-decision, from inside the gate.
+
+    The serializer warning is expected and filtered: dumping the deliberately
+    corrupted model is how the rebuild detects it, and the warning is the
+    mechanism working rather than a problem with the test.
+    """
+    corrupted = tool()
+    object.__setattr__(corrupted, "risk_level", "garbage")
+
+    with pytest.raises(ValidationError):
+        ActionRequest(tool=corrupted)
+
+
 def test_a_decision_refuses_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         PermissionDecision.model_validate(
@@ -602,7 +655,7 @@ def test_a_decision_refuses_unknown_fields() -> None:
                 "id": "d-1",
                 "ruling": {"outcome": "allow", "reason": "fine"},
                 "tool": tool().model_dump(mode="json"),
-                "parameters_digest": "x",
+                "parameters_digest": ActionRequest(tool=tool()).parameters_digest,
                 "decided_at": AT.isoformat(),
                 "surprise": True,
             }
