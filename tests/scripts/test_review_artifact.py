@@ -287,6 +287,44 @@ def test_refuses_to_review_a_dirty_tree(tmp_path: Path) -> None:
     assert not (repo / ".review").exists()
 
 
+def test_records_the_base_it_reviewed_when_the_base_ref_moves(tmp_path: Path) -> None:
+    """The left edge of the range is pinned too, not just HEAD.
+
+    A concurrent fetch can advance `main` mid-review. If the recorded base were
+    re-resolved afterwards, the artifact would certify a range wider than the
+    one Codex actually saw — and ship.sh, comparing against a freshly-fetched
+    base, would accept it.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    reviewed_base = _git(repo, "merge-base", "main", sha)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # A fake codex that advances `main` while "reviewing" — without touching the
+    # feature branch's own HEAD or working tree.
+    codex = bin_dir / "codex"
+    codex.write_text(
+        "#!/usr/bin/env bash\n"
+        "git branch -f main-tmp main >/dev/null 2>&1\n"
+        'git commit -q --allow-empty -m "base moved" >/dev/null 2>&1\n'
+        "git branch -f main HEAD >/dev/null 2>&1\n"
+        "git reset -q --hard HEAD~1\n"
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        '  [[ "$prev" == "-o" ]] && printf "a finding\\nVerdict: APPROVE\\n" >"$a"\n'
+        '  prev="$a"\n'
+        "done\n"
+    )
+    codex.chmod(0o755)
+
+    _run_review(repo, tmp_path)
+
+    assert _git(repo, "rev-parse", "main") != reviewed_base, "fake should have moved main"
+    header = (repo / ".review" / f"{sha}-adversarial.md").read_text().splitlines()[0]
+    # The base recorded is the one reviewed, not the one main now points at.
+    assert f"base_sha={reviewed_base}" in header
+
+
 def test_each_persona_records_a_separate_artifact_for_one_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
