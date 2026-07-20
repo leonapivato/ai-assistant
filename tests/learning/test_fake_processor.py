@@ -180,6 +180,32 @@ async def test_field_boundaries_cannot_be_smuggled_into_an_id_collision() -> Non
     assert len(await store.export()) == 2
 
 
+async def test_episodes_that_differ_only_in_when_are_distinct_records() -> None:
+    # `created_at` reaches the record — as an episode's `occurred_at` and as every
+    # record's provenance — so two events differing only there produce different
+    # records, and must not share an upsert key.
+    store = FakeMemoryStore()
+    for when in (datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)):
+        event = FeedbackEvent(
+            kind=FeedbackKind.CORRECTION,
+            memory_kind=MemoryKind.EPISODIC,
+            content="met Alice",
+            created_at=when,
+        )
+        [proposal] = await FakeFeedbackProcessor().process(event)
+        await store.add(proposal.proposed)
+
+    assert len(await store.export()) == 2
+
+
+async def test_evidence_is_part_of_a_records_identity() -> None:
+    # Likewise: evidence becomes provenance.evidence, so it distinguishes records.
+    [without] = await FakeFeedbackProcessor().process(_event())
+    [with_evidence] = await FakeFeedbackProcessor().process(_event(evidence=("ep-9",)))
+
+    assert without.proposed.id != with_evidence.proposed.id
+
+
 async def test_an_absent_subject_is_distinct_from_an_empty_one() -> None:
     [absent] = await FakeFeedbackProcessor().process(_event(subject=None))
     [empty] = await FakeFeedbackProcessor().process(_event(subject=""))

@@ -22,7 +22,6 @@ the contract.
 
 from __future__ import annotations
 
-import json
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
@@ -57,24 +56,27 @@ def _derived_id(event: FeedbackEvent) -> str:
     one store cannot silently overwrite each other. ``FakePlanner``'s
     ``f"{goal.id}-plan"`` is the same idea.
 
-    Two *equivalent* events do map to one id. That is the intended reading —
-    the same feedback establishes the same memory — and it is what makes the
-    scheme collision-free rather than collision-prone.
+    Only two events that are equal *in every field* map to one id. That is the
+    intended reading — the same feedback establishes the same memory — and it is
+    what makes the scheme collision-free rather than collision-prone.
 
-    The fields are JSON-serialised rather than joined by a separator, so no
+    The whole event is hashed rather than a chosen subset, because every field
+    reaches the synthesised record: ``created_at`` becomes an episode's
+    ``occurred_at`` and every record's ``provenance.last_updated``, and
+    ``evidence`` becomes its provenance evidence. A subset would let two events
+    that produce *different* records share an id, and ``MemoryStore.add`` treats
+    a repeated id as an upsert, so the first record would vanish. Hashing
+    everything makes that impossible by construction instead of by a judgement
+    about which fields matter — one this fake would have to revisit every time
+    ``FeedbackEvent`` gains a field.
+
+    Pydantic's JSON serialisation is used rather than a separator join, so no
     choice of separator can be smuggled inside a field to make two different
-    events hash alike: under a NUL join, a content ending in NUL-b with subject
-    c and a content of a with subject b-NUL-c produce one string — and
-    ``MemoryStore.add`` treats a repeated id as an upsert. JSON also keeps
-    ``subject=None`` distinct
-    from ``subject=""``. The digest is truncated only for legibility; 64 bits is
-    far beyond what a test process can collide by accident.
+    events hash alike, and ``subject=None`` stays distinct from ``subject=""``.
+    The digest is truncated only for legibility; 64 bits is far beyond what a
+    test process can collide by accident.
     """
-    material = json.dumps(
-        [event.memory_kind.value, event.content, event.subject],
-        ensure_ascii=False,
-    )
-    return f"fake-memory-{sha256(material.encode()).hexdigest()[:16]}"
+    return f"fake-memory-{sha256(event.model_dump_json().encode()).hexdigest()[:16]}"
 
 
 class FakeFeedbackProcessor:
