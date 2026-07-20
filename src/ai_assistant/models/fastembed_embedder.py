@@ -121,15 +121,19 @@ def _resolve_dimensions(backend: FastEmbedBackend, model: str) -> int:
     if reported is None:
         msg = f"unknown fastembed model: {model!r}"
         raise ModelError(msg)
-    try:
-        dimensions = int(reported)
-    except (TypeError, ValueError) as exc:
-        msg = f"fastembed reported a non-numeric dimension for {model!r}: {reported!r}"
-        raise ModelError(msg) from exc
-    if dimensions < 1:
-        msg = f"fastembed model {model!r} reports a non-positive dimension: {dimensions}"
+    # Require an actual int rather than coercing with `int()`, which is wrong in
+    # both directions here: `int(1.5)` would silently accept a fractional width
+    # as 1, and `int(float("inf"))` raises OverflowError straight past this
+    # boundary. `bool` is excluded because `True` would otherwise pass as a
+    # one-dimensional model. The Protocol already declares `Mapping[str, int]`,
+    # so this only enforces what a backend has promised.
+    if isinstance(reported, bool) or not isinstance(reported, int):
+        msg = f"fastembed reported a non-integer dimension for {model!r}: {reported!r}"
         raise ModelError(msg)
-    return dimensions
+    if reported < 1:
+        msg = f"fastembed model {model!r} reports a non-positive dimension: {reported}"
+        raise ModelError(msg)
+    return reported
 
 
 class FastEmbedEmbedder:
