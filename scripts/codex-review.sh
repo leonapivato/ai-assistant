@@ -507,9 +507,22 @@ fi
 # provide a verdict or APPROVE this change". Markdown emphasis is stripped
 # first, since the reviewer writes "**Verdict: X**", "Verdict: X" and
 # "VERDICT: X" interchangeably.
+#
+# The `Verdict:` label is optional, because the contract this check enforces
+# does not require it. docs/review/guide.md asks the reviewer to "end with a
+# one-line verdict: BLOCK, APPROVE WITH NITS, or APPROVE", and the preamble
+# tells it to output the verdict "from docs/review/guide.md" — so a bare
+# `APPROVE WITH NITS` is a conforming review. Demanding the label made this
+# check stricter than the rubric it cites and discarded conforming reviews as
+# refusals, at the cost of a full run each time (issue #120).
+#
+# The guard is not weakened by it. What it exists to catch is a refusal or a
+# timeout — "I'm unable to review this repository" — and those do not end in a
+# line that is exactly a verdict word. Anchoring to the whole line is what does
+# the work here; the label never did.
 last_line="$(grep -v '^[[:space:]]*$' "$out" | tail -n 1 |
     tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-if ! grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$last_line"; then
+if ! grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' <<<"$last_line"; then
     echo "codex output does not end in a verdict; not recording it as a review" >&2
     echo "this is usually a refusal or a timeout rather than a review" >&2
     echo "last line was: ${last_line}" >&2

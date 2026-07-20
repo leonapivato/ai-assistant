@@ -263,8 +263,23 @@ def test_prose_mentioning_a_verdict_is_not_accepted_as_one(tmp_path: Path) -> No
 
 
 def test_accepts_the_verdict_forms_the_reviewer_actually_emits(tmp_path: Path) -> None:
-    """Observed in real output: bold, all-caps, and plain, with and without nits."""
-    for form in ("**Verdict: APPROVE WITH NITS**", "VERDICT: BLOCK", "Verdict: APPROVE"):
+    """Observed in real output: bold, all-caps, and plain, with and without nits.
+
+    The bare forms are the contract, not a tolerance. ``docs/review/guide.md``
+    asks the reviewer to "end with a one-line verdict: ``BLOCK``,
+    ``APPROVE WITH NITS``, or ``APPROVE``" and never mentions a ``Verdict:``
+    label — so a bare ``APPROVE WITH NITS`` is what a conforming reviewer emits.
+    Requiring the label made this check stricter than the rubric it cites, and
+    it discarded a full conforming review as a refusal (issue #120).
+    """
+    for form in (
+        "**Verdict: APPROVE WITH NITS**",
+        "VERDICT: BLOCK",
+        "Verdict: APPROVE",
+        "APPROVE WITH NITS",
+        "**APPROVE**",
+        "BLOCK",
+    ):
         repo = tmp_path / f"repo-{abs(hash(form))}"
         _init_repo(repo)
         bin_dir = tmp_path / "bin"
