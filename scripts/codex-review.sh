@@ -141,6 +141,19 @@ if [[ ! -s "$out" ]] || ! grep -q '[^[:space:]]' "$out"; then
     exit 1
 fi
 
+# Non-empty is a weak test: a refusal or a timeout message ("I'm unable to
+# review this repository") is prose, and would be recorded and posted as though
+# it were a review. The rubric requires a closing verdict (docs/review/guide.md),
+# so demand one — it is the one token a genuine review always carries and a
+# non-review never does. Case-insensitive, since the reviewer varies between
+# "Verdict:" and "VERDICT:".
+if ! grep -qiE 'verdict.*(BLOCK|APPROVE)' "$out"; then
+    echo "codex output carries no verdict; not recording it as a review" >&2
+    echo "this is usually a refusal or a timeout rather than a review" >&2
+    echo "first line was: $(head -n 1 "$out")" >&2
+    exit 1
+fi
+
 # Record the review against the exact commit it covers (ADR-0015 §1). `just
 # ship` refuses to report a review whose SHA does not match the PR head, which
 # turns "did you review the current code?" from a matter of care into a check.
