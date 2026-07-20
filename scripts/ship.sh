@@ -202,24 +202,40 @@ fi
 # give up the very guarantee this lookup exists to provide, and a re-run costs
 # nothing now that it converges.
 comment_lines="$(gh api --paginate "repos/{owner}/{repo}/issues/${num}/comments" \
-    --jq '.[] | [(.id | tostring), (.body | split("\n")[0])] | @tsv')" ||
+    --jq '.[] | [(.id | tostring), (.user.login // ""), (.body | split("\n")[0])] | @tsv')" ||
     die "could not read the PR's existing comments to check for an earlier ship
      re-run once the API is reachable"
 
-existing_id=""
-while IFS=$'\t' read -r id first_line; do
+# The marker alone does not identify *our* comment — anyone can write the same
+# HTML comment, deliberately or by quoting an earlier ship. Patching a comment
+# belonging to someone else would destroy their text where permissions allow it
+# and fail the ship where they do not, so authorship is part of the match.
+me="$(gh api user --jq .login)" ||
+    die "could not determine the authenticated GitHub account
+     re-run once the API is reachable"
+
+existing_ids=()
+while IFS=$'\t' read -r id author first_line; do
     # GitHub returns bodies with CRLF line endings, so the marker would never
     # compare equal without stripping the carriage return.
-    if [[ "${first_line%$'\r'}" == "$marker" ]]; then
-        existing_id="$id"
-        break
+    if [[ "$author" == "$me" && "${first_line%$'\r'}" == "$marker" ]]; then
+        existing_ids+=("$id")
     fi
 done <<<"$comment_lines"
 
-if [[ -n "$existing_id" ]]; then
-    echo "ship: updating the review for ${sha:0:12} already on PR #${num}…" >&2
-    gh api --silent --method PATCH \
-        "repos/{owner}/{repo}/issues/comments/${existing_id}" -F "body=@${body}"
+# Every match is updated, not just the first. Check-then-create is not atomic —
+# GitHub offers no conditional comment creation — so two ships racing on one
+# commit can both find nothing and both post. That window is narrow (one clone
+# per agent, one PR per branch, ADR-0015) and its outcome is cosmetic. What
+# would not be cosmetic is a duplicate that then goes stale: updating only the
+# first match would leave the second showing a superseded review forever.
+if [[ ${#existing_ids[@]} -gt 0 ]]; then
+    echo "ship: updating ${#existing_ids[@]} existing review comment(s) for" \
+        "${sha:0:12} on PR #${num}…" >&2
+    for id in "${existing_ids[@]}"; do
+        gh api --silent --method PATCH \
+            "repos/{owner}/{repo}/issues/comments/${id}" -F "body=@${body}"
+    done
 else
     echo "ship: posting ${#artifacts[@]} review(s) for ${sha:0:12} to PR #${num}…" >&2
     gh pr comment "$num" --body-file "$body"
