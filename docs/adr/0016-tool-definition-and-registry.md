@@ -218,6 +218,15 @@ reversibly creates a draft. Two consistency rules make the contradictory
 combinations unrepresentable rather than merely discouraged:
 
 - a tool that declares `writes` **is** side-effecting;
+- a tool that declares `discloses` **is** side-effecting. Sending data to a
+  third party is an act with consequences even when nothing local changes: it
+  cannot be recalled, and it is exactly the class ADR-0004 §2 governs. Without
+  this rule a definition could pair `discloses=(PERSONAL,)` with
+  `side_effecting=False` and `REVERSIBLE` — an email tool declaring itself inert
+  — and satisfy every other constraint while handing consumers safety metadata
+  that contradicts itself. It means a web search is side-effecting, because it
+  discloses the query; that reads oddly for a moment and is right, since the
+  disclosure is the consequence worth gating;
 - a tool that is not side-effecting is `REVERSIBLE` — there is nothing to
   reverse.
 
@@ -314,8 +323,10 @@ transacted amounts need parameter-level policy, which needs the schema
 introspection §7 defers.
 
 `latency` is the expected duration of a typical call, for the selection stage
-and for deciding whether an action fits an interactive turn. Advisory: it is not
-a timeout, and nothing enforces it.
+and for deciding whether an action fits an interactive turn. Advisory as to its
+*accuracy* — it is not a timeout and nothing enforces it — but it must be
+non-negative, since a negative estimate is not a wrong guess but a nonsense one,
+and it would invert any selection that sorts on it.
 
 **`idempotency` declares a retry guarantee, not the presence of a parameter.**
 
@@ -338,11 +349,15 @@ make the guarantee usable:
   same tool with the same key are the same call; nothing is promised across
   tools, and a tool whose upstream dedupes more narrowly than that (per
   connection, per session) may not declare `KEYED`.
-- **Lifetime** is `idempotency_window`, required when and only when `KEYED`. A
-  repeat inside the window is deduplicated; outside it, the tool is free to act
-  again. A window is mandatory because every real implementation has one, and an
-  unstated one is the failure mode that looks safe in testing and doubles a
-  charge under a slow retry.
+- **Lifetime** is `idempotency_window`, required when and only when `KEYED`, and
+  **strictly positive**. A repeat inside the window is deduplicated; outside it,
+  the tool is free to act again. A window is mandatory because every real
+  implementation has one, and an unstated one is the failure mode that looks
+  safe in testing and doubles a charge under a slow retry. Zero or negative must
+  be rejected rather than merely discouraged: no retry can fall inside such a
+  window, so the definition would advertise a guarantee that is unsatisfiable by
+  construction — worse than declaring `NONE`, which at least tells the executor
+  the truth.
 
 `NATURAL` is not a weaker `KEYED`: it is the common case of a read, or a write
 that sets a value rather than appending one, which is safe to retry with no key
@@ -441,8 +456,8 @@ than a silent gap.
 `capabilities()` settles ADR-0014's open vocabulary question, and settles it
 **against** a closed enum. Capability names stay an open string vocabulary of
 which the registry is the authority: it reports what is actually advertised,
-sorted and de-duplicated, and that is what a planner should be given to plan
-against. A `Capability` enum in `core/types.py` was the tempting alternative and
+sorted and de-duplicated. A `Capability` enum in `core/types.py` was the
+tempting alternative and
 is the wrong shape — every new integration would become a `core` change and
 therefore a breaking change under golden rule 5, which contradicts a subsystem
 whose whole design is self-contained plugins, and forecloses a tool this
@@ -451,8 +466,24 @@ remains a legitimate, *detectable* outcome, and ADR-0014 already reserved
 `SkipReason.NO_CAPABLE_TOOL` for exactly it.
 
 `capabilities()` is derivable from `all_tools()`, and is on the contract anyway
-because it is the question the planning stage actually asks; making every caller
-re-derive the vocabulary invites each to derive it slightly differently.
+because it is the question the selection stage actually asks; making every
+caller re-derive the vocabulary invites each to derive it slightly differently.
+
+**Whether a *planner* is handed the vocabulary is not settled here.**
+`Planner.plan()` takes a goal, context and memories (ADR-0014 §6) and no
+capability list, so telling a planner what exists would need a new input and
+therefore a golden-rule-5 change to a contract this lane does not own. That
+change may well be worth making — a planner that knows the vocabulary proposes
+fewer unsatisfiable steps — but it is a planning-contract decision with its own
+trade-off (a planner constrained to what exists today cannot express a goal the
+system should grow to meet), and settling it inside a tools ADR would be
+reaching across the boundary this one spends §5 defending.
+
+Nothing is blocked by leaving it open, which is why it can be left open:
+ADR-0014 already treats a plan naming an unimplemented capability as a normal,
+detectable outcome rather than an error, and reserved `NO_CAPABLE_TOOL` for it.
+The registry is the authority on the vocabulary either way; delivery is issue
+#60.
 
 **One definition advertises one capability.** An integration that both sends and
 reads email registers two definitions, because a single one would have to carry
@@ -601,8 +632,17 @@ widening of this one.
 - **Nothing can be called yet.** A registry of definitions no executor can
   invoke is an unusual intermediate state, and the risk is that the contract is
   ratified without implementation contact — the failure CONTRIBUTING warns
-  about. It is mitigated but not eliminated: the registry contract itself ships
-  with a real in-memory implementation and a conformance suite, so the *lookup*
+  about. It is mitigated but not eliminated, and the mitigation is a
+  **requirement on the implementation PR that follows this one, not something
+  this ADR ships** — no code lands with the decision, by design (ADR-0015 §5).
+  That PR must deliver an in-memory `ToolRegistry` and a shared conformance
+  suite covering, at minimum: the id ordering of `find`/`all_tools`, a
+  conflicting re-registration refused, a deregistered id refused on reuse, an
+  unknown id and an unsatisfied capability both reading as empty rather than
+  raising, and the §1/§3/§4 consistency rules rejected at construction —
+  including the `discloses`-implies-`side_effecting` pair, a non-positive
+  `idempotency_window` on a `KEYED` tool, and a negative `latency`. With those,
+  the *lookup*
   seam is exercised; the *metadata's* fitness is argued from its two named
   consumers rather than demonstrated by one.
 - **`cost` is an estimate nothing reconciles.** A tool whose declared
