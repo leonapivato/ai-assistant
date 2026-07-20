@@ -13,11 +13,13 @@ state-transition graph does not, which is why that one lives in ``planning``.
 
 from __future__ import annotations
 
+import json
 import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
 from math import isfinite
 from typing import Annotated, Any, Literal
 
@@ -1446,3 +1448,306 @@ class ToolDefinition(BaseModel):
             msg = f"latency must not be negative, got {value!r}"
             raise ValueError(msg)
         return value
+
+
+class PermissionOutcome(_SeverityScale):
+    """What a policy ruled about an action (ADR-0021 §2).
+
+    Declared least restrictive first: ``ALLOW`` proceeds, ``CONFIRM`` requires a
+    user decision before proceeding, ``DENY`` refuses.
+
+    A :class:`_SeverityScale` rather than a plain ``StrEnum``, and the reason is
+    the trap ADR-0016 §2 documented. ``StrEnum`` members *are* strings, so an
+    un-overridden scale compares lexicographically — and today
+    ``"allow" < "confirm" < "deny"`` happens to be correct alphabetically, which
+    is worse than being wrong. The ordering appears to work, nothing fails, and
+    the first member inserted out of alphabetical order silently inverts every
+    threshold comparison written against it.
+    """
+
+    ALLOW = "allow"
+    CONFIRM = "confirm"
+    DENY = "deny"
+
+
+class ActionRequest(BaseModel):
+    """A self-contained proposal to invoke a tool, for a policy to rule on (ADR-0021 §3).
+
+    It carries the **definition** rather than an id, so a policy never consults a
+    registry. That is what makes :class:`PermissionDecision`'s guarantee
+    available at all — a policy that resolved an id would reintroduce the
+    rebinding hazard (issue #54) inside the very subsystem meant to close it —
+    and it keeps ``permissions`` free of any dependency on ``tools`` beyond this
+    shared ``core`` type.
+
+    ``parameters`` may **not** carry a Tier 0 credential value. That is a
+    pre-existing rule rather than one invented here: ADR-0004 §3 puts secrets in
+    the OS keyring and has ``tools/`` read them through ``SecretStore``, so a
+    tool fetches its own credential and is never handed one. It is restated
+    because a digest is *not* an adequate remedy if a secret ever gets in —
+    SHA-256 of a low-entropy secret is brute-forceable offline, so a hash of a
+    credential is a weakened copy of it, not an absence of one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool: ToolDefinition = Field(description="The declaration being ruled on, by value.")
+    parameters: FrozenJsonMapping = Field(
+        default=_EMPTY_PARAMS,
+        description="The arguments the call proposes; bound by digest, never stored.",
+    )
+    step_id: Identifier | None = Field(
+        default=None, description="The plan step this action belongs to, if any."
+    )
+
+    @property
+    def parameters_digest(self) -> str:
+        """A stable SHA-256 hex digest of :attr:`parameters`.
+
+        Computed **here** rather than supplied by a caller, and that placement
+        matters as much as the encoding: a ``str`` field each caller filled in
+        would be a canonicalisation per caller, and two that disagreed would
+        produce a false mismatch at execution — which reads as an attack rather
+        than as a bug.
+
+        The payload is bound but never stored. Arguments carry Tier 1 data
+        routinely (a recipient, a message body, a calendar entry), and a durable
+        record holding them verbatim would make the audit trail a second copy of
+        the user's most sensitive material, growing forever, for no purpose the
+        trail actually has. "Were *these* the arguments approved" is what the
+        trail must answer, and a digest answers it exactly.
+
+        Well-defined because :data:`FrozenJson` is already constrained to
+        JSON-safe values and already rejects non-finite floats (ADR-0014 §2) —
+        the one case that would otherwise have no encoding.
+        """
+        canonical = json.dumps(
+            _thaw_json(self.parameters),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class PermissionRuling(BaseModel):
+    """What a policy said about an :class:`ActionRequest` (ADR-0021 §3).
+
+    A ruling is ``outcome`` and ``reason`` — the only two things a policy is
+    entitled to author — and **it has no field naming a tool, a payload, or a
+    step**. That absence is the security property, not an economy. An earlier
+    draft had a policy return a whole :class:`PermissionDecision`, which has a
+    ``tool`` field, so a conforming implementation could have returned ``ALLOW``
+    for a *different* tool than the one it was handed, and
+    :meth:`PermissionDecision.authorises` would then have approved it. Splitting
+    the types removes the capability rather than forbidding it, and does so for
+    every implementation, including one written by someone who never read the
+    ADR.
+
+    The policy also does not mint an ``id`` or read a clock; the caller that
+    records supplies both. That leaves ``decide`` a genuine function of its
+    argument, which is in turn what makes the monotonicity obligations in
+    ADR-0021 §5 checkable at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: PermissionOutcome
+    reason: str = Field(description="Why, in text shown to the user at the moment they decide.")
+    authorised_by: Identifier | None = Field(
+        default=None, description="The recorded user decision this ALLOW rests on, if any."
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_is_present(cls, value: str) -> str:
+        """Reject a reason with nothing visible in it, returning it stripped.
+
+        The same ``_has_visible_text`` test ADR-0018 §1 applies to a tool's
+        description, and for the same reason: this is shown to the user at the
+        moment they are deciding, and a reason that renders as nothing leaves
+        the prompt with nothing to say.
+        """
+        stripped = value.strip()
+        if not _has_visible_text(stripped):
+            msg = "ruling reason must contain visible text"
+            raise ValueError(msg)
+        return stripped
+
+    @model_validator(mode="after")
+    def _only_an_allow_cites_an_authorisation(self) -> PermissionRuling:
+        """Permit ``authorised_by`` only on an ``ALLOW``.
+
+        A refusal rests on no authorisation, and a ``DENY`` — or a ``CONFIRM``,
+        which is a question rather than an answer — citing one is incoherent.
+        """
+        if self.authorised_by is not None and self.outcome is not PermissionOutcome.ALLOW:
+            msg = f"a {self.outcome} ruling cites no authorisation, got {self.authorised_by!r}"
+            raise ValueError(msg)
+        return self
+
+
+class PermissionDecision(BaseModel):
+    """A ruling bound to the request it was made about (ADR-0021 §1).
+
+    ``tool`` is the **whole** :class:`ToolDefinition`, embedded by value, and
+    that is the clause everything else here rests on. A decision does not say "I
+    approved ``send_message``"; it says "I approved *this declaration*, which
+    happens to call itself ``send_message``, is ``REVERSIBLE``, discloses
+    ``PERSONAL``, and costs nothing". There is no name left to rebind, so a
+    process that restarts and registers a different definition under the same id
+    has not altered any decision, and the mismatch is a value comparison away
+    (issue #54).
+
+    Not a digest of the definition, deliberately. A digest is what you reach for
+    when the thing is too large or too sensitive to keep, and a
+    ``ToolDefinition`` is neither — it is a few hundred bytes of Tier 2
+    configuration declared by code (ADR-0016 §6). Storing it buys three things a
+    digest does not: the trail stays **readable without the registry**, which
+    ADR-0016 §6 rebuilds in memory each run; there is **no canonicalisation to
+    get wrong**, so two implementations cannot produce false mismatches on
+    identical definitions; and it **composes with detachment** (ADR-0018 §3)
+    rather than adding a parallel mechanism.
+
+    Every field is serialisable, and that is load-bearing rather than
+    incidental: a decision that could not survive a ``model_dump(mode="json")``
+    round-trip would make the pin worthless across exactly the restart issue #54
+    is about.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier
+    ruling: PermissionRuling = Field(description="What the policy said.")
+    tool: ToolDefinition = Field(description="The declaration ruled on, verbatim.")
+    parameters_digest: str = Field(description="Binds the payload without storing it.")
+    decided_at: datetime = Field(description="When the ruling was made; timezone-aware.")
+    step_id: Identifier | None = None
+    resolves: Identifier | None = Field(
+        default=None, description="The CONFIRM decision this one answers, if any."
+    )
+
+    @classmethod
+    def from_request(
+        cls,
+        request: ActionRequest,
+        ruling: PermissionRuling,
+        *,
+        id: Identifier,  # noqa: A002 — names the field it fills; the ADR fixes the signature
+        decided_at: datetime,
+        resolves: Identifier | None = None,
+    ) -> PermissionDecision:
+        """Bind a ruling to the request it was made about.
+
+        **The only construction path a caller should use**, and it exists so the
+        binding is *transcribed* rather than asserted. Every field describing
+        what was ruled on — ``tool``, ``parameters_digest``, ``step_id`` — is
+        copied from the request by ``core``, so a decision naming a different
+        tool than the one the policy saw cannot be produced by following the
+        contract.
+
+        A factory rather than a validator because the request is not a field of
+        the decision: embedding it whole would store the parameters this design
+        is careful not to store. What remains open is a caller hand-constructing
+        a decision field by field — that is a caller falsifying its own audit
+        trail rather than a policy subverting a gate, and no producer can
+        prevent it (the boundary ADR-0018 §3 drew for detachment).
+
+        Args:
+            request: The action ruled on; its subject is copied across.
+            ruling: What the policy said about it.
+            id: Identifier for this decision, minted by the caller that records.
+            decided_at: When the ruling was made; must be timezone-aware.
+            resolves: The recorded ``CONFIRM`` this decision answers, if any.
+
+        Returns:
+            The decision, ready to record.
+        """
+        return cls(
+            id=id,
+            ruling=ruling,
+            tool=request.tool,
+            parameters_digest=request.parameters_digest,
+            decided_at=decided_at,
+            step_id=request.step_id,
+            resolves=resolves,
+        )
+
+    def authorises(self, request: ActionRequest) -> bool:
+        """Whether this decision authorises performing ``request``.
+
+        Takes a **request** rather than a bare definition, and that is what makes
+        it discharge ADR-0017 §3's "what is transmitted is bound to what was
+        authorised, immutably, and consumed unchanged". A signature taking only a
+        definition would have checked the tool and silently ignored the
+        arguments — authorising an email to one recipient and executing it to
+        another, with every record still reading as consistent. That is the same
+        failure shape as issue #54, one level down.
+
+        This lives in ``core`` because it **compares; it does not decide**.
+        Whether an action *should* be allowed is
+        :class:`~ai_assistant.core.protocols.ActionPolicy`'s, in ``permissions``,
+        and none of that reasoning is here — this asks only whether a record
+        already in hand is a record of *this* request being allowed. It is
+        therefore computable from the two values alone, independent of policy,
+        configuration, context and clock, and the same answer for every
+        consumer: ADR-0016 §2's three-part test for a semantic intrinsic to a
+        type. Putting it in ``permissions`` instead would fail for the reason
+        ADR-0016 §2 gave when it declined to put the severity ordering in a
+        subsystem — both ``permissions`` and the future invocation path need it,
+        golden rule 1 forbids either importing the other, so it would become two
+        copies of a safety-critical comparison free to disagree.
+
+        The authorisation pointer is deliberately *not* re-checked here: it is
+        validated once, by ``AuditTrail.record``, at the boundary where the
+        referenced record is in hand, rather than at every later read where it
+        is not.
+        """
+        return (
+            self.ruling.outcome is PermissionOutcome.ALLOW
+            and request.tool == self.tool
+            and request.parameters_digest == self.parameters_digest
+            and request.step_id == self.step_id
+        )
+
+    @field_validator("decided_at")
+    @classmethod
+    def _decided_at_is_aware(cls, value: datetime) -> datetime:
+        """Reject a naive decision timestamp.
+
+        A deliberate departure from the normalise-to-UTC convention the other
+        instants in this module follow, and ADR-0021 §4 asks for the stricter
+        rule here specifically. The trail is durable *and ordered*, so a naive
+        value is reinterpreted against whatever the host's local zone happens to
+        be at read time, and it sorts incoherently against the aware values
+        beside it. "When was this approved" is a question an audit trail must
+        not answer differently on a laptop that travelled — and unlike a
+        retention deadline, there is no later comparison that would surface the
+        mistake.
+
+        (Issue #36 tracks a known weakness in these validators — a ``tzinfo``
+        whose ``utcoffset()`` returns ``None`` — and applies here as elsewhere.)
+        """
+        if value.tzinfo is None or value.utcoffset() is None:
+            msg = f"decided_at must be timezone-aware, got {value!r}"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _a_resolution_is_not_itself_a_question(self) -> PermissionDecision:
+        """Refuse a resolving decision whose own ruling is ``CONFIRM``.
+
+        Keeps the chain one link long, so it cannot loop. Asking twice about one
+        request is a flow ADR-0021 does not offer; a policy that wants to is
+        issuing a *new* request.
+
+        The rest of the resolution invariant is enforced by ``AuditTrail.record``
+        rather than here, because it is the only place both records are in hand:
+        a decision in isolation cannot see the decision it names, which is
+        exactly why leaving that half to a model validator would have been
+        leaving it undone.
+        """
+        if self.resolves is not None and self.ruling.outcome is PermissionOutcome.CONFIRM:
+            msg = "a resolving decision may not itself be a CONFIRM"
+            raise ValueError(msg)
+        return self

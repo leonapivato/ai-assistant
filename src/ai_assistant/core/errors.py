@@ -149,6 +149,43 @@ class PermissionDeniedError(AssistantError):
     """An action was blocked by the permission/policy layer."""
 
 
+class AuditError(AssistantError):
+    """A write to the permission audit trail was refused (ADR-0021 §4).
+
+    The base for the refusals below, so a caller can handle "the trail would not
+    accept this" with one handler. The trail is an *active* participant rather
+    than a filing cabinet: it validates what it is asked to append, which means
+    ``record`` has a failure mode every caller must handle. That cost is
+    accepted because the alternative is a ``resolves`` pointer attesting that a
+    user agreed to something they were never shown.
+    """
+
+
+class DuplicateDecisionError(AuditError):
+    """A decision id already present in the trail was re-recorded (ADR-0021 §4).
+
+    ``record`` is write-once, a deliberate departure from ``MemoryStore.add``'s
+    upsert. Memory keys on ``id`` as the caller's idempotency key; an audit
+    trail that upserts is one where history can be rewritten by replaying a
+    write, which is the one property the trail exists to deny.
+    """
+
+
+class InvalidResolutionError(AuditError):
+    """A decision's ``resolves`` pointer failed the trail's invariant (ADR-0021 §1).
+
+    Raised when the referenced decision is absent, was not a ``CONFIRM``, has
+    already been resolved, describes a different subject, was decided *after*
+    the resolution claiming to answer it, or when the resolving ruling's
+    ``authorised_by`` does not match its ``resolves``.
+
+    Distinct from :class:`DuplicateDecisionError` because the caller's response
+    differs: a duplicate id is a replayed write, whereas an invalid resolution
+    is an answer that does not belong to the question it names — the
+    substitution the pointer exists to prevent.
+    """
+
+
 class PlanningError(AssistantError):
     """A request could not be turned into an executable plan.
 
