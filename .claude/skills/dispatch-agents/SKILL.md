@@ -79,14 +79,20 @@ Reports are written from the agent's belief, which can be stale or wrong.
 Reported status has been contradicted by CI. Check the thing, not the claim:
 
 ```bash
+sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)
 gh pr checks <n>                      # not the reported gate result
 gh pr view <n> --json isDraft,mergeable,mergeStateStatus,reviewDecision
 gh pr diff <n> --name-only            # scope claims: did it touch what it said?
+gh pr view <n> --json comments --jq '.comments[].body' | grep -c "ship:$sha"
 ```
 
 `mergeStateStatus: BEHIND` means it was never gated against current `main`.
 Scope claims ("no `core/` change") are one command to confirm and have been
-wrong.
+wrong. The last line is the one nothing else covers: green CI and a clean diff
+say nothing about whether `just review-codex` and `just ship` ever ran, and a
+report claiming both is not evidence that either did. `ship.sh` tags its comment
+with the SHA it reviewed, so no tag for the current head means no review of the
+current head.
 
 **Before merging, diff the open PRs against each other** — two lanes editing one
 file is invisible in either PR alone:
@@ -125,14 +131,17 @@ review is the operator's call; merging past `BEHIND` skips *evidence*.
 
 ```bash
 sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)
-gh pr checks <n> --watch --fail-fast && \
-  gh pr merge <n> --rebase --admin --delete-branch --match-head-commit "$sha"
+gh pr checks <n> --watch --fail-fast || exit 1
+[ "$(gh pr view <n> --json mergeStateStatus --jq .mergeStateStatus)" = BEHIND ] && exit 1
+gh pr merge <n> --rebase --admin --delete-branch --match-head-commit "$sha"
 ```
 
-`--watch` matters: bare `gh pr checks` exits immediately while checks are
-*pending*, reporting "no checks reported yet" so the merge proceeds anyway.
-`--match-head-commit` matters: without it, an agent pushing between the check
-and the merge gets its commit admin-merged unreviewed.
+Each line guards a different hole. `--watch`: bare `gh pr checks` exits
+immediately while checks are *pending*, reporting "no checks reported yet" so
+the merge proceeds anyway. The `BEHIND` recheck: `main` can land another PR
+while yours is being checked, and `--admin` will merge the now-stale branch.
+`--match-head-commit`: an agent pushing in the same window gets its commit
+admin-merged unreviewed.
 
 **A rebase invalidates the review record.** `just ship` anchors a review to a
 commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head nothing
