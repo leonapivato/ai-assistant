@@ -2,18 +2,19 @@
 
 - Status: Proposed
 - Date: 2026-07-20
+- Supersedes: ADR-0002's build-backend choice only (`uv_build` → `hatchling`,
+  §4). ADR-0002's stack decisions are otherwise unchanged; its status note is
+  appended on acceptance.
 
 ## Context
 
 [ADR-0006](0006-embedding-seam.md) §2 makes on-device embedding the default so
-that "memory content never leaves the device just to be indexed". That claim is
-true and this ADR does not disturb it — *on-device* describes where inference
-runs. It says nothing about where the model came from, and the model comes over
-the network.
-
-[ADR-0017](0017-egress-boundaries.md) §2 **declares** that fetch as something
-`models/` transmits, and deliberately declines to authorise it (issue #89).
-Nothing has covered it since. This ADR is the rule.
+that "memory content never leaves the device just to be indexed". True, and this
+ADR does not disturb it — *on-device* describes where inference runs, not where
+the model came from, and the model comes over the network.
+[ADR-0017](0017-egress-boundaries.md) §2 **declares** that fetch as `models/`
+transmission and declines to authorise it (issue #89). Nothing has covered it
+since. This ADR is the rule.
 
 ### What actually happens today
 
@@ -44,14 +45,13 @@ Verified against the installed `fastembed` 0.8.0, for the default model
 
 ### Does ADR-0004 §2 need amending?
 
-No, and this ADR declines to amend it. Issue #89's second option proposed
-widening §2 to admit an artifact-repository recipient. §2 governs sending **user
-data** off-device; this request carries none — only transport metadata (source
-IP, timing, the fact of the fetch). Reading §2's recipient clause onto a
-no-user-data fetch would widen a ratified clause by assertion, the move ADR-0017
-§5 refuses. The counter-reading — that "this install fetched this model" is
-user-adjacent, so §2's *spirit* reaches it — is fair, but little turns on it:
-the default path performs no runtime fetch at all, and the one path that still
+No. Issue #89's second option proposed widening §2 to admit an artifact-repository
+recipient, but §2 governs sending **user data** off-device and this request
+carries none — only transport metadata (source IP, timing, the fact of the
+fetch). Reading §2's recipient clause onto a no-user-data fetch would widen a
+ratified clause by assertion, the move ADR-0017 §5 refuses. The counter-reading —
+that "this install fetched this model" is user-adjacent — is fair, but little
+turns on it: the default path performs no runtime fetch, and the one that still
 does (§6) is reached only by a user who asked for it.
 
 ### What it costs to ship the model instead
@@ -67,11 +67,10 @@ Measured, not estimated:
 | **headroom** | **43,595,250** | **41.6 MiB** |
 
 The wheel was built to measure this, not calculated. The artifact is fp16 ONNX
-weights (no quantization operators, size matching fp16 arithmetic to within
-graph overhead — 66,465,124 actual against 66,425,856 predicted, despite the
-source repo being named `…-onnx-Q`) and deflates to 91.1% of raw, so almost none
-of it compresses away. 58.4% of the limit is the honest figure; "thin" was
-wrong.
+weights (no quantization operators, and its size matches fp16 arithmetic to
+within graph overhead — despite the source repo being named `…-onnx-Q`) and
+deflates to only 91.1% of raw, so almost none of it compresses away. 58.4% of the
+limit is the honest figure; "thin" was wrong.
 
 **Crossing the limit is a publish-time failure — but not a harmless one, because
 a release is not atomic.** A wheel over 100 MiB is rejected by PyPI's upload API
@@ -93,15 +92,12 @@ claim was wrong.
 artifact. The default model is a build input: pinned to an immutable revision,
 verified against a recorded digest at build time, and shipped inside the wheel.**
 
-Scoped to the default path deliberately. Selecting a non-default model (§6) is
-an explicit opt-in that leaves this rule's scope and re-enables fastembed's own
-download; an unscoped "nothing ever fetches" would be a rule this ADR's own §6
-breaks.
-
-It amends nothing: ADR-0004 §2 and ADR-0017 §1 continue to govern user-data
-egress, untouched. It is stricter than the rule ADR-0017 §2 left open — on the
-default path there is no runtime egress to authorise, so the gap issue #89
-identified closes rather than being managed.
+Scoped to the default path deliberately: a non-default model (§6) is an opt-in
+that re-enables fastembed's own download, so an unscoped "nothing ever fetches"
+would be a rule §6 breaks. It amends nothing — ADR-0004 §2 and ADR-0017 §1 still
+govern user-data egress — but is stricter than what ADR-0017 §2 left open: on the
+default path there is no runtime egress to authorise, so the #89 gap closes
+rather than being managed.
 
 ### 2. The pin is part of the embedding space
 
@@ -119,14 +115,13 @@ change within the existing `Embedder.model_id` contract, not a Protocol change.
 
 **It does not claim to fully fingerprint the embedding space.** On `main`,
 `model_id` is the bare model name and captures *no* runtime-stack version — not
-the tokenizer's, not fastembed's — so a dependency change that alters vectors is
-already undetectable, on every provisioning path. That is a pre-existing
-ADR-0006 §4 gap wanting a behavioural fingerprint, filed as **issue #136** and
-out of scope here. It needs no amendment from this ADR: §4 gives the store a
-*detection* mechanism, not a guarantee of a perfect fingerprint, and on `main`
-it already detects only name and dimension. Adding the revision is a strict
-improvement, never a regression — so there is nothing to amend, and completing
-§4's detection is #136's work.
+the tokenizer's, not fastembed's — so a vector-altering dependency change is
+already undetectable, on every provisioning path. That pre-existing ADR-0006 §4
+gap wants a behavioural fingerprint and is filed as **issue #136**. It needs no
+amendment from this ADR: §4 gives the store a *detection* mechanism, not a
+perfect fingerprint, and on `main` detects only name and dimension — so adding
+the revision is a strict improvement, never a regression, and completing §4's
+detection is #136's work.
 
 ### 3. fastembed is pinned, not ranged
 
@@ -154,13 +149,21 @@ content-addressed elsewhere: committing 58 MiB of incompressible binary would
 duplicate it permanently in every clone, and ADR-0015's one-clone-per-agent
 model makes that a recurring cost.
 
-**This requires changing the build backend.** `uv_build` supports no build hooks
-and cannot run code during a build; uv's own documentation directs projects
-needing build scripts to `hatchling`. So the backend becomes `hatchling` with a
-hook that fetches, verifies, and stages the artifact. That is a backend swap and
-a hook file — *not* the release pipeline a data-only package would need — but it
-changes project packaging rather than `models/`, so its blast radius is wider
-than the rest of this decision, and it is the part most worth challenging.
+**Acquisition stays owned by `models/`; only the trigger moves.** ADR-0006 §3
+confines every local-model dependency to `models/`, and the fetch client
+(`huggingface_hub`) is one — so the fetch-and-verify logic is a `models/`-owned
+seam, and the import-linter contract is extended to forbid `huggingface_hub`
+outside `models/` (issue #66's shape) so this is enforced, not merely stated.
+What changes is *when* that seam runs: a thin build-time adapter invokes it
+instead of `embed` doing so on first use. This also updates the fact ADR-0017 §2
+recorded — the default backend's *runtime* first-use fetch — without touching
+ADR-0017's rule: the egress is still `models/`-owned, it just happens at build.
+
+**This requires changing the build backend** (the header supersedes ADR-0002's
+choice). `uv_build` supports no build hooks; uv's own docs direct projects
+needing build scripts to `hatchling`, whose custom hook is the thin adapter
+above. That swap changes project packaging, so its blast radius is wider than the
+rest of this decision and is the part most worth challenging.
 
 §1 governs the installed runtime, not builds: a `py3-none-any` wheel unpacks and
 fetches nothing, while a from-sdist build runs the hook — and its fetch — on the
@@ -188,12 +191,11 @@ fastembed's own unpinned download, with none of §2's guarantees — the same sh
 as ADR-0006 §2's opt-in cloud embedder, and documented as such. "Local-first by
 default" is a claim about the default.
 
-That opt-in path carries the identity gap in full: an unpinned download resolves
-whatever the default branch holds, so a store indexed under revision A then
-re-fetched at B mixes vectors silently. This ADR does **not** introduce that — it
-is today's *default* behaviour, which §2 fixes for the vendored model and cannot
-fix here because fastembed's API takes no revision (§Context). A persistent store
-on a non-default model is subject to #136 until that gap closes.
+That opt-in path carries the identity gap in full — an unpinned download can
+serve different weights under an unchanged `model_id`, mixing vectors silently.
+This ADR does **not** introduce it: that is today's *default* behaviour, which §2
+fixes for the vendored model and cannot fix here (fastembed's API takes no
+revision). A persistent store on a non-default model is subject to #136.
 
 ### 7. What this ADR does not decide
 
@@ -203,8 +205,7 @@ on a non-default model is subject to #136 until that gap closes.
   may hold a network client, making §1 mechanically rather than review-checkable.
 - **It does not resolve the licence discrepancy** — Consequences records it as
   work that must complete before publishing.
-- **It does not give `model_id` a full behavioural fingerprint** — only the
-  revision axis, per §2; the rest is #136.
+- **It does not give `model_id` a full behavioural fingerprint** (§2, #136).
 
 ## Alternatives considered
 
@@ -222,9 +223,8 @@ embed on-device — did not survive being weighed against a first run that works
 network, but rejected on §4's reasoning: 58 MiB of incompressible binary
 permanent in every clone.
 
-**Keep the fetch lazy and pin it in place.** Not available — §Context's first
-bullet. It would require forking or monkeypatching fastembed's download path,
-more code than §2 and less auditable.
+**Keep the fetch lazy and pin it in place.** Not available (§Context's first
+bullet): it would mean forking or monkeypatching fastembed's download path.
 
 **A separate data-only package behind an `[local-embeddings]` extra.** The
 cleanest form, and the right answer if the wheel ever approaches the limit. It
@@ -253,9 +253,7 @@ shows it is not needed yet.
   name means shipping correct notices and someone must determine which governs.
   This obligation exists **only** because we redistribute. A release blocker, not
   a merge blocker.
-- **The build gains a network dependency and a backend change** (`uv_build` →
-  `hatchling`). CI has network; a contributor's first build will fetch 64 MiB
-  once.
+- **A contributor's first build fetches 64 MiB** once (CI has network).
 - **Model changes become explicit and release-bound.** ADR-0006 §4 already
   requires re-embedding when the model changes; tying that to a release makes it
   visible rather than ambient.
