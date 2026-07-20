@@ -71,6 +71,17 @@ by default), the telemetry clause (off by default, no observability egress), and
 the configured-set amendment governing *which recipients* `models/` may reach —
 is untouched and remains ADR-0004's.
 
+One reading of the residency clause is worth stating, since authorising tool
+egress makes it live: it governs **where the assistant keeps its own data** —
+memory, user model, audit trail — and commits those to the user's machine. It
+does not govern data a user's connected service holds as a result of an action
+the user authorised. Creating a calendar event puts data in Google's calendar;
+that is the user's own account doing what the user asked, not the assistant
+electing cloud storage for its state. Read otherwise, the clause would forbid
+every write-capable integration, which is plainly not what ADR-0004 — whose §3
+provisions credentials for exactly such integrations — decided. This is a
+reading, not an amendment; no clause changes.
+
 That last point is the important one, and it is why this rule says nothing about
 recipient authorisation. The obvious temptation was to restate recipient
 authorisation as a universal clause here, covering both boundaries. That would
@@ -259,8 +270,17 @@ for itself:
     `orchestration` adds that the user did not write into this message
     (Tier 1). Here the system *is* deciding, so ADR-0004 §7's minimisation rule
     binds it, and Tier 0 the system holds — credentials in the keyring — is
-    never included. The only Tier 0 leaving this boundary is the provider
-    credential, to the provider that issued it.
+    never included.
+
+  The tier claims above are **provenance-scoped**, and the distinction matters
+  because ADR-0004 §1 classifies by content, not by who typed it. A credential
+  the user pastes into a message is Tier 0 under §1 and stays Tier 0; it is not
+  reclassified by sitting in a conversation. What the provenance rule says is
+  narrower: the *system* did not select it, so no system-side authorisation
+  covers it and none is claimed. Precisely, then — the only Tier 0 the **system
+  selects and sends** at this boundary is the provider credential, to the
+  provider that issued it. Tier 0 that the user authored travels as part of
+  their content, disclosed by them.
 
   Embedding inputs read the same way: content the user wrote is theirs to
   disclose; content the system selected for indexing is the system's decision
