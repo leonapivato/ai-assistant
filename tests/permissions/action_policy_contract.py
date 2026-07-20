@@ -21,7 +21,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
-from itertools import combinations
+from itertools import combinations, permutations
 from typing import TYPE_CHECKING
 
 import pytest
@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ActionPolicy
+    from ai_assistant.core.types import ActionRequest, PermissionRuling
 
 #: Severity ladders, least severe first. Monotonicity is asserted over every
 #: ordered *pair* rather than adjacent rungs only: a policy can be correct
@@ -51,30 +52,58 @@ _REVERSIBILITY_LADDER = (
     Reversibility.IRREVERSIBLE,
 )
 
-#: Widening by inclusion: each rung is a superset of the one before it. The
-#: order the tuples are written in does not matter — ``TierReach`` sorts them.
-_DISCLOSES_LADDER = (
-    (),
-    (DataTier.OPERATIONAL,),
-    (DataTier.OPERATIONAL, DataTier.PERSONAL),
-    (DataTier.OPERATIONAL, DataTier.PERSONAL, DataTier.SECRET),
-)
-
-#: Every non-empty reach, including the single-tier ones. The floor is over
-#: *non-emptiness*, not over a list of tiers: ``OPERATIONAL`` is the tier a tool
-#: assigns to a disclosure it considers unremarkable, so exempting it would let
-#: the declaration decide whether it gets gated — the self-certifying fast path
-#: ADR-0016 §3 refused.
-_DISCLOSING = [
+#: Every reach a tool can declare — all eight subsets of the three tiers.
+#: "Widening ``discloses``" is inclusion, and inclusion is a *partial* order,
+#: not a chain: a single ladder from ``()`` to all three visits three of the
+#: nineteen strict-superset pairs and would accept a policy that relaxed on any
+#: of the other sixteen. Eight requests is cheap, so the suite takes them all.
+_REACHES = [
     tiers
-    for size in (1, 2, 3)
+    for size in range(4)
     for tiers in combinations((DataTier.SECRET, DataTier.PERSONAL, DataTier.OPERATIONAL), size)
 ]
+
+#: Every non-empty reach. The floor is over *non-emptiness*, not over a list of
+#: tiers: ``OPERATIONAL`` is the tier a tool assigns to a disclosure it
+#: considers unremarkable, so exempting it would let the declaration decide
+#: whether it gets gated — the self-certifying fast path ADR-0016 §3 refused.
+_DISCLOSING = [tiers for tiers in _REACHES if tiers]
 
 
 def _name_tiers(tiers: tuple[DataTier, ...]) -> str:
     """Name a parametrised case after the tiers it discloses."""
-    return "+".join(tiers)
+    return "+".join(tiers) or "nothing"
+
+
+async def _ruling_for(policy: ActionPolicy, request: ActionRequest) -> PermissionRuling:
+    """Rule on ``request``, checking the invariants **every** ruling must satisfy.
+
+    Two obligations hold for every call rather than for a representative one,
+    and sampling them is how a policy conforms in the cases a suite happens to
+    look at and not in the ones it does not:
+
+    * ``decide`` is a function of its argument, so a second call on the same
+      request must produce an identical ruling — including ``reason``, which is
+      what the user is shown.
+    * a fresh ruling may not name an authorisation. This is the one that matters:
+      ``authorised_by`` is a ``str`` a policy could fabricate, and the disclosure
+      floor is written as "``ALLOW`` **with ``authorised_by`` unset**" — so a
+      policy inventing a pointer for exactly the requests the floor covers would
+      auto-grant a disclosure while passing a floor test that only ever saw
+      unauthorised rulings.
+
+    Routing every ``decide`` in the suite through here is what makes both
+    universal instead of a spot check, at no cost in test bulk.
+    """
+    ruled = await policy.decide(request)
+    again = await policy.decide(request)
+
+    assert ruled == again, f"decide is not a function of its argument: {ruled} then {again}"
+    assert ruled.authorised_by is None, (
+        f"decide invented an authorisation ({ruled.authorised_by!r}); standing grants are "
+        f"deferred, so no policy today has a source for one"
+    )
+    return ruled
 
 
 class ActionPolicyContract:
@@ -96,7 +125,7 @@ class ActionPolicyContract:
         the type but which a policy could still reproduce in its own arithmetic.
         """
         outcomes = [
-            (await policy.decide(action(tool=tool(risk_level=level)))).outcome
+            (await _ruling_for(policy, action(tool=tool(risk_level=level)))).outcome
             for level in _RISK_LADDER
         ]
 
@@ -106,7 +135,7 @@ class ActionPolicyContract:
         self, policy: ActionPolicy
     ) -> None:
         outcomes = [
-            (await policy.decide(action(tool=tool(reversibility=level)))).outcome
+            (await _ruling_for(policy, action(tool=tool(reversibility=level)))).outcome
             for level in _REVERSIBILITY_LADDER
         ]
 
@@ -115,13 +144,27 @@ class ActionPolicyContract:
     async def test_widening_disclosure_never_relaxes_the_outcome(
         self, policy: ActionPolicy
     ) -> None:
-        """Each rung discloses a superset of the one before it."""
-        outcomes = [
-            (await policy.decide(action(tool=tool(discloses=tiers)))).outcome
-            for tiers in _DISCLOSES_LADDER
-        ]
+        """Over the whole inclusion lattice, not one chain through it.
 
-        _assert_never_relaxes(outcomes, _DISCLOSES_LADDER)
+        "Widening ``discloses``" is a *partial* order. A single ladder from
+        ``()`` to all three tiers visits three of the nineteen strict-superset
+        pairs, so a policy that ruled ``DENY`` for ``(SECRET,)`` and ``CONFIRM``
+        for ``(SECRET, PERSONAL)`` — relaxing as disclosure widened — would pass
+        it while violating the obligation outright. Eight requests cover every
+        pair.
+        """
+        outcomes = {
+            tiers: (await _ruling_for(policy, action(tool=tool(discloses=tiers)))).outcome
+            for tiers in _REACHES
+        }
+
+        for narrower, wider in permutations(_REACHES, 2):
+            if not set(narrower) < set(wider):
+                continue
+            assert outcomes[wider] >= outcomes[narrower], (
+                f"disclosing {_name_tiers(wider)} was ruled {outcomes[wider]}, less "
+                f"restrictive than {_name_tiers(narrower)}'s {outcomes[narrower]}"
+            )
 
     async def test_deciding_the_same_request_twice_agrees_with_itself(
         self, policy: ActionPolicy
@@ -139,6 +182,11 @@ class ActionPolicyContract:
         to the user, so a policy deriving it from a clock, a counter or a random
         source is one whose prompts differ between two identical questions, and
         an outcome-only assertion would call that conforming.
+
+        Named here because it is an obligation in its own right, but not *only*
+        checked here: ``_ruling_for`` re-decides every request the rest of the
+        suite builds, so a policy that varied its answer for low-risk or
+        disclosing requests only has nowhere left to hide.
         """
         request = action(tool=tool(risk_level=RiskLevel.HIGH))
 
@@ -165,7 +213,7 @@ class ActionPolicyContract:
         without amending the rule. Today nothing populates ``authorised_by`` on
         a fresh ruling, so in practice this is absolute.
         """
-        ruled = await policy.decide(action(tool=tool(discloses=tiers)))
+        ruled = await _ruling_for(policy, action(tool=tool(discloses=tiers)))
 
         assert not (ruled.outcome is PermissionOutcome.ALLOW and ruled.authorised_by is None), (
             f"disclosing {tiers} was auto-granted"
@@ -173,7 +221,7 @@ class ActionPolicyContract:
 
     async def test_an_undeclared_cost_is_never_auto_granted(self, policy: ActionPolicy) -> None:
         """ADR-0016 §4 ratified ``UNKNOWN`` as "policy must fail closed"."""
-        ruled = await policy.decide(action(tool=tool(cost=ToolCost(basis=CostBasis.UNKNOWN))))
+        ruled = await _ruling_for(policy, action(tool=tool(cost=ToolCost(basis=CostBasis.UNKNOWN))))
 
         assert not (ruled.outcome is PermissionOutcome.ALLOW and ruled.authorised_by is None)
 
@@ -187,23 +235,52 @@ class ActionPolicyContract:
         in a box. Standing grants are deferred, so *every* policy today is one
         constructed with no authorisation source — and this is checkable against
         any of them.
-        """
-        for tiers in ((), (DataTier.PERSONAL,)):
-            ruled = await policy.decide(action(tool=tool(discloses=tiers)))
 
-            assert ruled.authorised_by is None
+        Checked over every axis the contract varies rather than a sample,
+        because the failure it guards against is *selective*: a policy that
+        invented a pointer only for ``CRITICAL`` risk, an ``UNKNOWN`` cost or a
+        ``SECRET`` disclosure would auto-grant exactly the actions the floors
+        exist to catch, while a spot check on a benign request saw nothing.
+        (``_ruling_for`` asserts the same thing on every other request the suite
+        builds; this test is what states the obligation.)
+        """
+        varied = (
+            [action(tool=tool(risk_level=level)) for level in _RISK_LADDER]
+            + [action(tool=tool(reversibility=level)) for level in _REVERSIBILITY_LADDER]
+            + [action(tool=tool(discloses=tiers)) for tiers in _REACHES]
+            + [
+                action(tool=tool(cost=ToolCost(basis=basis)))
+                for basis in (CostBasis.FREE, CostBasis.UNKNOWN)
+            ]
+        )
+
+        for request in varied:
+            ruled = await policy.decide(request)
+
+            assert ruled.authorised_by is None, f"invented an authorisation for {request.tool}"
 
     # --- resolving a confirmation ----------------------------------------
 
-    async def test_a_refusal_is_honoured(self, policy: ActionPolicy) -> None:
+    @pytest.mark.parametrize("outcome", list(PermissionOutcome))
+    async def test_a_refusal_is_honoured(
+        self, policy: ActionPolicy, outcome: PermissionOutcome
+    ) -> None:
         """``approved=False`` must yield ``DENY``, citing no authorisation.
 
         The single worst failure available to this subsystem is the one it would
         make possible: a user who declines has *decided*, and a policy that could
         turn a refusal into an ``ALLOW`` would make the confirmation prompt
         theatre — at the one moment the user believes they are in control.
+
+        The obligation is *unconditional*, so it is checked against every
+        outcome a recorded decision can carry rather than only the ``CONFIRM``
+        the flow normally supplies. A policy that honoured "no" for a
+        confirmation but returned ``ALLOW`` when handed a prior ``ALLOW`` would
+        otherwise conform.
         """
-        resolved = await policy.resolve(decision(), approved=False)
+        confirmed = decision("d-1", ruled=ruling(outcome))
+
+        resolved = await policy.resolve(confirmed, approved=False)
 
         assert resolved.outcome is PermissionOutcome.DENY
         assert resolved.authorised_by is None
