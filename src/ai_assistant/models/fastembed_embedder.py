@@ -99,6 +99,39 @@ class _FastEmbedBackend:
         return TextEmbedding(model_name=model)
 
 
+def _resolve_dimensions(backend: FastEmbedBackend, model: str) -> int:
+    """The vector width the backend reports for ``model``.
+
+    Every way the metadata can be malformed is translated here, because the
+    constructor promises ``ModelError`` and a caller's ``except ModelError``
+    has to be sufficient. Reading the mapping is inside the boundary, not just
+    the call that produced it: a lazy or hostile mapping can raise from
+    ``get`` just as easily as from ``dimensions_by_model``, and a non-numeric
+    dimension would otherwise surface as a ``TypeError`` from the comparison.
+
+    Raises:
+        ModelError: If the metadata cannot be read, ``model`` is absent from
+            it, or its dimension is not a positive number.
+    """
+    try:
+        reported = backend.dimensions_by_model().get(model)
+    except Exception as exc:
+        msg = "fastembed could not report its supported models"
+        raise ModelError(msg) from exc
+    if reported is None:
+        msg = f"unknown fastembed model: {model!r}"
+        raise ModelError(msg)
+    try:
+        dimensions = int(reported)
+    except (TypeError, ValueError) as exc:
+        msg = f"fastembed reported a non-numeric dimension for {model!r}: {reported!r}"
+        raise ModelError(msg) from exc
+    if dimensions < 1:
+        msg = f"fastembed model {model!r} reports a non-positive dimension: {dimensions}"
+        raise ModelError(msg)
+    return dimensions
+
+
 class FastEmbedEmbedder:
     """A local, on-device embedder backed by fastembed."""
 
@@ -116,28 +149,16 @@ class FastEmbedEmbedder:
                 docstring).
 
         Raises:
-            ModelError: If the backend cannot report its supported models, if
-                ``model`` is not one of them, or if the backend reports a
-                non-positive dimension for it — a vector length of zero or less
-                cannot satisfy the ``Embedder`` contract, and accepting it would
-                defer the failure to the store that sized its vector column
-                from it.
+            ModelError: If the backend cannot report its supported models or
+                reports them malformed, if ``model`` is not one of them, or if
+                the reported dimension is not a positive number — a vector
+                length of zero or less cannot satisfy the ``Embedder`` contract,
+                and accepting it would defer the failure to the store that sized
+                its vector column from it.
         """
         self._backend = _FastEmbedBackend() if backend is None else backend
-        try:
-            supported = self._backend.dimensions_by_model()
-        except Exception as exc:
-            msg = "fastembed could not report its supported models"
-            raise ModelError(msg) from exc
-        dimensions = supported.get(model)
-        if dimensions is None:
-            msg = f"unknown fastembed model: {model!r}"
-            raise ModelError(msg)
-        if dimensions < 1:
-            msg = f"fastembed model {model!r} reports a non-positive dimension: {dimensions}"
-            raise ModelError(msg)
         self._model_name = model
-        self._dimensions = int(dimensions)
+        self._dimensions = _resolve_dimensions(self._backend, model)
         self._model: FastEmbedTextModel | None = None
         # Guards the lazy load only. Without it two concurrent `embed` calls —
         # each in its own worker thread — can both see `_model is None` and
