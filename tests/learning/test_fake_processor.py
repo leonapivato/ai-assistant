@@ -126,8 +126,9 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
 
 
 async def test_synthesised_ids_are_sequential_and_per_instance() -> None:
-    # Deterministic ids are what make the fake usable as a fixture; scoping the
-    # counter per instance keeps two fakes from colliding in one shared store.
+    # Deterministic ids are what make the fake usable as a fixture: a fresh fake
+    # always starts at 1, so a test can assert an exact id without depending on
+    # what ran before it. A process-global counter would not survive that.
     processor = FakeFeedbackProcessor()
 
     [first] = await processor.process(_event())
@@ -136,6 +137,18 @@ async def test_synthesised_ids_are_sequential_and_per_instance() -> None:
     assert (first.proposed.id, second.proposed.id) == ("fake-memory-1", "fake-memory-2")
     [fresh] = await FakeFeedbackProcessor().process(_event())
     assert fresh.proposed.id == "fake-memory-1"
+
+
+async def test_two_default_fakes_issue_colliding_ids() -> None:
+    # The documented cost of restarting at 1: two fakes tread on each other in a
+    # shared store. Pinned so it stays a known trade-off rather than a surprise —
+    # and so the docstring prescribing an injected factory has a test behind it.
+    [collides] = await FakeFeedbackProcessor().process(_event())
+    [also_collides] = await FakeFeedbackProcessor().process(_event())
+    assert collides.proposed.id == also_collides.proposed.id
+
+    [distinct] = await FakeFeedbackProcessor(id_factory=lambda: "b-1").process(_event())
+    assert distinct.proposed.id != collides.proposed.id
 
 
 async def test_id_factory_is_injectable() -> None:

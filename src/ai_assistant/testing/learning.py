@@ -45,7 +45,11 @@ _FULL_CONFIDENCE = 1.0
 
 
 def _sequential_ids() -> Callable[[], str]:
-    """Return a per-instance id factory yielding ``fake-memory-1``, ``-2``, ..."""
+    """Return an id factory yielding ``fake-memory-1``, ``fake-memory-2``, ...
+
+    One counter per call, so each fake restarts at 1 (see ``id_factory`` on
+    :class:`FakeFeedbackProcessor` for why, and for the collision that implies).
+    """
     issued = 0
 
     def factory() -> str:
@@ -78,9 +82,17 @@ class FakeFeedbackProcessor:
                 synthesises one proposal per event instead; an *empty* sequence
                 is the distinct, explicit "this processor proposes nothing", which
                 a consumer needs to exercise its no-op learning path.
-            id_factory: Supplies ids for synthesised records; injectable for
-                deterministic tests. Defaults to a per-instance counter, so two
-                fakes never hand out ids that collide in a shared store.
+            id_factory: Supplies ids for synthesised records. Defaults to a
+                counter scoped to *this instance*, so a fresh fake always issues
+                ``fake-memory-1`` first and a test can assert an exact id without
+                depending on what ran before it — which a process-global counter
+                would destroy.
+
+                The cost is that two fakes issue the *same* ids: feed both into
+                one store and the second overwrites the first. That is the
+                narrower hazard, and it has an answer — inject an ``id_factory``
+                per fake (``lambda: "b-1"``) when a test drives two processors
+                into shared state.
 
         Raises:
             ValueError: If any scripted proposal has blank ``proposed.content`` or
