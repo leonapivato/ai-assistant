@@ -123,6 +123,13 @@ needs no amendment; on `main` `model_id` is the bare name and detects only name
 and dimension, so this is a strict improvement, and gating it on #136's general
 solution inverts scope.
 
+Changing `model_id`'s composition owes no new migration contract. `SqliteMemoryStore`
+already raises "re-embedding is required" on any `model_id` mismatch (existing §4
+behaviour, records intact in the file), and pre-1.0 no released store exists to
+migrate (`CONTRIBUTING`: anything may change between minors). A dev store trips
+that existing signal and is re-created; automating the re-embed is §4's, not
+this ADR's.
+
 ### 3. The behaviour-affecting stack is exact-pinned, not ranged
 
 `fastembed>=0.7.0` is too loose to carry this decision — the offline load in §5
@@ -185,27 +192,28 @@ fetch; `embed([])` stays offline and returns `[]`, preserving the empty-batch
 contract, which is checked before any artifact-presence check.
 
 **The existing tests stub the backend and never build or install a
-distribution**, so a hook that verifies the wrong bytes, packages the wrong path,
-or configures only the wheel ships green. The implementation PR must add
-acceptance tests a hook mistake cannot pass:
+distribution**, so a hook that verifies the wrong bytes, requests the wrong
+revision, packages the wrong path, or configures only the wheel ships green. The
+implementation PR must add acceptance tests a hook or wiring mistake cannot pass —
+at minimum:
 
-- a digest mismatch fails the build leaving nothing staged;
-- the built wheel **and the sdist** each contain the artifact, and its every
-  file's SHA-256 matches the recorded manifest (verified bytes shipped, not
-  merely *some* valid ONNX);
-- a wheel built and installed *from the sdist* with the network denied embeds —
-  the promise that no PyPI path fetches;
+- the acquisition seam requests the *recorded commit*, and a moved default branch
+  does not change the build; a digest mismatch fails it, leaving nothing staged;
+- the wheel **and the sdist** each carry the artifact with every file's SHA-256
+  matching the recorded manifest (the verified bytes shipped, not merely *some*
+  valid ONNX), and a wheel built from the sdist embeds with the network denied;
 - the wheel METADATA carries all four exact pins, and each audited version
-  independently changes `model_id`;
-- a missing artifact raises `ModelError` on a non-empty batch without opening a
-  socket, while `embed([])` returns `[]`.
+  independently moves `model_id`;
+- a missing artifact raises `ModelError` on a non-empty batch without a socket
+  while `embed([])` returns `[]`; and composition refuses to wire an unpinned
+  non-default model into a persistent store, allowing it only ephemerally.
 
 ### 6. A non-default model is opt-in, fetches, and may not be persisted
 
 Only the default is vendored. Configuring a different fastembed model re-enables
-fastembed's own unpinned download, with none of §2's guarantees — the same shape
-as ADR-0006 §2's opt-in cloud embedder. "Local-first by default" is a claim about
-the default.
+fastembed's own unpinned download, with none of §2's guarantees — the opt-in
+shape of ADR-0006 §2's cloud embedder. "Local-first by default" is about the
+default.
 
 Because fastembed's API takes no revision, such a model has no establishable
 weights identity — an unpinned download can serve different weights under an
