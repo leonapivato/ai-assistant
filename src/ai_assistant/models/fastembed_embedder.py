@@ -30,6 +30,7 @@ in this module; ``fastembed`` itself stays out of the gate, as it must.
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 from typing import TYPE_CHECKING, Protocol
 
@@ -149,7 +150,8 @@ class FastEmbedEmbedder:
 
         Raises:
             ModelError: If the model cannot be loaded (a download failure, an
-                unwritable cache) or the backend fails to embed the batch.
+                unwritable cache), the backend fails to embed the batch, or it
+                returns a result that does not satisfy the ``Embedder`` contract.
         """
         documents = list(texts)
         if not documents:
@@ -161,10 +163,42 @@ class FastEmbedEmbedder:
         # rather than being re-wrapped into a misleading "failed to embed".
         model = self._loaded()
         try:
-            return [[float(value) for value in vector] for vector in model.embed(documents)]
+            vectors: list[Embedding] = [
+                [float(value) for value in vector] for vector in model.embed(documents)
+            ]
         except Exception as exc:
             msg = f"fastembed failed to embed a batch of {len(documents)} text(s)"
             raise ModelError(msg) from exc
+        self._check_conforms(vectors, len(documents))
+        return vectors
+
+    def _check_conforms(self, vectors: Sequence[Embedding], expected_count: int) -> None:
+        """Fail loudly if the backend's result breaks the ``Embedder`` contract.
+
+        This adapter, not the backend, is what promises the contract. A count
+        mismatch is the dangerous one: the caller zips these vectors against its
+        own records, so a short batch silently files every record after the gap
+        under another record's vector. A wrong dimension corrupts the store's
+        vector column, and a non-finite component poisons every later similarity
+        (inf/inf is NaN, and a NaN distance makes a record unrankable).
+
+        None of these is reachable today; all three become reachable the moment
+        fastembed changes behaviour under us, which is exactly when a silent
+        wrong answer costs the most.
+        """
+        if len(vectors) != expected_count:
+            msg = f"fastembed returned {len(vectors)} vectors for {expected_count} text(s)"
+            raise ModelError(msg)
+        for index, vector in enumerate(vectors):
+            if len(vector) != self._dimensions:
+                msg = (
+                    f"fastembed returned a {len(vector)}-dimensional vector at index {index}, "
+                    f"expected {self._dimensions}"
+                )
+                raise ModelError(msg)
+            if not all(math.isfinite(value) for value in vector):
+                msg = f"fastembed returned a non-finite component in the vector at index {index}"
+                raise ModelError(msg)
 
     def _loaded(self) -> FastEmbedTextModel:
         """The model, loading it on first use and reusing it after."""
