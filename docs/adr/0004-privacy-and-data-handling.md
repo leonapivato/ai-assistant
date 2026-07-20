@@ -118,11 +118,36 @@ today:
 - **`models/`** — to model providers the user has explicitly configured (per
   the amendment above).
 - **the `tools/` integration boundary** — to external services the user has
-  explicitly connected, per tool and per call.
+  explicitly connected, per tool and per call. This designates a *named module
+  seam inside* `tools/`, not the package: `tools/` also owns tool definitions
+  and the registry, and neither has any business holding a network client.
+  Which module is the seam is the integration/invocation ADR's to name, and it
+  must be named there precisely enough for the import-linter contract to pin
+  that module rather than the package (issue #66). Until it is named, the
+  designation has no concrete extent and nothing under `tools/` may transmit.
 
 Egress from anywhere else is still a bug, and adding a third designated
 boundary requires amending this section again — it is a closed list, not a
 category a subsystem can argue its way into.
+
+**This amendment is not self-executing.** It removes a categorical prohibition;
+it does not make any transmission legal. The three conditions below are
+preconditions on the *first byte* that leaves through `tools/`, not properties
+this amendment asserts are already in place — today none of them is fully
+discharged, and no egress from `tools/` is permitted. What must exist first:
+
+- the named seam and the import-linter contract pinning it (condition 1,
+  issue #66);
+- a ratified invocation contract that gates each call through `permissions/`
+  and records it in the audit trail *before* the call transmits, rather than
+  relying on the definition's declared ceiling alone (condition 3);
+- the destination and per-call payload rules — a tool's declared reach is a
+  *ceiling* over tiers, not proof that a given call's actual recipient and
+  actual bytes were approved (ADR-0016 §3, §7; issues #57, #68).
+
+A boundary that meets the conditions in a document but not in the code is not
+designated. If the invocation ADR cannot supply all three, it does not get to
+transmit on the strength of this amendment.
 
 **Why this preserves what §2 protects.** The prior amendment found that §2's
 rationale is about **who** receives data, never **how many**. The equivalent
@@ -162,13 +187,34 @@ egress is both. The amendment does not lower the bar to admit `tools/`; it
 writes down the bar `models/` was implicitly clearing and finds that `tools/`
 clears a higher one.
 
-**Why amend rather than supersede.** The contradiction is confined to one
-clause of one bullet. Every other clause of §2 — local-first residency, minimal
-egress, telemetry off by default — is unchanged and still correct, and a new
-ADR superseding §2 would have to restate all of it to fix a phrase. Nor is the
-tool layer's egress a new decision this ADR never made: §3, §7 and the
-Consequences made it. This amendment reconciles §2's wording with the rest of
-its own text rather than deciding anything new.
+**Why amend rather than supersede.** ADR-0001 says ADRs are append-only and
+that changing a past decision means a new ADR superseding the old one. That
+rule governs *changing a decision*. What is happening here is narrower: ADR-0004
+is internally inconsistent as ratified. §2's clause and the Consequences clause
+cannot both be true — one forbids the exact egress the other provisions network
+clients for — so there is no single past decision to overturn, only a question
+of which of the document's two incompatible readings was decided. §3, §7 and the
+Consequences all take the tool layer as transmitting; §2's clause is the outlier
+and the one written before that layer was contemplated. Resolving that in favour
+of the rest of the document determines what ADR-0004 decided; it does not
+replace it.
+
+The practical case runs the same way. Every other clause of §2 — local-first
+residency, minimal egress, telemetry off by default — is current and correct, as
+are §§1 and 3–7. A superseding ADR would either restate the whole document to
+fix one phrase, or leave the privacy policy split across two files where the
+live rule for a given clause is whichever one a reader checks second. The
+repository has already chosen this shape for exactly this situation:
+CONTRIBUTING names amendments as a first-class ADR category alongside
+supersedes, and §2 carries a ratified in-place amendment already.
+
+Recorded honestly, because it cut close: this amendment widens a boundary, which
+is more than the configured-set amendment did, and ADR-0001's blanket phrasing
+does not distinguish "reconcile an inconsistency" from "reverse a decision".
+That ADR-0001 and CONTRIBUTING describe the amendment mechanism differently is a
+real gap and not this ADR's to close — issue #65. If that reconciliation lands
+on the strict reading, this amendment is the first candidate to be reissued as
+a superseding ADR, and its argument transfers unchanged.
 
 **Reconciling the prior amendment.** The configured-set amendment closes by
 declining exactly this widening — "the amendment widens *which* providers are
@@ -183,15 +229,17 @@ the second, and an ADR is an append-only record of what was decided when.
 The annotation therefore marks only the stale clause, and this amendment is
 where the decision to widen is argued and recorded.
 
-**What is not decided here.** This amendment authorises egress from `tools/`;
-it does not authorise any particular tool, destination, or payload.
-Destination-level policy — which recipients are approved — remains parameter-
-level and deferred (ADR-0016 §7, issue #57 for per-call reach). Nor does it
-weaken §7's minimisation rule: "send the minimum necessary" now reads against
-both designated boundaries. The invocation ADR still owes the rules that decide
-which declared disclosures `permissions/` grants; what it no longer owes is a
-prior amendment permitting the category to exist. Discharging that precondition
-(ADR-0016 §7) is this amendment's only purpose.
+**What is not decided here.** This amendment makes tool egress *permissible in
+principle*; it authorises no particular tool, destination, or payload, and by
+itself no transmission at all. Destination-level policy — which recipients are
+approved — remains parameter-level and deferred (ADR-0016 §7; issue #57 for
+per-call reach). Nor does it weaken §7's minimisation rule: "send the minimum
+necessary" now reads against both designated boundaries. The invocation ADR
+still owes the seam, the gating contract, and the rules that decide which
+declared disclosures `permissions/` grants; what it no longer owes is a prior
+amendment permitting the category to exist. Discharging that one precondition
+(ADR-0016 §7) is this amendment's only purpose, and it is deliberately the
+smallest change that discharges it.
 
 **Scope.** This amends the wording of §2 only, and supersedes the final clause
 of the configured-set amendment above. §1 (tiers), §3 (secrets), §4 (encryption
