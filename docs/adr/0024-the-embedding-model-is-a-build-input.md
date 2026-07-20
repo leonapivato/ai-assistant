@@ -100,18 +100,22 @@ The pin is a commit SHA and a SHA-256 per file, recorded as constants in the
 repository. Both are checked at build time; a mismatch fails the build. Changing
 which weights this product runs therefore requires a reviewed commit.
 
-**`model_id` incorporates the pinned revision, not just the model name.**
-ADR-0006 §4 requires a store to detect a model change and re-embed; a `model_id`
-of `BAAI/bge-small-en-v1.5` cannot, because bumping the pin changes the weights
-while the name and 384 dimensions stay identical, so `SqliteMemoryStore` would
-rank existing vectors against queries from new weights — silently, the corruption
-§4 exists to prevent. Folding the revision in closes that: an implementation
-change within the existing `Embedder.model_id` contract, not a Protocol change.
+**`model_id` incorporates a digest of the verified artifact manifest, not just
+the model name.** ADR-0006 §4 requires a store to detect a model change and
+re-embed; a `model_id` of `BAAI/bge-small-en-v1.5` cannot, because changing the
+weights leaves the name and 384 dimensions identical, so `SqliteMemoryStore`
+would rank existing vectors against queries from new weights — silently, the
+corruption §4 exists to prevent. The identity component is a deterministic digest
+over the recorded SHA-256 manifest — the *actual bytes shipped* — rather than the
+repository revision, which is a separate constant that can drift from the manifest
+(a re-pin that changes the digests must change `model_id`, not merely the commit).
+This is an implementation change within the existing `Embedder.model_id`
+contract, not a Protocol change.
 
-The revision alone is still not a complete key, because §3 makes the
+The manifest digest alone is still not a complete key, because §3 makes the
 behaviour-affecting dependency stack a *release-bound* variable: a persisted
-store that survives an upgrade bumping that stack under an unchanged weights
-revision would keep the same `model_id` while its space moved — silent mixing
+store that survives an upgrade bumping that stack under unchanged weights (same
+manifest) would keep the same `model_id` while its space moved — silent mixing
 across the upgrade. So `model_id` also incorporates an identity over the audited
 behaviour-affecting versions (§3), advancing whenever any of them does, across
 installs *and* across a store's upgrade. Over-triggering a re-embed on a no-op
@@ -204,8 +208,8 @@ at minimum:
 - the wheel **and the sdist** each carry the artifact with every file's SHA-256
   matching the recorded manifest (the verified bytes shipped, not merely *some*
   valid ONNX), and a wheel built from the sdist embeds with the network denied;
-- the wheel METADATA carries all four exact pins, and each audited version
-  independently moves `model_id`;
+- the wheel METADATA carries all four exact pins, and changing any audited
+  version *or* any manifest digest independently moves `model_id`;
 - a missing artifact raises `ModelError` on a non-empty batch without a socket,
   while `embed([])` returns `[]`.
 
