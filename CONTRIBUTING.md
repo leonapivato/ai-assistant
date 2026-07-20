@@ -397,39 +397,28 @@ before you know the contract.
 
 ### No state claims in living documents
 
+Ratified in ADR-0019, which holds the evidence and the rejected alternative.
+
 `CONTRIBUTING.md` and `CLAUDE.md` are undated and read as standing law, so they
 carry **rules and the reasoning behind them, never snapshots.** If a fact about
 the repository matters, either a check asserts it or a dated ADR records it.
 
-A snapshot is anything **measured or observed** rather than **decided**: a test
-count, a wall-clock timing, a "currently"/"today"/"so far", or a claim that some
-piece of work is complete. Written into an undated document it loses the
-timestamp that made it true, becomes an assertion no one owns, and decays from
-that moment — while still reading as law to everyone after you. Prefer the
-durable form: name the rule, and point at whatever actually holds the state.
+- **A snapshot is anything measured or observed rather than decided** — a test
+  count, a wall-clock timing, a "currently"/"today"/"so far", a claim that some
+  piece of work is finished. The test is where the sentence came from: an
+  argument, or a measurement. Prefer the durable form — name the rule, and point
+  at whatever actually holds the state.
+- **A fact a check owns is not a snapshot.** Say which check owns it, so a
+  reader can tell the two apart.
+- **A decision does not become a snapshot by describing a situation.** "You are
+  the only agent in this clone" is a premise these documents *set* (ADR-0015),
+  not a count someone took.
+- **ADRs are exempt**, and that is why the rule works: an ADR is dated, so "at
+  the time of writing, X" belongs there and stays correct as history. Do not
+  scrub snapshots out of `docs/adr/`.
 
-**A fact a check owns is not a snapshot** — it is a description of something
-mechanically true, and the check is what keeps it that way. "Every Protocol has
-its triad" would be an unowned assertion on its own; with
-`tests/core/test_protocol_triad.py` failing the gate otherwise, it is a
-statement about an enforced invariant. Say which check owns it, so a reader can
-tell the two apart, and prefer a claim that can only stay true — a list that can
-only shrink, having reached empty, will not decay the way a count does.
-
-A decision does not become a snapshot by describing a situation. "You are the
-only agent in this clone" is a premise these documents *set* (ADR-0015), not a
-count someone took; if it stops holding, the workflow has been broken, which is
-a different problem from a fact going stale. The test is where the sentence came
-from — an argument, or a measurement.
-
-**ADRs are the exception, and the reason the rule works.** An ADR is a dated,
-point-in-time record, so "at the time of writing, X" is exactly what belongs
-there and stays correct as history. Do not scrub snapshots out of `docs/adr/`.
-
-This is enforced the way style is — by reviewers, reading the diff. There is
-deliberately no linter for it: a check hunting claims in prose could not tell a
-rule from an observation, and the failure mode here is slow and cosmetic rather
-than a broken build. That is the cost pattern ADR-0015 exists to avoid.
+Enforced the way style is — by reviewers, reading the diff. There is
+deliberately no linter for it (ADR-0019 §5).
 
 ## Testing
 
