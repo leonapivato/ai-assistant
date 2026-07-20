@@ -25,8 +25,18 @@ if TYPE_CHECKING:
 
 # Options that narrow what is collected or run. If any is in play the record is
 # a subset of the suite, and the absence of a class proves nothing. `maxfail`
-# covers `-x`, which stops the run before later tests report.
-_FILTERING_OPTIONS = ("keyword", "markexpr", "deselect", "lf", "failedfirst", "maxfail")
+# covers `-x`, which stops the run before later tests report; `ignore` and
+# `ignore_glob` drop whole paths while leaving `config.args` looking complete.
+_FILTERING_OPTIONS = (
+    "keyword",
+    "markexpr",
+    "deselect",
+    "lf",
+    "failedfirst",
+    "maxfail",
+    "ignore",
+    "ignore_glob",
+)
 
 #: The check whose subject is every other test, so it has to run after them.
 _TRIAD_CHECK = "tests/core/test_protocol_triad.py"
