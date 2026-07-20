@@ -84,16 +84,16 @@ user-visible breakage" claim missed, now closed rather than merely mitigated.
 
 ### 1. The rule
 
-**On the default embedding path, no `ai_assistant` runtime code fetches a model
-artifact. The default model is a build input: pinned to an immutable revision,
-verified against a recorded digest at build time, and shipped inside the wheel.**
+**No `ai_assistant` runtime code fetches a model artifact. The on-device
+embedding model is a build input: pinned to an immutable revision, verified
+against a recorded digest at build time, and shipped inside the wheel.**
 
-Scoped to the default path deliberately: a non-default model (§6) is an opt-in
-that re-enables fastembed's own download, so an unscoped "nothing ever fetches"
-would be a rule §6 breaks. It amends nothing — ADR-0004 §2 and ADR-0017 §1 still
-govern user-data egress — but is stricter than what ADR-0017 §2 left open: on the
-default path there is no runtime egress to authorise, so the #89 gap closes
-rather than being managed.
+There is no arbitrary-model escape hatch: `FastEmbedEmbedder` serves only the
+vendored model (§6), so the rule is unconditional rather than scoped to a
+"default" among many. It amends nothing — ADR-0004 §2 and ADR-0017 §1 still
+govern user-data egress — but is stricter than what ADR-0017 §2 left open: there
+is no runtime artifact egress to authorise, so the #89 gap closes rather than
+being managed.
 
 ### 2. The pin is part of the embedding space
 
@@ -210,24 +210,25 @@ at minimum:
 - a missing artifact raises `ModelError` on a non-empty batch without a socket,
   while `embed([])` returns `[]`.
 
-### 6. The non-default path is out of scope, not fixed
+### 6. The fastembed embedder serves only the vendored model
 
-This ADR decides the *vendored default* — the subject of #89. Configuring a
-different fastembed model re-enables fastembed's own unpinned download, with none
-of §2's guarantees — the opt-in shape of ADR-0006 §2's cloud embedder, and its
-cache resolves under the application data directory (via `Settings`, not `/tmp`),
-closing the §Context residency point for that path too.
+There is no arbitrary-fastembed-model path. `FastEmbedEmbedder` is bound to the
+one vendored, verified model; it does not accept an arbitrary `model` name that
+would re-enable fastembed's unpinned download. That is the direct consequence of
+"the embedding model is a build input" — there is one build input, not a family.
 
-Its embedding-space identity is a different matter. Because fastembed's API takes
-no revision, an unpinned model has no pinnable weights identity, so `model_id`
-cannot be made truthful for it by pinning — only by *deriving* identity from the
-downloaded content, which is exactly **issue #136**'s content/behavioural
-fingerprint. This ADR does not attempt a smaller fix here: a composition rule
-("don't persist an unpinned model") is not contract-level — another composer
-could persist it, and the store cannot tell (golden rule 1: `model_id` is just a
-`str`). So the non-default path's persistence safety is **unchanged from `main`
-and owned by #136**, neither closed nor worsened here. What this ADR guarantees
-is the default; the non-default path is flagged, not blessed.
+This is a decision, not a deferral, and it is what closes the path the review
+rounds kept flagging. An arbitrary fastembed model reintroduces every problem
+this ADR removes at once: an unpinned runtime fetch (§1), no verified digest
+(§2), and — because fastembed's API takes no revision — no pinnable weights
+identity, so `model_id` cannot be made truthful for it by pinning, only by
+*deriving* identity from downloaded content, which is **issue #136**. Rather than
+carry a path that fails §1, §2 and ADR-0006 §4, this ADR does not offer one.
+
+A *different* embedding backend remains available where it has a real identity:
+the cloud opt-in of ADR-0006 §2, whose provider versions its model. Restoring
+multiple *local* models is future work, gated on #136 giving an arbitrary model a
+truthful identifier and on a provisioning path that pins it.
 
 ### 7. What this ADR does not decide
 
@@ -237,8 +238,8 @@ is the default; the non-default path is flagged, not blessed.
   may hold a network client, making §1 mechanically rather than review-checkable.
 - **It does not resolve the licence discrepancy** — Consequences records it as
   work that must complete before publishing.
-- **It does not give `model_id` a full behavioural fingerprint, nor make the
-  non-default path safe to persist** — both are #136 (§2, §6).
+- **It does not give `model_id` a full behavioural fingerprint** (§2, #136), nor
+  restore multiple local models (§6).
 
 ## Alternatives considered
 
