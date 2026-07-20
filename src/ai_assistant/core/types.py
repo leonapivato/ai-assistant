@@ -1513,6 +1513,42 @@ type DurableIdentifier = Annotated[Identifier, AfterValidator(_durable_identifie
 """An :data:`Identifier` that survives serialisation — for fields a record keeps."""
 
 
+#: A SHA-256 digest rendered as lowercase hex is exactly this long.
+_SHA256_HEX_LENGTH = 64
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _sha256_hex(value: str) -> str:
+    """Require a lowercase SHA-256 hex digest.
+
+    :attr:`PermissionDecision.parameters_digest` is filled by
+    :meth:`PermissionDecision.from_request` from
+    :attr:`ActionRequest.parameters_digest`, which always produces this shape —
+    but the field is a plain ``str``, so a hand-constructed decision could carry
+    anything, including text with no UTF-8 encoding. That is the last field of a
+    decision that could break ADR-0021 §4's requirement that a record reload,
+    and unlike the others it has an exact form to check rather than merely a
+    property.
+
+    Lowercase specifically: ``hexdigest()`` emits lowercase, so accepting
+    uppercase would admit a second spelling of the same digest that compares
+    unequal — a false mismatch at execution, which reads as an attack rather
+    than as a bug.
+
+    Raises:
+        ValueError: If the value is not 64 lowercase hex digits.
+    """
+    if len(value) != _SHA256_HEX_LENGTH or not _HEX_DIGITS.issuperset(value):
+        msg = f"parameters_digest must be {_SHA256_HEX_LENGTH} lowercase hex digits, got {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+type Sha256Hex = Annotated[str, AfterValidator(_sha256_hex)]
+"""A lowercase SHA-256 digest in hex — the form :func:`hashlib.sha256` emits."""
+
+
 def _detached_tool(value: ToolDefinition) -> ToolDefinition:
     """Take the request's own copy of the declaration it is about.
 
@@ -1523,13 +1559,20 @@ def _detached_tool(value: ToolDefinition) -> ToolDefinition:
     with :meth:`PermissionDecision.from_request` then transcribing the mutated
     version faithfully.
 
-    This is the first of the three copies that make ADR-0021 §1's binding hold
-    end to end, and each closes a different window: the request takes its own
-    subject here, ``from_request`` takes the decision's, and ``AuditTrail.record``
-    revalidates what it stores. Between them no reference a caller still holds
-    reaches recorded state.
+    Rebuilt through validation rather than merely deep-copied, so the request's
+    copy is *valid* as well as its own. A definition corrupted past its frozen
+    model's guard — ``risk_level`` written back as a bare string is the sharp
+    case — would otherwise reach a policy, which compares that field on a
+    severity scale and would raise ``TypeError`` mid-decision. A policy should
+    be able to trust the request it is handed; this is what makes that true.
+
+    This is the first of the three detachments that make ADR-0021 §1's binding
+    hold end to end, and each closes a different window: the request takes its
+    own subject here, ``from_request`` takes the decision's, and
+    ``AuditTrail.record`` revalidates what it stores. Between them no reference
+    a caller still holds reaches recorded state.
     """
-    return value.model_copy(deep=True)
+    return type(value).model_validate(value.model_dump())
 
 
 def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
@@ -1739,7 +1782,7 @@ class PermissionDecision(BaseModel):
     id: DurableIdentifier
     ruling: PermissionRuling = Field(description="What the policy said.")
     tool: ToolDefinition = Field(description="The declaration ruled on, verbatim.")
-    parameters_digest: str = Field(description="Binds the payload without storing it.")
+    parameters_digest: Sha256Hex = Field(description="Binds the payload without storing it.")
     decided_at: datetime = Field(description="When the ruling was made; timezone-aware.")
     step_id: DurableIdentifier | None = None
     resolves: DurableIdentifier | None = Field(
