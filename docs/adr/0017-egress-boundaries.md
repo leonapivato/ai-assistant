@@ -40,9 +40,17 @@ to touch the axis this ADR changes.
 
 ### 1. The rule
 
-**User data may leave the device only from a boundary this ADR authorises to
-transmit, and any such boundary must declare the application-layer content it
-transmits before it transmits.**
+**Outbound application-layer content may leave the device only from a boundary
+this ADR authorises to transmit, and any such boundary must declare what it
+transmits before it transmits. User data carries the further restriction that
+its recipients are limited as §2 sets out per boundary.**
+
+Two clauses, because they have different scopes. The **boundary and declaration**
+requirement covers everything the system sends, user data or not — otherwise a
+request carrying no user data, like the model artifact fetch below, would fall
+outside the rule entirely and could originate anywhere undeclared, which is the
+gap this ADR exists to close. The **recipient** restriction applies to user
+data, and is ADR-0004 §2's for `models/` and §3's for `tools/`.
 
 Approval is not authorisation to transmit. §2 defines two authorising statuses
 and there are no others: `models/` is **continuing** — it transmits under the
