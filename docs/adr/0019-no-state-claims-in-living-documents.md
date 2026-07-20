@@ -1,6 +1,6 @@
 # 19. No state claims in living documents
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-19
 - Complements: ADR-0003 §"Documentation". It adds a rule about what the living
   documents may contain; it does not change, narrow, or reverse any clause
