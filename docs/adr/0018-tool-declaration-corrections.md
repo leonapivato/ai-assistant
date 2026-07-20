@@ -253,9 +253,18 @@ A definition can reach `register` in a state the type would refuse to construct:
 effect. `model_copy` preserves that state faithfully, so a registry that copies
 stores the contradiction as authoritative and serves it to every consumer.
 
-The contract therefore requires **registration to rebuild the definition through
-validation**, not to copy it — so a definition that could not have been
-constructed cannot be registered either.
+The contract therefore states a **postcondition**, not a technique: **what a
+registry stores must be valid and detached** — a definition that could not have
+been constructed cannot be registered either, and what is stored is not the
+caller's object.
+
+Rebuilding through validation (`model_validate(tool.model_dump())`) is the
+current strategy and the obvious one, but the decision is deliberately not
+written as "must re-validate". A trusted minting factory, a validated wrapper,
+or a provenance-bearing declaration could all guarantee the same postcondition
+without a rebuild, and would satisfy the security property while violating a
+rule phrased as a technique. Binding an internal `tools/` seam that tightly buys
+nothing — the property is what matters, and the property is testable directly.
 
 This is arguably implied by ADR-0016's threat model, which already treats
 `frozen=True` as insufficient. But "arguably implied" is not a contract: an
@@ -288,8 +297,9 @@ gap is not mistaken for coverage.
 The same applies to §5. Both are tested against `InMemoryToolRegistry` only; the
 canonical fake is held to the query contract and nothing more.
 
-**Migration.** An implementation that copies must rebuild through validation
-instead — one line. Its test case is the inert-email definition above, in
+**Migration.** An implementation that copies must instead guarantee the
+postcondition; re-validating is one line and is what the current registry
+does. Its test case is the inert-email definition above, in
 `tools/`'s own tests; the `risk_level` case there exercises the §5 conflict rule,
 not this one.
 
