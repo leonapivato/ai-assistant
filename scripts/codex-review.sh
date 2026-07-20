@@ -127,8 +127,14 @@ fi
 review_dir="${repo_root}/.review"
 mkdir -p "$review_dir"
 artifact="${review_dir}/${sha}-${persona}.md"
+# base_sha is the *resolved* left edge of the reviewed range (`base...sha` diffs
+# from the merge base, not from the branch tip). ship.sh compares it against the
+# PR's real base, so a review deliberately run against a narrower base — which
+# still produces a correctly-named artifact — cannot pass as review of the whole
+# PR diff.
+base_sha="$(git merge-base "$base" "$sha")"
 {
-    echo "<!-- persona=${persona} base=${base} sha=${sha} -->"
+    echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha} -->"
     cat "$out"
 } >"$artifact"
 
