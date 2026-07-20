@@ -255,6 +255,59 @@ def test_a_decision_embeds_the_definition_by_value_not_by_reference() -> None:
     assert made.tool.id == "smtp"
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda request, ruling: object.__setattr__(request.tool, "risk_level", RiskLevel.CRITICAL),
+        lambda request, ruling: object.__setattr__(request.tool, "id", "something-else"),
+        lambda request, ruling: object.__setattr__(request.tool.cost, "basis", CostBasis.UNKNOWN),
+        lambda request, ruling: object.__setattr__(ruling, "outcome", PermissionOutcome.ALLOW),
+        lambda request, ruling: object.__setattr__(ruling, "reason", "rewritten"),
+    ],
+    ids=["the risk level", "the tool id", "the nested cost", "the outcome", "the reason"],
+)
+def test_a_decision_is_detached_from_the_request_it_was_built_from(
+    tamper: Any,
+) -> None:
+    """ "By value" has to mean a copy, or the pin moves with what it pinned.
+
+    Pydantic passes an already-valid model instance through without copying, so
+    a decision built from a request would otherwise hold the *same*
+    `ToolDefinition` object — and `frozen=True` stops `x.risk_level = ...` but
+    not `x.__dict__["risk_level"] = ...`. Both sides would then move together
+    and `authorises` would go on answering `True`, which is the substitution
+    ADR-0021 §1 exists to make detectable.
+    """
+    request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    ruling = PermissionRuling(outcome=PermissionOutcome.DENY, reason="no")
+    made = PermissionDecision.from_request(request, ruling, id="d-1", decided_at=AT)
+    before = made.model_dump(mode="json")
+
+    tamper(request, ruling)
+
+    assert made.model_dump(mode="json") == before
+
+
+def test_a_substituted_definition_stops_a_decision_authorising_the_request() -> None:
+    """The detachment above is what turns tampering into a refusal.
+
+    The decision keeps the declaration the policy actually ruled on, so a
+    request whose tool has since been rewritten no longer matches it.
+    """
+    request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    made = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
+        id="d-1",
+        decided_at=AT,
+    )
+    assert made.authorises(request)
+
+    object.__setattr__(request.tool, "risk_level", RiskLevel.CRITICAL)
+
+    assert not made.authorises(request)
+
+
 def test_a_decision_authorises_the_request_it_was_made_about() -> None:
     request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
     made = PermissionDecision.from_request(

@@ -1705,6 +1705,17 @@ class PermissionDecision(BaseModel):
         trail rather than a policy subverting a gate, and no producer can
         prevent it (the boundary ADR-0018 §3 drew for detachment).
 
+        **The tool and the ruling are deep-copied, which is what makes "by
+        value" true rather than nominal.** Pydantic passes an already-valid
+        model instance through without copying it, so the decision would
+        otherwise hold the *same* ``ToolDefinition`` object the request does —
+        and ``object.__setattr__(request.tool, "risk_level", CRITICAL)`` would
+        then rewrite what the policy is recorded as having approved, while
+        ``authorises`` went on answering ``True`` because both sides moved
+        together. Copying here is the same discipline ADR-0018 §3 applied to
+        registry queries, at the moment the value stops being the caller's and
+        becomes the record's.
+
         Args:
             request: The action ruled on; its subject is copied across.
             ruling: What the policy said about it.
@@ -1717,8 +1728,8 @@ class PermissionDecision(BaseModel):
         """
         return cls(
             id=id,
-            ruling=ruling,
-            tool=request.tool,
+            ruling=ruling.model_copy(deep=True),
+            tool=request.tool.model_copy(deep=True),
             parameters_digest=request.parameters_digest,
             decided_at=decided_at,
             step_id=request.step_id,
