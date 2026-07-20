@@ -99,8 +99,8 @@ uv run pytest           # tests
 ```
 
 Run **all** of it, every time. CI runs the same gate on every PR and push to
-`main` (ADR-0010) as the backstop, not the first line of defence. `pre-commit` runs the fast subset on commit; `just setup`
-enables it once per clone.
+`main` (ADR-0010) as the backstop, not the first line of defence. `pre-commit`
+runs the fast subset on commit; `just setup` enables it once per clone.
 
 ## Review (local only, ADR-0015)
 
