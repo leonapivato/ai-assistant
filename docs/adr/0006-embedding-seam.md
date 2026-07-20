@@ -61,8 +61,13 @@ The default `Embedder` runs a **local** model on the user's machine, so memory
 content never leaves the device just to be indexed. This is the privacy-correct
 default under ADR-0004 and keeps the product usable offline. A **cloud** embedder
 remains available for users who want higher quality and accept the egress, but it
-is opt-in and, like all egress, confined to the `models/` layer and the provider
-the user configured.
+is opt-in and, like all model-provider egress, confined to the `models/` layer
+and the provider the user configured. [Reference corrected: this clause said
+"like all egress", restating ADR-0004 §2 as it then stood. ADR-0004's
+egress-boundaries amendment (2026-07-19) narrowed that — `models/` is no longer
+the sole egress boundary. ADR-0004 §2 owns the rule; this sentence only cites
+it, and ADR-0006's own decision is unchanged: embedders live in `models/`,
+cloud embedding is opt-in, and embedding egress happens nowhere else.]
 
 The proposed default implementation is a lightweight ONNX model via `fastembed`
 (no heavy `torch` dependency); the exact library is confirmed when slice 3 lands,
