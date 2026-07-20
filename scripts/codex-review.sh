@@ -529,6 +529,25 @@ if ! grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' 
     exit 1
 fi
 
+# A verdict and nothing else is not a review either. The rubric's own
+# anti-patterns say so: "No rubber-stamping. 'Looks good' with no scrutiny is a
+# failure. If you genuinely find nothing, say so explicitly and state what you
+# checked." So an output whose only non-blank line is the verdict has skipped
+# the part that carries the value.
+#
+# This check is new rather than moved. Dropping the `Verdict:` label above let a
+# bare `APPROVE` through, which the label had been excluding by accident — but
+# `Verdict: APPROVE` alone always passed, so the hole predates that and merely
+# widened. Closed for both forms, since closing it for one would leave the rule
+# depending on which spelling the reviewer happened to pick.
+body_lines="$(grep -c -v '^[[:space:]]*$' "$out" || true)"
+if [[ "$body_lines" -lt 2 ]]; then
+    echo "codex returned a verdict with no review body; not recording it" >&2
+    echo "the rubric requires ranked findings, or an explicit statement of what" >&2
+    echo "was checked when there are none (docs/review/guide.md)" >&2
+    exit 1
+fi
+
 # Record the review against the content it covers (ADR-0020 §3, superseding
 # ADR-0015 §1's commit anchor). `just ship` refuses to report a review whose
 # recorded base and tree do not match the PR's current merge base and HEAD tree,

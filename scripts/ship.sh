@@ -163,11 +163,20 @@ provenance_field() {
 # codex-review.sh — one records the artifact and the other refuses to post an
 # incomplete one, so a review the recorder accepts and the shipper rejects would
 # strand a valid review with no way to ship it.
+#
+# A verdict alone does not count, for the same reason the recorder rejects one:
+# the rubric's anti-patterns forbid rubber-stamping, and an artifact whose only
+# non-blank body line is the verdict carries no findings and no statement of
+# what was checked. Line 1 is the provenance comment and is not body — the same
+# line `tail -n +2` strips before posting.
 artifact_has_verdict() {
-    local last
+    local last body_lines
     last="$(grep -v '^[[:space:]]*$' "$1" | tail -n 1 |
         tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' <<<"$last"
+    grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' <<<"$last" ||
+        return 1
+    body_lines="$(tail -n +2 "$1" | grep -c -v '^[[:space:]]*$' || true)"
+    [[ "$body_lines" -ge 2 ]]
 }
 
 declare -A covering_rank=()
