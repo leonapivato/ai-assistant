@@ -27,17 +27,15 @@ Verified against the installed `fastembed` 0.8.0, for the default model
   supported path for a caller to pass `revision` through `TextEmbedding`. This
   closes an option empirically rather than by argument, and it is the single
   most important fact in this document.
-- **No revision pin.** Consequently `snapshot_download` is called with no
-  `revision` (the resolved `.sha` is used only for the tree listing), so every
-  install takes whatever the repo's default branch holds at that moment.
-- **No integrity pin.** Verification compares file *size* and HF's `blob_id`,
-  both from the same host in the same session — self-consistency with what the
-  server just said, not agreement with a known-good value (a warm-cache re-check
-  compares size alone). No digest is pinned anywhere.
+- **No revision or integrity pin.** `snapshot_download` is called with no
+  `revision`, so every install takes whatever the repo's default branch holds;
+  verification compares file *size* and HF's `blob_id`, both from the same host
+  in the same session — self-consistency with what the server just said, not a
+  known-good digest. None is pinned anywhere.
 - **One source, but not one host.** The description carries only
   `hf="qdrant/bge-small-en-v1.5-onnx-q"`, so the recipient is `huggingface.co`
-  *plus* whatever Xet content-addressed store the Hub names at transfer time in
-  an `X-Xet-Cas-Url` header (`hf-xet` is installed and enabled by default).
+  *plus* whatever Xet store the Hub names at transfer time (`hf-xet` is enabled by
+  default).
 - **The cache is the system temp directory** (`tempfile.gettempdir()`), not the
   application data directory ADR-0004 §2 requires. **So this was never a
   first-run event** — the 64 MiB fetch recurs whenever `/tmp` is cleared.
@@ -156,14 +154,13 @@ duplicate it permanently in every clone, and ADR-0015's one-clone-per-agent
 model makes that a recurring cost.
 
 **Acquisition stays owned by `models/`; only the trigger moves.** ADR-0006 §3
-confines every local-model dependency to `models/`, and the fetch client
-(`huggingface_hub`) is one — so the fetch-and-verify logic is a `models/`-owned
-seam, and the import-linter contract is extended to forbid `huggingface_hub`
-outside `models/` (issue #66's shape) so this is enforced, not merely stated.
-What changes is *when* that seam runs: a thin build-time adapter invokes it
-instead of `embed` doing so on first use. This also updates the fact ADR-0017 §2
-recorded — the default backend's *runtime* first-use fetch — without touching
-ADR-0017's rule: the egress is still `models/`-owned, it just happens at build.
+confines every local-model dependency to `models/`, and `huggingface_hub` is one
+— so fetch-and-verify is a `models/`-owned seam, with the import-linter contract
+extended to forbid `huggingface_hub` outside `models/` (issue #66's shape) so it
+is enforced, not asserted. A thin build-time adapter invokes that seam instead of
+`embed` doing so on first use. The egress stays `models/`-owned; only its timing
+moves, which reconciles the runtime fetch ADR-0017 §2 recorded without touching
+ADR-0017's rule.
 
 **This requires changing the build backend** (the header supersedes ADR-0002's
 choice). `uv_build` supports no build hooks; uv's own docs direct projects
@@ -182,17 +179,26 @@ any build dependency — not the stored Tier 1 user data ADR-0004 §1 classifies
 ### 5. The default embedder loads the packaged artifact, offline
 
 `FastEmbedEmbedder` is constructed against the packaged files via fastembed's
-`specific_model_path`, with `local_files_only=True`. If the artifact is absent —
-a source build that skipped the hook — `embed` raises `ModelError` naming the
-cause. It does not fall back to fetching.
+`specific_model_path`, with `local_files_only=True`. On a *non-empty* batch with
+the artifact absent, `embed` raises `ModelError` naming the cause and does not
+fetch; `embed([])` stays offline and returns `[]`, preserving the empty-batch
+contract, which is checked before any artifact-presence check.
 
 **The existing tests stub the backend and never build or install a
-distribution**, so a hook that verifies the wrong bytes or packages the wrong
-path ships green. The implementation PR must add acceptance tests a hook mistake
-cannot pass: a digest mismatch fails the build leaving nothing staged, the built
-wheel contains the artifact at the expected path, the real default embedder
-embeds with the network denied, and a missing artifact raises `ModelError`
-without opening a socket.
+distribution**, so a hook that verifies the wrong bytes, packages the wrong path,
+or configures only the wheel ships green. The implementation PR must add
+acceptance tests a hook mistake cannot pass:
+
+- a digest mismatch fails the build leaving nothing staged;
+- the built wheel **and the sdist** each contain the artifact, and its every
+  file's SHA-256 matches the recorded manifest (verified bytes shipped, not
+  merely *some* valid ONNX);
+- a wheel built and installed *from the sdist* with the network denied embeds —
+  the promise that no PyPI path fetches;
+- the wheel METADATA carries all four exact pins, and each audited version
+  independently changes `model_id`;
+- a missing artifact raises `ModelError` on a non-empty batch without opening a
+  socket, while `embed([])` returns `[]`.
 
 ### 6. A non-default model is opt-in, fetches, and may not be persisted
 
@@ -205,11 +211,15 @@ Because fastembed's API takes no revision, such a model has no establishable
 weights identity — an unpinned download can serve different weights under an
 unchanged `model_id`. Rather than defer that to #136, this ADR **closes it: an
 embedder whose embedding-space identity cannot be pinned must not back a
-persistent store.** The unpinned non-default path is ephemeral-only; a persistent
-`SqliteMemoryStore` requires a pinned-identity embedder (the vendored default, or
-a cloud embedder whose provider versions its model), enforced at composition by
-the store refusing one that cannot supply a stable `model_id`. A decision, not a
-deferral — it removes the non-default corruption path.
+persistent store.** The unpinned non-default path is ephemeral-only.
+
+This is enforced at **composition, not by the store.** `model_id` is only a
+`str`; the store, depending on the `Embedder` Protocol alone (golden rule 1),
+cannot tell a pinned identity from an unpinned one, and must not type-inspect the
+embedder to try. But the layer that wires an embedder into a `SqliteMemoryStore`
+knows the concrete configuration, and simply does not wire an unpinned non-default
+model into a persistent store. No Protocol change, no cross-boundary inspection —
+a decision the composer already has the knowledge to keep.
 
 ### 7. What this ADR does not decide
 
@@ -223,27 +233,24 @@ deferral — it removes the non-default corruption path.
 
 ## Alternatives considered
 
-**Runtime provisioning: the embedder never fetches, and an explicit user-run
-step acquires the artifact.** This ADR's recommendation in its first draft, on
-the sole ground that 67 MB in the wheel was too expensive. That ground was
-withdrawn, and nothing else supported it: provisioning is strictly more code (an
-entry point, `huggingface_hub` as a direct dependency, a CLI command, a
-cache-location decision), it makes every user's machine re-verify what we can
-verify once, and it buys a 58 MiB-smaller wheel with a failure in the user's
-first session. Its one real advantage — costing nothing for users who never
-embed on-device — did not survive being weighed against a first run that works.
+**Runtime provisioning: the embedder never fetches; an explicit user step
+acquires the artifact.** This ADR's first-draft recommendation, on the sole
+ground that 67 MB in the wheel was too expensive. That ground was withdrawn, and
+nothing else supported it: provisioning is strictly more code, re-verifies on
+every machine what we can verify once, and buys a smaller wheel with a failure in
+the user's first session. Its one advantage — costing nothing for users who never
+embed on-device — did not outweigh a first run that just works.
 
-**Commit the artifact to git.** Avoids the backend change and build-time
-network, but rejected on §4's reasoning: 58 MiB of incompressible binary
-permanent in every clone.
+**Commit the artifact to git.** Rejected on §4's reasoning: 58 MiB of
+incompressible binary permanent in every clone.
 
 **Keep the fetch lazy and pin it in place.** Not available (§Context's first
 bullet): it would mean forking or monkeypatching fastembed's download path.
 
 **A separate data-only package behind an `[local-embeddings]` extra.** The
-cleanest form, and the right answer if the wheel ever approaches the limit. It
-needs a release pipeline this project does not have, and §Context's measurement
-shows it is not needed yet.
+cleanest form, and the right answer if the wheel nears the limit — but it needs a
+release pipeline this project does not have, and the measurement shows it is not
+needed yet.
 
 ## Consequences
 
@@ -265,7 +272,6 @@ shows it is not needed yet.
   vendoring is permissible, but shipping the weights under our package name means
   shipping correct notices, and someone must determine which governs. This exists
   **only** because we redistribute. A release blocker, not a merge blocker.
-- **A contributor's first build fetches 64 MiB** once (CI has network).
 - **Model changes become explicit and release-bound.** ADR-0006 §4 already
   requires re-embedding when the model changes; tying that to a release makes it
   visible rather than ambient.
