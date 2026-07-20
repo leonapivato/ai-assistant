@@ -154,7 +154,12 @@ author still owns ratification; the reviewer only surfaces blind spots (a missed
 alternative, inconsistency with a prior ADR, a seam that will not extend).
 
 **Trivial ADRs** (amendments, status changes, supersedes) skip both the separate
-PR and the review — not worth the round-trip.
+PR and the review — not worth the round-trip. That is a statement about *review
+cost*, and nothing else. It does not license editing a ratified decision in
+place: ADRs are append-only, so changing one always means a new ADR that
+supersedes it, plus a status update on the old one
+(`docs/adr/0001-record-architecture-decisions.md`). How small the change is, and
+how cheap it is to review, do not bear on that.
 
 **Spike first if you need to.** A contract ratified with no implementation
 contact is how a seam that does not survive first use gets blessed. Run a
