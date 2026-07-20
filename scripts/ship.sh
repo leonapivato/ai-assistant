@@ -138,15 +138,16 @@ num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
-# A hidden marker naming the commit, so a re-run can find the comment it already
-# posted. It is the first line of the body precisely so the lookup below can
-# match on a first line alone, without pulling whole comment bodies through a
-# shell variable.
+# The two lines that identify a ship comment: a hidden marker naming the commit,
+# then the visible header. They lead the body precisely so the lookup below can
+# recognise a comment from its opening lines alone, without pulling whole comment
+# bodies through a shell variable.
 marker="<!-- ship:${sha} -->"
+header="🔍 **Local Codex review** — commit \`${sha:0:12}\`"
 
 {
     echo "$marker"
-    echo "🔍 **Local Codex review** — commit \`${sha:0:12}\`"
+    echo "$header"
     echo
     for a in "${artifacts[@]}"; do
         persona="$(basename "$a" .md)"
@@ -178,50 +179,59 @@ if [[ "$(wc -c <"$body")" -gt "$max_bytes" ]]; then
      post it by hand, or re-run the review to get a shorter one"
 fi
 
-# Re-read the PR head immediately before posting. Fetching the base and building
-# the body takes seconds, and a push landing in that window would leave a review
-# on the PR that reads as current but covers superseded code. This cannot be
-# atomic with comment creation — hence the SHA in the comment header as well —
-# but it closes the realistic window rather than the theoretical one.
-if [[ "$(gh pr view --json headRefOid --jq .headRefOid)" != "$sha" ]]; then
-    die "PR head moved while preparing the review — re-run ship"
-fi
-
 # Posting is not idempotent on its own: if GitHub creates the comment but the
 # response is lost in transit, `gh` exits non-zero having already succeeded, and
-# a re-run adds an identical second review. Look for this commit's marker first
+# a re-run adds an identical second review. Look for this commit's comment first
 # and update in place when it is there, so a re-run converges on one comment
 # whether the previous attempt failed before, during, or after the write.
 #
 # `@tsv` keeps one comment per line — a body's own newlines are escaped — so the
 # match happens here rather than in a jq filter, which is also what lets this be
-# tested against a fake `gh`. Only the first line is fetched; whole bodies are
-# not needed and would be megabytes on a long-running PR.
+# tested against a fake `gh`. Only the opening two lines are fetched; whole
+# bodies are not needed and would be megabytes on a long-running PR.
 #
 # A failure to read the existing comments stops the ship. Posting anyway would
 # give up the very guarantee this lookup exists to provide, and a re-run costs
 # nothing now that it converges.
 comment_lines="$(gh api --paginate "repos/{owner}/{repo}/issues/${num}/comments" \
-    --jq '.[] | [(.id | tostring), (.user.login // ""), (.body | split("\n")[0])] | @tsv')" ||
+    --jq '.[] | [(.id | tostring), (.user.login // ""),
+        (.body | split("\n")[0]), (.body | split("\n")[1] // "")] | @tsv')" ||
     die "could not read the PR's existing comments to check for an earlier ship
      re-run once the API is reachable"
 
-# The marker alone does not identify *our* comment — anyone can write the same
-# HTML comment, deliberately or by quoting an earlier ship. Patching a comment
-# belonging to someone else would destroy their text where permissions allow it
-# and fail the ship where they do not, so authorship is part of the match.
+# The marker alone does not identify *our* comment — it is public text anyone can
+# write or quote. Patching on it alone would destroy someone else's comment where
+# permissions allow it and fail the ship where they do not. Two further
+# conditions narrow the match: the comment must be authored by this account, and
+# it must carry ship's own header on the line after the marker.
+#
+# A byte-identical forgery still matches, and nothing short of server-side state
+# this script deliberately does not keep would catch that. What is closed is the
+# case that actually happens — a comment quoting or mentioning a ship marker.
 me="$(gh api user --jq .login)" ||
     die "could not determine the authenticated GitHub account
      re-run once the API is reachable"
 
 existing_ids=()
-while IFS=$'\t' read -r id author first_line; do
-    # GitHub returns bodies with CRLF line endings, so the marker would never
+while IFS=$'\t' read -r id author line1 line2; do
+    # GitHub returns bodies with CRLF line endings, so neither line would ever
     # compare equal without stripping the carriage return.
-    if [[ "$author" == "$me" && "${first_line%$'\r'}" == "$marker" ]]; then
+    if [[ "$author" == "$me" && "${line1%$'\r'}" == "$marker" &&
+        "${line2%$'\r'}" == "$header" ]]; then
         existing_ids+=("$id")
     fi
 done <<<"$comment_lines"
+
+# Re-read the PR head immediately before writing. Fetching the base, building the
+# body, and reading the PR's comments all take seconds, and a push landing in
+# that window would leave a review on the PR that reads as current but covers
+# superseded code. This check sits after the lookup for that reason: everything
+# between it and the write must be the write itself. It cannot be atomic with
+# comment creation — hence the SHA in the comment header as well — but it closes
+# the realistic window rather than the theoretical one.
+if [[ "$(gh pr view --json headRefOid --jq .headRefOid)" != "$sha" ]]; then
+    die "PR head moved while preparing the review — re-run ship"
+fi
 
 # Every match is updated, not just the first. Check-then-create is not atomic —
 # GitHub offers no conditional comment creation — so two ships racing on one
