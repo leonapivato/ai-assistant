@@ -2,11 +2,10 @@
 """Print a derived snapshot of project status — packages, Protocols, ADRs.
 
 Onboarding to "what exists" otherwise means stitching together the source tree,
-``core/protocols.py``, and every ADR header (TODO #4). This derives that view
-fresh from the repository on each run, so it cannot go stale. The *human*-declared
-state — who owns which lane and which ADR numbers are in flight — deliberately
-stays in ``WORKING.md`` (its rightful home); this points there rather than
-duplicating it.
+``core/protocols.py``, and every ADR header. This derives that view fresh from
+the repository on each run, so it cannot go stale. Work in flight is *not*
+derived here: since ADR-0015 it lives in GitHub issues and open pull requests,
+which hold it authoritatively — a tracked file duplicating it only decays.
 
 Run via ``just status`` (or ``python3 scripts/project_status.py``). Pass
 ``--root`` to point at a different checkout (used by the tests).
@@ -224,7 +223,7 @@ def render(root: Path) -> str:
         pretty = ", ".join(f"{n:04d}" for n in gaps)
         lines.append(
             f"  ! gap(s): {pretty} — no ADR here for this number "
-            "(in flight on a branch, or retired); see WORKING.md"
+            "(in flight on a branch, or retired); check open PRs"
         )
     if duplicates:
         pretty = ", ".join(f"{n:04d}" for n in duplicates)
@@ -235,8 +234,9 @@ def render(root: Path) -> str:
 
     lines += [
         "",
-        "Ownership & work in flight",
-        "  Lane owners and in-flight ADR numbers are human-maintained in WORKING.md.",
+        "Work in flight",
+        "  Open issues and pull requests on GitHub (ADR-0015); ADR numbers are",
+        "  assigned by whoever dispatches the work.",
     ]
     return "\n".join(lines)
 
