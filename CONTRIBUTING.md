@@ -367,10 +367,10 @@ outstanding when it landed. That list is a backlog, not an escape hatch: each
 entry names the missing parts and the issue tracking them, an entry that
 outlives its gap fails the check, and only the Protocols that predate the check
 may be named at all — so a new Protocol cannot buy itself an exemption, and the
-list can only shrink. **It is now empty.** `FeedbackProcessor` was the last
-entry and its triad was completed in issue #46, so every Protocol has all three
-parts and the set of Protocols an exemption may name is empty too — the hatch is
-closed rather than merely unused.
+list can only shrink. **The hatch is closed rather than merely unused:** the
+list is empty and no Protocol remains that an exemption could name, both of
+which `tests/core/test_protocol_triad.py` enforces on every run. Read it for
+what the list holds.
 
 This does not loosen contract-first. The sequence is two stages, not one:
 
