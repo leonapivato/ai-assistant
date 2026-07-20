@@ -55,6 +55,15 @@ fi
 # it. Reviewing with uncommitted changes present therefore reasons about a tree
 # that is not the commit the artifact will name — and once those changes are
 # stashed, ship.sh still accepts it. Same rule as ship: clean tree or nothing.
+#
+# `status --porcelain` does not report *ignored* files, and deliberately so.
+# Codex can read an ignored file, so in principle one could influence a review
+# and then vanish. Closing that would mean refusing to run whenever any ignored
+# file exists — which is always: .venv/, .env, and every tool cache are ignored
+# by design. There is no reliable way to tell "an ignored fixture that swayed
+# the review" from "the virtualenv", so the check would either never pass or
+# depend on a hand-maintained exemption list that silently rots. Waived
+# deliberately; the tracked+untracked check is what is enforceable here.
 if [[ -n "$(git status --porcelain)" ]]; then
     echo "working tree is dirty (tracked or untracked); commit or stash first" >&2
     echo "the review would reason about files that are not in the reviewed commit" >&2
