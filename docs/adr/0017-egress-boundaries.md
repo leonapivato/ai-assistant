@@ -347,6 +347,14 @@ undesignated, and permitted no egress at all:
   destination's protocol offers — a service-issued id where one exists, a
   normalised address where none does (§2); the audit record must capture that
   identifier, the connected account, and that basis.
+- the credential-access rules — ADR-0004 §7 gates access to Tier 0 data, not
+  only its transmission, so reading an integration's token from `SecretStore`
+  is itself gated and audited. Nothing above covers this: an implementation
+  could read the token, then run the per-call check and stop when denied, and
+  satisfy every other precondition while having already accessed Tier 0 data
+  ungated. The invocation ADR must resolve §7's applicability (issue #74) and
+  gate the read, not just the send. `models/` carries this as debt because it
+  already transmits (§2); `tools/` does not, so here it is a precondition.
 - the transport rules — the endpoint the seam actually opens a connection to
   must be pinned to the service the user connected, and a redirect must not
   carry the request or its credential to another host. Authorising a semantic
