@@ -111,14 +111,26 @@ layer that may hold a calendar token but may not reach the calendar is not a
 design; it is a contradiction the ADR has been carrying since it was ratified.
 
 The rule is amended to: **user data may leave the device only from a boundary
-this ADR designates for egress, and only where that boundary declares what it
-transmits and is gated before it transmits.** Two boundaries are designated
-today:
+this ADR designates for egress; every designated boundary must have what it
+transmits declared, and its recipients authorised by the user, before it
+transmits.** Two boundaries are designated today, and because what they send
+differs in kind, this section fixes the *granularity* at which each discharges
+those obligations. The granularity is part of the designation — not an
+implementer's choice, and not something a boundary may weaken for itself:
 
-- **`models/`** — to model providers the user has explicitly configured (per
-  the amendment above).
+- **`models/`** — sends conversation content (Tier 1) to model providers the
+  user has explicitly configured. Its declaration is **static and made here**:
+  the payload class is fixed by the boundary's single purpose, so it is stated
+  once in this ADR rather than per call. Its recipient authorisation is
+  **per configuration** — the explicitly-configured provider set of the
+  amendment above — not per call. §7's minimisation rule binds the content of
+  each call.
 - **the `tools/` integration boundary** — to external services the user has
-  explicitly connected, per tool and per call. This designates a *named module
+  explicitly connected. Its declaration is **per tool**, and its recipient
+  authorisation is **per call**, through `permissions/`. Both are stronger than
+  `models/`, and necessarily so: `models/` has one payload class and one
+  purpose, while tool egress is heterogeneous, so nothing about it can be
+  inferred from the boundary itself. This designates a *named module
   seam inside* `tools/`, not the package: `tools/` also owns tool definitions
   and the registry, and neither has any business holding a network client.
   Which module is the seam is the integration/invocation ADR's to name, and it
@@ -167,25 +179,26 @@ costs that property nothing as long as it meets all three conditions, and the
    enumerable list a reader can audit by grepping one contract.
 2. **Declaring.** Every tool states, as a required and fail-closed property of
    its definition, which data tiers a call transmits off-device (ADR-0016 §3).
-   This is the condition `models/` gets for free and `tools/` cannot: what
-   `models/` sends is homogeneous and obvious — the prompt — whereas tool egress
-   is heterogeneous, so it must be *stated* rather than inferred from the
-   integration's name. A tool whose author does not say what leaves cannot be
-   defined at all.
-3. **Gated.** §7 already requires that every side-effecting tool call pass
-   `permissions/` and land in the audit trail, and a tool that transmits is
-   side-effecting by construction (ADR-0016 §3). Every byte leaving through
-   `tools/` is therefore approved and recorded per call.
+   A tool whose author does not say what leaves cannot be defined at all. This
+   is the per-tool granularity the designation fixes above, and it is strictly
+   more than `models/` owes — not because `tools/` is less trusted, but because
+   a single fixed payload class can be declared once in a document while a
+   heterogeneous one cannot be declared anywhere but at each tool.
+3. **Authorised before transmitting.** §7 already requires that every
+   side-effecting tool call pass `permissions/` and land in the audit trail,
+   and a tool that transmits is side-effecting by construction (ADR-0016 §3).
+   Every byte leaving through `tools/` is therefore approved and recorded per
+   call — again more than `models/`, whose recipients the user authorises once
+   by configuring them.
 
 Honest accounting: condition 1 is a genuine widening, and this amendment does
 not pretend otherwise — a second exit point is a second thing that can be got
 wrong, and mechanical enforcement of the contract in condition 1 is what keeps
 "designated" from decaying into "whatever imported `httpx`". Against that, the
-`tools/` boundary is *more* constrained than the one §2 was written to describe:
-`models/` egress is neither declared per call nor gated per call, while tool
-egress is both. The amendment does not lower the bar to admit `tools/`; it
-writes down the bar `models/` was implicitly clearing and finds that `tools/`
-clears a higher one.
+`tools/` boundary is held to a *stricter* granularity on conditions 2 and 3
+than the boundary §2 was written to describe. The amendment does not lower the
+bar to admit `tools/`; it writes down the bar `models/` was implicitly clearing,
+and sets a higher one where the weaker form would not be meaningful.
 
 **Why amend rather than supersede.** ADR-0001 says ADRs are append-only and
 that changing a past decision means a new ADR superseding the old one. That
