@@ -111,8 +111,11 @@ unfixable.** Value at the tail is real; the defect is that the tail is invisible
 not that it exists. The failure mode this addresses is illegibility, so the
 remedy is a number, not a gate.
 
-Accompanying it, one rule in the living documents: **a green pair of records is a
-terminal state, not a checkpoint.** When both personas pass, ship. This is prose,
+Accompanying it, one rule in the living documents: **every review the change
+requires coming back green is a terminal state, not a checkpoint.** That is
+adversarial alone for most changes, adversarial and architecture for a
+contract-surface one (ADR-0015 §1) — #90 ran nine adversarial rounds and never
+needed a pair. When the required set is green, ship. This is prose,
 and ADR-0015 is right that prose does not hold on its own — which is exactly why
 it is paired with the printed aggregate rather than shipped alone.
 
