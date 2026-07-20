@@ -160,14 +160,25 @@ for itself:
   the tool in the abstract:
 
   - an explicit user decision for this call, or
-  - a standing user-established policy that covers this destination — the
-    account the user connected, an allowlist they configured, a
-    credential-scoped host.
+  - a standing user-established policy that covers that destination — the
+    account the user connected, an allowlist they configured.
 
-  A grant justified only by the tool's declared metadata does not qualify. The
-  audit record must capture the resolved destination and which of the two
-  authorised it, or after the fact nobody can tell an authorised recipient from
-  a defaulted one. Working this out is the invocation ADR's, with issue #68.
+  **"Destination" means every semantic recipient the call's arguments select,
+  not the transport endpoint.** A Gmail send resolves to the addressees in its
+  `to` field, not to `googleapis.com`; a Slack post resolves to the channel and
+  therefore its members; a calendar invite resolves to its attendees.
+  Authorising the *host* would be close to vacuous — one compromised or
+  mistaken argument sends the user's data to an address they never approved,
+  over a connection that is entirely legitimate, and every check still passes.
+  Host- or credential-scoped authorisation is sufficient only for an operation
+  that cannot disclose onward to a recipient chosen by argument — a read, or a
+  write whose effect stays inside the connected account.
+
+  A grant justified only by the tool's declared metadata does not qualify
+  either. The audit record must capture the resolved destinations and which of
+  the two bases authorised them, or after the fact nobody can tell an
+  authorised recipient from a defaulted one. Working this out is the invocation
+  ADR's, with issue #68.
 
   What is approved is a *named module seam inside* `tools/`, not the package:
   `tools/` also owns tool definitions and the registry, and neither has any
@@ -195,10 +206,12 @@ undesignated, and permitted no egress at all. What must exist first:
 - a ratified invocation contract that gates each call through `permissions/`
   and records it in the audit trail *before* the call transmits, rather than
   relying on the definition's declared ceiling alone (§4 condition 3);
-- the destination rules — recipient authorisation must bind to the resolved
-  destination and trace to a user decision or standing user policy (§2), and
-  the audit record must capture both the destination and that basis; a
-  `permissions/` grant alone does not satisfy §1 (ADR-0016 §3, §7; issue #68).
+- the destination rules — recipient authorisation must bind to every semantic
+  recipient the call's arguments select, not the transport endpoint (§2), and
+  trace to a user decision or standing user policy; the audit record must
+  capture those destinations and that basis. A `permissions/` grant alone does
+  not satisfy §1, and neither does a credential-scoped host for an operation
+  that can disclose onward (ADR-0016 §3, §7; issue #68).
 - the per-call payload rules. A tool's declared reach is a *ceiling over
   tiers*, and a ceiling authorises nothing: a tool declaring it may disclose
   Tier 1 satisfies its declaration whether it sends one selected memory record
