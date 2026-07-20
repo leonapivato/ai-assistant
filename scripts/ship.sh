@@ -120,6 +120,18 @@ for a in "${artifacts[@]}"; do
      (recorded base ${recorded_base:-none}, PR base ${expected_base:0:12})
      re-run the review with its default base: just review-codex <persona>"
     fi
+
+    # Re-check the verdict here, not just when recording. A filename and a
+    # base_sha say where an artifact came from, not that it holds a finished
+    # review: a file truncated by an interrupt, or edited by hand, keeps valid
+    # metadata while losing its body. ship is the last point before this
+    # becomes the record, so it verifies rather than trusts.
+    a_last="$(grep -v '^[[:space:]]*$' "$a" | tail -n 1 |
+        tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if ! grep -qiE '^verdict:?[[:space:]]*(block|approve with nits|approve)\.?$' <<<"$a_last"; then
+        die "$(basename "$a") does not end in a verdict — it is incomplete
+     re-run: just review-codex $(basename "$a" .md | sed "s/^${sha}-//")"
+    fi
 done
 
 num="$(gh pr view --json number --jq .number)"
