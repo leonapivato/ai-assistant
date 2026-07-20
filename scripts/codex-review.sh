@@ -188,10 +188,18 @@ artifact="${review_dir}/${sha}-${persona}.md"
 # compares it against the PR's real base, so a review run against a narrower or
 # since-moved base — which still produces a correctly-named artifact — cannot
 # pass as review of the whole PR diff.
+#
+# Written to a temporary file and renamed into place, never streamed straight
+# to the final path: an interrupt partway through the write would otherwise
+# leave a truncated artifact carrying a valid name and base_sha, which ship
+# would accept as proof of a completed review. `mv` within one directory is
+# atomic, so the artifact either exists whole or not at all.
+artifact_tmp="${artifact}.partial.$$"
 {
     echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha} -->"
     cat "$out"
-} >"$artifact"
+} >"$artifact_tmp"
+mv "$artifact_tmp" "$artifact"
 
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2

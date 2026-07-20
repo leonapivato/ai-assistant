@@ -22,6 +22,9 @@ _SCRIPT = Path(__file__).parents[2] / "scripts" / "ship.sh"
 _BASH = shutil.which("bash")
 _GIT = shutil.which("git")
 
+# The closing line every genuine review carries; ship.sh verifies it.
+_VERDICT = "Verdict: APPROVE"
+
 
 def _git(repo: Path, *args: str) -> str:
     assert _GIT is not None
@@ -120,14 +123,15 @@ def _record_review(
     repo: Path,
     sha: str,
     persona: str,
-    body: str = "a finding\n",
+    body: str = f"a finding\n{_VERDICT}\n",
     *,
     base_sha: str | None = None,
 ) -> None:
     """Write an artifact as codex-review.sh would.
 
     ``base_sha`` defaults to the real merge base with ``main``; pass a different
-    commit to simulate a review run against a narrower base.
+    commit to simulate a review run against a narrower base. A ``body`` without
+    a closing ``_VERDICT`` simulates an artifact truncated mid-write.
     """
     if base_sha is None:
         base_sha = _git(repo, "merge-base", "main", sha)
@@ -148,8 +152,8 @@ def _run_ship(
 ) -> subprocess.CompletedProcess[str]:
     """Run ship.sh against the fake gh.
 
-    ``gh_env`` overrides what the fake reports (e.g. ``GH_BASE_REPO`` /
-    ``GH_ORIGIN_REPO`` to simulate a fork).
+    ``gh_env`` overrides what the fake reports (e.g. ``GH_CROSS_REPO=true`` to
+    simulate a PR from a fork).
     """
     assert _BASH is not None
     env = os.environ.copy()
@@ -175,7 +179,7 @@ def test_posts_the_review_when_it_matches_the_pr_head(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, sha, "adversarial", "a real finding\n")
+    _record_review(repo, sha, "adversarial", f"a real finding\n{_VERDICT}\n")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -245,8 +249,8 @@ def test_posts_every_persona_recorded_for_the_commit(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, sha, "adversarial", "adversarial finding\n")
-    _record_review(repo, sha, "architecture", "architecture finding\n")
+    _record_review(repo, sha, "adversarial", f"adversarial finding\n{_VERDICT}\n")
+    _record_review(repo, sha, "architecture", f"architecture finding\n{_VERDICT}\n")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -403,7 +407,7 @@ def test_fails_closed_on_a_review_too_large_to_post_intact(tmp_path: Path) -> No
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, sha, "adversarial", "x" * 80_000)
+    _record_review(repo, sha, "adversarial", "x" * 80_000 + f"\n{_VERDICT}\n")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -417,13 +421,44 @@ def test_posts_the_whole_report_in_a_single_comment(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, sha, "adversarial", "adversarial finding\n")
-    _record_review(repo, sha, "architecture", "architecture finding\n")
+    _record_review(repo, sha, "adversarial", f"adversarial finding\n{_VERDICT}\n")
+    _record_review(repo, sha, "architecture", f"architecture finding\n{_VERDICT}\n")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "gh-comment-calls").read_text().count("call") == 1
+
+
+def test_refuses_an_artifact_truncated_before_its_verdict(tmp_path: Path) -> None:
+    """Valid metadata is not proof of a finished review.
+
+    An interrupt partway through writing leaves a header and a partial body.
+    ship is the last point before that becomes the record.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", "half a fin\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "does not end in a verdict" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_refuses_a_header_only_artifact(tmp_path: Path) -> None:
+    """The narrowest form of the same failure: nothing but provenance."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", "")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert not (tmp_path / "comment.md").exists()
 
 
 def test_refuses_a_pr_from_a_fork(tmp_path: Path) -> None:
