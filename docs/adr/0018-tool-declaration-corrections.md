@@ -167,6 +167,34 @@ in place. This is the reasoning ADR-0014 already applied to stored plans; it
 applies at least as strongly to tool metadata, which is what a permission
 decision is made against.
 
+**This is registry-state isolation, and nothing more. It does not make tool
+metadata tamper-proof**, and the ADR should not be read as claiming it does. A
+caller still owns the copy it was handed, and
+
+```python
+definition = await registry.get("smtp")
+definition.__dict__["risk_level"] = RiskLevel.LOW
+```
+
+produces an object a permission check would then rule on. What detachment
+guarantees is that this reaches *no other reader*: the registry still holds
+`CRITICAL`, and the next query returns it. The guarantee is about what the
+registry **produces**, not about what a caller subsequently does with its own
+copy — exactly the boundary ADR-0014 drew for `PlanStore`, and for the same
+reason: closing it would mean freezing an object graph the caller owns, which no
+producer can do.
+
+Closing it properly needs a **verification seam** rather than a stronger copy:
+the permission decision must pin the definition it ruled on — a digest or a
+version — and execution must check that pin against the registry before acting,
+so a definition altered anywhere between the two is detected rather than
+trusted. That is already recorded as issue #54, which arrived at the same seam
+from the cross-restart direction, and it is a precondition on the invocation ADR
+rather than something this one can settle: there is no permission contract and
+no invocation contract yet to carry the pin. Until then, VISION §7's
+"deterministic services own permissions" holds only as far as callers pass along
+what they were given.
+
 Return types stay `list`, matching `MemoryStore.search` and
 `PlanStore.active_executions`, rather than becoming `tuple`. Switching them would
 enforce half of this mechanically while doing nothing about the definitions
@@ -247,10 +275,16 @@ line in a composition root already prevents.
 
 - **The tool contract survives its own first implementation**, which is the
   thing ADR-0016 could not demonstrate about itself.
-- **An inert-email definition, a query that deregisters, and an id rebound
-  between approval and execution are all now unrepresentable** — three concrete
-  substitution or misdeclaration paths closed, each found by writing the code
-  rather than by reading the ADR.
+- **Three concrete failure paths close**, each found by writing the code rather
+  than by reading the ADR: an inert-email definition is now unrepresentable
+  (registration re-validates), a query can no longer deregister (results are
+  detached), and an id cannot be rebound within a registry's life.
+- **A fourth does not close, and is named rather than implied.** A caller can
+  still tamper with the copy a query handed it and pass that downstream (§3).
+  Detachment isolates *registry state*; it does not make metadata tamper-proof,
+  and no amount of copying would — that needs a pinned digest checked at
+  execution, which is issue #54 and belongs to the permission and invocation
+  contracts that do not exist yet.
 - **`core` carries a second identifier type** (`VisibleIdentifier`) whose
   existence is a stopgap until #62 settles a canonical identifier syntax. Two
   types that differ in a subtlety is a real readability cost, accepted over a
