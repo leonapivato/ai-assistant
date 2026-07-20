@@ -342,15 +342,31 @@ asserts is already in place. It does not apply to `models/`, which this ADR
 does not gate at all (§2): `models/` transmits under ADR-0004 §2's existing
 permission, and nothing here adds a condition to it or removes one.
 
-**These are properties that must hold, not designs.** Each item says what must
-be true before `tools/` transmits and why — several name a concrete failure to
-make the requirement legible. None of them chooses a mechanism, and this ADR
-does not amend ADR-0016 or pre-empt the invocation and `permissions/` ADRs that
-own these contracts: they may satisfy any item however they judge best,
-including in ways this ADR did not anticipate. What they may not do is
-designate the boundary with an item unsatisfied. Where an item names specifics —
-the contents of a binding envelope, the entries in the test matrix — read it as
-a floor the owning ADR must cover, not a schema it must adopt.
+**These are decisions, and it is worth being straight about that.** Calling
+them "just preconditions" would understate what this section does. §3 settles,
+for the `tools/` boundary:
+
+- that recipient authorisation must trace to a user decision or standing user
+  policy, so a bare `permissions/` grant does not suffice — narrowing the grant
+  policy ADR-0016 §3 left open, without saying which grants are given;
+- that a destination is the semantic recipient at the stable logical level,
+  identified by service-issued id where one exists and normalised address where
+  none does, with exact comparison wherever equivalence is unproven;
+- that a resolution lookup is itself a tool call, not a privileged side channel;
+- that the payload must be bound before transmission and described inspectably
+  after it, which is a partial answer to ADR-0016 §7's deferred per-call data
+  reach (issue #57) — it fixes the *obligation* while leaving the artifact open;
+- that the audit record needs outcomes, not just intents;
+- that these hold in code, evidenced by failure-path tests.
+
+**What remains deferred is implementation shape and grant policy**: how each
+obligation is constructed, and which combinations `permissions/` actually
+approves or refuses. Where an item names specifics — the contents of a binding
+envelope, the entries in the test matrix — read it as a floor the owning ADR
+must cover, not a schema it must adopt. This ADR does not amend ADR-0016; it
+constrains what the invocation and `permissions/` ADRs may ratify, which is
+what a precondition is for. What they may not do is designate the boundary with
+an item unsatisfied.
 
 None of it is discharged today, which is why `tools/` is approved,
 undesignated, and permitted no egress at all:
