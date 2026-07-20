@@ -189,17 +189,32 @@ for itself:
   reasonably anticipate — a list the assistant selected rather than the user —
   is not covered by this and needs the explicit per-call decision.
 
-  **A destination is identified by what the service issued, not by what it is
-  called.** Authorisation and audit bind to the service's immutable identifier
-  for the recipient — the channel id, the account id — together with the
-  connected account it belongs to. Display names are for showing the user and
-  nothing else. Binding a standing policy to the string `#team` authorises
-  whatever `#team` names later: an administrator renames the channel, a new
-  `#team` is created, and a call still matches the authorised string while
-  sending to an entirely different room. That is not the accepted
-  membership-drift cost above — the logical recipient itself has been
-  substituted, which is the same rebinding failure ADR-0016 §5 avoids by
-  spending a tool id on first use.
+  **A destination is identified by the strongest identity its protocol
+  offers**, which differs by destination type:
+
+  - **Service-scoped resources** — a Slack channel, a Drive folder, a connected
+    account — have a service-issued immutable id. Authorisation and audit bind
+    to that id plus the connected account it belongs to, never to a display
+    name. Binding a standing policy to the string `#team` authorises whatever
+    `#team` names later: an administrator renames the channel, a new `#team`
+    takes the name, and a call still matches the authorised string while
+    sending to a different room. That is not the accepted membership-drift cost
+    above — the logical recipient itself has been substituted, the same
+    rebinding failure ADR-0016 §5 avoids by spending a tool id on first use.
+  - **Address-based protocols** — email to `alice@example.com`, an external
+    calendar attendee — have no issued identifier; the address *is* the
+    identity. Authorisation binds to the normalised address, and normalisation
+    has to be specified rather than assumed, since case handling and provider
+    aliasing decide whether two strings are the same recipient.
+
+  **Accepted cost for the second kind:** an address can be reassigned, and
+  nothing in the protocol reveals that it changed hands. A standing
+  authorisation for `alice@example.com` follows the address, not the person. No
+  mechanism can close this — it is a property of email, and the same one every
+  user already lives with — so it is recorded rather than engineered around.
+  Requiring an immutable id here would be requiring something that does not
+  exist, and would make ordinary email and calendar operations permanently
+  unable to satisfy §3.
 
   A grant justified only by the tool's declared metadata does not qualify
   either. The audit record must capture the resolved destinations and which of
@@ -236,9 +251,10 @@ undesignated, and permitted no egress at all. What must exist first:
 - the destination rules — recipient authorisation must bind to the semantic
   recipient the call's arguments select, not the transport endpoint, at the
   granularity of the stable logical destination (§2), and trace to a user
-  decision or standing user policy, bound to the service-issued immutable
-  identifier rather than a display name (§2); the audit record must capture
-  that identifier, the connected account, and that basis.
+  decision or standing user policy, bound to the strongest identity the
+  destination's protocol offers — a service-issued id where one exists, a
+  normalised address where none does (§2); the audit record must capture that
+  identifier, the connected account, and that basis.
 - the transport rules — the endpoint the seam actually opens a connection to
   must be pinned to the service the user connected, and a redirect must not
   carry the request or its credential to another host. Authorising a semantic
