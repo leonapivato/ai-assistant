@@ -94,6 +94,12 @@ def _fake_gh(bin_dir: Path) -> None:
         # GH_PR_SHA_2, when set, is returned from the *second* headRefOid call
         # onward — the pre-post re-check sees a head that moved mid-run.
         "      headRefOid)\n"
+        # GH_PR_SHA_AFTER_LOOKUP moves the head only once the comment listing
+        # has happened, which pins the *ordering* of the pre-write head check
+        # rather than merely its existence.
+        '        if [[ -n "${GH_PR_SHA_AFTER_LOOKUP:-}" && -f "$GH_LOOKUP_MARK" ]]; then\n'
+        '          printf "%s\\n" "$GH_PR_SHA_AFTER_LOOKUP"; exit 0\n'
+        "        fi\n"
         '        if [[ -n "${GH_PR_SHA_2:-}" && -f "$GH_CALL_MARK" ]]; then\n'
         '          printf "%s\\n" "$GH_PR_SHA_2"; exit 0\n'
         "        fi\n"
@@ -138,14 +144,16 @@ def _fake_gh(bin_dir: Path) -> None:
         '  if [[ "$endpoint" == "user" ]]; then\n'
         '    printf "%s\\n" "${GH_LOGIN:-shipper}"; exit 0\n'
         "  fi\n"
-        # The GET emits what ship.sh's --jq asks for: id, author, and first body
-        # line, tab-separated, one comment per line.
+        # The GET emits what ship.sh's --jq asks for: id, author, and the first
+        # two body lines, tab-separated, one comment per line.
         '  if [[ "$method" == "GET" ]]; then\n'
+        '    touch "$GH_LOOKUP_MARK"\n'
         '    for f in "$GH_COMMENTS_DIR"/*; do\n'
         '      [[ -e "$f" ]] || continue\n'
         '      case "$f" in *.author) continue ;; esac\n'
-        '      printf "%s\\t%s\\t%s\\n" "$(basename "$f")" \\\n'
-        '        "$(cat "$f.author" 2>/dev/null)" "$(head -n 1 "$f")"\n'
+        '      printf "%s\\t%s\\t%s\\t%s\\n" "$(basename "$f")" \\\n'
+        '        "$(cat "$f.author" 2>/dev/null)" \\\n'
+        '        "$(sed -n "1p" "$f")" "$(sed -n "2p" "$f")"\n'
         "    done\n"
         "    exit 0\n"
         "  fi\n"
@@ -205,6 +213,7 @@ def _run_ship(
     env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
     env["GH_PR_SHA"] = pr_sha
     env["GH_CALL_MARK"] = str(tmp_path / "gh-called")
+    env["GH_LOOKUP_MARK"] = str(tmp_path / "gh-comments-listed")
     if pr_sha_after is not None:
         env["GH_PR_SHA_2"] = pr_sha_after
     env["GH_COMMENT_OUT"] = str(tmp_path / "comment.md")
@@ -556,6 +565,11 @@ def _stored_comments(tmp_path: Path) -> list[str]:
     ]
 
 
+def _ship_comment_opening(sha: str) -> str:
+    """The two lines ship.sh uses to recognise a comment as its own."""
+    return f"<!-- ship:{sha} -->\n🔍 **Local Codex review** — commit `{sha[:12]}`\n"
+
+
 def _seed_comment(tmp_path: Path, comment_id: str, body: str, author: str) -> None:
     """Put a comment on the PR that ship.sh did not write.
 
@@ -659,7 +673,7 @@ def test_never_edits_a_marked_comment_written_by_someone_else(tmp_path: Path) ->
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
     _record_review(repo, sha, "adversarial", f"my finding\n{_VERDICT}\n")
-    foreign = f"<!-- ship:{sha} -->\nsomeone else's comment\n"
+    foreign = _ship_comment_opening(sha) + "\nsomeone else's comment\n"
     _seed_comment(tmp_path, "900", foreign, author="not-the-shipper")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
@@ -669,6 +683,45 @@ def test_never_edits_a_marked_comment_written_by_someone_else(tmp_path: Path) ->
     stored = _stored_comments(tmp_path)
     assert len(stored) == 2, "the review is posted as a new comment, not into theirs"
     assert any("my finding" in c for c in stored)
+
+
+def test_does_not_edit_a_comment_of_ours_that_merely_quotes_the_marker(tmp_path: Path) -> None:
+    """Same author, same marker, but not a ship comment — it must be left alone.
+
+    Quoting a marker while discussing a review is the realistic way this
+    collides. Requiring ship's own header on the following line separates a
+    comment *about* the marker from a comment ship wrote.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"my finding\n{_VERDICT}\n")
+    quoted = f"<!-- ship:{sha} -->\nwhy does ship write that marker above?\n"
+    _seed_comment(tmp_path, "900", quoted, author="shipper")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "comments" / "900").read_text() == quoted
+    assert len(_stored_comments(tmp_path)) == 2
+
+
+def test_refuses_when_the_pr_head_moves_during_the_comment_lookup(tmp_path: Path) -> None:
+    """The head check must sit after the lookup, not before it.
+
+    Reading the PR's comments is itself a round trip; a push landing during it
+    would otherwise be written up as a review of the current head.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"GH_PR_SHA_AFTER_LOOKUP": "0" * 40})
+
+    assert result.returncode != 0
+    assert "PR head moved" in result.stderr
+    assert _stored_comments(tmp_path) == []
 
 
 def test_updates_every_duplicate_it_owns_for_the_commit(tmp_path: Path) -> None:
@@ -682,7 +735,7 @@ def test_updates_every_duplicate_it_owns_for_the_commit(tmp_path: Path) -> None:
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
     _record_review(repo, sha, "adversarial", f"current finding\n{_VERDICT}\n")
-    stale = f"<!-- ship:{sha} -->\nsuperseded finding\n"
+    stale = _ship_comment_opening(sha) + "\nsuperseded finding\n"
     _seed_comment(tmp_path, "901", stale, author="shipper")
     _seed_comment(tmp_path, "902", stale, author="shipper")
 
