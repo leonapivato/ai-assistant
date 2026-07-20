@@ -59,6 +59,14 @@ different states. The distinction is load-bearing, so it is named:
 - **Designated** — approved *and* every precondition in §3 discharged **in
   code**, not merely in a document. Only a designated boundary may transmit.
 
+This is a rule code must obey, backed by the strongest enforcement currently
+available — not a proof that undesignated code cannot reach the network. §4
+condition 1 is explicit that an import contract is a net rather than a proof,
+and until outbound I/O runs through an injected capability (issue #85) a
+subsystem determined to bypass the boundary can. "Only a designated boundary
+may transmit" states what is permitted, and what review and the contracts
+enforce; it does not claim the machine forbids the alternative.
+
 There is one transition and §3 is its complete condition. A boundary is
 designated exactly when it is approved here and every item in §3's list holds
 for it; short of that it is approved and must not transmit, whatever partial
@@ -94,8 +102,15 @@ for itself:
     content is Tier 1. Only when the user has opted into a cloud embedder;
     the default embedder is on-device and transmits nothing (ADR-0006 §2);
   - **the provider credential** for the endpoint being called (Tier 0), sent
-    as authentication and only ever to the provider it belongs to
-    (ADR-0004 §3);
+    as authentication and required to reach only the provider it belongs to
+    (ADR-0004 §3). "Required to" and not "guaranteed to": a provider SDK
+    configured with a hostile base URL, or following a cross-host redirect,
+    would carry both the conversation and the credential elsewhere. The
+    transport pinning §3 requires of `tools/` is the same obligation here, and
+    is recorded as debt for `models/` on the same grounds as the import-linter
+    gap — `models/` transmits today under ADR-0004 §2, and making it a
+    precondition would prohibit every model call until the work lands. Issue
+    #83 covers both boundaries;
   - **request configuration and protocol metadata** (Tier 2) — the model
     identifier, generation parameters such as temperature and token limits, and
     the headers the transport requires. Every call carries some of this and it
