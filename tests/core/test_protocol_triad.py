@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import ast
 import inspect
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import FunctionType
@@ -241,11 +240,12 @@ def _fixture_value(func: Callable[..., object]) -> object | None:
 def _binds_fake(cls: type, protocol: str, requested: set[str]) -> bool:
     """Report whether ``cls`` supplies the canonical fake to its conformance suite.
 
-    Two things must hold, both by object identity rather than text. The test
-    module must have imported the canonical fake itself, not a same-named local
-    stand-in. And among the fixtures ``cls`` defines that the suite's tests
-    actually request, one must evaluate to an instance of that fake -- while
-    none evaluates to a *different* implementation of the same Protocol.
+    The evidence is the object a fixture produces, never a name: among the
+    fixtures visible on ``cls`` that the suite's tests actually request, one
+    must evaluate to an instance of the canonical fake -- while none evaluates
+    to a *different* implementation of the same Protocol. How the test module
+    got hold of the fake (a direct import, an alias, a module attribute) is
+    therefore beside the point; a same-named local stand-in fails on identity.
 
     That second clause is what distinguishes the two things a second fixture
     can be. An auxiliary fixture (a limit, a clock, an expected value) does not
@@ -258,15 +258,10 @@ def _binds_fake(cls: type, protocol: str, requested: set[str]) -> bool:
     on a dead branch, or a decoy fixture no contract test consumes is likewise
     not a binding.
     """
-    fake_name = f"Fake{protocol}"
     canonical = _canonical_fake(protocol)
     if canonical is None:
         return False
     fake: type = canonical
-    module = sys.modules.get(cls.__module__)
-    if getattr(module, fake_name, None) is not fake:
-        return False
-
     subject_type = getattr(protocols_module, protocol)
     values = [
         value
@@ -294,7 +289,9 @@ def _suite_declared_tests(suite: type) -> set[str]:
     }
 
 
-def _ran_every_obligation(cls: type, suite: type, honoured: frozenset[str]) -> bool:
+def _ran_every_obligation(
+    cls: type, suite: type, honoured: frozenset[str], opted_out: frozenset[str]
+) -> bool:
     """Report whether ``cls`` honoured every test ``suite`` declares.
 
     Enumerating from the suite rather than from what got reported is what makes
@@ -306,14 +303,22 @@ def _ran_every_obligation(cls: type, suite: type, honoured: frozenset[str]) -> b
     An obligation is honoured when it still resolves to the suite's own
     function object *and* every case pytest reported for it passed, or was one
     the suite's own body opted out of (see ``tests/conftest.py``).
+
+    At least one obligation must have been honoured by *passing*: a suite whose
+    obligations are all optional and all skipped has asserted nothing, and must
+    not be able to certify itself.
     """
-    return all(
+    obligations = _suite_declared_tests(suite)
+    honoured_all = all(
         getattr(cls, name, None) is getattr(suite, name) and name in honoured
-        for name in _suite_declared_tests(suite)
+        for name in obligations
     )
+    return honoured_all and bool(obligations - opted_out)
 
 
-def _binding_classes(protocol: str, honoured: CollectedTests) -> list[type]:
+def _binding_classes(
+    protocol: str, honoured: CollectedTests, opted_out: CollectedTests | None = None
+) -> list[type]:
     """Return the classes that really ran the canonical fake through the suite.
 
     Every condition closes a way of satisfying the letter of the triad while
@@ -337,7 +342,9 @@ def _binding_classes(protocol: str, honoured: CollectedTests) -> list[type]:
         obligations = _suite_declared_tests(suite)
         if not obligations:
             continue
-        if not _ran_every_obligation(cls, suite, honoured_tests):
+        if not _ran_every_obligation(
+            cls, suite, honoured_tests, (opted_out or {}).get(cls, frozenset())
+        ):
             continue
         if _binds_fake(cls, protocol, _fixtures_requested_by(suite, obligations)):
             found.append(cls)
@@ -345,7 +352,10 @@ def _binding_classes(protocol: str, honoured: CollectedTests) -> list[type]:
 
 
 def _missing_parts(
-    protocol: str, declared: set[str], honoured: CollectedTests | None
+    protocol: str,
+    declared: set[str],
+    honoured: CollectedTests | None,
+    opted_out: CollectedTests | None = None,
 ) -> tuple[str, ...]:
     """Return the triad parts ``protocol`` is missing.
 
@@ -356,7 +366,7 @@ def _missing_parts(
         missing.append("suite")
     if _canonical_fake(protocol) is None:
         missing.append("fake")
-    if honoured is not None and not _binding_classes(protocol, honoured):
+    if honoured is not None and not _binding_classes(protocol, honoured, opted_out):
         missing.append("binding")
     return tuple(missing)
 
@@ -411,6 +421,7 @@ def test_every_protocol_has_a_conformance_suite_and_canonical_fake() -> None:
 
 def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
     honoured_class_tests: CollectedTests,
+    opted_out_class_tests: CollectedTests,
     run_is_unfiltered: bool,
 ) -> None:
     """Part 3: a subclass really ran each fake through its suite, and passed.
@@ -432,7 +443,7 @@ def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
         if (
             gaps := _unexcused(
                 protocol,
-                _missing_parts(protocol, declared, honoured_class_tests),
+                _missing_parts(protocol, declared, honoured_class_tests, opted_out_class_tests),
             )
         )
     ]
@@ -442,6 +453,7 @@ def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
 
 def test_no_exemption_is_stale(
     honoured_class_tests: CollectedTests,
+    opted_out_class_tests: CollectedTests,
     run_is_unfiltered: bool,
 ) -> None:
     """An exemption dies with the gap it describes, so the backlog only shrinks."""
@@ -458,7 +470,11 @@ def test_no_exemption_is_stale(
                 f"core/protocols.py -- drop the entry ({exemption.issue})"
             )
             continue
-        gaps = set(_missing_parts(exemption.protocol, declared, honoured_class_tests))
+        gaps = set(
+            _missing_parts(
+                exemption.protocol, declared, honoured_class_tests, opted_out_class_tests
+            )
+        )
         if closed := set(exemption.missing) - gaps:
             failures.append(
                 f"{exemption.protocol} is exempted for {sorted(closed)} but that "
@@ -726,6 +742,21 @@ def test_report_shapes_that_do_and_do_not_honour_an_obligation(shape: _Shape) ->
     honoured = conftest._is_satisfactory(report, optional=shape.optional)
 
     assert honoured is shape.satisfactory, shape.why
+
+
+def test_a_suite_whose_every_obligation_opted_out_certifies_nothing() -> None:
+    """Opting out of all of them is not the same as meeting any of them.
+
+    A suite that marked every test optional and skipped every one would
+    otherwise satisfy the check having asserted nothing at all.
+    """
+    _, bound = _suite_and_binding(overridden=())
+    honoured: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
+    some: CollectedTests = {bound: frozenset({"test_two"})}
+    all_of_them: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
+
+    assert _binding_classes("MemoryStore", honoured, some) == [bound]  # control
+    assert _binding_classes("MemoryStore", honoured, all_of_them) == []
 
 
 def test_only_the_suites_own_function_can_declare_an_obligation_optional() -> None:
