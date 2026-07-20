@@ -65,20 +65,17 @@ reviewer's claim about the code, produced without the ability to run it. Check i
 against the actual text before acting — and when it is wrong, say so with
 grounding rather than changing the code to satisfy it.
 
-This is not hypothetical caution. Two `blocker`s in this repository were stated
-with full confidence and specific-looking grounding and were factually false: one
-claimed no-force-push protection covers feature branches (it covers `main` only),
-one claimed the `ai-assistant-*` glob included the primary clone (it does not).
-Both were correctly rejected with grounding. Complying with either would have
-made the code worse on the strength of a confident sentence.
+A finding worded with full confidence, and carrying specific-looking grounding,
+can still be factually false — complying with one makes the code worse on the
+strength of a confident sentence. ADR-0020 §1 records the cases this rule comes
+from.
 
 **Every review the change requires coming back green is a terminal state, not a
 checkpoint.** That is adversarial alone for most changes, and adversarial *and*
-architecture for a contract-surface one (ADR-0015 §1) — #90 ran nine adversarial
-rounds and never needed a pair. When the required set is green, ship. Do not
-treat it as a base to improve on: ADR-0017 sat shippable with both personas
-passing, then made one *good* commit that cut scope, and paid another round for
-it (ADR-0020 §2).
+architecture for a contract-surface one (ADR-0015 §1). When the required set is
+green, ship. Do not treat it as a base to improve on: a further commit destroys
+those records and starts a fresh round, and a *good* commit does this exactly as
+thoroughly as a bad one. ADR-0020 §2 records the evidence.
 
 Waiving a `blocker` or `major` is allowed; write the one-line rationale in the PR
 or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but

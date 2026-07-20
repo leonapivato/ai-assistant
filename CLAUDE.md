@@ -135,8 +135,8 @@ ratio); nothing in it blocks, but a churn ratio far above 1 means the loop is
 reworking itself rather than converging.
 
 **Findings are hypotheses to verify, not facts to comply with.** Check each one
-against the actual text before acting; two `blocker`s in this repo were stated
-with full confidence and were factually false (`docs/review/guide.md`).
+against the actual text before acting; a confidently worded finding carrying
+specific-looking grounding can still be factually false (`docs/review/guide.md`).
 
 **Triage each finding — do not let the PR grow to absorb them.**
 
