@@ -90,8 +90,14 @@ def _fake_gh(bin_dir: Path) -> None:
         '        touch "$GH_CALL_MARK"; printf "%s\\n" "$GH_PR_SHA"; exit 0 ;;\n'
         "      number) printf '42\\n'; exit 0 ;;\n"
         "      baseRefName) printf 'main\\n'; exit 0 ;;\n"
+        # GH_BASE_REPO lets a test make the PR target a different repo than
+        # origin, i.e. the fork case ship must refuse.
+        '      baseRepository) printf "%s\\n" "${GH_BASE_REPO:-acme/app}"; exit 0 ;;\n'
         "    esac\n"
         "  done\n"
+        "fi\n"
+        'if [[ "$1" == "repo" && "$2" == "view" ]]; then\n'
+        '  printf "%s\\n" "${GH_ORIGIN_REPO:-acme/app}"; exit 0\n'
         "fi\n"
         'if [[ "$1" == "pr" && "$2" == "comment" ]]; then\n'
         '  prev=""\n'
@@ -134,10 +140,21 @@ def _record_review(
 
 
 def _run_ship(
-    repo: Path, tmp_path: Path, *, pr_sha: str, pr_sha_after: str | None = None
+    repo: Path,
+    tmp_path: Path,
+    *,
+    pr_sha: str,
+    pr_sha_after: str | None = None,
+    gh_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run ship.sh against the fake gh.
+
+    ``gh_env`` overrides what the fake reports (e.g. ``GH_BASE_REPO`` /
+    ``GH_ORIGIN_REPO`` to simulate a fork).
+    """
     assert _BASH is not None
     env = os.environ.copy()
+    env.update(gh_env or {})
     env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
     env["GH_PR_SHA"] = pr_sha
     env["GH_CALL_MARK"] = str(tmp_path / "gh-called")
@@ -408,6 +425,25 @@ def test_posts_the_whole_report_in_a_single_comment(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "gh-comment-calls").read_text().count("call") == 1
+
+
+def test_refuses_when_origin_is_not_the_prs_base_repository(tmp_path: Path) -> None:
+    """From a fork, origin/<base> is the fork's copy — the wrong diff to check."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(
+        repo,
+        tmp_path,
+        pr_sha=sha,
+        gh_env={"GH_BASE_REPO": "upstream/app", "GH_ORIGIN_REPO": "me/app-fork"},
+    )
+
+    assert result.returncode != 0
+    assert "origin is" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
 
 
 def test_refuses_on_main(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ depends on the propose/dispose write path (``learning``, ``orchestration``, ...)
 can drive a policy to any outcome it needs to exercise *without importing the
 memory subsystem's internals* (CLAUDE.md golden rule 1) and without depending on
 ``DefaultMemoryPolicy``'s particular rules — which are an implementation choice
-and expected to change (see ``TODO.md`` item 2).
+and expected to change (see issue #38).
 
 That independence is the point. A test that wants "the policy said MERGE" should
 say so directly, rather than reverse-engineering a proposal that happens to make
