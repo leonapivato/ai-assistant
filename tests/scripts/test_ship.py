@@ -72,10 +72,17 @@ def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
 
 
 def _fake_gh(bin_dir: Path) -> None:
-    """A fake ``gh`` answering the three calls ship.sh makes.
+    """A fake ``gh`` answering the calls ship.sh makes.
 
     ``GH_PR_SHA`` is what the PR head reports; ``GH_COMMENT_OUT`` is where a
     posted comment body is captured so a test can assert on it.
+
+    Comments are modelled as files in ``GH_COMMENTS_DIR`` named by their id, so
+    the idempotency path has real state to converge on: `gh pr comment` creates
+    one, the `gh api` GET lists them, and the `gh api` PATCH rewrites one in
+    place. ``GH_COMMENT_EXIT`` makes the create *report* failure after storing
+    the comment — the lost-response window this guards. ``GH_API_FAIL`` makes
+    the listing call fail.
     """
     bin_dir.mkdir(exist_ok=True)
     gh = bin_dir / "gh"
@@ -109,10 +116,41 @@ def _fake_gh(bin_dir: Path) -> None:
         '    if [[ "$prev" == "--body-file" ]]; then\n'
         '      cat "$a" >>"$GH_COMMENT_OUT"\n'
         '      printf "call\\n" >>"$GH_COMMENT_CALLS"\n'
+        '      id=$(( $(find "$GH_COMMENTS_DIR" -type f | wc -l) + 1 ))\n'
+        '      cp "$a" "$GH_COMMENTS_DIR/$id"\n'
         "    fi\n"
         '    prev="$a"\n'
         "  done\n"
-        "  exit 0\n"
+        # The comment is stored first, then the exit status is reported: that is
+        # exactly the created-but-response-lost case.
+        '  exit "${GH_COMMENT_EXIT:-0}"\n'
+        "fi\n"
+        'if [[ "$1" == "api" ]]; then\n'
+        '  [[ -n "${GH_API_FAIL:-}" ]] && { echo "api unreachable" >&2; exit 1; }\n'
+        '  method=GET; endpoint=""; body_file=""; prev=""\n'
+        '  for a in "$@"; do\n'
+        '    [[ "$prev" == "--method" ]] && method="$a"\n'
+        '    [[ "$prev" == "-F" ]] && body_file="${a#body=@}"\n'
+        '    case "$a" in repos/*) endpoint="$a" ;; esac\n'
+        '    prev="$a"\n'
+        "  done\n"
+        # The GET emits what ship.sh's --jq asks for: id and first body line,
+        # tab-separated, one comment per line.
+        '  if [[ "$method" == "GET" ]]; then\n'
+        '    for f in "$GH_COMMENTS_DIR"/*; do\n'
+        '      [[ -e "$f" ]] || continue\n'
+        '      printf "%s\\t%s\\n" "$(basename "$f")" "$(head -n 1 "$f")"\n'
+        "    done\n"
+        "    exit 0\n"
+        "  fi\n"
+        '  if [[ "$method" == "PATCH" ]]; then\n'
+        '    id="${endpoint##*/}"\n'
+        '    [[ -f "$GH_COMMENTS_DIR/$id" ]] || exit 1\n'
+        '    cat "$body_file" >"$GH_COMMENTS_DIR/$id"\n'
+        '    printf "patch %s\\n" "$id" >>"$GH_COMMENT_CALLS"\n'
+        "    exit 0\n"
+        "  fi\n"
+        "  exit 1\n"
         "fi\n"
         "exit 1\n"
     )
@@ -165,6 +203,9 @@ def _run_ship(
         env["GH_PR_SHA_2"] = pr_sha_after
     env["GH_COMMENT_OUT"] = str(tmp_path / "comment.md")
     env["GH_COMMENT_CALLS"] = str(tmp_path / "gh-comment-calls")
+    comments = tmp_path / "comments"
+    comments.mkdir(exist_ok=True)
+    env["GH_COMMENTS_DIR"] = str(comments)
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
         [_BASH, str(_SCRIPT)],
         cwd=repo,
@@ -499,6 +540,106 @@ def test_refuses_when_the_fork_check_cannot_run(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "could not determine" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def _stored_comments(tmp_path: Path) -> list[str]:
+    """Every comment the fake `gh` currently holds for the PR."""
+    return [p.read_text() for p in sorted((tmp_path / "comments").iterdir())]
+
+
+def test_marks_the_comment_with_the_commit_it_reviews(tmp_path: Path) -> None:
+    """The hidden marker is what makes a re-run recognise its own comment."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "comment.md").read_text().startswith(f"<!-- ship:{sha} -->\n")
+
+
+def test_a_rerun_updates_the_existing_comment_rather_than_duplicating(tmp_path: Path) -> None:
+    """Shipping the same commit twice converges on one comment."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"first finding\n{_VERDICT}\n")
+
+    assert _run_ship(repo, tmp_path, pr_sha=sha).returncode == 0
+    # A re-review of the same commit, with a different body to prove the
+    # existing comment is rewritten rather than merely left alone.
+    _record_review(repo, sha, "adversarial", f"second finding\n{_VERDICT}\n")
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    stored = _stored_comments(tmp_path)
+    assert len(stored) == 1
+    assert "second finding" in stored[0]
+    assert "first finding" not in stored[0]
+    calls = (tmp_path / "gh-comment-calls").read_text()
+    assert calls.count("call") == 1
+    assert calls.count("patch") == 1
+
+
+def test_a_lost_response_does_not_leave_a_duplicate_on_the_next_run(tmp_path: Path) -> None:
+    """The failure #45 is about: GitHub created the comment, `gh` reported failure.
+
+    The naive retry posts an identical second review. Finding the marker turns
+    the retry into an update of the comment that did land.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    failed = _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"GH_COMMENT_EXIT": "1"})
+
+    assert failed.returncode != 0
+    assert len(_stored_comments(tmp_path)) == 1, "the comment was created before the failure"
+
+    retried = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert retried.returncode == 0, retried.stderr
+    assert len(_stored_comments(tmp_path)) == 1
+
+
+def test_a_review_of_a_later_commit_gets_its_own_comment(tmp_path: Path) -> None:
+    """The marker keys on the SHA, so it must not overwrite an earlier review."""
+    repo = tmp_path / "repo"
+    first_sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, first_sha, "adversarial", f"on the first commit\n{_VERDICT}\n")
+    assert _run_ship(repo, tmp_path, pr_sha=first_sha).returncode == 0
+
+    (repo / "f.txt").write_text("three\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-qm", "more")
+    second_sha = _git(repo, "rev-parse", "HEAD")
+    _record_review(repo, second_sha, "adversarial", f"on the second commit\n{_VERDICT}\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=second_sha)
+
+    assert result.returncode == 0, result.stderr
+    stored = _stored_comments(tmp_path)
+    assert len(stored) == 2
+    assert any("on the first commit" in c for c in stored)
+    assert any("on the second commit" in c for c in stored)
+
+
+def test_refuses_when_the_existing_comments_cannot_be_read(tmp_path: Path) -> None:
+    """Posting blind would give up the guarantee the lookup exists to provide."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"GH_API_FAIL": "1"})
+
+    assert result.returncode != 0
+    assert "existing comments" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 

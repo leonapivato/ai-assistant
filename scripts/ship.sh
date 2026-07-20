@@ -138,7 +138,14 @@ num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
+# A hidden marker naming the commit, so a re-run can find the comment it already
+# posted. It is the first line of the body precisely so the lookup below can
+# match on a first line alone, without pulling whole comment bodies through a
+# shell variable.
+marker="<!-- ship:${sha} -->"
+
 {
+    echo "$marker"
     echo "🔍 **Local Codex review** — commit \`${sha:0:12}\`"
     echo
     for a in "${artifacts[@]}"; do
@@ -155,15 +162,10 @@ trap 'rm -f "$body"' EXIT
     done
 } >"$body"
 
-# One comment, posted once — the whole report is a single API call, so there is
-# no partial-success state to reconcile. (Posting per persona would avoid the
-# shared size budget below, but a transient failure on the second call would
-# leave the first posted and make re-running `ship` duplicate it.)
-#
-# One call is not the same as idempotent: if GitHub creates the comment but the
-# response is lost, `gh` reports failure and a re-run posts a duplicate. That
-# window is narrow and its outcome is cosmetic — two identical reviews on a PR,
-# not a false record — so it is tracked rather than solved here.
+# One comment per commit — the whole report is a single API call, so there is no
+# partial-success state to reconcile. (Posting per persona would avoid the shared
+# size budget below, but a transient failure on the second call would leave the
+# first posted and make re-running `ship` duplicate it.)
 #
 # GitHub rejects a body over 65536 characters, and nothing here is truncated:
 # cutting at a byte boundary drops the tail, which is exactly where the ranked
@@ -185,6 +187,41 @@ if [[ "$(gh pr view --json headRefOid --jq .headRefOid)" != "$sha" ]]; then
     die "PR head moved while preparing the review — re-run ship"
 fi
 
-echo "ship: posting ${#artifacts[@]} review(s) for ${sha:0:12} to PR #${num}…" >&2
-gh pr comment "$num" --body-file "$body"
+# Posting is not idempotent on its own: if GitHub creates the comment but the
+# response is lost in transit, `gh` exits non-zero having already succeeded, and
+# a re-run adds an identical second review. Look for this commit's marker first
+# and update in place when it is there, so a re-run converges on one comment
+# whether the previous attempt failed before, during, or after the write.
+#
+# `@tsv` keeps one comment per line — a body's own newlines are escaped — so the
+# match happens here rather than in a jq filter, which is also what lets this be
+# tested against a fake `gh`. Only the first line is fetched; whole bodies are
+# not needed and would be megabytes on a long-running PR.
+#
+# A failure to read the existing comments stops the ship. Posting anyway would
+# give up the very guarantee this lookup exists to provide, and a re-run costs
+# nothing now that it converges.
+comment_lines="$(gh api --paginate "repos/{owner}/{repo}/issues/${num}/comments" \
+    --jq '.[] | [(.id | tostring), (.body | split("\n")[0])] | @tsv')" ||
+    die "could not read the PR's existing comments to check for an earlier ship
+     re-run once the API is reachable"
+
+existing_id=""
+while IFS=$'\t' read -r id first_line; do
+    # GitHub returns bodies with CRLF line endings, so the marker would never
+    # compare equal without stripping the carriage return.
+    if [[ "${first_line%$'\r'}" == "$marker" ]]; then
+        existing_id="$id"
+        break
+    fi
+done <<<"$comment_lines"
+
+if [[ -n "$existing_id" ]]; then
+    echo "ship: updating the review for ${sha:0:12} already on PR #${num}…" >&2
+    gh api --silent --method PATCH \
+        "repos/{owner}/{repo}/issues/comments/${existing_id}" -F "body=@${body}"
+else
+    echo "ship: posting ${#artifacts[@]} review(s) for ${sha:0:12} to PR #${num}…" >&2
+    gh pr comment "$num" --body-file "$body"
+fi
 echo "ship: done. Resolve or file issues for any blocker/major finding before merging." >&2
