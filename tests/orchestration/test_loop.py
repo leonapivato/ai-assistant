@@ -440,3 +440,130 @@ async def test_learn_propagates_a_store_failure() -> None:
 
     with pytest.raises(MemoryStoreError, match="retrieval is unavailable"):
         await loop.learn(_preference_feedback())
+
+
+async def test_learn_resolves_a_repeated_record_id_last_write_wins() -> None:
+    """``MemoryStore.add`` is an upsert, so the loop does not de-duplicate.
+
+    Both outcomes report the shared id, which is what makes the collision
+    visible to the caller rather than hidden by it (ADR-0022 §4).
+    """
+    memory = FakeMemoryStore(now=_clock)
+    proposals = [
+        MemoryUpdateProposal(
+            proposed=PreferenceMemory(
+                id="pref-same",
+                content=content,
+                preference=content,
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+                ),
+            ),
+            rationale="user preference",
+        )
+        for content in ("prefers short replies", "prefers very short replies")
+    ]
+    loop = _loop(memory=memory, feedback=FakeFeedbackProcessor(proposals))
+
+    outcomes = await loop.learn(_preference_feedback())
+
+    assert [outcome.record_id for outcome in outcomes] == ["pref-same", "pref-same"]
+    stored = await memory.get("pref-same")
+    assert stored is not None
+    assert stored.content == "prefers very short replies"
+
+
+async def test_learn_leaves_earlier_proposals_applied_when_a_later_write_fails() -> None:
+    """The partial application ADR-0022 §4 documents, pinned rather than assumed."""
+
+    class _FailsOnSecondAdd(FakeMemoryStore):
+        """The canonical store, refusing every write after the first."""
+
+        def __init__(self) -> None:
+            super().__init__(now=_clock)
+            self.writes = 0
+
+        async def add(self, record: MemoryRecord) -> str:
+            """Accept the first write, then fail the way a full store fails."""
+            self.writes += 1
+            if self.writes > 1:
+                msg = "fake: the store is full"
+                raise MemoryStoreError(msg)
+            return await super().add(record)
+
+    memory = _FailsOnSecondAdd()
+    proposals = [
+        MemoryUpdateProposal(
+            proposed=PreferenceMemory(
+                id=f"pref-{index}",
+                content=f"preference {index}",
+                preference=f"preference {index}",
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+                ),
+            ),
+            rationale="user preference",
+        )
+        for index in range(2)
+    ]
+    loop = _loop(memory=memory, feedback=FakeFeedbackProcessor(proposals))
+
+    with pytest.raises(MemoryStoreError, match="the store is full"):
+        await loop.learn(_preference_feedback())
+
+    # No result is returned at all, and the first proposal stays written: the
+    # loop reports no success it cannot stand behind, and invents no rollback
+    # the MemoryStore contract does not offer.
+    assert [record.id for record in await memory.export()] == ["pref-0"]
+
+
+# --------------------------------------------------------------------------- #
+# Tuning                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"retrieval_limit": 0}, "retrieval_limit must be at least 1"),
+        ({"retrieval_limit": -1}, "retrieval_limit must be at least 1"),
+        ({"conflict_limit": 0}, "conflict_limit must be at least 1"),
+        ({"conflict_threshold": float("nan")}, "finite value in"),
+        ({"conflict_threshold": 1.5}, "finite value in"),
+        ({"conflict_threshold": -0.1}, "finite value in"),
+    ],
+)
+def test_tuning_that_would_silently_disable_a_stage_is_refused(
+    kwargs: dict[str, float], match: str
+) -> None:
+    """A stage turned off while the loop still reports health is refused up front."""
+    with pytest.raises(ValueError, match=match):
+        LearningLoop(
+            context=FakeContextProvider(),
+            memory=FakeMemoryStore(now=_clock),
+            policy=FakeMemoryPolicy(),
+            planner=FakePlanner(now=_clock),
+            feedback=FakeFeedbackProcessor(),
+            now=_clock,
+            **kwargs,  # type: ignore[arg-type]  # deliberately invalid tuning
+        )
+
+
+@pytest.mark.parametrize(("threshold", "limit"), [(0.0, 1), (1.0, 1)])
+async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) -> None:
+    """0 and 1 bound the score range, and 1 is the smallest useful limit."""
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=FakeMemoryStore(now=_clock),
+        policy=FakeMemoryPolicy(),
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(),
+        retrieval_limit=limit,
+        conflict_threshold=threshold,
+        conflict_limit=limit,
+        now=_clock,
+    )
+
+    result = await loop.respond("hello")
+
+    assert result.goal.statement == "hello"
