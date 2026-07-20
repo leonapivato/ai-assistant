@@ -71,7 +71,7 @@ class ToolDefinition(BaseModel):
     idempotency: Idempotency         # required
     idempotency_window: timedelta | None = None   # required iff KEYED
     latency: timedelta | None = None
-    parameters_schema: FrozenJsonMapping = {}
+    parameters_schema: FrozenJsonMapping = _EMPTY_PARAMS   # a frozen mapping
 ```
 
 **Every field that a permission decision depends on is required.** This is the
@@ -136,12 +136,24 @@ severity ordering is not a convenience here; it is the removal of a live trap,
 and it has to live on the type rather than in `permissions/`, because the trap
 is reachable from anywhere the enum is.
 
-The comparison operators are therefore overridden to rank by declaration order,
-and they return `NotImplemented` against anything that is not the same enum —
-so `RiskLevel.LOW < "medium"` raises rather than quietly answering
-lexicographically. Rank is derived from declaration order rather than a parallel
-table, so a level inserted in the middle cannot be given a rank that contradicts
-where it reads.
+The comparison operators are therefore overridden to rank by declaration order.
+All four (`__lt__`, `__le__`, `__gt__`, `__ge__`) are overridden, not just
+`__lt__`: `functools.total_ordering` fills in only the operators a class does
+not already have, and `str` supplies all of them, so three would silently keep
+the inherited lexicographic behaviour.
+
+**Against a non-member they must raise `TypeError` directly, not return
+`NotImplemented`.** Returning `NotImplemented` is the ordinary Python idiom and
+it is wrong here for a specific reason: these are `str` subclasses, so when
+`RiskLevel.__lt__` declines, Python falls back to the reflected operation —
+`str.__gt__("medium", RiskLevel.LOW)` — which succeeds lexicographically. The
+comparison would answer, wrongly, and the trap this whole subsection exists to
+close would survive in the mixed-type case, which is exactly the case a policy
+loading a threshold from configuration produces. An earlier draft of this ADR
+claimed `NotImplemented` made `RiskLevel.LOW < "medium"` raise; it does not.
+
+Rank is derived from declaration order rather than a parallel table, so a level
+inserted in the middle cannot be given a rank that contradicts where it reads.
 
 **This amends ADR-0014 §4's "data only" convention, narrowly and on purpose.**
 That ADR says transitions live in `planning/` because "`core/types.py` is
@@ -329,7 +341,12 @@ carry that, so the enum is what makes the declaration possible rather than
 merely mandatory.
 
 `Decimal`, never a float, because this feeds spend limits and binary floating
-point is not a thing to accumulate money in.
+point is not a thing to accumulate money in. `amount` must be non-negative
+**and finite**: `Decimal` admits `Infinity` and `NaN`, both of which satisfy
+`ge=0` — `NaN` by making every comparison false rather than by being large — and
+neither has a JSON representation or survives arithmetic in a running total.
+`core` already rejects non-finite floats in `_freeze_json` (ADR-0014 §2) for the
+same reason; a currency amount deserves it more, not less.
 
 It deliberately does **not** model money the tool *moves*. The price of a flight
 lives in the call's parameters, not in the definition of the tool that books
@@ -398,6 +415,14 @@ author — a remotely-described integration cannot hand over a Python class — 
 because it is the shape model tool-calling already speaks. Enforcement is
 deferred (§7); carrying it is what lets enforcement land without a contract
 change.
+
+Its default is the shared pre-frozen `_EMPTY_PARAMS` that `PlanStep.parameters`
+already uses (ADR-0014 §2), **not** a `{}` literal. Pydantic does not validate
+defaults unless asked, so a bare `{}` would leave a plain, mutable `dict` on a
+frozen model — `definition.parameters_schema["type"] = "string"` would succeed
+after registration and after approval. Defaults are the easiest place for an
+immutability guarantee to leak, precisely because nothing about the field
+declaration looks wrong.
 
 ### 5. `ToolRegistry` — it answers questions, it does not rank
 
@@ -656,10 +681,14 @@ widening of this one.
   unknown id and an unsatisfied capability both reading as empty rather than
   raising, and the §1/§3/§4 consistency rules rejected at construction —
   including the `discloses`-implies-`side_effecting` pair, a non-positive
-  `idempotency_window` on a `KEYED` tool, a negative `latency`, and a blank
-  `description`. It must also prove the immutability the audit story rests on:
-  that neither a definition nor the `ToolCost` nested inside it can be mutated
-  after construction. With those, the *lookup*
+  `idempotency_window` on a `KEYED` tool, a negative `latency`, a blank
+  `description`, and a `PER_CALL` amount that is negative, infinite or `NaN`.
+  It must also prove the immutability the audit story rests on: that a
+  definition, the `ToolCost` nested inside it, and a `parameters_schema` left at
+  its default all refuse mutation after construction. And it must pin the
+  severity ordering in both operand orders, across all four operators, including
+  that a comparison against a bare string raises rather than answering. With
+  those, the *lookup*
   seam is exercised; the *metadata's* fitness is argued from its two named
   consumers rather than demonstrated by one.
 - **`cost` is an estimate nothing reconciles.** A tool whose declared
