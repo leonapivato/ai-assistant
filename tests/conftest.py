@@ -67,9 +67,12 @@ class _RunRecord:
 
 _RECORD = _RunRecord()
 
-#: nodeid -> (owning class, test name), so a report can be attributed without
-#: the report itself carrying the class.
-_OWNERS: dict[str, tuple[type, str]] = {}
+#: nodeid -> (owning class, test name, is-an-optional-obligation), so a report
+#: can be attributed without the report itself carrying any of it.
+_OWNERS: dict[str, tuple[type, str, bool]] = {}
+
+#: Marker a conformance suite puts on a test its implementations may skip.
+_OPTIONAL = "optional_obligation"
 
 
 def _is_unfiltered(config: pytest.Config) -> bool:
@@ -89,21 +92,29 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         cls = getattr(item, "cls", None)
         if cls is not None:
-            _OWNERS[item.nodeid] = (cls, getattr(item, "originalname", None) or item.name)
+            _OWNERS[item.nodeid] = (
+                cls,
+                getattr(item, "originalname", None) or item.name,
+                item.get_closest_marker(_OPTIONAL) is not None,
+            )
 
     deferred = [item for item in items if item.nodeid.startswith(_TRIAD_CHECK)]
     if deferred:
         items[:] = [item for item in items if not item.nodeid.startswith(_TRIAD_CHECK)] + deferred
 
 
-def _is_satisfactory(report: pytest.TestReport) -> bool:
+def _is_satisfactory(report: pytest.TestReport, *, optional: bool) -> bool:
     """Report whether one phase report is consistent with an obligation being met.
 
-    At the call phase, a pass is satisfactory and so is a skip -- the body ran
-    and chose to bow out, which is the contract deciding an obligation does not
-    apply (see ``ContextProviderContract``'s ``serves_a_fixed_instant``). A
-    *mark* skips at setup instead, before the body runs; that is imposed from
-    outside the contract, so it is not.
+    Only a call-phase pass is evidence that a contract's assertions ran. A skip
+    counts *only* where the suite itself marked the test ``optional_obligation``
+    and the test's own body then chose to bow out -- see
+    ``ContextProviderContract``'s ``serves_a_fixed_instant``, an obligation that
+    genuinely does not apply to a provider serving a fixed instant.
+
+    Any other skip is an obligation that did not happen, whatever its cause: a
+    ``pytest.skip("not implemented")`` in an unmarked contract test, or a mark
+    imposing a skip at setup before the body ever runs.
 
     ``wasxfail`` is never satisfactory: an expected failure is a contract
     assertion that did not hold, kept green by the mark.
@@ -111,7 +122,7 @@ def _is_satisfactory(report: pytest.TestReport) -> bool:
     if hasattr(report, "wasxfail"):
         return False
     if report.when == "call":
-        return bool(report.passed or report.skipped)
+        return bool(report.passed or (report.skipped and optional))
     return not (report.skipped or report.failed)
 
 
@@ -120,8 +131,8 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     owner = _OWNERS.get(report.nodeid)
     if owner is None:
         return
-    cls, name = owner
-    if not _is_satisfactory(report):
+    cls, name, optional = owner
+    if not _is_satisfactory(report, optional=optional):
         _RECORD.unsatisfactory.setdefault(cls, set()).add(name)
     elif report.when == "call":
         _RECORD.reported.setdefault(cls, set()).add(name)
