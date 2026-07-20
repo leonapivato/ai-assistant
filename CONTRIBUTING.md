@@ -104,11 +104,25 @@ commit. A reviewer that disagrees with a ratified decision files an ADR
 proposal; it does not block on it (authority hierarchy: `docs/review/guide.md`).
 Review is advisory tooling, not a hard gate; the only required check is `gate`.
 
-### Report the review before merging
+### Report the review, then mark it ready — on your own judgement
+
+Finishing a change is one continuous motion, and it belongs to whoever is doing
+the work:
 
 ```bash
-just ship      # posts the recorded review(s) to the PR
+just ship        # posts the recorded review(s) to the PR
+gh pr ready      # flip it out of draft
 ```
+
+**An agent does not ask permission for any of this** — not to run the review,
+not for the OpenAI spend it incurs, not to flip the PR ready. Deciding a change
+is done is the job; stopping to ask just adds a round-trip to something already
+authorized. Say what you concluded and why in the PR, and let the review and the
+gate speak for the rest.
+
+What still warrants stopping is unchanged and narrow: an irreversible or
+destructive action, or discovering the task itself was wrong. "Is this ready?"
+is not on that list.
 
 `ship` refuses unless an adversarial review exists for **the exact commit the PR
 head is on** — so the record cannot be a review of an earlier commit. It also
@@ -193,8 +207,9 @@ is protected and integration happens through pull requests — not local merges
   commit, open it as a **draft**, before the work is done. CI runs on every push
   so you get the gate continuously, and anyone else can see your direction (and
   any contract change) before it lands. Mark it **ready for review** when the
-  change is complete. Nothing automated fires on that transition any more
-  (ADR-0015) — it is a signal to humans.
+  change is complete — your call, made without asking (see "Report the review,
+  then mark it ready"). Nothing automated fires on that transition any more
+  (ADR-0015); it is a signal to humans.
 - **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
   on every PR and push; a PR cannot merge while it is red. This is enforced for
   everyone. Run the gate locally first anyway — CI is the backstop, not the

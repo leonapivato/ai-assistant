@@ -59,6 +59,12 @@ We accept that a pasted review is self-attested where a CI-posted one was not.
 The SHA anchor makes the common failure — a review of a stale commit — mechanical
 rather than a matter of care. It is not tamper-proof, and does not try to be.
 
+**The whole loop is the author's to run and to finish, agent or human.** Running
+the review, incurring its spend, and marking the PR ready are steps of doing the
+work, not decisions to escalate. An agent that pauses to ask "shall I review?" or
+"is this ready?" reintroduces by hand the round-trip this ADR removes from CI.
+Approval belongs at merge, where a human already reviews.
+
 **2. One clone per agent, not one worktree per branch.**
 `claim-workspace.sh`, `claim-workspaces.sh`, `release-workspace.sh`,
 `prune-workspaces.sh` and `list-workspaces.sh` are removed (~856 lines of shell,
