@@ -343,10 +343,11 @@ in CI. Add a Protocol without its triad and the gate goes red, naming what is
 missing.
 
 The check ships with an `EXEMPTIONS` list for Protocols whose backfill is still
-outstanding. That list is a backlog, not configuration: each entry names the
-missing parts and the issue tracking them, and the check fails if an entry
-outlives the gap it describes — so it can only shrink. It currently holds one
-entry (`FeedbackProcessor`, missing its canonical fake).
+outstanding. That list is a backlog, not an escape hatch: each entry names the
+missing parts and the issue tracking them, an entry that outlives its gap fails
+the check, and only the Protocols that predate the check may be named at all —
+so a new Protocol cannot buy itself an exemption, and the list can only shrink.
+It currently holds one entry (`FeedbackProcessor`, missing its canonical fake).
 
 This does not loosen contract-first. The sequence is two stages, not one:
 
