@@ -326,6 +326,11 @@ agg_churn="$(agg_field churn_lines)"
 agg_ratio="$(agg_field churn_ratio)"
 agg_commits="$(agg_field commits)"
 agg_supersedes="$(agg_field supersedes)"
+# Both are absent from artifacts recorded before they existed, and `binary_files`
+# is absent whenever the diff has no binary path at all — so each is rendered
+# only when present, never as a zero or an "exact" the reader has to discount.
+agg_bound="$(agg_field churn_bound)"
+agg_binary="$(agg_field binary_files)"
 
 {
     echo "$marker"
@@ -335,7 +340,22 @@ agg_supersedes="$(agg_field supersedes)"
     if [[ -n "$agg_round" ]]; then
         summary="round ${agg_round} · ${agg_net} lines net"
         [[ -n "$agg_commits" ]] && summary="${summary} across ${agg_commits} commit(s)"
-        [[ -n "$agg_ratio" ]] && summary="${summary} · churn ${agg_ratio}× (${agg_churn} touched)"
+        if [[ -n "$agg_binary" ]]; then
+            summary="${summary} + ${agg_binary} binary file(s) unmeasured"
+        fi
+        if [[ -n "$agg_ratio" ]]; then
+            # A churn figure computed after a squash, amend or rebase counts only
+            # the work still on the branch, so it is a floor rather than a
+            # measurement. The merge reviewer has to see that distinction or the
+            # number reads as "little rework happened" on precisely the branch
+            # that was reworked enough to be worth squashing (issue #97).
+            if [[ "$agg_bound" == "lower" ]]; then
+                summary="${summary} · churn ≥${agg_ratio}× (${agg_churn} touched;"
+                summary="${summary} lower bound — history rewritten, earlier rounds not counted)"
+            else
+                summary="${summary} · churn ${agg_ratio}× (${agg_churn} touched)"
+            fi
+        fi
         if [[ -n "$agg_supersedes" ]]; then
             # `ADR-0004:175,ADR-0012:98` → `ADR-0004 (175 lines), ADR-0012 (98 lines)`
             pretty="$(sed 's/:\([0-9]*\)/ (\1 lines)/g; s/,/, /g' <<<"$agg_supersedes")"
