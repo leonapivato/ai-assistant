@@ -538,6 +538,16 @@ refused with `InvalidResolutionError` unless the referenced id is present, its
 ruling was `CONFIRM`, no other recorded decision already resolves it, and its
 `tool`, `parameters_digest` and `step_id` match the incoming decision's exactly.
 
+**It checks the authorisation pointer too**, which is what makes §1's
+"verified end to end" true rather than aspirational: a resolving `ALLOW` is
+refused unless its `authorised_by` equals its `resolves`, and a resolving `DENY`
+is refused unless `authorised_by` is unset. Without that pair, a resolving
+`ALLOW` could name any confirmation it liked — or a string naming nothing — while
+satisfying every other check, and §5's disclosure floor would be satisfiable by
+fabrication after all. `authorises()` deliberately does not re-check it: the
+pointer is validated once, at the boundary where the referenced record is in
+hand, rather than at every later read where it is not.
+
 This makes the trail an active participant rather than a filing cabinet, which is
 a real cost worth stating: a store that validates is a store that can refuse a
 write, and a caller must handle that. It is accepted because the alternative is a
@@ -783,6 +793,10 @@ nobody declared treated as free.
   the non-emptiness ADR-0016 §2 states the obligation over. A tier exemption
   would let a declaration decide whether it gets gated, which is the
   self-certifying fast path ADR-0016 §3 refused.
+- **The authorisation pointer is validated where it can be.** `record` refuses a
+  resolving `ALLOW` whose `authorised_by` does not equal its `resolves`, and a
+  resolving `DENY` that carries one at all. The floor is only as good as this
+  check; without it the pointer is a string a policy could invent.
 - **A refusal is honoured.** `resolve(approved=False)` must yield `DENY`; no
   conforming policy can convert a user's "no" into an authorisation. The prompt
   is not theatre.
