@@ -136,6 +136,28 @@ class AuditTrailContract:
         assert stored is not None
         assert stored.ruling.outcome is PermissionOutcome.CONFIRM
 
+    async def test_two_racing_writes_of_one_id_settle_it_once(self, trail: AuditTrail) -> None:
+        """Write-once must survive an interleaving, like the resolution check.
+
+        ADR-0021 §4 makes the duplicate-id check, the resolution validation and
+        the append *one* operation. Racing two resolutions covers the second
+        half; without this the first half is untested, and a store that awaited
+        between "is this id taken?" and the append would let two writers both
+        observe a free id and both append — history rewritten by a replayed
+        write, which is the property the trail exists to deny.
+        """
+        results = await asyncio.gather(
+            trail.record(decision("d-1", ruled=ruling(PermissionOutcome.CONFIRM))),
+            trail.record(decision("d-1", ruled=ruling(PermissionOutcome.DENY))),
+            return_exceptions=True,
+        )
+
+        succeeded = [result for result in results if not isinstance(result, BaseException)]
+        refused = [result for result in results if isinstance(result, DuplicateDecisionError)]
+        assert len(succeeded) == 1, f"expected exactly one winner, got {results}"
+        assert len(refused) == 1, f"the loser must be refused, got {results}"
+        assert len(await trail.export()) == 1
+
     # --- the resolution invariant ----------------------------------------
 
     async def test_a_matching_resolution_is_accepted(self, trail: AuditTrail) -> None:
