@@ -93,7 +93,7 @@ blessed.
 
 ## Consequences
 
-**Easier.** The gate is ~18s locally (14.7s of it pytest, 566 tests), so the
+**Easier.** The gate is ~33s locally (27s of it pytest, 5,777 tests), so the
 full gate stays mandatory on every commit — no test selection, no judgment call,
 no CI-only divergence. Review iterates at local speed with no hosted spend and
 no draft/ready choreography. Roughly 2,600 lines of shell and shell-testing code

@@ -1,223 +1,93 @@
 ---
 name: find-parallel-work
-description: Survey the roadmap, WORKING.md, and core/protocols.py to find independent subsystem slices ready for parallel agents, then draft a GitHub tracking issue for them. Use when asked to find, plan, or scope parallel work for multiple agents, or to open an issue coordinating that work.
+description: Survey the roadmap and core/protocols.py to find independent subsystem slices ready to hand to agents, then draft a GitHub tracking issue for them. Use when asked to find, plan, or scope parallel work for multiple agents, or to open an issue coordinating that work.
 ---
 
 # find-parallel-work
 
-Produces one GitHub tracking issue that lays out a batch of independent,
-non-colliding work slices — sized so each one maps to a single
-`just claim-workspace <area>/<slug>` and a single agent. This is a
-dev-process tool for building `ai-assistant` itself, not a feature of the
-product. It **proposes** a batch; it never claims workspaces, edits
-`WORKING.md`, or spawns agents itself — a human reviews the issue and decides
-what to hand out.
+Produces one GitHub tracking issue laying out a batch of independent,
+non-colliding work slices, each sized for a single agent in a single clone.
+This is a dev-process tool for building `ai-assistant` itself, not a product
+feature. It **proposes**; the operator decides what actually gets dispatched.
 
-## 1. Gather ground truth — don't hand-roll it, and don't trust the checkout
+## 1. Survey a current `origin/main`
 
-`just status` and a plain file read both reflect whatever is currently
-checked out — they are not ref-aware. Running this skill from any branch
-other than an up-to-the-second `origin/main` (a workspace claimed an hour
-ago, the main checkout before its next fetch, anything) means these can
-silently report stale state even right after a `git fetch`, since fetch only
-updates the remote-tracking ref, not what's on disk. So never read them from
-"wherever this happens to be run" — always survey a disposable, freshly
-fetched `origin/main` on its own:
+State on disk can be stale, and a lane list computed from a stale tree proposes
+work that is already done. Read the ref, not the checkout:
 
-1. `git fetch origin`.
-2. Reserve a directory before touching anything else — `tmp_dir="$(mktemp
-   -d)"` actually creates and owns it, unlike `mktemp -u`, which only prints
-   an unused name with no guarantee it stays unused. From this point on, if
-   *any* later step in this list fails, remove it (`git worktree remove
-   "$tmp_dir/survey"` first if that step ran, either way `rm -rf
-   "$tmp_dir"`) before stopping — don't leave a partial survey registered.
-3. `git worktree add --detach "$tmp_dir/survey" origin/main` (a
-   non-existent child path `git worktree add` can create, inside the
-   directory `mktemp -d` already owns) — never a fixed literal path, so two
-   runs of this skill can't collide.
-4. Note the commit actually checked out — `git -C "$tmp_dir/survey"
-   rev-parse HEAD`, not a fresh `git rev-parse origin/main` — step 4 below
-   needs it later to tell whether anything has changed since this survey.
-   Re-resolving `origin/main` here instead would record whatever it points
-   to *now*, which can have moved again in the moments since step 3 actually
-   checked it out — recording `HEAD` of the worktree itself is the one
-   value guaranteed to match what was actually surveyed.
-5. From `$tmp_dir/survey`, read **and retain** these — don't discard the
-   worktree until every one of them has actually been read, since step 2
-   below needs the `core/protocols.py` and `core/types.py` contents
-   specifically, not just what `just status` summarizes:
-   - The derived picture — module counts per package, the current
-     `core/protocols.py` Protocol inventory, and ADR states — via
-     `python3 scripts/project_status.py --root "$tmp_dir/survey"`, run
-     directly rather than through `just status`/`uv run`: the script's own
-     docstring documents it as stdlib-only and runnable bare, and its
-     `--root` flag exists precisely so a caller doesn't have to be standing
-     inside the checkout it's inspecting. Skipping `uv run` here also means
-     skipping the `.venv` bootstrap that command would otherwise trigger on
-     a brand-new worktree — wasted disk and time for a status read, not a
-     safety issue (`git worktree remove` isn't blocked by an ignored
-     directory like `.venv` either way, verified directly). This is the
-     canonical source for "what's actually built" — never guess it.
-   - The actual contents of `src/ai_assistant/core/protocols.py` and
-     `src/ai_assistant/core/types.py` — step 2 checks each candidate against
-     both, and by the time you're in step 2 the worktree is already gone.
-   - `WORKING.md` — the *human-declared* picture: lane ownership and ADR
-     numbers currently in flight. Any subsystem with a named owner, or any
-     ADR number claimed against it that isn't yet `Accepted`, is off the
-     table for this batch.
-   - `docs/roadmap.md` — the "first vertical" seven-artifact table and the
-     build sequence checklist. A candidate lane must map to an unchecked item
-     there; don't propose work the roadmap hasn't sequenced yet.
-   - `VISION.md` — pull the specific principle/section that justifies each
-     lane, so the issue reads as "why this, now" rather than a bare task
-     list.
-6. Only now, with everything above actually read and retained, remove the
-   worktree (`git worktree remove "$tmp_dir/survey"` then `rm -rf
-   "$tmp_dir"`) — step 2 onward doesn't need it kept around.
+```bash
+git fetch origin
+git show origin/main:docs/roadmap.md
+git show origin/main:src/ai_assistant/core/protocols.py
+git show origin/main:src/ai_assistant/core/types.py
+```
+
+For the derived picture — module counts per package, Protocol inventory, ADR
+states — run `python3 scripts/project_status.py` (stdlib-only, runnable bare).
+It reads the working tree, so fast-forward the clone first
+(`git merge --ff-only origin/main` while on `main`) or its answer is the stale
+one you just avoided.
+
+Also check what is already claimed by open work:
+
+```bash
+gh pr list --state open --json number,title,headRefName
+gh issue list --state open --limit 100 --json number,title,body
+```
+
+Open PRs and issues are where work-in-flight lives (ADR-0015). There is no
+ledger file; do not look for one.
 
 ## 2. Compute candidates
 
-A subsystem is a valid candidate for this batch only if **all** of:
+A subsystem is a valid candidate only if **all** of:
 
-1. It's `_unclaimed_` in `WORKING.md` (no owner, no in-flight ADR against it).
+1. No open PR or issue already covers it.
 2. It maps to one of the roadmap's **first-vertical seven artifacts**
    (`UserProfile`, `Memory`, `CurrentContext`, `Goal`, `ToolDefinition`,
-   `ActionPlan`, `FeedbackEvent`) — not merely to *any* unchecked
-   build-sequence item, and not to the wider per-subsystem candidate-artifact
-   table. The build-sequence checklist tells you which of the seven are
-   still unbuilt; an unchecked item that isn't one of the seven (e.g.
-   `permissions`' `ActionPolicy`) fails this rule and belongs in "Out of
-   scope" as second-wave, not in the batch. **This is the authoritative
-   signal for "still needs building," not rule 3 below.**
-3. `just status`'s module count is consistent with rule 2 — "contract only"
-   or clearly behind the others, matching the roadmap's unchecked state.
-   `scripts/project_status.py` itself calls this count "a rough progress
-   proxy," not a completion test: a subsystem can be genuinely built with
-   few, dense modules, and the roadmap checkbox is what actually says so. If
-   the module count *disagrees* with the roadmap checklist — the checklist
-   says unbuilt but the count looks substantial, or vice versa — don't
-   silently trust either one: drop that lane from the batch and name the
-   discrepancy in "Out of scope" instead of guessing which source is right.
+   `ActionPlan`, `FeedbackEvent`). An unchecked build-sequence item that isn't
+   one of the seven belongs in "Out of scope" as second-wave.
+3. `project_status.py`'s module count is consistent with rule 2. That count is
+   "a rough progress proxy," not a completion test — a subsystem can be built
+   with few dense modules. If the count and the roadmap checklist **disagree**,
+   drop the lane and name the discrepancy rather than guessing which is right.
 
-For each candidate, check whether it has entries in **both**
-`core/protocols.py` and `core/types.py` yet. A subsystem can be missing
-either independently — a new Protocol method can take/return a pydantic
-model that doesn't exist yet, and CLAUDE.md requires any public data crossing
-a subsystem boundary to live in `core/types.py`, not just the Protocol
-signature. If either is missing, flag it explicitly: that's the shared
-surface CONTRIBUTING.md calls out as highest-collision — two lanes both
-proposing a `core/` addition the same day is exactly the scenario "push the
-contract first, say so in the PR title" exists to defuse. Don't silently
-omit this risk from the issue; state it as an instruction to whoever picks up
-the lane, and name which of the two files (or both) is involved.
+For each candidate, note whether it needs an entry in `core/protocols.py`,
+`core/types.py`, or both — a Protocol method can take or return a type that
+does not exist yet, and public data crossing a subsystem boundary must live in
+`core/types.py`.
 
-**Cross-check the batch, not just each lane in isolation.** If two or more
-selected candidates would each need to touch `core/protocols.py` or
-`core/types.py`, they are not actually independent — "push the contract
-first" only defuses the collision for one of them; the second is now building
-against a contract file that's about to change out from under it. Don't
-present both as start-now-in-parallel. Either drop the batch to one `core/`
-touching lane plus everything that's a pure leaf (no `core/` change needed),
-or explicitly sequence the second to stack on the first once the first's
-contract commit is pushed. The picker of the second lane must `git fetch
-origin` first and stack on `origin/<first-lane-branch>`, not the bare branch
-name — the first lane's contract commit exists on a teammate's push, not
-necessarily as a local ref on the second picker's machine, and
-`claim-workspace` resolves whatever base string it's given without fetching
-for you (`just claim-workspace <area>/<slug> origin/<first-lane-branch>`).
-State which of the two this batch is doing, don't leave it implicit.
+**Cross-check the batch as a whole.** Two lanes that both touch `core/` are not
+independent: the second would build against a contract about to change. Either
+keep one `core/`-touching lane plus pure leaves, or explicitly sequence the
+second to start after the first's contract PR merges. State which; don't leave
+it implicit.
 
 ## 3. Draft the issue
 
-One issue, not one per lane — matches `WORKING.md`'s own lightweight-ledger
-style. Structure:
+One issue for the batch, not one per lane.
 
-- **Title**: short, names the batch (e.g. "Parallel work: planning + tools
-  contracts").
-- **Why**: 2-3 sentences linking the specific `VISION.md` principle and
-  `docs/roadmap.md` line this batch advances.
-**Pre-assign ADR numbers for the whole batch before writing any lane's
-checklist item** — don't let each lane compute its own number independently,
-even a stacked/sequenced one, or two `core/`-touching lanes in the same batch
-can both land on the same number. Read `WORKING.md`'s "Highest merged ADR"
-line and its "ADR numbers in flight" table once, take one past the higher of
-the two as the batch's starting number, then hand out consecutive numbers —
-first, second, third — to every `core/`-touching lane in the batch in the
-order they're sequenced (the one starting now gets the first number; each
-stacked lane after it gets the next). It is still provisional, the same as
-any ADR number is (`CONTRIBUTING.md` — "provisional until merge"): unrelated
-concurrent work *outside* this batch can still land one of these numbers
-first, in which case the standard "second to merge renumbers" process
-applies, unchanged.
+- **Title**: names the batch (e.g. "Parallel work: planning + tools contracts").
+- **Why**: 2–3 sentences tying the batch to a specific `VISION.md` principle and
+  `docs/roadmap.md` line.
+- **One checklist section per lane**, each with: the subsystem and roadmap
+  artifact(s) it delivers, a proposed `<area>/<slug>` branch name, and whether
+  it touches `core/protocols.py`, `core/types.py`, or both.
 
-- **One checklist section per lane**, each with:
-  - Subsystem name and the roadmap artifact(s) it delivers.
-  - Proposed `area/slug` for `just claim-workspace`.
-  - Whether it touches `core/protocols.py`, `core/types.py`, or both. If so,
-    write this lane's number from the batch-level assignment above into its
-    checklist item (e.g. "touches `core/`: claim ADR-0014") — don't leave the
-    picker to compute it independently later. The coordination instruction:
-    **first**
-    `just claim-workspace <area>/<slug>` (CLAUDE.md — claiming a workspace is
-    the first action of any task, before editing anything, `WORKING.md`
-    included); **then**, from inside that workspace, register the lane and
-    the pre-assigned ADR number in `WORKING.md`; **then draft the ADR and
-    get it through architecture review and ratified before implementing
-    against the new contract** (golden rule 5 — claiming the number reserves
-    it, it is not ratification); only once ratified, push the contract
-    commit ahead of the dependent implementation and flag it in the PR
-    title, so a concurrent lane sees the new shape before building against
-    the old one.
-  - A reminder that registering the lane in `WORKING.md` (per the ordering
-    above) is the picker's job on pickup — this skill does not do that
-    itself.
-- **Out of scope**: name anything that looked tempting but got excluded in
-  step 2 and why (already owned, not in the first vertical, etc.) so the
-  issue doesn't get re-litigated in comments.
+For a `core/`-touching lane, the checklist item says the contract ADR ships as
+its own PR and merges before the implementation (ADR-0015 §5). **Do not assign
+ADR numbers here** — the operator assigns them at dispatch. Proposing a number
+in an issue that sits open for a week just recreates the stale-ledger problem.
+
+- **Out of scope**: anything excluded in step 2 and why, so it isn't
+  re-litigated in comments.
 
 ## 4. Confirm before posting
 
-`gh issue create` is the one externally-visible action here — it posts to
-shared GitHub state other people see. Print the drafted body and get
-explicit confirmation before running it. Never auto-fire this step.
+`gh issue create` posts to shared state. Print the drafted body and get explicit
+confirmation first — never auto-fire it.
 
-State can go stale while that confirmation is pending — not just between
-step 1 and here, but for however long the human takes to respond. Everything
-below runs **immediately before the actual `gh issue create` call**, after
-confirmation has been given, not once earlier and reused:
-
-1. **Re-check whether `origin/main` moved first:** `git fetch origin`,
-   compare against the commit noted in step 1. If it hasn't moved, the lane
-   list is still current — go to 2. If it has, redo **steps 1 through 3 in
-   full** against the new commit — not just 1 and 2: step 3's ADR
-   pre-assignment was computed from the old `WORKING.md` state, and an ADR
-   number that was free at the original survey can have been claimed by the
-   time `origin/main` moved, same as any other candidacy fact. This can
-   add or drop lanes, not just change ownership flags.
-2. **Re-scan for duplicates against the now-final lane list, every time,
-   regardless of whether step 1 changed anything:** `gh issue list --state
-   open --limit 200 --json title,body,url` — the bare command only returns
-   titles; without `--json body` a match hiding in an issue's body text (a
-   generic title, the lane named only in a checklist line) is invisible.
-   Scan both titles and bodies for an existing tracking issue already
-   proposing one or more of the lanes *currently in the draft* — including
-   any lane step 1 just added, not only the ones from the original survey.
-   Someone else (or an earlier run of this skill) can have opened a matching
-   issue during the wait, independent of whether `origin/main` moved at
-   all. If a match exists, don't create a new issue for the overlapping
-   lane(s) — point back to the existing one instead (in the batch's "Out of
-   scope" section, or by not posting at all if the whole batch overlaps).
-3. If either check above changed the lane list, the ADR assignments, or any
-   other checklist content from what was already shown and approved,
-   **re-print the revised draft and get confirmation again** before
-   proceeding — never post a body different from the one actually approved.
-
-Both checks are best-effort, not an atomic reservation — closing either
-fully would need a real lane/number-reservation mechanism, out of scope for
-a proposal tool. This closes the gap for anything already merged to
-`main` or already posted as an issue; work only pushed to someone else's
-still-open feature branch, or a duplicate issue opened in the instant
-between this scan and the actual `gh issue create` call, is outside what
-any of these checks can guarantee — merged/posted state is authoritative,
-not before (same reason `CONTRIBUTING.md`'s "stay in your lane" check is
-best-effort, not atomic, for two people claiming at once).
+If the confirmation takes a while, re-run the `gh issue list` scan from step 1
+immediately before creating, in case someone opened an overlapping issue in the
+meantime. That is a courtesy check, not a reservation; merged and posted state
+is authoritative, nothing before it.
