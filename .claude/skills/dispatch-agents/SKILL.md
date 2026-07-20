@@ -30,17 +30,25 @@ A clone on a non-`main` branch is occupied. A clone with no `.venv` needs
 letting the agent discover it.
 
 **Assign ADR numbers yourself.** ADR-0015 §5 makes this the dispatcher's job
-precisely to remove the race a shared ledger could not arbitrate. Read *both*
-sources — merged ADRs and open branches, since a number is claimed the moment a
-lane starts, not when it merges:
+precisely to remove the race a shared ledger could not arbitrate. A number is
+claimed the moment a lane starts, not when it merges, so `docs/adr/` on `main`
+is never sufficient on its own:
 
 ```bash
-git ls-tree origin/main docs/adr/ --name-only | tail -3
-git ls-remote --heads origin | awk '{print $2}'   # branch names carry claims
+git fetch origin --prune
+git ls-tree origin/main docs/adr/ --name-only              # merged
+for b in $(git ls-remote --heads origin | awk '{sub("refs/heads/","",$2); print $2}'); do
+  git ls-tree "origin/$b" docs/adr/ --name-only            # written but unmerged
+done | sort -u
+gh pr list --state open --limit 100 --json number,title,body \
+  | grep -oE 'ADR-[0-9]{4}' | sort -u                      # claimed in prose
 ```
 
-Checking only `docs/adr/` on `main` will hand out a number another live lane is
-already using.
+**None of these is authoritative for a number you assigned but whose ADR is not
+yet written.** Branch names need not contain the number — `tools/tooldefinition-registry`
+carried ADR-0016 — so a name scan alone will hand out a live number. Keep your
+own list of what you have handed out this session and treat it as the primary
+record; the commands above catch what predates you.
 
 ## 2. Write the brief
 
@@ -91,10 +99,15 @@ gh pr diff <n> --name-only              # scope claims: did it touch what it sai
 editing one file is invisible in either PR alone:
 
 ```bash
-for p in $(gh pr list --state open --json number --jq '.[].number'); do
-  gh pr diff "$p" --name-only | sed "s|^|$p |"
-done | sort -k2 | uniq -f1 -D
+prs=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
+[ "$(printf '%s\n' "$prs" | wc -l)" -ge 100 ] && echo "SATURATED — paginate" >&2
+for p in $prs; do gh pr diff "$p" --name-only | sed "s|^|$p |"; done \
+  | sort -k2 | uniq -f1 -D
 ```
+
+`gh pr list` defaults to 30 and truncates **silently**, which would report no
+collision between the lanes it never looked at. Pass an explicit limit and check
+for saturation, the same guard `find-parallel-work` uses.
 
 ## 4. Adjudicate escalations — do not encode the answers
 
@@ -122,9 +135,14 @@ time with full confidence.
 
   ```bash
   gh pr update-branch <n> --rebase
-  gh pr checks <n>            # wait for pass
-  gh pr merge <n> --rebase --admin --delete-branch
+  gh pr checks <n> --watch --fail-fast && \
+    gh pr merge <n> --rebase --admin --delete-branch
   ```
+
+  The `&&` is load-bearing, and so is `--watch`. Bare `gh pr checks` exits
+  immediately with status 8 while checks are *pending* — run as two separate
+  commands, it reports "no checks reported yet" and the merge proceeds anyway,
+  admin-bypassing the very gate this step exists to wait for.
 
 - **Rebase-merge only** — the repo forbids squash and merge commits, and
   requires linear history.
@@ -142,3 +160,12 @@ The dominant cost is agent tokens, not wall time, and the dominant *waste* is
 rework from a thin brief. Prefer fewer, larger, well-fenced lanes over many
 small ones. A lane that needs three rounds of correction cost more than the two
 lanes it displaced.
+
+**These commands are illustrations, not an implementation.** Extracting them
+into tested scripts has been proposed and is declined deliberately: that is the
+`claim-workspace.sh` shape ADR-0015 deleted — ~856 lines of shell plus ~1,770
+lines of shell tests — and the `fix(dev)` commits that maintained it dominated
+the history. The failure modes here are caught by a human reading a result, and
+the expensive ones (a stale gate, a silent truncation) are guarded by the checks
+above rather than by more code. If this file ever needs its own test suite, it
+has become the thing ADR-0015 removed.
