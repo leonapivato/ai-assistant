@@ -94,16 +94,22 @@ class MemoryIngestor:
         return MemoryIngestResult(decision=decision, record_id=record_id)
 
     async def _detect_conflicts(self, record: MemoryRecord) -> list[MemoryRecord]:
+        # Over-fetch by one, because the store applies the limit before this
+        # method can drop the proposal's own record: a re-proposal would
+        # otherwise spend a slot on a record that is then discarded, hiding a
+        # genuine conflict ranked just below it. One extra suffices — ids are
+        # unique in a store, so at most one match can be the proposal itself.
         matches = await self._store.search(
             record.content,
-            limit=self._conflict_limit,
+            limit=self._conflict_limit + 1,
             kinds=[MemoryKind(record.kind)],
         )
-        return [
+        conflicts = [
             match
             for match in matches
             if match.id != record.id and (match.score or 0.0) >= self._conflict_threshold
         ]
+        return conflicts[: self._conflict_limit]
 
     async def _apply(
         self,

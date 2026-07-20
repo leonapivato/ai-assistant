@@ -412,6 +412,89 @@ async def test_learn_does_not_treat_the_proposal_itself_as_a_conflict() -> None:
     assert policy.calls[1].conflicts == ()
 
 
+async def test_learn_does_not_let_the_proposal_itself_consume_a_conflict_slot() -> None:
+    """Excluding the proposal must not cost a slot the limit already spent (#110).
+
+    The store applies ``conflict_limit`` before the loop can drop the proposal's
+    own record, so at ``conflict_limit=1`` a re-proposal used to leave the policy
+    seeing no conflict at all — while a genuine one sat just below it.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    content = "prefers concise replies"
+    # Added self-first so the equally-scoring pair ranks it above the rival: the
+    # exact order in which the old code discarded the only slot it fetched.
+    for record_id in ("pref-self", "pref-rival"):
+        await memory.add(
+            PreferenceMemory(
+                id=record_id,
+                content=content,
+                preference=content,
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+                ),
+            )
+        )
+    policy = FakeMemoryPolicy()
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        policy=policy,
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(
+            [
+                MemoryUpdateProposal(
+                    proposed=PreferenceMemory(
+                        id="pref-self",
+                        content=content,
+                        preference=content,
+                        provenance=Provenance(
+                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+                        ),
+                    ),
+                    rationale="user preference",
+                )
+            ]
+        ),
+        conflict_limit=1,
+        now=_clock,
+    )
+
+    await loop.learn(_preference_feedback())
+
+    assert [record.id for record in policy.calls[0].conflicts] == ["pref-rival"]
+
+
+async def test_learn_offers_the_policy_no_more_conflicts_than_the_limit() -> None:
+    """Over-fetching to make room for the exclusion must not widen the limit."""
+    memory = FakeMemoryStore(now=_clock)
+    content = "prefers concise replies"
+    for index in range(3):
+        await memory.add(
+            PreferenceMemory(
+                id=f"pref-{index}",
+                content=content,
+                preference=content,
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+                ),
+            )
+        )
+    policy = FakeMemoryPolicy()
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        policy=policy,
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(),
+        conflict_limit=2,
+        now=_clock,
+    )
+
+    await loop.learn(_preference_feedback())
+
+    assert len(policy.calls[0].conflicts) == 2
+
+
 async def test_learn_applies_every_proposal_in_order() -> None:
     memory = FakeMemoryStore(now=_clock)
     proposals = [
