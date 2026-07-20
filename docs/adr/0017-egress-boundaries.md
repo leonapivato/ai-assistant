@@ -135,9 +135,41 @@ with one unsatisfied.
 - **A named approver able to refuse.** An inspectable record makes an overbroad
   send visible, not refusable. Which combinations `permissions/` refuses is its
   ADR's to write; that the decision exists and can say no is required here.
-- **The detailed obligations in issue #93** — binding envelope and credential
-  references, multi-recipient sets, per-protocol canonicalisation, resolution
-  as a gated call, audit outcome states, and the failure-path test matrix.
+- **What is transmitted is bound to what was authorised**, immutably, and
+  consumed unchanged — covering at minimum the connected account, the canonical
+  destination set, the approved payload description and the decision. Credential
+  *values* are excluded from that binding: bind a reference, fetch the secret
+  after approval, or the binding and every audit record derived from it become
+  Tier 0 stores.
+- **Multi-recipient calls are authorised as one set**; an unauthorised member
+  fails the whole call rather than being silently dropped from it.
+- **Destinations are canonicalised per protocol**, defaulting to exact
+  comparison wherever equivalence cannot be proven, with both supplied and
+  canonical forms audited. Case folding an address whose local part is
+  case-sensitive lets a grant for one address authorise another.
+- **Resolving a name to an identifier is itself a gated, audited call** — or is
+  forbidden, with destinations required to come from data already obtained that
+  way. It may not be an ungated side channel.
+- **Audit records carry an attempt identifier and an explicit outcome** —
+  pending, succeeded, failed, indeterminate — with a path for reconciling
+  records left pending by a crash. Otherwise a timeout is indistinguishable
+  from a successful disclosure.
+- **Outbound payload classification is settled** (issue #94), including how
+  Tier 0 a user typed into a conversation is treated. Without it the tier
+  description above is unusable for tool arguments: an implementation could
+  classify a pasted OAuth token as Tier 1 because it arrived in conversation,
+  pass inspection, and disclose a credential under weaker policy.
+- **Failure paths are tested, not just the happy path** — at minimum: denial
+  performs no credential read and no network I/O; a hostile base URL and a
+  cross-host redirect are both refused without the credential travelling;
+  canonicalisation boundaries resolve as the protocol says; a failed resolution
+  does not fall through to a send; destination, payload and transport cannot
+  change between authorisation and transmission; a multi-recipient call with one
+  unauthorised member fails entirely; a crash-pending record is reconcilable.
+
+Issue #93 tracks the implementation of these, but the obligations are the list
+above — an issue can be edited or closed narrowly, and the decision record has
+to stand in-repo (ADR-0001).
 
 A boundary meeting these in a document but not in code is approved, not
 designated, and an approved boundary transmits nothing.
@@ -244,9 +276,11 @@ Tool egress becomes *permissible in principle*; no particular tool, destination
 or payload is authorised, and by itself nothing transmits. Also out of scope and
 tracked: how outbound content is classified by provenance, including Tier 0 a
 user typed into a conversation (issue #94); the detailed invocation obligations
-(#93); and ADR-0004 §7's minimisation rule, which is written about the model
+(#93, whose binding content is §3's list); and ADR-0004 §7's minimisation rule,
+which is written about the model
 provider and stays as scoped — the equivalent obligation on tool payloads is
-imposed by §3 rather than read into §7.
+imposed by §3 rather than read into §7. Note that #94 is a §3 condition, not
+merely deferred: the seam cannot be designated until it is settled.
 
 ## Consequences
 
