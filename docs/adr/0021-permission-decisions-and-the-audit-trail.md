@@ -1,6 +1,6 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-20
 
 ## Context
