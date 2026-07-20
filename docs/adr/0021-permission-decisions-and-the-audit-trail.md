@@ -482,14 +482,15 @@ ADR-0017 §3 makes gated credential access a condition on the egress seam. Addin
 a second request shape now would mean guessing the answer to an open question and
 ratifying a union type around the guess.
 
-`ActionRequest` is therefore about invoking a tool, and **extending this contract
-to cover direct data access will be a breaking change, not an additive one** — a
-union parameter on `decide`, or a second Protocol beside it. An earlier draft of
-this section called it additive, which was simply wrong: `decide` names a
-concrete parameter type, so widening it breaks every structural implementation
-under golden rule 5. Saying so is the point of deferring it honestly. Which of
-the two shapes is right depends on what #74 decides the rule is, and that is a
-reason to wait rather than to guess now.
+`ActionRequest` is therefore about invoking a tool, and the two ways to cover
+direct data access later differ in exactly this respect: **widening `decide`'s
+parameter is breaking; adding a second Protocol beside `ActionPolicy` is
+additive.** `decide` names a concrete type, so a union parameter breaks every
+structural implementation under golden rule 5 — an earlier draft called that
+additive, which was wrong. A separate Protocol takes nothing away from anyone
+and is therefore the presumptive shape, and it is named as such rather than left
+to be discovered. What #74 settles is whether direct data access is a permission
+subject at all and under what rule; the *shape* is not the part that is stuck.
 
 ### 4. The audit trail is append-only, and erasure is wholesale
 
@@ -538,6 +539,15 @@ refused with `InvalidResolutionError` unless the referenced id is present, its
 ruling was `CONFIRM`, no other recorded decision already resolves it, and its
 `tool`, `parameters_digest` and `step_id` match the incoming decision's exactly.
 
+**A resolution may not predate its confirmation.** `record` refuses a resolving
+decision whose `decided_at` is earlier than the referenced `CONFIRM`'s. Nothing
+else in the invariant notices, so without this a trail could show an answer
+timestamped before the question, and `recent()` would present them in that
+order — an audit record that is internally consistent and chronologically false,
+which is worse than one that is obviously broken. Equal timestamps are permitted:
+a fast confirmation at a coarse clock resolution is real, and refusing it would
+reject correct behaviour to catch nothing.
+
 **It checks the authorisation pointer too**, which is what makes §1's
 "verified end to end" true rather than aspirational: a resolving `ALLOW` is
 refused unless its `authorised_by` equals its `resolves`, and a resolving `DENY`
@@ -553,9 +563,18 @@ a real cost worth stating: a store that validates is a store that can refuse a
 write, and a caller must handle that. It is accepted because the alternative is a
 `resolves` pointer that means nothing — a `CONFIRM` shown to the user for one
 action and an `ALLOW` recorded for another, with the trail attesting that the
-user agreed. The single-resolution rule matters for the same reason: without it,
-one confirmation could be spent authorising an unbounded number of executions,
-which is how "approve once" quietly becomes "approve always".
+user agreed. The single-resolution rule matters for the same reason: without it, one
+confirmation could be answered repeatedly, so a "no" could be followed by a "yes"
+until one stuck.
+
+**It bounds resolutions, not executions, and the difference is worth being
+precise about.** `authorises()` is a pure comparison, so the same resolved
+`ALLOW` answers `True` every time it is asked — one approval can therefore back
+repeated invocations of the identical request. Making an approval single-*use*
+needs an atomic consume-on-execution step, which belongs to the invocation
+contract (ADR-0016 §7) and is the same seam ADR-0014 §7's exactly-once debt
+already waits on. This ADR does not claim it: "approve once" means the question
+is settled once, not that the answer is spent on exactly one call.
 
 **There is no `delete(id)`; there is `clear()`.** ADR-0004 §6 gives the user the
 right to delete their data and ADR-0004 §7 makes this store Tier 1, so it must
