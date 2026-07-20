@@ -25,7 +25,7 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
 )
-from ai_assistant.testing import FakeFeedbackProcessor
+from ai_assistant.testing import FakeFeedbackProcessor, FakeMemoryStore
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import FeedbackProcessor
@@ -125,30 +125,47 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
     assert record.provenance.last_updated == _WHEN
 
 
-async def test_synthesised_ids_are_sequential_and_per_instance() -> None:
-    # Deterministic ids are what make the fake usable as a fixture: a fresh fake
-    # always starts at 1, so a test can assert an exact id without depending on
-    # what ran before it. A process-global counter would not survive that.
+async def test_synthesised_ids_are_derived_from_the_feedback() -> None:
+    # Deterministic ids are what make the fake usable as a fixture, but a counter
+    # would make them depend on how many events came first. Deriving them from the
+    # feedback keeps them stable under reordering — and identical across instances.
     processor = FakeFeedbackProcessor()
 
-    [first] = await processor.process(_event())
-    [second] = await processor.process(_event())
+    [first] = await processor.process(_event(content="likes tea"))
+    [second] = await processor.process(_event(content="likes coffee"))
+    [elsewhere] = await FakeFeedbackProcessor().process(_event(content="likes tea"))
 
-    assert (first.proposed.id, second.proposed.id) == ("fake-memory-1", "fake-memory-2")
-    [fresh] = await FakeFeedbackProcessor().process(_event())
-    assert fresh.proposed.id == "fake-memory-1"
+    assert first.proposed.id != second.proposed.id  # different feedback, different record
+    assert first.proposed.id == elsewhere.proposed.id  # same feedback, same record
 
 
-async def test_two_default_fakes_issue_colliding_ids() -> None:
-    # The documented cost of restarting at 1: two fakes tread on each other in a
-    # shared store. Pinned so it stays a known trade-off rather than a surprise —
-    # and so the docstring prescribing an injected factory has a test behind it.
-    [collides] = await FakeFeedbackProcessor().process(_event())
-    [also_collides] = await FakeFeedbackProcessor().process(_event())
-    assert collides.proposed.id == also_collides.proposed.id
+async def test_two_fakes_do_not_overwrite_each_other_in_a_shared_store() -> None:
+    # The failure a per-instance counter would cause: both fakes issue id #1, and
+    # the second write silently replaces the first. Exercised against the real
+    # shared store, not just asserted on the ids.
+    store = FakeMemoryStore()
+    for content in ("likes tea", "likes coffee"):
+        [proposal] = await FakeFeedbackProcessor().process(_event(content=content))
+        await store.add(proposal.proposed)
 
-    [distinct] = await FakeFeedbackProcessor(id_factory=lambda: "b-1").process(_event())
-    assert distinct.proposed.id != collides.proposed.id
+    assert sorted(record.content for record in await store.export()) == [
+        "likes coffee",
+        "likes tea",
+    ]
+
+
+async def test_ids_distinguish_feedback_that_differs_only_in_kind_or_subject() -> None:
+    # Content alone is not the identity: the same words targeting a different
+    # memory kind, or scoped to a different subject, is a different record.
+    words = "office is in Boston"
+    processor = FakeFeedbackProcessor()
+
+    [baseline] = await processor.process(_event(content=words))
+    [other_kind] = await processor.process(_event(content=words, memory_kind=MemoryKind.SEMANTIC))
+    [other_subject] = await processor.process(_event(content=words, subject="work"))
+
+    ids = {baseline.proposed.id, other_kind.proposed.id, other_subject.proposed.id}
+    assert len(ids) == 3
 
 
 async def test_id_factory_is_injectable() -> None:
