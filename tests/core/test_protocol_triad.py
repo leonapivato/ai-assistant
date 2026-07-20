@@ -173,14 +173,24 @@ def _canonical_fake(protocol: str) -> type | None:
     return fake
 
 
-def _own_fixtures(cls: type) -> dict[str, Callable[..., object]]:
-    """Return the fixtures ``cls`` itself defines, by name, unwrapped."""
-    return {
-        name: raw
-        for name, value in vars(cls).items()
-        if isinstance(raw := getattr(value, "__wrapped__", None), FunctionType)
-        and hasattr(value, "_fixture_function_marker")
-    }
+def _resolved_fixtures(cls: type) -> dict[str, Callable[..., object]]:
+    """Return the fixtures visible on ``cls``, by name, unwrapped.
+
+    Resolved through the MRO with normal override precedence, because a
+    binding class may legitimately take its subject fixture from a shared base
+    (``class TestFakeStoreContract(FakeStoreFixtures, MemoryStoreContract)``)
+    rather than define it inline. Looking only at ``vars(cls)`` would reject
+    that, and would also miss an inherited fixture supplying a second subject.
+    """
+    fixtures: dict[str, Callable[..., object]] = {}
+    for klass in cls.__mro__:
+        for name, value in vars(klass).items():
+            raw = getattr(value, "__wrapped__", None)
+            if name in fixtures or not isinstance(raw, FunctionType):
+                continue
+            if hasattr(value, "_fixture_function_marker"):
+                fixtures[name] = raw
+    return fixtures
 
 
 def _fixtures_requested_by(suite: type, test_names: Iterable[str]) -> set[str]:
@@ -260,7 +270,7 @@ def _binds_fake(cls: type, protocol: str, requested: set[str]) -> bool:
     subject_type = getattr(protocols_module, protocol)
     values = [
         value
-        for name, func in _own_fixtures(cls).items()
+        for name, func in _resolved_fixtures(cls).items()
         if name in requested and (value := _fixture_value(func)) is not None
     ]
     if not any(isinstance(value, fake) for value in values):
