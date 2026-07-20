@@ -9,211 +9,157 @@ Runs the loop that begins where `find-parallel-work` stops. That skill
 *proposes* lanes; this one dispatches them, checks what returns, and merges in
 an order that respects contract-first.
 
-This is a dev-process tool for building `ai-assistant` itself. It covers the
-mechanical parts only — the judgement calls are yours, and §4 says why encoding
-them is a mistake.
+The commands here are illustrations for an operator, not an implementation —
+see §6. The judgement calls are yours, and §4 says why encoding them is a
+mistake.
 
 ## 1. Preflight
 
-**Inventory the clones.** Agents run one per clone (ADR-0015 §2), never in
-linked worktrees, and never in the user's primary clone:
+**Inventory the clones.** One agent per clone (ADR-0015 §2), never a linked
+worktree, never the user's primary clone — the `-*` glob excludes it:
 
 ```bash
 for d in ~/projects/ai-assistant-*; do
-  printf '%s: %s %s\n' "$d" "$(git -C "$d" branch --show-current)" \
-    "$(git -C "$d" status --porcelain | wc -l) dirty"
+  printf '%s: %s %s dirty\n' "$d" "$(git -C "$d" branch --show-current)" \
+    "$(git -C "$d" status --porcelain | wc -l)"
 done
 ```
 
-A clone is available only if it is on `main` **and** reports zero dirty files.
-Either condition alone is not enough: uncommitted work in a clone sitting on
-`main` is someone's in-progress change, and dispatching there either sweeps it
-into the agent's branch or loses it. The glob excludes the user's primary clone
-by construction — `ai-assistant` does not match `ai-assistant-*` — and that is
-the only thing keeping an agent out of it, so do not "fix" the glob to be
-broader.
+A clone is free only if it is on `main` **and** clean. Uncommitted work in a
+clone sitting on `main` is someone's in-progress change; dispatching there
+sweeps it into the agent's branch or loses it. A clone with no `.venv` needs
+`just setup` first — say so in the brief rather than letting the agent find out.
 
-A clone with no `.venv` needs `just setup` before its agent can run the gate —
-say so in the brief rather than letting the agent discover it.
-
-**Assign ADR numbers yourself.** ADR-0015 §5 makes this the dispatcher's job
-precisely to remove the race a shared ledger could not arbitrate. A number is
-claimed the moment a lane starts, not when it merges, so `docs/adr/` on `main`
-is never sufficient on its own:
+**Assign ADR numbers yourself.** ADR-0015 §5 makes this the dispatcher's job, to
+remove the race a shared ledger could not arbitrate. A number is claimed when a
+lane starts, not when it merges, so `main` alone is never enough:
 
 ```bash
 git fetch origin --prune
-git ls-tree origin/main docs/adr/ --name-only              # merged
+git ls-tree origin/main docs/adr/ --name-only                    # merged
 for r in $(git for-each-ref --format='%(refname)' refs/remotes/origin); do
-  git ls-tree "$r" docs/adr/ --name-only || exit 1         # written but unmerged
+  git ls-tree "$r" docs/adr/ --name-only                         # unmerged
 done | sort -u
-gh pr list --state open --limit 100 --json number,title,body > /tmp/prs.json
-[ "$(jq length /tmp/prs.json)" -ge 100 ] && { echo "SATURATED — paginate"; exit 1; }
-grep -oE 'ADR-[0-9]{4}' /tmp/prs.json | sort -u             # claimed in prose
 ```
 
-Abort on saturation rather than warning: a truncated scan that keeps going
-reports a free number that another lane already holds, which is the exact
-collision this preflight exists to prevent.
-
-Then the clones, because an ADR written but not yet pushed appears in no remote:
-
-```bash
-ls -d ~/projects/ai-assistant-*/docs/adr/[0-9]*.md | xargs -n1 basename | sort -u
-```
-
-**None of these is authoritative for a number you assigned but whose ADR is not
-yet written.** Branch names need not contain the number — `tools/tooldefinition-registry`
-carried ADR-0016 — so a name scan alone will hand out a live number. Keep your
-own list of what you have handed out and treat it as the primary record. That
-list does not survive a restarted session, which is what the clone scan above is
-for.
-
-Run all four and **assign one above the highest number any source mentions**,
-merged or not. Never fill a gap: with `0018` present and `0017` absent, `0017`
-is a live claim by a lane that has not written its file yet, not a free slot.
-Gaps close when the lane merges or is abandoned, and only the dispatcher who
-opened one may reuse it.
+Assign **one above the highest number any source mentions**, and never fill a
+gap — an absent number below the maximum is a live claim whose file is not
+written yet. Branch names need not contain the number
+(`tools/tooldefinition-registry` carried ADR-0016), so your own record of what
+you handed out is the primary source; the scan only catches what predates you.
 
 ## 2. Write the brief
 
-An under-specified brief is the single largest source of rework. Each one
-carries:
+An under-specified brief is the largest source of rework. Each one carries:
 
 - **The clone path**, and that other clones are off-limits.
-- **A scope fence** — the directories this lane may touch, and the ones it may
+- **A scope fence** — which directories this lane may touch and which it may
   not, naming the lane that owns each excluded one. `core/protocols.py` and
-  `core/types.py` are the highest-collision surface; at most one lane holds them
-  at a time.
-- **Corrections to stale issue text.** Issues written before a decision landed
-  will instruct against it. Read the issue before dispatching and say plainly
-  which parts no longer apply — an agent that follows a stale issue faithfully
-  has still done the wrong work.
+  `core/types.py` are the highest-collision surface; one lane holds them at a
+  time.
+- **Corrections to stale issue text.** An issue written before a decision landed
+  will instruct against it. Read it before dispatching and say which parts no
+  longer apply — an agent that follows a stale issue faithfully has still done
+  the wrong work.
 - **The ADR number, or that none is needed.** Never let an agent pick one.
-- **Cross-lane interactions**, in both directions: what this lane will see if
+- **Cross-lane interactions** in both directions: what this lane will see if
   another merges first, and what it must not assume.
-- **The finishing loop**: full gate, `just review-codex`, triage, `just ship`,
+- **The finishing loop** — full gate, `just review-codex`, triage, `just ship`,
   `gh pr ready` — and that the agent owns all of it without asking.
 - **Fetch and rebase before gating *and* before reviewing.** A gate against a
   stale tree is not evidence, and Codex reads the working tree for context, so a
   stale branch makes it report other lanes' merged work as regressions.
 
-State the deliverable you want in the report: PR number, what was verified, what
-was waived and why, what was filed.
+Say what the report must contain: PR number, what was verified and at which
+commit, what was waived and why, what was filed.
 
 ## 3. Verify every report — assume nothing
 
-Agent reports are written from the agent's belief, which can be stale or wrong.
-Reported status has been contradicted by CI more than once. Check the thing, not
-the claim:
+Reports are written from the agent's belief, which can be stale or wrong.
+Reported status has been contradicted by CI. Check the thing, not the claim:
 
 ```bash
-gh pr checks <n>                        # not the reported gate result
+gh pr checks <n>                      # not the reported gate result
 gh pr view <n> --json isDraft,mergeable,mergeStateStatus,reviewDecision
-gh pr diff <n> --name-only              # scope claims: did it touch what it said?
+gh pr diff <n> --name-only            # scope claims: did it touch what it said?
 ```
 
-- **`gh pr checks` over any reported green.** An agent that gated before
-  rebasing ran a full suite that was missing the check which would have failed.
-- **`mergeStateStatus: BEHIND`** means it was never gated against current
-  `main`.
-- **Scope claims** ("no `core/` change", "docs untouched") are one command to
-  confirm and have been wrong.
+`mergeStateStatus: BEHIND` means it was never gated against current `main`.
+Scope claims ("no `core/` change") are one command to confirm and have been
+wrong.
 
-**Before merging anything, diff the open PRs against each other.** Two lanes
-editing one file is invisible in either PR alone:
+**Before merging, diff the open PRs against each other** — two lanes editing one
+file is invisible in either PR alone:
 
 ```bash
-set -o pipefail
-prs=$(gh pr list --state open --limit 100 --json number --jq '.[].number')
-[ "$(printf '%s\n' "$prs" | wc -l)" -ge 100 ] && { echo "SATURATED — paginate"; exit 1; }
-for p in $prs; do gh pr diff "$p" --name-only | sed "s|^|$p |" || exit 1; done \
-  | sort -k2 | uniq -f1 -D
+for p in $(gh pr list --state open --json number --jq '.[].number'); do
+  gh pr diff "$p" --name-only | sed "s|^|$p |"
+done | sort -k2 | uniq -f1 -D
 ```
-
-`gh pr list` defaults to 30 and truncates **silently**, which would report no
-collision between the lanes it never looked at. Pass an explicit limit and
-**abort** on saturation — a partial scan that reports "collision-free" is worse
-than no scan, because it is believed. Same guard `find-parallel-work` uses.
 
 ## 4. Adjudicate escalations — do not encode the answers
 
 When an agent stops on a conflict between authorities, resolve it from the
-texts, not from precedent or from this file. Read the actual lines before
-ruling; agents cite these from memory and misquote them.
+texts. Read the actual lines before ruling; agents cite these from memory and
+misquote them.
 
 Authority runs: **ADRs and `CLAUDE.md`'s golden rules > `CONTRIBUTING.md` > a
-reviewer's opinion.** `CONTRIBUTING.md` is itself ratified by ADR-0003, so an
-ADR outranks it. The golden rules bind alongside ADRs and three of them are
-mechanically enforced by `lint-imports` — a brief that permits a cross-subsystem
-concrete import conflicts with golden rule 1 even though it contradicts no ADR
-and no line of `CONTRIBUTING.md`. **A brief never outranks either.** If your own
-brief conflicts with one, that is your error to fix, not the agent's to follow.
+reviewer's opinion.** `CONTRIBUTING.md` is ratified by ADR-0003, so an ADR
+outranks it. A brief outranks neither — if yours conflicts with one, that is
+your error to fix, not the agent's to follow.
 
-Deliberately not encoded here: the rulings themselves. Two waivers that look
-alike can resolve opposite ways because the governing authority differs — one
-structural finding against `CONTRIBUTING.md` was correctly overruled and the
-next correctly upheld. A skill that pre-decided them would be wrong half the
-time with full confidence.
+Deliberately not encoded: the rulings themselves. Two waivers that look alike
+resolve opposite ways when the governing authority differs — one structural
+finding against `CONTRIBUTING.md` was correctly overruled and the next correctly
+upheld. A skill that pre-decided them would be wrong half the time with full
+confidence.
 
 ## 5. Merge
 
-- **A contract ADR merges before its implementation** (golden rule 5,
-  ADR-0015 §5). Where a lane split into an ADR PR and an implementation PR, the
-  order is load-bearing — admin bypass makes merging out of order easy.
-- **Bypassing review is not the same as bypassing the gate.** Merging past a
-  required human review is the operator's call. Merging past `BEHIND` skips
-  *evidence*. Update the branch, let CI run, then merge:
+**A contract ADR merges before its implementation** (golden rule 5, ADR-0015 §5).
+Where a lane split into an ADR PR and an implementation PR, the order is
+load-bearing, and admin bypass makes merging out of order easy.
 
-  ```bash
-  sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)
-  gh pr checks <n> --watch --fail-fast && \
-    gh pr merge <n> --rebase --admin --delete-branch --match-head-commit "$sha"
-  ```
+**Bypassing review is not bypassing the gate.** Merging past a required human
+review is the operator's call; merging past `BEHIND` skips *evidence*.
 
-  The `&&` is load-bearing, and so is `--watch`. Bare `gh pr checks` exits
-  immediately with status 8 while checks are *pending* — run as two separate
-  commands, it reports "no checks reported yet" and the merge proceeds anyway,
-  admin-bypassing the very gate this step exists to wait for.
+```bash
+sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)
+gh pr checks <n> --watch --fail-fast && \
+  gh pr merge <n> --rebase --admin --delete-branch --match-head-commit "$sha"
+```
 
-  `--match-head-commit` closes the window between the checks passing and the
-  merge running. Without it, an agent pushing in that gap gets its new commit
-  admin-merged unchecked and unreviewed — `--admin` will not stop for it. Bind
-  the merge to the SHA you actually verified, and it refuses instead.
+`--watch` matters: bare `gh pr checks` exits immediately while checks are
+*pending*, reporting "no checks reported yet" so the merge proceeds anyway.
+`--match-head-commit` matters: without it, an agent pushing between the check
+and the merge gets its commit admin-merged unreviewed.
 
-- **A rebase invalidates the review record.** `just ship` anchors a review to a
-  commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head SHA
-  nothing has reviewed — and `--admin` will merge it regardless. Branch
-  protection is `strict`, so a stale branch must be updated before it can merge:
-  the two rules pull against each other and the resolution is ordering, not a
-  shortcut. **Merge while the branch is still current.** Where an update is
-  unavoidable, the new SHA needs its own gate, `just review-codex` and
-  `just ship` before it merges — the diff usually survives a clean rebase
-  unchanged, but "usually" is not evidence, and a rebase over a conflict is
-  exactly when it does not.
+**A rebase invalidates the review record.** `just ship` anchors a review to a
+commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head nothing
+has reviewed, and `--admin` merges it regardless. Branch protection is `strict`,
+so a stale branch must be updated before it can merge — the two rules pull
+against each other, and the resolution is ordering. Merge while the branch is
+current. Where an update is unavoidable, the new SHA needs its own gate, review
+and ship.
 
-- **Rebase-merge only** — the repo forbids squash and merge commits, and
-  requires linear history.
-- **Renaming a clone breaks its `.venv`** (absolute paths). Rename only between
-  agents, then `rm -rf .venv && just setup`. Never rename a clone an agent is
-  running in; its working directory vanishes mid-run.
+Rebase-merge only; the repo forbids squash and merge commits.
+
+**Renaming a clone breaks its `.venv`** (absolute paths): `rm -rf .venv && just
+setup` after. Never rename a clone an agent is running in.
 
 ## 6. Watch the cost
 
 Parallelism is capped by clones deliberately (ADR-0015 Consequences): nothing
 detects two agents colliding, so lane separation is the dispatcher's job and
-does not scale by adding agents.
-
-The dominant cost is agent tokens, not wall time, and the dominant *waste* is
-rework from a thin brief. Prefer fewer, larger, well-fenced lanes over many
-small ones. A lane that needs three rounds of correction cost more than the two
-lanes it displaced.
+does not scale by adding agents. The dominant cost is agent tokens and the
+dominant waste is rework from a thin brief — prefer fewer, larger, well-fenced
+lanes.
 
 **These commands are illustrations, not an implementation.** Extracting them
-into tested scripts has been proposed and is declined deliberately: that is the
+into tested scripts has been proposed and is declined: that is the
 `claim-workspace.sh` shape ADR-0015 deleted — ~856 lines of shell plus ~1,770
-lines of shell tests — and the `fix(dev)` commits that maintained it dominated
-the history. The failure modes here are caught by a human reading a result, and
-the expensive ones (a stale gate, a silent truncation) are guarded by the checks
-above rather than by more code. If this file ever needs its own test suite, it
-has become the thing ADR-0015 removed.
+of shell tests — whose `fix(dev)` commits dominated the history. Adversarial
+review will keep proposing hardening for conditions this repo does not have
+(hundreds of open PRs, hostile concurrent pushes); harden the two or three
+paths that have actually failed and leave the rest as prose. If this file needs
+its own test suite, it has become the thing ADR-0015 removed.
