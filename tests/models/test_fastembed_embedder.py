@@ -31,6 +31,7 @@ from ai_assistant.models.fastembed_embedder import (
     FastEmbedBackend,
     FastEmbedEmbedder,
     FastEmbedTextModel,
+    _FastEmbedBackend,
 )
 
 if TYPE_CHECKING:
@@ -121,6 +122,59 @@ def test_default_model_dimensions() -> None:
     # Reads the real fastembed metadata: production construction is untouched by
     # the backend seam and still resolves its dimension from fastembed itself.
     assert FastEmbedEmbedder().dimensions == _BGE_SMALL_DIMENSIONS
+
+
+class _FixedSizeModel:
+    """A loaded model returning correctly-shaped vectors of the given width."""
+
+    def __init__(self, dimensions: int) -> None:
+        self._dimensions = dimensions
+
+    def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
+        return ([0.5] * self._dimensions for _ in documents)
+
+
+async def test_the_default_backend_loads_through_text_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default backend really does construct fastembed's ``TextEmbedding``.
+
+    Everything else here injects a stub *instead of* fastembed, which leaves the
+    default backend's one line of wiring — ``TextEmbedding(model_name=...)`` —
+    covered by nothing: swap it for the wrong keyword, or for a different class,
+    and every stub-backed test stays green while production breaks on its first
+    embed.
+
+    This is the one place patching ``TextEmbedding`` is the right tool rather
+    than the rejected shortcut. The rejected version patches it out and then
+    asserts *embedding* properties, which become properties of the patch. This
+    asserts only the call shape we are responsible for — that we hand fastembed
+    the configured model name and return what it gives back — which is exactly
+    what a patch can honestly witness.
+    """
+    # Deliberately *not* the default model: with the default, an implementation
+    # that ignored `model` and hardcoded `_DEFAULT_MODEL` would pass. (It did,
+    # in the first version of this test.)
+    supported = _FastEmbedBackend().dimensions_by_model()
+    default_model = FastEmbedEmbedder().model_id
+    alternative, alternative_dimensions = next(
+        (name, dimensions) for name, dimensions in supported.items() if name != default_model
+    )
+
+    embedder = FastEmbedEmbedder(model=alternative)  # real metadata, still no download
+    loaded = _FixedSizeModel(alternative_dimensions)
+    model_names: list[str] = []
+
+    def fake_text_embedding(*, model_name: str) -> _FixedSizeModel:
+        model_names.append(model_name)
+        return loaded
+
+    monkeypatch.setattr("ai_assistant.models.fastembed_embedder.TextEmbedding", fake_text_embedding)
+
+    vectors = await embedder.embed(["alpha"])
+
+    assert model_names == [alternative]
+    assert len(vectors[0]) == alternative_dimensions
 
 
 def test_unknown_model_raises() -> None:
