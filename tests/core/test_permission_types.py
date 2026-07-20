@@ -490,6 +490,41 @@ def test_a_resolving_decision_may_not_itself_be_a_confirmation() -> None:
         )
 
 
+@pytest.mark.parametrize("field", ["id", "step_id", "resolves"])
+def test_a_decision_identifier_with_no_utf8_encoding_is_refused(field: str) -> None:
+    """The last field family that could break the round-trip guarantee.
+
+    ADR-0021 §4 requires a recorded decision to reload, so every field has to
+    survive serialisation — not just the payload and the reason. `Identifier`
+    only strips and refuses a blank, so a lone surrogate reaches the store.
+    """
+    bad = "d-" + chr(0xD800)
+    fields: dict[str, Any] = {"id": "d-1", "resolves": None}
+    request = ActionRequest(tool=tool(), step_id="step-1")
+    if field == "step_id":
+        with pytest.raises(ValidationError, match="UTF-8"):
+            ActionRequest(tool=tool(), step_id=bad)
+        return
+    fields[field] = bad
+
+    with pytest.raises(ValidationError, match="UTF-8"):
+        PermissionDecision.from_request(
+            request,
+            PermissionRuling(outcome=PermissionOutcome.DENY, reason="no"),
+            id=fields["id"],
+            decided_at=AT,
+            resolves=fields["resolves"],
+        )
+
+
+def test_an_authorisation_pointer_with_no_utf8_encoding_is_refused() -> None:
+    """`authorised_by` is stored beside the rest and binds the disclosure floor."""
+    with pytest.raises(ValidationError, match="UTF-8"):
+        PermissionRuling(
+            outcome=PermissionOutcome.ALLOW, reason="ok", authorised_by="d-" + chr(0xD800)
+        )
+
+
 def test_a_decision_survives_a_json_round_trip_with_its_definition_intact() -> None:
     """Durability is what forces this, and the pin is worthless without it."""
     request = ActionRequest(
