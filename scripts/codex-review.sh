@@ -96,6 +96,22 @@ tree="$(git rev-parse "${sha}^{tree}")"
 # survives a squash, an amend and a rebase — which is exactly the property the
 # count needs (issue #97).
 branch="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$branch" == "HEAD" ]]; then
+    # Detached: "HEAD" is a placeholder, not an identity, so using it as the
+    # scope key would make every detached checkout share one review loop and
+    # contaminate the others' counts. Key on the commit instead — each detached
+    # review is then its own loop, starting at round 1. Nothing is lost: such a
+    # review cannot be shipped at all, since ship refuses a detached HEAD.
+    branch="detached-${sha}"
+fi
+
+# One limit is left standing, deliberately. Deleting a branch and creating a new
+# one with the same name in the same clone inherits the old branch's rounds,
+# because the name is all that identifies the loop. Fixing it needs a durable
+# per-loop identifier — a ledger in `.review/`, which is state to maintain and
+# to keep consistent across the same rewrites this is trying to survive. Not
+# worth it for an advisory number whose failure here is an over-count, which
+# errs toward "look at your loop" rather than away from it.
 
 # `core.quotePath=false` here too, so a non-ASCII path reaches the reviewer as
 # `docs/café.md` rather than `"docs/caf\303\251.md"`. Same reason as the path
@@ -498,12 +514,22 @@ artifact="${review_dir}/${sha}-${persona}.md"
 # churn ratio the author saw, which is the whole point of printing it.
 artifact_tmp="${artifact}.partial.$$"
 {
-    # `binary_files` is omitted rather than recorded as 0, so ship renders the
-    # caveat only where there is one. `${var:+…}` cannot do this: net_binary is
-    # the string "0" when there are none, which is non-empty and would expand.
+    # Both binary counts are recorded, not just the one in the final diff. §2's
+    # requirement is that the reviewer at merge holds the aggregate the author
+    # held, and the terminal prints both — so persisting only `net_binary` would
+    # drop a caveat the author saw. They come apart for real: a binary added in
+    # one commit and reverted in a later one is absent from the net diff while
+    # still being unmeasured work the branch did.
+    #
+    # Each is omitted rather than recorded as 0, so ship renders a caveat only
+    # where there is one. `${var:+…}` cannot express that: the counts are the
+    # string "0" when empty, which is non-empty and would expand.
     binary_field=""
     if [[ "$net_binary" -gt 0 ]]; then
         binary_field="binary_files=${net_binary} "
+    fi
+    if [[ "$churn_binary" -gt 0 ]]; then
+        binary_field="${binary_field}binary_churn=${churn_binary} "
     fi
     echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha}" \
         "branch=${branch} tree=${tree} round=${round}" \

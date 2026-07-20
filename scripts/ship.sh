@@ -331,6 +331,10 @@ agg_supersedes="$(agg_field supersedes)"
 # only when present, never as a zero or an "exact" the reader has to discount.
 agg_bound="$(agg_field churn_bound)"
 agg_binary="$(agg_field binary_files)"
+# Binary work can be absent from the net diff and still be work the branch did —
+# added in one commit, reverted in a later one. Carried separately for that
+# reason, so the caveat the author saw is not lost on the way to the PR.
+agg_binary_churn="$(agg_field binary_churn)"
 
 {
     echo "$marker"
@@ -354,6 +358,9 @@ agg_binary="$(agg_field binary_files)"
                 summary="${summary} lower bound — history rewritten, earlier rounds not counted)"
             else
                 summary="${summary} · churn ${agg_ratio}× (${agg_churn} touched)"
+            fi
+            if [[ -n "$agg_binary_churn" ]]; then
+                summary="${summary} + ${agg_binary_churn} binary change(s) unmeasured"
             fi
         fi
         if [[ -n "$agg_supersedes" ]]; then
