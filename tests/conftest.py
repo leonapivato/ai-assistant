@@ -41,10 +41,12 @@ class _RunRecord:
     #: contributed assertions that really executed, rather than merely being
     #: inherited from, overridden, or skipped.
     class_tests: dict[type, set[str]] = field(default_factory=dict)
-    #: Test class -> names of the tests on it skipped by a *mark*. Tracked
-    #: separately because a *partly* skipped suite is the interesting case:
-    #: one passing test would otherwise vouch for nine skipped obligations.
-    skipped_tests: dict[type, set[str]] = field(default_factory=dict)
+    #: Test class -> names of the tests on it that the test body itself opted
+    #: out of, by calling ``pytest.skip()``. That is a contract deciding an
+    #: obligation does not apply to this implementation, which is legitimate;
+    #: it is tracked so the triad check can tell it apart from an obligation
+    #: that simply never ran.
+    opted_out_tests: dict[type, set[str]] = field(default_factory=dict)
     unfiltered: bool = False
 
 
@@ -85,13 +87,12 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     if owner is None:
         return
     cls, name = owner
-    if report.skipped and report.when == "setup":
-        # Only a *mark* skips before the body runs, and a mark is imposed on the
-        # test from outside it -- that is the disqualifying case. A suite whose
-        # own body calls `pytest.skip()` (see ContextProviderContract's
-        # `serves_a_fixed_instant`) skips at the call phase, and is the contract
-        # deciding an obligation does not apply, which is legitimate.
-        _RECORD.skipped_tests.setdefault(cls, set()).add(name)
+    if report.skipped and report.when == "call":
+        # The body ran and chose to bow out -- see ContextProviderContract's
+        # `serves_a_fixed_instant`. A *mark* skips at setup instead, before the
+        # body runs; that is imposed from outside the contract and is recorded
+        # nowhere, so the triad check sees the obligation as simply not met.
+        _RECORD.opted_out_tests.setdefault(cls, set()).add(name)
     elif report.when == "call" and report.passed:
         _RECORD.class_tests.setdefault(cls, set()).add(name)
 
@@ -103,9 +104,9 @@ def passing_class_tests() -> dict[type, frozenset[str]]:
 
 
 @pytest.fixture(scope="session")
-def skipped_class_tests() -> dict[type, frozenset[str]]:
-    """Every test class, mapped to the tests on it that were skipped."""
-    return {cls: frozenset(names) for cls, names in _RECORD.skipped_tests.items()}
+def opted_out_class_tests() -> dict[type, frozenset[str]]:
+    """Every test class, mapped to the tests whose own body skipped them."""
+    return {cls: frozenset(names) for cls, names in _RECORD.opted_out_tests.items()}
 
 
 @pytest.fixture(scope="session")
