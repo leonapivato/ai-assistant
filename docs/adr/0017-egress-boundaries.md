@@ -65,12 +65,22 @@ for it; short of that it is approved and must not transmit, whatever partial
 progress exists. Naming the seam is one precondition among several, not the
 transition itself.
 
-`models/` is **designated** on acceptance: it is an existing package the
-contract can name today, its declaration is complete in §2, and its recipients
-are authorised by configuration — §3's list is empty for it, because every
-condition is already met. The `tools/` seam is **approved and undesignated**,
-and stays that way until §3's preconditions are all discharged. Enforcement
-tooling should read approved-and-undesignated as "still prohibited".
+The two boundaries have different precondition lists, and §3 states each.
+
+`models/` is **designated** on acceptance. Its declaration is complete in §2,
+its recipients are authorised by configuration, and its mechanical pin is the
+existing "provider SDKs are confined to the models layer" contract. That pin is
+narrower than this ADR wants — it forbids four named SDKs rather than network
+clients generally, so nothing today stops an unrelated subsystem importing
+`httpx` — and closing that gap is §3's one outstanding item for `models/`. It
+is a strengthening, not a gate: `models/` transmits today under ADR-0004 §2,
+this ADR does not narrow that permission, and making designation wait on a
+contract that has never existed would prohibit the model calls the product is
+built on. Issue #66.
+
+The `tools/` seam is **approved and undesignated**, and stays that way until
+every item in §3's `tools/` list is discharged. Enforcement tooling should read
+approved-and-undesignated as "still prohibited".
 
 Because what the two send differs in kind, this ADR fixes the *granularity* at
 which each discharges its obligations. The granularity is part of the
@@ -238,10 +248,17 @@ argue its way into.
 ### 3. This ADR is not self-executing
 
 It removes a categorical prohibition; it does not make any transmission legal.
-This list is the complete condition for `tools/` becoming **designated** (§2),
-and every item must hold **in code** — none is a property this ADR asserts is
-already in place. Today none is fully discharged, so `tools/` is approved,
-undesignated, and permitted no egress at all. What must exist first:
+Each boundary has its own exhaustive precondition list, and every item must
+hold **in code** — none is a property this ADR asserts is already in place.
+
+**For `models/`,** one item: widen the import-linter contract from the four
+named provider SDKs it forbids today to network clients generally. `models/` is
+designated on acceptance regardless (§2) — it transmits today under ADR-0004
+§2 and this ADR does not narrow that — so this strengthens an existing pin
+rather than gating the boundary. Issue #66.
+
+**For `tools/`,** the list below, none of it discharged today, which is why
+`tools/` is approved, undesignated, and permitted no egress at all:
 
 - the named seam and the import-linter contract pinning it (§4 condition 1,
   issue #66);
@@ -423,9 +440,11 @@ exist.
   rule permits a status update and an appended note, not an edit to accepted
   text — the same discipline §6 applies to the configured-set amendment.
 - **The import-linter contract ADR-0004's Consequences provision for is now
-  load-bearing** and still unwritten. Until it exists and pins a named module,
-  "designated" is a claim in a document rather than an enforced property
-  (issue #66).
+  load-bearing** and only partly written. What exists forbids four named
+  provider SDKs outside `models/`; what is missing is a contract over network
+  clients generally, and one that can pin the `tools/` seam by module once it
+  is named. Until both land, "designated" leans on a narrower pin than the word
+  implies for `models/`, and is unreachable for `tools/` (issue #66).
 - **The invocation ADR inherits three obligations** it must discharge before the
   first tool transmits: name the seam, gate per call before transmitting, and
   constrain destination and per-call payload. It no longer inherits a
