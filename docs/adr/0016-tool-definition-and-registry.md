@@ -2,6 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-07-19
+- Amends: ADR-0014 §4 (the "`core/types.py` is data-only" convention; §2 below)
 
 ## Context
 
@@ -137,10 +138,43 @@ lexicographically. Rank is derived from declaration order rather than a parallel
 table, so a level inserted in the middle cannot be given a rank that contradicts
 where it reads.
 
-Putting behaviour in `core/types.py` is a deliberate exception to that module's
-"data only" convention, of the same kind `FrozenDict` and
-`ExecutionState.is_active` already are: this is what the type *means*, not what
-a subsystem does with it.
+**This amends ADR-0014 §4's "data only" convention, narrowly and on purpose.**
+That ADR says transitions live in `planning/` because "`core/types.py` is
+data-only by convention", and its reasoning is about *state transitions* —
+VISION §7's deterministic-code-owns-critical-state, which is a subsystem's
+business. Severity ordering is not that, and the convention as literally worded
+would forbid it, so the rule is restated rather than quietly bent:
+
+> `core/types.py` holds no **subsystem logic**. It may hold semantics
+> **intrinsic** to a type it defines.
+
+A semantic is intrinsic when it is (a) computable from the type's own
+declaration alone, (b) independent of policy, configuration, context or a
+clock, and (c) the same answer for every consumer. `RiskLevel`'s ordering meets
+all three. ADR-0014's transition graph meets none: it needs a retry ceiling, an
+injected clock, and a stored snapshot, and `PlanExecution` is exactly where it
+belongs. `FrozenDict` and `ExecutionState.is_active` were already on the
+intrinsic side of this line; the line simply had not been drawn.
+
+Two things make relocation the worse option rather than merely the less
+convenient one:
+
+- **No subsystem can own it.** `permissions` needs to order risk to decide, and
+  `orchestration`'s selection stage needs to order it to choose between
+  candidates. Golden rule 1 forbids either importing the other, so a rank table
+  in one of them is a rank table duplicated in both — two copies of a
+  safety-critical ordering, free to disagree, with nothing that fails when they
+  do.
+- **Relocation does not disarm the trap.** `RiskLevel.CRITICAL <
+  RiskLevel.LOW` evaluating to `True` is a property of `StrEnum` inheritance,
+  reachable from every module that can see the enum. A rank table elsewhere adds
+  a correct way to compare beside the incorrect one that still works; only
+  overriding the operators removes the wrong answer.
+
+The scope of the amendment is the wording of a convention, nothing else.
+ADR-0014's substantive decision — that deterministic subsystem code owns state
+transitions — is untouched and remains the reason the transition graph is not
+here.
 
 ### 3. Data reach reuses ADR-0004's tiers, and gating stays in `permissions`
 
@@ -496,10 +530,13 @@ widening of this one.
   RiskLevel.LOW` would be `True` under `StrEnum`'s inherited comparison; it is
   now `False`, and comparing a level against a bare string raises instead of
   answering wrongly.
-- **`core/types.py` grows behaviour again** — comparison operators on two enums,
-  after `FrozenDict` and `ExecutionState`'s properties. The convention is now
-  more accurately "no *subsystem* logic" than "no behaviour"; a future ADR may
-  want to say so plainly.
+- **ADR-0014 §4's "data only" convention is amended** to "no subsystem logic,
+  intrinsic semantics allowed", with a three-part test for intrinsic (§2). This
+  is a real widening of what may live in the most shared module in the codebase,
+  and the mitigation is that the test is narrow enough to exclude the case
+  ADR-0014 actually cared about — its own transition graph fails all three
+  clauses. Reviewers now have a rule to apply rather than a precedent to argue
+  from.
 - **ADR-0014's capability debt is settled**: the vocabulary is open,
   registry-authoritative, and deliberately not an enum. Its **idempotency debt is
   not** — the guarantee is declarable here and unexercised until invocation, and
