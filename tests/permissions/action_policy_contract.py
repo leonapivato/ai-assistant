@@ -134,13 +134,18 @@ class ActionPolicyContract:
         flaky. It is also what the ADR buys by keeping the clock and the id
         minting out of the policy — there is nothing left for an answer to
         legitimately depend on but the request.
+
+        The whole ruling is compared, not just the outcome: ``reason`` is shown
+        to the user, so a policy deriving it from a clock, a counter or a random
+        source is one whose prompts differ between two identical questions, and
+        an outcome-only assertion would call that conforming.
         """
         request = action(tool=tool(risk_level=RiskLevel.HIGH))
 
         first = await policy.decide(request)
         second = await policy.decide(request)
 
-        assert first.outcome is second.outcome
+        assert first == second, "the whole ruling, not just the outcome, is the answer"
 
     # --- the two floors --------------------------------------------------
 
