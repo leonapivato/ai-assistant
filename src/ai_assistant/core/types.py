@@ -1484,6 +1484,35 @@ def _is_encodable(text: str) -> bool:
     return True
 
 
+def _durable_identifier(value: str) -> str:
+    """Reject an identifier with no UTF-8 encoding.
+
+    ADR-0021 §4 requires a recorded decision to survive a
+    ``model_dump(mode="json")`` round trip, because a decision that could not be
+    reloaded would make the embedded definition worthless across exactly the
+    restart issue #54 is about. An identifier holding a lone surrogate satisfies
+    :data:`Identifier` — which only strips and refuses a blank — and then fails
+    at the store or export boundary, which is the durability guarantee broken
+    one field family short of complete.
+
+    Layered on the permission types rather than folded into :data:`Identifier`
+    itself, which ``planning`` shares (ADR-0014): tightening it there is a
+    cross-lane change, and issue #62 already holds the identifier-syntax
+    question. The same boundary :func:`_visible_identifier` drew for tool ids.
+
+    Raises:
+        ValueError: If the identifier cannot be encoded as UTF-8.
+    """
+    if not _is_encodable(value):
+        msg = f"identifier has no UTF-8 encoding, so the record could not be stored: {value!r}"
+        raise ValueError(msg)
+    return value
+
+
+type DurableIdentifier = Annotated[Identifier, AfterValidator(_durable_identifier)]
+"""An :data:`Identifier` that survives serialisation — for fields a record keeps."""
+
+
 def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
     """Render ``parameters`` in the exact form ADR-0021 §1 pins for the digest.
 
@@ -1563,7 +1592,7 @@ class ActionRequest(BaseModel):
         default=_EMPTY_PARAMS,
         description="The arguments the call proposes; bound by digest, never stored.",
     )
-    step_id: Identifier | None = Field(
+    step_id: DurableIdentifier | None = Field(
         default=None, description="The plan step this action belongs to, if any."
     )
 
@@ -1620,7 +1649,7 @@ class PermissionRuling(BaseModel):
 
     outcome: PermissionOutcome
     reason: str = Field(description="Why, in text shown to the user at the moment they decide.")
-    authorised_by: Identifier | None = Field(
+    authorised_by: DurableIdentifier | None = Field(
         default=None, description="The recorded user decision this ALLOW rests on, if any."
     )
 
@@ -1686,13 +1715,13 @@ class PermissionDecision(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: Identifier
+    id: DurableIdentifier
     ruling: PermissionRuling = Field(description="What the policy said.")
     tool: ToolDefinition = Field(description="The declaration ruled on, verbatim.")
     parameters_digest: str = Field(description="Binds the payload without storing it.")
     decided_at: datetime = Field(description="When the ruling was made; timezone-aware.")
-    step_id: Identifier | None = None
-    resolves: Identifier | None = Field(
+    step_id: DurableIdentifier | None = None
+    resolves: DurableIdentifier | None = Field(
         default=None, description="The CONFIRM decision this one answers, if any."
     )
 
