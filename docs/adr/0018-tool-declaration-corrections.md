@@ -1,7 +1,7 @@
 # 18. Corrections to the tool declaration and registry contract
 
 - Status: Accepted
-- Date: 2026-07-20
+- Date: 2026-07-19
 - Supersedes: ADR-0016 §1 (the `id`/`capability` types and the `description`
   rule) and §5 (query results and the spent-id rule). The rest of ADR-0016
   stands unchanged.
@@ -224,7 +224,24 @@ operation that can empty the registry is a strange enough failure that leaving i
 unstated was not a defensible silence.
 
 The contract therefore requires: **every query returns a detached snapshot —
-the list *and* the definitions in it.**
+the list, the definitions in it, and everything mutable those definitions
+reach.**
+
+The last clause is not pedantry. `ToolDefinition` holds a nested `ToolCost`, so
+a shallow copy would hand back a *new* definition sharing the *stored* cost
+object, and
+
+```python
+(await registry.get("smtp")).cost.__dict__["amount"] = Decimal("0")
+```
+
+would rewrite registry-owned security metadata through a definition that was
+technically "detached". ADR-0016 §4 already identified nested freezing as
+load-bearing for exactly this reason; a detachment rule that stopped at the top
+level would reintroduce underneath what it closed above. Detachment is therefore
+**recursive over reachable mutable state**, and the conformance suite mutates a
+nested value — not just a top-level field — and asserts the next query is
+unaffected.
 
 The definitions are included because `frozen=True` refuses
 `tool.risk_level = ...` but not `tool.__dict__["risk_level"] = ...`, so handing
@@ -244,7 +261,8 @@ definition.__dict__["risk_level"] = RiskLevel.LOW
 
 produces an object a permission check would then rule on. What detachment
 guarantees is that this reaches *no other reader*: the registry still holds
-`CRITICAL`, and the next query returns it. The guarantee is about what the
+`CRITICAL`, and the next query returns it — and the same holds for a nested
+`cost.amount`, which is why detachment is recursive. The guarantee is about what the
 registry **produces**, not about what a caller subsequently does with its own
 copy — exactly the boundary ADR-0014 drew for `PlanStore`, and for the same
 reason: closing it would mean freezing an object graph the caller owns, which no
@@ -263,9 +281,10 @@ what they were given.
 
 Return types stay `list`, matching `MemoryStore.search` and
 `PlanStore.active_executions`, rather than becoming `tuple`. Switching them would
-enforce half of this mechanically while doing nothing about the definitions
-inside, and would break the convention the other Protocols set for a partial
-guarantee. The conformance suite tests both halves instead.
+enforce the outermost layer mechanically while doing nothing about the
+definitions inside or their nested values, and would break the convention the
+other Protocols set in exchange for the least important third of the guarantee.
+The conformance suite covers all three layers instead.
 
 ### 4. Registration re-validates rather than copies (supersedes §5)
 

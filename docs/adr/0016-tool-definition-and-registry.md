@@ -3,7 +3,7 @@
 - Status: Accepted, partially superseded by ADR-0018
 - Date: 2026-07-19
 - Amends: ADR-0014 §4 (the "`core/types.py` is data-only" convention; §2 below)
-- Partially superseded: 2026-07-20 by ADR-0018 — five clauses, found by the first
+- Partially superseded: 2026-07-19 by ADR-0018 — five clauses, found by the first
   implementation of this contract. **§1**: `id` and `capability` become
   `VisibleIdentifier`, and `description` must contain a character that *renders*
   rather than merely surviving `strip()`. **§5**: every query returns a detached
