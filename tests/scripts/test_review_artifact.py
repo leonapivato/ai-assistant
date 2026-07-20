@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "codex-review.sh"
@@ -72,6 +71,19 @@ def _fake_codex(bin_dir: Path) -> None:
     codex.chmod(0o755)
 
 
+def _private_tmpdir(tmp_path: Path) -> Path:
+    """The temp directory the script under test is pointed at.
+
+    `mktemp -t` honours `TMPDIR`, so redirecting it gives each test a directory
+    it owns. Asserting against the shared system temp dir instead would couple
+    the leak checks to every other process on the machine — including a real
+    `just review-codex` running in another clone.
+    """
+    private = tmp_path / "tmp"
+    private.mkdir(exist_ok=True)
+    return private
+
+
 def _run_review(
     repo: Path, tmp_path: Path, persona: str = "adversarial", *, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -80,6 +92,7 @@ def _run_review(
     env.pop("GITHUB_ACTIONS", None)
     env.pop("CODEX_REVIEW_NO_SANDBOX", None)
     env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
+    env["TMPDIR"] = str(_private_tmpdir(tmp_path))
     return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
         [_BASH, str(_SCRIPT), persona, "main"],
         cwd=repo,
@@ -275,19 +288,20 @@ def test_accepts_the_verdict_forms_the_reviewer_actually_emits(tmp_path: Path) -
 
 
 def test_leaves_no_temporary_files_behind(tmp_path: Path) -> None:
-    """Review text must not accumulate in /tmp or as .partial files.
+    """Review text must not accumulate in the temp dir or as .partial files.
 
     `.review/` is git-ignored, so a stray partial artifact there is invisible to
-    the dirty-tree check as well.
+    the dirty-tree check as well. The script writes into a temp dir this test
+    owns, so "empty afterwards" is a statement about this invocation alone — and
+    it catches any leak, not only the `codex-*` names.
     """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_codex(tmp_path / "bin")
-    before = set(Path(tempfile.gettempdir()).glob("codex-*"))
 
     _run_review(repo, tmp_path)
 
-    assert set(Path(tempfile.gettempdir()).glob("codex-*")) == before
+    assert list(_private_tmpdir(tmp_path).iterdir()) == []
     assert list((repo / ".review").iterdir()) == [repo / ".review" / f"{sha}-adversarial.md"]
 
 
@@ -306,12 +320,11 @@ def test_leaves_no_temporary_files_behind_on_rejection(tmp_path: Path) -> None:
         "done\n"
     )
     codex.chmod(0o755)
-    before = set(Path(tempfile.gettempdir()).glob("codex-*"))
 
     result = _run_review(repo, tmp_path, check=False)
 
     assert result.returncode != 0
-    assert set(Path(tempfile.gettempdir()).glob("codex-*")) == before
+    assert list(_private_tmpdir(tmp_path).iterdir()) == []
 
 
 def test_refuses_to_review_a_dirty_tree(tmp_path: Path) -> None:
