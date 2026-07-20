@@ -195,7 +195,9 @@ def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
         # does use it is simply unproven, per the docstring above.
         produced = func(None)
         if inspect.isgenerator(produced):
-            produced = next(produced)
+            generator = produced
+            produced = next(generator)
+            generator.close()  # do not leave the fixture's teardown pending
     except Exception:  # an unevaluable fixture is unproven here, not a failure
         return False
     return isinstance(produced, fake)
