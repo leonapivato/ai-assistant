@@ -189,6 +189,18 @@ for itself:
   reasonably anticipate — a list the assistant selected rather than the user —
   is not covered by this and needs the explicit per-call decision.
 
+  **A destination is identified by what the service issued, not by what it is
+  called.** Authorisation and audit bind to the service's immutable identifier
+  for the recipient — the channel id, the account id — together with the
+  connected account it belongs to. Display names are for showing the user and
+  nothing else. Binding a standing policy to the string `#team` authorises
+  whatever `#team` names later: an administrator renames the channel, a new
+  `#team` is created, and a call still matches the authorised string while
+  sending to an entirely different room. That is not the accepted
+  membership-drift cost above — the logical recipient itself has been
+  substituted, which is the same rebinding failure ADR-0016 §5 avoids by
+  spending a tool id on first use.
+
   A grant justified only by the tool's declared metadata does not qualify
   either. The audit record must capture the resolved destinations and which of
   the two bases authorised them, or after the fact nobody can tell an
@@ -224,8 +236,9 @@ undesignated, and permitted no egress at all. What must exist first:
 - the destination rules — recipient authorisation must bind to the semantic
   recipient the call's arguments select, not the transport endpoint, at the
   granularity of the stable logical destination (§2), and trace to a user
-  decision or standing user policy; the audit record must capture that
-  destination and that basis.
+  decision or standing user policy, bound to the service-issued immutable
+  identifier rather than a display name (§2); the audit record must capture
+  that identifier, the connected account, and that basis.
 - the transport rules — the endpoint the seam actually opens a connection to
   must be pinned to the service the user connected, and a redirect must not
   carry the request or its credential to another host. Authorising a semantic
