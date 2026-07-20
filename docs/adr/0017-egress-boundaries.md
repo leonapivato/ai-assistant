@@ -342,6 +342,16 @@ asserts is already in place. It does not apply to `models/`, which this ADR
 does not gate at all (§2): `models/` transmits under ADR-0004 §2's existing
 permission, and nothing here adds a condition to it or removes one.
 
+**These are properties that must hold, not designs.** Each item says what must
+be true before `tools/` transmits and why — several name a concrete failure to
+make the requirement legible. None of them chooses a mechanism, and this ADR
+does not amend ADR-0016 or pre-empt the invocation and `permissions/` ADRs that
+own these contracts: they may satisfy any item however they judge best,
+including in ways this ADR did not anticipate. What they may not do is
+designate the boundary with an item unsatisfied. Where an item names specifics —
+the contents of a binding envelope, the entries in the test matrix — read it as
+a floor the owning ADR must cover, not a schema it must adopt.
+
 None of it is discharged today, which is why `tools/` is approved,
 undesignated, and permitted no egress at all:
 
@@ -420,10 +430,11 @@ undesignated, and permitted no egress at all:
   artifact: what that payload description is, and how a gate binds to it,
   depends on the invocation contract's shape and is that ADR's to settle.
 
-- the binding rules — authorisation must be bound to an **immutable
-  invocation envelope** carrying the connected account, the canonical
-  destination, the approved payload description and the authorisation
-  decision, and execution must consume exactly that envelope. Without it the
+- the binding rules — what execution transmits must be the thing that was
+  authorised, immutably bound at authorisation time and consumed unchanged.
+  Binding at least the connected account, the canonical destination, the
+  approved payload description and the decision itself; whether that is one
+  envelope object or another construction is the invocation ADR's call. Without it the
   payload is bound (above) while the destination is not: a call can resolve and
   authorise `alice@example.com`, then have a mutable argument re-resolved to
   `bob@example.com` before the send, with the audit still reading Alice. This
@@ -462,7 +473,7 @@ undesignated, and permitted no egress at all:
   exists to provide.
 - **conformance tests for every condition above**, not prose alone, and
   failure-path tests specifically — the happy path passing proves almost
-  nothing here. The minimum matrix:
+  nothing here. The matrix must cover at least:
 
   - **denial** performs no credential read and no network I/O;
   - **transport diversion** — a hostile base URL and a cross-host redirect are
