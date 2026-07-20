@@ -316,11 +316,25 @@ leave from somewhere nobody designated, in a quantity nobody declared, without a
 check nobody ran. A second boundary costs that property nothing as long as it
 meets all three conditions, and `tools/` is held to all three:
 
-1. **Designated.** The boundary is named here and enforced mechanically, not by
-   convention: the import-linter contract ADR-0004's Consequences already
-   provision for permits network/provider clients in `models/` and the
-   designated `tools/` seam once it exists, and nowhere else. Egress stays an
-   enumerable list a reader can audit by grepping one contract.
+1. **Designated.** The boundary is named here and backed by mechanical
+   enforcement rather than convention: the import-linter contract ADR-0004's
+   Consequences provision for permits network/provider clients in `models/` and
+   the designated `tools/` seam once it exists, and nowhere else.
+
+   **An import contract is a net, not a proof**, and this ADR does not claim
+   otherwise. It matches module names, so it cannot see a subsystem reaching
+   the network through `urllib`, a raw `socket`, a library added after the
+   contract was written, or an internal wrapper that imports the client on its
+   behalf. What it reliably catches is the realistic accident — someone adding
+   `httpx` to `memory/` without thinking — not a determined bypass.
+
+   Closing that gap properly means outbound I/O going through a transport
+   capability only designated boundaries hold: *injected*, as `ModelProvider`,
+   `Embedder` and `SecretStore` already are, so a subsystem never handed it
+   cannot connect regardless of what it imports, and a test can prove the
+   property directly. That is issue #85, and it is the enforcement this
+   condition ultimately wants; the import contracts are defence in depth in the
+   meantime.
 2. **Declaring.** Every tool states, as a required and fail-closed property of
    its definition, which data tiers a call transmits off-device (ADR-0016 §3).
    A tool whose author does not say what leaves cannot be defined at all. This
