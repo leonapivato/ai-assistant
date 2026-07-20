@@ -75,6 +75,18 @@ _OWNERS: dict[str, tuple[type, str, bool]] = {}
 _OPTIONAL = "optional_obligation"
 
 
+def _declares_optional(func: object) -> bool:
+    """Report whether the *test function itself* is marked an optional obligation.
+
+    Read off the function rather than through ``item.get_closest_marker``,
+    which would also honour the mark applied to a subclass or a whole module.
+    Only the conformance suite gets to say which of its obligations are
+    optional; a binding class declaring its inherited tests optional and then
+    skipping them all is precisely the bypass this guards.
+    """
+    return any(mark.name == _OPTIONAL for mark in getattr(func, "pytestmark", []))
+
+
 def _is_unfiltered(config: pytest.Config) -> bool:
     """Report whether this session is running the entire configured suite."""
     if any(config.getoption(option, default=None) for option in _FILTERING_OPTIONS):
@@ -95,7 +107,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             _OWNERS[item.nodeid] = (
                 cls,
                 getattr(item, "originalname", None) or item.name,
-                item.get_closest_marker(_OPTIONAL) is not None,
+                _declares_optional(getattr(item, "function", None)),
             )
 
     deferred = [item for item in items if item.nodeid.startswith(_TRIAD_CHECK)]

@@ -728,6 +728,27 @@ def test_report_shapes_that_do_and_do_not_honour_an_obligation(shape: _Shape) ->
     assert honoured is shape.satisfactory, shape.why
 
 
+def test_only_the_suites_own_function_can_declare_an_obligation_optional() -> None:
+    """A binding class cannot mark itself out of its inherited obligations.
+
+    `pytestmark` on a subclass or a module is what `get_closest_marker` would
+    honour; reading the mark off the function keeps the declaration with the
+    contract that owns the obligation.
+    """
+
+    class _Suite:
+        @pytest.mark.optional_obligation
+        def test_optional(self) -> None: ...
+
+        def test_required(self) -> None: ...
+
+    class _Bound(_Suite):
+        pytestmark = pytest.mark.optional_obligation  # the bypass under test
+
+    assert conftest._declares_optional(_Bound.test_optional)
+    assert not conftest._declares_optional(_Bound.test_required)
+
+
 def _report(*, when: _Phase, outcome: _Outcome, wasxfail: bool) -> pytest.TestReport:
     """Build a minimal pytest report with the given phase and outcome."""
     report = pytest.TestReport(
