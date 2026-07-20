@@ -55,13 +55,25 @@ fixes the *granularity* at which each discharges its obligations. The
 granularity is part of the designation — not an implementer's choice, and not
 something a boundary may weaken for itself:
 
-- **`models/`** — sends conversation content (Tier 1) to model providers the
-  user has explicitly configured. Its declaration is **static and made here**:
-  the payload class is fixed by the boundary's single purpose, so it is stated
-  once in this ADR rather than per call. Its recipient authorisation is **per
-  configuration** — the explicitly-configured provider set of ADR-0004 §2's
-  configured-set amendment, which stands — not per call. ADR-0004 §7's
-  minimisation rule binds the content of each call.
+- **`models/`** — to model providers the user has explicitly configured. Its
+  declaration is **static and made here**, because its payload classes are
+  fixed by the boundary's purpose rather than varying per caller. They are:
+
+  - **generation inputs** — conversation content and assembled context
+    (Tier 1);
+  - **embedding inputs** — the text being indexed or queried, which for memory
+    content is Tier 1. Only when the user has opted into a cloud embedder;
+    the default embedder is on-device and transmits nothing (ADR-0006 §2);
+  - **the provider credential** for the endpoint being called (Tier 0), sent
+    as authentication and only ever to the provider it belongs to
+    (ADR-0004 §3).
+
+  That list *is* the declaration, and it is exhaustive: a payload class not
+  listed here is not authorised at this boundary, and adding one — multimodal
+  attachments, tuning corpora, anything else — requires amending this ADR.
+  Recipient authorisation is **per configuration** — the explicitly-configured
+  provider set of ADR-0004 §2's configured-set amendment, which stands — not
+  per call. ADR-0004 §7's minimisation rule binds the content of each call.
 - **the `tools/` integration boundary** — to external services the user has
   explicitly connected. Its declaration is **per tool**, and its recipient
   authorisation is **per call**, through `permissions/`. Both are stronger than
@@ -179,7 +191,26 @@ out of date on acceptance. Rewriting it would erase the first to fix the second,
 and an ADR is an append-only record of what was decided when. So the note
 carries the pointer, and the accepted text carries none of it.
 
-### 7. What is not decided here
+### 7. What happens to ADR-0004 on acceptance
+
+ADR-0001 requires the superseded ADR's status to be updated, not merely
+annotated. While this ADR is `Proposed`, ADR-0004 is untouched and its §2 is
+the live rule. **On acceptance of this ADR**, and as part of ratifying it:
+
+- ADR-0004's header line becomes
+  `- Status: Accepted (partially superseded by ADR-0017 — §2's egress clause)`,
+  replacing the "partial supersession **proposed**" line currently there. The
+  status change is the ADR-0001 mechanism; it is the one edit to ADR-0004 that
+  ADR-0001 authorises.
+- The dated note at the end of ADR-0004 §2 is updated from proposed to in
+  force, and stays as the historical record.
+- ADR-0004's §2 text, its configured-set amendment, and the notes in ADR-0006
+  and ADR-0016 remain as written. Only status lines and the dated notes move.
+
+Stated here so acceptance is a defined operation rather than a judgement call
+by whoever merges it.
+
+### 8. What is not decided here
 
 This ADR makes tool egress *permissible in principle*; it authorises no
 particular tool, destination, or payload, and by itself no transmission at all.
