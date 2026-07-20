@@ -318,13 +318,27 @@ change.
 
 ```python
 class ToolRegistry(Protocol):
-    async def register(self, tool: ToolDefinition) -> None: ...
-    async def deregister(self, tool_id: str) -> bool: ...
     async def get(self, tool_id: str) -> ToolDefinition | None: ...
     async def find(self, capability: str) -> list[ToolDefinition]: ...
     async def capabilities(self) -> tuple[str, ...]: ...
     async def all_tools(self) -> list[ToolDefinition]: ...
 ```
+
+**The Protocol is query-only, and population is internal to `tools/`.** An
+earlier draft put `register`/`deregister` on it. Nothing outside `tools/` ever
+calls them: `permissions` asks what a tool is, `orchestration` asks which tools
+satisfy a capability, and neither has any business owning the registration
+lifecycle. Putting mutation on a cross-subsystem contract widened the ratified
+surface to cover a purely internal concern — and, because §7's invocation work
+must eventually bind a *callable* at registration, it ratified a signature
+already known to be temporary. A contract whose author expects it to break is
+not a contract.
+
+`context/` set the precedent (ADR-0008): `ContextProvider` crosses the boundary,
+while the `ContextSource` seam that populates it stays inside the subsystem.
+Registration is this subsystem's `ContextSource`. When invocation lands it will
+change how `tools/` is populated, which is then a `tools/` change and not a
+breaking one — the query methods return `ToolDefinition` either way.
 
 **The registry does not choose.** `find` returns every candidate for a
 capability; which one runs is the selection stage's decision, and it needs the
@@ -338,14 +352,36 @@ implementations differ observably and the conformance suite cannot assert
 anything; `id` order is the one that carries no accidental meaning. Ordering by
 risk would be the beginning of ranking, and a caller would come to depend on it.
 
-**Re-registering a different definition under a live id is refused**
-(`ToolRegistrationError`); re-registering an identical one is idempotent. Tool
-metadata is a security control, so silently overwriting `risk_level=CRITICAL`
-with `LOW` under an id a policy already trusts is a privilege escalation with a
-lookup's ergonomics — the same audit hazard `PlanStore.save_plan` refuses
-(ADR-0014). Rebinding an id is still possible; it just has to be said out loud,
-as `deregister` then `register`. `deregister` exists for that and for revoking a
-tool, and it is what keeps the refusal from making an id permanently unusable.
+**A tool id, once registered, is bound to that definition for the life of the
+process — permanently, and `deregister` does not free it.** Re-registering an
+identical definition is idempotent; registering a *different* one under a used
+id is refused with `ToolRegistrationError`, whether or not the id was
+deregistered in between.
+
+The obvious rule — refuse a conflicting redefinition, but let `deregister` then
+`register` rebind — is not enough, and the gap is a time-of-check/time-of-use
+hole with real consequences. ADR-0014 records `bound_tool: str` on a step, an
+*id*, and the `approval_ref` alongside it points at a permission decision made
+against whatever that id meant at the time. If the id can be rebound, then
+between "the user approved `send_message`, which is `REVERSIBLE`" and "the
+executor runs `send_message`" the definition can become an `IRREVERSIBLE` one,
+and every record involved still reads as consistent. Deregistration is
+revocation — the tool is gone and its id is spent — not a way to say the same
+name differently.
+
+This makes ids permanently unusable after removal, which is the intended
+direction for a security control and cheap here: the registry is in-memory and
+rebuilt from scratch each run (§6), so "for the life of the process" is the
+whole of its life.
+
+**The residual hazard crosses a restart, and is not this ADR's to close.** Plan
+state is contracted as durable (ADR-0014 §5), so a step approved before a
+restart could be executed after one against a definition the new process
+registered differently. Closing that needs the approval record to pin the
+definition it ruled on — a digest or a version carried through `permissions`
+and checked at invocation — which touches two contracts that do not exist yet.
+It is recorded as issue #54, a named precondition on the invocation ADR rather
+than a silent gap.
 
 `capabilities()` settles ADR-0014's open vocabulary question, and settles it
 **against** a closed enum. Capability names stay an open string vocabulary of
@@ -405,29 +441,24 @@ widening of this one.
   is itself still uncontracted — a larger decision that deserves its own ADR
   rather than a corner of this one.
 
-  Two constraints on that ADR are set **here**, because getting them wrong later
-  is not recoverable:
+  Three constraints on that ADR are set **here**, because getting them wrong
+  later is not recoverable:
 
-  - **This registry is the only one.** A callable is registered *with* its
-    definition, through this contract; invocation must not arrive as a second
+  - **This registry is the only one.** A callable is bound to its definition at
+    registration, inside `tools/`; invocation must not arrive as a second
     registry sitting beside this one. Two registries keyed by the same id could
     be rebound independently, and the failure that produces is the worst
     available: executing an implementation whose risk declaration is not the one
-    the user approved. The binding of a definition to the thing that runs it is
-    made once, at registration.
-  - **`register`'s parameter type will change**, from `ToolDefinition` to
-    whatever pairs it with a call site. That is a breaking Protocol change under
-    golden rule 5, and it needs its own ADR — as the invocation decision does
-    anyway. An earlier draft of this ADR called invocation "strictly additive",
-    which was an overclaim; the query methods are what stay stable, since they
-    return `ToolDefinition` either way.
+    the user approved.
+  - **The approval record must pin the definition it ruled on** (§5, issue #54),
+    or the same substitution is possible across a restart.
+  - **ADR-0004 §2 must be amended first** (§3, issue #52).
 
-  Declaring the `Tool` Protocol *now*, with a lone `definition` property and no
-  method, would make the signature stable at the cost of ratifying a seam with
-  no implementation contact — the failure CONTRIBUTING explicitly warns about,
-  and one whose shape depends entirely on invocation questions this slice has
-  not answered. The naming of the hazard is what matters; paying for it with a
-  speculative Protocol is not.
+  Because registration is internal (§5), none of this changes the `ToolRegistry`
+  Protocol. Declaring a `Tool` Protocol *now*, with a lone `definition` property
+  and no method, would be ratifying a seam with no implementation contact — the
+  failure CONTRIBUTING explicitly warns about, and one whose shape depends
+  entirely on invocation questions this slice has not answered.
 - **Exactly-once execution** (ADR-0014 §7's debt, carried forward). The
   `idempotency` vocabulary lands here; requiring a key on the call, threading it
   through a retry, and holding a tool to its declared window are all invocation's
@@ -489,10 +520,17 @@ widening of this one.
 - **Every integration ships at least as many definitions as it has operations**
   (§5). Gmail is not one tool. This is more registration code and it is the
   point — per-operation risk is the granularity a permission decision is made at.
-- **The registry cannot be the place a bad definition is fixed quickly.**
-  Refusing a conflicting re-registration means a wrong `risk_level` in a shipped
-  plugin needs an explicit deregister, not a re-import that happens to win. That
-  friction is the intended direction for a security control.
+- **A bad definition cannot be hot-fixed; it needs a restart.** An id is spent
+  once used, so correcting a wrong `risk_level` means changing the code and
+  starting again rather than re-registering over it. That friction is the
+  intended direction for a security control, and it is what forecloses
+  substituting a tool between approval and execution.
+- **The ratified surface is four query methods.** Registration, the one part of
+  a registry that will have to change when invocation lands, is not on the
+  contract at all — so the change that is coming is a `tools/` change rather
+  than a breaking Protocol change. The cost is that `orchestration` cannot
+  compose a registry from parts; it receives one already populated, which is
+  what injection means here anyway.
 - **Nothing can be called yet.** A registry of definitions no executor can
   invoke is an unusual intermediate state, and the risk is that the contract is
   ratified without implementation contact — the failure CONTRIBUTING warns
@@ -509,10 +547,10 @@ widening of this one.
   the deliberate trade of §1, and it will be felt most by the simplest tools —
   a clock reader must still state its cost basis, its idempotency, and three
   empty data-reach tuples.
-- **`register` will break when invocation lands** (§7), and it is named here so
-  that the change is a planned, ADR-backed one rather than a surprise. What must
-  not happen — a second registry binding behaviour to an id independently of the
-  declaration that was approved — is foreclosed by decision, not by a type.
+- **Two substitution hazards are closed by decision, not by a type.** One
+  registry only, and an id that cannot be rebound. The cross-restart residue —
+  an approval that names an id rather than a definition — is genuinely open and
+  is issue #54 against the invocation ADR.
 - **New `core` surface:** `RiskLevel`, `Reversibility`, `CostBasis`,
   `ToolCost`, `Idempotency`, `ToolDefinition`, the `ToolRegistry` Protocol, and
   `ToolRegistrationError` — eight, against ADR-0014's fifteen, because execution
