@@ -16,7 +16,8 @@ mistake.
 ## 1. Preflight
 
 **Inventory the clones.** One agent per clone (ADR-0015 §2), never a linked
-worktree, never the user's primary clone — the `-*` glob excludes it:
+worktree, never the user's primary clone, and never the clone you are yourself
+working in — the glob will list that one if it has a suffix:
 
 ```bash
 for d in ~/projects/ai-assistant-*; do
