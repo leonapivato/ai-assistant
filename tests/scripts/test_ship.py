@@ -116,8 +116,9 @@ def _fake_gh(bin_dir: Path) -> None:
         '    if [[ "$prev" == "--body-file" ]]; then\n'
         '      cat "$a" >>"$GH_COMMENT_OUT"\n'
         '      printf "call\\n" >>"$GH_COMMENT_CALLS"\n'
-        '      id=$(( $(find "$GH_COMMENTS_DIR" -type f | wc -l) + 1 ))\n'
+        '      id=$(( $(find "$GH_COMMENTS_DIR" -type f -not -name "*.author" | wc -l) + 1 ))\n'
         '      cp "$a" "$GH_COMMENTS_DIR/$id"\n'
+        '      printf "%s\\n" "${GH_LOGIN:-shipper}" >"$GH_COMMENTS_DIR/$id.author"\n'
         "    fi\n"
         '    prev="$a"\n'
         "  done\n"
@@ -131,15 +132,20 @@ def _fake_gh(bin_dir: Path) -> None:
         '  for a in "$@"; do\n'
         '    [[ "$prev" == "--method" ]] && method="$a"\n'
         '    [[ "$prev" == "-F" ]] && body_file="${a#body=@}"\n'
-        '    case "$a" in repos/*) endpoint="$a" ;; esac\n'
+        '    case "$a" in repos/*|user) endpoint="$a" ;; esac\n'
         '    prev="$a"\n'
         "  done\n"
-        # The GET emits what ship.sh's --jq asks for: id and first body line,
-        # tab-separated, one comment per line.
+        '  if [[ "$endpoint" == "user" ]]; then\n'
+        '    printf "%s\\n" "${GH_LOGIN:-shipper}"; exit 0\n'
+        "  fi\n"
+        # The GET emits what ship.sh's --jq asks for: id, author, and first body
+        # line, tab-separated, one comment per line.
         '  if [[ "$method" == "GET" ]]; then\n'
         '    for f in "$GH_COMMENTS_DIR"/*; do\n'
         '      [[ -e "$f" ]] || continue\n'
-        '      printf "%s\\t%s\\n" "$(basename "$f")" "$(head -n 1 "$f")"\n'
+        '      case "$f" in *.author) continue ;; esac\n'
+        '      printf "%s\\t%s\\t%s\\n" "$(basename "$f")" \\\n'
+        '        "$(cat "$f.author" 2>/dev/null)" "$(head -n 1 "$f")"\n'
         "    done\n"
         "    exit 0\n"
         "  fi\n"
@@ -544,8 +550,22 @@ def test_refuses_when_the_fork_check_cannot_run(tmp_path: Path) -> None:
 
 
 def _stored_comments(tmp_path: Path) -> list[str]:
-    """Every comment the fake `gh` currently holds for the PR."""
-    return [p.read_text() for p in sorted((tmp_path / "comments").iterdir())]
+    """Every comment body the fake `gh` currently holds for the PR."""
+    return [
+        p.read_text() for p in sorted((tmp_path / "comments").iterdir()) if p.suffix != ".author"
+    ]
+
+
+def _seed_comment(tmp_path: Path, comment_id: str, body: str, author: str) -> None:
+    """Put a comment on the PR that ship.sh did not write.
+
+    Ids are chosen above the range the fake allocates, so seeding cannot collide
+    with a comment ship goes on to create.
+    """
+    comments = tmp_path / "comments"
+    comments.mkdir(exist_ok=True)
+    (comments / comment_id).write_text(body)
+    (comments / f"{comment_id}.author").write_text(f"{author}\n")
 
 
 def test_marks_the_comment_with_the_commit_it_reviews(tmp_path: Path) -> None:
@@ -627,6 +647,52 @@ def test_a_review_of_a_later_commit_gets_its_own_comment(tmp_path: Path) -> None
     assert len(stored) == 2
     assert any("on the first commit" in c for c in stored)
     assert any("on the second commit" in c for c in stored)
+
+
+def test_never_edits_a_marked_comment_written_by_someone_else(tmp_path: Path) -> None:
+    """The marker is public text; anyone can write or quote it.
+
+    Patching on the marker alone would rewrite another author's comment where
+    permissions allow it, and fail the ship where they do not.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"my finding\n{_VERDICT}\n")
+    foreign = f"<!-- ship:{sha} -->\nsomeone else's comment\n"
+    _seed_comment(tmp_path, "900", foreign, author="not-the-shipper")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "comments" / "900").read_text() == foreign
+    stored = _stored_comments(tmp_path)
+    assert len(stored) == 2, "the review is posted as a new comment, not into theirs"
+    assert any("my finding" in c for c in stored)
+
+
+def test_updates_every_duplicate_it_owns_for_the_commit(tmp_path: Path) -> None:
+    """Check-then-create is not atomic, so a duplicate can exist.
+
+    It cannot be prevented without conditional creation GitHub does not offer.
+    What it must not become is a *stale* duplicate — so every owned match is
+    rewritten, not just the first.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"current finding\n{_VERDICT}\n")
+    stale = f"<!-- ship:{sha} -->\nsuperseded finding\n"
+    _seed_comment(tmp_path, "901", stale, author="shipper")
+    _seed_comment(tmp_path, "902", stale, author="shipper")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    stored = _stored_comments(tmp_path)
+    assert len(stored) == 2, "both duplicates are updated; no third comment is created"
+    assert all("current finding" in c for c in stored)
+    assert all("superseded finding" not in c for c in stored)
 
 
 def test_refuses_when_the_existing_comments_cannot_be_read(tmp_path: Path) -> None:
