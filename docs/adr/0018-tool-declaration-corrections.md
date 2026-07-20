@@ -5,8 +5,9 @@
 - Supersedes: ADR-0016 §1 (the `id`/`capability` types and the `description`
   rule) and §5 (query results and the spent-id rule). The rest of ADR-0016
   stands unchanged.
-- **Breaking**: changes the `ToolRegistry` Protocol's contract and two `core`
-  types (golden rule 5). See "Compatibility" below.
+- **Breaking**: changes the `ToolRegistry` Protocol's contract (§3) and the
+  `core` types it exchanges (§1–2), per golden rule 5. The registration clauses
+  (§4–5) bind `tools/` only. See "Compatibility".
 
 ## Context
 
@@ -58,35 +59,56 @@ untouched and remains in force.
 | §1, field list | `id`/`capability`: `Identifier` → `VisibleIdentifier` | New `core` surface |
 | §1, `description` | "non-blank" → "contains something that renders" | Tightening |
 | §5, query results | Adds: every query returns a detached snapshot | New Protocol obligation (**breaking**) |
-| §5, registration | Adds: registration re-validates rather than copies | New `tools/` invariant (not a Protocol change) |
-| §5, spent ids | Identical re-registration under a deregistered id: idempotent → **refused**; scope corrected to per-registry | **Reverses a ratified rule** (**breaking**) |
+| §5, registration | Adds: registration re-validates rather than copies | New `tools/` invariant |
+| §5, spent ids | Identical re-registration under a deregistered id: idempotent → **refused**; scope corrected to per-registry | **Reverses a ratified rule** (`tools/` invariant) |
 
 ### Compatibility
 
-**This is a breaking Protocol change** (golden rule 5), even though no method
-signature moves. A `ToolRegistry` implementation that satisfied ADR-0016 can
-fail this contract in two ways, and neither is visible to a type checker:
+ADR-0016 §5 made `ToolRegistry` **query-only**, keeping registration inside
+`tools/` so its lifecycle can change without moving a cross-subsystem contract.
+**That decision stands, and it is what sorts these five clauses into two very
+different piles.**
 
-- returning its own list or its own stored definitions from `get`, `find` or
-  `all_tools` — previously unspecified, now forbidden (§3);
-- accepting an identical definition under a deregistered id — previously
-  *required* to be idempotent, now required to raise (§5).
+**Breaking for consumers of the contract** — golden rule 5 applies:
 
-§4 (registration re-validates) is **not** in that list: registration is not on
-the Protocol, so that clause binds `tools/` internally and no consumer of
-`ToolRegistry` can be broken by it.
+- **§3, detached snapshots.** A registry that returned its own list or its own
+  stored definitions satisfied ADR-0016 and fails this. No signature moves, so
+  a type checker sees nothing; the conformance suite is what catches it.
+- **§1–2, the `core` narrowings.** `ToolDefinition.id` and `.capability` go from
+  `Identifier` to `VisibleIdentifier`, and `description` tightens. All are
+  *narrowings*: every definition valid after this ADR was valid before it, but
+  not the reverse, so a tool declaring an invisible id or description now fails
+  to construct where it previously loaded.
 
-The `core` types change too: `ToolDefinition.id` and `.capability` narrow from
-`Identifier` to `VisibleIdentifier`, and `description` narrows. All three are
-*narrowings*, so every definition that is valid after this ADR was valid before
-it; the reverse does not hold, and a tool declaring an invisible id or
-description now fails to construct where it previously loaded.
+**Not breaking for consumers — `tools/` invariants:**
+
+- **§4, registration re-validates**, and **§5, the spent-id rule.** Both are
+  registration behaviour, and registration is not on the Protocol. No consumer
+  of `ToolRegistry` can be broken by either, because no consumer can reach them.
+
+An earlier draft listed §5 among the Protocol incompatibilities. That was the
+same mistake twice: it would have exported the internal registration lifecycle
+in practice while claiming ADR-0016's query-only boundary still held. Either the
+boundary holds or it does not, and reversing it is a decision this ADR does not
+make and sees no reason to.
+
+**Where the registration rules are tested follows from that.** They belong in a
+shared *registration-convention* suite that both `tools/` implementations run,
+kept separate from the `ToolRegistry` conformance suite, which tests the four
+query methods and nothing else. They are shared rather than per-implementation
+for one narrow reason: `FakeToolRegistry` is a stand-in for
+`InMemoryToolRegistry`, and a fake that accepted a definition the real registry
+refused would let a consumer's tests set up a state production cannot reach.
+That is fake-vs-real fidelity, not Protocol conformance, and the file layout
+should say so rather than leave a reader to infer which obligations cross the
+boundary. (PR #67 currently has them in one suite; separating them is part of
+implementing this ADR.)
 
 **Migration cost today is nil.** The only implementations are
 `InMemoryToolRegistry` and `FakeToolRegistry`, both in the unmerged PR #67, and
-both already conform. The obligations are enforced by the shared conformance
-suite rather than the signatures, so the practical migration instruction for any
-future implementation is: run the suite.
+both already conform. Since the obligations live in suites rather than
+signatures, the practical instruction for any future implementation is: run
+them.
 
 ### 1. `description` must render, not merely be non-blank (supersedes §1)
 
@@ -248,20 +270,9 @@ is the only way to mint a definition, or the pinned digest issue #54 already
 proposes for the approval path. That is out of scope here and is named so the
 gap is not mistaken for coverage.
 
-**Scope: a `tools/` invariant, not a Protocol obligation.** Registration is
-deliberately off `ToolRegistry` (ADR-0016 §5) so its lifecycle can evolve inside
-`tools/`, and this clause does not change that — it is **not** a breaking change
-to the cross-subsystem contract, and a consumer depending only on the Protocol
-is unaffected. It binds the registration convention the two implementations
-share.
-
-The shared suite tests it because `FakeToolRegistry` must not diverge from
-`InMemoryToolRegistry` on registration: a fake that accepted a definition the
-real registry refused would let a consumer's tests pass against behaviour
-production rejects. That is fidelity between two stand-ins for each other, which
-is what a canonical fake is for — not an extension of the Protocol, and if the
-registration lifecycle later changes inside `tools/`, this clause changes with
-it and no consumer contract moves.
+**Scope: a `tools/` invariant, not a Protocol obligation** — see Compatibility.
+The same applies to §5, and both are tested in the shared registration-convention
+suite rather than the `ToolRegistry` conformance suite.
 
 **Migration.** An implementation that copies must rebuild through validation
 instead — one line. The suite's case for it is the inert-email definition above;
@@ -269,6 +280,11 @@ the `risk_level` case in the suite exercises the §5 conflict rule, not this
 one.
 
 ### 5. The spent-id rule: reversal and rescoping (supersedes §5)
+
+Like §4, this is registration behaviour and therefore a `tools/` invariant, not
+a Protocol obligation — no consumer of `ToolRegistry` can reach `register` or
+`deregister`. It is still the most consequential of the five, because it is the
+one that reverses a ratified rule.
 
 **This clause reverses a rule ADR-0016 states.** Merged ADR-0016 §5 reads, in
 full:
