@@ -151,9 +151,14 @@ def _fake_gh(bin_dir: Path) -> None:
         '    for f in "$GH_COMMENTS_DIR"/*; do\n'
         '      [[ -e "$f" ]] || continue\n'
         '      case "$f" in *.author) continue ;; esac\n'
+        '      l1="$(sed -n "1p" "$f")"; l2="$(sed -n "2p" "$f")"\n'
+        # Real `@tsv` cannot emit a raw carriage return without breaking its
+        # one-record-per-line format, so it escapes it as the two characters
+        # `\` and `r`. Reproduced here, or a CRLF body would be handed to
+        # ship.sh in a form the real gh never produces.
+        "      l1=\"${l1//$'\\r'/\\\\r}\"; l2=\"${l2//$'\\r'/\\\\r}\"\n"
         '      printf "%s\\t%s\\t%s\\t%s\\n" "$(basename "$f")" \\\n'
-        '        "$(cat "$f.author" 2>/dev/null)" \\\n'
-        '        "$(sed -n "1p" "$f")" "$(sed -n "2p" "$f")"\n'
+        '        "$(cat "$f.author" 2>/dev/null)" "$l1" "$l2"\n'
         "    done\n"
         "    exit 0\n"
         "  fi\n"
@@ -704,6 +709,28 @@ def test_does_not_edit_a_comment_of_ours_that_merely_quotes_the_marker(tmp_path:
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "comments" / "900").read_text() == quoted
     assert len(_stored_comments(tmp_path)) == 2
+
+
+def test_recognises_its_own_comment_when_github_returns_it_with_crlf(tmp_path: Path) -> None:
+    """GitHub stores comment bodies with CRLF line endings.
+
+    `@tsv` cannot emit a raw carriage return, so it arrives as the two-character
+    escape `\\r`. Matching against a control byte instead would miss every real
+    comment and duplicate the review on every re-run.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"current finding\n{_VERDICT}\n")
+    crlf = (_ship_comment_opening(sha) + "\nsuperseded finding\n").replace("\n", "\r\n")
+    _seed_comment(tmp_path, "900", crlf, author="shipper")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    stored = _stored_comments(tmp_path)
+    assert len(stored) == 1, "the CRLF comment is updated, not duplicated"
+    assert "current finding" in stored[0]
 
 
 def test_refuses_when_the_pr_head_moves_during_the_comment_lookup(tmp_path: Path) -> None:

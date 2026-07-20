@@ -214,10 +214,13 @@ me="$(gh api user --jq .login)" ||
 
 existing_ids=()
 while IFS=$'\t' read -r id author line1 line2; do
-    # GitHub returns bodies with CRLF line endings, so neither line would ever
-    # compare equal without stripping the carriage return.
-    if [[ "$author" == "$me" && "${line1%$'\r'}" == "$marker" &&
-        "${line2%$'\r'}" == "$header" ]]; then
+    # GitHub returns comment bodies with CRLF line endings, so every line
+    # arrives with a trailing carriage return and would never compare equal.
+    # `@tsv` encodes that CR as the two characters `\` and `r` — it cannot emit
+    # a raw one without breaking the one-record-per-line format — so what is
+    # stripped here is the escape, not a control byte.
+    if [[ "$author" == "$me" && "${line1%'\r'}" == "$marker" &&
+        "${line2%'\r'}" == "$header" ]]; then
         existing_ids+=("$id")
     fi
 done <<<"$comment_lines"
