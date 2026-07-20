@@ -18,6 +18,7 @@ store is wired, not here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import threading
 import time
@@ -243,6 +244,31 @@ async def test_the_model_is_loaded_once_and_reused() -> None:
     assert backend.loads == [_STUB_MODEL]
 
 
+@contextlib.contextmanager
+def _worker_threads(count: int) -> Iterator[None]:
+    """Run this loop's ``to_thread`` work on a pool of exactly ``count`` threads.
+
+    Both concurrency tests below park one worker while a second one still has to
+    start, so they need a known thread budget. The adapter calls
+    `asyncio.to_thread` internally — the tests cannot route their embeds
+    themselves — and that uses whatever default executor the running loop
+    carries, which a fixture or host is free to configure with a single worker.
+    The second embed would then never start, and the test would fail on a
+    ten-second timeout with the production code entirely correct. Establishing
+    the pool here makes the budget part of the test instead of an assumption
+    about the environment.
+
+    Nothing is restored afterwards because nothing is displaced: each test gets
+    its own event loop, a loop creates its default executor lazily on first use,
+    and this installs one before any `to_thread` call has run. The corollary is
+    that *every* `to_thread` the test triggers must happen inside the block — the
+    pool is shut down on the way out, and a later `embed` would be refused.
+    """
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        asyncio.get_running_loop().set_default_executor(pool)
+        yield
+
+
 class _ArrivalSignallingLock:
     """The load lock, wrapped to announce each thread *before* it contends for it.
 
@@ -319,27 +345,30 @@ async def test_concurrent_first_calls_load_the_model_once() -> None:
     # for why the observation point cannot come from the backend seam instead.
     embedder._load_lock = lock  # type: ignore[assignment]  # test-only lock instrumentation
 
-    calls = asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
-    # A dedicated executor, not `asyncio.to_thread`: both racing embeds occupy a
-    # default-executor thread each and neither releases it until this observer
-    # runs, so borrowing a third thread from that same pool would deadlock the
-    # rendezvous wherever the pool is small.
-    with ThreadPoolExecutor(max_workers=1) as observer:
-        both_arrived = await asyncio.get_running_loop().run_in_executor(
-            observer, lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS
-        )
-        # Released unconditionally, so a failing run finishes and reports rather
-        # than leaving two workers parked inside `load`.
-        backend.proceed.set()
-        first, second = await calls
+    with _worker_threads(2):
+        # The observer gets a pool of its own rather than a third thread from the
+        # embeds' pool: both racing embeds hold one each and neither can release
+        # it until the observer has run.
+        with ThreadPoolExecutor(max_workers=1) as observer:
+            calls = asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+            both_arrived = await asyncio.get_running_loop().run_in_executor(
+                observer, lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS
+            )
+            # Released unconditionally, so a failing run finishes and reports
+            # rather than leaving two workers parked inside `load`.
+            backend.proceed.set()
+            first, second = await calls
 
-    assert both_arrived, "the second caller never reached the load lock; the race did not happen"
-    assert not backend.timed_out, "the backend gave up waiting; the rendezvous did not drive this"
-    assert backend.loads == [_STUB_MODEL]
-    # And the race must not have crossed the two callers' results.
-    assert first == await embedder.embed(["zulu"])
-    assert second == await embedder.embed(["alpha"])
-    assert first != second
+        assert both_arrived, (
+            "the second caller never reached the load lock; the race did not happen"
+        )
+        assert not backend.timed_out, "the backend gave up waiting; it did not drive the rendezvous"
+        assert backend.loads == [_STUB_MODEL]
+        # And the race must not have crossed the two callers' results. Still
+        # inside the pool: these embeds dispatch to it too.
+        assert first == await embedder.embed(["zulu"])
+        assert second == await embedder.embed(["alpha"])
+        assert first != second
 
 
 class _RendezvousTextModel:
@@ -367,13 +396,14 @@ async def test_concurrent_embeds_reach_the_loaded_model_together() -> None:
     # inference runs — if it were, the second caller could never reach the
     # barrier and this would fail rather than serialise.
     #
-    # Needs two default-executor threads at once, which is inherent to asserting
-    # concurrency and always available: asyncio's default pool is at least five
-    # workers. Unlike the load-race test above, it never needs a third.
+    # Two worker threads at once is inherent to asserting concurrency, so the
+    # pool is established rather than assumed. Unlike the load-race test above,
+    # nothing here needs a third.
     backend = _ModelBackend(_RendezvousTextModel(parties=2))
     embedder = _stub_embedder(backend)
 
-    first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
+    with _worker_threads(2):
+        first, second = await asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
 
     # Un-swapped: each caller gets its own text's vector, not the other's.
     assert first == [[float(value) for value in _StubTextModel.embed_one("zulu")]]
