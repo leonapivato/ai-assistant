@@ -47,8 +47,7 @@ its recipients are limited as §2 sets out per boundary.**
 
 Two clauses, because they have different scopes. The **boundary and declaration**
 requirement covers everything the system sends, user data or not — otherwise a
-request carrying no user data, like the model artifact fetch below, would fall
-outside the rule entirely and could originate anywhere undeclared, which is the
+request carrying no user data would fall outside the rule entirely and could originate anywhere undeclared, which is the
 gap this ADR exists to close. The **recipient** restriction applies to user
 data, and is ADR-0004 §2's for `models/` and §3's for `tools/`.
 
@@ -111,9 +110,6 @@ continuing terms are:
   of what it already sends rather than a new grant;
 - its recipients for user data are the model providers the user explicitly
   configured (ADR-0004 §2's configured-set amendment, which stands unamended);
-  the model artifact fetch declared below reaches a host that rule does not
-  cover, which this ADR records as an unresolved gap rather than authorising
-  (issue #89);
 - ADR-0004 §7's minimisation rule binds the content of each call;
 - the two controls it does not yet satisfy — transport pinning and
   credential-access gating — are named below, unchanged by this ADR, and
@@ -162,20 +158,37 @@ and until outbound I/O runs through an injected capability (issue #85) a
 subsystem determined to bypass the boundary can.
 
 **Why `models/` is not put through the `tools/` gate.** It would fail it today,
-on two counts: nothing pins its transport endpoint (issue #83), and nothing gates its
-Tier 0 credential read against ADR-0004 §7 (issue #74). Both gaps are
-**pre-existing and unchanged by this ADR** — they hold identically right now
-under ADR-0004 §2 and would remain exactly as open if this ADR were rejected.
-This ADR did not create them; writing down what `models/` transmits is what
-made them visible.
+on three counts:
+
+- nothing pins its transport endpoint (issue #83);
+- nothing gates its Tier 0 credential read against ADR-0004 §7 (issue #74);
+- a local embedding backend fetches its model file on first use — `fastembed`'s
+  ONNX model, ADR-0006 §2 — from an artifact repository that is not a
+  configured model provider and that ADR-0004 §2's recipient rule does not
+  cover. Easy to miss, because the *default* embedder is the on-device one and
+  "on-device" describes where inference runs, not where the model came from. No
+  user data is in that request, but it is a real connection to a real host.
+  ADR-0006's claim that memory content never leaves the device to be indexed is
+  unaffected — a different request carrying different content. It is
+  deliberately **not** among the declared payload classes below: listing it in
+  an exhaustive list of authorised classes would authorise it, and authorising
+  a new recipient would widen ADR-0004 §2's recipient clause, outside this
+  ADR's supersession scope. Issue #89 — preinstall the artifact and it
+  disappears, or pin the host and amend ADR-0004 §2 properly; unpinned,
+  whoever serves that artifact chooses what the embedder computes.
+
+All three are **pre-existing and unchanged by this ADR** — they hold identically
+right now under ADR-0004 §2 and would remain exactly as open if this ADR were
+rejected. This ADR did not create them; writing down what `models/` transmits is
+what made them visible.
 
 So designating `models/` would be certifying a compliance this ADR cannot
 demonstrate, and gating it would prohibit every model call the product runs on
 in order to close nothing. It does neither. `models/` keeps the permission
-ADR-0004 §2 already gives it, on the terms ADR-0004 already sets, and the two
+ADR-0004 §2 already gives it, on the terms ADR-0004 already sets, and the three
 gaps stay ADR-0004's to resolve — #74 in particular is a question about §7's
 meaning that this ADR has no standing to answer. What this ADR contributes is
-that both are now written down with issues against them instead of being
+that all three are now written down with issues against them instead of being
 undocumented.
 
 Because what the two send differs in kind, this ADR fixes the *granularity* at
@@ -202,27 +215,6 @@ for itself:
     gap — `models/` transmits today under ADR-0004 §2, and making it a
     precondition would prohibit every model call until the work lands. Issue
     #83 covers both boundaries;
-  - **model artifact fetches** (Tier 2) — the request for a named model file
-    when a local backend downloads its weights on first use. **Declared here,
-    not authorised here.** Its recipient is an artifact repository, which is
-    not a configured model provider, so ADR-0004 §2's configured-provider rule
-    does not cover it — and authorising a new recipient class would widen that
-    rule, which is outside this ADR's supersession scope (§1). So this entry
-    records an egress that already happens and that nothing had declared; it
-    does not bless it. Resolving it — preinstall the artifact, or pin and
-    verify the host, and amend ADR-0004 §2 if a recipient class is genuinely
-    needed — is issue #89. `fastembed`'s ONNX
-    model (ADR-0006 §2) is the live case, and it is easy to miss: the *default*
-    embedder is the on-device one, and "on-device" describes where inference
-    runs, not where the model came from. No user data is in the request, but it
-    is a real connection to a real host, and it discloses that this
-    installation is fetching that model. ADR-0006's claim that memory content
-    "never leaves the device just to be indexed" is unaffected and remains
-    true — this is a different request carrying different content. The
-    alternative, requiring artifacts to be preinstalled, stays open to the
-    embedding work — as does pinning and verifying the host, since an unpinned
-    model download lets whoever serves it choose what the embedder computes.
-    Issue #89;
   - **request configuration and protocol metadata** (Tier 2) — the model
     identifier, generation parameters such as temperature and token limits, and
     the headers the transport requires. Every call carries some of this and it
