@@ -1484,38 +1484,57 @@ def _is_encodable(text: str) -> bool:
     return True
 
 
-def _encodable_json(value: FrozenJson) -> FrozenJson:
-    """Reject a payload holding text with no UTF-8 encoding, recursively.
+def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
+    """Render ``parameters`` in the exact form ADR-0021 §1 pins for the digest.
+
+    One definition, used by both the validator below and
+    :attr:`ActionRequest.parameters_digest`. That sharing is the point: it makes
+    "the payload validates" and "the payload can be digested" the *same*
+    predicate by construction, rather than two enumerations that can disagree —
+    and disagreeing means a request a policy can rule on but no decision can be
+    recorded about.
+    """
+    text = json.dumps(
+        _thaw_json(parameters), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return text.encode("utf-8")
+
+
+def _digestible(parameters: Mapping[str, FrozenJson]) -> Mapping[str, FrozenJson]:
+    """Reject a payload the canonical encoding cannot render.
 
     The same rule, for the same reason, as :func:`_freeze_json`'s refusal of
-    non-finite floats (ADR-0014 §2): a value that satisfies ``str`` but has no
-    transportable representation would change or fail on the way through a
-    digest, a store, or an export. It is checked over keys as well as values,
-    since a mapping key is text the encoding has to survive too.
+    non-finite floats (ADR-0014 §2): a value that satisfies its Python type but
+    has no transportable representation would fail on the way through a digest,
+    a store, or an export. Two such values are reachable here and neither is
+    exotic —
+
+    - a **lone surrogate**, which satisfies ``str`` and has no UTF-8 encoding;
+    - a **very large integer**, which ``json.dumps`` renders through ``str()``
+      and CPython refuses past its integer-string conversion limit.
+
+    Checked by *attempting the encoding* rather than by enumerating the value
+    types that can fail. An enumeration is a list someone has to keep complete,
+    and the two cases above are what a first attempt at one missed; running the
+    real operation cannot be incomplete. It also means the rule automatically
+    tracks the encoding if the ADR ever pins a different one.
 
     Applied to :attr:`ActionRequest.parameters` rather than inside
     ``_freeze_json``, which would tighten ADR-0014's plan parameters and step
-    outputs at the same time. Those have the identical latent hole and it is
-    filed as its own issue rather than folded into this change, because that
-    type is another lane's contract.
+    outputs at the same time. Those have the identical latent hole, filed as its
+    own issue rather than folded into this change, because that type is another
+    lane's contract.
 
     Raises:
-        ValueError: If any string in the payload cannot be encoded as UTF-8.
+        ValueError: If the payload has no canonical encoding. ``UnicodeError``
+            is a ``ValueError``, so one clause covers both causes.
     """
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if not _is_encodable(key):
-                msg = f"parameter key {key!r} has no UTF-8 encoding, so it cannot be digested"
-                raise ValueError(msg)
-            _encodable_json(item)
-    elif isinstance(value, str):
-        if not _is_encodable(value):
-            msg = f"parameter value {value!r} has no UTF-8 encoding, so it cannot be digested"
-            raise ValueError(msg)
-    elif isinstance(value, Sequence):
-        for item in value:
-            _encodable_json(item)
-    return value
+    try:
+        _canonical_json(parameters)
+    except ValueError as exc:
+        msg = f"parameters have no canonical JSON encoding, so they cannot be digested: {exc}"
+        raise ValueError(msg) from exc
+    return parameters
 
 
 class ActionRequest(BaseModel):
@@ -1540,7 +1559,7 @@ class ActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool: ToolDefinition = Field(description="The declaration being ruled on, by value.")
-    parameters: Annotated[FrozenJsonMapping, AfterValidator(_encodable_json)] = Field(
+    parameters: Annotated[FrozenJsonMapping, AfterValidator(_digestible)] = Field(
         default=_EMPTY_PARAMS,
         description="The arguments the call proposes; bound by digest, never stored.",
     )
@@ -1565,21 +1584,16 @@ class ActionRequest(BaseModel):
         trail actually has. "Were *these* the arguments approved" is what the
         trail must answer, and a digest answers it exactly.
 
-        Well-defined because the payload is constrained to values that *have* an
-        encoding: :data:`FrozenJson` already rejects non-finite floats (ADR-0014
-        §2), and :func:`_encodable_json` rejects text with no UTF-8 form. The
-        ADR named only the first; the second is the same class of hole one
-        character-set down, and a digest that raised ``UnicodeEncodeError`` on a
-        payload the model had already accepted would make every decision about
-        it unconstructable.
+        **Total on every payload the model accepts**, which is a property of how
+        the two are wired rather than a claim. :func:`_digestible` validates by
+        running :func:`_canonical_json` — the same function this hashes — so
+        "accepted" and "digestible" cannot come apart. The ADR justified
+        well-definedness by pointing at ``FrozenJson`` rejecting non-finite
+        floats (ADR-0014 §2); that was necessary and not sufficient, and a
+        digest raising on a payload the model had already accepted would make
+        every decision about that request unconstructable, at the gate.
         """
-        canonical = json.dumps(
-            _thaw_json(self.parameters),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-        return sha256(canonical.encode("utf-8")).hexdigest()
+        return sha256(_canonical_json(self.parameters)).hexdigest()
 
 
 class PermissionRuling(BaseModel):
@@ -1623,6 +1637,9 @@ class PermissionRuling(BaseModel):
         stripped = value.strip()
         if not _has_visible_text(stripped):
             msg = "ruling reason must contain visible text"
+            raise ValueError(msg)
+        if not _is_encodable(stripped):
+            msg = f"ruling reason has no UTF-8 encoding, so it could not be stored: {stripped!r}"
             raise ValueError(msg)
         return stripped
 
