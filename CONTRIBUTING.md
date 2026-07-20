@@ -409,6 +409,14 @@ timestamp that made it true, becomes an assertion no one owns, and decays from
 that moment — while still reading as law to everyone after you. Prefer the
 durable form: name the rule, and point at whatever actually holds the state.
 
+**A fact a check owns is not a snapshot** — it is a description of something
+mechanically true, and the check is what keeps it that way. "Every Protocol has
+its triad" would be an unowned assertion on its own; with
+`tests/core/test_protocol_triad.py` failing the gate otherwise, it is a
+statement about an enforced invariant. Say which check owns it, so a reader can
+tell the two apart, and prefer a claim that can only stay true — a list that can
+only shrink, having reached empty, will not decay the way a count does.
+
 A decision does not become a snapshot by describing a situation. "You are the
 only agent in this clone" is a premise these documents *set* (ADR-0015), not a
 count someone took; if it stops holding, the workflow has been broken, which is
