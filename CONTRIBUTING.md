@@ -45,11 +45,11 @@ every pull request and push to `main` (`.github/workflows/gate.yml`, ADR-0010).
 CI is the backstop — but run the gate locally before you push. A red PR is a
 wasted round-trip, not a first line of defence.
 
-**Run the whole suite, always.** The gate is ~33 seconds end to end (27s of it
-`pytest`, 5,777 tests). Selecting "the tests that matter for this change" would
-save a few seconds and introduce a judgment call whose failure mode — a
-cross-subsystem regression `lint-imports` cannot see — surfaces in CI after
-you have moved on. Revisit if `pytest` ever crosses a couple of minutes.
+**Run the whole suite, always.** Selecting "the tests that matter for this
+change" would save a few seconds and introduce a judgment call whose failure
+mode — a cross-subsystem regression `lint-imports` cannot see — surfaces in CI
+after you have moved on. Revisit if `pytest` ever crosses a couple of minutes;
+until then the saving is not worth the class of bug it lets through.
 
 ## Review (pre-merge)
 
@@ -390,6 +390,28 @@ before you know the contract.
 - Do **not** repeat types in docstrings — they live in annotations.
 - Comments explain **why**, not what. No commented-out code.
 - Record every non-obvious decision as an ADR (`docs/adr/`, see the template).
+
+### No state claims in living documents
+
+`CONTRIBUTING.md` and `CLAUDE.md` are undated and read as standing law, so they
+carry **rules and the reasoning behind them, never snapshots.** If a fact about
+the repository matters, either a check asserts it or a dated ADR records it.
+
+A snapshot is anything that was measured or observed rather than decided: a test
+count, a wall-clock timing, a "currently"/"today"/"so far", or a claim that some
+piece of work is complete. Written into an undated document it loses the
+timestamp that made it true, becomes an assertion no one owns, and decays from
+that moment — while still reading as law to everyone after you. Prefer the
+durable form: name the rule, and point at whatever actually holds the state.
+
+**ADRs are the exception, and the reason the rule works.** An ADR is a dated,
+point-in-time record, so "at the time of writing, X" is exactly what belongs
+there and stays correct as history. Do not scrub snapshots out of `docs/adr/`.
+
+This is enforced the way style is — by reviewers, reading the diff. There is
+deliberately no linter for it: a check hunting claims in prose could not tell a
+rule from an observation, and the failure mode here is slow and cosmetic rather
+than a broken build. That is the cost pattern ADR-0015 exists to avoid.
 
 ## Testing
 
