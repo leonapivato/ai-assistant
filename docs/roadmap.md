@@ -89,7 +89,16 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       rights (ADR-0014). Deferred: a model-backed planner, a SQLite `PlanStore`,
       step dependencies, and exactly-once execution (a crash mid-effect yields an
       `INDETERMINATE` step for explicit resolution).
-- [ ] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.
+- [x] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.
+      A frozen `ToolDefinition` where no safety field has a default, carrying
+      severity-ordered `RiskLevel`/`Reversibility`, ADR-0004 tier reach
+      (`reads`/`writes`/`discloses`, a ceiling rather than a per-call measure),
+      structured `ToolCost`, and an `Idempotency` guarantee; queried through a
+      query-only `ToolRegistry` that returns candidates without ranking them
+      (ADR-0016). Settles ADR-0014's capability vocabulary as an open,
+      registry-authoritative set. Deferred: invocation (and with it exactly-once,
+      parameter-schema enforcement, and ADR-0004 §2's egress rule), ranking,
+      persistence, per-call data reach.
 - [ ] **`permissions` — `ActionPolicy` + audit trail** (ADR-0004).
 - [x] **`learning` — `FeedbackEvent` capture.** `FeedbackEvent` +
       `FeedbackProcessor`; a deterministic processor turns explicit
