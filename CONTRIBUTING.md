@@ -158,16 +158,17 @@ starts a fresh round.
 Each review run prints an aggregate, unasked: the round number on this branch,
 the net diff size, and the **churn ratio** (cumulative lines touched ÷ net lines
 in the final diff). A ratio far above 1 means most of the work has been rework.
-Nothing in it blocks — round 6 of #90 found a real hole that a cap would have
-forbidden — but it is on the record, and `just ship` carries it to the PR so the
+Nothing in it blocks — a cap would forbid rounds that produce findings worth
+having — but it is on the record, and `just ship` carries it to the PR so the
 reviewer at merge sees the same numbers you did.
 
-Both runaway cases behind ADR-0020 (#90 at nine rounds; #72 at 79 review records
-over ~2.5 hours, peaking at 821 lines to supersede one clause of a 175-line
-document) were locally defensible at every step, and neither terminated on its
-own — both were stopped from outside by someone holding exactly this aggregate.
-Several rounds in with a high churn ratio is the signal: the loop is reworking
-itself, not converging.
+A long review loop is locally defensible at every step: a late round looks like
+an early one from inside, and the author cannot read the signal they are
+emitting.
+That is why the aggregate is printed rather than left to judgement — the view
+that ends such a loop has historically been held from outside it. Several rounds
+in with a high churn ratio is the signal that the loop is reworking itself rather
+than converging. ADR-0020 records the cases this rule comes from.
 
 This is deliberately not a pre-push hook: review is a pre-merge step, and gating
 every push would force a full Codex run per WIP commit — the per-push cost
