@@ -58,7 +58,9 @@ is about *freshness*. A branch that predates a check added to `main` runs a full
 suite that cannot fail on it, which is how a change has been reported green
 while CI had it red. The same staleness misleads Codex, which reads the working
 tree for context and will report other branches' merged work as regressions in
-yours — so fetch before reviewing too.
+yours — so rebase before you *invoke* a review as well. The reviewer itself
+stays read-only (`docs/review/guide.md`); freshening the tree is the branch
+owner's job, not the reviewer's.
 
 ## Review (pre-merge)
 
