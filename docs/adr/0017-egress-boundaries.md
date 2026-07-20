@@ -73,23 +73,34 @@ for it; short of that it is approved and must not transmit, whatever partial
 progress exists. Naming the seam is one precondition among several, not the
 transition itself.
 
-**Accepted limitation, stated rather than implied.** For `models/` today,
-designation does not by itself guarantee §1's recipient authorisation at the
-transport level. §1 requires recipients to be user-authorised, and the
-authorised recipient is the configured provider — but nothing yet pins the
-endpoint, so a provider SDK given a hostile base URL, or following a cross-host
-redirect, would deliver conversation and credential to a host the user never
-authorised, from a boundary this ADR calls designated.
+**Accepted limitations for `models/`, stated rather than implied.** Two
+controls this ADR would want at a designated boundary are not in place today:
 
-This ADR accepts that gap rather than papering over it. The alternative —
-making transport pinning a `models/` precondition — would leave the boundary
-undesignated and so prohibit every model call from the moment this ADR is
-accepted, breaking the product to close a hole that exists identically today
-under ADR-0004 §2. Accepting a known gap the ADR names is better than a rule
-nobody can comply with, and strictly better than the status quo, where the gap
-existed and was written down nowhere. It is debt with an issue (#83), not a
-property of the design; for `tools/`, which transmits nothing yet, the same
-obligation is a hard precondition (§3).
+- **Transport pinning.** §1 requires recipients to be user-authorised and the
+  authorised recipient is the configured provider — but nothing pins the
+  endpoint, so a provider SDK given a hostile base URL, or following a
+  cross-host redirect, would deliver conversation and credential to a host the
+  user never authorised. Issue #83.
+- **Credential-access gating.** ADR-0004 §7 requires access to Tier 0 data to
+  pass `permissions/` and be audited. Every model call reads its credential
+  from the keyring, and nothing gates that read, so `models/` cannot today
+  demonstrate compliance with a rule this ADR leaves standing. Whether §7 was
+  ever meant to bite per call on a credential the user configured is ADR-0004's
+  question, not this ADR's to answer. Issue #74.
+
+Both are **pre-existing**: they hold identically today under ADR-0004 §2, which
+permits `models/` egress and always has. This ADR neither creates nor widens
+them; it makes them visible by writing down what the boundary transmits and
+under what conditions.
+
+Both are therefore accepted rather than made preconditions. Requiring either
+would leave `models/` undesignated and so prohibit every model call from the
+moment this ADR is accepted — breaking the product to close holes that would
+remain exactly as open if this ADR were rejected. A named gap with an issue is
+worse than a closed one and much better than an unnamed one, which is what the
+status quo offers. For `tools/`, which transmits nothing yet, the equivalent
+obligations are hard preconditions (§3): there, requiring them first costs
+nothing.
 
 `models/` is **designated** on acceptance, with an empty §3 list. Its
 declaration is complete in §2, its recipients are authorised by configuration,
