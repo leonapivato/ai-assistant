@@ -28,13 +28,12 @@ Verified against the installed `fastembed` 0.8.0, for the default model
   closes an option empirically rather than by argument, and it is the single
   most important fact in this document.
 - **No revision pin.** Consequently `snapshot_download` is called with no
-  `revision`. `model_info(...).sha` is resolved, but used only for the tree
-  listing. Every install takes whatever that repo's default branch holds at
-  that moment.
+  `revision` (the resolved `.sha` is used only for the tree listing), so every
+  install takes whatever the repo's default branch holds at that moment.
 - **No integrity pin.** Verification compares file *size* and HF's `blob_id`,
-  both obtained from the same host in the same session — self-consistency with
-  what the server just said, not agreement with a known-good value. Re-checking
-  a warm cache compares size alone. No digest is pinned anywhere.
+  both from the same host in the same session — self-consistency with what the
+  server just said, not agreement with a known-good value (a warm-cache re-check
+  compares size alone). No digest is pinned anywhere.
 - **One source, but not one host.** The description carries only
   `hf="qdrant/bge-small-en-v1.5-onnx-q"`, so the recipient is `huggingface.co`
   *plus* whatever Xet content-addressed store the Hub names at transfer time in
@@ -113,17 +112,18 @@ rank existing vectors against queries from new weights — silently, the corrupt
 §4 exists to prevent. Folding the revision in closes that: an implementation
 change within the existing `Embedder.model_id` contract, not a Protocol change.
 
-**It does not claim to fully fingerprint the embedding space.** On `main`,
-`model_id` is the bare model name and captures *no* runtime-stack version — not
-the tokenizer's, not fastembed's — so a vector-altering dependency change is
-already undetectable, on every provisioning path. That pre-existing ADR-0006 §4
-gap wants a behavioural fingerprint and is filed as **issue #136**. It needs no
-amendment from this ADR: §4 gives the store a *detection* mechanism, not a
-perfect fingerprint, and on `main` detects only name and dimension — so adding
-the revision is a strict improvement, never a regression, and completing §4's
-detection is #136's work.
+For the vendored default this is a *complete* key: §3 exact-pins the whole
+behaviour-affecting stack, so no input to the embedding space can vary under a
+fixed name + revision. On `main`, by contrast, `model_id` is the bare name and
+captures no runtime-stack version, so a vector-altering dependency change is
+undetectable — a pre-existing ADR-0006 §4 gap (**issue #136**). This ADR closes
+it for the default by *pinning* rather than *detecting*; a general behavioural
+fingerprint, and the non-default fetch, stay #136. §4 needs no amendment — it
+gives a *detection* mechanism, not a perfect fingerprint, and on `main` detects
+only name and dimension — so this is a strict improvement, and gating it on
+#136's general solution inverts scope.
 
-### 3. fastembed is pinned, not ranged
+### 3. The behaviour-affecting stack is exact-pinned, not ranged
 
 `fastembed>=0.7.0` is too loose to carry this decision — the offline load in §5
 leans on `specific_model_path` and the on-disk layout (no stable pre-1.0
@@ -131,15 +131,21 @@ contract), and fastembed's source shows a *preprocessing* change with no outward
 signal: 0.6 moved several models from CLS to mean pooling, an embedding-space
 change from a version bump alone, identical weights and digest.
 
-The defence is to **pin the dependency, not detect the change after the fact.**
-The committed lockfile already fixes `fastembed==0.8.0` (and `tokenizers`,
-`onnxruntime`) for a `uv sync` install; this ADR additionally makes the
-*published* specifier the exact pin `fastembed==0.8.0`, not a `<0.9` range — a
-range lets a resolver prefer a later 0.8.x that changes preprocessing under an
-unchanged `model_id`, which is the whole failure this section is about. A
-fastembed bump is then a reviewed change to that constant, tied to a release —
-what "release-bound" means. The residual preprocessing-fingerprint risk is the
-same #136 gap.
+Pinning fastembed alone is still not enough: it ranges `tokenizers` and
+`onnxruntime`, so a *published wheel* install resolves them fresh and two installs
+can produce different vectors under the same weights and `model_id` —
+preprocessing (`tokenizers`) and inference kernels (`onnxruntime`) both affect the
+output. So the *published* specifiers exact-pin the whole behaviour-affecting
+stack — `fastembed`, `tokenizers`, `onnxruntime` — to the versions the lockfile
+already fixes for `uv sync`. The vendored default's embedding space is then fixed
+by construction: nothing in it can vary within a release, which is what makes
+`model_id` = name + revision (§2) truthful for that path. A bump to any of them
+is a reviewed, release-bound change.
+
+This is not the "pile of version strings" §2 rejects for `model_id`: that was
+about *detecting* arbitrary drift, where a version number over- and
+under-triggers; exact pins *prevent* drift for one product. Detecting it on
+unpinned paths — the non-default fetch, a general fingerprint — stays #136.
 
 ### 4. The artifact is not committed to git
 
@@ -237,32 +243,28 @@ shows it is not needed yet.
   decision's main benefit and the thing #89 was ultimately asking for.
 - **The strongest case against it: the fetch is relocated, not eliminated.** A
   wheel install fetches nothing, but a from-sdist build runs the hook on the
-  user's own machine. The honest claim is that the fetch happens once per build
-  and never for a wheel install — not that it is gone. Accepted because
-  `py3-none-any` means every user who does not deliberately opt out gets the
-  wheel, and because a build-time fetch is verified where a runtime one was not.
+  user's machine — so the honest claim is "once per build, never for a wheel
+  install", not "gone". Accepted because `py3-none-any` means every user who does
+  not opt out gets the wheel, and a build-time fetch is verified where a runtime
+  one was not.
 - **Every install pays 58.4 MiB**, including users on a cloud embedder or the
   lexical `InMemoryMemoryStore`. Accepted deliberately.
 - **Licence attribution must be resolved before publishing.** Three sources
-  disagree: upstream `BAAI/bge-small-en-v1.5` declares MIT, the
-  `Qdrant/bge-small-en-v1.5-onnx-Q` card declares Apache-2.0, fastembed's model
-  description says `mit`. That artifact repository carries no `LICENSE` file (only
-  the card field), and this project's own root `LICENSE` is unrelated and does
-  not discharge the obligation. Both permit redistribution with attribution, so
-  vendoring is permissible either way, but shipping the weights under our package
-  name means shipping correct notices and someone must determine which governs.
-  This obligation exists **only** because we redistribute. A release blocker, not
-  a merge blocker.
+  disagree — upstream `BAAI/bge-small-en-v1.5` says MIT, the
+  `Qdrant/bge-small-en-v1.5-onnx-Q` card says Apache-2.0, fastembed's metadata
+  says `mit` — and that artifact repo carries no `LICENSE` file (our own root
+  `LICENSE` is unrelated). Both permit redistribution with attribution, so
+  vendoring is permissible, but shipping the weights under our package name means
+  shipping correct notices, and someone must determine which governs. This exists
+  **only** because we redistribute. A release blocker, not a merge blocker.
 - **A contributor's first build fetches 64 MiB** once (CI has network).
 - **Model changes become explicit and release-bound.** ADR-0006 §4 already
   requires re-embedding when the model changes; tying that to a release makes it
   visible rather than ambient.
-- **Nothing else in the stack has this shape.** Checked, per #89's last line:
-  `sqlite-vec` bundles `vec0.so` in its wheel; `tokenizers`, `mmh3` and
-  `py-rust-stemmers` fetch nothing lazily; `genai-prices` (via `pydantic-ai`)
-  ships a bundled price snapshot and returns it with `from_auto_update=False` —
-  its updater reaches `raw.githubusercontent.com` but is opt-in and never
-  started by default. That last one is a latent instance and has issue #132.
+- **Nothing else in the stack has this shape** (checked, per #89's last line):
+  `sqlite-vec` bundles `vec0.so`; `tokenizers`, `mmh3`, `py-rust-stemmers` fetch
+  nothing lazily; `genai-prices` ships a bundled snapshot (`from_auto_update=False`)
+  with an opt-in updater never started by default — latent, filed as #132.
 - **Revisit if** the wheel approaches the 100 MiB limit (move to the data-only
   package), if fastembed gains a supported way to pass a revision, or if the
   install-size cost proves to matter more than first-run friction did.
