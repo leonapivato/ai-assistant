@@ -375,6 +375,18 @@ neither has a JSON representation or survives arithmetic in a running total.
 `core` already rejects non-finite floats in `_freeze_json` (ADR-0014 §2) for the
 same reason; a currency amount deserves it more, not less.
 
+`currency` is **exactly three uppercase ASCII letters**, matching ISO-4217's
+alphabetic form, and is validated on shape only — `"usd"` is rejected rather
+than upcast. Two decisions worth stating because leaving either implicit lets
+two conforming registries disagree about whether the same definition loads:
+normalising silently would mean a typo'd `"USDD"` and a lowercase `"usd"` are
+treated differently for no reason a caller can see, and validating against the
+*live* ISO-4217 register would make loading a definition depend on a data table
+that changes when currencies are withdrawn — a tool that loaded last year
+failing to load today, offline. Shape-checking catches the realistic error (a
+malformed or empty code) without either. A policy comparing amounts across
+currencies needs conversion rates and is out of scope entirely.
+
 It deliberately does **not** model money the tool *moves*. The price of a flight
 lives in the call's parameters, not in the definition of the tool that books
 it; a definition-level field could only ever hold a fiction. Spend limits over
@@ -724,7 +736,13 @@ widening of this one.
   combinations that are deliberately *accepted* need pinning as well as the
   rejected ones — in particular a `REVERSIBLE` tool with a non-empty
   `discloses`, which §2 argues must stay legal and which a later reader would
-  otherwise be tempted to "fix". With those, the *lookup*
+  otherwise be tempted to "fix". Finally the **normalisations must be tested as
+  observable behaviour, not assumed**: `capabilities()` fed duplicate,
+  out-of-order capability names, and `reads`/`writes`/`discloses` constructed
+  with duplicate, out-of-order tiers, each asserted to come back exactly sorted
+  and de-duplicated. Both are promises this ADR makes about what consumers see;
+  untested, two registries could satisfy every other requirement and still
+  serialise an audit record differently. With those, the *lookup*
   seam is exercised; the *metadata's* fitness is argued from its two named
   consumers rather than demonstrated by one.
 - **`cost` is an estimate nothing reconciles.** A tool whose declared
