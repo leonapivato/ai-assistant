@@ -48,82 +48,58 @@ This replaces ADR-0004 §2's "only component" clause. Its residency clause (all
 persistent data local, no cloud storage by default) and its telemetry clause
 (off by default, no observability egress) are unaffected and remain ADR-0004's.
 
-**This is a requirement on the system, not a claim about its current state.**
-"Designated" means a boundary is permitted to transmit and is bound by the rule
-above — it does not certify that every clause of the rule is already enforced
-there. Two of them are not, at `models/`, today: nothing pins the transport
-endpoint and nothing gates credential access. §2 names both, argues why they
-are accepted rather than blocking, and points at the issues that close them.
-They are stated where the rule is stated so that no reader takes designation
-for a guarantee, and so the ADR is not quietly weaker than it sounds.
+**This is a requirement on the system, not a certificate about any boundary.**
+It states what must hold before data leaves. Where it does not yet hold, §2 says
+so rather than letting "designated" imply otherwise.
 
 ### 2. The boundaries
 
-Two boundaries are **approved** for egress by this ADR, and they are in
-different states. The distinction is load-bearing, so it is named:
+Two boundaries are **approved** for egress by this ADR, and this ADR treats them
+differently because their situations differ:
 
-- **Approved** — this ADR permits the boundary to transmit *in principle*. The
-  list of approved boundaries is closed; adding a third requires another ADR.
-  Approval alone never authorises a byte.
+- **`models/` continues under ADR-0004 §2's existing permission.** It has
+  transmitted since that ADR was ratified, and this ADR neither re-authorises
+  it nor certifies it. Its payload declaration below is **documentation of what
+  it already sends**, not a new grant and not a compliance finding.
+- **the `tools/` integration boundary** is the boundary this ADR actually adds,
+  and the one the new status applies to.
+
+The list of approved boundaries is closed; adding a third requires another ADR.
+
+For `tools/`, two states:
+
+- **Approved** — permitted to transmit *in principle*. Approval alone never
+  authorises a byte.
 - **Designated** — approved *and* every precondition in §3 discharged **in
   code**, not merely in a document. Only a designated boundary may transmit.
+
+There is one transition and §3 is its complete condition. `tools/` is approved
+and undesignated today, and stays that way until every item in §3 holds;
+enforcement tooling should read approved-and-undesignated as "still
+prohibited".
 
 This is a rule code must obey, backed by the strongest enforcement currently
 available — not a proof that undesignated code cannot reach the network. §4
 condition 1 is explicit that an import contract is a net rather than a proof,
 and until outbound I/O runs through an injected capability (issue #85) a
-subsystem determined to bypass the boundary can. "Only a designated boundary
-may transmit" states what is permitted, and what review and the contracts
-enforce; it does not claim the machine forbids the alternative.
+subsystem determined to bypass the boundary can.
 
-There is one transition and §3 is its complete condition. A boundary is
-designated exactly when it is approved here and every item in §3's list holds
-for it; short of that it is approved and must not transmit, whatever partial
-progress exists. Naming the seam is one precondition among several, not the
-transition itself.
+**Why `models/` is not put through this gate.** It would fail it today, on two
+counts: nothing pins its transport endpoint (issue #83), and nothing gates its
+Tier 0 credential read against ADR-0004 §7 (issue #74). Both gaps are
+**pre-existing and unchanged by this ADR** — they hold identically right now
+under ADR-0004 §2 and would remain exactly as open if this ADR were rejected.
+This ADR did not create them; writing down what `models/` transmits is what
+made them visible.
 
-**Accepted limitations for `models/`, stated rather than implied.** Two
-controls this ADR would want at a designated boundary are not in place today:
-
-- **Transport pinning.** §1 requires recipients to be user-authorised and the
-  authorised recipient is the configured provider — but nothing pins the
-  endpoint, so a provider SDK given a hostile base URL, or following a
-  cross-host redirect, would deliver conversation and credential to a host the
-  user never authorised. Issue #83.
-- **Credential-access gating.** ADR-0004 §7 requires access to Tier 0 data to
-  pass `permissions/` and be audited. Every model call reads its credential
-  from the keyring, and nothing gates that read, so `models/` cannot today
-  demonstrate compliance with a rule this ADR leaves standing. Whether §7 was
-  ever meant to bite per call on a credential the user configured is ADR-0004's
-  question, not this ADR's to answer. Issue #74.
-
-Both are **pre-existing**: they hold identically today under ADR-0004 §2, which
-permits `models/` egress and always has. This ADR neither creates nor widens
-them; it makes them visible by writing down what the boundary transmits and
-under what conditions.
-
-Both are therefore accepted rather than made preconditions. Requiring either
-would leave `models/` undesignated and so prohibit every model call from the
-moment this ADR is accepted — breaking the product to close holes that would
-remain exactly as open if this ADR were rejected. A named gap with an issue is
-worse than a closed one and much better than an unnamed one, which is what the
-status quo offers. For `tools/`, which transmits nothing yet, the equivalent
-obligations are hard preconditions (§3): there, requiring them first costs
-nothing.
-
-`models/` is **designated** on acceptance, with an empty §3 list. Its
-declaration is complete in §2, its recipients are authorised by configuration,
-and its mechanical pin is the existing "provider SDKs are confined to the
-models layer" contract. That pin is narrower than this ADR would like — it
-forbids four named SDKs rather than network clients generally — but widening it
-is **debt, not a precondition** (Consequences, issue #66). The distinction is
-deliberate: `models/` transmits today under ADR-0004 §2, this ADR does not
-narrow that permission, and a precondition would mean prohibiting the model
-calls the product runs on until a contract that has never existed gets written.
-
-The `tools/` seam is **approved and undesignated**, and stays that way until
-every item in §3 is discharged. Enforcement tooling should read
-approved-and-undesignated as "still prohibited".
+So designating `models/` would be certifying a compliance this ADR cannot
+demonstrate, and gating it would prohibit every model call the product runs on
+in order to close nothing. It does neither. `models/` keeps the permission
+ADR-0004 §2 already gives it, on the terms ADR-0004 already sets, and the two
+gaps stay ADR-0004's to resolve — #74 in particular is a question about §7's
+meaning that this ADR has no standing to answer. What this ADR contributes is
+that both are now written down with issues against them instead of being
+undocumented.
 
 Because what the two send differs in kind, this ADR fixes the *granularity* at
 which each discharges its obligations. The granularity is part of the
@@ -322,8 +298,9 @@ argue its way into.
 It removes a categorical prohibition; it does not make any transmission legal.
 This section is the **complete and only** precondition list, it applies to
 `tools/`, and every item must hold **in code** — none is a property this ADR
-asserts is already in place. `models/` has no preconditions (§2); nothing below
-gates it, and nothing elsewhere in this ADR adds a condition to either boundary.
+asserts is already in place. It does not apply to `models/`, which this ADR
+does not gate at all (§2): `models/` transmits under ADR-0004 §2's existing
+permission, and nothing here adds a condition to it or removes one.
 
 None of it is discharged today, which is why `tools/` is approved,
 undesignated, and permitted no egress at all:
@@ -537,6 +514,36 @@ contract, and the rules deciding which declared disclosures `permissions/`
 grants. What it no longer owes is a prior decision permitting the category to
 exist.
 
+### 9. Rejected alternative: a dedicated injected egress capability
+
+The stronger enforcement shape is an outbound-transport capability in `core`,
+injected into the boundaries allowed to use it, so a subsystem never handed it
+cannot connect regardless of what it imports. That is testable, contract-based,
+and squarely golden rule 1 — and §4 condition 1 concedes it is what mechanical
+enforcement here ultimately wants. It is deferred rather than adopted, for
+reasons worth stating since it is the better end state:
+
+- **It does not fit `models/`.** Provider SDKs (`pydantic-ai`, `anthropic`,
+  `openai`) open their own sockets. Routing `models/` through our transport
+  would mean either not using those SDKs or wrapping them at a seam they do not
+  expose, so the capability could not cover the one boundary transmitting
+  today. A rule enforced at one boundary and not the other is roughly what we
+  already have with import contracts, at much higher cost.
+- **Its shape depends on the invocation contract that does not exist.** Whether
+  it is HTTP-shaped or lower-level, and what it must expose for retries,
+  streaming and timeouts, are answerable once something calls it and not
+  before. Ratifying it now would bless a seam with no implementation contact —
+  the failure CONTRIBUTING explicitly warns about, and the one ADR-0016 §5
+  avoided by keeping registration internal.
+- **The decisions are independent.** Which boundaries may transmit, and what
+  mechanism enforces that, are separate questions. Settling the first now
+  unblocks the invocation ADR; the second can land later without reopening it,
+  because nothing here depends on enforcement being import-based.
+
+The cost of deferring is stated plainly in §2 and §4 rather than hidden: until
+the capability exists, "designated" is a rule backed by a net, not a proof.
+Issue #85 carries it.
+
 ## Consequences
 
 - **ADR-0004 §2's egress clause is superseded on acceptance**, not before. Its
@@ -559,13 +566,11 @@ exist.
   clients generally, and one that can pin the `tools/` seam by module once it
   is named (issue #66).
 
-  For `models/` this is **debt, not a precondition** — it is designated on
-  acceptance and "designated" simply leans on a narrower pin than the word
-  implies until the contract widens. For `tools/` the module-pinning contract
-  *is* a §3 precondition, because there the contract is what gives the
-  approval a concrete extent in the first place. Treating the `models/` gap as
-  a precondition instead would have prohibited every model call on acceptance,
-  which is why the two are recorded differently.
+  For `models/` this is **debt**, not a condition on anything — this ADR does
+  not gate that boundary (§2), so widening the contract strengthens enforcement
+  of a permission ADR-0004 already grants. For `tools/` the module-pinning
+  contract *is* a §3 precondition, because there the contract is what gives the
+  approval a concrete extent in the first place.
 - **The invocation ADR inherits three obligations** it must discharge before the
   first tool transmits: name the seam, gate per call before transmitting, and
   constrain destination and per-call payload. It no longer inherits a
