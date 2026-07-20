@@ -353,7 +353,18 @@ agg_binary_churn="$(agg_field binary_churn)"
             # measurement. The merge reviewer has to see that distinction or the
             # number reads as "little rework happened" on precisely the branch
             # that was reworked enough to be worth squashing (issue #97).
-            if [[ "$agg_bound" == "lower" ]]; then
+            #
+            # `n/a` is not a ratio, so it takes neither the `≥` nor the `×` — a
+            # diff with no measurable text lines (a binary-only or rename-only
+            # state) reports no ratio at all, and `churn ≥n/a×` would be noise
+            # in the one line that exists to be read at a glance. The
+            # rewritten-history caveat still applies and is stated on its own.
+            if [[ "$agg_ratio" == "n/a" ]]; then
+                summary="${summary} · churn n/a (${agg_churn} touched)"
+                if [[ "$agg_bound" == "lower" ]]; then
+                    summary="${summary} · history rewritten, earlier rounds not counted"
+                fi
+            elif [[ "$agg_bound" == "lower" ]]; then
                 summary="${summary} · churn ≥${agg_ratio}× (${agg_churn} touched;"
                 summary="${summary} lower bound — history rewritten, earlier rounds not counted)"
             else

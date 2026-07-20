@@ -1309,6 +1309,37 @@ def test_carries_the_unmeasured_binary_count_to_the_pr(tmp_path: Path) -> None:
     assert "3 binary file(s) unmeasured" in (tmp_path / "comment.md").read_text()
 
 
+def test_an_unmeasurable_ratio_on_a_rewritten_branch_is_not_rendered_as_a_number(
+    tmp_path: Path,
+) -> None:
+    """The two caveats combine: no measurable lines *and* a rewritten history.
+
+    A binary-only or rename-only state reports no ratio at all, so decorating
+    `n/a` with a floor marker and a multiplication sign would put noise in the one
+    line that exists to be read
+    at a glance. The rewritten-history caveat is still true and is stated on its
+    own.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", churn_bound="lower")
+    # Rewrite the ratio to the unmeasurable form the real script emits when the
+    # diff touches no text lines.
+    artifact = repo / ".review" / f"{sha}-adversarial.md"
+    artifact.write_text(artifact.read_text().replace("churn_ratio=1.0", "churn_ratio=n/a"))
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "churn n/a" in posted
+    assert "≥n/a" not in posted
+    assert "n/a\u00d7" not in posted
+    # The rewrite is still reported — it is a separate fact from the ratio.
+    assert "history rewritten" in posted
+
+
 def test_carries_binary_churn_absent_from_the_final_diff(tmp_path: Path) -> None:
     """A binary added and reverted inside the branch is still unmeasured work.
 
