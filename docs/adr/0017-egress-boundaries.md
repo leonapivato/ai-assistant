@@ -72,24 +72,35 @@ something a boundary may weaken for itself:
   listed here is not authorised at this boundary, and adding one — multimodal
   attachments, tuning corpora, anything else — requires amending this ADR.
 
-  **Classification follows the tier of the data, not the container it arrives
-  in.** "Generation inputs are Tier 1" describes what that payload class is
-  *authorised to carry*; it does not reclassify Tier 0 data that happens to sit
-  inside a message. If a user pastes a credential into a conversation, that
-  value is still Tier 0 (ADR-0004 §1), it is not one of the classes authorised
-  above, and being wrapped in an authorised container does not authorise it.
-  The only Tier 0 authorised at this boundary is the provider credential, to
-  the provider that issued it. The same reading applies to embedding inputs.
+  **The declaration constrains what the *system* discloses, not what the user
+  says.** Generation input has two parts, and they are not alike:
 
-  This states the rule; it does not claim the rule is enforced. **Nothing
-  currently detects a secret inside user-authored content before it is
-  transmitted** — ADR-0004 §5's redaction net is keyed on field names and
-  cannot see inside a message body. Whether egress-side detection is in scope
-  at all, and whether it would block or prompt (refusing to send is refusing to
-  answer, and the user may have pasted the key deliberately), is issue #75.
-  Stating the classification rule now is what keeps a later implementation from
-  reading "generation inputs are Tier 1" as a licence to ship whatever a
-  message contains.
+  - **User-authored content** — what the user typed or pasted into the
+    conversation. Authorised as submitted, whatever it contains. The user is
+    the discloser here: authoring the message and sending it to a provider they
+    configured is one act, and the system is a conduit, not a party deciding on
+    their behalf. A pasted credential does not make the call non-compliant —
+    the user disclosed it, deliberately, perhaps to ask about it.
+  - **System-assembled context** — memory records, retrieved facts, anything
+    `orchestration` adds that the user did not write into this message
+    (Tier 1). Here the system *is* deciding, so ADR-0004 §7's minimisation rule
+    binds it, and Tier 0 the system holds — credentials in the keyring — is
+    never included. The only Tier 0 leaving this boundary is the provider
+    credential, to the provider that issued it.
+
+  Embedding inputs read the same way: content the user wrote is theirs to
+  disclose; content the system selected for indexing is the system's decision
+  and is bounded by minimisation.
+
+  This is the line that keeps the rule enforceable. A rule forbidding secrets
+  in user-authored content would be violated by every ordinary model call the
+  moment someone pastes a key, and no mechanism exists to detect it —
+  ADR-0004 §5's redaction net is keyed on field names and cannot see inside a
+  message body. Declaring such calls non-compliant would make the rule false on
+  the day it is accepted. Whether the assistant should nonetheless *warn* a
+  user who appears to be pasting a secret is a real question and a good
+  feature — it is a product and safety decision, not an egress-compliance one,
+  and it is issue #75.
   Recipient authorisation is **per configuration** — the explicitly-configured
   provider set of ADR-0004 §2's configured-set amendment, which stands — not
   per call. ADR-0004 §7's minimisation rule binds the content of each call.
