@@ -102,14 +102,20 @@ class FastEmbedEmbedder:
                 docstring).
 
         Raises:
-            ModelError: If ``model`` is not a model the backend supports, or the
-                backend reports a non-positive dimension for it — a vector length
-                of zero or less cannot satisfy the ``Embedder`` contract, and
-                accepting it would defer the failure to the store that sized its
-                vector column from it.
+            ModelError: If the backend cannot report its supported models, if
+                ``model`` is not one of them, or if the backend reports a
+                non-positive dimension for it — a vector length of zero or less
+                cannot satisfy the ``Embedder`` contract, and accepting it would
+                defer the failure to the store that sized its vector column
+                from it.
         """
         self._backend = _FastEmbedBackend() if backend is None else backend
-        dimensions = self._backend.dimensions_by_model().get(model)
+        try:
+            supported = self._backend.dimensions_by_model()
+        except Exception as exc:
+            msg = "fastembed could not report its supported models"
+            raise ModelError(msg) from exc
+        dimensions = supported.get(model)
         if dimensions is None:
             msg = f"unknown fastembed model: {model!r}"
             raise ModelError(msg)
@@ -140,6 +146,10 @@ class FastEmbedEmbedder:
         The model is loaded on first use; the embedding itself runs in a worker
         thread so it does not block the event loop. An empty batch is answered
         without loading anything.
+
+        Raises:
+            ModelError: If the model cannot be loaded (a download failure, an
+                unwritable cache) or the backend fails to embed the batch.
         """
         documents = list(texts)
         if not documents:
@@ -147,11 +157,22 @@ class FastEmbedEmbedder:
         return await asyncio.to_thread(self._embed_sync, documents)
 
     def _embed_sync(self, documents: list[str]) -> list[Embedding]:
-        return [[float(value) for value in vector] for vector in self._loaded().embed(documents)]
+        # `_loaded` sits outside the try so its own ModelError passes through
+        # rather than being re-wrapped into a misleading "failed to embed".
+        model = self._loaded()
+        try:
+            return [[float(value) for value in vector] for vector in model.embed(documents)]
+        except Exception as exc:
+            msg = f"fastembed failed to embed a batch of {len(documents)} text(s)"
+            raise ModelError(msg) from exc
 
     def _loaded(self) -> FastEmbedTextModel:
         """The model, loading it on first use and reusing it after."""
         with self._load_lock:
             if self._model is None:
-                self._model = self._backend.load(self._model_name)
+                try:
+                    self._model = self._backend.load(self._model_name)
+                except Exception as exc:
+                    msg = f"fastembed could not load model {self._model_name!r}"
+                    raise ModelError(msg) from exc
             return self._model

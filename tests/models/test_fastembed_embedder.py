@@ -26,6 +26,7 @@ from embedder_contract import EmbedderContract
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.protocols import Embedder
 from ai_assistant.models.fastembed_embedder import (
+    FastEmbedBackend,
     FastEmbedEmbedder,
     FastEmbedTextModel,
 )
@@ -89,7 +90,7 @@ class _StubBackend:
         return self.model
 
 
-def _stub_embedder(backend: _StubBackend | None = None) -> FastEmbedEmbedder:
+def _stub_embedder(backend: FastEmbedBackend | None = None) -> FastEmbedEmbedder:
     return FastEmbedEmbedder(model=_STUB_MODEL, backend=backend or _StubBackend())
 
 
@@ -199,6 +200,86 @@ async def test_embedding_is_exactly_deterministic_for_a_deterministic_backend() 
     second = await embedder.embed(["the user likes coffee"])
 
     assert first == second
+
+
+class _BrokenMetadataBackend:
+    """A backend whose offline metadata lookup fails."""
+
+    def dimensions_by_model(self) -> Mapping[str, int]:
+        raise RuntimeError("metadata is malformed")
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        raise AssertionError("must not be reached")
+
+
+class _FailingLoadBackend:
+    """A backend that supports the model but cannot load it (no network, say)."""
+
+    def __init__(self) -> None:
+        self.load_attempts = 0
+
+    def dimensions_by_model(self) -> Mapping[str, int]:
+        return {_STUB_MODEL: _STUB_DIMENSIONS}
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        self.load_attempts += 1
+        raise RuntimeError("download failed")
+
+
+class _FailingEmbedModel:
+    """A loaded model that raises when asked to embed."""
+
+    def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
+        raise RuntimeError("inference failed")
+
+
+class _FailingEmbedBackend(_StubBackend):
+    """A backend that loads fine but whose model cannot embed."""
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        self.loads.append(model)
+        return _FailingEmbedModel()
+
+
+def test_a_backend_that_cannot_report_its_models_raises_model_error() -> None:
+    # Everything this package raises belongs to the AssistantError hierarchy
+    # (CONTRIBUTING, "Errors"), so a caller's `except ModelError` is sufficient
+    # and a backend's own exception type never leaks past this adapter.
+    with pytest.raises(ModelError, match="could not report its supported models") as caught:
+        FastEmbedEmbedder(model=_STUB_MODEL, backend=_BrokenMetadataBackend())
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+async def test_a_failed_load_raises_model_error() -> None:
+    embedder = _stub_embedder(_FailingLoadBackend())
+
+    with pytest.raises(ModelError, match="could not load model") as caught:
+        await embedder.embed(["alpha"])
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+
+
+async def test_a_failed_load_is_retried_on_the_next_call() -> None:
+    # A transient failure (network, cold cache) must not wedge the embedder into
+    # permanently believing it has no model.
+    backend = _FailingLoadBackend()
+    embedder = _stub_embedder(backend)
+
+    for _ in range(2):
+        with pytest.raises(ModelError):
+            await embedder.embed(["alpha"])
+
+    assert backend.load_attempts == 2
+
+
+async def test_a_failed_embed_raises_model_error() -> None:
+    embedder = _stub_embedder(_FailingEmbedBackend())
+
+    with pytest.raises(ModelError, match="failed to embed a batch of 1 text") as caught:
+        await embedder.embed(["alpha"])
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
 
 
 def test_the_stub_distinguishes_the_contract_inputs() -> None:
