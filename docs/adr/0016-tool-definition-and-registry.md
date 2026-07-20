@@ -185,6 +185,27 @@ like *"a tool that reads Tier 0 always requires confirmation"* is expressible
 without a translation layer, and a tool's declared reach is checkable against
 the tiering the rest of the system is already built on.
 
+**All three tuples state a tool's *maximum possible* reach, not the reach of any
+particular call.** This is the definition, and it is deliberately the
+conservative one. A `send_email` tool can disclose Tier 1 data, so it declares
+`PERSONAL` — even though a given call might carry nothing but a Tier 2 status
+line. The alternative reading, "what this call actually touches", is not
+expressible by a definition at all: it depends on arguments the definition never
+sees, and a field that silently meant the narrow thing would license exactly the
+under-classification it looks like it prevents.
+
+The accepted cost is over-conservatism: a policy keyed on these fields treats
+every `send_email` call as a Tier 1 disclosure and will prompt where a
+per-call analysis would not have. That is the correct direction for a bound to
+err in, and it is a *ceiling* a later per-call mechanism can narrow, never a
+floor it must raise. Narrowing needs a tool-agnostic way to derive actual reach
+from arguments — a mapping from `parameters_schema` fields to tiers, or a
+disclosure report from the invocation itself — which requires the invocation
+contract this slice defers (§7) and is issue #57. Until then, "may reach Tier 1"
+is what the permission layer gets, and it is enough to gate on; what it is not
+yet enough for is ADR-0004 §7's *minimisation* rule, which is a per-call
+judgement by nature.
+
 They are ordered tuples, sorted and de-duplicated on validation, rather than
 `frozenset`s. A `frozenset` serialises in hash order, which varies between
 processes; these values are written into permission decisions and audit records,
@@ -497,6 +518,9 @@ widening of this one.
   `idempotency` vocabulary lands here; requiring a key on the call, threading it
   through a retry, and holding a tool to its declared window are all invocation's
   to do, and until then the declaration is unexercised.
+- **Per-call data reach, and with it ADR-0004 §7's minimisation rule.** The
+  definition states a ceiling (§3); deriving what an individual call actually
+  touches needs argument-level analysis and the invocation contract. Issue #57.
 - **Parameter validation against `parameters_schema`.** The schema is carried
   (§4); validating a `PlanStep`'s parameters against it at selection time needs
   a JSON Schema implementation, which is a runtime dependency decision, and has
@@ -549,6 +573,12 @@ widening of this one.
 - **A tool's off-device disclosure is a declared fact.** `discloses` gives
   ADR-0004 §2 something to police, and its required-ness means a tool that
   quietly transmits Tier 1 data has to say so in order to load.
+- **Data reach is a ceiling, so policy will over-prompt** (§3). Every
+  `send_email` call is treated as a Tier 1 disclosure whether or not it is one.
+  Accepted as the safe direction and as a bound a later per-call mechanism can
+  tighten; the honest consequence is that ADR-0004 §7's minimisation rule is
+  *not* enforceable from this contract alone (issue #57) — gating is, and that
+  is what unblocks `permissions` to be written at all.
 - **ADR-0004 §2 still reads as forbidding all tool egress**, and this ADR does
   not amend it — it cannot, without inventing the invocation contract. Ratifying
   this changes no egress behaviour because nothing is callable, but the
