@@ -1571,8 +1571,17 @@ def _detached_tool(value: ToolDefinition) -> ToolDefinition:
     own subject here, ``from_request`` takes the decision's, and
     ``AuditTrail.record`` revalidates what it stores. Between them no reference
     a caller still holds reaches recorded state.
+
+    Rebuilt as a :class:`ToolDefinition` specifically, not as ``type(value)``. A
+    subclass carrying extra fields would survive on the request and then be
+    flattened to the declared base type when the decision is serialised, so the
+    trail would reload a definition that no longer equals the one approved and
+    :meth:`PermissionDecision.authorises` would answer ``False`` for the very
+    request it was made about. ``extra="forbid"`` turns that into a refusal at
+    construction instead — the divergence surfaces where it can be fixed rather
+    than after a restart.
     """
-    return type(value).model_validate(value.model_dump())
+    return ToolDefinition.model_validate(value.model_dump())
 
 
 def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:

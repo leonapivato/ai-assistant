@@ -14,7 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ConfigDict, ValidationError
 
 from ai_assistant.core.types import (
     ActionRequest,
@@ -626,6 +626,28 @@ def test_a_decision_rejects_a_digest_that_is_not_one(digest: str) -> None:
             parameters_digest=digest,
             decided_at=AT,
         )
+
+
+def test_a_request_refuses_a_definition_subclass_carrying_extra_fields() -> None:
+    """A subclass would be flattened on the way into the record, and diverge.
+
+    `PermissionDecision.tool` is declared as `ToolDefinition`, so dumping it
+    serialises the base schema and drops a subclass's extra fields. The trail
+    would reload a definition no longer equal to the one approved, and
+    `authorises` would answer `False` for the very request it was made about —
+    after a restart, which is exactly when issue #54's failure bites. Refused at
+    construction instead.
+    """
+
+    class TenantScopedTool(ToolDefinition):
+        tenant: str
+
+        model_config = ConfigDict(extra="forbid", frozen=True)
+
+    extended = TenantScopedTool(**tool().model_dump(), tenant="acme")
+
+    with pytest.raises(ValidationError):
+        ActionRequest(tool=extended)
 
 
 @pytest.mark.filterwarnings("ignore:Pydantic serializer warnings:UserWarning")
