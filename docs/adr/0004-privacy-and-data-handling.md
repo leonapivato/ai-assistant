@@ -4,11 +4,12 @@
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
-- Partial supersession **proposed** 2026-07-19: **ADR-0017** (`Proposed`) would
-  replace §2's egress clause ("the **only** component permitted…") with a
-  designated set of egress boundaries. **Until ADR-0017 is accepted, §2 below
-  remains the live rule and this ADR is unchanged by it.** See the dated note
-  at the end of §2.
+- Note (2026-07-19): a partial supersession is **proposed** — **ADR-0017**
+  (`Proposed`) would replace §2's egress clause ("the **only** component
+  permitted…") with a designated set of egress boundaries. This is a note, not
+  a status: the `Status` line above is this ADR's only status field. **Until
+  ADR-0017 is accepted, §2 below remains the live rule and this ADR is
+  unchanged by it.** See the dated note at the end of §2.
 
 ## Context
 

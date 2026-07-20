@@ -211,15 +211,21 @@ ADR-0001 requires the superseded ADR's status to be updated, not merely
 annotated. While this ADR is `Proposed`, ADR-0004 is untouched and its §2 is
 the live rule. **On acceptance of this ADR**, and as part of ratifying it:
 
-- ADR-0004's header line becomes
-  `- Status: Accepted (partially superseded by ADR-0017 — §2's egress clause)`,
-  replacing the "partial supersession **proposed**" line currently there. The
-  status change is the ADR-0001 mechanism; it is the one edit to ADR-0004 that
-  ADR-0001 authorises.
-- The dated note at the end of ADR-0004 §2 is updated from proposed to in
-  force, and stays as the historical record.
-- ADR-0004's §2 text, its configured-set amendment, and the notes in ADR-0006
-  and ADR-0016 remain as written. Only status lines and the dated notes move.
+- **Edit exactly one line:** ADR-0004's `Status` field becomes
+  `- Status: Accepted (partially superseded by ADR-0017 — §2's egress clause)`.
+  That is the status update ADR-0001 requires and the only edit to ADR-0004 it
+  authorises. ADR-0004 has one status field and keeps one; the dated notes are
+  notes, not competing status declarations.
+- **Append, do not rewrite, everywhere else.** The existing dated notes — in
+  ADR-0004's header and at the end of its §2 — stay exactly as merged, still
+  reading "proposed", because that is what was true when they were written.
+  Acceptance adds a new dated note beside each recording that ADR-0017 was
+  accepted and the supersession is in force. Flipping the old notes from
+  "proposed" to "in force" would erase what they recorded, which is the same
+  append-only violation this ADR exists to avoid committing.
+- **Nothing else moves.** ADR-0004's §2 text and its configured-set amendment,
+  and the notes in ADR-0006 and ADR-0016, remain as written. The ADR-0006 and
+  ADR-0016 notes are already phrased conditionally and need no change.
 
 Stated here so acceptance is a defined operation rather than a judgement call
 by whoever merges it.
