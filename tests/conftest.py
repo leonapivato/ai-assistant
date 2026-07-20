@@ -41,6 +41,10 @@ class _RunRecord:
     #: contributed assertions that really executed, rather than merely being
     #: inherited from, overridden, or skipped.
     class_tests: dict[type, set[str]] = field(default_factory=dict)
+    #: Test class -> names of the tests on it skipped by a *mark*. Tracked
+    #: separately because a *partly* skipped suite is the interesting case:
+    #: one passing test would otherwise vouch for nine skipped obligations.
+    skipped_tests: dict[type, set[str]] = field(default_factory=dict)
     unfiltered: bool = False
 
 
@@ -76,20 +80,32 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Record a test that got as far as calling its body, and passed."""
-    if report.when != "call" or not report.passed:
-        return
+    """Record whether each test passed its call phase, or was skipped."""
     owner = _OWNERS.get(report.nodeid)
     if owner is None:
         return
     cls, name = owner
-    _RECORD.class_tests.setdefault(cls, set()).add(name)
+    if report.skipped and report.when == "setup":
+        # Only a *mark* skips before the body runs, and a mark is imposed on the
+        # test from outside it -- that is the disqualifying case. A suite whose
+        # own body calls `pytest.skip()` (see ContextProviderContract's
+        # `serves_a_fixed_instant`) skips at the call phase, and is the contract
+        # deciding an obligation does not apply, which is legitimate.
+        _RECORD.skipped_tests.setdefault(cls, set()).add(name)
+    elif report.when == "call" and report.passed:
+        _RECORD.class_tests.setdefault(cls, set()).add(name)
 
 
 @pytest.fixture(scope="session")
 def passing_class_tests() -> dict[type, frozenset[str]]:
     """Every test class, mapped to the tests on it that ran and passed."""
     return {cls: frozenset(names) for cls, names in _RECORD.class_tests.items()}
+
+
+@pytest.fixture(scope="session")
+def skipped_class_tests() -> dict[type, frozenset[str]]:
+    """Every test class, mapped to the tests on it that were skipped."""
+    return {cls: frozenset(names) for cls, names in _RECORD.skipped_tests.items()}
 
 
 @pytest.fixture(scope="session")
