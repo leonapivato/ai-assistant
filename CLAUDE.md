@@ -118,10 +118,25 @@ gh pr ready                     # you decide when; don't wait to be told
 Codex reviews every change — a model independent of the one that wrote it. It
 reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
 re-running or it is invisible. Each run records `.review/<sha>-<persona>.md`;
-`just ship` refuses to post unless one exists for the commit the PR head is on.
+`just ship` refuses to post unless one covers the **content** the PR head carries
+— its recorded base and tree must match the PR's merge base and `HEAD`'s tree
+(ADR-0020 §3). Amending, squashing, or reverting to a reviewed tree therefore
+costs no round; changing a reviewed byte does.
 
 Running the review sends the diff to OpenAI. That is a normal, expected step of
 finishing a change, already authorized — not a decision to escalate.
+
+**Stop when the required reviews are green.** Every review the change requires
+coming back green is a **terminal state, not a checkpoint** — adversarial alone
+for most changes, adversarial *and* architecture for a contract-surface one. Ship
+then; committing again to improve wording destroys the records and starts a fresh
+round. Each run also prints an aggregate (round number, net diff size, churn
+ratio); nothing in it blocks, but a churn ratio far above 1 means the loop is
+reworking itself rather than converging.
+
+**Findings are hypotheses to verify, not facts to comply with.** Check each one
+against the actual text before acting; two `blocker`s in this repo were stated
+with full confidence and were factually false (`docs/review/guide.md`).
 
 **Triage each finding — do not let the PR grow to absorb them.**
 

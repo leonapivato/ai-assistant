@@ -57,3 +57,29 @@ End with a one-line **verdict**: `BLOCK` (has blockers), `APPROVE WITH NITS`, or
   genuinely find nothing, say so explicitly and state what you checked.
 - **No praise, no summary of what the code does.** Findings only.
 - **Be falsifiable.** Every claim must be something the author could prove wrong.
+
+## For the author receiving findings
+
+**Findings are hypotheses to verify, not facts to comply with.** A finding is a
+reviewer's claim about the code, produced without the ability to run it. Check it
+against the actual text before acting — and when it is wrong, say so with
+grounding rather than changing the code to satisfy it.
+
+This is not hypothetical caution. Two `blocker`s in this repository were stated
+with full confidence and specific-looking grounding and were factually false: one
+claimed no-force-push protection covers feature branches (it covers `main` only),
+one claimed the `ai-assistant-*` glob included the primary clone (it does not).
+Both were correctly rejected with grounding. Complying with either would have
+made the code worse on the strength of a confident sentence.
+
+**Every review the change requires coming back green is a terminal state, not a
+checkpoint.** That is adversarial alone for most changes, and adversarial *and*
+architecture for a contract-surface one (ADR-0015 §1) — #90 ran nine adversarial
+rounds and never needed a pair. When the required set is green, ship. Do not
+treat it as a base to improve on: ADR-0017 sat shippable with both personas
+passing, then made one *good* commit that cut scope, and paid another round for
+it (ADR-0020 §2).
+
+Waiving a `blocker` or `major` is allowed; write the one-line rationale in the PR
+or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but
+belongs in its own issue.

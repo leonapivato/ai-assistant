@@ -135,17 +135,47 @@ What still warrants stopping is unchanged and narrow: an irreversible or
 destructive action, or discovering the task itself was wrong. "Is this ready?"
 is not on that list.
 
-`ship` refuses unless an adversarial review exists for **the exact commit the PR
-head is on** — so the record cannot be a review of an earlier commit. It also
-refuses on a dirty tree, on `main`, and when the PR head is behind local `HEAD`.
+`ship` refuses unless an adversarial review exists for **the content the PR head
+carries** — matching the review's recorded base *and* tree against the PR's
+current merge base and `HEAD`'s tree (ADR-0020 §3) — so the record cannot be a
+review of different code. It also refuses on a dirty tree, on `main`, and when
+the PR head is behind local `HEAD`.
+
+Anchoring on content rather than the commit SHA is what makes squashing,
+amending, and reverting free: a commit that changes no reviewed byte no longer
+costs a review round. A review taken against different content, or against a
+different base, still fails mechanically — and a scope cut is a real content
+change, so it genuinely re-reviews.
+
+### Stop when the required reviews are green
+
+**Every review the change requires coming back green is a terminal state, not a
+checkpoint.** Adversarial alone for most changes; adversarial *and* architecture
+for a contract-surface one (ADR-0015 §1). When the required set is green, ship —
+do not commit again to improve wording, because that destroys the records and
+starts a fresh round.
+
+Each review run prints an aggregate, unasked: the round number on this branch,
+the net diff size, and the **churn ratio** (cumulative lines touched ÷ net lines
+in the final diff). A ratio far above 1 means most of the work has been rework.
+Nothing in it blocks — round 6 of #90 found a real hole that a cap would have
+forbidden — but it is on the record, and `just ship` carries it to the PR so the
+reviewer at merge sees the same numbers you did.
+
+Both runaway cases behind ADR-0020 (#90 at nine rounds; #72 at 79 review records
+over ~2.5 hours, peaking at 821 lines to supersede one clause of a 175-line
+document) were locally defensible at every step, and neither terminated on its
+own — both were stopped from outside by someone holding exactly this aggregate.
+Several rounds in with a high churn ratio is the signal: the loop is reworking
+itself, not converging.
 
 This is deliberately not a pre-push hook: review is a pre-merge step, and gating
 every push would force a full Codex run per WIP commit — the per-push cost
 pattern ADR-0015 exists to remove.
 
-A pasted review is self-attested where the CI-posted one was not. The SHA anchor
-covers the failure that actually happens (reviewing a stale commit); it is not
-tamper-proof and does not try to be.
+A pasted review is self-attested where the CI-posted one was not. The content
+anchor covers the failure that actually happens (reviewing stale content); it is
+not tamper-proof and does not try to be.
 
 ### Contract ADRs land before their implementation
 
