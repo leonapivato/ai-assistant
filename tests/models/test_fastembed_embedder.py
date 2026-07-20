@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
@@ -287,10 +288,14 @@ class _GatedLoadBackend(_StubBackend):
     def __init__(self) -> None:
         super().__init__()
         self.proceed = threading.Event()
+        self.timed_out = False
 
     def load(self, model: str) -> FastEmbedTextModel:
         self.loads.append(model)
-        self.proceed.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS)
+        if not self.proceed.wait(timeout=_RENDEZVOUS_TIMEOUT_SECONDS):
+            # Recorded rather than raised: the test asserts on it, so a run that
+            # only "passed" because this backend gave up cannot look green.
+            self.timed_out = True
         return self.model
 
 
@@ -315,13 +320,21 @@ async def test_concurrent_first_calls_load_the_model_once() -> None:
     embedder._load_lock = lock  # type: ignore[assignment]  # test-only lock instrumentation
 
     calls = asyncio.gather(embedder.embed(["zulu"]), embedder.embed(["alpha"]))
-    both_arrived = await asyncio.to_thread(lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS)
-    # Released unconditionally, so a failing run finishes and reports rather than
-    # leaving two workers parked inside `load`.
-    backend.proceed.set()
-    first, second = await calls
+    # A dedicated executor, not `asyncio.to_thread`: both racing embeds occupy a
+    # default-executor thread each and neither releases it until this observer
+    # runs, so borrowing a third thread from that same pool would deadlock the
+    # rendezvous wherever the pool is small.
+    with ThreadPoolExecutor(max_workers=1) as observer:
+        both_arrived = await asyncio.get_running_loop().run_in_executor(
+            observer, lock.wait_for_arrivals, 2, _RENDEZVOUS_TIMEOUT_SECONDS
+        )
+        # Released unconditionally, so a failing run finishes and reports rather
+        # than leaving two workers parked inside `load`.
+        backend.proceed.set()
+        first, second = await calls
 
     assert both_arrived, "the second caller never reached the load lock; the race did not happen"
+    assert not backend.timed_out, "the backend gave up waiting; the rendezvous did not drive this"
     assert backend.loads == [_STUB_MODEL]
     # And the race must not have crossed the two callers' results.
     assert first == await embedder.embed(["zulu"])
@@ -353,6 +366,10 @@ async def test_concurrent_embeds_reach_the_loaded_model_together() -> None:
     # wins the lock, so this also pins that the load lock is not still held while
     # inference runs — if it were, the second caller could never reach the
     # barrier and this would fail rather than serialise.
+    #
+    # Needs two default-executor threads at once, which is inherent to asserting
+    # concurrency and always available: asyncio's default pool is at least five
+    # workers. Unlike the load-race test above, it never needs a third.
     backend = _ModelBackend(_RendezvousTextModel(parties=2))
     embedder = _stub_embedder(backend)
 
