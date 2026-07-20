@@ -1,8 +1,16 @@
 # 16. `ToolDefinition`: declared risk metadata and a `ToolRegistry` to reason over
 
-- Status: Accepted
+- Status: Accepted, partially superseded by ADR-0018
 - Date: 2026-07-19
 - Amends: ADR-0014 §4 (the "`core/types.py` is data-only" convention; §2 below)
+- Partially superseded: 2026-07-20 by ADR-0018 — four clauses only, found by the
+  first implementation of this contract. **§1**: `id` and `capability` become
+  `VisibleIdentifier`, and `description` must contain a character that *renders*
+  rather than merely surviving `strip()`. **§5**: every query returns a detached
+  snapshot; and the spent-id rule is corrected — registering an identical
+  definition under a *deregistered* id is **refused**, reversing the rule stated
+  below, with the ledger scoped to the registry rather than the process.
+  Everything else in this ADR stands.
 
 ## Context
 
