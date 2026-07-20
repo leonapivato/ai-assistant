@@ -667,6 +667,28 @@ def test_ships_an_artifact_whose_verdict_carries_no_label(tmp_path: Path) -> Non
     assert "a real finding" in (tmp_path / "comment.md").read_text()
 
 
+def test_refuses_an_artifact_that_is_nothing_but_a_verdict(tmp_path: Path) -> None:
+    """A verdict with no body is a rubber stamp, which the rubric forbids.
+
+    ``docs/review/guide.md``: "No rubber-stamping. 'Looks good' with no scrutiny
+    is a failure. If you genuinely find nothing, say so explicitly and state what
+    you checked." Both spellings are refused — dropping the ``Verdict:`` label
+    let the bare form through, but the labelled form always passed, so the hole
+    predates that change and closing it for one spelling only would leave the
+    rule depending on which the reviewer happened to pick.
+    """
+    for body in ("APPROVE\n", "Verdict: APPROVE\n"):
+        repo = tmp_path / f"repo-{abs(hash(body))}"
+        sha = _init_repo(repo)
+        _fake_gh(tmp_path / "bin")
+        _record_review(repo, sha, "adversarial", body)
+
+        result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+        assert result.returncode != 0, f"{body!r} was shipped"
+        assert not (tmp_path / "comment.md").exists()
+
+
 def test_still_refuses_prose_merely_mentioning_a_verdict_word(tmp_path: Path) -> None:
     """Dropping the label must not weaken what the check exists to catch.
 

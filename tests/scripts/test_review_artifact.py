@@ -237,6 +237,40 @@ def test_a_refusal_without_a_verdict_is_not_recorded_as_a_review(tmp_path: Path)
     assert not (repo / ".review").exists()
 
 
+def test_a_verdict_with_no_review_body_is_not_recorded(tmp_path: Path) -> None:
+    """A rubber stamp is a failure by the rubric's own anti-patterns.
+
+    ``docs/review/guide.md``: "No rubber-stamping. 'Looks good' with no scrutiny
+    is a failure. If you genuinely find nothing, say so explicitly and state what
+    you checked." Both spellings are refused: dropping the ``Verdict:`` label let
+    the bare form through, but the labelled form always passed, so the hole
+    predates that change rather than being created by it.
+    """
+    for output in ("APPROVE\\n", "Verdict: APPROVE\\n"):
+        repo = tmp_path / f"repo-{abs(hash(output))}"
+        _init_repo(repo)
+        bin_dir = tmp_path / "bin"
+        if bin_dir.exists():
+            shutil.rmtree(bin_dir)
+        bin_dir.mkdir()
+        codex = bin_dir / "codex"
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            'prev=""\n'
+            'for a in "$@"; do\n'
+            f'  [[ "$prev" == "-o" ]] && printf "{output}" >"$a"\n'
+            '  prev="$a"\n'
+            "done\n"
+        )
+        codex.chmod(0o755)
+
+        result = _run_review(repo, tmp_path, check=False)
+
+        assert result.returncode != 0, f"{output!r} was recorded"
+        assert "no review body" in result.stderr
+        assert not (repo / ".review").exists()
+
+
 def test_prose_mentioning_a_verdict_is_not_accepted_as_one(tmp_path: Path) -> None:
     """A substring search would pass this; the check is anchored for that reason."""
     repo = tmp_path / "repo"
