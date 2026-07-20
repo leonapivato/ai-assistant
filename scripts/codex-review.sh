@@ -355,6 +355,25 @@ trap 'rm -f "$prompt" "$out" ${artifact_tmp:+"$artifact_tmp"}' EXIT
 mapfile -d '' -t changed_paths < <(
     git -c core.quotePath=false diff -z --name-only "${base_sha}...${sha}"
 )
+
+# One list item per path. Reading NUL-delimited keeps a path with a newline in
+# it whole as one array element, but printing it raw would still put its second
+# line into the prompt as *structure* rather than as a filename — one path
+# rendering as two list items, neither of which exists. Escaped only when there
+# is a control character to escape, so an ordinary path — a non-ASCII one
+# included — is shown exactly as it appears on disk.
+#
+# This is a legibility fix, not a security boundary. The diff itself is handed
+# to the reviewer verbatim a few lines below, so anyone who can commit a file
+# can already put arbitrary text in front of it; the path is not a privileged
+# channel and treating it as one would be theatre.
+_render_path() {
+    case "$1" in
+    *[$'\n\t\r']*) printf -- '- `%s` (control characters escaped)\n' "$(printf '%q' "$1")" ;;
+    *) printf -- '- `%s`\n' "$1" ;;
+    esac
+}
+
 prose_paths=()
 other_paths=()
 for changed_path in "${changed_paths[@]}"; do
@@ -378,15 +397,13 @@ done
     if [[ ${#prose_paths[@]} -gt 0 ]]; then
         echo "**Prose** — documentation read by a human operator, not executed or tested:"
         echo
-        # One printf per element: the paths are array members now, so a path
-        # containing a space — or a newline — survives intact.
-        for p in "${prose_paths[@]}"; do printf -- '- `%s`\n' "$p"; done
+        for p in "${prose_paths[@]}"; do _render_path "$p"; done
         echo
     fi
     if [[ ${#other_paths[@]} -gt 0 ]]; then
         echo "**Code, scripts, config, and tests** — machine-consumed, and judged as such:"
         echo
-        for p in "${other_paths[@]}"; do printf -- '- `%s`\n' "$p"; done
+        for p in "${other_paths[@]}"; do _render_path "$p"; done
         echo
     fi
     if [[ ${#prose_paths[@]} -gt 0 ]]; then

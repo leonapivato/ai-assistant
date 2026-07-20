@@ -522,6 +522,33 @@ def test_a_non_ascii_prose_path_is_still_classified_as_prose(tmp_path: Path) -> 
     assert "illustrative" in prompt
 
 
+def test_a_path_containing_a_newline_stays_one_list_item(tmp_path: Path) -> None:
+    """Reading NUL-delimited keeps such a path whole; printing it must too.
+
+    Raw, its second line would land in the prompt as structure rather than as a
+    filename — one path rendering as two list items, neither of which exists.
+    This is legibility, not a security boundary: the diff below it is handed to
+    the reviewer verbatim, so the path is not a privileged channel.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "docs/two\nlines.md", "# A document\n", "odd path")
+    _fake_codex(tmp_path / "bin", tmp_path / "prompt.txt")
+
+    _run(repo, tmp_path)
+
+    prompt = (tmp_path / "prompt.txt").read_text()
+    listing = prompt.split("### What these paths are")[1].split("In the prose files")[0]
+    assert "control characters escaped" in listing
+    # The escaped form is on one line, so the listing still has exactly the
+    # bullets it should rather than a stray line masquerading as prompt text.
+    assert [line for line in listing.splitlines() if line.startswith("- ")] != []
+    for line in listing.splitlines():
+        assert "lines.md" not in line or line.startswith("- "), (
+            "no fragment of the path escaped its list item"
+        )
+
+
 def test_records_the_size_of_a_document_the_change_amends(tmp_path: Path) -> None:
     """`Amends` is matched alongside `Supersedes`, and was previously untested.
 
