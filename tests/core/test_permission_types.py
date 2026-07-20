@@ -151,8 +151,34 @@ def test_a_payload_with_no_utf8_encoding_is_refused(parameters: dict[str, Any]) 
     ``UnicodeEncodeError``, so every decision about the request becomes
     unconstructable — a crash rather than a refusal, at the gate.
     """
-    with pytest.raises(ValidationError, match="UTF-8"):
+    with pytest.raises(ValidationError, match="canonical JSON encoding"):
         ActionRequest(tool=tool(), parameters=parameters)
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [{"n": 10**5000}, {"nested": {"n": -(10**5000)}}, {"items": [10**5000]}],
+    ids=["a value", "nested in a mapping", "inside a sequence"],
+)
+def test_a_payload_with_an_unrenderable_integer_is_refused(
+    parameters: dict[str, Any],
+) -> None:
+    """The same class as the surrogate, reached through a different type.
+
+    ``json.dumps`` renders an ``int`` through ``str()``, and CPython refuses
+    that past its integer-string conversion limit — so a payload the model
+    accepted would raise ``ValueError`` at digest time. Caught because
+    validation runs the real encoder rather than enumerating the types that can
+    fail; an enumeration is a list someone has to keep complete, and this is the
+    case a first attempt at one missed.
+    """
+    with pytest.raises(ValidationError, match="canonical JSON encoding"):
+        ActionRequest(tool=tool(), parameters=parameters)
+
+
+def test_a_large_but_renderable_integer_is_accepted() -> None:
+    """The bound is "can it be encoded", not "is it big"."""
+    assert ActionRequest(tool=tool(), parameters={"n": 10**100}).parameters_digest
 
 
 def test_an_astral_character_is_still_accepted() -> None:
@@ -189,6 +215,18 @@ def test_a_ruling_reason_must_render_as_something(reason: str) -> None:
     """It is shown to the user at the moment they decide (ADR-0018 §1's test)."""
     with pytest.raises(ValidationError, match="visible text"):
         PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason=reason)
+
+
+def test_a_ruling_reason_with_no_utf8_encoding_is_refused() -> None:
+    r"""Visible text is not the only thing a reason has to be.
+
+    ``_has_visible_text`` sees the ordinary letters in ``"approve \ud800"`` and
+    passes it, but the reason is carried into a durable record ADR-0021 §4
+    requires to survive serialisation — so an unpaired surrogate beside real
+    text would fail at the write rather than at the gate.
+    """
+    with pytest.raises(ValidationError, match="UTF-8"):
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="approve \ud800")
 
 
 def test_a_ruling_reason_is_stripped() -> None:
