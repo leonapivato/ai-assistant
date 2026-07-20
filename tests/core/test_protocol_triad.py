@@ -91,19 +91,12 @@ TRIAD_PARTS: Final = ("suite", "fake", "binding")
 #: refuses to let an entry outlive the gap it describes (see
 #: ``test_no_exemption_is_stale``). Adding an entry is how you record a
 #: backfill you are not doing; it is not a way to skip the rule for new work.
-EXEMPTIONS: Final = (
-    TriadExemption(
-        protocol="FeedbackProcessor",
-        missing=("fake", "binding"),
-        issue="https://github.com/leonapivato/ai-assistant/issues/46",
-        note=(
-            "Predates the triad rule. FeedbackProcessorContract exists and "
-            "RuleBasedFeedbackProcessor runs through it, but there is no "
-            "canonical FakeFeedbackProcessor in ai_assistant.testing, so "
-            "consumers hand-roll a mock."
-        ),
-    ),
-)
+#:
+#: **Empty, and it stays that way.** ``FeedbackProcessor`` was the last entry;
+#: its triad was completed in issue #46, so every Protocol now has all three
+#: parts. With ``_LEGACY_DEBT`` empty too, no further entry is admissible --
+#: ``test_no_new_protocol_can_be_exempted`` rejects any Protocol added here.
+EXEMPTIONS: Final[tuple[TriadExemption, ...]] = ()
 
 #: The debt that existed when this check landed, and the *only* Protocols an
 #: exemption may ever name. Without this the list would be an escape hatch:
@@ -111,7 +104,10 @@ EXEMPTIONS: Final = (
 #: gate -- exactly what this check exists to prevent. It is a closed set, so
 #: the list can only shrink. Removing a name is how a backfill finishes;
 #: adding one is not a normal operation and should not survive review.
-_LEGACY_DEBT: Final = frozenset({"FeedbackProcessor"})
+#:
+#: The backfill is finished, so this is now empty: the escape hatch is closed
+#: for good rather than left ajar for the one Protocol that no longer needs it.
+_LEGACY_DEBT: Final[frozenset[str]] = frozenset()
 
 _EXEMPT_BY_PROTOCOL: Final = {exemption.protocol: exemption for exemption in EXEMPTIONS}
 
@@ -145,9 +141,10 @@ def _declared_class_names() -> set[str]:
 
     Requiring tests, not just a matching name, is what stops
     ``class WidgetContract: pass`` from standing in for a conformance suite.
-    That matters most for a Protocol whose *binding* is exempted, since the
-    runtime checks that would otherwise catch an empty suite are skipped for
-    it -- exactly the ``FeedbackProcessor`` case in ``EXEMPTIONS`` today.
+    That would matter most for a Protocol whose *binding* is exempted, since
+    the runtime checks that would otherwise catch an empty suite are skipped
+    for it. No exemption remains, but the requirement stays: it is what makes
+    the static half of the check meaningful on its own.
 
     Parsed rather than imported: the conformance suites are plain modules that
     pytest puts on ``sys.path`` per directory, and importing them here purely

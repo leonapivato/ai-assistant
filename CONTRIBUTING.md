@@ -358,12 +358,15 @@ Protocol and leave its suite alone and the gate stays green. Keeping the suite
 abreast of the contract is a review concern, like the adequacy of any other
 test (ADR-0003).
 
-The check ships with an `EXEMPTIONS` list for Protocols whose backfill is still
-outstanding. That list is a backlog, not an escape hatch: each entry names the
-missing parts and the issue tracking them, an entry that outlives its gap fails
-the check, and only the Protocols that predate the check may be named at all —
-so a new Protocol cannot buy itself an exemption, and the list can only shrink.
-It currently holds one entry (`FeedbackProcessor`, missing its canonical fake).
+The check carries an `EXEMPTIONS` list for Protocols whose backfill was still
+outstanding when it landed. That list is a backlog, not an escape hatch: each
+entry names the missing parts and the issue tracking them, an entry that
+outlives its gap fails the check, and only the Protocols that predate the check
+may be named at all — so a new Protocol cannot buy itself an exemption, and the
+list can only shrink. **It is now empty.** `FeedbackProcessor` was the last
+entry and its triad was completed in issue #46, so every Protocol has all three
+parts and the set of Protocols an exemption may name is empty too — the hatch is
+closed rather than merely unused.
 
 This does not loosen contract-first. The sequence is two stages, not one:
 
