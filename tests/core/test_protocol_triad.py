@@ -5,20 +5,27 @@ artifacts one unit of work for every Protocol in ``core/protocols.py``:
 
 1. a shared ``<Protocol>Contract`` conformance suite under ``tests/``,
 2. a canonical ``Fake<Protocol>`` exported from ``ai_assistant.testing``, and
-3. a ``Test...Contract`` subclass binding the two, **collected and run** by
-   pytest -- the abstract suite collects nothing on its own, so without the
-   subclass the fake is unverified however many files exist.
+3. a ``Test...Contract`` subclass binding the two, whose contract tests
+   pytest **actually ran and passed** -- the abstract suite collects nothing
+   on its own, so without the subclass the fake is unverified however many
+   files exist.
 
 Until now that rule was held by review alone: a Protocol could land with no
 suite and no fake and pass the entire gate, which is how the original backfill
 debt accumulated. This is the same class of gap ADR-0015 names -- an invariant
 held by prose rather than mechanism.
 
-Part 3 is why this lives in pytest rather than in a standalone script. "Is the
-binding subclass actually collected?" is a question only pytest can answer; a
-script would have to re-run pytest to ask it. Living here it also inherits the
-gate and CI for free (``uv run pytest`` already runs in both), and fails as an
-ordinary test failure naming exactly what is missing.
+Part 3 is why this lives in pytest rather than in a standalone script. "Did the
+suite's assertions run against the fake?" is a question only pytest can answer;
+a script would have to re-run pytest to ask it. ``tests/conftest.py`` records
+the outcomes and defers this module to the end of the run so it can read them.
+Living here it also inherits the gate and CI for free (``uv run pytest``
+already runs in both), and fails as an ordinary test failure naming exactly
+what is missing.
+
+The predicates below are deliberately strict about *evidence*: a file, a name,
+or a lexical mention is never enough, because each of those was a way past an
+earlier draft of this check (see the negative tests at the bottom).
 
 Conventions the check relies on (all eight Protocols already follow them):
 suite ``<Protocol>Contract``, fake ``Fake<Protocol>``. A Protocol that wants
@@ -42,9 +49,9 @@ from ai_assistant.core import protocols as protocols_module
 from ai_assistant.testing import FakeMemoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
-#: Collected test class -> the tests pytest collected on it (see tests/conftest.py).
+#: Test class -> the tests on it that ran and passed (see tests/conftest.py).
 type CollectedTests = dict[type, frozenset[str]]
 
 _TESTS_ROOT: Final = Path(__file__).resolve().parent.parent
@@ -141,14 +148,30 @@ def _canonical_fake(protocol: str) -> type | None:
     return fake
 
 
-def _own_fixture_functions(cls: type) -> list[Callable[..., object]]:
-    """Return the raw functions behind the fixtures ``cls`` itself defines."""
-    return [
-        raw
-        for value in vars(cls).values()
+def _own_fixtures(cls: type) -> dict[str, Callable[..., object]]:
+    """Return the fixtures ``cls`` itself defines, by name, unwrapped."""
+    return {
+        name: raw
+        for name, value in vars(cls).items()
         if isinstance(raw := getattr(value, "__wrapped__", None), FunctionType)
         and hasattr(value, "_fixture_function_marker")
-    ]
+    }
+
+
+def _fixtures_requested_by(suite: type, test_names: Iterable[str]) -> set[str]:
+    """Return the fixture names the suite's own tests take as parameters.
+
+    This is what makes the binding check target the *subject* fixture rather
+    than any fixture on the class. A decoy -- a real implementation supplied
+    through `store` plus an unused fixture that returns the fake -- does not
+    put the fake in front of a single contract assertion, and must not count.
+    """
+    requested: set[str] = set()
+    for name in test_names:
+        func = getattr(suite, name, None)
+        if callable(func):
+            requested.update(p for p in inspect.signature(func).parameters if p != "self")
+    return requested
 
 
 def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
@@ -178,14 +201,15 @@ def _fixture_yields(func: Callable[..., object], fake: type) -> bool:
     return isinstance(produced, fake)
 
 
-def _binds_fake(cls: type, protocol: str) -> bool:
+def _binds_fake(cls: type, protocol: str, subject_fixtures: set[str]) -> bool:
     """Report whether ``cls`` supplies the canonical fake to its conformance suite.
 
     Both conditions are object identity rather than text: the test module
     imported the canonical fake itself (not a same-named local stand-in), and
-    one of the fixtures ``cls`` defines evaluates to an instance of it. A
-    mention of the fake in a docstring, an unused import, or a constructor call
-    on a dead branch is not a binding.
+    one of the fixtures the suite's tests actually *request* evaluates to an
+    instance of it. A mention of the fake in a docstring, an unused import, a
+    constructor call on a dead branch, or a decoy fixture no contract test
+    consumes is not a binding.
     """
     fake_name = f"Fake{protocol}"
     canonical = _canonical_fake(protocol)
@@ -195,7 +219,10 @@ def _binds_fake(cls: type, protocol: str) -> bool:
     module = sys.modules.get(cls.__module__)
     if getattr(module, fake_name, None) is not fake:
         return False
-    return any(_fixture_yields(func, fake) for func in _own_fixture_functions(cls))
+    fixtures = _own_fixtures(cls)
+    return any(
+        _fixture_yields(func, fake) for name, func in fixtures.items() if name in subject_fixtures
+    )
 
 
 def _suite_of(cls: type, protocol: str) -> type | None:
@@ -203,34 +230,37 @@ def _suite_of(cls: type, protocol: str) -> type | None:
     return next((base for base in cls.__mro__[1:] if base.__name__ == f"{protocol}Contract"), None)
 
 
-def _binding_classes(protocol: str, collected: CollectedTests) -> list[type]:
-    """Return the collected classes that really run the canonical fake through the suite.
+def _binding_classes(protocol: str, passing: CollectedTests) -> list[type]:
+    """Return the classes that really ran the canonical fake through the suite.
 
-    A class counts only if the tests pytest collected on it include at least
-    one whose implementation *is the suite's own* -- same function object,
-    reached through inheritance. That rules out both an empty ``…Contract``
-    with a token test alongside it (it contributes no tests to inherit) and a
-    subclass that overrides every contract test with a no-op (the override is
-    a different function object, so it does not count as running the suite).
+    Every condition here closes a way of satisfying the letter of the triad
+    while testing nothing:
+
+    - at least one of the tests that *passed* on the class must come from the
+      suite, which an empty ``…Contract`` cannot supply;
+    - **every** passing test the suite also declares must still be the suite's
+      own function object, so overriding contract tests with no-ops -- all of
+      them or some of them -- does not count; and
+    - the fake must arrive through a fixture the suite's tests request, not
+      merely exist somewhere on the class.
     """
     found = []
-    for cls, test_names in collected.items():
+    for cls, passing_tests in passing.items():
         suite = _suite_of(cls, protocol)
-        if suite is None or not _binds_fake(cls, protocol):
+        if suite is None:
             continue
-        if any(_is_inherited_from(cls, suite, name) for name in test_names):
+        from_suite = {name for name in passing_tests if getattr(suite, name, None) is not None}
+        if not from_suite:
+            continue
+        if any(getattr(cls, name, None) is not getattr(suite, name) for name in from_suite):
+            continue
+        if _binds_fake(cls, protocol, _fixtures_requested_by(suite, from_suite)):
             found.append(cls)
     return found
 
 
-def _is_inherited_from(cls: type, suite: type, name: str) -> bool:
-    """Report whether ``cls.name`` is the very function ``suite`` defines."""
-    inherited = getattr(suite, name, None)
-    return inherited is not None and getattr(cls, name, None) is inherited
-
-
 def _missing_parts(
-    protocol: str, declared: set[str], collected: CollectedTests | None
+    protocol: str, declared: set[str], passing: CollectedTests | None
 ) -> tuple[str, ...]:
     """Return the triad parts ``protocol`` is missing.
 
@@ -241,7 +271,7 @@ def _missing_parts(
         missing.append("suite")
     if _canonical_fake(protocol) is None:
         missing.append("fake")
-    if collected is not None and not _binding_classes(protocol, collected):
+    if passing is not None and not _binding_classes(protocol, passing):
         missing.append("binding")
     return tuple(missing)
 
@@ -259,9 +289,10 @@ def _describe(protocol: str, missing: tuple[str, ...]) -> str:
         "suite": f"a shared `{protocol}Contract` conformance suite under tests/",
         "fake": f"a canonical `Fake{protocol}` exported from ai_assistant.testing",
         "binding": (
-            f"a collected `Test...Contract` subclass of `{protocol}Contract` "
-            f"whose fixture supplies `Fake{protocol}` -- and a `{protocol}Contract` "
-            f"that contributes tests of its own, since an empty suite asserts nothing"
+            f"a `Test...Contract` subclass of `{protocol}Contract` whose subject "
+            f"fixture supplies `Fake{protocol}`, and whose inherited contract "
+            f"tests actually ran and passed (not skipped, not overridden, and "
+            f"not inherited from an empty suite)"
         ),
     }
     return f"{protocol} is missing:\n" + "\n".join(f"    - {wants[part]}" for part in missing)
@@ -287,25 +318,25 @@ def test_every_protocol_has_a_conformance_suite_and_canonical_fake() -> None:
     failures = [
         _describe(protocol, gaps)
         for protocol in _protocol_names()
-        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, collected=None)))
+        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, passing=None)))
     ]
 
     assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
 
 
-def test_every_protocols_fake_is_bound_by_a_collected_contract_subclass(
-    collected_class_tests: CollectedTests,
-    collection_is_unfiltered: bool,
+def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
+    passing_class_tests: CollectedTests,
+    run_is_unfiltered: bool,
 ) -> None:
-    """Part 3: pytest really collects a subclass running each fake through its suite.
+    """Part 3: a subclass really ran each fake through its suite, and passed.
 
-    This is the part a file-existence check cannot make: the abstract suite
+    This is the part a file-existence check cannot make. The abstract suite
     collects nothing, so only the binding subclass turns the contract into
-    assertions that run.
+    assertions -- and only executing them turns those assertions into evidence.
     """
-    if not collection_is_unfiltered:
+    if not run_is_unfiltered:
         pytest.skip(
-            "collection was narrowed (-k, -m, or a path/nodeid argument), so an "
+            "the run was narrowed (-k, -m, -x, or a path/nodeid argument), so an "
             "absent binding class proves nothing; the gate runs the full suite"
         )
     declared = _declared_class_names()
@@ -313,18 +344,18 @@ def test_every_protocols_fake_is_bound_by_a_collected_contract_subclass(
     failures = [
         _describe(protocol, gaps)
         for protocol in _protocol_names()
-        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, collected_class_tests)))
+        if (gaps := _unexcused(protocol, _missing_parts(protocol, declared, passing_class_tests)))
     ]
 
     assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
 
 
 def test_no_exemption_is_stale(
-    collected_class_tests: CollectedTests,
-    collection_is_unfiltered: bool,
+    passing_class_tests: CollectedTests,
+    run_is_unfiltered: bool,
 ) -> None:
     """An exemption dies with the gap it describes, so the backlog only shrinks."""
-    if not collection_is_unfiltered:
+    if not run_is_unfiltered:
         pytest.skip("needs a full collection to tell a closed gap from a filtered one")
     declared = _declared_class_names()
     known = set(_protocol_names())
@@ -337,7 +368,7 @@ def test_no_exemption_is_stale(
                 f"core/protocols.py -- drop the entry ({exemption.issue})"
             )
             continue
-        gaps = set(_missing_parts(exemption.protocol, declared, collected_class_tests))
+        gaps = set(_missing_parts(exemption.protocol, declared, passing_class_tests))
         if closed := set(exemption.missing) - gaps:
             failures.append(
                 f"{exemption.protocol} is exempted for {sorted(closed)} but that "
@@ -388,7 +419,7 @@ def test_check_discovers_the_protocols_it_is_meant_to_guard() -> None:
 
 def test_a_protocol_without_its_triad_is_reported() -> None:
     """The check fails on a Protocol with nothing behind it -- not vacuously true."""
-    missing = _missing_parts("NonexistentThing", declared=set(), collected={})
+    missing = _missing_parts("NonexistentThing", declared=set(), passing={})
 
     assert missing == TRIAD_PARTS
     assert "NonexistentThing" in _describe("NonexistentThing", missing)
@@ -447,64 +478,94 @@ class _BoundToAnEmptySuite(_EmptySuite):
     def test_something_of_its_own(self) -> None: ...
 
 
+class _DecoyFixture:
+    """Supplies a non-fake through the subject fixture, the fake through a decoy."""
+
+    @pytest.fixture
+    def store(self) -> object:
+        return object()
+
+    @pytest.fixture
+    def unused_probe(self) -> object:
+        return FakeMemoryStore()
+
+
 def test_naming_the_fake_without_constructing_it_is_not_a_binding() -> None:
     """A docstring mention, a type annotation, or a stray import proves nothing."""
-    assert not _binds_fake(_MentionsTheFakeWithoutBindingIt, "MemoryStore")
+    assert not _binds_fake(_MentionsTheFakeWithoutBindingIt, "MemoryStore", {"store"})
 
 
 def test_constructing_the_fake_on_a_dead_branch_is_not_a_binding() -> None:
     """The fixture is evaluated, so an unreachable constructor call proves nothing."""
-    assert not _binds_fake(_ConstructsTheFakeOnADeadBranch, "MemoryStore")
+    assert not _binds_fake(_ConstructsTheFakeOnADeadBranch, "MemoryStore", {"store"})
+
+
+def test_a_fixture_no_contract_test_requests_is_not_a_binding() -> None:
+    """Only the fixture the suite's tests consume can put the fake under test."""
+    assert not _binds_fake(_DecoyFixture, "MemoryStore", {"store"})
 
 
 def test_a_fixture_that_returns_the_fake_is_a_binding() -> None:
     """The positive half of the same predicate, so it is not failing for free."""
-    assert _binds_fake(_ReallyBindsTheFake, "MemoryStore")
+    assert _binds_fake(_ReallyBindsTheFake, "MemoryStore", {"store"})
 
 
 def test_an_empty_suite_does_not_count_as_a_conformance_suite() -> None:
-    """A `…Contract` class contributing no collected tests binds nothing.
+    """A `…Contract` class contributing no tests of its own binds nothing.
 
     Otherwise `class WidgetContract: pass` plus one token test would satisfy
     the whole check while testing no Protocol behaviour at all.
     """
-    collected: CollectedTests = {_BoundToAnEmptySuite: frozenset({"test_something_of_its_own"})}
+    passing: CollectedTests = {_BoundToAnEmptySuite: frozenset({"test_something_of_its_own"})}
 
-    assert _binding_classes("MemoryStore", collected) == []
+    assert _binding_classes("MemoryStore", passing) == []
 
 
-def test_a_suite_that_contributes_collected_tests_does_count() -> None:
-    """Same input shape, but the test is inherited from the suite."""
-    suite, bound = _suite_and_binding(override=False)
-    collected: CollectedTests = {bound: frozenset({"test_from_the_suite"})}
+def test_a_suite_whose_tests_ran_does_count() -> None:
+    """The positive case: both suite tests ran on the binding class."""
+    suite, bound = _suite_and_binding(overridden=())
+    passing: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
 
     assert suite.__name__ == "MemoryStoreContract"
-    assert _binding_classes("MemoryStore", collected) == [bound]
+    assert _binding_classes("MemoryStore", passing) == [bound]
 
 
-def test_overriding_every_suite_test_does_not_count_as_running_the_suite() -> None:
-    """A no-op override collects under the suite's name but runs none of it."""
-    _, bound = _suite_and_binding(override=True)
-    collected: CollectedTests = {bound: frozenset({"test_from_the_suite"})}
+@pytest.mark.parametrize(
+    ("overridden", "label"),
+    [(("test_one", "test_two"), "every suite test"), (("test_two",), "one suite test")],
+)
+def test_overriding_a_suite_test_does_not_count_as_running_the_suite(
+    overridden: tuple[str, ...], label: str
+) -> None:
+    """A no-op override runs under the suite's name but runs none of its assertions.
 
-    assert _binding_classes("MemoryStore", collected) == []
+    Partial override matters as much as total: inheriting one test of ten and
+    replacing the rest would otherwise pass while nine obligations went
+    untested.
+    """
+    _, bound = _suite_and_binding(overridden=overridden)
+    passing: CollectedTests = {bound: frozenset({"test_one", "test_two"})}
+
+    assert _binding_classes("MemoryStore", passing) == [], f"{label} was overridden"
 
 
-def _suite_and_binding(*, override: bool) -> tuple[type, type]:
-    """Build a suite and a subclass that either inherits or overrides its test."""
+def _suite_and_binding(*, overridden: tuple[str, ...]) -> tuple[type, type]:
+    """Build a suite and a subclass overriding the named suite tests with no-ops."""
 
     class _Suite:
-        def test_from_the_suite(self) -> None: ...
+        def test_one(self, store: object) -> None: ...
+
+        def test_two(self, store: object) -> None: ...
 
     class _Bound(_Suite):
         @pytest.fixture
         def store(self) -> object:
             return FakeMemoryStore()
 
-    if override:
-        # Same name, different function object: pytest still collects it, but
-        # the suite's assertions never run.
-        _Bound.test_from_the_suite = lambda self: None  # type: ignore[method-assign]
+    for name in overridden:
+        # Same name, different function object: pytest still runs it, but the
+        # suite's assertions do not.
+        setattr(_Bound, name, lambda self, store: None)
 
     # Renamed rather than declared, so the literal name does not leak into
     # `_declared_class_names()` (see `_EmptySuite`).

@@ -335,12 +335,13 @@ in the same change, so the new obligation is enforced rather than assumed.
 
 **This is mechanically enforced.** `tests/core/test_protocol_triad.py` maps
 every Protocol in `core/protocols.py` to its suite, its canonical fake, and a
-`Test…Contract` subclass that pytest actually *collects* — the last part is the
-one that matters, since an abstract suite bound by a class nobody collects runs
-zero assertions. It lives in pytest rather than in a script because only pytest
-can answer "was this collected?", and `uv run pytest` is already in the gate and
-in CI. Add a Protocol without its triad and the gate goes red, naming what is
-missing.
+`Test…Contract` subclass whose contract tests pytest actually *ran and passed*.
+The last part is the one that matters: an abstract suite is only worth anything
+once something runs it against a real subject, so the check demands evidence of
+execution rather than the existence of files. It lives in pytest rather than in
+a script because only pytest can answer "did these assertions run?", and
+`uv run pytest` is already in the gate and in CI. Add a Protocol without its
+triad and the gate goes red, naming what is missing.
 
 The check ships with an `EXEMPTIONS` list for Protocols whose backfill is still
 outstanding. That list is a backlog, not an escape hatch: each entry names the
