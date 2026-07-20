@@ -92,17 +92,31 @@ in practice while claiming ADR-0016's query-only boundary still held. Either the
 boundary holds or it does not, and reversing it is a decision this ADR does not
 make and sees no reason to.
 
-**Where the registration rules are tested follows from that.** They belong in a
-shared *registration-convention* suite that both `tools/` implementations run,
-kept separate from the `ToolRegistry` conformance suite, which tests the four
-query methods and nothing else. They are shared rather than per-implementation
-for one narrow reason: `FakeToolRegistry` is a stand-in for
-`InMemoryToolRegistry`, and a fake that accepted a definition the real registry
-refused would let a consumer's tests set up a state production cannot reach.
-That is fake-vs-real fidelity, not Protocol conformance, and the file layout
-should say so rather than leave a reader to infer which obligations cross the
-boundary. (PR #67 currently has them in one suite; separating them is part of
-implementing this ADR.)
+**Where the registration rules are tested follows from that, and it is not where
+PR #67 currently puts them.** `FakeToolRegistry` lives in `ai_assistant.testing`
+and is reachable by every subsystem. Holding it to §4 and §5 would make
+`tools/`'s internal registration lifecycle an external compatibility contract in
+practice, however the prose described it — and would mean that changing how
+`tools/` registers, which ADR-0016 §5 exists to keep cheap, broke a shared fake.
+
+So:
+
+- **The shared `ToolRegistryContract` covers the four query methods and nothing
+  else.** That is the whole of what crosses the boundary, and therefore the
+  whole of what the canonical fake is obliged to satisfy.
+- **§4 and §5 are tested only against `InMemoryToolRegistry`**, in `tools/`'s
+  own tests, alongside the code they constrain.
+- The suite still needs to *arrange* a populated registry, so it calls
+  `register` to do so. Using a method for arrangement is not the same as
+  contracting its edge cases: no assertion in the shared suite depends on what
+  `register` does with a duplicate, a tampered, or a revoked id.
+
+The fidelity worry that pointed the other way — a fake accepting what the real
+registry refuses, letting a consumer set up an unreachable state — survives only
+in a form small enough to handle directly: the fake refuses two definitions with
+the same id, because that is the one arrangement mistake a consumer could
+plausibly make. It does not reproduce spent ids or re-validation, and it is not
+required to.
 
 **Migration cost today is nil.** The only implementations are
 `InMemoryToolRegistry` and `FakeToolRegistry`, both in the unmerged PR #67, and
@@ -271,20 +285,20 @@ proposes for the approval path. That is out of scope here and is named so the
 gap is not mistaken for coverage.
 
 **Scope: a `tools/` invariant, not a Protocol obligation** — see Compatibility.
-The same applies to §5, and both are tested in the shared registration-convention
-suite rather than the `ToolRegistry` conformance suite.
+The same applies to §5. Both are tested against `InMemoryToolRegistry` only; the
+canonical fake is held to the query contract and nothing more.
 
 **Migration.** An implementation that copies must rebuild through validation
-instead — one line. The suite's case for it is the inert-email definition above;
-the `risk_level` case in the suite exercises the §5 conflict rule, not this
-one.
+instead — one line. Its test case is the inert-email definition above, in
+`tools/`'s own tests; the `risk_level` case there exercises the §5 conflict rule,
+not this one.
 
 ### 5. The spent-id rule: reversal and rescoping (supersedes §5)
 
 Like §4, this is registration behaviour and therefore a `tools/` invariant, not
 a Protocol obligation — no consumer of `ToolRegistry` can reach `register` or
-`deregister`. It is still the most consequential of the five, because it is the
-one that reverses a ratified rule.
+`deregister`, and the canonical fake is not held to it. It is still the most
+consequential of the five, because it is the one that reverses a ratified rule.
 
 **This clause reverses a rule ADR-0016 states.** Merged ADR-0016 §5 reads, in
 full:
@@ -371,6 +385,11 @@ line in a composition root already prevents.
 - **A description can still be made to render blank** with U+2800 or U+3164
   (§1). The whitelist narrows the attack from "any invisible character" to "two
   known codepoints in visible categories", and #62 closes it properly.
+- **The canonical fake's obligations stay exactly the Protocol's.** Registration
+  rules bind `tools/` and are tested there, so `tools/` can change how it
+  registers without breaking a fake that every subsystem imports — which is the
+  freedom ADR-0016 §5 bought by keeping the Protocol query-only, and which an
+  earlier draft of this ADR would have spent without noticing.
 - **`ToolRegistry` gains an obligation that is not expressible in its
   signatures.** "Returns a detached snapshot" lives in the docstring and the
   conformance suite, not the types, so it holds only for implementations that
