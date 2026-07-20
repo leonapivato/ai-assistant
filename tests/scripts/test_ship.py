@@ -336,6 +336,42 @@ def test_refuses_an_artifact_with_no_recorded_base(tmp_path: Path) -> None:
     assert "different range" in result.stderr
 
 
+def test_core_check_survives_a_diff_larger_than_the_pipe_buffer(tmp_path: Path) -> None:
+    """The architecture requirement must not fail *open* on a big diff.
+
+    Piping `git diff --name-only` into `grep -q` lets grep close the pipe on its
+    first match; with a file list larger than the ~64KB pipe buffer git then
+    dies of SIGPIPE, and `pipefail` turns that into a false condition — silently
+    skipping the check. This diff is deliberately far past that threshold.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo, touches_core=True)
+    # The padding must sort *after* src/ai_assistant/core/, since
+    # `git diff --name-only` emits sorted paths: grep has to match early and
+    # close the pipe while git still has plenty left to write. Padding that
+    # sorted first would be fully consumed before the match, and the test would
+    # pass against the very bug it exists to catch (it did, before this).
+    padding = repo / "zzz-padding"
+    padding.mkdir()
+    for i in range(3000):
+        (padding / f"a-rather-long-generated-file-name-number-{i:05d}.txt").write_text("x\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a large diff")
+    sha = _git(repo, "rev-parse", "HEAD")
+
+    name_bytes = len(_git(repo, "diff", "--name-only", "main...HEAD"))
+    assert name_bytes > 65_536, f"diff name list is only {name_bytes} bytes; test is toothless"
+
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "architecture" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
 def test_truncates_an_oversized_review_rather_than_failing_to_post(tmp_path: Path) -> None:
     """GitHub rejects a body over 65536 chars; a truncated review beats none."""
     repo = tmp_path / "repo"

@@ -30,13 +30,19 @@ fast-forward path to it):
 
 ```bash
 tmp="$(mktemp -d)"
+# Clean up on any exit path — a failure between add and remove would otherwise
+# leave a worktree registered, and the two steps are independent so neither
+# blocks the other.
+trap 'git worktree remove --force "$tmp/survey" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 git worktree add --detach --quiet "$tmp/survey" origin/main
-python3 scripts/project_status.py --root "$tmp/survey"   # stdlib-only, runnable bare
-git worktree remove "$tmp/survey" && rm -rf "$tmp"
+# Run the *surveyed* commit's own copy of the script, not the one on your
+# branch: if origin/main changed how packages are classified, your branch's
+# version would analyse the new tree with stale logic and mis-rank lanes.
+python3 "$tmp/survey/scripts/project_status.py" --root "$tmp/survey"
 ```
 
-`--root` exists for exactly this. Remove the worktree even if a step in between
-fails, so a partial survey does not stay registered.
+`--root` exists for exactly this — the script is stdlib-only and runnable bare,
+so it needs no environment in the temporary checkout.
 
 Also check what is already claimed by open work:
 
