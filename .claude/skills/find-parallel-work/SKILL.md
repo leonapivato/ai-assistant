@@ -15,12 +15,18 @@ feature. It **proposes**; the operator decides what actually gets dispatched.
 State on disk can be stale, and a lane list computed from a stale tree proposes
 work that is already done. Read the ref, not the checkout:
 
+Resolve the ref to a commit **once**, then read everything from that commit.
+`origin/main` is a moving target — a concurrent fetch between two `git show`
+calls would mix a roadmap from one commit with protocols from another, and the
+staleness check in step 4 would compare against a third:
+
 ```bash
 git fetch origin
-git show origin/main:docs/roadmap.md
-git show origin/main:src/ai_assistant/core/protocols.py
-git show origin/main:src/ai_assistant/core/types.py
-git show origin/main:VISION.md   # step 3 cites a principle from it — read the ref, not your copy
+surveyed="$(git rev-parse origin/main^{commit})"   # every read below uses this
+git show "$surveyed:docs/roadmap.md"
+git show "$surveyed:src/ai_assistant/core/protocols.py"
+git show "$surveyed:src/ai_assistant/core/types.py"
+git show "$surveyed:VISION.md"   # step 3 cites a principle from it — read the ref, not your copy
 ```
 
 For the derived picture — module counts per package, Protocol inventory, ADR
@@ -35,7 +41,7 @@ tmp="$(mktemp -d)"
 # leave a worktree registered, and the two steps are independent so neither
 # blocks the other.
 trap 'git worktree remove --force "$tmp/survey" 2>/dev/null || true; rm -rf "$tmp"' EXIT
-git worktree add --detach --quiet "$tmp/survey" origin/main
+git worktree add --detach --quiet "$tmp/survey" "$surveyed"   # the same commit, not the ref
 # Run the *surveyed* commit's own copy of the script, not the one on your
 # branch: if origin/main changed how packages are classified, your branch's
 # version would analyse the new tree with stale logic and mis-rank lanes.
@@ -110,10 +116,10 @@ confirmation first — never auto-fire it.
 
 State can go stale while confirmation is pending, and a lane that merged in the
 meantime is exactly the "work already done" this skill exists not to propose.
-Note the commit you surveyed (`git rev-parse origin/main` in step 1), then
+Using `$surveyed` from step 1 — the commit every read actually came from —
 **immediately before** `gh issue create`:
 
-1. `git fetch origin` and compare. If `origin/main` moved, redo steps 1–3
+1. `git fetch origin` and compare against `$surveyed`. If it moved, redo steps 1–3
    against the new commit — an issue rescan alone will not catch a lane that
    merged, since a merged lane leaves no open issue behind.
 2. Re-run the `gh issue list` scan regardless, in case someone opened an

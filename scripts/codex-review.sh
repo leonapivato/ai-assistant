@@ -77,9 +77,17 @@ fi
 # the artifact always names exactly the code that was reviewed.
 sha="$(git rev-parse HEAD)"
 
-diff="$(git diff "${base}...${sha}")"
+# Pin the *base* for the same reason, and at the same time. `base` is a ref
+# ("origin/main"), and a concurrent fetch can move it mid-review: the diff would
+# be computed from the old merge base while the recorded one is re-resolved
+# afterwards to the new commit — an artifact certifying a range Codex never saw,
+# which ship.sh would then accept. Both edges of the reviewed range are immutable
+# from here on.
+base_sha="$(git merge-base "$base" "$sha")"
+
+diff="$(git diff "${base_sha}...${sha}")"
 if [[ -z "$diff" ]]; then
-    echo "no changes between ${base} and ${sha} to review" >&2
+    echo "no changes between ${base_sha} and ${sha} to review" >&2
     exit 0
 fi
 
@@ -176,12 +184,10 @@ fi
 review_dir="${repo_root}/.review"
 mkdir -p "$review_dir"
 artifact="${review_dir}/${sha}-${persona}.md"
-# base_sha is the *resolved* left edge of the reviewed range (`base...sha` diffs
-# from the merge base, not from the branch tip). ship.sh compares it against the
-# PR's real base, so a review deliberately run against a narrower base — which
-# still produces a correctly-named artifact — cannot pass as review of the whole
-# PR diff.
-base_sha="$(git merge-base "$base" "$sha")"
+# base_sha was pinned before the diff (above), not re-resolved here: ship.sh
+# compares it against the PR's real base, so a review run against a narrower or
+# since-moved base — which still produces a correctly-named artifact — cannot
+# pass as review of the whole PR diff.
 {
     echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha} -->"
     cat "$out"
