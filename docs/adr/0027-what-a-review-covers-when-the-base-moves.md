@@ -150,11 +150,21 @@ relief, no drift disclosure:
   about a diff that consumes it or now should. `ship.sh` already greps exactly
   this pair to decide persona requirements, so the floor costs one reuse of an
   existing regex over one extra name listing of the base move.
-- `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` — the standing contracts the
-  review was conducted under. A review run against a superseded rubric is not a
-  review under this repo's standard, whatever its verdict says. These move
-  rarely; when they move, everything open should be re-reviewed, which is the
-  correct answer and not a tax.
+- `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`, `scripts/codex-review.sh` —
+  the standing contracts the review was conducted under. A review run against a
+  superseded rubric is not a review under this repo's standard, whatever its
+  verdict says. The driver is in this list on the same footing as the rubrics,
+  not as an implementation detail: it assembles the prompt — the ADR-0020 §1
+  preamble, the persona rubric, the verdict contract — so a base move that adds
+  a required instruction there conducts every later review under different
+  instructions while touching no document. These paths move rarely; when they
+  move, everything open should be re-reviewed, which is the correct answer and
+  not a tax.
+
+  `scripts/ship.sh` is deliberately **not** in the floor, and the boundary is
+  "what the reviewer read", not "what the review loop touches". `ship` shapes no
+  prompt; it applies the acceptance rule, and it applies whatever version of it
+  is on disk at ship time. A stale copy of `ship` cannot exist to be reused.
 
 **The floor reads both endpoints of every entry, not a single name.** A plain
 `git diff --name-only <old_base>...<new_base>` reports only the *destination* of
@@ -261,7 +271,8 @@ requires the recorded base to equal the PR's current merge base. Where the base
 has moved, an artifact covers HEAD if its recorded patch identity is unchanged
 and the move touches neither the contract surface (core/protocols.py,
 core/types.py) nor the standing review contracts (docs/review/**, CLAUDE.md,
-CONTRIBUTING.md); the move is then published at ship rather than costing a
+CONTRIBUTING.md, scripts/codex-review.sh); the move is then published at ship
+rather than costing a
 round. Where the base has not moved, the recorded-tree comparison stands exactly
 as written. The artifact is named by the anchor it is selected by rather than by
 the commit it is filed under. §§1–2 are untouched.`
@@ -362,8 +373,9 @@ The acceptance rule is a fail-closed surface, so the implementation owes a test
 per branch of it, not only the happy path: #118's two rebases (§2's falsifiable
 prediction — the #117 rebase holds the identity, the #116 rebase moves it); a
 whitespace-only change to a context line inside a reviewed hunk, which must
-invalidate; each floor path changed, deleted, renamed *out* of the floor and
-renamed *into* it (§3); a recorded base that is not an ancestor of the merge
+invalidate; **each** floor path — the two `core` files, the review documents and
+the driver alike — changed, deleted, renamed *out* of the floor and renamed
+*into* it (§3); a recorded base that is not an ancestor of the merge
 base; and a drift record that cannot be rendered (§4). Every one of those must
 refuse. An implementation that satisfies only the #118 cases would accept
 several of them.
