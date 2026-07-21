@@ -32,7 +32,8 @@ scope").
 
 Run via ``just review-history`` (or ``python3 scripts/review_history.py``). Pass
 ``--limit`` for a different window, or ``--from-json`` to read a saved
-``gh pr list --json number,title,comments`` payload instead of calling ``gh`` —
+``gh pr list --json number,title,comments,mergedAt`` payload instead of calling
+``gh`` —
 which is the seam the tests drive, so they never touch the network. ``--limit``
 applies to either path, so both report the same window.
 
@@ -270,7 +271,7 @@ def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggreg
 
 
 def parse_pull_requests(payload: object, ship_author: str) -> list[ShippedPr]:
-    """Convert a ``gh pr list --json number,title,comments`` payload to records.
+    """Convert a ``gh pr list --json number,title,comments,mergedAt`` payload to records.
 
     Args:
         payload: The decoded JSON — a list of PR objects.
@@ -545,8 +546,16 @@ def _headline(prs: list[ShippedPr], stats: _Stats) -> list[str]:
     return [header, "  " + " · ".join(parts)]
 
 
-def render(prs: list[ShippedPr]) -> str:
-    """Build the full review-history report for the given pull requests."""
+def render(prs: list[ShippedPr], *, pool_saturated: bool = False) -> str:
+    """Build the full review-history report for the given pull requests.
+
+    Args:
+        prs: The window to report, already ordered and sliced.
+        pool_saturated: The fetch returned every PR it asked for, so ordering by
+            merge time could only order what was fetched — an older PR merged
+            inside the window may not have been fetched at all. Stated in the
+            report rather than assumed away.
+    """
     stats = summarize(prs)
     lines = [
         "ai-assistant — review history",
@@ -589,6 +598,26 @@ def render(prs: list[ShippedPr]) -> str:
     # A PR whose comment list filled a page may be missing its LAST ship comment,
     # which is the one reported — so the figure above it could be a stale round.
     # Named rather than silently trusted (issue #157).
+    # Ordering can only reorder what was fetched, and `gh pr list` orders by
+    # creation. GitHub offers no server-side merge-time ordering to ask for
+    # instead, so the pool is the bound and the report says so rather than
+    # claiming a window it cannot prove.
+    if pool_saturated:
+        lines += [
+            "",
+            "! the fetch returned every PR it asked for, so this window is ordered",
+            f"  within a pool of {_ORDER_SLACK} beyond it — a PR created further back",
+            "  but merged inside the window may be missing. Raise --limit to widen it.",
+        ]
+    undated = [pr.number for pr in prs if not pr.merged_at]
+    if undated:
+        listed = ", ".join(f"#{n}" for n in undated)
+        lines += [
+            "",
+            f"! no merge time on {listed}, so the window kept the order it was given",
+            "  rather than ordering by merge time (a payload captured without",
+            "  `mergedAt`).",
+        ]
     truncated = [pr.number for pr in prs if pr.comments_may_be_truncated]
     if truncated:
         listed = ", ".join(f"#{n}" for n in truncated)
@@ -624,7 +653,8 @@ def main() -> int:
         type=Path,
         default=None,
         help=(
-            "Read a saved `gh pr list --json number,title,comments` payload from this "
+            "Read a saved `gh pr list --json number,title,comments,mergedAt` payload "
+            "from this "
             "file instead of calling gh (used by the tests, and for offline runs). "
             "--limit still applies, so the window is the same either way."
         ),
@@ -659,11 +689,15 @@ def main() -> int:
         # --limit, but a saved payload holds whatever it was captured with, and a
         # flag that silently does nothing on one path would report a different
         # window than the one asked for.
-        prs = by_merge_time(parse_pull_requests(payload, args.ship_author), args.limit)
+        parsed = parse_pull_requests(payload, args.ship_author)
+        # Saturation is what makes the window unprovable, so it is measured
+        # against what was asked for rather than assumed.
+        saturated = args.from_json is None and len(parsed) >= args.limit + _ORDER_SLACK
+        prs = by_merge_time(parsed, args.limit)
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"review-history: {exc}", file=sys.stderr)
         return 1
-    print(render(prs))
+    print(render(prs, pool_saturated=saturated))
     return 0
 
 
