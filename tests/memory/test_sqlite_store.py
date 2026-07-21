@@ -7,6 +7,7 @@ retrieval is reproducible and offline.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -429,6 +430,89 @@ async def test_migration_backfills_expiry_so_legacy_expired_stays_forgotten(
         assert await store.purge_expired() == 1
     finally:
         store.close()
+
+
+def _store_naive_json(store: SqliteMemoryStore, record_id: str, **naive: str) -> None:
+    """Rewrite a stored row's JSON so the named instants carry no offset.
+
+    Emulates a row written before ADR-0023 tightened ``core``: at the time the
+    validators attributed UTC to a naive value, so nothing stopped one being
+    serialised without an offset.
+    """
+    row = store._conn.execute("SELECT data FROM records WHERE id = ?", (record_id,)).fetchone()
+    payload = json.loads(row[0])
+    for key, value in naive.items():
+        if key == "last_updated":
+            payload["provenance"][key] = value
+        else:
+            payload[key] = value
+    store._conn.execute(
+        "UPDATE records SET data = ? WHERE id = ?", (json.dumps(payload), record_id)
+    )
+    store._conn.commit()
+
+
+async def test_a_stored_naive_instant_is_read_as_utc_not_a_decode_failure(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """ADR-0023 §3's sanctioned attribution: the decoder knows what the store wrote.
+
+    ``core`` may not guess an offset, but this layer is entitled to: ``_add_sync``
+    indexes every deadline as ``expires_at.timestamp()``, which reads a naive
+    value host-local, so the store both wrote and interpreted these as UTC.
+    Rejecting instead would make a live record unreadable, which ADR-0004 §6 and
+    ADR-0007 §3 forbid.
+    """
+    store = make_store()
+    await store.add(_semantic("1", "legacy row", expires_at=datetime(2027, 1, 2, tzinfo=UTC)))
+    _store_naive_json(
+        store, "1", expires_at="2027-01-02T00:00:00", last_updated="2026-01-01T00:00:00"
+    )
+
+    got = await store.get("1")
+
+    assert got is not None
+    assert got.expires_at == datetime(2027, 1, 2, tzinfo=UTC)
+    assert got.provenance.last_updated == _WHEN
+    assert [r.id for r in await store.export()] == ["1"]  # the all-live guarantee holds
+
+
+async def test_a_stored_naive_instant_survives_search_and_export(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """Every read path goes through ``_decode``, so none of them may break."""
+    store = make_store()
+    await store.add(_semantic("1", "coffee legacy"))
+    _store_naive_json(store, "1", last_updated="2026-01-01T00:00:00")
+
+    assert [r.id for r in await store.search("coffee")] == ["1"]
+    assert [r.provenance.last_updated for r in await store.export()] == [_WHEN]
+
+
+async def test_genuine_corruption_still_fails_after_the_repair_attempt(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The repair is narrow: it fixes instants, and reports anything else."""
+    store = make_store()
+    await store.add(_semantic("1", "fine"))
+    _store_naive_json(store, "1", last_updated="2026-01-01T00:00:00", expires_at="not-a-datetime")
+
+    with pytest.raises(MemoryStoreError, match="could not be decoded"):
+        await store.get("1")
+
+
+async def test_a_content_string_that_looks_like_a_timestamp_is_not_rewritten(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The repair keys off field names, so free text is never reinterpreted."""
+    store = make_store()
+    await store.add(_semantic("1", "2026-01-01T09:00:00"))
+    _store_naive_json(store, "1", last_updated="2026-01-01T00:00:00")
+
+    got = await store.get("1")
+
+    assert got is not None
+    assert got.content == "2026-01-01T09:00:00"
 
 
 async def test_export_wraps_corrupt_stored_record(

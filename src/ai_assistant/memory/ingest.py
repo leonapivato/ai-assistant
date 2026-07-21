@@ -135,12 +135,32 @@ class MemoryIngestor:
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 
+    def _now_utc(self) -> datetime:
+        """The injected clock's time, normalising a naive reading to UTC.
+
+        Load-bearing for :meth:`_expiry`, and the same guard
+        ``LearningLoop._now_utc`` already carries on the identical write.
+        ``model_copy(update=...)`` does **not** re-run validators, so a naive
+        ``expires_at`` installed that way reaches the store untouched — and
+        since ADR-0023 makes ``MemoryBase.expires_at`` *reject* a naive value
+        rather than assume UTC, there is no longer a validator downstream that
+        would have caught it. Every later read then compares it against an aware
+        UTC now and raises ``TypeError`` deep inside the store, or fails to
+        decode after a round trip through the persistent one.
+
+        This is the boundary shim ADR-0023 §6 requires for a clock-fed field
+        until ADR-0026's producer guard lands; it is deliberately not that
+        guard.
+        """
+        now = self._now()
+        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""
         if ttl is None:
             return None
         try:
-            return self._now() + ttl
+            return self._now_utc() + ttl
         except OverflowError as exc:
             msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
             raise MemoryStoreError(msg) from exc

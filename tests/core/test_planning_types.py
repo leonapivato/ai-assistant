@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import pickle
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -84,11 +84,51 @@ def test_goal_rejects_a_blank_statement() -> None:
         _goal(statement="   ")
 
 
-def test_goal_normalises_naive_timestamps_to_utc() -> None:
-    goal = _goal(created_at=datetime(2026, 1, 1), deadline=datetime(2026, 9, 1))  # noqa: DTZ001
+def test_goal_refuses_naive_timestamps() -> None:
+    """ADR-0023 §3: ``core`` never attributes an offset it was not given."""
+    with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
+        _goal(created_at=datetime(2026, 1, 1))  # noqa: DTZ001 — a naive value is the subject
+    with pytest.raises(ValidationError, match="deadline must be timezone-aware"):
+        _goal(deadline=datetime(2026, 9, 1))  # noqa: DTZ001 — a naive value is the subject
+
+
+def test_goal_converts_aware_timestamps_to_utc() -> None:
+    goal = _goal(
+        created_at=datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2))),
+        deadline=datetime(2026, 9, 1, 2, tzinfo=timezone(timedelta(hours=2))),
+    )
+    assert goal.created_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert goal.created_at.tzinfo is UTC
     assert goal.deadline is not None
     assert goal.deadline.tzinfo is UTC
+
+
+def test_the_clock_fed_planning_fields_still_attribute_utc() -> None:
+    """ADR-0023 §6's ordering: these five wait for ADR-0026's producer guard.
+
+    Their producers (``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner``,
+    ``FakePlanStore``) pass an injected reading straight in with no shim, and
+    what normalises a naive one today is the validator itself. Tightening them
+    before the producer is guaranteed aware would break a naive test or config
+    clock — the exact failure the ordering exists to prevent. Pinned so the
+    remaining debt is visible rather than merely absent.
+    """
+    naive = datetime(2026, 1, 1)  # noqa: DTZ001 — the deferral is the subject
+
+    assert ActionPlan(id="p1", goal_id="g1", steps=(), created_at=naive).created_at.tzinfo is UTC
+    running = _step(
+        status=StepStatus.RUNNING,
+        approval_ref="perm-1",
+        bound_tool="smtp",
+        attempts=1,
+        started_at=naive,
+    )
+    assert running.started_at is not None
+    assert running.started_at.tzinfo is UTC
+    assert (
+        ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=naive).updated_at.tzinfo is UTC
+    )
+    assert PlanExport(exported_at=naive).exported_at.tzinfo is UTC
 
 
 # --- PlanStep parameters are frozen all the way down --------------------

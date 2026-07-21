@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
@@ -215,4 +215,43 @@ async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:
     stored = await store.get("1")
     assert stored is not None
     # _fixed_now (2026-06-01) + the policy's 7-day TTL.
+    assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
+
+
+async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
+    """``_expiry`` installs ``expires_at`` through ``model_copy``, which skips
+    validators — so the clock is the only place this can be caught.
+
+    ``LearningLoop`` already guards the identical write and says why; this path
+    did not, and since ADR-0023 makes ``MemoryBase.expires_at`` reject a naive
+    value rather than assume UTC, there is no longer a validator behind it. The
+    boundary shim ADR-0023 §6 requires until ADR-0026's producer guard lands.
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    naive_clock = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=lambda: datetime(2026, 6, 1),  # noqa: DTZ001 — the naive clock is the subject
+    )
+
+    await naive_clock.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+
+    stored = await store.get("1")
+    assert stored is not None
+    assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
+
+
+async def test_a_non_utc_clock_stamps_the_same_instant() -> None:
+    """Conversion is information-preserving, so only the representation moves."""
+    store = InMemoryMemoryStore(now=_fixed_now)
+    berlin_clock = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=lambda: datetime(2026, 6, 1, 2, tzinfo=timezone(timedelta(hours=2))),
+    )
+
+    await berlin_clock.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+
+    stored = await store.get("1")
+    assert stored is not None
     assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)

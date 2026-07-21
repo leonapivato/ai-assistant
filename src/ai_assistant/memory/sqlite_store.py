@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import sqlite_vec
+import structlog
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding, MemoryKind
+
+_log = structlog.get_logger(__name__)
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # ``search`` applies the kind and expiry filters *after* the vector KNN (sqlite-vec
@@ -44,6 +47,53 @@ _OWNER_ONLY = 0o600
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+#: JSON keys a ``MemoryRecord`` carries an instant under — ``expires_at`` on every
+#: kind, ``occurred_at`` on episodic, ``valid_until`` on semantic, and
+#: ``last_updated`` inside the nested provenance. Listed rather than inferred from
+#: the model so the repair below can never rewrite a free-text field that happens
+#: to parse as a date; if ``core`` grows an instant, the gate check in
+#: ``tests/core/test_instant_coverage.py`` is what surfaces it, and this set is
+#: covered by ``tests/memory/test_sqlite_store.py``'s legacy-row cases.
+_INSTANT_KEYS = frozenset({"expires_at", "occurred_at", "valid_until", "last_updated"})
+
+
+def _utc_attributed(value: object, *, key: str | None) -> tuple[object, bool]:
+    """Return ``value`` with naive instants read as UTC, and whether any changed."""
+    if isinstance(value, dict):
+        rebuilt: dict[str, object] = {}
+        changed = False
+        for name, item in value.items():
+            rebuilt[name], item_changed = _utc_attributed(item, key=name)
+            changed = changed or item_changed
+        return rebuilt, changed
+    if isinstance(value, list):
+        pairs = [_utc_attributed(item, key=key) for item in value]
+        return [item for item, _ in pairs], any(item_changed for _, item_changed in pairs)
+    if key in _INSTANT_KEYS and isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return value, False
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC).isoformat(), True
+    return value, False
+
+
+def _utc_attributed_json(data: str) -> str | None:
+    """Re-render ``data`` with naive instants read as UTC, or ``None`` if unchanged.
+
+    ``None`` covers both "nothing to repair" and "not even JSON", so the caller
+    reports the original validation failure rather than a second, less
+    informative one.
+    """
+    try:
+        decoded = json.loads(data)
+    except ValueError:
+        return None
+    repaired, changed = _utc_attributed(decoded, key=None)
+    return json.dumps(repaired) if changed else None
 
 
 class SqliteMemoryStore:
@@ -245,12 +295,51 @@ class SqliteMemoryStore:
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:
-        """Decode a stored JSON record, surfacing corruption as ``MemoryStoreError``."""
+        """Decode a stored JSON record, attributing UTC to a legacy naive instant.
+
+        ADR-0023 §3 makes ``core`` reject a naive datetime, because a shared type
+        cannot know whether attributing UTC restores a fact or invents one. The
+        *decoder* is the layer that can: rows written before that rule ran
+        through validators that assumed UTC for a naive value, and
+        :meth:`_add_sync` indexes every deadline as ``expires_at.timestamp()``,
+        which reads a naive value host-local — so the store both wrote and
+        interpreted these values as UTC. Saying so here is §3's sanctioned
+        relocation of attribution to the layer entitled to perform it.
+
+        Without it a persisted naive instant would stop decoding the moment
+        ``core`` tightened, and a live record would become unreadable — which
+        ADR-0004 §6 and ADR-0007 §3 forbid, since a row a user may view, export
+        and delete may not be dropped or hidden by a migration. Rejecting or
+        quarantining is therefore not open to this method; attributing *and
+        recording* it is.
+
+        The repair is attempted only after a first strict pass has failed, and
+        only on keys this module's records actually hold an instant under, so a
+        ``content`` string that merely looks like a timestamp is never rewritten.
+        Anything still invalid afterwards is genuine corruption.
+
+        Raises:
+            MemoryStoreError: If the row cannot be decoded even with UTC
+                attributed.
+        """
         try:
             return _ADAPTER.validate_json(data)
         except ValidationError as exc:
-            msg = f"stored memory could not be decoded: {exc}"
-            raise MemoryStoreError(msg) from exc
+            repaired = _utc_attributed_json(data)
+            if repaired is None:
+                msg = f"stored memory could not be decoded: {exc}"
+                raise MemoryStoreError(msg) from exc
+            try:
+                record = _ADAPTER.validate_json(repaired)
+            except ValidationError as retry_exc:
+                msg = f"stored memory could not be decoded: {retry_exc}"
+                raise MemoryStoreError(msg) from retry_exc
+            _log.warning(
+                "stored_instant_utc_attributed",
+                record_id=record.id,
+                detail="a stored naive timestamp was read as UTC (ADR-0023 §3)",
+            )
+            return record
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if absent or expired."""

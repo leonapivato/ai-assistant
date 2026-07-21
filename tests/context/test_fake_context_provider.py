@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from context_provider_contract import ContextProviderContract
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import ContextError
 from ai_assistant.core.types import CurrentContext, TimeOfDay
@@ -129,16 +130,17 @@ async def test_the_default_context_cannot_be_corrupted_between_instances() -> No
     assert fresh.time_of_day is TimeOfDay.MORNING
 
 
-async def test_a_supplied_context_is_revalidated_on_the_way_in() -> None:
+def test_a_supplied_context_is_revalidated_on_the_way_in() -> None:
     # CurrentContext does not validate on assignment, so a caller can mutate one
-    # into an invalid state and hand it over. Normalising a naive `now` back to UTC
-    # here is what keeps the fake passing the tz-aware assertion in its own suite.
+    # into an invalid state and hand it over. Re-validating here is what keeps the
+    # fake passing the tz-aware assertion in its own suite — and since ADR-0023 the
+    # re-validation *refuses* a naive `now` rather than assuming UTC for it, so the
+    # mistake is reported at the point it was made instead of being papered over.
     corrupted = _saturday_night()
     corrupted.now = datetime(2026, 6, 6, 23, 0)  # noqa: DTZ001  deliberately naive
 
-    context = await FakeContextProvider(corrupted).assemble()
-
-    assert context.now == datetime(2026, 6, 6, 23, 0, tzinfo=UTC)
+    with pytest.raises(ValidationError, match="now must be timezone-aware"):
+        FakeContextProvider(corrupted)
 
 
 def test_an_indeterminate_timezone_is_rejected() -> None:
