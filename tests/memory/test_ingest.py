@@ -366,3 +366,41 @@ async def test_a_clock_whose_conversion_lies_cannot_install_a_naive_expiry() -> 
         await lying.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
 
     assert await store.get("1") is None
+
+
+class _FlipOnConvert(datetime):
+    """Flips its overridden offset *during* ``astimezone``, then returns itself."""
+
+    lie = timedelta(0)
+
+    def utcoffset(self) -> timedelta | None:
+        return _FlipOnConvert.lie
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        _FlipOnConvert.lie = timedelta(hours=2)
+        return self
+
+
+async def test_a_clock_that_flips_its_offset_during_conversion_is_refused() -> None:
+    """The ingest guard is a separate implementation, so it needs its own proof.
+
+    Same shape ``UtcInstant`` refuses: the reading reports UTC when checked,
+    changes offset inside ``astimezone``, and returns itself still carrying
+    ``tzinfo is UTC``. Copying its components then would stamp an expiry two
+    hours late, past a validator this write never reaches.
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    _FlipOnConvert.lie = timedelta(0)
+    flipping = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=lambda: _FlipOnConvert(2026, 6, 1, tzinfo=UTC),
+    )
+
+    try:
+        with pytest.raises(MemoryStoreError, match="did not convert to UTC"):
+            await flipping.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+    finally:
+        _FlipOnConvert.lie = timedelta(0)
+
+    assert await store.get("1") is None
