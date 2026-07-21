@@ -221,6 +221,7 @@ def test_a_full_page_of_comments_is_flagged_as_possibly_truncated(tmp_path: Path
     ]
     out = _run(payload, tmp_path)
     assert "comment list may be truncated on #1" in out
+    assert "which the medians above then include" in out
     assert "#2" not in out.split("truncated on")[1]
 
 
@@ -392,6 +393,19 @@ def test_a_plain_n_a_churn_claims_no_rewrite(tmp_path: Path) -> None:
     out = _run(payload, tmp_path)
     assert "1 diff(s) report churn n/a" in out
     assert "also had history rewritten" not in out
+
+
+def test_a_sliced_saved_payload_reports_the_pool_it_cannot_verify(tmp_path: Path) -> None:
+    payload = [
+        _pr(n, "fix: x", [_ship(str(n) * 40, _EXACT)], f"2026-01-{n:02d}T00:00Z")
+        for n in range(1, 4)
+    ]
+    assert "the pool this window was ordered within was full" in _run(
+        payload, tmp_path, "--limit", "2"
+    )
+    assert "the pool this window was ordered within was full" not in _run(
+        payload, tmp_path, "--limit", "5"
+    )
 
 
 def test_limit_applies_to_a_saved_payload_too(tmp_path: Path) -> None:
