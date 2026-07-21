@@ -395,6 +395,23 @@ def test_a_payload_without_merge_times_keeps_its_order_and_says_so(tmp_path: Pat
     assert "no merge time on #9, #4, #7" in out
 
 
+def test_an_undated_pr_cut_from_the_window_is_still_named(tmp_path: Path) -> None:
+    """An undated PR sorts last, so it is the one slicing removes first.
+
+    Reporting only the undated PRs that survived would go quiet in exactly the
+    case the warning exists for.
+    """
+    payload = [
+        _pr(1, "fix: undated", [_ship("1" * 40, _EXACT)]),
+        _pr(2, "fix: dated", [_ship("2" * 40, _EXACT)], "2026-06-01T00:00Z"),
+    ]
+    out = _run(payload, tmp_path, "--limit", "1")
+    rows = [line for line in out.splitlines() if line.startswith("  #")]
+    assert len(rows) == 1
+    assert "#2" in rows[0]
+    assert "no merge time on #1" in out
+
+
 def test_a_fully_dated_window_claims_no_ordering_fallback(tmp_path: Path) -> None:
     payload = [_pr(1, "fix: x", [_ship("1" * 40, _EXACT)], "2026-01-01T00:00Z")]
     assert "no merge time on" not in _run(payload, tmp_path)
@@ -443,10 +460,14 @@ def test_a_sliced_saved_payload_reports_the_pool_it_cannot_verify(tmp_path: Path
 
 
 def test_limit_applies_to_a_saved_payload_too(tmp_path: Path) -> None:
-    payload = [_pr(n, "fix: x", [_ship(str(n) * 40, _EXACT)]) for n in range(1, 6)]
+    payload = [
+        _pr(n, "fix: x", [_ship(str(n) * 40, _EXACT)], f"2026-01-{6 - n:02d}T00:00Z")
+        for n in range(1, 6)
+    ]
     out = _run(payload, tmp_path, "--limit", "2")
+    rows = [line for line in out.splitlines() if line.startswith("  #")]
     assert "last 2 merged PR(s)" in out
-    assert "#3" not in out
+    assert [r.split()[0] for r in rows] == ["#1", "#2"]
 
 
 def test_the_report_states_it_does_not_gate(tmp_path: Path) -> None:

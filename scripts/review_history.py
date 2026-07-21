@@ -575,7 +575,12 @@ def _headline(prs: list[ShippedPr], stats: _Stats) -> list[str]:
     return [header, "  " + " · ".join(parts)]
 
 
-def render(prs: list[ShippedPr], *, pool_saturated: bool = False) -> str:
+def render(
+    prs: list[ShippedPr],
+    *,
+    pool_saturated: bool = False,
+    undated: list[int] | None = None,
+) -> str:
     """Build the full review-history report for the given pull requests.
 
     Args:
@@ -584,6 +589,11 @@ def render(prs: list[ShippedPr], *, pool_saturated: bool = False) -> str:
             merge time could only order what was fetched — an older PR merged
             inside the window may not have been fetched at all. Stated in the
             report rather than assumed away.
+        undated: PR numbers carrying no merge time, taken from the whole
+            candidate pool rather than the window. An undated PR sorts to the
+            bottom and so is the one most likely to have been *sliced out* — a
+            warning drawn from the window alone would go quiet in exactly the
+            case it exists to report. Defaults to those visible in ``prs``.
     """
     stats = summarize(prs)
     lines = [
@@ -640,13 +650,15 @@ def render(prs: list[ShippedPr], *, pool_saturated: bool = False) -> str:
             "  whatever it was captured with, which this cannot know). Raise",
             "  --limit to widen it.",
         ]
-    undated = [pr.number for pr in prs if not pr.merged_at]
+    if undated is None:
+        undated = [pr.number for pr in prs if not pr.merged_at]
     if undated:
         listed = ", ".join(f"#{n}" for n in undated)
         lines += [
             "",
-            f"! no merge time on {listed}, so the window kept the order it was given",
-            "  rather than ordering by merge time (a payload captured without",
+            f"! no merge time on {listed}, so those could not be ordered by merge",
+            "  time and sorted below everything dated — some may have been cut from",
+            "  the window on that basis alone (a payload captured without",
             "  `mergedAt`).",
         ]
     truncated = [pr.number for pr in prs if pr.comments_may_be_truncated]
@@ -740,10 +752,14 @@ def main() -> int:
             else len(parsed) >= args.limit
         )
         prs = by_merge_time(parsed, args.limit)
+        # Drawn from the pool, not the window: an undated PR sorts last, so it is
+        # the one most likely to have been sliced away, and reporting only what
+        # survived would hide precisely that.
+        undated = [pr.number for pr in parsed if not pr.merged_at]
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"review-history: {exc}", file=sys.stderr)
         return 1
-    print(render(prs, pool_saturated=saturated))
+    print(render(prs, pool_saturated=saturated, undated=undated))
     return 0
 
 
