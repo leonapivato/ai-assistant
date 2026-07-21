@@ -33,7 +33,14 @@ scope").
 Run via ``just review-history`` (or ``python3 scripts/review_history.py``). Pass
 ``--limit`` for a different window, or ``--from-json`` to read a saved
 ``gh pr list --json number,title,comments`` payload instead of calling ``gh`` —
-which is the seam the tests drive, so they never touch the network.
+which is the seam the tests drive, so they never touch the network. ``--limit``
+applies to either path, so both report the same window.
+
+A ship comment is counted only from an author who could have run ship: the
+``<!-- ship:<sha> -->`` marker is public text any commenter can quote, and since
+the *last* ship comment on a PR is the one reported, an unchecked marker would
+hand a drive-by commenter control of the figure. ``ship.sh`` checks its own
+comment's author for exactly this reason.
 """
 
 from __future__ import annotations
@@ -162,13 +169,50 @@ def parse_summary(line: str) -> Aggregate | None:
     )
 
 
-def _is_ship_comment(body: str) -> bool:
-    """Whether a comment body opens with ship's marker *and* its header.
+@dataclass(frozen=True)
+class Comment:
+    """One PR comment: its body and who wrote it.
+
+    Attributes:
+        body: The raw comment body, CRLF endings included.
+        author: The commenter's login.
+        association: GitHub's ``authorAssociation`` — ``OWNER``, ``MEMBER``,
+            ``COLLABORATOR``, ``CONTRIBUTOR``, ``NONE``, ….
+    """
+
+    body: str
+    author: str
+    association: str
+
+
+# The associations whose holders can already push to this repository. ship.sh
+# recognises its own comment by marker + header + *author*, precisely because the
+# marker is public text anyone can quote; reading the marker alone here would let
+# any commenter inject a `_round 999 …_` line and skew the report. Restricting to
+# write-access authors closes the drive-by case. It does not make the record
+# tamper-proof and does not try to: as ship.sh already notes, a byte-identical
+# forgery from an account that can post one is indistinguishable. Narrow it to a
+# single login with --ship-author when that matters.
+_TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def _is_ship_comment(comment: Comment, ship_author: str | None) -> bool:
+    """Whether a comment is a genuine ship comment from a trusted author.
 
     GitHub returns bodies with CRLF endings, so each line is stripped of its
     trailing carriage return before matching.
+
+    Args:
+        comment: The comment to test.
+        ship_author: A login to require exactly, or ``None`` to accept any author
+            whose association carries write access.
     """
-    lines = [line.rstrip("\r") for line in body.split("\n")[:2]]
+    if ship_author is not None:
+        if comment.author != ship_author:
+            return False
+    elif comment.association.upper() not in _TRUSTED_ASSOCIATIONS:
+        return False
+    lines = [line.rstrip("\r") for line in comment.body.split("\n")[:2]]
     return (
         len(lines) == 2  # noqa: PLR2004  # marker line + header line
         and _MARKER_RE.match(lines[0]) is not None
@@ -176,35 +220,44 @@ def _is_ship_comment(body: str) -> bool:
     )
 
 
-def aggregate_from_comments(bodies: list[str]) -> Aggregate | None:
-    """Return the aggregate from a PR's *last* ship comment, if it has one.
+def aggregate_from_comments(
+    comments: list[Comment], ship_author: str | None = None
+) -> Aggregate | None:
+    """Return the aggregate from a PR's *last* trusted ship comment, if it has one.
 
     ship posts one comment per commit, so a PR that shipped more than once
     carries several. The last is the one covering the content that merged, so it
     is the one the history reports; earlier rounds on the same PR are already
-    counted inside its round number.
+    counted inside its round number. Because the *last* one wins, an untrusted
+    commenter who could get a forged marker counted would control the figure
+    outright — hence the author check in :func:`_is_ship_comment`.
 
     Args:
-        bodies: Every comment body on the PR, in chronological order.
+        comments: Every comment on the PR, in chronological order.
+        ship_author: A login to require exactly, or ``None`` for any author with
+            write access.
 
     Returns:
-        The aggregate, or ``None`` when no ship comment carries a summary line.
+        The aggregate, or ``None`` when no trusted ship comment carries a
+        summary line.
     """
-    for body in reversed(bodies):
-        if not _is_ship_comment(body):
+    for comment in reversed(comments):
+        if not _is_ship_comment(comment, ship_author):
             continue
-        for line in body.split("\n"):
+        for line in comment.body.split("\n"):
             aggregate = parse_summary(line.rstrip("\r"))
             if aggregate is not None:
                 return aggregate
     return None
 
 
-def parse_pull_requests(payload: object) -> list[ShippedPr]:
+def parse_pull_requests(payload: object, ship_author: str | None = None) -> list[ShippedPr]:
     """Convert a ``gh pr list --json number,title,comments`` payload to records.
 
     Args:
         payload: The decoded JSON — a list of PR objects.
+        ship_author: A login whose ship comments are the only ones counted, or
+            ``None`` to accept any author with write access to the repository.
 
     Returns:
         One :class:`ShippedPr` per entry, in the order ``gh`` returned them.
@@ -218,18 +271,29 @@ def parse_pull_requests(payload: object) -> list[ShippedPr]:
     for entry in payload:
         if not isinstance(entry, dict):
             raise ValueError("expected each pull request to be a JSON object")
-        comments = entry.get("comments") or []
-        if not isinstance(comments, list):
+        raw = entry.get("comments") or []
+        if not isinstance(raw, list):
             raise ValueError(f"PR {entry.get('number')}: 'comments' is not a list")
-        bodies = [str(c.get("body", "")) for c in comments if isinstance(c, dict)]
+        comments = [_comment(c) for c in raw if isinstance(c, dict)]
         prs.append(
             ShippedPr(
                 number=int(entry["number"]),
                 title=str(entry.get("title", "")),
-                aggregate=aggregate_from_comments(bodies),
+                aggregate=aggregate_from_comments(comments, ship_author),
             )
         )
     return prs
+
+
+def _comment(raw: dict[str, object]) -> Comment:
+    """Build a :class:`Comment` from one entry of ``gh``'s ``comments`` array."""
+    author = raw.get("author")
+    login = author.get("login", "") if isinstance(author, dict) else ""
+    return Comment(
+        body=str(raw.get("body", "")),
+        author=str(login),
+        association=str(raw.get("authorAssociation", "")),
+    )
 
 
 def fetch_pull_requests(limit: int) -> object:
@@ -256,6 +320,9 @@ def fetch_pull_requests(limit: int) -> object:
         "--limit",
         str(limit),
         "--json",
+        # `comments` carries author and authorAssociation as well as body; both
+        # are needed, because a ship comment is only counted from an author who
+        # could have run ship (see _is_ship_comment).
         "number,title,comments",
     ]
     try:
@@ -447,7 +514,17 @@ def main() -> int:
         default=None,
         help=(
             "Read a saved `gh pr list --json number,title,comments` payload from this "
-            "file instead of calling gh (used by the tests, and for offline runs)."
+            "file instead of calling gh (used by the tests, and for offline runs). "
+            "--limit still applies, so the window is the same either way."
+        ),
+    )
+    parser.add_argument(
+        "--ship-author",
+        default=None,
+        help=(
+            "Count ship comments only from this login. The default accepts any "
+            "author whose GitHub association carries write access "
+            f"({', '.join(sorted(_TRUSTED_ASSOCIATIONS))})."
         ),
     )
     args = parser.parse_args()
@@ -459,7 +536,11 @@ def main() -> int:
             payload = json.loads(args.from_json.read_text(encoding="utf-8"))
         else:
             payload = fetch_pull_requests(args.limit)
-        prs = parse_pull_requests(payload)
+        # Applied to both paths, not only the fetch. `gh` already honours
+        # --limit, but a saved payload holds whatever it was captured with, and a
+        # flag that silently does nothing on one path would report a different
+        # window than the one asked for.
+        prs = parse_pull_requests(payload, args.ship_author)[: args.limit]
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"review-history: {exc}", file=sys.stderr)
         return 1

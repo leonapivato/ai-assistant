@@ -55,8 +55,17 @@ def _ship(sha: str, summary: str | None) -> str:
     return "\r\n".join(lines)
 
 
-def _pr(number: int, title: str, bodies: list[str]) -> dict[str, object]:
-    return {"number": number, "title": title, "comments": [{"body": b} for b in bodies]}
+def _comment(body: str, author: str = "owner", association: str = "OWNER") -> dict[str, object]:
+    """One comment as `gh pr list --json comments` returns it."""
+    return {"body": body, "author": {"login": author}, "authorAssociation": association}
+
+
+def _pr(number: int, title: str, comments: list[str | dict[str, object]]) -> dict[str, object]:
+    return {
+        "number": number,
+        "title": title,
+        "comments": [_comment(c) if isinstance(c, str) else c for c in comments],
+    }
 
 
 _TIMES = "\u00d7"
@@ -135,13 +144,37 @@ def test_an_aggregate_without_a_churn_clause_still_parses() -> None:
 # --- which comment counts ----------------------------------------------------
 
 
+def _c(body: str, author: str = "owner", association: str = "OWNER") -> object:
+    return rh.Comment(body=body, author=author, association=association)
+
+
 def test_a_quoted_marker_without_the_header_is_not_a_ship_comment() -> None:
     forged = "<!-- ship:66f455957a6c00b227013b5b06cd2324f11d4472 -->\r\nsee above\r\n"
-    assert rh.aggregate_from_comments([forged]) is None
+    assert rh.aggregate_from_comments([_c(forged)]) is None
+
+
+def test_a_complete_forgery_from_an_untrusted_author_is_ignored() -> None:
+    """A drive-by commenter can quote the marker, header and a summary verbatim."""
+    forged = _ship("f" * 40, "round 999 · 1 lines net · churn 9.9x (10 touched)")
+    comments = [_c(_ship("a" * 40, _EXACT)), _c(forged, "stranger", "NONE")]
+    agg = rh.aggregate_from_comments(comments)
+    assert agg is not None
+    assert agg.round == 3  # the genuine one, not the later forgery
+
+
+def test_ship_author_narrows_to_one_login() -> None:
+    comments = [_c(_ship("a" * 40, _EXACT)), _c(_ship("b" * 40, _LOWER), "other", "COLLABORATOR")]
+    # Without a pin, both collaborators' comments count and the last wins.
+    unpinned = rh.aggregate_from_comments(comments)
+    assert unpinned is not None
+    assert unpinned.round == 29
+    pinned = rh.aggregate_from_comments(comments, "owner")
+    assert pinned is not None
+    assert pinned.round == 3
 
 
 def test_the_last_ship_comment_wins() -> None:
-    bodies = [_ship("a" * 40, _EXACT), "unrelated chatter", _ship("b" * 40, _LOWER)]
+    bodies = [_c(_ship("a" * 40, _EXACT)), _c("unrelated chatter"), _c(_ship("b" * 40, _LOWER))]
     agg = rh.aggregate_from_comments(bodies)
     assert agg is not None
     assert agg.round == 29
@@ -246,6 +279,13 @@ def test_an_empty_window_renders_without_statistics(tmp_path: Path) -> None:
     out = _run([], tmp_path)
     assert "no aggregate to report" in out
     assert "outliers" not in out
+
+
+def test_limit_applies_to_a_saved_payload_too(tmp_path: Path) -> None:
+    payload = [_pr(n, "fix: x", [_ship(str(n) * 40, _EXACT)]) for n in range(1, 6)]
+    out = _run(payload, tmp_path, "--limit", "2")
+    assert "last 2 merged PR(s)" in out
+    assert "#3" not in out
 
 
 def test_the_report_states_it_does_not_gate(tmp_path: Path) -> None:
