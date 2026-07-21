@@ -108,16 +108,30 @@ implementation's first test, not an assumption it may inherit.
 
 - **(a)** its recorded base equals the PR's merge base **and** its recorded tree
   equals `HEAD`'s tree — ADR-0020 §3 exactly as written, unmodified; **or**
-- **(b)** its recorded base is an ancestor of the PR's merge base, its recorded
-  patch identity equals the current one, the base move clears §3's floor, and
+- **(b)** its recorded base is an ancestor of the PR's merge base, both patch
+  identities are **non-empty** and equal, the base move clears §3's floor, and
   the drift is published per §4.
 
-The tree comparison is not weakened, it is scoped: under (a) it is the whole
-test and catches every edit to reviewed content — including a whitespace-only
-one, which patch identity by construction would not. Under (b) the base itself
-moved, so a tree comparison has nothing to say; content is pinned by the patch
-identity and the base by §3. A recorded base that is *not* an ancestor of the
-current merge base is not drift — it is a different history — and fails closed.
+The tree comparison is not weakened, it is scoped: under (a) it refuses on any
+changed byte anywhere in the tree, which is strictly stronger than any identity
+computed from a diff, and it is untouched. Under (b) the base itself moved, so a
+tree comparison has nothing to say — the tree legitimately differs by the base
+move — and content is pinned by the patch identity, the base by §3. A recorded
+base that is *not* an ancestor of the current merge base is not drift; it is a
+different history, and fails closed.
+
+**An absent identity is not a matching identity.** `git patch-id` accumulates
+over hunk lines and emits nothing for a diff that has none — a binary-only
+change, which `git diff` renders as `Binary files … differ`. Two different
+binary deltas would then both present an empty identity and compare equal, and
+the gate cannot read binary semantics either; this repo already treats binary
+work as unmeasurable, which `ship`'s own aggregate says out loud (`binary
+change(s) unmeasured`). So an empty identity on either side makes path (b)
+**unavailable**, not satisfied: the artifact falls back to (a) and the moved
+base costs its round. A diff mixing binary and text is the same case — its
+identity covers only the text, so it is treated as absent. Buying those cases
+back would mean inventing a binary-aware identity, which is more mechanism than
+a change that is mostly text and prose is worth.
 
 ### 3. Path disjointness is not adopted as a safety test, because it is not one
 
@@ -376,9 +390,10 @@ whitespace-only change to a context line inside a reviewed hunk, which must
 invalidate; **each** floor path — the two `core` files, the review documents and
 the driver alike — changed, deleted, renamed *out* of the floor and renamed
 *into* it (§3); a recorded base that is not an ancestor of the merge
-base; and a drift record that cannot be rendered (§4). Every one of those must
-refuse. An implementation that satisfies only the #118 cases would accept
-several of them.
+base; a binary-only and a mixed binary/text diff, whose identity is absent
+rather than equal (§2); and a drift record that cannot be rendered (§4). Every
+one of those must refuse. An implementation that satisfies only the #118 cases
+would accept several of them.
 
 ### The strongest case against this decision
 
