@@ -443,6 +443,37 @@ _unlock_session() {
     lock_fd=""
 }
 
+# One round per persona per loop AT A TIME, and this one is refused rather than
+# queued. Serializing the loop's state is not enough on its own: two rounds of
+# the SAME persona write the same artifact path, the same thread file and the
+# same snapshot path, so whichever ordering they interleave in, the published
+# verdict can end up paired with the other round's dispositions — the terminal
+# turn ADR-0025 §4 requires them to belong to. There is nothing to merge and no
+# ordering that helps, so the second invocation is refused loudly (the "detect
+# and refuse a second concurrent init" half of #142). Held for the whole round,
+# Codex call included, and never released explicitly: process exit closes the
+# descriptor, so a crashed round leaves nothing to wedge the next one.
+#
+# The loop lock above is still taken and released around the short state phases,
+# so a DIFFERENT persona is only ever blocked for that filesystem work, never for
+# the minutes a round spends in Codex.
+inflight_fd=""
+_claim_persona() {
+    if [[ "$serialized" -eq 0 ]]; then
+        return 0
+    fi
+    mkdir -p "$session_dir"
+    exec {inflight_fd}<>"${session_dir}/${loop_key}.${persona}.inflight"
+    if ! flock -n "$inflight_fd"; then
+        echo "another '${persona}' review of this loop is already running in this" >&2
+        echo "clone; refusing to start a second one. Two rounds of one persona share" >&2
+        echo "an artifact, a thread and a disposition snapshot, so they cannot both" >&2
+        echo "be recorded. Run personas one at a time (ADR-0015, issue #142)." >&2
+        exit 1
+    fi
+    return 0
+}
+
 # Whether the loop phases can be serialized at all. `flock` is util-linux, so it
 # is present wherever `sha1sum` (already required above, for the loop key) is.
 # Where it is somehow absent, the loop degrades to the unserialized behaviour it
@@ -495,6 +526,7 @@ _write_meta() {
 loop_id=""
 recorded_thread=""
 if [[ "$bypass" -eq 0 ]]; then
+    _claim_persona
     _lock_session
     recorded_last_sha=""
     if [[ -f "$meta_file" ]]; then
