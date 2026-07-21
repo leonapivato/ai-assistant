@@ -277,24 +277,73 @@ class _ShiftySubclass(datetime):
         return _ShiftySubclass.lie
 
 
-def test_the_stored_value_is_a_plain_datetime_that_cannot_change_its_offset() -> None:
-    """``tzinfo is UTC`` is necessary but not sufficient — the value can still lie.
+class _FlipDuringComponentRead(datetime):
+    """Flips its offset from inside ``__getattribute__``, as its digits are read."""
 
-    ``datetime.utcoffset()`` is overridable on a subclass, so a value can carry
-    ``tzinfo is UTC``, answer zero while being validated, and answer ``+02:00``
-    afterwards. Python compares datetimes *by* ``utcoffset()``, so the validated
-    model would sort as something other than what was checked. Rebuilding the
-    result as a plain ``datetime`` makes UTC a property of the stored object.
+    lie = timedelta(0)
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return self
+
+    def utcoffset(self) -> timedelta | None:
+        return _FlipDuringComponentRead.lie
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "year":
+            _FlipDuringComponentRead.lie = timedelta(hours=2)
+        return object.__getattribute__(self, name)
+
+
+@pytest.mark.parametrize(
+    "subclass",
+    [
+        pytest.param(_ShiftySubclass, id="flips-after-validation"),
+        pytest.param(_FlipDuringComponentRead, id="flips-during-component-read"),
+    ],
+)
+def test_a_conversion_returning_a_subclass_is_refused_outright(
+    subclass: type[datetime],
+) -> None:
+    """Why the canonicaliser requires an *exact* ``datetime``, not an instance of one.
+
+    A subclass can override ``utcoffset()``, ``astimezone()``, the component
+    properties and ``__getattribute__``, so it executes code between any two
+    checks made on it: verify the offset and it flips while the digits are read;
+    verify it again mid-read and it flips between two of them. No ordering of
+    checks wins. Refusing the subclass makes every subsequent read the C
+    implementation, which cannot be intercepted — so the offset and the
+    components are necessarily one snapshot.
     """
-    _ShiftySubclass.lie = timedelta(0)
+    subclass.lie = timedelta(0)  # type: ignore[attr-defined]
     try:
-        stored = _Instant(when=_ShiftySubclass(2026, 1, 2, tzinfo=UTC)).when
-        _ShiftySubclass.lie = timedelta(hours=2)
-
-        assert type(stored) is datetime  # not the subclass it arrived as
-        assert stored.utcoffset() == timedelta(0)  # and it stayed UTC
+        with pytest.raises(ValidationError, match="when did not convert to UTC"):
+            _Instant(when=subclass(2026, 1, 2, 9, 0, tzinfo=UTC))
     finally:
-        _ShiftySubclass.lie = timedelta(0)
+        subclass.lie = timedelta(0)  # type: ignore[attr-defined]
+
+
+def test_even_a_well_behaved_subclass_is_refused_and_that_is_the_trade() -> None:
+    """Stating the cost rather than implying there is none.
+
+    ``astimezone`` *preserves* the subclass, so the rule refuses every
+    ``datetime`` subclass and not only a hostile one. Pinned deliberately: this
+    is the behaviour a future caller will meet, and the alternative — trusting a
+    subclass and checking it — is the thing shown above to be uncheckable.
+    """
+
+    class _WellBehaved(datetime):
+        pass
+
+    with pytest.raises(ValidationError, match="when did not convert to UTC"):
+        _Instant(when=_WellBehaved(2026, 1, 2, 9, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+
+
+def test_a_plain_datetime_is_still_canonicalised_to_a_plain_datetime() -> None:
+    """The path everything real takes: parsed input is always a base datetime."""
+    stored = _Instant(when=datetime(2026, 1, 2, 9, 0, tzinfo=ZoneInfo("Europe/Berlin"))).when
+
+    assert type(stored) is datetime
+    assert stored == datetime(2026, 1, 2, 8, 0, tzinfo=UTC)
 
 
 class _FlipOnConvert(datetime):
