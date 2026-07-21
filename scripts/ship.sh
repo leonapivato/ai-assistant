@@ -187,14 +187,22 @@ artifact_has_verdict() {
 # merge reviewer can read the verdict-changing history — which findings were
 # retired, and across which rounds — not only the terminal verdict.
 
-# The snapshot for a terminal artifact, selected by the full anchor. Echoes the
-# path, or nothing when none exists (a bypass or pre-ADR-0025 artifact). Fails
-# closed on ambiguity: if more than one loop recorded a snapshot for this
-# (persona, tree), refuse rather than post dispositions that may not belong
-# beside this verdict; and the one loop found must be the loop the artifact
-# names. $1 persona, $2 tree, $3 expected loop_id.
+# The snapshot for a terminal artifact, selected by the full anchor
+# (loop_id, persona, tree). Echoes the path, or nothing when the artifact carries
+# no loop_id — a bypass or pre-ADR-0025 artifact, which has no persistent-session
+# dispositions to publish. An artifact that DOES carry a loop_id is a persistent
+# round and must have its anchored snapshot: a missing one fails closed rather
+# than posting the verdict with no disposition evidence (e.g. a snapshot write
+# that failed). Fails closed too on ambiguity (more than one loop recorded a
+# snapshot for the same content) or a loop mismatch (the snapshot found is not
+# the loop the artifact names — a stale snapshot from another path). $1 persona,
+# $2 tree, $3 the artifact's recorded loop_id.
 disposition_snapshot() {
     local persona="$1" tree="$2" want="$3" f lid
+    # No loop_id: not a persistent artifact, so nothing to select. Requiring a
+    # non-empty match below is what closes the stale-snapshot case a bypass
+    # artifact would otherwise pick up.
+    [[ -n "$want" ]] || return 0
     local -a matches=()
     local -A loops=()
     shopt -s nullglob
@@ -202,20 +210,20 @@ disposition_snapshot() {
         lid="$(provenance_field loop_id "$(head -n 1 "$f")")"
         [[ -n "$lid" ]] || continue
         loops["$lid"]=1
-        matches+=("$f")
+        [[ "$lid" == "$want" ]] && matches+=("$f")
     done
     shopt -u nullglob
-    [[ ${#matches[@]} -eq 0 ]] && return 0
     if [[ ${#loops[@]} -gt 1 ]]; then
         die "ambiguous disposition snapshots for ${persona} tree ${tree:0:12}:
      ${#loops[@]} loops recorded one for the same content, so which belongs beside
      this verdict cannot be determined (ADR-0025 §4). Clear stale
      .review/dispositions/ and re-run the review."
     fi
-    if [[ -n "$want" && -z "${loops[$want]:-}" ]]; then
-        die "the disposition snapshot for ${persona} tree ${tree:0:12} names a
-     different loop than the review artifact — refusing to post mismatched
-     dispositions (ADR-0025 §4)"
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        die "the review artifact for ${persona} tree ${tree:0:12} is a persistent
+     round (loop ${want}) but its anchored disposition snapshot is missing —
+     refusing to post a verdict with no disposition evidence (ADR-0025 §4).
+     Re-run: just review-codex ${persona}"
     fi
     printf '%s\n' "${matches[0]}"
 }
@@ -242,12 +250,15 @@ contains_secret() {
     grep -qiE '(-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[posur]_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|(api[_-]?key|secret|password|passwd|token|bearer)[[:space:]]*[=:][[:space:]]*[^[:space:]]{6,})' <<<"$1"
 }
 
-# Replaces a fenced diff/patch/suggestion block (a Codex proposal) with a marker,
-# so an excluded proposal is dropped rather than truncated or redacted in place.
+# Replaces every fenced block (a Codex proposal patch) with a marker, so an
+# excluded proposal is dropped rather than truncated or redacted in place. Any
+# ``` line toggles the fence, so the block is removed whatever its language label.
 strip_proposal_fences() {
     awk '
-        /^[[:space:]]*```(diff|patch|suggestion)/ { infence = 1; print "> _(Codex proposal excluded — see note)_"; next }
-        infence && /^[[:space:]]*```[[:space:]]*$/ { infence = 0; next }
+        /^[[:space:]]*```/ {
+            if (infence) { infence = 0 } else { infence = 1; print "> _(Codex proposal excluded — see note)_" }
+            next
+        }
         !infence { print }
     ' <<<"$1"
 }
@@ -272,23 +283,28 @@ render_dispositions() {
     echo "after the reviewer's own reassessment, not re-raised — the auditable"
     echo "evidence that a verdict changed._"
     echo
-    local id sev status first last text note is_proposal entry entry_bytes
+    local id sev status first last text note is_proposal has_fence entry entry_bytes
     while IFS=$'\t' read -r id sev status first last; do
         [[ -n "$id" ]] || continue
         text="$(snapshot_finding_text "$snap" "$id")"
         note=""
         is_proposal=0
-        if grep -qiE '^[[:space:]]*```(diff|patch|suggestion)' <<<"$text"; then
-            if contains_secret "$text"; then
-                text="$(strip_proposal_fences "$text")"
-                note="  "$'\n'"> ⚠ **Codex proposal excluded** — it may carry a secret, so it is not published; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
-            elif [[ "$(printf '%s' "$text" | wc -c)" -gt "$budget" ]]; then
-                text="$(strip_proposal_fences "$text")"
-                note="  "$'\n'"> ⚠ **Codex proposal excluded** — too large to publish in full; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
-            else
-                # Published in full: a proposal appears in full, never bounded away.
-                is_proposal=1
-            fi
+        has_fence=0
+        grep -qiE '^[[:space:]]*```' <<<"$text" && has_fence=1
+        # The secret scan covers the WHOLE finding, not only a labelled proposal
+        # fence: a key Codex read from an ignored file could sit in prose or in a
+        # `python`/unlabelled fence too. If any is found, the entire finding text
+        # is excluded — not redacted in place — so publishing never leaks it, and
+        # that finding takes ordinary independent review (ADR-0025 §3, fail-closed).
+        if contains_secret "$text"; then
+            text="_(finding content excluded — see note)_"
+            note="  "$'\n'"> ⚠ **Content excluded** — this finding may carry a secret, so it is not published; it takes ordinary independent review (ADR-0025 §3, fail-closed)."
+        elif [[ "$has_fence" -eq 1 && "$(printf '%s' "$text" | wc -c)" -gt "$budget" ]]; then
+            text="$(strip_proposal_fences "$text")"
+            note="  "$'\n'"> ⚠ **Codex proposal excluded** — too large to publish in full; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
+        elif [[ "$has_fence" -eq 1 ]]; then
+            # A proposal (any fenced block) appears in full, never bounded away.
+            is_proposal=1
         fi
         entry="$(printf -- '- **%s** — _%s_ (rounds %s–%s)\n\n%s\n%s\n' \
             "$sev" "$status" "$first" "$last" "$text" "$note")"

@@ -622,11 +622,13 @@ _render_dispositions() {
 # an alnum key, hashed. Stable across reformatting of the same claim, distinct
 # across different claims (ADR-0025 §4's id uniqueness/stability). The leading
 # list enumerator (`1.`, `2)`, …) is dropped first, so the same finding keeps its
-# id when its rank shifts between rounds. Reads stdin.
+# id when its rank shifts between rounds. The WHOLE key is hashed — never a
+# prefix — so two long findings sharing an opening (a shared reproduction
+# preamble, say) do not collide and silently drop one. Reads stdin.
 _finding_id() {
     local key
     key="$(tr -d '*#`_>~' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ' |
-        sed 's/^ *//; s/^[0-9][0-9]* //; s/ *$//' | cut -c1-200)"
+        sed 's/^ *//; s/^[0-9][0-9]* //; s/ *$//')"
     printf '%s-%s' "$persona" "$(printf '%s' "$key" | sha1sum | cut -c1-12)"
 }
 
