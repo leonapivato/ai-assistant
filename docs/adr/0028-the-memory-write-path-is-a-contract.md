@@ -88,6 +88,12 @@ class MemoryWriter(Protocol):
         ...
 ```
 
+`MemoryIngestResult` joins the `TYPE_CHECKING` import block at the top of
+`core/protocols.py`, which today imports `MemoryUpdateProposal` but not the
+result type — no other Protocol in the file returns one. That is the whole of
+the module-level change; the block is already `TYPE_CHECKING`-only, and the
+`from __future__ import annotations` at the top is what keeps it so.
+
 `@runtime_checkable` matches every other Protocol in the file. The parameter
 keeps the name `proposal` and stays positional-or-keyword, because a structural
 match requires the names to agree and the point is to match the implementation
