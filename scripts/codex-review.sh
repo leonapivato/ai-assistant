@@ -1098,11 +1098,26 @@ mv "$artifact_tmp" "$artifact"
 # dispositions under a loop_id no later round will look up, silently orphaning
 # them. The review itself is already on disk at `.review/<sha>-<persona>.md`; only
 # the session advance is refused, and re-running the persona records it cleanly.
+#
+# The identity is necessary but not sufficient: the anchor must also only ever
+# move FORWARD. Two concurrent rounds of the same loop can finish out of order —
+# one started at B, another at its descendant C — and the later-finishing older
+# round would otherwise rewind last_sha to B and replace the persona's thread
+# with its own staler session, so the next round resumes the conversation that
+# saw less. The settled-tree check above catches the ordinary shape of this (the
+# older round's HEAD has moved under it), but it is a check about the *checkout*,
+# not about the loop's state, and it passes if the checkout is put back. So the
+# loop guards its own anchor too: the advance requires the recorded state to be
+# an ancestor of this round's — "this round builds on what the loop recorded".
+# Sequentially this always holds: the meta's last_sha is either empty (a fresh,
+# reset, or adopted loop) or the state this round continued from.
 if [[ "$bypass" -eq 0 ]]; then
     _lock_session
     current_loop_id=""
+    current_last_sha=""
     if [[ -f "$meta_file" ]]; then
         current_loop_id="$(sed -n 's/^loop_id=//p' "$meta_file")"
+        current_last_sha="$(sed -n 's/^last_sha=//p' "$meta_file")"
     fi
     if [[ "$current_loop_id" != "$loop_id" ]]; then
         _unlock_session
@@ -1110,6 +1125,16 @@ if [[ "$bypass" -eq 0 ]]; then
         echo "another codex-review run reset this review loop while this round was" >&2
         echo "in flight (loop ${loop_id:0:12} was replaced by ${current_loop_id:0:12})." >&2
         echo "Refusing to record this round's session state under a dead identity." >&2
+        echo "Run one persona at a time in a clone (ADR-0015), then re-run this one." >&2
+        exit 1
+    fi
+    if [[ -n "$current_last_sha" ]] &&
+        ! git merge-base --is-ancestor "$current_last_sha" "$sha" 2>/dev/null; then
+        _unlock_session
+        echo >&2
+        echo "this review loop has already recorded a newer state (${current_last_sha:0:12})" >&2
+        echo "than this round's (${sha:0:12}), so this round finished out of order." >&2
+        echo "Refusing to rewind the loop's anchor and session to the older state." >&2
         echo "Run one persona at a time in a clone (ADR-0015), then re-run this one." >&2
         exit 1
     fi

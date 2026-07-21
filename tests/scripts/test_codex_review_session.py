@@ -404,3 +404,43 @@ def test_a_round_whose_loop_was_reset_in_flight_refuses_to_record(tmp_path: Path
     assert (repo / ".review" / f"{sha}-adversarial.md").exists()
     assert not list((repo / ".review" / "session").glob("*.thread"))
     assert not list((repo / ".review" / "dispositions").glob("*.md"))
+
+
+def test_an_out_of_order_round_refuses_to_rewind_the_loop(tmp_path: Path) -> None:
+    """The loop anchor only moves forward, even for the same persona (#142).
+
+    Two rounds of one loop finish out of order: the round started at HEAD is
+    still running when a round started at a *descendant* commit completes and
+    records itself. The older round must not rewind ``last_sha`` or replace the
+    persona's thread with its staler session, or the next round resumes the
+    conversation that saw less.
+
+    The checkout is put back where the outer round found it, so the settled-tree
+    guard — which catches this in the ordinary case — passes and the loop-state
+    guard under test is the one that has to hold.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log = tmp_path / "inner.log"
+    outer_sha = _git(repo, "rev-parse", "HEAD")
+    # All of this runs inside the outer round's Codex call, so the inner round
+    # reviews a descendant of the outer's pinned SHA — deterministically.
+    advance = "printf 'three\\n' >f.txt; git add f.txt; git commit -qm 'round 2'; "
+    restore = f"; git reset -q --hard {outer_sha}"
+
+    result = run_review(
+        repo,
+        tmp_path,
+        check=False,
+        FAKE_CODEX_THREAD_ID="thread-outer",
+        FAKE_CODEX_PRE_CMD=advance + _nested_review_cmd(tmp_path, "adversarial", log) + restore,
+    )
+
+    assert Path(f"{log}.rc").read_text().strip() == "0", log.read_text()
+    assert result.returncode != 0
+    assert "finished out of order" in result.stderr
+    # The newer round's anchor and session stand, unrewound.
+    meta = next(iter((repo / ".review" / "session").glob("*.meta"))).read_text()
+    assert f"last_sha={outer_sha}\n" not in meta
+    thread = next(iter((repo / ".review" / "session").glob("*.adversarial.thread")))
+    assert thread.read_text().strip() == "thread-inner"
