@@ -70,7 +70,21 @@ class MemoryWriter(Protocol):
     """The memory write path: conflicts, policy, persistence, in one call."""
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        """Resolve conflicts, ask the policy to rule, and apply its ruling."""
+        """Resolve conflicts, ask the policy to rule, and apply its ruling.
+
+        Args:
+            proposal: The candidate memory and why it was proposed. Its
+                ``conflicts`` are resolved here, not supplied by the caller.
+
+        Returns:
+            The policy's decision and the id written, or ``None`` if nothing
+            was.
+
+        Raises:
+            MemoryStoreError: If reading conflicts or writing a record failed,
+                or a ``MERGE`` named a target that is not among the conflicts
+                (§5).
+        """
         ...
 ```
 
@@ -191,18 +205,33 @@ wall-clock time. This is how every other injected collaborator already behaves
 `now`), so it is the existing convention applied to one more seam, not a new
 rule.
 
-One hazard moves and is **not** solved here. `loop.py:397–408`'s `_now_utc`
-normalises a naive reading before it reaches `expires_at`; `ingest.py:143` writes
-`self._now() + ttl` through `model_copy(update=...)`, which skips validators, and
-does not normalise. ADR-0026 §Context names that precise line as the one
-"bypassing" site and §2 closes it by wrapping the clock in `checked_clock` at
-storage, which fixes `ingest.py` "without being touched". Delegation therefore
-moves the temporary-expiry write from a guarded site to an unguarded one for as
-long as ADR-0026 is unimplemented. Duplicating `_now_utc` into `memory` to cover
-that window would plant a second copy of the normalisation ADR-0026 exists to
-delete — the same mistake as cost 1, in a new place — so this ADR records the
-dependency instead: a naive clock injected into the writer is a wiring bug today
-and a rejected one after ADR-0026.
+**The naive-clock guard moves with the write it guards.** `loop.py:397–408`'s
+`_now_utc` normalises a naive reading before it reaches `expires_at`;
+`ingest.py:143` writes `self._now() + ttl` through `model_copy(update=...)`,
+which skips validators, and does not normalise. ADR-0026 §Context names that
+precise line as the one "bypassing" site. So a naive clock that today yields an
+aware expiry — `tests/orchestration/test_loop.py::test_a_naive_clock_still_produces_an_aware_expiry`
+asserts exactly that, and `memory` has no counterpart test — would after
+delegation persist a naive `expires_at` and raise `TypeError` on a later read.
+Delegating without saying more would convert a passing, asserted behaviour into
+a runtime fault.
+
+The implementing change therefore may not leave that window open, and satisfies
+this **either** way:
+
+- it lands **after** ADR-0026's `checked_clock` is wired into `MemoryIngestor`,
+  at which point a naive reading is rejected at the seam and nothing more is
+  needed; **or**
+- it lands **first** and carries the normalisation to `ingest.py:143` — the same
+  guard `loop.py` has today, moved rather than copied, since `_expiry` is being
+  deleted from the loop in the same change. ADR-0026 then deletes it there along
+  with the other five attributing sites, which is precisely what its
+  §Consequences already commits to for this file.
+
+Stating it as a disjunction rather than a hard dependency is deliberate: ADR-0026
+is `Proposed`, and making one proposed decision's implementation a precondition
+for another's would couple two ratification schedules for a hazard a single
+existing line closes. What is *not* optional is that the window stay shut.
 
 ### 5. Failure semantics: `MemoryStoreError` crosses the seam
 
@@ -249,9 +278,12 @@ ratification:
   it would have (ADR-0028 §4a). §4a's retrieval_limit check is unaffected. §5's
   injected clock stops stamping expires_at, which the writer's own clock now
   does (ADR-0028 §4b); it still stamps the goal.`
-- Nothing else in ADR-0022 is edited. Its §§1–3, §5 and Consequences stand as
-  ratified, including Consequences item 1, which named this gap correctly and is
-  answered by this ADR rather than falsified by it.
+- Nothing else in ADR-0022 is edited. Its §§1–3, §4a's `retrieval_limit` clause
+  and Consequences stand as ratified — including Consequences item 1, which named
+  this gap correctly and is answered by this ADR rather than falsified by it. Of
+  §5, what stands is the *principle*: the clock and the id factory are injected,
+  so a turn is reproducible and tests assert exact ids and timestamps. What the
+  note above changes is only which object's clock stamps `expires_at`.
 
 The note is worded around the implementation because that is when the behaviour
 changes; the amendment is recorded at ratification because that is when the
