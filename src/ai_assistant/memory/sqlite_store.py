@@ -49,14 +49,27 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-#: JSON keys a ``MemoryRecord`` carries an instant under — ``expires_at`` on every
-#: kind, ``occurred_at`` on episodic, ``valid_until`` on semantic, and
-#: ``last_updated`` inside the nested provenance. Listed rather than inferred from
-#: the model so the repair below can never rewrite a free-text field that happens
-#: to parse as a date; if ``core`` grows an instant, the gate check in
-#: ``tests/core/test_instant_coverage.py`` is what surfaces it, and this set is
-#: covered by ``tests/memory/test_sqlite_store.py``'s legacy-row cases.
-_INSTANT_KEYS = frozenset({"expires_at", "occurred_at", "valid_until", "last_updated"})
+#: The one stored key this store may read as UTC — and deliberately only this one.
+#:
+#: ADR-0023 §3 permits attribution "exactly where provenance is known — in the
+#: adapter that decoded the value, which knows it wrote UTC". This store knows it
+#: for ``expires_at`` and for nothing else: the field carried a UTC-attributing
+#: validator on construction, :meth:`SqliteMemoryStore._add_sync` indexes it as
+#: ``expires_at.timestamp()``, and :meth:`_expires_epoch_from_json` reads a naive
+#: one as UTC — three places that all treat a stored deadline as UTC.
+#:
+#: A ``MemoryRecord`` holds three further instants: ``occurred_at``,
+#: ``valid_until`` and ``provenance.last_updated``. Until ADR-0023 they had **no
+#: validator at all**, so the store wrote exactly what it was handed and
+#: established nothing. A legacy naive ``occurred_at`` of ``09:00`` may be a
+#: user's own wall clock, and reading it as ``09:00Z`` would be the fabrication
+#: §3 exists to forbid — done by the one layer with no grounds to. They are left
+#: to fail loudly, and what to do for them is #167/#168's recorded decision, not
+#: this decoder's guess.
+#:
+#: Keyed by name rather than inferred from the model, so a free-text field that
+#: happens to parse as a date is never rewritten.
+_INSTANT_KEYS = frozenset({"expires_at"})
 
 
 def _utc_attributed(value: object, *, key: str | None) -> tuple[object, bool]:
@@ -295,32 +308,35 @@ class SqliteMemoryStore:
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:
-        """Decode a stored JSON record, attributing UTC to a legacy naive instant.
+        """Decode a stored JSON record, reading a legacy naive deadline as UTC.
 
         ADR-0023 §3 makes ``core`` reject a naive datetime, because a shared type
-        cannot know whether attributing UTC restores a fact or invents one. The
-        *decoder* is the layer that can: rows written before that rule ran
-        through validators that assumed UTC for a naive value, and
-        :meth:`_add_sync` indexes every deadline as ``expires_at.timestamp()``,
-        which reads a naive value host-local — so the store both wrote and
-        interpreted these values as UTC. Saying so here is §3's sanctioned
-        relocation of attribution to the layer entitled to perform it.
+        cannot know whether attributing UTC restores a fact or invents one, and
+        moves attribution to "the adapter that decoded the value, which knows it
+        wrote UTC and may therefore say so". This store knows that of exactly one
+        field — see :data:`_INSTANT_KEYS`, which is why the repair is scoped to a
+        single key rather than to every instant a record holds.
 
-        Without it a persisted naive instant would stop decoding the moment
-        ``core`` tightened, and a live record would become unreadable — which
-        ADR-0004 §6 and ADR-0007 §3 forbid, since a row a user may view, export
-        and delete may not be dropped or hidden by a migration. Rejecting or
-        quarantining is therefore not open to this method; attributing *and
-        recording* it is.
+        Without it a persisted naive ``expires_at`` would stop decoding the
+        moment ``core`` tightened, and a live record would become unreadable —
+        which ADR-0004 §6 and ADR-0007 §3 forbid, since a row a user may view,
+        export and delete may not be dropped or hidden by a migration. That is
+        the constraint that makes rejecting it not an available option here.
 
-        The repair is attempted only after a first strict pass has failed, and
-        only on keys this module's records actually hold an instant under, so a
-        ``content`` string that merely looks like a timestamp is never rewritten.
-        Anything still invalid afterwards is genuine corruption.
+        The repair is attempted only after a strict pass has failed, so a
+        conforming row costs nothing; anything still invalid afterwards is
+        genuine corruption and is reported as such.
+
+        **The warning it emits is a diagnostic, not the data-rights record.** It
+        names no identifier and carries no record content — logs are Tier 2 and
+        may hold neither (ADR-0004 §5) — so it says that a row was read this way,
+        not which. Whether the assumption must additionally be carried per row,
+        through ``MemoryStore.export()``, is a ``core`` contract question ADR-0023
+        §3 reserves; it is tracked in #168, not answered here.
 
         Raises:
-            MemoryStoreError: If the row cannot be decoded even with UTC
-                attributed.
+            MemoryStoreError: If the row cannot be decoded even with UTC read
+                into a naive deadline.
         """
         try:
             return _ADAPTER.validate_json(data)
@@ -335,9 +351,8 @@ class SqliteMemoryStore:
                 msg = f"stored memory could not be decoded: {retry_exc}"
                 raise MemoryStoreError(msg) from retry_exc
             _log.warning(
-                "stored_instant_utc_attributed",
-                record_id=record.id,
-                detail="a stored naive timestamp was read as UTC (ADR-0023 §3)",
+                "stored_deadline_read_as_utc",
+                detail="a stored naive expires_at was read as UTC (ADR-0023 §3)",
             )
             return record
 
