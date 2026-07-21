@@ -90,9 +90,14 @@ library here (golden rule 2), and every subsystem may depend on `core`.
 
 ### 2. Enforcement wraps the clock once, where the clock is stored
 
-`core` gains **`checked_clock(now: Callable[[], datetime]) -> Clock`**. Every
-constructor in the table stores `self._now = checked_clock(now)` rather than the
-raw callable. On each reading the wrapper:
+`core` gains **`checked_clock(now: Callable[[], datetime], *, owner: str)
+-> Clock`**. Every constructor in the table stores
+`self._now = checked_clock(now, owner=...)` rather than the raw callable. The
+`owner` label is supplied by the caller and not inferable: the same fixture
+callable can be injected into `ClockContextSource` and `PlanExecution` at once,
+so `core` has nothing to distinguish them by, and a diagnostic that cannot name
+which seam received the bad reading is the one thing this guard exists to
+provide. On each reading the wrapper:
 
 1. **rejects** a reading whose `utcoffset()` returns `None` — naive, or a
    `tzinfo` that is set but indeterminate. That is ADR-0023 §5's spelling of
@@ -157,8 +162,10 @@ same reasoning ADR-0023 §2 applies to its own UTC-conversion edge.
 
 ### 4. A non-conforming reading is a wiring bug, raised as the subsystem's error
 
-`checked_clock` raises `ValueError` naming the clock's owner — ADR-0023 §3's
-shape, and the only option open to `core`, which cannot know its caller. **Each
+`checked_clock` raises `ValueError` naming its `owner` label and what the
+reading was — ADR-0023 §3's shape (which names the offending field), and the
+only option open to `core`, which cannot know what its caller will do with the
+failure. **Each
 subsystem translates at its own boundary** into the `AssistantError` subclass it
 already owns in `core/errors.py`. That is the pattern already in the code:
 `memory/ingest.py:147` and `orchestration/loop.py` both turn `_expiry`'s
@@ -204,9 +211,13 @@ guaranteed aware would break a naive test or config clock.
   guard is in place at that field's producer, or retains the existing
   normalisation at that boundary as a shim until it is. The clock-fed fields
   are `CurrentContext.now`, `MemoryBase.expires_at`, `Goal.created_at`,
-  `Provenance.last_updated`, `ExecutionState.updated_at`,
-  `StepExecution.started_at`/`finished_at`, and `PlanExport.exported_at`.
-  Recorded fields no clock feeds migrate independently.
+  `Provenance.last_updated`, `ActionPlan.created_at`,
+  `ExecutionState.updated_at`, `StepExecution.started_at`/`finished_at`, and
+  `PlanExport.exported_at`. `ActionPlan.created_at`'s only producer today is
+  `FakePlanner` (`testing/planning.py:108`), which is a clock seam like any
+  other (§7) — a field whose sole producer is a fake is still clock-fed, and
+  classifying it as independently recorded is exactly the mistake this ordering
+  prevents. Recorded fields no clock feeds migrate independently.
 - **This ADR does not wait for `UtcInstant`** (§1). Its guard is runtime and
   self-contained, so its producers land first; then #130 tightens the fields
   they feed.
