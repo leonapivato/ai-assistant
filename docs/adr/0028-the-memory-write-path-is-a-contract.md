@@ -228,7 +228,20 @@ this **either** way:
   with the other five attributing sites, which is precisely what its
   §Consequences already commits to for this file.
 
-Stating it as a disjunction rather than a hard dependency is deliberate: ADR-0026
+**The assertion moves with the guard, and moves either way.** Deleting
+`test_a_naive_clock_still_produces_an_aware_expiry` from `tests/orchestration/`
+without replacing it in `tests/memory/` would leave the hazard covered by prose
+alone, which is how the guard came to be missing at `ingest.py:143` in the first
+place. The implementing change adds to `tests/memory/test_ingest.py` a test that
+injects a **naive** clock into `MemoryIngestor` and drives a `STORE_TEMPORARY`,
+asserting the outcome its chosen order prescribes: an aware `expires_at` if the
+normalisation moved, or a rejection if `checked_clock` landed first. It is a test
+of `MemoryIngestor`, not of the Protocol, and it deliberately does **not** enter
+the §8 conformance suite — a writer with no clock at all conforms, so an
+obligation about clock handling would be one implementation's rule wearing the
+contract's coat.
+
+Stating the order as a disjunction rather than a hard dependency is deliberate: ADR-0026
 is `Proposed`, and making one proposed decision's implementation a precondition
 for another's would couple two ratification schedules for a hazard a single
 existing line closes. What is *not* optional is that the window stay shut.
@@ -355,8 +368,12 @@ outcome and the reason the triad is named here rather than left to be remembered
 - `orchestration` shrinks toward what it is for. `learn` becomes process → ingest,
   with no `memory` semantics resident in the wiring package — the property
   ADR-0022 §Context called the thing actually being tested.
-- Any writer can be swapped in: a writer that batches, one that audits its
-  proposals, one that queues them for later, all behind the same seam.
+- Any writer can be swapped in: one that audits every proposal it is handed, one
+  that writes through to a different store, one that refuses a sensitivity tier
+  outright — all behind the same seam. Not a writer that *queues* a proposal for
+  later: `ingest` returns the id written, and §8 requires an `ACCEPT` to have
+  stored the record by the time it returns, so deferral would need a result type
+  that can say "not yet" and this one cannot.
 
 **Harder.**
 
