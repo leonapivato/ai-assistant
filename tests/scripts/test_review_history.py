@@ -361,12 +361,23 @@ def test_the_window_is_ordered_by_merge_time_not_creation(tmp_path: Path) -> Non
     assert "#3" in rows[0]
 
 
-def test_a_payload_without_merge_times_keeps_its_order(tmp_path: Path) -> None:
+def test_a_payload_without_merge_times_keeps_its_order_and_says_so(tmp_path: Path) -> None:
+    """A fixture captured without `mergedAt` cannot be merge-ordered.
+
+    The fallback is the payload's own order, which is what makes hermetic
+    fixtures possible — but the report names the PRs it could not order rather
+    than presenting the result as a merge-time window.
+    """
     payload = [_pr(n, "fix: x", [_ship(str(n) * 40, _EXACT)]) for n in (9, 4, 7)]
-    numbers = [
-        line.split()[0] for line in _run(payload, tmp_path).splitlines() if line.startswith("  #")
-    ]
+    out = _run(payload, tmp_path)
+    numbers = [line.split()[0] for line in out.splitlines() if line.startswith("  #")]
     assert numbers == ["#9", "#4", "#7"]
+    assert "no merge time on #9, #4, #7" in out
+
+
+def test_a_fully_dated_window_claims_no_ordering_fallback(tmp_path: Path) -> None:
+    payload = [_pr(1, "fix: x", [_ship("1" * 40, _EXACT)], "2026-01-01T00:00Z")]
+    assert "no merge time on" not in _run(payload, tmp_path)
 
 
 def test_an_n_a_churn_that_was_also_rewritten_keeps_both_facts(tmp_path: Path) -> None:
