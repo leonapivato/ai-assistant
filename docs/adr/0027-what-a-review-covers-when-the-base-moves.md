@@ -77,16 +77,26 @@ gate has just certified.
 ### 2. Coverage is anchored on the reviewed patch, not on base identity
 
 `scripts/codex-review.sh` records, alongside `base_sha` and `tree`, a **patch
-identity**: the stable identifier of `git diff <base>...<HEAD>` — candidate
-mechanism `git diff <base>...<HEAD> | git patch-id --stable`, whose properties
-are the reason for the choice and are the decision:
+identity** for `git diff <base>...<HEAD>`. Two properties are the decision; the
+mechanism is chosen to satisfy them and may not be widened:
 
-- it **ignores line numbers**, so a base move elsewhere in a file the diff
-  touches, which merely shifts hunk offsets, leaves it unchanged;
-- it **hashes the hunk bodies including context lines**, so a base move *into*
-  the region the diff touches changes it.
+- **insensitive to hunk offsets** — a base move elsewhere in a file the diff
+  touches merely renumbers the hunk headers, and must not invalidate;
+- **byte-sensitive to hunk bodies, context lines included** — a base move
+  *into* the region the diff touches changes the content the reviewer read, and
+  must invalidate.
 
-That second property is what makes this more than a proxy for the case #124
+**The mechanism is therefore `git patch-id --verbatim`, and specifically not
+`--stable`.** Both ignore line numbers, but `--stable` also strips whitespace,
+which fails the second property outright: a base move that re-indents a context
+line inside a reviewed hunk — semantic in Python — would leave the identity
+unchanged, and path (b) would reuse a review of content that is no longer there.
+`--verbatim` "calculate[s] the patch ID of the input as it is given, do[es] not
+strip any whitespace" and implies `--stable`, so it satisfies both. The
+distinction is recorded here rather than left to the implementation because the
+two spellings differ by one flag and only one of them is safe.
+
+The second property is what makes this more than a proxy for the case #124
 measured. It classifies both of #118's rebases the way the operator did, without
 a judgement call: the #116 rebase changed `scripts/ship.sh` in the same function
 region the diff touched, so the context lines and therefore the identity move,
@@ -139,21 +149,31 @@ relief, no drift disclosure:
   landing new contract surface changes what the architecture lens would say
   about a diff that consumes it or now should. `ship.sh` already greps exactly
   this pair to decide persona requirements, so the floor costs one reuse of an
-  existing regex over one extra `git diff --name-only`.
+  existing regex over one extra name listing of the base move.
 - `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md` — the standing contracts the
   review was conducted under. A review run against a superseded rubric is not a
   review under this repo's standard, whatever its verdict says. These move
   rarely; when they move, everything open should be re-reviewed, which is the
   correct answer and not a tax.
 
+**The floor reads both endpoints of every entry, not a single name.** A plain
+`git diff --name-only <old_base>...<new_base>` reports only the *destination* of
+a detected rename, so a base move renaming `docs/review/adversarial.md` out of
+that tree would clear a floor it plainly breaches — the rubric the review was
+conducted under is gone, and the listing never says so. The comparison is
+therefore rename-aware and NUL-delimited (`--name-status -M -z`), and a floor
+path appearing as either endpoint — source or destination — is a breach, as is
+its deletion. The same reading applies to the drift record §4 publishes, so the
+file set the merge reviewer reads is the file set the floor tested.
+
 **The `docs/adr/` tree is deliberately *not* in the floor**, and this is where
 the residual risk concentrates. An ADR merged under an open lane can contradict
 the one that lane is writing, the gate cannot see it, and no path test will
 catch it. It is excluded because the reviewer's rubric does not incorporate
-every ADR by reference — the documents binding it mechanically are listed above —
-and because parallel docs lanes are this repo's dominant traffic, so including
-it would return most of the tax while buying a hazard that §4 handles better
-than an invalidation does.
+every ADR by reference — the documents binding it mechanically are listed
+above — and because parallel docs lanes are this repo's dominant traffic, so
+including it would return most of the tax while buying a hazard that §4 handles
+better than an invalidation does.
 
 ### 4. A moved base is disclosed, never silently absorbed
 
@@ -272,8 +292,8 @@ Nothing else in either document is edited.
 Rejected as stated, for its own objection and for a second reason the issue does
 not have: relaxing the base comparison while the tree comparison stands changes
 no outcome at all, because a rebase moves both. What is kept from it is the
-`git diff --name-only <old_base>...<new_base>` computation — demoted from an
-acceptance test to §3's floor and §4's published evidence.
+base-move file listing — demoted from an acceptance test to §3's floor and §4's
+published evidence, and read rename-aware in both roles.
 
 **Drop the base comparison entirely and anchor on the tree alone.** Rejected for
 the reason `ship.sh` already records: a review run against a narrower base
@@ -305,10 +325,12 @@ gains a base-drift record that no one produces by hand today.
 **Harder.** `ship` gains a second acceptance path, and its refusal messages must
 now distinguish three states, not two: content moved, base moved past the floor,
 and history diverged. The patch identity is a fourth provenance field to record
-and keep stable, and its normalization is a correctness surface — a patch id
-that is *too* insensitive silently accepts a review of different content, which
-is why §2 keeps the tree comparison whole on the unmoved-base path rather than
-replacing it. The `docs/adr/` residual (§3) is a real, gate-invisible hazard
+and keep stable, and its normalization is a correctness surface where the safe
+and unsafe spellings differ by one flag — a patch identity that is *too*
+insensitive silently accepts a review of content that is no longer there, which
+is why §2 fixes `--verbatim` rather than leaving the choice open, and why §2
+keeps the tree comparison whole on the unmoved-base path rather than replacing
+it. The `docs/adr/` residual (§3) is a real, gate-invisible hazard
 carried deliberately, mitigated by disclosure rather than by prevention.
 
 **#153 is not broken, stated plainly.** `scripts/review_history.py` parses the
@@ -334,8 +356,17 @@ building): `scripts/codex-review.sh` records the patch identity and names the
 artifact by its anchor; `scripts/ship.sh` gains acceptance path (b), the §3
 floor check, the §4 drift rendering, and reads the persona from provenance
 rather than from the filename; `CLAUDE.md` and `CONTRIBUTING.md` carry the
-one-line restatement of when a base move costs a round. #118's two rebases are
-the first regression test (§2).
+one-line restatement of when a base move costs a round.
+
+The acceptance rule is a fail-closed surface, so the implementation owes a test
+per branch of it, not only the happy path: #118's two rebases (§2's falsifiable
+prediction — the #117 rebase holds the identity, the #116 rebase moves it); a
+whitespace-only change to a context line inside a reviewed hunk, which must
+invalidate; each floor path changed, deleted, renamed *out* of the floor and
+renamed *into* it (§3); a recorded base that is not an ancestor of the merge
+base; and a drift record that cannot be rendered (§4). Every one of those must
+refuse. An implementation that satisfies only the #118 cases would accept
+several of them.
 
 ### The strongest case against this decision
 
