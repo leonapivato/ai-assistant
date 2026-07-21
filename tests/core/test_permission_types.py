@@ -562,6 +562,47 @@ def test_a_decision_identifier_with_no_utf8_encoding_is_refused(field: str) -> N
         )
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({"description": "Send \ud800 mail."}, id="description"),
+        pytest.param({"capability": "send_\ud800"}, id="capability"),
+        pytest.param({"parameters_schema": {"to": "\ud800"}}, id="schema-value"),
+        pytest.param({"parameters_schema": {"\ud800": "string"}}, id="schema-key"),
+    ],
+)
+def test_a_request_whose_definition_has_no_utf8_encoding_is_refused(
+    override: dict[str, Any],
+) -> None:
+    """The embedded declaration is stored too, so it has to survive the trip.
+
+    ADR-0016 §6 keeps the registry in memory, so nothing ever forced a
+    definition to be serialisable; ADR-0021 §4 makes the trail the first durable
+    holder of one. A lone surrogate anywhere the definition reaches would be
+    accepted here and fail at the store — the round-trip guarantee broken
+    through the one field a decision copies verbatim rather than authors.
+    """
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        ActionRequest(tool=tool(**override))
+
+
+def test_a_hand_built_decision_with_an_unencodable_definition_is_refused() -> None:
+    """The request is not the only construction path, so the decision checks too.
+
+    ADR-0021 §1 leaves hand construction open — it is a caller falsifying its own
+    trail, not a policy subverting a gate — but an unstorable record is a
+    different failure from a false one, and it is the store that would break.
+    """
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        PermissionDecision(
+            id="d-1",
+            ruling=PermissionRuling(outcome=PermissionOutcome.DENY, reason="no"),
+            tool=tool(description="Send \ud800 mail."),
+            parameters_digest="0" * 64,
+            decided_at=AT,
+        )
+
+
 def test_an_authorisation_pointer_with_no_utf8_encoding_is_refused() -> None:
     """`authorised_by` is stored beside the rest and binds the disclosure floor."""
     with pytest.raises(ValidationError, match="UTF-8"):
