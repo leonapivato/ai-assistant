@@ -267,25 +267,31 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     )
 
 
-def _record_snapshot(
+def _record_snapshot(  # noqa: PLR0913  # one parameter per anchor field ship validates
     repo: Path,
     persona: str,
     tree: str,
     findings: list[tuple[str, str, str]],
     *,
+    sha: str,
+    base_sha: str | None = None,
     loop_id: str = "loop-a",
 ) -> Path:
     """Write a disposition snapshot as codex-review.sh's _write_snapshot would.
 
     ``findings`` is a list of ``(severity, status, text)``; each becomes one
     finding block with a stable id. The file is named by the full anchor
-    ``<loop_id>-<persona>-<tree>.md`` so ship selects it deterministically.
+    ``<loop_id>-<persona>-<tree>.md`` so ship selects it deterministically; its
+    header carries ``base_sha`` and ``sha`` too, which ship validates against the
+    artifact (the full anchor). ``base_sha`` defaults to the real merge base.
     """
+    if base_sha is None:
+        base_sha = _git(repo, "merge-base", "main", sha)
     disp = repo / ".review" / "dispositions"
     disp.mkdir(parents=True, exist_ok=True)
     lines = [
-        f"<!-- snapshot loop_id={loop_id} persona={persona} base_sha=x "
-        f"tree={tree} sha=x round=2 verdict=APPROVE -->"
+        f"<!-- snapshot loop_id={loop_id} persona={persona} base_sha={base_sha} "
+        f"tree={tree} sha={sha} round=2 verdict=APPROVE -->"
     ]
     for i, (severity, status, text) in enumerate(findings):
         fid = f"{persona}-{i:012d}"
@@ -1639,6 +1645,7 @@ def test_renders_the_disposition_snapshot_for_the_terminal_tree(tmp_path: Path) 
             ("minor", "open", "1. a small nit remains"),
             ("blocker", "retired", "1. the value was wrong"),
         ],
+        sha=sha,
     )
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
@@ -1673,8 +1680,12 @@ def test_ambiguous_snapshots_fail_closed(tmp_path: Path) -> None:
     _fake_gh(tmp_path / "bin")
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
-    _record_snapshot(repo, "adversarial", tree, [("minor", "open", "nit")], loop_id="loop-a")
-    _record_snapshot(repo, "adversarial", tree, [("minor", "open", "nit")], loop_id="loop-b")
+    _record_snapshot(
+        repo, "adversarial", tree, [("minor", "open", "nit")], sha=sha, loop_id="loop-a"
+    )
+    _record_snapshot(
+        repo, "adversarial", tree, [("minor", "open", "nit")], sha=sha, loop_id="loop-b"
+    )
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -1690,7 +1701,9 @@ def test_snapshot_from_a_different_loop_fails_closed(tmp_path: Path) -> None:
     _fake_gh(tmp_path / "bin")
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
-    _record_snapshot(repo, "adversarial", tree, [("minor", "open", "nit")], loop_id="loop-b")
+    _record_snapshot(
+        repo, "adversarial", tree, [("minor", "open", "nit")], sha=sha, loop_id="loop-b"
+    )
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -1722,7 +1735,9 @@ def test_a_bypass_artifact_ignores_a_stale_snapshot(tmp_path: Path) -> None:
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     # Artifact carries no loop_id; a stale snapshot for the same tree exists.
     _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n")
-    _record_snapshot(repo, "adversarial", tree, [("blocker", "open", "stale")], loop_id="old")
+    _record_snapshot(
+        repo, "adversarial", tree, [("blocker", "open", "stale")], sha=sha, loop_id="old"
+    )
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -1740,7 +1755,7 @@ def test_a_codex_proposal_is_published_in_full(tmp_path: Path) -> None:
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     proposal = "1. **minor** fix it thus\n\n```diff\n-bad = 1\n+good = 2\n```"
     _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
-    _record_snapshot(repo, "adversarial", tree, [("minor", "open", proposal)])
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", proposal)], sha=sha)
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -1757,7 +1772,7 @@ def test_a_proposal_carrying_a_secret_is_excluded_not_published(tmp_path: Path) 
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     leaky_proposal = "1. **minor** fix it\n\n```diff\n+AWS_KEY = AKIAIOSFODNN7EXAMPLE\n```"
     _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
-    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky_proposal)])
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky_proposal)], sha=sha)
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
@@ -1775,11 +1790,51 @@ def test_a_secret_in_an_unlabelled_fence_is_still_excluded(tmp_path: Path) -> No
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     leaky = '1. **minor** here\n\n```python\nAPI_KEY = "AKIAIOSFODNN7EXAMPLE"\n```'
     _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
-    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky)])
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky)], sha=sha)
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode == 0, result.stderr
     posted = (tmp_path / "comment.md").read_text()
     assert "AKIAIOSFODNN7EXAMPLE" not in posted
+    assert "Content excluded" in posted
+
+
+def test_a_snapshot_from_a_different_terminal_turn_fails_closed(tmp_path: Path) -> None:
+    """The full anchor includes base_sha and the terminal sha, not just loop+tree."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    base = _git(repo, "merge-base", "main", sha)
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    # A snapshot for the same (loop, persona, tree) but recorded at a different
+    # commit — as an overwrite by a later same-tree round would leave.
+    _record_snapshot(
+        repo, "adversarial", tree, [("minor", "open", "nit")], sha="deadbeef" * 5, base_sha=base
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "different terminal turn" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_bearer_token_is_excluded(tmp_path: Path) -> None:
+    """The secret scan catches a whitespace-delimited bearer/JWT, not only `key=`."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEFghiJKL"
+    leaky = f"1. **minor** the header leaks\n\n    Authorization: Bearer {jwt}"
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky)], sha=sha)
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert jwt not in posted
     assert "Content excluded" in posted
