@@ -213,13 +213,16 @@ The system should use probabilistic intelligence without making critical state p
 
 ## Core System Capabilities
 
+These are the capabilities the system is being built to have. They describe the
+target, not what is implemented; what has shipped is recorded in `CHANGELOG.md`.
+
 ### Persistent User Model
 
 A structured representation of what is known or inferred about the user, including confidence, evidence, context, and recency.
 
 ### Memory System
 
-Storage and retrieval across profile facts, preferences, episodes, procedures, projects, and commitments.
+Storage and retrieval across profile facts, preferences, episodes, and procedures.
 
 ### Context Engine
 
@@ -450,5 +453,4 @@ and changes rarely.
 - **How and in what order** we build it — `docs/roadmap.md`.
 - **Decisions that commit us** to specifics — `docs/adr/`. Where this vision and
   a ratified ADR disagree, the ADR wins.
-- **What has shipped** — `CHANGELOG.md`. (The memory subsystem — typed memory,
-  the propose/dispose write path, and a persistent semantic store — is built.)
+- **What has shipped** — `CHANGELOG.md`.
