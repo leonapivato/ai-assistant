@@ -238,3 +238,23 @@ def test_each_round_writes_a_per_finding_snapshot_with_retirement(tmp_path: Path
     assert "severity=minor status=open" in snap2
     assert "severity=blocker status=retired" in snap2
     assert "the value is wrong" in snap2  # retired finding's text is carried forward
+
+
+def test_two_findings_sharing_a_long_prefix_get_distinct_ids(tmp_path: Path) -> None:
+    """The whole finding is hashed, not a prefix, so a shared preamble does not
+
+    collapse two distinct findings into one and silently drop the second.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    prefix = "the reproduction is " + ("x " * 200)
+    review = f"1. **major** {prefix} case A fails\n2. **major** {prefix} case B fails\nBLOCK\n"
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW=review)
+
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    snap = next(iter((repo / ".review" / "dispositions").glob(f"*-adversarial-{tree}.md")))
+    text = snap.read_text()
+    # Both distinct findings are recorded, with different ids.
+    assert text.count("<!-- finding id=") == 2
+    assert "case A fails" in text
+    assert "case B fails" in text

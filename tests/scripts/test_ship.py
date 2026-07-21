@@ -1684,7 +1684,7 @@ def test_ambiguous_snapshots_fail_closed(tmp_path: Path) -> None:
 
 
 def test_snapshot_from_a_different_loop_fails_closed(tmp_path: Path) -> None:
-    """The one snapshot found must be the loop the terminal artifact names."""
+    """A snapshot only from another loop leaves this loop's anchored one missing."""
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
@@ -1695,8 +1695,41 @@ def test_snapshot_from_a_different_loop_fails_closed(tmp_path: Path) -> None:
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
-    assert "different loop" in result.stderr
+    assert "anchored disposition snapshot is missing" in result.stderr
     assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_persistent_artifact_without_its_snapshot_fails_closed(tmp_path: Path) -> None:
+    """A loop_id artifact whose snapshot write failed must not post evidence-free."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    # loop_id present (persistent round), but no snapshot recorded at all.
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "anchored disposition snapshot is missing" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_bypass_artifact_ignores_a_stale_snapshot(tmp_path: Path) -> None:
+    """No loop_id (bypass/old) must not pick up a prior persistent snapshot."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    # Artifact carries no loop_id; a stale snapshot for the same tree exists.
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n")
+    _record_snapshot(repo, "adversarial", tree, [("blocker", "open", "stale")], loop_id="old")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "stale" not in posted
+    assert "dispositions" not in posted
 
 
 def test_a_codex_proposal_is_published_in_full(tmp_path: Path) -> None:
@@ -1731,4 +1764,22 @@ def test_a_proposal_carrying_a_secret_is_excluded_not_published(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
     posted = (tmp_path / "comment.md").read_text()
     assert "AKIAIOSFODNN7EXAMPLE" not in posted  # the secret never reaches the PR
-    assert "proposal excluded" in posted
+    assert "Content excluded" in posted
+
+
+def test_a_secret_in_an_unlabelled_fence_is_still_excluded(tmp_path: Path) -> None:
+    """The secret scan covers all finding text, not only diff/patch fences."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    leaky = '1. **minor** here\n\n```python\nAPI_KEY = "AKIAIOSFODNN7EXAMPLE"\n```'
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky)])
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "AKIAIOSFODNN7EXAMPLE" not in posted
+    assert "Content excluded" in posted
