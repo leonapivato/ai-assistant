@@ -109,8 +109,8 @@ implementation's first test, not an assumption it may inherit.
 - **(a)** its recorded base equals the PR's merge base **and** its recorded tree
   equals `HEAD`'s tree — ADR-0020 §3 exactly as written, unmodified; **or**
 - **(b)** its recorded base is an ancestor of the PR's merge base, both patch
-  identities are **non-empty** and equal, the base move clears §3's floor, and
-  the drift is published per §4.
+  identities are **hashable** (below) and equal, the base move clears §3's
+  floor, and the drift is published per §4.
 
 The tree comparison is not weakened, it is scoped: under (a) it refuses on any
 changed byte anywhere in the tree, which is strictly stronger than any identity
@@ -120,18 +120,33 @@ move — and content is pinned by the patch identity, the base by §3. A recorde
 base that is *not* an ancestor of the current merge base is not drift; it is a
 different history, and fails closed.
 
-**An absent identity is not a matching identity.** `git patch-id` accumulates
-over hunk lines and emits nothing for a diff that has none — a binary-only
-change, which `git diff` renders as `Binary files … differ`. Two different
-binary deltas would then both present an empty identity and compare equal, and
-the gate cannot read binary semantics either; this repo already treats binary
-work as unmeasurable, which `ship`'s own aggregate says out loud (`binary
-change(s) unmeasured`). So an empty identity on either side makes path (b)
-**unavailable**, not satisfied: the artifact falls back to (a) and the moved
-base costs its round. A diff mixing binary and text is the same case — its
-identity covers only the text, so it is treated as absent. Buying those cases
-back would mean inventing a binary-aware identity, which is more mechanism than
-a change that is mostly text and prose is worth.
+**An entry with nothing to hash makes path (b) unavailable.** What `patch-id`
+hashes per file entry is the `diff --git` header, the `index <old>..<new>` line
+where `git diff` emits one, and the hunk bodies. Two consequences, both measured
+rather than reasoned about — the checks are three commands and belong in the
+implementation's tests:
+
+- **A binary change is content-anchored, and needs no special case.** `git diff`
+  renders it as `Binary files … differ` with no hunk, but it still carries the
+  `index` line, whose blob hashes are the content. Two different binary deltas
+  to one path therefore produce *different* identities.
+- **A pure rename or copy, and a mode-only change, are not.** At 100% similarity
+  `git diff` emits `similarity index 100% / rename from / rename to` and no
+  `index` line at all; a mode change emits `old mode / new mode` and no `index`
+  line. The identity of such an entry is a function of its **paths alone**. So a
+  reviewed PR that only renames `f` to `g`, rebased onto a base that changed
+  `f`'s contents, presents a byte-identical identity while `g` now holds content
+  no reviewer saw — verified directly, same id before and after.
+
+So path (b) is **unavailable** — not satisfied — when the diff carries any entry
+with neither a hunk nor an `index` line, and when either identity is empty. Such
+a change falls back to (a) and the moved base costs its round. This is a
+fail-closed hole in the mechanism, not a judgement about how much renames
+matter; buying the case back means adding blob identity to the entry, which is
+available (`git diff --raw` carries it) but trades away the offset-insensitivity
+that is the whole benefit, since a raw blob hash moves whenever *any* region of
+a touched file moves. The narrow rule is preferred and the trade is recorded so
+the implementation does not silently take the other side of it.
 
 ### 3. Path disjointness is not adopted as a safety test, because it is not one
 
@@ -312,7 +327,7 @@ that reconciliation had been reopened. Appended to ADR-0025's header after
 `Amended: <ratification date> by ADR-0027 — §4's "pinned to the final (base,
 tree)", and the Amends line's "the acceptance rule (recorded base and tree both
 match) is unchanged", describe the anchor as ADR-0025 left it. ADR-0027 amends
-that rule in ADR-0020 §3: where the base has moved, a matching non-empty patch
+that rule in ADR-0020 §3: where the base has moved, a matching hashable patch
 identity and a clear floor can cover the content instead. §4's decision is
 unchanged — the shippable artifact is still the conversation's terminal verdict,
 pinned to whatever anchor ADR-0020 §3 defines, and its disposition snapshot is
@@ -402,8 +417,9 @@ whitespace-only change to a context line inside a reviewed hunk, which must
 invalidate; **each** floor path — the two `core` files, the review documents and
 the driver alike — changed, deleted, renamed *out* of the floor and renamed
 *into* it (§3); a recorded base that is not an ancestor of the merge
-base; a binary-only and a mixed binary/text diff, whose identity is absent
-rather than equal (§2); and a drift record that cannot be rendered (§4). Every
+base; a rename-only and a mode-only diff rebased onto a base that changed the
+renamed file's content, which §2 measured as producing an identical identity;
+and a drift record that cannot be rendered (§4). Every
 one of those must refuse. An implementation that satisfies only the #118 cases
 would accept several of them.
 
