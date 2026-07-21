@@ -5,8 +5,8 @@
 - Closes the gap ADR-0022 §Consequences item 1 filed as issue #103, and the one
   ADR-0009 §Context named before it. Neither is reopened here: this ADR promotes
   an existing shape to a contract and changes no memory semantics.
-- Amends on ratification: ADR-0022 §4. The edit is **not** made by this change —
-  see §6 for its exact form and why it waits.
+- Amends on ratification: ADR-0022 §§4, 4a, 5. The edit is **not** made by this
+  change — see §6 for its exact form and why it waits.
 
 ## Context
 
@@ -166,6 +166,24 @@ and they are the decision, not incidental consequences:
 This is a breaking constructor change to `LearningLoop`, in the package whose
 whole purpose is wiring. It is called out here so the implementing change is
 expected to carry it, not discover it.
+
+**The writer must persist to the store the loop retrieves from.** Today one
+`MemoryStore` serves both halves, because the loop holds one store and reads and
+writes through it. After delegation there are two independently injected
+collaborators, and nothing in the type system stops
+`LearningLoop(memory=store_a, writer=MemoryIngestor(store=store_b, …))`. That
+wiring returns a healthy `MemoryIngestResult` with a real record id and then
+never retrieves the record on any later turn — the closed loop of ADR-0022
+silently open, reporting success at every step. It is the same class of failure
+`memory_degraded` exists to expose, in the one place that flag cannot see.
+
+The contracts cannot enforce it: a `MemoryWriter` exposes no store, deliberately
+— exposing one would put `memory`'s internals back on the seam this ADR exists
+to keep closed — so `orchestration` has nothing to compare. It is therefore a
+**composition-root obligation**, stated here rather than assumed: whoever builds
+the loop passes the same `MemoryStore` instance to the loop and to the writer.
+The integration test that demonstrates the vertical (ADR-0022 §Consequences)
+composes them that way and is what keeps the obligation honest.
 
 ### 4a. The tuning check moves with the tuning; it is not dropped
 
