@@ -605,9 +605,11 @@ def render(prs: list[ShippedPr], *, pool_saturated: bool = False) -> str:
     if pool_saturated:
         lines += [
             "",
-            "! the fetch returned every PR it asked for, so this window is ordered",
-            f"  within a pool of {_ORDER_SLACK} beyond it — a PR created further back",
-            "  but merged inside the window may be missing. Raise --limit to widen it.",
+            "! the pool this window was ordered within was full, so a PR created",
+            "  further back but merged inside the window may never have been",
+            f"  fetched (live: {_ORDER_SLACK} beyond --limit; from a saved payload:",
+            "  whatever it was captured with, which this cannot know). Raise",
+            "  --limit to widen it.",
         ]
     undated = [pr.number for pr in prs if not pr.merged_at]
     if undated:
@@ -626,7 +628,10 @@ def render(prs: list[ShippedPr], *, pool_saturated: bool = False) -> str:
             f"! comment list may be truncated on {listed} — GitHub returned a full",
             f"  page ({_COMMENT_PAGE}) and `gh pr list` does not page the nested",
             "  connection, so the last ship comment may be missing and the row above",
-            "  may report an earlier round (issue #157).",
+            "  may report an earlier round — which the medians above then include.",
+            "  Not excluded: the page may well hold the terminal comment, and",
+            "  dropping a probably-correct figure is its own distortion. #157",
+            "  fixes it by paging.",
         ]
     lines += [
         "",
@@ -692,7 +697,15 @@ def main() -> int:
         parsed = parse_pull_requests(payload, args.ship_author)
         # Saturation is what makes the window unprovable, so it is measured
         # against what was asked for rather than assumed.
-        saturated = args.from_json is None and len(parsed) >= args.limit + _ORDER_SLACK
+        # Live: the pool is known, so saturation is measurable. From a saved
+        # payload it is not — the capture's own limit is not recorded — so any
+        # payload big enough to be sliced is reported as a bound this cannot
+        # verify, rather than as a window it cannot prove.
+        saturated = (
+            len(parsed) >= args.limit + _ORDER_SLACK
+            if args.from_json is None
+            else len(parsed) > args.limit
+        )
         prs = by_merge_time(parsed, args.limit)
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"review-history: {exc}", file=sys.stderr)
