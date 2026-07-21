@@ -217,8 +217,13 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     churn_bound: str = "exact",
     binary_files: int = 0,
     binary_churn: int = 0,
+    loop_id: str | None = None,
 ) -> None:
     """Write an artifact exactly as codex-review.sh would.
+
+    ``loop_id`` adds the ADR-0025 §4 provenance field ship reads to select the
+    matching disposition snapshot; omitted (the default) it is absent, as it is
+    on a bypass or pre-ADR-0025 artifact, and ship renders no dispositions.
 
     The provenance line reproduces what the real script emits, aggregate fields
     and all. #45's CRLF bug shipped a no-op precisely because a fake produced a
@@ -251,14 +256,48 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     review_dir = repo / ".review"
     review_dir.mkdir(exist_ok=True)
     persona_field = f"persona={recorded_persona} " if recorded_persona else ""
+    loop_field = f"loop_id={loop_id} " if loop_id else ""
     binary_field = f"binary_files={binary_files} " if binary_files else ""
     if binary_churn:
         binary_field = f"{binary_field}binary_churn={binary_churn} "
     (review_dir / f"{sha}-{persona}.md").write_text(
         f"<!-- {persona_field}base=main base_sha={base_sha} sha={sha} "
-        f"branch=feature tree={tree} round=1 net_lines=2 churn_lines=2 "
+        f"branch=feature tree={tree} round=1 {loop_field}net_lines=2 churn_lines=2 "
         f"churn_ratio=1.0 churn_bound={churn_bound} commits=1 {binary_field}-->\n{body}"
     )
+
+
+def _record_snapshot(
+    repo: Path,
+    persona: str,
+    tree: str,
+    findings: list[tuple[str, str, str]],
+    *,
+    loop_id: str = "loop-a",
+) -> Path:
+    """Write a disposition snapshot as codex-review.sh's _write_snapshot would.
+
+    ``findings`` is a list of ``(severity, status, text)``; each becomes one
+    finding block with a stable id. The file is named by the full anchor
+    ``<loop_id>-<persona>-<tree>.md`` so ship selects it deterministically.
+    """
+    disp = repo / ".review" / "dispositions"
+    disp.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"<!-- snapshot loop_id={loop_id} persona={persona} base_sha=x "
+        f"tree={tree} sha=x round=2 verdict=APPROVE -->"
+    ]
+    for i, (severity, status, text) in enumerate(findings):
+        fid = f"{persona}-{i:012d}"
+        lines.append(
+            f"<!-- finding id={fid} severity={severity} status={status} "
+            f"first_round=1 last_round=2 -->"
+        )
+        lines.append(text)
+        lines.append("<!-- /finding -->")
+    path = disp / f"{loop_id}-{persona}-{tree}.md"
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 def _run_ship(
@@ -1580,3 +1619,116 @@ def test_still_refuses_when_every_covering_artifact_is_incomplete(tmp_path: Path
     assert result.returncode != 0
     assert "does not end in a verdict" in result.stderr
     assert not (tmp_path / "comment.md").exists()
+
+
+# --- Disposition rendering (ADR-0025 §4) -------------------------------------
+
+
+def test_renders_the_disposition_snapshot_for_the_terminal_tree(tmp_path: Path) -> None:
+    """The verdict-changing history reaches the merge reviewer, not only .review/."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(
+        repo,
+        "adversarial",
+        tree,
+        [
+            ("minor", "open", "1. a small nit remains"),
+            ("blocker", "retired", "1. the value was wrong"),
+        ],
+    )
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "dispositions" in posted
+    assert "the value was wrong" in posted  # the retired finding's evidence
+    assert "_retired_" in posted
+    assert "a small nit remains" in posted
+
+
+def test_no_snapshot_renders_no_dispositions(tmp_path: Path) -> None:
+    """A bypass or pre-ADR-0025 artifact (no loop_id) posts as before."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "a finding" in posted
+    assert "dispositions" not in posted
+
+
+def test_ambiguous_snapshots_fail_closed(tmp_path: Path) -> None:
+    """Two loops recording a snapshot for the same (persona, tree) refuse to post."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", "nit")], loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", "nit")], loop_id="loop-b")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "ambiguous disposition snapshots" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_snapshot_from_a_different_loop_fails_closed(tmp_path: Path) -> None:
+    """The one snapshot found must be the loop the terminal artifact names."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", "nit")], loop_id="loop-b")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0
+    assert "different loop" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_codex_proposal_is_published_in_full(tmp_path: Path) -> None:
+    """A §3 proposal appears in full — a local-only reference defeats its audit."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    proposal = "1. **minor** fix it thus\n\n```diff\n-bad = 1\n+good = 2\n```"
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", proposal)])
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "+good = 2" in posted  # the proposal patch is published verbatim
+
+
+def test_a_proposal_carrying_a_secret_is_excluded_not_published(tmp_path: Path) -> None:
+    """Fail-closed: a proposal that would leak a secret is excluded, not redacted."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    leaky_proposal = "1. **minor** fix it\n\n```diff\n+AWS_KEY = AKIAIOSFODNN7EXAMPLE\n```"
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(repo, "adversarial", tree, [("minor", "open", leaky_proposal)])
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "AKIAIOSFODNN7EXAMPLE" not in posted  # the secret never reaches the PR
+    assert "proposal excluded" in posted
