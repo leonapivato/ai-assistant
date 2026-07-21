@@ -1581,7 +1581,50 @@ def _detached_tool(value: ToolDefinition) -> ToolDefinition:
     construction instead — the divergence surfaces where it can be fixed rather
     than after a restart.
     """
-    return ToolDefinition.model_validate(value.model_dump())
+    return _durable_tool(ToolDefinition.model_validate(value.model_dump()))
+
+
+def _durable_tool(value: ToolDefinition) -> ToolDefinition:
+    """Reject a declaration the recorded decision could not be stored as.
+
+    The same durability rule :func:`_durable_identifier` applies to a decision's
+    own identifiers, applied to the definition it embeds. A ``ToolDefinition``
+    admits any ``str`` in its text fields and any JSON-safe value in its schema,
+    so a lone surrogate — a ``str`` Python holds happily and no UTF-8 encoder
+    accepts — reaches the trail through ``description``, ``capability`` or
+    ``parameters_schema`` and fails at the store boundary, one field family
+    short of the guarantee ADR-0021 §4 makes about a record reloading.
+
+    Checked *here* rather than on :class:`ToolDefinition` because ADR-0016 §6
+    makes the registry in-memory and rebuilt each run: it never serialises a
+    definition, so nothing forced the question until this ADR made the audit
+    trail the first durable holder of one. Tightening the shared type is the
+    tools lane's change (issue #156); requiring a decision to be storable is
+    this one's, and it is the same boundary :func:`_durable_identifier` drew.
+
+    The predicate is the serialisation itself rather than an enumeration of
+    reachable strings, so "accepted" and "storable" cannot come apart as the
+    definition grows fields — the reason :func:`_canonical_json` is shared with
+    the digest instead of being restated. It runs over the field a decision
+    actually keeps, which is why it is not simply :func:`_is_encodable` on the
+    text fields: ``parameters_schema`` carries strings too, in both its keys and
+    its values.
+
+    Raises:
+        ValueError: If the definition has no JSON encoding.
+    """
+    try:
+        encodable = _is_encodable(json.dumps(value.model_dump(mode="json"), ensure_ascii=False))
+    except UnicodeEncodeError:
+        # An unencodable *key* fails inside the dump rather than after it,
+        # because pydantic encodes a mapping key on the way to JSON. Caught here
+        # so both halves of the same defect raise the same error rather than one
+        # arriving as a bare codec failure.
+        encodable = False
+    if not encodable:
+        msg = f"tool has no JSON encoding, so the decision could not be stored: {value.id!r}"
+        raise ValueError(msg)
+    return value
 
 
 def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
@@ -1790,7 +1833,9 @@ class PermissionDecision(BaseModel):
 
     id: DurableIdentifier
     ruling: PermissionRuling = Field(description="What the policy said.")
-    tool: ToolDefinition = Field(description="The declaration ruled on, verbatim.")
+    tool: Annotated[ToolDefinition, AfterValidator(_durable_tool)] = Field(
+        description="The declaration ruled on, verbatim."
+    )
     parameters_digest: Sha256Hex = Field(description="Binds the payload without storing it.")
     decided_at: datetime = Field(description="When the ruling was made; timezone-aware.")
     step_id: DurableIdentifier | None = None
