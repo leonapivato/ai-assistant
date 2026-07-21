@@ -376,6 +376,7 @@ base_key="$(printf '%s' "$base_sha" | sha1sum | awk '{print $1}')"
 loop_key="${branch_key}-${base_key}"
 meta_file="${session_dir}/${loop_key}.meta"
 thread_file="${session_dir}/${loop_key}.${persona}.thread"
+lock_file="${session_dir}/${loop_key}.lock"
 # The disposition record is a per-reviewed-state SNAPSHOT (ADR-0025 §4), named by
 # the full anchor `<loop_id>-<persona>-<tree>.md`, so `ship` selects the one
 # belonging to the terminal artifact's tree and fails closed if two loops claim
@@ -392,6 +393,80 @@ _mint_id() {
         od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
     fi
 }
+
+# --- Serializing the loop's read-modify-write (issue #142) -------------------
+#
+# Deciding the loop identity is a READ (the meta) then a WRITE (a minted id, a
+# thread wipe), and advancing the loop at the end of a round is another. Each
+# individual `mv` is atomic, but two concurrent invocations — `adversarial` and
+# `architecture` started at once on a fresh loop — could interleave *between*
+# read and write: both see no meta, both mint a different loop_id, and a later
+# run then pairs one run's loop_id with the other run's thread, mixing
+# differently-anchored records into one disposition ledger. So each phase runs
+# inside an exclusive lock on `<loop_key>.lock`, making it one read-modify-write.
+#
+# The lock is held only across the two filesystem phases, NEVER across the Codex
+# call itself: a round runs for minutes, and blocking a sibling persona for the
+# whole of it would trade a latent race for a guaranteed stall.
+#
+# `flock` is used rather than a hand-rolled `mkdir`/`O_EXCL` lockfile precisely
+# because of the stale-lock failure mode: an flock lives on an open file
+# descriptor, so the kernel releases it when the holder exits — cleanly, on a
+# crash, or on SIGKILL. A crashed prior round therefore cannot wedge the review
+# loop; the worst it leaves behind is an inert zero-byte lock file. A directory
+# or PID lockfile would survive its owner and need a stale-timeout heuristic
+# that either wedges or breaks mutual exclusion. `-w` bounds the wait anyway, so
+# even a live-but-hung holder produces a loud failure instead of a hang.
+lock_wait="${CODEX_REVIEW_LOCK_WAIT:-60}"
+lock_fd=""
+_lock_session() {
+    if [[ -n "$lock_fd" || "$serialized" -eq 0 ]]; then
+        return 0
+    fi
+    mkdir -p "$session_dir"
+    exec {lock_fd}<>"$lock_file"
+    if ! flock -w "$lock_wait" "$lock_fd"; then
+        echo "timed out after ${lock_wait}s waiting for the review-loop lock" >&2
+        echo "  ${lock_file}" >&2
+        echo "another codex-review run is holding it; personas run sequentially in" \
+            "one clone (ADR-0015)" >&2
+        exit 1
+    fi
+    return 0
+}
+_unlock_session() {
+    if [[ -z "$lock_fd" ]]; then
+        return 0
+    fi
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
+    lock_fd=""
+}
+
+# Whether the loop phases can be serialized at all. `flock` is util-linux, so it
+# is present wherever `sha1sum` (already required above, for the loop key) is.
+# Where it is somehow absent, the loop degrades to the unserialized behaviour it
+# had before #142 and says so, rather than refusing to review: the race needs two
+# concurrent invocations, which the one-agent-per-clone workflow (ADR-0015) does
+# not produce, so bricking the tool would be the worse failure.
+serialized=1
+if ! command -v flock >/dev/null 2>&1; then
+    serialized=0
+    if [[ "$bypass" -eq 0 ]]; then
+        echo "warning: flock not found; the review loop's init/update cannot be" >&2
+        echo "  serialized. Run one codex-review at a time (issue #142)." >&2
+    fi
+fi
+
+# The loop meta, written atomically. `last_sha` is the ancestry anchor the next
+# round continues from, so it is passed explicitly: init publishes the identity
+# WITHOUT advancing it, and only a fully recorded round moves it forward.
+_write_meta() {
+    local last="$1" tmp="${meta_file}.partial.$$"
+    printf 'loop_id=%s\nbranch=%s\nbase_sha=%s\nlast_sha=%s\n' \
+        "$loop_id" "$branch" "$base_sha" "$last" >"$tmp"
+    mv "$tmp" "$meta_file"
+}
 # No session state on the bypass path — it keeps no thread to resume. loop_id
 # stays empty there and is recorded empty, alongside the empty thread_id.
 #
@@ -407,9 +482,20 @@ _mint_id() {
 # ancestry test and resets to a fresh cold session — safe, never worse than
 # today's cold loop, and such rewrites usually land at the end of a loop rather
 # than between the warm rounds this is optimising.
+#
+# A meta carrying a loop_id but NO last_sha is a loop whose identity has been
+# reserved and which has recorded no round yet — an invocation still in flight,
+# or one that died before completing a round. That is ADOPTED, not reset: the
+# reset exists to detect a branch name reused for unrelated work, and the
+# evidence for that is the recorded last state, which such a loop does not have.
+# Adopting is what makes two concurrent fresh starts agree on one identity
+# (#142); there is also nothing to bleed, since no thread or disposition is
+# filed until a round completes. It is not resumed either (the ancestry test
+# gates that), so an adopted loop's first recorded round is a cold one.
 loop_id=""
 recorded_thread=""
 if [[ "$bypass" -eq 0 ]]; then
+    _lock_session
     recorded_last_sha=""
     if [[ -f "$meta_file" ]]; then
         loop_id="$(sed -n 's/^loop_id=//p' "$meta_file")"
@@ -421,6 +507,9 @@ if [[ "$bypass" -eq 0 ]]; then
         if [[ -f "$thread_file" ]]; then
             recorded_thread="$(head -n 1 "$thread_file")"
         fi
+    elif [[ -n "$loop_id" && -z "$recorded_last_sha" ]]; then
+        # Reserved, not yet advanced: adopt the identity as described above.
+        :
     else
         # New loop, or a reused/rewritten branch: reset the per-loop identity and
         # clear any session and dispositions filed under it. Threads are keyed by
@@ -428,9 +517,17 @@ if [[ "$bypass" -eq 0 ]]; then
         # the OUTGOING loop_id, cleared by it (the new loop_id has none of its own).
         old_loop_id="$loop_id"
         loop_id="$(_mint_id)"
+        recorded_last_sha=""
         rm -f "${session_dir}/${loop_key}."*.thread
         [[ -n "$old_loop_id" ]] && rm -f "${disposition_dir}/${old_loop_id}-"*.md
     fi
+    # Publish the identity before releasing the lock, so a concurrent invocation
+    # reads it instead of minting a rival one. `last_sha` is deliberately carried
+    # unchanged (empty on a fresh or reset loop): reserving the identity must not
+    # advance the anchor the next round continues from — only a fully recorded
+    # round does that, below.
+    _write_meta "$recorded_last_sha"
+    _unlock_session
 fi
 
 # The disposition snapshot for this reviewed state, and the most recent snapshot
@@ -993,18 +1090,37 @@ mv "$artifact_tmp" "$artifact"
 # path keeps no thread. Written last, after every validation has passed, so a
 # rejected round never advances the loop the next round continues: the meta's
 # last_sha (the ancestry anchor above) only moves once a round is fully recorded.
+#
+# The whole advance is one read-modify-write under the loop lock (#142): re-read
+# the meta and refuse to record if the identity this round was anchored to is no
+# longer the loop's. That happens when another invocation reset the loop while
+# this round was in flight — recording anyway would file this round's thread and
+# dispositions under a loop_id no later round will look up, silently orphaning
+# them. The review itself is already on disk at `.review/<sha>-<persona>.md`; only
+# the session advance is refused, and re-running the persona records it cleanly.
 if [[ "$bypass" -eq 0 ]]; then
-    mkdir -p "$session_dir"
-    meta_tmp="${meta_file}.partial.$$"
-    printf 'loop_id=%s\nbranch=%s\nbase_sha=%s\nlast_sha=%s\n' \
-        "$loop_id" "$branch" "$base_sha" "$sha" >"$meta_tmp"
-    mv "$meta_tmp" "$meta_file"
+    _lock_session
+    current_loop_id=""
+    if [[ -f "$meta_file" ]]; then
+        current_loop_id="$(sed -n 's/^loop_id=//p' "$meta_file")"
+    fi
+    if [[ "$current_loop_id" != "$loop_id" ]]; then
+        _unlock_session
+        echo >&2
+        echo "another codex-review run reset this review loop while this round was" >&2
+        echo "in flight (loop ${loop_id:0:12} was replaced by ${current_loop_id:0:12})." >&2
+        echo "Refusing to record this round's session state under a dead identity." >&2
+        echo "Run one persona at a time in a clone (ADR-0015), then re-run this one." >&2
+        exit 1
+    fi
+    _write_meta "$sha"
     if [[ -n "$round_thread" ]]; then
         thread_tmp="${thread_file}.partial.$$"
         printf '%s\n' "$round_thread" >"$thread_tmp"
         mv "$thread_tmp" "$thread_file"
     fi
     _write_snapshot
+    _unlock_session
 fi
 
 echo >&2
