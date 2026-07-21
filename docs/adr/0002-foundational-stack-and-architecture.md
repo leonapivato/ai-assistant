@@ -1,7 +1,15 @@
 # 2. Foundational stack and architecture
 
-- Status: Accepted
+- Status: Accepted, partially superseded by ADR-0024 (build-backend clause)
 - Date: 2026-07-16
+- Note (2026-07-21): **The build-backend clause is superseded by ADR-0024.**
+  That clause is the "(+ `uv_build` backend)" parenthetical in *Language &
+  tooling* below; ADR-0024 §4 replaces `uv_build` with `hatchling`, whose build
+  hook fetches and verifies the vendored embedding artifact. This is a note,
+  not a status — the `Status` line above carries the status change ADR-0001
+  requires. Everything else here stands: the rest of *Language & tooling*, and
+  the architecture, model layer, interface, and persistence decisions, plus the
+  ADR-0010 supersession already recorded inline under *Workflow / CI*.
 
 ## Context
 
