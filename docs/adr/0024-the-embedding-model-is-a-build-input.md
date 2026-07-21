@@ -212,7 +212,8 @@ at minimum, and not limited to:
   presence is not trust; every file is re-hashed before it is packaged;
 - the wheel **and the sdist** each carry the artifact with every file's SHA-256
   matching the recorded manifest (the verified bytes shipped, not merely *some*
-  valid ONNX), and a wheel built from the sdist embeds with the network denied;
+  valid ONNX), and *both* the checkout-built wheel and the sdist-derived wheel
+  embed with the network denied — the packaged path proven for each build source;
 - the wheel METADATA carries all four exact pins, and changing any audited
   version *or* any manifest digest independently moves `model_id`;
 - `FastEmbedEmbedder` rejects a non-vendored model name before any backend load
