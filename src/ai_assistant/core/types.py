@@ -34,6 +34,26 @@ Embedding = Sequence[float]
 """A dense vector embedding of a piece of text (see ADR-0006)."""
 
 
+#: The offset an instant must carry once converted. Named so the check below
+#: reads as the assertion it is rather than as a magic comparison.
+_UTC_OFFSET = timedelta(0)
+
+
+def _describe(value: object) -> str:
+    """``repr`` of an untrusted value, for an error message, never raising.
+
+    ``datetime.__repr__`` embeds ``repr(tzinfo)``, so a hostile ``tzinfo`` can
+    raise from inside the very message that reports it — turning the
+    field-naming ``ValueError`` this module promises into whatever that
+    ``__repr__`` threw, from inside an ``except`` block. The diagnostic must not
+    be able to destroy the diagnosis.
+    """
+    try:
+        return repr(value)
+    except Exception:  # the value cannot describe itself; say so and move on
+        return "<a value whose repr() failed>"
+
+
 def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     """Reject a value with no determinate offset; return the instant in UTC.
 
@@ -62,12 +82,23 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     Converting makes same-``tzinfo`` comparison identical to instant comparison,
     once, for every field rather than per implementation.
 
+    **The converted value is re-checked, which is the only step that can check
+    itself.** ``astimezone`` is overridable: a ``datetime`` *subclass* can carry
+    a perfectly valid ``utcoffset()``, pass every test above, and return a naive
+    or non-UTC value from its own ``astimezone``. Pydantic does not re-validate
+    what an ``AfterValidator`` returns, so trusting the conversion would let this
+    type certify precisely the value it exists to reject — and the naive expiry
+    would then raise ``TypeError`` at the first comparison in a store, far from
+    here. Verifying the result costs one comparison and removes the assumption.
+
     The failure path is total because the annotation is not: a custom ``tzinfo``
-    whose ``utcoffset()`` raises, and a value near ``datetime.min``/``max`` at a
-    non-UTC offset that overflows ``astimezone``, both reach here. Each becomes
-    the same field-naming ``ValueError`` rather than escaping as a crash pydantic
-    would not report as a validation failure — the "accepted, then unusable"
-    shape a validator exists to close.
+    whose ``utcoffset()`` raises, a value near ``datetime.min``/``max`` at a
+    non-UTC offset that overflows ``astimezone``, and a conversion that returns
+    something unusable all reach here. Each becomes the same field-naming
+    ``ValueError`` rather than escaping as a crash pydantic would not report as a
+    validation failure — the "accepted, then unusable" shape a validator exists
+    to close. That is also why the messages describe the value through
+    :func:`_describe` rather than ``!r``.
 
     Args:
         value: The candidate instant.
@@ -78,22 +109,27 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
 
     Raises:
         ValueError: If the value has no determinate UTC offset, its ``tzinfo``
-            fails, or it has no UTC representation.
+            fails, or it has no usable UTC representation.
     """
     field = info.field_name or "instant"
     try:
         offset = value.utcoffset()
     except Exception as exc:  # any tzinfo failure is one rejection, not a leaked crash
-        msg = f"{field} must be timezone-aware, but its tzinfo failed: {value!r}"
+        msg = f"{field} must be timezone-aware, but its tzinfo failed: {_describe(value)}"
         raise ValueError(msg) from exc
     if offset is None:
-        msg = f"{field} must be timezone-aware with a determinate offset, got {value!r}"
+        msg = f"{field} must be timezone-aware with a determinate offset, got {_describe(value)}"
         raise ValueError(msg)
     try:
-        return value.astimezone(UTC)
+        converted = value.astimezone(UTC)
+        converted_offset = converted.utcoffset()
     except Exception as exc:  # incl. OverflowError, which is not a ValueError
-        msg = f"{field} has no UTC representation, got {value!r}"
+        msg = f"{field} has no UTC representation, got {_describe(value)}"
         raise ValueError(msg) from exc
+    if converted_offset != _UTC_OFFSET:
+        msg = f"{field} did not convert to UTC, got {_describe(converted)}"
+        raise ValueError(msg)
+    return converted
 
 
 type UtcInstant = Annotated[datetime, AfterValidator(_utc_instant)]
