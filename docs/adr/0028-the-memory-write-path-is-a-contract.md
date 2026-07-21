@@ -335,6 +335,17 @@ the triad in **one** change:
    concrete `TestFakeMemoryWriterContract` subclass that runs the suite against
    it — the abstract base collects nothing on its own.
 
+**And a `TestMemoryIngestorContract` binding in `tests/memory/`**, running the
+same suite against the real writer. The triad check demands only the fake's
+binding, so this would pass without it — and a suite bound only to the fake
+certifies the double while the production writer drifts, which is the one
+outcome this ADR cannot afford, since `MemoryIngestor` is what `LearningLoop`
+will be delegating to. `MemoryStore` already carries both bindings
+(`TestFakeMemoryStoreContract`, `TestInMemoryMemoryStoreContract`,
+`TestSqliteMemoryStoreContract`); this is that convention, stated so it is not
+left to be remembered. `tests/memory/test_ingest.py` stays what it is —
+implementation tests, including §4b's — and does not count as the binding.
+
 The obligations the suite encodes are the ones the write path is already held to
 by `tests/memory/test_ingest.py`, restated as contract rather than as one
 implementation's tests: conflicts are resolved *before* the policy is asked and
@@ -387,9 +398,11 @@ outcome and the reason the triad is named here rather than left to be remembered
   `tests/memory/test_ingest.py` (§4a), and the `MERGE`-not-applied test inverts —
   the loop now asserts that it delegated, and `memory` keeps asserting what a
   merge does.
-- **Determinism now needs two clocks wired, not one** (§4b), and until ADR-0026
-  lands a naive clock injected into the writer is unguarded where the loop's was
-  guarded.
+- **Determinism now needs two clocks wired, not one** (§4b): a test fixing the
+  loop's clock and not the writer's gets a wall-clock expiry. The naive-clock
+  guard itself does not lapse — §4b requires the implementation to supply it,
+  by moved normalisation or by ADR-0026's `checked_clock`, whichever order it
+  lands in.
 - **A conforming writer can be wrong in a way the loop cannot see.** Today the
   loop's write half is inspectable in `loop.py`; afterwards it is an injected
   object, and a writer that never persists conforms structurally. That is the
