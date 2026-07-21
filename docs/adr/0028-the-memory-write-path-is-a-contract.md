@@ -388,6 +388,15 @@ outcome and the reason the triad is named here rather than left to be remembered
 
 **Harder.**
 
+- **New `core` contract surface, and golden rule 5 treats a Protocol change as a
+  breaking change** — this one included, and it is flagged as such. Additive, so
+  it breaks no implementation that exists today: nothing imports `MemoryWriter`
+  until the implementing change does, and `MemoryIngestor` already conforms (§2).
+  It is contract surface all the same, which is why it is an ADR, why it merges
+  alone ahead of any implementation, why it carries the architecture review as
+  well as the adversarial one, and why §8's triad is not optional. The change
+  that *does* break a caller is §4's `LearningLoop` constructor, downstream of
+  this one.
 - **A third `core` Protocol touching memory**, so the memory contract surface is
   now `MemoryStore`, `MemoryPolicy`, `MemoryWriter` — three seams a future
   refactor must move together. Accepted because the alternative on offer is not
