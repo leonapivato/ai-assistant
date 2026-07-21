@@ -407,6 +407,16 @@ def test_an_n_a_churn_that_was_also_rewritten_keeps_both_facts(tmp_path: Path) -
     assert "1 of those also had history rewritten" in out
 
 
+def test_no_churn_clause_is_not_reported_as_n_a(tmp_path: Path) -> None:
+    """An aggregate with no churn clause measured nothing; `n/a` is a measurement."""
+    payload = [_pr(1, "fix: a", [_ship("1" * 40, "round 2 · 40 lines net across 1 commit(s)")])]
+    out = _run(payload, tmp_path)
+    assert "carry no churn clause at all" in out
+    assert "report churn n/a" not in out
+    row = next(line for line in out.splitlines() if line.startswith("  #1"))
+    assert "n/a" not in row
+
+
 def test_a_plain_n_a_churn_claims_no_rewrite(tmp_path: Path) -> None:
     payload = [_pr(1, "fix: a", [_ship("1" * 40, _NA)])]
     out = _run(payload, tmp_path)
