@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from typing import TYPE_CHECKING
 
 import pytest
@@ -239,10 +239,17 @@ async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
     stored = await store.get("1")
     assert stored is not None
     assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
+    assert stored.expires_at.tzinfo is UTC
 
 
-async def test_a_non_utc_clock_stamps_the_same_instant() -> None:
-    """Conversion is information-preserving, so only the representation moves."""
+async def test_a_non_utc_clock_is_converted_not_merely_accepted() -> None:
+    """The write skips the validator, so §2's UTC storage has to happen here.
+
+    Asserted on ``tzinfo``, not only on the instant: an equality check alone
+    passes for a ``+02:00`` value, which is exactly the state ADR-0023 §2's
+    "no field opting out" forbids — and which
+    ``SqliteMemoryStore._add_sync``'s expiry index would then be computed from.
+    """
     store = InMemoryMemoryStore(now=_fixed_now)
     berlin_clock = MemoryIngestor(
         store=store,
@@ -255,3 +262,52 @@ async def test_a_non_utc_clock_stamps_the_same_instant() -> None:
     stored = await store.get("1")
     assert stored is not None
     assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
+    assert stored.expires_at.tzinfo is UTC
+
+
+class _NoOffset(tzinfo):
+    """A ``tzinfo`` that is set but indeterminate — issue #36's case."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "indeterminate"
+
+
+class _RaisingOffset(tzinfo):
+    """A ``tzinfo`` whose ``utcoffset()`` raises rather than answering."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        msg = "no offset available"
+        raise RuntimeError(msg)
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "raises"
+
+
+@pytest.mark.parametrize("zone", [_NoOffset(), _RaisingOffset()], ids=["indeterminate", "raising"])
+async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -> None:
+    """Translated at this boundary, as ``_expiry`` already does for overflow.
+
+    Unguarded, such a reading reaches ``.timestamp()`` inside the SQLite store
+    and surfaces as a raw ``TypeError`` from several layers down, naming neither
+    the clock nor the record.
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    broken = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=lambda: datetime(2026, 6, 1, tzinfo=zone),
+    )
+
+    with pytest.raises(MemoryStoreError, match="no UTC representation"):
+        await broken.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+
+    assert await store.get("1") is None

@@ -136,24 +136,58 @@ class MemoryIngestor:
                 return None
 
     def _now_utc(self) -> datetime:
-        """The injected clock's time, normalising a naive reading to UTC.
+        """The injected clock's reading, as UTC — attributed if naive, else converted.
 
-        Load-bearing for :meth:`_expiry`, and the same guard
-        ``LearningLoop._now_utc`` already carries on the identical write.
-        ``model_copy(update=...)`` does **not** re-run validators, so a naive
-        ``expires_at`` installed that way reaches the store untouched — and
-        since ADR-0023 makes ``MemoryBase.expires_at`` *reject* a naive value
-        rather than assume UTC, there is no longer a validator downstream that
-        would have caught it. Every later read then compares it against an aware
-        UTC now and raises ``TypeError`` deep inside the store, or fails to
-        decode after a round trip through the persistent one.
+        Load-bearing for :meth:`_expiry`, and the guard ``LearningLoop._now_utc``
+        already carries on the identical write. ``model_copy(update=...)`` does
+        **not** re-run validators, so an ``expires_at`` installed that way
+        reaches the store exactly as this method left it — and since ADR-0023
+        makes ``MemoryBase.expires_at`` *reject* a naive value rather than assume
+        UTC, there is no longer a validator downstream that would have caught it.
+        A naive deadline then raises ``TypeError`` on the first comparison deep
+        inside the store, or fails to decode after a round trip through the
+        persistent one.
 
-        This is the boundary shim ADR-0023 §6 requires for a clock-fed field
-        until ADR-0026's producer guard lands; it is deliberately not that
-        guard.
+        **Converting, not merely attributing.** ADR-0023 §2 makes UTC storage
+        mandatory and uniform, and the qualifier it attaches is precisely this
+        one: the invariant holds at the validation boundary, so "a write that
+        reaches past it must re-validate". This write does reach past it, so the
+        conversion has to happen here or nowhere — a ``+02:00`` deadline would
+        otherwise be persisted verbatim, and
+        ``SqliteMemoryStore._add_sync``'s expiry index, computed from it, is one
+        of the comparisons §2 exists to keep coherent.
+
+        **The indeterminate offset is checked explicitly, not left to
+        ``astimezone``.** ADR-0023 §5 spells "aware" as ``utcoffset()``
+        returning a value (issue #36), and a ``tzinfo`` that answers ``None``
+        satisfies ``tzinfo is not None`` while satisfying nothing else:
+        ``astimezone(UTC)`` then treats the value as *host-local* and returns a
+        confidently wrong instant, which is precisely the fabrication ADR-0023
+        §3 exists to stop. It becomes ``MemoryStoreError`` here — as does a
+        ``tzinfo`` that raises — rather than a raw ``TypeError`` from
+        ``.timestamp()`` several layers down. Same boundary translation
+        :meth:`_expiry` already performs for ``OverflowError``.
+
+        This is the shim ADR-0023 §6 requires at a clock-fed field's producer
+        until ADR-0026's guard lands; it is deliberately not that guard.
+
+        Raises:
+            MemoryStoreError: If the clock's reading has no UTC representation.
         """
         now = self._now()
-        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        unusable = f"the injected clock returned an instant with no UTC representation: {now!r}"
+        try:
+            offset = now.utcoffset()
+        except Exception as exc:  # a tzinfo that raises rather than answering
+            raise MemoryStoreError(unusable) from exc
+        if offset is None:
+            raise MemoryStoreError(unusable)
+        try:
+            return now.astimezone(UTC)
+        except Exception as exc:  # incl. OverflowError near datetime.min/max
+            raise MemoryStoreError(unusable) from exc
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""
