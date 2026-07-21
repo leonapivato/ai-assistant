@@ -121,17 +121,25 @@ base that is *not* an ancestor of the current merge base is not drift; it is a
 different history, and fails closed.
 
 **An entry with nothing to hash makes path (b) unavailable.** What `patch-id`
-hashes per file entry is the `diff --git` header, the `index <old>..<new>` line
-where `git diff` emits one, and the hunk bodies. Two consequences, both measured
-rather than reasoned about — the checks are three commands and belong in the
-implementation's tests:
+hashes per file entry depends on whether the entry has hunks, and the three
+cases were measured rather than reasoned about — each check is two commands and
+belongs in the implementation's tests:
 
-- **A binary change is content-anchored, and needs no special case.** `git diff`
-  renders it as `Binary files … differ` with no hunk, but it still carries the
-  `index` line, whose blob hashes are the content. Two different binary deltas
-  to one path therefore produce *different* identities.
-- **A pure rename or copy, and a mode-only change, are not.** At 100% similarity
-  `git diff` emits `similarity index 100% / rename from / rename to` and no
+- **An entry with hunks is anchored on its hunks, and its `index
+  <old>..<new>` preamble is ignored.** Rewriting those blob IDs by hand leaves
+  the identity unchanged. This is what delivers §2's first property, and it is
+  load-bearing: an implementation that folded the `index` IDs into the identity
+  would invalidate on a base edit anywhere in a touched file and defeat the
+  decision. Measured: a PR hunk at line 100 of a 200-line file keeps its
+  identity across a rebase onto a base that inserted a line at the top.
+- **An entry with no hunks is anchored on that preamble instead, which is why a
+  binary change needs no special case.** `git diff` renders it as `Binary files
+  … differ`, and there the `index` line *is* hashed — mutating it changes the
+  identity, and two different binary deltas to one path produce different
+  identities.
+- **An entry with neither is anchored on nothing but its paths.** At 100%
+  similarity `git diff` emits `similarity index 100% / rename from / rename to`
+  and no
   `index` line at all; a mode change emits `old mode / new mode` and no `index`
   line. The identity of such an entry is a function of its **paths alone**. So a
   reviewed PR that only renames `f` to `g`, rebased onto a base that changed
@@ -419,9 +427,17 @@ the driver alike — changed, deleted, renamed *out* of the floor and renamed
 *into* it (§3); a recorded base that is not an ancestor of the merge
 base; a rename-only and a mode-only diff rebased onto a base that changed the
 renamed file's content, which §2 measured as producing an identical identity;
-and a drift record that cannot be rendered (§4). Every
-one of those must refuse. An implementation that satisfies only the #118 cases
-would accept several of them.
+and a drift record that cannot be rendered (§4). Every one of those must refuse.
+An implementation that satisfies only the #118 cases would accept several of
+them.
+
+Two must *accept*, and they are not decoration — they are what stops a
+fail-closed implementation from satisfying the list above by refusing
+everything: the #117 rebase, and the same-file off-hunk case, where the base
+edits a region of a file the PR also touches without entering any reviewed hunk.
+The second is the one #118 does not cover and the one an implementation folding
+the `index` blob IDs into the identity would fail, and it is the benefit this
+whole decision is for.
 
 ### The strongest case against this decision
 
