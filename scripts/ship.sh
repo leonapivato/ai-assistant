@@ -288,21 +288,25 @@ render_dispositions() {
     echo "<details><summary><strong>${persona} — dispositions (${total} finding(s))</strong></summary>"
     echo
     echo "_Per-finding disposition record from the persistent review session"
-    echo "(ADR-0025 §4). A **retired** finding was raised in an earlier round and,"
-    echo "after the reviewer's own reassessment, not re-raised — the auditable"
-    echo "evidence that a verdict changed._"
+    echo "(ADR-0025 §4). A **retired** finding was raised in an earlier round and"
+    echo "not re-raised in the terminal round; its withdrawal is not separately"
+    echo "recorded, so verify each retirement against this PR's diff._"
     echo
     local id sev status first last text note has_fence entry entry_bytes when
     while IFS=$'\t' read -r id sev status first last; do
         [[ -n "$id" ]] || continue
         text="$(snapshot_finding_text "$snap" "$id")"
         note=""
-        # A retired finding: state the reassessment explicitly, and point the
-        # merge reviewer at where the deciding change is published (ADR-0025 §4).
+        # A retired finding: report only what retirement actually knows — raised,
+        # then not re-raised — and assert NO cause. The mechanism retires on
+        # absence alone, so it cannot know whether a code change resolved the
+        # finding or the reviewer dropped it on reflection with no change. Naming a
+        # cause would fabricate audit evidence; the merge reviewer is pointed at
+        # the diff to judge for itself (ADR-0025 §4).
         when="(rounds ${first}–${last})"
         if [[ "$status" == "retired" ]]; then
-            when="raised through round ${last}, not re-raised since — the reviewer's own"
-            when="${when} reassessment; the change that resolved it is in this PR's diff"
+            when="raised through round ${last}, not re-raised in the terminal round —"
+            when="${when} no explicit withdrawal was recorded; verify against this PR's diff"
         fi
         # Any fenced block is a possible §3 proposal (a language label is not a
         # reliable signal). Nothing bypasses the cumulative budget: a proposal is

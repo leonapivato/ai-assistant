@@ -1656,6 +1656,13 @@ def test_renders_the_disposition_snapshot_for_the_terminal_tree(tmp_path: Path) 
     assert "the value was wrong" in posted  # the retired finding's evidence
     assert "_retired_" in posted
     assert "a small nit remains" in posted
+    # Retirement reports only the observable fact and points at the diff — it must
+    # NOT fabricate a cause, since the mechanism retires on absence alone and
+    # cannot know whether a code change or a no-change reflection dropped it.
+    assert "no explicit withdrawal was recorded" in posted
+    assert "verify against this PR's diff" in posted
+    assert "reviewer's own reassessment" not in posted
+    assert "the change that resolved it" not in posted
 
 
 def test_no_snapshot_renders_no_dispositions(tmp_path: Path) -> None:
