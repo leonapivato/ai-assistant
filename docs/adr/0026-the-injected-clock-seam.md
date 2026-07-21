@@ -93,9 +93,21 @@ ADR-0023's migration, which is the order §5 requires.
 type's own declaration, independent of policy, configuration, context or a
 clock, and the same answer for every consumer. A guard that calls an injected
 callable is not a semantic of a type at all, so it does not belong in
-`types.py`. It belongs in `core` all the same, alongside the non-type shared
-machinery already there (`core/config.py`, `core/errors.py`,
-`core/logging.py`), and it keeps golden rule 2: nothing but the standard library.
+`types.py`.
+
+**It does belong in `core`, because that rule is about `core/types.py`, not
+about `core`.** No ratified decision makes `core` behaviour-free, and the code
+says otherwise: `core/logging.py` holds `redact_sensitive`, `_redact_mapping`
+and `install_redaction` — executable cross-cutting enforcement every subsystem's
+logging runs through — and `core/config.py` holds `load_settings()` and
+`Settings`' validators, which read configuration. `CLAUDE.md`'s own map lists
+`core` as "contracts (Protocols), shared types, config, errors". `checked_clock`
+is that same category: shared machinery with exactly one definition, which is
+the point — §2's whole argument is that five subsystems already answered this
+question five ways and one omitted it. Pushing it into an owning subsystem
+recreates that; putting it in a shared non-`core` layer would mean a layer
+*below* `core` that `core` may not depend on, inverting golden rule 2 for one
+function. It keeps golden rule 2 as written: nothing but the standard library.
 
 Two things the guard deliberately does **not** carry, so it stays shared rather
 than becoming one subsystem's rule housed in `core`:
@@ -313,8 +325,13 @@ guaranteed aware would break a naive test or config clock.
 ### 6. What ratification does to ADR-0008
 
 ADR-0017 §7 requires the operation performed on an amended ADR to be recorded
-rather than inferred, and ADR-0025 fixes its form: a qualified `Status` line
-plus a dated header note, with no ratified text rewritten. ADR-0017 §7 wrote its
+rather than inferred, and names the form's origin: "the precedent ADR-0018 set
+for ADR-0016" — a qualified `Status` line plus a dated header note, with no
+ratified text rewritten. ADR-0025's edit to ADR-0020 is the most recent instance
+of that form, not its author; it decides nothing about amendment recording
+generally. This ADR adopts the same form for the same reason ADR-0017 §7 gives:
+"a second ADR inventing a second format is how a vocabulary stops being one."
+ADR-0017 §7 wrote its
 notes in accepted form *because it was ratified before merging*. This ADR merges
 as `Proposed`, so **the edit is not made by this change** — writing "amended by
 ADR-0026" onto ADR-0008 while ADR-0026 is only proposed is the state claim
