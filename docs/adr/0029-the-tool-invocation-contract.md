@@ -561,8 +561,18 @@ fallback is named rather than assumed.** A commit awaited inside a handler is an
 await point like any other, so a second cancellation — a shutdown that stops
 waiting politely — lands mid-`commit_transition` and leaves the step `RUNNING`
 with no record of the classification just computed. So the transition is
-committed under `asyncio.shield`, which is what makes "commits, then re-raises"
-a sequence rather than a hope. Shielding is not a guarantee: the process can
+committed under `asyncio.shield` — **and shielding alone is not enough, which is
+worth spelling out because it is the part that looks done and is not.** `shield`
+protects the inner task, not the `await` of it: a repeat `cancel()` raises in the
+executor immediately while the commit is still in flight, so an executor that
+re-raised there would re-raise before the write landed, which is the failure this
+paragraph exists to remove. The rule is therefore the whole idiom: keep the
+commit as a task, wait on it through the shield, **absorb any further
+cancellations while it is still running**, and re-raise only once it has
+completed. Anything short of that weakens "commits, then re-raises" back to a
+hope.
+
+Even that is not a guarantee: the process can
 still be killed between the classification and the write, and there the answer
 is ADR-0014 §4's unchanged — recovery finds a durable `RUNNING` and records
 `INDETERMINATE`. For a read that is more pessimistic than the `FAILED` this
@@ -1008,7 +1018,9 @@ ADR makes that are not visible in a signature:
   two tests together are what pin the classification to provenance rather than
   to the exception type. A third pins the shield: a store held mid-commit with a
   second cancellation injected must still land the transition before the
-  `CancelledError` leaves the executor.
+  `CancelledError` leaves the executor. That test fails against a bare
+  `await asyncio.shield(...)`, which is the point of writing it: shielding the
+  task without absorbing the repeat cancellation looks correct and is not.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
   `approval_ref` alone after a simulated restart.
