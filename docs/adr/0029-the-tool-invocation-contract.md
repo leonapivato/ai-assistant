@@ -510,6 +510,17 @@ either direction is the thing that ADR refused. A tool that *can* establish it
 did not act may return `FAILED` with `TIMED_OUT`; nothing can make it prove the
 converse.
 
+**`TIMED_OUT` means the seam's own deadline expired, and the seam must
+establish that rather than infer it from an exception type.** An upstream SDK
+raises Python's `TimeoutError` for its own reasons — a connect timeout, a read
+timeout it configures itself — often long inside our budget, and an
+implementation that classified by catching `TimeoutError` would label it
+`TIMED_OUT` and, for a side-effecting tool, escalate it to `INDETERMINATE`: a
+call that failed fast and provably did nothing, recorded as one whose effect is
+unknown, and therefore excluded from retry. So classification keys on *this*
+deadline having expired, which the seam alone knows. Anything else escaping the
+callable is an exception like any other and becomes `INTERNAL` (§3).
+
 **A cancellation delivered from outside propagates as `CancelledError` and the
 seam does not convert it to a result.** Swallowing it would break structured
 concurrency and shutdown, and there is no return path from a task being torn
@@ -916,6 +927,11 @@ ADR makes that are not visible in a signature:
   acquiring a watchdog, or a later reader assuming the deadline is hard; a suite
   that only exercises a cooperative tool would leave both open.
 - **A tool that raises becomes `INTERNAL`**, while a `BaseException` propagates.
+  Two variants, because an implementation can pass the plain case and leak both:
+  a tool returning a value `FrozenJsonValue` rejects — a `set`, a `NaN` — must
+  come back as `INTERNAL` rather than as an escaping `ValidationError`; and a
+  tool raising Python's own `TimeoutError` well inside its deadline must come
+  back as `INTERNAL`, not `TIMED_OUT`.
 - **`retryable` for every member of `ToolFailureKind`**, asserted exhaustively
   rather than sampled, so a member added later cannot default silently.
 - **External cancellation classified on both branches** (§4): a cancelled
