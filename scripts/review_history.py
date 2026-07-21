@@ -444,7 +444,13 @@ def _churn_cell(aggregate: Aggregate) -> str:
     tell a measurement from a floor and from a missing value.
     """
     if aggregate.churn_ratio is None:
-        return "n/a"
+        # Two different absences. `n/a` is a measurement ship made and could not
+        # express as a ratio (no measurable text lines), and it carries a
+        # touched-line count. No churn clause at all is an artifact that recorded
+        # no churn fields — nothing was measured. Rendering both as `n/a` would
+        # claim a binary- or rename-only diff for a change that may have been
+        # neither.
+        return "n/a" if aggregate.churn_lines is not None else "-"
     prefix = _GE if aggregate.churn_is_lower_bound else ""
     return f"{prefix}{aggregate.churn_ratio:.1f}{_TIMES}"
 
@@ -459,7 +465,11 @@ class _Stats:
             be taken over.
         lower_bound: How many measurable churn ratios are understated by a
             rewrite.
-        not_applicable: How many diffs had no measurable text lines.
+        not_applicable: How many diffs ship measured as ``n/a`` — binary- or
+            rename-only, no measurable text lines.
+        no_churn_clause: How many aggregates carried no churn clause at all, so
+            nothing was measured. Distinct from ``n/a``: one is a measurement
+            with no expressible ratio, the other is no measurement.
         rewritten_not_applicable: How many of those ``n/a`` diffs ALSO had their
             history rewritten, so even the touched-line count behind them is a
             floor. Tracked separately because a rewrite and an absent ratio are
@@ -472,6 +482,7 @@ class _Stats:
     lower_bound: int
     not_applicable: int
     rewritten_not_applicable: int
+    no_churn_clause: int
     unshipped: int
 
 
@@ -479,14 +490,16 @@ def summarize(prs: list[ShippedPr]) -> _Stats:
     """Split the PRs into the figures a median may use and the ones it may not."""
     rounds: list[int] = []
     exact: list[float] = []
-    lower = na = na_rewritten = unshipped = 0
+    lower = na = na_rewritten = no_clause = unshipped = 0
     for pr in prs:
         agg = pr.aggregate
         if agg is None:
             unshipped += 1
             continue
         rounds.append(agg.round)
-        if agg.churn_ratio is None:
+        if agg.churn_ratio is None and agg.churn_lines is None:
+            no_clause += 1
+        elif agg.churn_ratio is None:
             na += 1
             # An absent ratio and a rewritten history are independent facts. A
             # diff can be both, and counting it only as `n/a` would silently drop
@@ -502,6 +515,7 @@ def summarize(prs: list[ShippedPr]) -> _Stats:
         lower_bound=lower,
         not_applicable=na,
         rewritten_not_applicable=na_rewritten,
+        no_churn_clause=no_clause,
         unshipped=unshipped,
     )
 
@@ -530,6 +544,12 @@ def _caveat_lines(stats: _Stats) -> list[str]:
                 f"    {stats.rewritten_not_applicable} of those also had history rewritten, "
                 "so even the touched-line count is a floor."
             )
+    if stats.no_churn_clause:
+        lines += [
+            f"  {stats.no_churn_clause} aggregate(s) carry no churn clause at all — an",
+            "    artifact recorded before churn was measured. Shown as `-`: nothing was",
+            "    measured, which is not the same as ship measuring n/a.",
+        ]
     if stats.unshipped:
         lines += [
             f"  {stats.unshipped} merged PR(s) carry no ship comment — merged before the",
