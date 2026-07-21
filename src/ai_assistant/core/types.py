@@ -49,6 +49,32 @@ def _describe(value: object) -> str:
         return "<a value whose repr() failed>"
 
 
+def _canonical_utc(value: object) -> datetime | None:
+    """Rebuild ``value`` as a plain ``datetime`` in UTC, or ``None`` if it is not one.
+
+    Rebuilding rather than returning what ``astimezone`` handed back is what
+    makes "stored as UTC" a property of the stored object instead of a claim it
+    makes about itself. ``datetime.utcoffset()`` is overridable on a *subclass*,
+    so a value can carry ``tzinfo is UTC``, answer zero while being validated,
+    and answer ``+02:00`` afterwards — and Python compares datetimes by
+    ``utcoffset()``, so the validated model would then sort and compare as
+    something other than what it was checked as. A base ``datetime`` with
+    ``timezone.utc`` cannot: its offset comes from an immutable singleton.
+    """
+    if not isinstance(value, datetime) or value.tzinfo is not UTC:
+        return None
+    return datetime(
+        value.year,
+        value.month,
+        value.day,
+        value.hour,
+        value.minute,
+        value.second,
+        value.microsecond,
+        tzinfo=UTC,
+    )
+
+
 def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     """Reject a value with no determinate offset; return the instant in UTC.
 
@@ -86,17 +112,18 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     would then raise ``TypeError`` at the first comparison in a store, far from
     here. Verifying the result costs one comparison and removes the assumption.
 
-    The result must **be a datetime** and carry ``tzinfo is UTC``. Both halves
-    are load-bearing against an overridden ``astimezone``: one returning an
-    object that merely exposes a ``tzinfo`` attribute would otherwise be stored
-    in a field annotated ``datetime``, and one returning ``None`` would leak an
-    ``AttributeError`` from the check itself. Identity rather than a zero
-    ``utcoffset()``, because ``utcoffset()`` is a method on an arbitrary object
-    and need not answer the same way twice — a ``tzinfo`` reporting zero here and
-    ``+02:00`` afterwards would pass an offset test and leave a validated model
-    holding a non-UTC instant. Identity is not merely stricter but exact:
-    ``astimezone(tz)`` sets the result's ``tzinfo`` to the ``tz`` it was given,
-    so every genuine conversion returns ``UTC`` itself.
+    The result must **be a datetime** carrying ``tzinfo is UTC``, and what is
+    stored is a plain ``datetime`` rebuilt from it (:func:`_canonical_utc`).
+    Each part answers a way the check could otherwise be talked out of: a
+    conversion returning an object that merely exposes a ``tzinfo`` attribute
+    would be stored in a field annotated ``datetime``; one returning ``None``
+    would leak an ``AttributeError`` from the check itself; and one returning a
+    subclass that overrides ``utcoffset()`` would answer zero while being
+    validated and ``+02:00`` afterwards. Identity rather than a zero offset
+    because ``utcoffset()`` need not answer the same way twice; identity is also
+    exact rather than merely strict, since ``astimezone(tz)`` sets the result's
+    ``tzinfo`` to the ``tz`` it was given, so every genuine conversion returns
+    ``UTC`` itself.
 
     The failure path is total because the annotation is not: a custom ``tzinfo``
     whose ``utcoffset()`` raises, a value near ``datetime.min``/``max`` at a
@@ -129,16 +156,17 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
         raise ValueError(msg)
     try:
         # Deliberately typed `object`: `astimezone` is *annotated* to return a
-        # datetime and is not obliged to, so the check below has to be a real one
-        # rather than one the type checker optimises away as always-true.
+        # datetime and is not obliged to, so the check in `_canonical_utc` has to
+        # be a real one rather than one the type checker folds away as always-true.
         converted: object = value.astimezone(UTC)
+        canonical = _canonical_utc(converted)
     except Exception as exc:  # incl. OverflowError, which is not a ValueError
         msg = f"{field} has no UTC representation, got {_describe(value)}"
         raise ValueError(msg) from exc
-    if not isinstance(converted, datetime) or converted.tzinfo is not UTC:
+    if canonical is None:
         msg = f"{field} did not convert to UTC, got {_describe(converted)}"
         raise ValueError(msg)
-    return converted
+    return canonical
 
 
 type UtcInstant = Annotated[datetime, AfterValidator(_utc_instant)]

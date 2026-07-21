@@ -265,6 +265,46 @@ def test_a_value_that_cannot_describe_itself_still_yields_a_validation_error() -
         _Instant(when=datetime(2026, 1, 1, tzinfo=_UnreprableOffset()))
 
 
+class _ShiftySubclass(datetime):
+    """Returns *itself* from ``astimezone``, and overrides ``utcoffset`` to lie."""
+
+    lie = timedelta(0)
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return self
+
+    def utcoffset(self) -> timedelta | None:
+        return _ShiftySubclass.lie
+
+
+def test_the_stored_value_is_a_plain_datetime_that_cannot_change_its_offset() -> None:
+    """``tzinfo is UTC`` is necessary but not sufficient — the value can still lie.
+
+    ``datetime.utcoffset()`` is overridable on a subclass, so a value can carry
+    ``tzinfo is UTC``, answer zero while being validated, and answer ``+02:00``
+    afterwards. Python compares datetimes *by* ``utcoffset()``, so the validated
+    model would sort as something other than what was checked. Rebuilding the
+    result as a plain ``datetime`` makes UTC a property of the stored object.
+    """
+    _ShiftySubclass.lie = timedelta(0)
+    try:
+        stored = _Instant(when=_ShiftySubclass(2026, 1, 2, tzinfo=UTC)).when
+        _ShiftySubclass.lie = timedelta(hours=2)
+
+        assert type(stored) is datetime  # not the subclass it arrived as
+        assert stored.utcoffset() == timedelta(0)  # and it stayed UTC
+    finally:
+        _ShiftySubclass.lie = timedelta(0)
+
+
+def test_canonicalisation_preserves_the_instant_exactly() -> None:
+    """Rebuilding must not round or drop precision — microseconds included."""
+    precise = datetime(2026, 6, 1, 12, 34, 56, 987654, tzinfo=timezone(timedelta(hours=-3)))
+
+    assert _Instant(when=precise).when == precise
+    assert _Instant(when=precise).when.microsecond == 987654
+
+
 def test_a_zero_offset_that_is_not_utc_cannot_change_its_mind_later() -> None:
     """Why the result is checked by ``tzinfo is UTC`` and not by a zero offset.
 
