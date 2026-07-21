@@ -783,6 +783,20 @@ rather than rediscovering them.
   rejected call and a re-authorisation is a *different* call with a new
   decision. This is the only outcome an executor must derive from an exception
   rather than from a `ToolResult`, which is precisely why it is written down.
+
+  **"Never retried" needs a mechanism, and the mechanism is that the executor
+  does not schedule one.** ADR-0014 §4 permits `FAILED → RUNNING` while attempts
+  remain, and `StepExecution.error` is an unstructured string, so nothing
+  durable distinguishes this `FAILED` from a retryable one — a generic loop that
+  re-drove failed steps would resubmit the same rejected call forever. So the
+  rule is: **retry is scheduled only from a `ToolResult`, never from an
+  exception.** §5's two conjuncts read `result.failure.kind`, and a raised
+  `ToolBindingError` produces no result to read, so there is nothing for a retry
+  decision to be made from — which is the property to preserve rather than an
+  accident to work around. Widening the tracker to reject the transition was the
+  alternative and is rejected: it would put a tools-specific failure category
+  into ADR-0014's graph, a breaking change to a contract this ADR does not own,
+  to encode a rule the executor can simply not violate.
 - **Failure kind does not survive a restart, and this ADR does not widen
   `StepExecution` to fix it.** `error` is an unstructured `str`, so after a
   restart an executor can read *that* a step failed but not whether it was
@@ -908,7 +922,9 @@ ADR makes that are not visible in a signature:
 - **And the durable state after that rejection** (§8): a claimed step whose
   `invoke` raised `ToolBindingError` ends `FAILED`, not left `RUNNING` and not
   `INDETERMINATE`. Asserting only that the tool was never reached would leave
-  the stranding this rule exists to prevent untested.
+  the stranding this rule exists to prevent untested — and the step must also be
+  shown *not* to be re-driven, since `FAILED` alone is a status ADR-0014 §4 lets
+  a retry leave.
 - **And the order of those checks**, which only a malformed mutation
   distinguishes: `parameters` replaced with a mapping `FrozenJson` would have
   rejected must come back as `ToolBindingError` carrying the `ValidationError`
