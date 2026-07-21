@@ -155,3 +155,70 @@ def test_a_naive_iso_string_is_rejected_on_the_way_in() -> None:
     """
     with pytest.raises(ValidationError, match="when must be timezone-aware"):
         _Instant.model_validate_json('{"when": "2026-01-01T09:00:00"}')
+
+
+class _LyingConversion(datetime):
+    """Aware and well-behaved, until it is asked to convert itself."""
+
+    # Violating `astimezone`'s `Self` return is the whole point of this double:
+    # it is the hostile subclass the validator must not trust.
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return datetime(2026, 1, 1)  # noqa: DTZ001 — returning a naive value is the subject
+
+
+class _NonUtcConversion(datetime):
+    """Converts, but not to UTC."""
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=2)))
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        pytest.param(_LyingConversion(2026, 1, 2, tzinfo=UTC), id="returns-naive"),
+        pytest.param(_NonUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-utc"),
+    ],
+)
+def test_a_conversion_that_does_not_produce_utc_is_rejected(hostile: datetime) -> None:
+    """Re-checking the result is the only step that can check itself.
+
+    ``astimezone`` is overridable, and pydantic does not re-validate what an
+    ``AfterValidator`` returns — so trusting the conversion would let this type
+    certify exactly the naive value it exists to reject, with the ``TypeError``
+    surfacing at the first comparison inside a store instead of here.
+    """
+    assert hostile.utcoffset() == timedelta(0)  # it passes every earlier check
+
+    with pytest.raises(ValidationError, match="when did not convert to UTC"):
+        _Instant(when=hostile)
+
+
+class _UnreprableOffset(tzinfo):
+    """A ``tzinfo`` that raises from ``utcoffset()`` *and* from ``__repr__``."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        msg = "no offset available"
+        raise RuntimeError(msg)
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "hostile"
+
+    def __repr__(self) -> str:
+        msg = "repr is hostile too"
+        raise RuntimeError(msg)
+
+
+def test_a_value_that_cannot_describe_itself_still_yields_a_validation_error() -> None:
+    """The diagnostic must not be able to destroy the diagnosis.
+
+    ``datetime.__repr__`` embeds ``repr(tzinfo)``, so interpolating the offending
+    value with ``!r`` lets a hostile ``tzinfo`` raise from *inside* the ``except``
+    block that was reporting it — replacing the field-naming ``ValueError`` with
+    whatever ``__repr__`` threw.
+    """
+    with pytest.raises(ValidationError, match="when must be timezone-aware"):
+        _Instant(when=datetime(2026, 1, 1, tzinfo=_UnreprableOffset()))
