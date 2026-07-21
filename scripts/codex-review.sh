@@ -649,10 +649,12 @@ _write_snapshot() {
     # already), so the verdict is not folded into the last finding block.
     awk 'NF{last=NR} {l[NR]=$0} END{for(i=1;i<=NR;i++) if(i!=last) print l[i]}' \
         "$out" >"${work}/body"
-    # Split into finding blocks at each ranked list item ("1.", "2)", ...). Text
-    # before the first item (a preamble) is discarded — findings only.
+    # Split into finding blocks at each TOP-LEVEL ranked list item ("1.", "2)",
+    # …) — anchored at column 0, so an indented numbered line (a finding's own
+    # reproduction steps) stays part of its finding rather than being mistaken for
+    # a new one. Text before the first item (a preamble) is discarded.
     awk -v dir="$work" '
-        /^[[:space:]]*[0-9]+[.)]/ { n++; f=sprintf("%s/cur-%04d", dir, n) }
+        /^[0-9]+[.)]/ { n++; f=sprintf("%s/cur-%04d", dir, n) }
         n>0 { print >> f }
     ' "${work}/body"
     # A review the reviewer did not format as a ranked list yields no blocks

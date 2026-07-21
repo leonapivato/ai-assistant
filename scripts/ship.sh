@@ -278,7 +278,9 @@ contains_secret() {
 # ordinary review, fail-closed. $1 snapshot path, $2 persona.
 render_dispositions() {
     local snap="$1" persona="$2"
-    local budget="${CODEX_SHIP_DISPOSITION_BUDGET:-20000}"
+    # Budget derived from the comment's remaining capacity by the caller; the env
+    # override (default 20000) is the fallback and the cap.
+    local budget="${disp_budget:-${CODEX_SHIP_DISPOSITION_BUDGET:-20000}}"
     local total used=0 hidden=0
     total="$(grep -c '<!-- finding id=' "$snap" || true)"
     [[ "${total:-0}" -eq 0 ]] && return 0
@@ -501,6 +503,28 @@ for a in "${artifacts[@]}"; do
     [[ -n "$snap" ]] && snapshot["$a_persona"]="$snap"
 done
 
+# The disposition budget is derived from the comment's ACTUAL remaining capacity,
+# not a fixed allowance — otherwise a large terminal artifact plus a small
+# disposition section could together exceed GitHub's limit and break a ship that
+# would have succeeded without dispositions (ADR-0025 §4: the cumulative budget
+# must not break the existing ship path). Sum the artifact sizes, subtract a
+# margin for the aggregate line and the details wrappers, and split what remains
+# across the personas that have a snapshot; the env override only lowers it.
+max_bytes=60000
+artifacts_bytes=0
+for a in "${artifacts[@]}"; do
+    artifacts_bytes=$((artifacts_bytes + $(wc -c <"$a")))
+done
+num_snap=${#snapshot[@]}
+disp_budget=0
+if [[ "$num_snap" -gt 0 ]]; then
+    remaining=$((max_bytes - artifacts_bytes - 4000))
+    [[ "$remaining" -lt 0 ]] && remaining=0
+    disp_budget=$((remaining / num_snap))
+    cap="${CODEX_SHIP_DISPOSITION_BUDGET:-20000}"
+    [[ "$disp_budget" -gt "$cap" ]] && disp_budget="$cap"
+fi
+
 num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
@@ -611,7 +635,8 @@ agg_binary_churn="$(agg_field binary_churn)"
 # cutting at a byte boundary drops the tail, which is exactly where the ranked
 # findings and the verdict sit. A silently-shortened review posted as a
 # successful ship is worse than no comment, so an oversized report fails closed.
-max_bytes=60000
+# This stays the backstop; the disposition budget above keeps dispositions from
+# being what trips it (max_bytes was set there).
 if [[ "$(wc -c <"$body")" -gt "$max_bytes" ]]; then
     die "the review report is over ${max_bytes} bytes and cannot be posted intact
      truncating it would risk dropping the findings and the verdict

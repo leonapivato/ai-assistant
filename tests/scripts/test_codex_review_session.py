@@ -279,3 +279,24 @@ def test_a_finding_quoting_the_frame_marker_is_not_truncated(tmp_path: Path) -> 
     assert "GROUNDING_TAIL" in text
     # The quoted marker was neutralised, not left as a literal terminator.
     assert "&lt;!-- /finding --&gt;" in text
+
+
+def test_nested_numbered_steps_do_not_split_a_finding(tmp_path: Path) -> None:
+    """Indented reproduction steps stay part of their finding, not new findings."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    review = (
+        "1. **major** it fails, reproduce with:\n"
+        "    1. start the service\n"
+        "    2. send a request\n"
+        "   and it crashes.\n"
+        "BLOCK\n"
+    )
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW=review)
+
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    snap = next(iter((repo / ".review" / "dispositions").glob(f"*-adversarial-{tree}.md")))
+    text = snap.read_text()
+    # Exactly one finding — the nested "1." / "2." steps did not spawn more.
+    assert text.count("<!-- finding id=") == 1
+    assert "send a request" in text
