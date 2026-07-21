@@ -1,10 +1,15 @@
 # 15. Simplify the agent workflow: local review, clone per agent, issues over files
 
-- Status: Accepted, partially superseded by ADR-0020
+- Status: Accepted, partially superseded by ADR-0020 and ADR-0025
 - Date: 2026-07-19
 - Superseded: 2026-07-20 by ADR-0020 — §1's freshness clause ("refuses unless
   one exists for the exact commit the PR head is on") is replaced by an anchor on
   the reviewed content rather than the commit. The rest of §1 and §§2–5 stand.
+- Superseded: 2026-07-20 by ADR-0025 (the one-shot review model) — §1 ran each
+  review round as an independent cold `codex exec` with no memory across rounds;
+  ADR-0025 replaces it with one persistent session per review loop, resumed each
+  round. Local-only execution, the `.review/` artifact, ship-not-push, and the
+  author owning the loop all stand.
 - Supersedes: ADR-0012 (Codex review in CI)
 - Amends: ADR-0010 §"working on GitHub" (review reporting), ADR-0003
   ("Coordinating parallel work")

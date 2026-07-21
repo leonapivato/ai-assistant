@@ -1,7 +1,11 @@
 # 20. Making the review loop terminate
 
-- Status: Accepted
+- Status: Accepted, §3 amended by ADR-0025
 - Date: 2026-07-20
+- Amended: 2026-07-20 by ADR-0025 — §3's content anchor now pins the *terminal
+  verdict* of a review conversation rather than the sole output of a one-shot
+  `codex exec`. The acceptance rule (recorded base and tree both match the PR's
+  merge base and HEAD tree) is unchanged.
 - Supersedes: ADR-0015 §1's freshness clause — that `just ship` "refuses unless
   [a review artifact] exists for the exact commit the PR head is on". §3 below
   replaces the commit with the reviewed *content* as the anchor. The rest of
