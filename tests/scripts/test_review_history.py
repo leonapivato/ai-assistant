@@ -60,10 +60,16 @@ def _comment(body: str, author: str = "owner") -> dict[str, object]:
     return {"body": body, "author": {"login": author}, "authorAssociation": "OWNER"}
 
 
-def _pr(number: int, title: str, comments: list[str | dict[str, object]]) -> dict[str, object]:
+def _pr(
+    number: int,
+    title: str,
+    comments: list[str | dict[str, object]],
+    merged_at: str = "",
+) -> dict[str, object]:
     return {
         "number": number,
         "title": title,
+        "mergedAt": merged_at,
         "comments": [_comment(c) if isinstance(c, str) else c for c in comments],
     }
 
@@ -167,6 +173,16 @@ def test_a_complete_forgery_from_another_account_is_ignored(impostor: str) -> No
     agg = rh.aggregate_from_comments(comments, "owner")
     assert agg is not None
     assert agg.round == 3  # the genuine one, not the later forgery
+
+
+def test_a_terminal_ship_comment_without_a_summary_does_not_fall_back() -> None:
+    """The last ship comment is the terminal record, summary or not.
+
+    Falling through to an earlier one would report a superseded round as this
+    PR's terminal figure — a wrong number, worse than the absence.
+    """
+    bodies = [_c(_ship("a" * 40, _EXACT)), _c(_ship("b" * 40, None))]
+    assert rh.aggregate_from_comments(bodies, "owner") is None
 
 
 def test_the_last_ship_comment_wins() -> None:
@@ -288,7 +304,11 @@ def test_rows_distinguish_lower_bound_absent_and_missing(tmp_path: Path) -> None
         _pr(3, "feat: c", [_ship("3" * 40, _NA)]),
         _pr(4, "docs: d", ["no ship here"]),
     ]
-    rows = {line.split()[0]: line for line in _run(payload, tmp_path).splitlines() if "#" in line}
+    rows = {
+        line.split()[0]: line
+        for line in _run(payload, tmp_path).splitlines()
+        if line.startswith("  #")
+    }
     assert f"1.1{_TIMES}" in rows["#1"]
     assert _GE not in rows["#1"]
     assert f"{_GE}1.0{_TIMES}" in rows["#2"]
@@ -323,6 +343,44 @@ def test_an_empty_window_renders_without_statistics(tmp_path: Path) -> None:
     out = _run([], tmp_path)
     assert "no aggregate to report" in out
     assert "outliers" not in out
+
+
+def test_the_window_is_ordered_by_merge_time_not_creation(tmp_path: Path) -> None:
+    """gh orders by creation, so an old PR merged recently must still make the cut."""
+    payload = [
+        _pr(50, "fix: newly created, merged first", [_ship("5" * 40, _EXACT)], "2026-01-01T00:00Z"),
+        _pr(40, "fix: also old", [_ship("4" * 40, _EXACT)], "2026-01-02T00:00Z"),
+        _pr(3, "fix: old PR, merged last", [_ship("3" * 40, _EXACT)], "2026-06-01T00:00Z"),
+    ]
+    rows = [
+        line
+        for line in _run(payload, tmp_path, "--limit", "1").splitlines()
+        if line.startswith("  #")
+    ]
+    assert len(rows) == 1
+    assert "#3" in rows[0]
+
+
+def test_a_payload_without_merge_times_keeps_its_order(tmp_path: Path) -> None:
+    payload = [_pr(n, "fix: x", [_ship(str(n) * 40, _EXACT)]) for n in (9, 4, 7)]
+    numbers = [
+        line.split()[0] for line in _run(payload, tmp_path).splitlines() if line.startswith("  #")
+    ]
+    assert numbers == ["#9", "#4", "#7"]
+
+
+def test_an_n_a_churn_that_was_also_rewritten_keeps_both_facts(tmp_path: Path) -> None:
+    payload = [_pr(1, "fix: a", [_ship("1" * 40, _NA_LOWER)])]
+    out = _run(payload, tmp_path)
+    assert "1 diff(s) report churn n/a" in out
+    assert "1 of those also had history rewritten" in out
+
+
+def test_a_plain_n_a_churn_claims_no_rewrite(tmp_path: Path) -> None:
+    payload = [_pr(1, "fix: a", [_ship("1" * 40, _NA)])]
+    out = _run(payload, tmp_path)
+    assert "1 diff(s) report churn n/a" in out
+    assert "also had history rewritten" not in out
 
 
 def test_limit_applies_to_a_saved_payload_too(tmp_path: Path) -> None:
