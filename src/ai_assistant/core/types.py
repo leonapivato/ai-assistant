@@ -49,6 +49,10 @@ def _describe(value: object) -> str:
         return "<a value whose repr() failed>"
 
 
+#: What a value expressed in UTC must report as its offset.
+_NO_OFFSET = timedelta(0)
+
+
 def _canonical_utc(value: object) -> datetime | None:
     """Rebuild ``value`` as a plain ``datetime`` in UTC, or ``None`` if it is not one.
 
@@ -60,8 +64,19 @@ def _canonical_utc(value: object) -> datetime | None:
     ``utcoffset()``, so the validated model would then sort and compare as
     something other than what it was checked as. A base ``datetime`` with
     ``timezone.utc`` cannot: its offset comes from an immutable singleton.
+
+    The offset is re-read **here**, immediately before the components are
+    copied, rather than relying on the earlier check in :func:`_utc_instant`.
+    Wall-clock components only denote an instant *together with* an offset, so
+    reading them while the value reports something other than zero would stamp
+    one instant's digits with another instant's label — which is precisely what
+    a value that flips its overridden ``utcoffset()`` during ``astimezone`` and
+    returns itself achieves. Checking at the moment of the copy pins the two
+    together.
     """
     if not isinstance(value, datetime) or value.tzinfo is not UTC:
+        return None
+    if value.utcoffset() != _NO_OFFSET:
         return None
     return datetime(
         value.year,

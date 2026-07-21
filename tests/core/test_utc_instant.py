@@ -297,6 +297,36 @@ def test_the_stored_value_is_a_plain_datetime_that_cannot_change_its_offset() ->
         _ShiftySubclass.lie = timedelta(0)
 
 
+class _FlipOnConvert(datetime):
+    """Flips its overridden offset *during* ``astimezone``, then returns itself."""
+
+    lie = timedelta(0)
+
+    def utcoffset(self) -> timedelta | None:
+        return _FlipOnConvert.lie
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        _FlipOnConvert.lie = timedelta(hours=2)
+        return self
+
+
+def test_a_value_that_flips_its_offset_during_conversion_is_rejected() -> None:
+    """Wall-clock digits denote an instant only together with an offset.
+
+    This value passes the opening awareness check at zero, changes its offset
+    while converting, and returns itself still carrying ``tzinfo is UTC``.
+    Copying its components at that point would stamp ``09:00`` as ``09:00Z``
+    when the value was, on its own account, ``07:00Z`` — so the offset is
+    re-read at the moment of the copy, and this is refused instead.
+    """
+    _FlipOnConvert.lie = timedelta(0)
+    try:
+        with pytest.raises(ValidationError, match="when did not convert to UTC"):
+            _Instant(when=_FlipOnConvert(2026, 1, 2, 9, 0, tzinfo=UTC))
+    finally:
+        _FlipOnConvert.lie = timedelta(0)
+
+
 def test_canonicalisation_preserves_the_instant_exactly() -> None:
     """Rebuilding must not round or drop precision — microseconds included."""
     precise = datetime(2026, 6, 1, 12, 34, 56, 987654, tzinfo=timezone(timedelta(hours=-3)))
