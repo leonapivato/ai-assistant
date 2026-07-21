@@ -106,7 +106,16 @@ provide. On each reading the wrapper:
    `tzinfo` that is set but indeterminate. That is ADR-0023 §5's spelling of
    "aware", and issue #36's rule, applied at the producer;
 3. **rejects** a reading outside §3's range;
-4. **returns** `value.astimezone(UTC)`.
+4. converts with `value.astimezone(UTC)` and **re-checks the converted value**
+   before returning it — a `datetime` whose `utcoffset()` is exactly zero and
+   which is still in range.
+
+Step 4 checks its own output, which is the only step that can. `astimezone` is
+overridable: a `datetime` subclass can satisfy steps 1–3 and still return a
+naive or non-UTC value from it, and the wrapper would then certify precisely the
+value this ADR exists to stop, on the `model_copy` paths that have no validator
+behind them. Validating the result rather than trusting the conversion costs one
+more comparison and removes the assumption.
 
 **The guard is total over the reading, because the annotation is not.** §1 is
 explicit that `Clock` enforces nothing at runtime, so `now=lambda: None` is a
