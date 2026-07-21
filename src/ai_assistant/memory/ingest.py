@@ -41,6 +41,32 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _canonical_utc(value: object) -> datetime | None:
+    """Rebuild ``value`` as a plain ``datetime`` in UTC, or ``None`` if it is not one.
+
+    The clock-side twin of ``core``'s own check, and separate from it because
+    that one is private to ``core.types`` and reached only through a pydantic
+    validator this write never touches. ``datetime.utcoffset()`` is overridable
+    on a *subclass*, so a reading can carry ``tzinfo is UTC``, answer zero while
+    it is checked, and answer ``+02:00`` once it is stored. Rebuilding as a base
+    ``datetime`` makes the value's UTC-ness a fact about it rather than a claim
+    it keeps making. The clock seams collapse into one guard when ADR-0026 lands
+    (#169).
+    """
+    if not isinstance(value, datetime) or value.tzinfo is not UTC:
+        return None
+    return datetime(
+        value.year,
+        value.month,
+        value.day,
+        value.hour,
+        value.minute,
+        value.second,
+        value.microsecond,
+        tzinfo=UTC,
+    )
+
+
 def _describe(value: object) -> str:
     """``repr`` of an untrusted value, for an error message, never raising.
 
@@ -220,12 +246,13 @@ class MemoryIngestor:
             # `object` for the same reason `core`'s `_utc_instant` does it:
             # `astimezone` is annotated to return a datetime and need not.
             converted: object = now.astimezone(UTC)
+            canonical = _canonical_utc(converted)
         except Exception as exc:  # incl. OverflowError near datetime.min/max
             raise MemoryStoreError(unusable) from exc
-        if not isinstance(converted, datetime) or converted.tzinfo is not UTC:
+        if canonical is None:
             msg = f"the injected clock did not convert to UTC: {_describe(converted)}"
             raise MemoryStoreError(msg)
-        return converted
+        return canonical
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""
