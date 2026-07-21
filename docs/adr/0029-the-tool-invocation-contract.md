@@ -307,14 +307,32 @@ class ToolFailureKind(StrEnum):
 class ToolFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     kind: ToolFailureKind
-    message: str                    # must contain visible text; Tier 2 only
+    message: str                    # Tier 2 only
+
+    @field_validator("message")
+    @classmethod
+    def _message_is_present(cls, value: str) -> str:
+        """Reject a message with nothing visible in it, returning it stripped."""
 
 class ToolResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     outcome: ToolOutcome
-    output: FrozenJsonValue = None       # only meaningful when SUCCEEDED
-    failure: ToolFailure | None = None   # required unless SUCCEEDED, forbidden when SUCCEEDED
+    output: FrozenJsonValue = None
+    failure: ToolFailure | None = None
+
+    @model_validator(mode="after")
+    def _outcome_fields_match(self) -> ToolResult:
+        """Refuse a result that half-says two things.
+
+        SUCCEEDED: `failure` must be None.
+        FAILED, INDETERMINATE: `failure` is required, and `output` must be None.
+        """
 ```
+
+Annotations do not express those two rules, and a comment does not enforce them,
+so they are written as a validator here rather than described beside the fields —
+the shape `StepExecution._outcome_fields_match_status` already has for the same
+question one layer up.
 
 **The cross-field invariants are validated, not conventional**, because every
 one of them has a wrong state that reads as plausible:
@@ -405,8 +423,15 @@ type is a model rather than a bare tuple.
 
 ### 4. Timeouts and cancellation: the seam owns the deadline
 
-**Every invocation is bounded. `timeout` is a required keyword-only argument
-with no default, so the contract has no spelling for "forever".** A default
+**Every invocation carries a deadline, and enforcing it is cooperative.**
+`timeout` is a required keyword-only argument with no default, so the contract
+has no spelling for "forever" — but what it buys is that the seam stops waiting,
+not that the tool stops working. Python has no way to interrupt a coroutine that
+declines to be cancelled, so any stronger claim would be false, and the guarantee
+is stated in the weaker form deliberately (the third bullet at the end of this
+section is the case it excludes).
+
+A default
 would be `core` choosing a policy; `None` would be a documented route to an
 unbounded call, which is the shape ADR-0016 §3 refused when it declined a
 `requires_permission` predicate that could return `False`.
@@ -838,6 +863,12 @@ ADR makes that are not visible in a signature:
   read-only or `NATURAL` one yields `FAILED`. And that a `timeout` which is
   zero, negative, or not a `timedelta` at all raises before the tool's coroutine
   is created.
+- **The cooperative limit, deterministically** (§4): a fake whose `finally`
+  suppresses the injected cancellation and awaits an event the test controls
+  must be shown to keep `invoke` waiting past its deadline, and the test then
+  releases it. Pinning the *limit* is what stops an implementation quietly
+  acquiring a watchdog, or a later reader assuming the deadline is hard; a suite
+  that only exercises a cooperative tool would leave both open.
 - **A tool that raises becomes `INTERNAL`**, while a `BaseException` propagates.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
