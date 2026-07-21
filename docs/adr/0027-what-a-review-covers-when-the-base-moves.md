@@ -250,10 +250,14 @@ better than an invalidation does.
 
 When (b) accepts an artifact, `ship` **must** publish the drift in the comment
 it posts: the base the review was taken against, the base being shipped on, and
-the files the base move touched, bounded in rendering the way ADR-0025 §4 bounds
-the disposition record. Failing to render it fails the ship; an artifact
-accepted under (b) whose drift cannot be published is refused, which is the
-fail-closed direction.
+the files the base move touched — **the whole set, never a bounded rendering of
+it.** ADR-0025 §4 bounds the *disposition* record because a local reference
+preserves its audit value; here the file set is not context for a decision, it
+*is* the decision, so an omitted tail is exactly where the contradicting
+`docs/adr/` entry hides. A drift list that does not fit whatever budget `ship`
+enforces therefore makes path (b) unavailable, on the same footing as an
+unhashable identity: the artifact falls back to (a) and the moved base costs its
+round. Truncating and shipping is the one outcome §4 must not have.
 
 This is the substantive difference from the interim operating rule, not a
 formality. §3's floor is mechanical and sound; the `docs/adr/` residual is
@@ -453,8 +457,9 @@ the driver alike — changed, deleted, renamed *out* of the floor and renamed
 an *unmoved* base whose reviewed edit has been relocated between two identical
 regions — same identity, different tree, refused by (a) because (b) requires a
 proper ancestor; a rename-only and a mode-only diff rebased onto a base that
-changed the renamed file's content, which §2 measured as producing an identical identity;
-and a drift record that cannot be rendered (§4). Every one of those must refuse.
+changed the renamed file's content, which §2 measured as producing an identical
+identity; and a drift list that does not fit the publishing budget, which must
+refuse rather than truncate (§4). Every one of those must refuse.
 An implementation that satisfies only the #118 cases would accept several of
 them.
 
