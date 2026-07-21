@@ -300,3 +300,16 @@ def test_nested_numbered_steps_do_not_split_a_finding(tmp_path: Path) -> None:
     # Exactly one finding — the nested "1." / "2." steps did not spawn more.
     assert text.count("<!-- finding id=") == 1
     assert "send a request" in text
+
+
+def test_slightly_indented_top_level_findings_still_split(tmp_path: Path) -> None:
+    """Markdown treats 0-3 leading spaces as top-level, so such a list splits."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    review = "  1. **major** first claim\n  2. **minor** second claim\nBLOCK\n"
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW=review)
+
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    snap = next(iter((repo / ".review" / "dispositions").glob(f"*-adversarial-{tree}.md")))
+    text = snap.read_text()
+    assert text.count("<!-- finding id=") == 2
