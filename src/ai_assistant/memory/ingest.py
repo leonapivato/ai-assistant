@@ -15,7 +15,7 @@ concrete store or policy is wired in.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import MemoryStoreError
@@ -28,7 +28,6 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import timedelta
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
@@ -41,6 +40,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: What a value expressed in UTC must report as its offset.
+_NO_OFFSET = timedelta(0)
+
+
 def _canonical_utc(value: object) -> datetime | None:
     """Rebuild ``value`` as a plain ``datetime`` in UTC, or ``None`` if it is not one.
 
@@ -50,10 +53,13 @@ def _canonical_utc(value: object) -> datetime | None:
     on a *subclass*, so a reading can carry ``tzinfo is UTC``, answer zero while
     it is checked, and answer ``+02:00`` once it is stored. Rebuilding as a base
     ``datetime`` makes the value's UTC-ness a fact about it rather than a claim
-    it keeps making. The clock seams collapse into one guard when ADR-0026 lands
-    (#169).
+    it keeps making. The offset is re-read immediately before the components are
+    copied, since those digits only denote an instant together with an offset.
+    The clock seams collapse into one guard when ADR-0026 lands (#169).
     """
     if not isinstance(value, datetime) or value.tzinfo is not UTC:
+        return None
+    if value.utcoffset() != _NO_OFFSET:
         return None
     return datetime(
         value.year,
