@@ -13,8 +13,8 @@
 
 `core/types.py` holds thirteen datetime fields. Ten run through a field
 validator that does two things at once: it attributes UTC to a *naive* value,
-and (usually) converts an *aware* value to UTC — eight validators, at lines 128,
-305, 349, 552, 600, 821, 884, 999.
+and (usually) converts an *aware* value to UTC — eight validators, whose
+attributing lines are 127, 303, 348, 550, 598, 819, 882, 999.
 
 **Three have no validator at all.** `Provenance.last_updated`,
 `EpisodicMemory.occurred_at` and `SemanticMemory.valid_until` accept a naive or
@@ -41,7 +41,7 @@ unchanged. "Normalised to UTC" is already two behaviours wearing one name.
 
 **The validator is not the only way a timestamp is written.**
 `model_copy(update=...)` does not re-run validators, and the codebase
-half-knows it: `orchestration/loop.py:396` normalises its injected clock before
+half-knows it: `orchestration/loop.py:407` normalises its injected clock before
 installing `expires_at` this way, while `memory/ingest.py:143` runs the *same*
 write with no such guard. So naive values circulate not from callers passing
 them to constructors — ruff's `DTZ` rules make that hard (`CONTRIBUTING.md` →
@@ -188,8 +188,8 @@ awareness and naive-handling stand verbatim.
 
 ADR-0019 decides what that means for statuses: its "Relationship to ADR-0003"
 holds that the grounds for touching an accepted ADR are amendment or
-supersession, and a complementary decision "references the old ADR one-way ...
-without touching it". So the field relationships edit no status — including
+supersession, and that for a complementary decision "the reference runs one
+way" — the older ADR is not edited to point back. So the field relationships edit no status — including
 ADR-0021's; an earlier draft called this an *extension* and edited it, the error
 ADR-0019 names, since nothing in §4 is withdrawn. Correcting §4's false "like
 every other instant" rationale is forward commentary, not a decision change, so
@@ -245,7 +245,7 @@ producers first, then #130 tightens the fields they feed.
   never had. That is a breaking change to `core`, and it is **not** simply
   deletion.
 - **Injected clocks feed `core` and are ADR-0026's, not this ADR's.** They come
-  in two shapes: some *attribute* UTC to a naive reading (`loop.py:396`,
+  in two shapes: some *attribute* UTC to a naive reading (`loop.py:407`,
   `memory/store.py:67`, `sqlite_store.py:_now_epoch`, `testing/memory.py:54`,
   `context/sources.py:107`), which is §3's fabrication relocated to a subsystem;
   others are *unguarded bypasses* that pass a naive value straight through
