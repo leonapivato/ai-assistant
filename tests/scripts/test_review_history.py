@@ -55,9 +55,9 @@ def _ship(sha: str, summary: str | None) -> str:
     return "\r\n".join(lines)
 
 
-def _comment(body: str, author: str = "owner", association: str = "OWNER") -> dict[str, object]:
+def _comment(body: str, author: str = "owner") -> dict[str, object]:
     """One comment as `gh pr list --json comments` returns it."""
-    return {"body": body, "author": {"login": author}, "authorAssociation": association}
+    return {"body": body, "author": {"login": author}, "authorAssociation": "OWNER"}
 
 
 def _pr(number: int, title: str, comments: list[str | dict[str, object]]) -> dict[str, object]:
@@ -87,7 +87,7 @@ def _run(payload: list[dict[str, object]], tmp_path: Path, *args: str) -> str:
     saved = tmp_path / "prs.json"
     saved.write_text(json.dumps(payload), encoding="utf-8")
     result = subprocess.run(  # noqa: S603  # fixed interpreter + in-repo script
-        [sys.executable, str(_SCRIPT), "--from-json", str(saved), *args],
+        [sys.executable, str(_SCRIPT), "--from-json", str(saved), "--ship-author", "owner", *args],
         capture_output=True,
         text=True,
         check=True,
@@ -144,53 +144,75 @@ def test_an_aggregate_without_a_churn_clause_still_parses() -> None:
 # --- which comment counts ----------------------------------------------------
 
 
-def _c(body: str, author: str = "owner", association: str = "OWNER") -> object:
-    return rh.Comment(body=body, author=author, association=association)
+def _c(body: str, author: str = "owner") -> object:
+    return rh.Comment(body=body, author=author)
 
 
 def test_a_quoted_marker_without_the_header_is_not_a_ship_comment() -> None:
     forged = "<!-- ship:66f455957a6c00b227013b5b06cd2324f11d4472 -->\r\nsee above\r\n"
-    assert rh.aggregate_from_comments([_c(forged)]) is None
+    assert rh.aggregate_from_comments([_c(forged)], "owner") is None
 
 
-def test_a_complete_forgery_from_an_untrusted_author_is_ignored() -> None:
-    """A drive-by commenter can quote the marker, header and a summary verbatim."""
+@pytest.mark.parametrize("impostor", ["stranger", "read-only-collaborator", "org-member"])
+def test_a_complete_forgery_from_another_account_is_ignored(impostor: str) -> None:
+    """Any account can quote the marker, header and a summary verbatim.
+
+    A GitHub association is a relationship to the repository, not write access —
+    a read-only COLLABORATOR or an org MEMBER can post a comment too. Only the
+    ship account's own login is accepted, so none of them can displace the
+    genuine terminal aggregate.
+    """
     forged = _ship("f" * 40, "round 999 · 1 lines net · churn 9.9x (10 touched)")
-    comments = [_c(_ship("a" * 40, _EXACT)), _c(forged, "stranger", "NONE")]
-    agg = rh.aggregate_from_comments(comments)
+    comments = [_c(_ship("a" * 40, _EXACT)), _c(forged, impostor)]
+    agg = rh.aggregate_from_comments(comments, "owner")
     assert agg is not None
     assert agg.round == 3  # the genuine one, not the later forgery
 
 
-def test_ship_author_narrows_to_one_login() -> None:
-    comments = [_c(_ship("a" * 40, _EXACT)), _c(_ship("b" * 40, _LOWER), "other", "COLLABORATOR")]
-    # Without a pin, both collaborators' comments count and the last wins.
-    unpinned = rh.aggregate_from_comments(comments)
-    assert unpinned is not None
-    assert unpinned.round == 29
-    pinned = rh.aggregate_from_comments(comments, "owner")
-    assert pinned is not None
-    assert pinned.round == 3
-
-
 def test_the_last_ship_comment_wins() -> None:
     bodies = [_c(_ship("a" * 40, _EXACT)), _c("unrelated chatter"), _c(_ship("b" * 40, _LOWER))]
-    agg = rh.aggregate_from_comments(bodies)
+    agg = rh.aggregate_from_comments(bodies, "owner")
     assert agg is not None
     assert agg.round == 29
 
 
 def test_a_pr_with_no_ship_comment_has_no_aggregate() -> None:
-    prs = rh.parse_pull_requests([_pr(90, "docs: something", ["just a review note"])])
+    prs = rh.parse_pull_requests([_pr(90, "docs: something", ["just a review note"])], "owner")
     assert prs[0].aggregate is None
     assert prs[0].kind == "docs"
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ({"title": "x", "comments": []}, "no 'number'"),
+        ({"number": "not-a-number"}, "not an integer"),
+        ({"number": 1, "comments": {}}, "'comments' is not a list"),
+        ("a string", "expected each pull request"),
+    ],
+)
+def test_every_malformed_entry_raises_value_error(entry: object, expected: str) -> None:
+    """The documented ValueError, never a bare KeyError or TypeError from inside."""
+    with pytest.raises(ValueError, match=expected):
+        rh.parse_pull_requests([entry], "owner")
+
+
+def test_a_full_page_of_comments_is_flagged_as_possibly_truncated(tmp_path: Path) -> None:
+    filler = [_comment("chatter") for _ in range(rh._COMMENT_PAGE - 1)]
+    payload = [
+        _pr(1, "fix: a", [*filler, _comment(_ship("1" * 40, _EXACT))]),
+        _pr(2, "fix: b", [_ship("2" * 40, _EXACT)]),
+    ]
+    out = _run(payload, tmp_path)
+    assert "comment list may be truncated on #1" in out
+    assert "#2" not in out.split("truncated on")[1]
 
 
 def test_a_malformed_payload_is_reported_not_crashed(tmp_path: Path) -> None:
     saved = tmp_path / "prs.json"
     saved.write_text('{"not": "a list"}', encoding="utf-8")
     result = subprocess.run(  # noqa: S603  # fixed interpreter + in-repo script
-        [sys.executable, str(_SCRIPT), "--from-json", str(saved)],
+        [sys.executable, str(_SCRIPT), "--from-json", str(saved), "--ship-author", "owner"],
         capture_output=True,
         text=True,
         check=False,
@@ -199,11 +221,33 @@ def test_a_malformed_payload_is_reported_not_crashed(tmp_path: Path) -> None:
     assert "expected a JSON list" in result.stderr
 
 
+def test_from_json_without_a_ship_author_is_refused(tmp_path: Path) -> None:
+    saved = tmp_path / "prs.json"
+    saved.write_text("[]", encoding="utf-8")
+    result = subprocess.run(  # noqa: S603  # fixed interpreter + in-repo script
+        [sys.executable, str(_SCRIPT), "--from-json", str(saved)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "--from-json needs --ship-author" in result.stderr
+
+
 def test_a_bad_limit_is_rejected(tmp_path: Path) -> None:
     saved = tmp_path / "prs.json"
     saved.write_text("[]", encoding="utf-8")
     result = subprocess.run(  # noqa: S603  # fixed interpreter + in-repo script
-        [sys.executable, str(_SCRIPT), "--from-json", str(saved), "--limit", "0"],
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--from-json",
+            str(saved),
+            "--ship-author",
+            "o",
+            "--limit",
+            "0",
+        ],
         capture_output=True,
         text=True,
         check=False,
