@@ -128,6 +128,22 @@ with two identical regions, moving the reviewed edit from one to the other
 leaves the identity intact and the tree changed, and (a) is what refuses it.
 Where the base has not moved, (a) governs and its tree check is the whole test.
 
+**The residual, stated rather than engineered away: the identity knows content,
+not location.** Ignoring hunk offsets is the first property, so on a moved base
+an identity cannot distinguish the reviewed hunk from a byte-identical
+application of it elsewhere in the same file. Constructing the failure takes two
+regions whose bodies *and* surrounding context are identical, a base move that
+reorders them, and a rebase resolution that lands the hunk in the other one;
+the reviewer would then have read the right text at the wrong place. This is
+**not** repaired by narrowing (b) to base moves that avoid the diff's own files:
+that is path disjointness returning under another name, it forfeits the
+same-file off-hunk case that is the decision's main benefit, and it would still
+not be sound. It is repaired, if it ever needs to be, by an identity that
+carries location — which costs the first property and is the trade §2 already
+declines. What holds meanwhile is §4: a base move inside a file the diff touches
+is exactly the kind that appears in the published drift record, in front of the
+human at merge.
+
 **An entry with nothing to hash makes path (b) unavailable.** What `patch-id`
 hashes per file entry depends on whether the entry has hunks, and the three
 cases were measured rather than reasoned about — each check is two commands and
@@ -413,8 +429,9 @@ nothing but persona `<details>` blocks would see one more block.
 would have caught — the `docs/adr/` residual materializing — which argues for
 promoting the contradicted-ADR case into the floor, or for a cheap
 contradiction check rather than a path test. Or if the patch identity is
-observed accepting content it should not have, which argues the mechanism, not
-the split in §1.
+observed accepting content it should not have — including §2's relocation
+residual, whose remedy is a location-carrying identity, not a narrower (b) —
+which argues the mechanism, not the split in §1.
 
 **Follow-on.** Implementation is a separate PR — a review-contract decision
 ratified before anything builds on it, which is the ratify-before-build
@@ -435,8 +452,8 @@ the driver alike — changed, deleted, renamed *out* of the floor and renamed
 *into* it (§3); a recorded base that is not an ancestor of the merge base, and
 an *unmoved* base whose reviewed edit has been relocated between two identical
 regions — same identity, different tree, refused by (a) because (b) requires a
-proper ancestor; a rename-only and a mode-only diff rebased onto a base that changed the
-renamed file's content, which §2 measured as producing an identical identity;
+proper ancestor; a rename-only and a mode-only diff rebased onto a base that
+changed the renamed file's content, which §2 measured as producing an identical identity;
 and a drift record that cannot be rendered (§4). Every one of those must refuse.
 An implementation that satisfies only the #118 cases would accept several of
 them.
