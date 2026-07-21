@@ -2,6 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-07-19
+- Note (2026-07-21): §4's RUNNING → INDETERMINATE transition has a second
+  trigger from ADR-0029 §4 — a tool that exceeds its invocation deadline, or is
+  cancelled, while side_effecting and not NATURAL. §4's rule is unchanged and is
+  what selects it: such a call cannot be distinguished from one that did not
+  act. The transition graph, the retry ceiling, and INDETERMINATE's
+  never-auto-retried, resolved-explicitly treatment all stand as ratified. §7's
+  idempotency-key debt is discharged by ADR-0029 §5; its INDETERMINATE
+  reconciliation deferral is not.
 
 ## Context
 

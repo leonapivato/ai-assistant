@@ -1,6 +1,6 @@
 # 11. Model resilience: a classified failure surface and a decorator seam
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-18
 
 ## Context
