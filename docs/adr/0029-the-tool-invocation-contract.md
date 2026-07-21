@@ -220,6 +220,35 @@ unanswered `CONFIRM` cannot construct a `ToolCall`; nor can altered arguments,
 a substituted definition, or a different step, since `authorises` compares all
 three (ADR-0021 §1).
 
+**Construction is the first line, not the only one: `invoke` re-runs the same
+check.** `frozen=True` refuses `call.request = ...` and does nothing about
+`call.__dict__["request"] = ...` or `object.__setattr__`, and that bypass is
+inside this repository's threat model rather than outside it — ADR-0018 §3 and
+§4 closed both the read and write paths of the registry against it, and
+ADR-0021 §4 required the audit trail to store a detached snapshot for the same
+reason. A validator alone would therefore be the "closes the door and leaves the
+window open" position ADR-0018 §3 names: construct a call approving one
+recipient, replace `parameters` with a valid frozen mapping naming another, and
+a seam checking only the definition would execute the second under the first's
+approval.
+
+So the obligation on `invoke` is stated as three checks in one place, before the
+callable is reached:
+
+1. the definition matches the registry's original (§1);
+2. `call.decision.authorises(call.request)` — re-evaluated on the value as
+   received, not trusted from construction;
+3. the call is **revalidated and detached** on the way in, as ADR-0018 §4
+   requires of anything a registry stores and ADR-0021 §4 of anything the trail
+   records, so a mutation landed after validation cannot survive into execution.
+
+A failed re-check raises `ToolBindingError`, like a mismatched definition: both
+are the same fault — the thing about to run is not the thing that was
+authorised — and neither is a tool failing, so neither may be an ordinary
+`FAILED` result an executor might retry. The validator stays because it catches
+the honest mistake at the point it is made, with a better message and no I/O;
+the seam check is what holds against a deliberate one.
+
 **Why this may live in `core`.** The validator compares two values it is given.
 It does not decide whether an action *should* be allowed — that is
 `ActionPolicy`'s, in `permissions/` — and it introduces no new comparison: it
@@ -369,6 +398,26 @@ with no default, so the contract has no spelling for "forever".** A default
 would be `core` choosing a policy; `None` would be a documented route to an
 unbounded call, which is the shape ADR-0016 §3 refused when it declined a
 `requires_permission` predicate that could return `False`.
+
+**The annotation is not the enforcement, so `invoke` checks the value.** Python
+does not check a parameter annotation at runtime, and this argument crosses a
+Protocol boundary from an untyped or dynamically-wired caller, so `invoke`
+raises `ValueError` — before the callable is created or awaited — when `timeout`
+is not a `timedelta`, or is not strictly positive. That is ADR-0026 §2's rule
+for the clock reading ("the guard is total over the reading, because the
+annotation is not") and ADR-0021 §4's for `recent`'s `limit`, which raises on a
+non-positive value rather than clamping it, for the concrete reason that the
+natural implementation leaks — there, `LIMIT -1` in SQLite becomes no limit at
+all; here, `asyncio.timeout(None)` becomes no deadline at all, in the one method
+whose contract is that there is always one.
+
+**Strictly positive, and not "expired means do not call".** A zero or negative
+duration is refused rather than treated as an instantly-expired deadline,
+because expiry is delivered by the event loop at an await point: a callable that
+performs a synchronous side effect before its first `await` would already have
+acted. Refusing the value never creates the coroutine, which is the only
+placement that holds for every tool. Nothing legitimate asks to invoke with no
+time to do it in — a caller with no budget left should not call.
 
 **It is the caller's budget, not the tool's property, and `ToolDefinition` does
 not gain a timeout field.** This answers one of ADR-0016's own "revisit when
@@ -759,11 +808,18 @@ ADR makes that are not visible in a signature:
   named gap and this is where it closes.
 - **An unauthorised `ToolCall` is unconstructable** — a `DENY`, an unanswered
   `CONFIRM`, altered parameters, a substituted definition, and a mismatched
-  `step_id` each refused at construction, not at `invoke`.
+  `step_id` each refused at construction.
+- **And unauthorised again at the seam** (§2): a call mutated through
+  `__dict__` *after* passing construction — parameters swapped for a different
+  valid payload, the decision replaced — refused by `invoke` with the tool never
+  reached. This is the check that survives the bypass `frozen=True` does not
+  cover, so testing only the construction case would certify the door and not
+  the window.
 - **The timeout rule in §4 in both directions**: a `side_effecting`,
   non-`NATURAL` tool that exceeds its deadline yields `INDETERMINATE`; a
-  read-only or `NATURAL` one yields `FAILED`. And that an already-expired
-  timeout does not call the tool at all.
+  read-only or `NATURAL` one yields `FAILED`. And that a `timeout` which is
+  zero, negative, or not a `timedelta` at all raises before the tool's coroutine
+  is created.
 - **A tool that raises becomes `INTERNAL`**, while a `BaseException` propagates.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
@@ -787,11 +843,14 @@ ADR makes that are not visible in a signature:
 - **New `core` surface:** the `ToolInvoker` Protocol, `ToolCall`, `ToolResult`,
   `ToolFailure`, `ToolOutcome`, `ToolFailureKind`, and `ToolBindingError` in
   `core/errors.py` — seven, and **one triad** in the implementation PR (§10).
-- **An unauthorised invocation is unconstructable, not merely forbidden.**
-  ADR-0021 built `authorises` and named the one call missing; this places that
-  call in a validator rather than in an executor's memory. The cost is that
-  `ToolCall` is a type with a failure mode at construction, which callers must
-  handle — the same cost ADR-0021 §4 accepted for a trail that validates.
+- **An unauthorised invocation is refused twice, and neither refusal is the
+  executor remembering to check.** ADR-0021 built `authorises` and named the one
+  call missing; this puts it in a `ToolCall` validator *and* at the seam, since
+  `frozen=True` does not survive a `__dict__` write and a construction-time
+  check alone would be ADR-0018 §3's door-closed-window-open. The cost is a type
+  with a failure mode at construction and a second comparison per call — the
+  same costs ADR-0021 §4 accepted for a trail that validates, and ADR-0026 §2
+  for a clock that is checked per reading.
 - **#54 closes in full.** ADR-0021 §1 closed the permissions half by embedding
   the declaration by value and said the remaining half was "one call … it
   belongs to the invocation contract". §2 is that call, and §1's registry check
