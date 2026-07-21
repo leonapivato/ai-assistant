@@ -86,9 +86,30 @@ callable's return annotation at runtime, and §2 is what decides. This is
 deliberate — it is what lets this ADR's producers land without waiting on
 ADR-0023's migration, which is the order §5 requires.
 
-Placement (beside `UtcInstant` in `core/types.py`, or a small `core/clock.py`)
-is the implementing change's call. `core` depends on nothing but the standard
-library here (golden rule 2), and every subsystem may depend on `core`.
+**Placement is decided, not left open: `core/clock.py`, and specifically not
+`core/types.py`.** ADR-0014 §4, as restated by ADR-0016 §2, is that
+"`core/types.py` holds no **subsystem logic**. It may hold semantics
+**intrinsic** to a type it defines" — intrinsic meaning computable from the
+type's own declaration, independent of policy, configuration, context or a
+clock, and the same answer for every consumer. A guard that calls an injected
+callable is not a semantic of a type at all, so it does not belong in
+`types.py`. It belongs in `core` all the same, alongside the non-type shared
+machinery already there (`core/config.py`, `core/errors.py`,
+`core/logging.py`), and it keeps golden rule 2: nothing but the standard library.
+
+Two things the guard deliberately does **not** carry, so it stays shared rather
+than becoming one subsystem's rule housed in `core`:
+
+- **No configured zone.** §3's range is a flat margin off `datetime.min`/`max`,
+  chosen precisely so the check never reads `Settings.timezone` — it asks
+  "representable under *any* localization", which is a fact about `datetime`
+  arithmetic, computable from the type's own bounds and identical for every
+  consumer. Had it depended on the configured zone it would be `context`'s rule
+  wearing `core`'s coat, and it would belong in `context`.
+- **No failure policy.** `core` raises `ValueError` and nothing else; which
+  `AssistantError` a violation becomes is each subsystem's, at its own boundary
+  (§4). The `owner` label is a string the caller supplies for the message, not a
+  policy `core` selects.
 
 ### 2. Enforcement wraps the clock once, where the clock is stored
 
@@ -205,6 +226,13 @@ already owns in `core/errors.py`. That is the pattern already in the code:
 - `context` → `ContextError`
 - `memory` → `MemoryStoreError`
 - `planning` → `PlanningError`
+- `testing` → **the error of the implementation each fake doubles**, not
+  `ValueError`: `FakeMemoryStore` raises `MemoryStoreError`, `FakePlanner` and
+  `FakePlanStore` raise `PlanningError`. A fake exists to certify a consumer
+  against its contract (§7), so a fake that leaked the raw `ValueError` where
+  the real store raises `MemoryStoreError` would certify a consumer's error
+  handling against behaviour it will never meet in production — the one failure
+  mode a canonical double must not have.
 - `orchestration` → the error of the stage that read the clock, since
   `core/errors.py` defines none for `orchestration`: goal construction raises
   `PlanningError`, as `_turn_goal` already does for a blank utterance, and
