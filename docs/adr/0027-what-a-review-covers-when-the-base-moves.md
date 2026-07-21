@@ -108,9 +108,9 @@ implementation's first test, not an assumption it may inherit.
 
 - **(a)** its recorded base equals the PR's merge base **and** its recorded tree
   equals `HEAD`'s tree — ADR-0020 §3 exactly as written, unmodified; **or**
-- **(b)** its recorded base is an ancestor of the PR's merge base, both patch
-  identities are **hashable** (below) and equal, the base move clears §3's
-  floor, and the drift is published per §4.
+- **(b)** its recorded base is a **proper** ancestor of the PR's merge base,
+  both patch identities are **hashable** (below) and equal, the base move clears
+  §3's floor, and the drift is published per §4.
 
 The tree comparison is not weakened, it is scoped: under (a) it refuses on any
 changed byte anywhere in the tree, which is strictly stronger than any identity
@@ -119,6 +119,14 @@ tree comparison has nothing to say — the tree legitimately differs by the base
 move — and content is pinned by the patch identity, the base by §3. A recorded
 base that is *not* an ancestor of the current merge base is not drift; it is a
 different history, and fails closed.
+
+**Proper is the load-bearing word: (b) is the moved-base path only.** An equal
+base is an ancestor of itself, so an (b) that admitted equality would let the
+patch identity govern a case (a) already covers — and govern it more weakly,
+since the identity ignores hunk line numbers while the tree does not. In a file
+with two identical regions, moving the reviewed edit from one to the other
+leaves the identity intact and the tree changed, and (a) is what refuses it.
+Where the base has not moved, (a) governs and its tree check is the whole test.
 
 **An entry with nothing to hash makes path (b) unavailable.** What `patch-id`
 hashes per file entry depends on whether the entry has hunks, and the three
@@ -424,8 +432,10 @@ prediction — the #117 rebase holds the identity, the #116 rebase moves it); a
 whitespace-only change to a context line inside a reviewed hunk, which must
 invalidate; **each** floor path — the two `core` files, the review documents and
 the driver alike — changed, deleted, renamed *out* of the floor and renamed
-*into* it (§3); a recorded base that is not an ancestor of the merge
-base; a rename-only and a mode-only diff rebased onto a base that changed the
+*into* it (§3); a recorded base that is not an ancestor of the merge base, and
+an *unmoved* base whose reviewed edit has been relocated between two identical
+regions — same identity, different tree, refused by (a) because (b) requires a
+proper ancestor; a rename-only and a mode-only diff rebased onto a base that changed the
 renamed file's content, which §2 measured as producing an identical identity;
 and a drift record that cannot be rendered (§4). Every one of those must refuse.
 An implementation that satisfies only the #118 cases would accept several of
