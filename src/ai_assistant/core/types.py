@@ -34,11 +34,6 @@ Embedding = Sequence[float]
 """A dense vector embedding of a piece of text (see ADR-0006)."""
 
 
-#: The offset an instant must carry once converted. Named so the check below
-#: reads as the assertion it is rather than as a magic comparison.
-_UTC_OFFSET = timedelta(0)
-
-
 def _describe(value: object) -> str:
     """``repr`` of an untrusted value, for an error message, never raising.
 
@@ -91,6 +86,15 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     would then raise ``TypeError`` at the first comparison in a store, far from
     here. Verifying the result costs one comparison and removes the assumption.
 
+    The result is checked by ``tzinfo is UTC``, **not** by a zero ``utcoffset()``.
+    ``utcoffset()`` is a method on an arbitrary object and need not answer the
+    same way twice: a ``tzinfo`` reporting zero here and ``+02:00`` afterwards
+    would pass an offset test and leave a validated model holding a non-UTC
+    instant. Identity is not merely the stricter test but the exactly correct
+    one — ``astimezone(tz)`` sets the result's ``tzinfo`` to the ``tz`` it was
+    given, so every genuine conversion returns ``UTC`` itself, and only an
+    overridden ``astimezone`` can fail this.
+
     The failure path is total because the annotation is not: a custom ``tzinfo``
     whose ``utcoffset()`` raises, a value near ``datetime.min``/``max`` at a
     non-UTC offset that overflows ``astimezone``, and a conversion that returns
@@ -122,11 +126,10 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
         raise ValueError(msg)
     try:
         converted = value.astimezone(UTC)
-        converted_offset = converted.utcoffset()
     except Exception as exc:  # incl. OverflowError, which is not a ValueError
         msg = f"{field} has no UTC representation, got {_describe(value)}"
         raise ValueError(msg) from exc
-    if converted_offset != _UTC_OFFSET:
+    if converted.tzinfo is not UTC:
         msg = f"{field} did not convert to UTC, got {_describe(converted)}"
         raise ValueError(msg)
     return converted

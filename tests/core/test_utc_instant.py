@@ -173,11 +173,34 @@ class _NonUtcConversion(datetime):
         return datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=2)))
 
 
+class _MutableOffset(tzinfo):
+    """Reports UTC when asked at validation time, and something else later."""
+
+    shift = timedelta(0)
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return _MutableOffset.shift
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "mutable"
+
+
+class _ZeroButNotUtcConversion(datetime):
+    """Converts to a zero *offset* that is not the ``UTC`` object."""
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return datetime(2026, 1, 1, tzinfo=_MutableOffset())
+
+
 @pytest.mark.parametrize(
     "hostile",
     [
         pytest.param(_LyingConversion(2026, 1, 2, tzinfo=UTC), id="returns-naive"),
         pytest.param(_NonUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-utc"),
+        pytest.param(_ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-zero-not-utc"),
     ],
 )
 def test_a_conversion_that_does_not_produce_utc_is_rejected(hostile: datetime) -> None:
@@ -222,3 +245,36 @@ def test_a_value_that_cannot_describe_itself_still_yields_a_validation_error() -
     """
     with pytest.raises(ValidationError, match="when must be timezone-aware"):
         _Instant(when=datetime(2026, 1, 1, tzinfo=_UnreprableOffset()))
+
+
+def test_a_zero_offset_that_is_not_utc_cannot_change_its_mind_later() -> None:
+    """Why the result is checked by ``tzinfo is UTC`` and not by a zero offset.
+
+    ``utcoffset()`` is a method on an arbitrary object and need not answer the
+    same way twice. An offset test would pass here and leave a *validated* model
+    holding a value that becomes ``+02:00`` afterwards — the shared type's
+    "stored as UTC" guarantee broken after the fact, with no comparison left to
+    catch it.
+    """
+    _MutableOffset.shift = timedelta(0)
+    try:
+        with pytest.raises(ValidationError, match="when did not convert to UTC"):
+            _Instant(when=_ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC))
+    finally:
+        _MutableOffset.shift = timedelta(0)
+
+
+def test_every_genuine_conversion_yields_the_utc_object_itself() -> None:
+    """The identity check is exact, not merely strict — it rejects nothing real.
+
+    ``astimezone(tz)`` sets the result's ``tzinfo`` to the ``tz`` it was given,
+    so only an overridden ``astimezone`` can fail it.
+    """
+    for zone in (
+        ZoneInfo("America/New_York"),
+        ZoneInfo("UTC"),
+        timezone(timedelta(hours=2)),
+        timezone(timedelta(0)),
+        UTC,
+    ):
+        assert _Instant(when=datetime(2026, 1, 1, tzinfo=zone)).when.tzinfo is UTC

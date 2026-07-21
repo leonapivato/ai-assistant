@@ -41,6 +41,20 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _describe(value: object) -> str:
+    """``repr`` of an untrusted value, for an error message, never raising.
+
+    ``datetime.__repr__`` embeds ``repr(tzinfo)``, so a clock returning a value
+    whose ``tzinfo`` raises from ``__repr__`` would raise from inside the message
+    that reports it — replacing this seam's ``MemoryStoreError`` with whatever
+    that ``__repr__`` threw. The diagnostic must not destroy the diagnosis.
+    """
+    try:
+        return repr(value)
+    except Exception:  # the value cannot describe itself; say so and move on
+        return "<a value whose repr() failed>"
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
@@ -187,7 +201,9 @@ class MemoryIngestor:
         now = self._now()
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
-        unusable = f"the injected clock returned an instant with no UTC representation: {now!r}"
+        unusable = (
+            f"the injected clock returned an instant with no UTC representation: {_describe(now)}"
+        )
         try:
             offset = now.utcoffset()
         except Exception as exc:  # a tzinfo that raises rather than answering

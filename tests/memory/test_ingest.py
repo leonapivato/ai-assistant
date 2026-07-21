@@ -292,13 +292,40 @@ class _RaisingOffset(tzinfo):
         return "raises"
 
 
-@pytest.mark.parametrize("zone", [_NoOffset(), _RaisingOffset()], ids=["indeterminate", "raising"])
+class _UnreprableOffset(tzinfo):
+    """Raises from ``utcoffset()`` *and* from ``__repr__``.
+
+    ``datetime.__repr__`` embeds ``repr(tzinfo)``, so building the error message
+    for this reading is itself a call into hostile code.
+    """
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        msg = "no offset available"
+        raise RuntimeError(msg)
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "hostile"
+
+    def __repr__(self) -> str:
+        msg = "repr is hostile too"
+        raise RuntimeError(msg)
+
+
+@pytest.mark.parametrize(
+    "zone",
+    [_NoOffset(), _RaisingOffset(), _UnreprableOffset()],
+    ids=["indeterminate", "raising", "unreprable"],
+)
 async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -> None:
     """Translated at this boundary, as ``_expiry`` already does for overflow.
 
     Unguarded, such a reading reaches ``.timestamp()`` inside the SQLite store
     and surfaces as a raw ``TypeError`` from several layers down, naming neither
-    the clock nor the record.
+    the clock nor the record. The ``unreprable`` case additionally checks that
+    *describing* the reading cannot itself escape the translation.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
     broken = MemoryIngestor(
