@@ -270,19 +270,6 @@ contains_secret() {
     grep -qiE '(api[_-]?key|secret|passwd|password|token)[[:space:]'\''":]+[^[:space:]'\''"]{6,}' <<<"$t"
 }
 
-# Replaces every fenced block (a Codex proposal patch) with a marker, so an
-# excluded proposal is dropped rather than truncated or redacted in place. Any
-# ``` line toggles the fence, so the block is removed whatever its language label.
-strip_proposal_fences() {
-    awk '
-        /^[[:space:]]*```/ {
-            if (infence) { infence = 0 } else { infence = 1; print "> _(Codex proposal excluded — see note)_" }
-            next
-        }
-        !infence { print }
-    ' <<<"$1"
-}
-
 # Renders a disposition snapshot into a collapsible section, bounded by a
 # cumulative published-byte budget so a long loop cannot exceed ship's comment
 # limit (ADR-0025 §4). A §3 Codex proposal is the exception: it appears in full,
@@ -303,42 +290,53 @@ render_dispositions() {
     echo "after the reviewer's own reassessment, not re-raised — the auditable"
     echo "evidence that a verdict changed._"
     echo
-    local id sev status first last text note is_proposal has_fence entry entry_bytes
+    local id sev status first last text note has_fence entry entry_bytes when
     while IFS=$'\t' read -r id sev status first last; do
         [[ -n "$id" ]] || continue
         text="$(snapshot_finding_text "$snap" "$id")"
         note=""
-        is_proposal=0
-        has_proposal=0
-        # A §3 proposal is a fenced patch (diff/patch/suggestion). Only that
-        # bypasses the cumulative budget below — an ordinary finding that happens
-        # to quote a fenced log or reproduction stays bounded, so a large one
-        # cannot blow the comment past its hard limit.
-        grep -qiE '^[[:space:]]*```(diff|patch|suggestion)' <<<"$text" && has_proposal=1
-        # The secret scan covers the WHOLE finding, not only a labelled proposal
-        # fence: a key Codex read from an ignored file could sit in prose or in a
-        # `python`/unlabelled fence too. If any is found, the entire finding text
-        # is excluded — not redacted in place — so publishing never leaks it, and
-        # that finding takes ordinary independent review (ADR-0025 §3, fail-closed).
+        # A retired finding: state the reassessment explicitly, and point the
+        # merge reviewer at where the deciding change is published (ADR-0025 §4).
+        when="(rounds ${first}–${last})"
+        if [[ "$status" == "retired" ]]; then
+            when="raised through round ${last}, not re-raised since — the reviewer's own"
+            when="${when} reassessment; the change that resolved it is in this PR's diff"
+        fi
+        # Any fenced block is a possible §3 proposal (a language label is not a
+        # reliable signal). Nothing bypasses the cumulative budget: a proposal is
+        # published in full only if it fits, else it is EXCLUDED — not truncated —
+        # so several proposals cannot together exceed ship's comment limit.
+        has_fence=0
+        grep -qiE '^[[:space:]]*```' <<<"$text" && has_fence=1
+        # The secret scan covers the WHOLE finding, not only a labelled fence: a
+        # key Codex read from an ignored file could sit in prose or any fence. If
+        # found, the entire finding text is excluded — not redacted in place — so
+        # publishing never leaks it (ADR-0025 §3, fail-closed).
         if contains_secret "$text"; then
             text="_(finding content excluded — see note)_"
             note="  "$'\n'"> ⚠ **Content excluded** — this finding may carry a secret, so it is not published; it takes ordinary independent review (ADR-0025 §3, fail-closed)."
-        elif [[ "$has_proposal" -eq 1 && "$(printf '%s' "$text" | wc -c)" -gt "$budget" ]]; then
-            text="$(strip_proposal_fences "$text")"
-            note="  "$'\n'"> ⚠ **Codex proposal excluded** — too large to publish in full; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
-        elif [[ "$has_proposal" -eq 1 ]]; then
-            # A proposal appears in full, never bounded away (ADR-0025 §4).
-            is_proposal=1
         fi
-        entry="$(printf -- '- **%s** — _%s_ (rounds %s–%s)\n\n%s\n%s\n' \
-            "$sev" "$status" "$first" "$last" "$text" "$note")"
+        entry="$(printf -- '- **%s** — _%s_ %s\n\n%s\n%s\n' \
+            "$sev" "$status" "$when" "$text" "$note")"
         entry_bytes="$(printf '%s' "$entry" | wc -c)"
-        if [[ "$is_proposal" -eq 0 && $((used + entry_bytes)) -gt "$budget" ]]; then
-            hidden=$((hidden + 1))
+        if [[ $((used + entry_bytes)) -le "$budget" ]]; then
+            printf '%s\n\n' "$entry"
+            used=$((used + entry_bytes))
             continue
         fi
-        printf '%s\n\n' "$entry"
-        used=$((used + entry_bytes))
+        # Does not fit. A fenced proposal is excluded whole (its audit value needs
+        # the full patch or nothing); its header is still recorded if that fits.
+        if [[ "$has_fence" -eq 1 ]]; then
+            entry="$(printf -- '- **%s** — _%s_ %s  \n> ⚠ **Codex proposal excluded** — it does not fit the published budget in full; this finding takes ordinary independent review (ADR-0025 §3, fail-closed).\n' \
+                "$sev" "$status" "$when")"
+            entry_bytes="$(printf '%s' "$entry" | wc -c)"
+            if [[ $((used + entry_bytes)) -le "$budget" ]]; then
+                printf '%s\n\n' "$entry"
+                used=$((used + entry_bytes))
+                continue
+            fi
+        fi
+        hidden=$((hidden + 1))
     done < <(snapshot_finding_lines "$snap")
     if [[ "$hidden" -gt 0 ]]; then
         echo "_…${hidden} more finding(s) omitted to stay within the published-size"
