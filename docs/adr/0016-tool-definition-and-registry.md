@@ -11,6 +11,17 @@
   rule is corrected — registering an identical definition under a *deregistered*
   id is **refused**, reversing the rule stated below, with the ledger scoped to
   the registry rather than the process. Everything else here stands.
+- Note (2026-07-21): §7's **invocation** deferral is discharged by ADR-0029,
+  which honours the three constraints §7 sets on it — one registry (ADR-0029
+  §1), the approval pinned to the definition it ruled on (ADR-0029 §2, building
+  on ADR-0021 §1's resolution of #54), and ADR-0004 §2's amendment, which
+  ADR-0017 discharged ahead of it. §7's **exactly-once** debt is discharged with
+  it (ADR-0029 §5). §7's remaining deferrals — per-call data reach (#57),
+  parameter-schema validation, ranking and selection, persistence, enablement,
+  namespacing, transacted cost — are unaffected and remain deferred. ADR-0016's
+  decision text is unchanged: the registry stays query-only, ids stay spent on
+  first use, `latency` stays advisory and `ToolDefinition` gains no timeout
+  field (ADR-0029 §4).
 
 ## Context
 

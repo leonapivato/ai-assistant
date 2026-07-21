@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
