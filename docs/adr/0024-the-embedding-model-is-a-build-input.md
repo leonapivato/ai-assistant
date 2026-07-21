@@ -25,19 +25,16 @@ Verified against the installed `fastembed` 0.8.0, for the default model
 `BAAI/bge-small-en-v1.5`:
 
 - **The pin cannot be supplied from outside.** `OnnxTextEmbedding.__init__`
-  calls `self.download_model(desc, cache_dir, local_files_only=...,
-  specific_model_path=...)` and drops `**kwargs` on the way. There is no
-  supported path for a caller to pass `revision` through `TextEmbedding`. This
-  closes an option empirically rather than by argument, and it is the single
-  most important fact in this document.
+  drops `**kwargs` before calling `download_model`, so there is no supported path
+  to pass `revision` through `TextEmbedding`. This closes an option empirically
+  rather than by argument — the single most important fact in this document.
 - **No revision or integrity pin.** `snapshot_download` is called with no
   `revision`, so every install takes whatever the repo's default branch holds;
   verification compares file *size* and HF's `blob_id`, both from the same host
   in the same session — self-consistency with what the server just said, not a
   known-good digest. None is pinned anywhere.
-- **One source, but not one host.** The description carries only
-  `hf="qdrant/bge-small-en-v1.5-onnx-q"`, so the recipient is `huggingface.co`
-  *plus* whatever Xet store the Hub names at transfer time (`hf-xet` is enabled by
+- **One source, but not one host.** The recipient is `huggingface.co` *plus*
+  whatever Xet store the Hub names at transfer time (`hf-xet` is enabled by
   default).
 - **The cache is the system temp directory** (`tempfile.gettempdir()`), not the
   application data directory ADR-0004 §2 requires. **So this was never a
@@ -66,10 +63,9 @@ Measured, not estimated:
 | **headroom** | **43,595,250** | **41.6 MiB** |
 
 The wheel was built to measure this, not calculated. The artifact is fp16 ONNX
-weights (no quantization operators, and its size matches fp16 arithmetic to
-within graph overhead — despite the source repo being named `…-onnx-Q`) and
-deflates to only 91.1% of raw, so almost none of it compresses away. 58.4% of the
-limit is the honest figure; "thin" was wrong.
+weights (despite the source repo being named `…-onnx-Q`) and deflates to only
+91.1% of raw, so almost none compresses away. 58.4% of the limit is the honest
+figure; "thin" was wrong.
 
 **Crossing the limit is a publish-time failure.** A file over 100 MiB is rejected
 by PyPI's upload API (remedy: a limit increase, granted routinely, or a data-only
@@ -107,34 +103,32 @@ weights leaves the name and 384 dimensions identical, so `SqliteMemoryStore`
 would rank existing vectors against queries from new weights — silently, the
 corruption §4 exists to prevent. The identity component is a deterministic digest
 over the recorded SHA-256 manifest — the *actual bytes shipped* — rather than the
-repository revision, which is a separate constant that can drift from the manifest
-(a re-pin that changes the digests must change `model_id`, not merely the commit).
-This is an implementation change within the existing `Embedder.model_id`
-contract, not a Protocol change.
+repository revision, a separate constant that can drift from it (a re-pin that
+changes the digests must move `model_id`, not merely the commit). An
+implementation change within the existing `Embedder.model_id` contract, not a
+Protocol change.
 
 The manifest digest alone is still not a complete key, because §3 makes the
 behaviour-affecting dependency stack a *release-bound* variable: a persisted
 store that survives an upgrade bumping that stack under unchanged weights (same
-manifest) would keep the same `model_id` while its space moved — silent mixing
-across the upgrade. So `model_id` also incorporates an identity over the audited
-behaviour-affecting versions (§3), advancing whenever any of them does, across
-installs *and* across a store's upgrade. Over-triggering a re-embed on a no-op
-patch bump is the safe direction; under-triggering is the corruption.
+manifest) would keep the same `model_id` while its space moved. So `model_id`
+also incorporates an identity over the audited behaviour-affecting versions (§3),
+advancing whenever any of them does, across installs *and* across a store's
+upgrade. Over-triggering a re-embed on a no-op patch bump is the safe direction;
+under-triggering is the corruption.
 
-What this still cannot self-certify — that the audit names *every*
-behaviour-affecting package (an earlier draft of §3 missed NumPy) — is the
-residual, and it is **issue #136**: a behavioural fingerprint measures outputs
-instead of enumerating inputs, and generalises to non-fastembed embedders. §4
-needs no amendment; on `main` `model_id` is the bare name and detects only name
-and dimension, so this is a strict improvement, and gating it on #136's general
-solution inverts scope.
+What this cannot self-certify — that the audit names *every* behaviour-affecting
+package (an earlier draft of §3 missed NumPy) — is the residual, **issue #136**:
+a behavioural fingerprint measures outputs instead of enumerating inputs, and
+generalises to non-fastembed embedders. §4 needs no amendment; on `main`
+`model_id` is the bare name and detects only name and dimension, so this is a
+strict improvement, and gating it on #136 inverts scope.
 
-Changing `model_id`'s composition owes no new migration contract. `SqliteMemoryStore`
-already raises "re-embedding is required" on any `model_id` mismatch (existing §4
-behaviour, records intact in the file), and pre-1.0 no released store exists to
-migrate (`CONTRIBUTING`: anything may change between minors). A dev store trips
-that existing signal and is re-created; automating the re-embed is §4's, not
-this ADR's.
+Changing `model_id`'s composition owes no new migration contract:
+`SqliteMemoryStore` already raises "re-embedding is required" on any mismatch
+(existing §4 behaviour, records intact), and pre-1.0 no released store exists to
+migrate. A dev store trips that signal and is re-created; automating the re-embed
+is §4's.
 
 ### 3. The behaviour-affecting stack is exact-pinned, not ranged
 
@@ -152,11 +146,20 @@ kernels) and `numpy` (fastembed normalises the default model's output with
 `np.linalg.norm`) — the *published* specifiers exact-pin each to the version the
 lockfile already fixes for `uv sync`, so nothing in the space floats within a
 release, and a bump to any is a reviewed, release-bound change. This same audited
-set feeds §2's `model_id` identity, so a release that bumps it re-embeds.
+set feeds §2's `model_id` identity, so a release that bumps it re-embeds. Pinning
+*prevents* drift within a release; the `model_id` identity (§2) *detects* it
+across one.
 
-Pinning *prevents* drift within a release; the `model_id` identity *detects* it
-across one. The residual — proving the audit is complete, and a fingerprint
-robust to version-vs-behaviour mismatch — is #136.
+The **execution provider is pinned to CPU**, not left to fastembed's
+`Device.AUTO`. The provider is behaviour-affecting — CPU and GPU kernels produce
+different vectors — so `Device.AUTO` would let the *same* store shift its
+embedding space the moment a user's machine gains a GPU, the silent
+same-id/different-vectors corruption §2 exists to prevent. Forcing CPU is simpler
+than admitting the provider to `model_id` and re-embedding on a hardware change,
+and it is the right default for this product: embedding throughput is not its
+bottleneck, and cross-machine store consistency matters more than GPU speed. GPU
+acceleration is future work, gated like §6's multiple-local-models path (its
+"provider as identity" case folds into #136).
 
 ### 4. The artifact is not committed to git
 
@@ -213,7 +216,8 @@ at minimum, and not limited to:
 - the wheel METADATA carries all four exact pins, and changing any audited
   version *or* any manifest digest independently moves `model_id`;
 - `FastEmbedEmbedder` rejects a non-vendored model name before any backend load
-  or socket (§6), so the prohibition cannot be bypassed;
+  or socket (§6), so the prohibition cannot be bypassed, and pins the CPU
+  execution provider so GPU availability cannot change it (§3);
 - a missing artifact raises `ModelError` on a non-empty batch without a socket,
   while `embed([])` returns `[]`.
 
@@ -274,11 +278,11 @@ needed yet.
 - **First run works offline, with no fetch and no second command.** This is the
   decision's main benefit and the thing #89 was ultimately asking for.
 - **The strongest case against it: the fetch is relocated, not eliminated.** No
-  PyPI install path fetches (wheel and sdist both carry the artifact), but a build
-  from a *git checkout* does — so the honest claim is "once per source build,
-  never for an install", not "gone". Accepted because that fetch is a contributor
-  building the software, verified against a pin, where the eliminated one was an
-  unverified runtime fetch on every user's machine.
+  PyPI install path fetches (wheel and sdist both carry the artifact), but a
+  *git-checkout* build does — "once per source build, never for an install", not
+  "gone". Accepted because that fetch is a contributor building the software,
+  verified against a pin, where the eliminated one was an unverified runtime fetch
+  on every user's machine.
 - **Every install pays 58.4 MiB** (both wheel and sdist), including users on a
   cloud embedder or the lexical `InMemoryMemoryStore`. Accepted deliberately.
 - **Licence attribution must be resolved before publishing.** Three sources
