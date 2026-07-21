@@ -334,8 +334,8 @@ def _nested_review_cmd(tmp_path: Path, persona: str, log: Path) -> str:
     assertions, not the fake's ``set -e``, decide the outcome.
     """
     return (
-        f"env -u FAKE_CODEX_PRE_CMD FAKE_CODEX_THREAD_ID=thread-inner "
-        f"bash {SCRIPT} {persona} main >{log} 2>&1; echo $? >{log}.rc"
+        f"rc=0; env -u FAKE_CODEX_PRE_CMD FAKE_CODEX_THREAD_ID=thread-inner "
+        f"bash {SCRIPT} {persona} main >{log} 2>&1 || rc=$?; printf '%s\\n' \"$rc\" >{log}.rc"
     )
 
 
@@ -409,11 +409,11 @@ def test_a_round_whose_loop_was_reset_in_flight_refuses_to_record(tmp_path: Path
 def test_an_out_of_order_round_refuses_to_rewind_the_loop(tmp_path: Path) -> None:
     """The loop anchor only moves forward, even for the same persona (#142).
 
-    Two rounds of one loop finish out of order: the round started at HEAD is
-    still running when a round started at a *descendant* commit completes and
-    records itself. The older round must not rewind ``last_sha`` or replace the
-    persona's thread with its staler session, or the next round resumes the
-    conversation that saw less.
+    Two rounds of one loop finish out of order: an ``adversarial`` round started
+    at HEAD is still running when an ``architecture`` round started at a
+    *descendant* commit completes and records itself. The older round must not
+    rewind the loop's shared ``last_sha``, or the next round's continuation
+    decision is anchored to a state the loop has already moved past.
 
     The checkout is put back where the outer round found it, so the settled-tree
     guard — which catches this in the ordinary case — passes and the loop-state
@@ -421,6 +421,7 @@ def test_an_out_of_order_round_refuses_to_rewind_the_loop(tmp_path: Path) -> Non
     """
     repo = tmp_path / "repo"
     _init_repo(repo)
+    _add_architecture_rubric(repo)
     log = tmp_path / "inner.log"
     outer_sha = _git(repo, "rev-parse", "HEAD")
     # All of this runs inside the outer round's Codex call, so the inner round
@@ -433,14 +434,43 @@ def test_an_out_of_order_round_refuses_to_rewind_the_loop(tmp_path: Path) -> Non
         tmp_path,
         check=False,
         FAKE_CODEX_THREAD_ID="thread-outer",
-        FAKE_CODEX_PRE_CMD=advance + _nested_review_cmd(tmp_path, "adversarial", log) + restore,
+        FAKE_CODEX_PRE_CMD=advance + _nested_review_cmd(tmp_path, "architecture", log) + restore,
     )
 
     assert Path(f"{log}.rc").read_text().strip() == "0", log.read_text()
     assert result.returncode != 0
     assert "finished out of order" in result.stderr
-    # The newer round's anchor and session stand, unrewound.
+    # The newer round's anchor stands, unrewound, and the older round recorded
+    # neither a thread nor a snapshot.
     meta = next(iter((repo / ".review" / "session").glob("*.meta"))).read_text()
     assert f"last_sha={outer_sha}\n" not in meta
+    assert not list((repo / ".review" / "session").glob("*.adversarial.thread"))
+
+
+def test_a_second_concurrent_round_of_one_persona_is_refused(tmp_path: Path) -> None:
+    """One round per persona per loop at a time — the second is refused (#142).
+
+    Two rounds of one persona share an artifact path, a thread file and a
+    disposition snapshot path, so no interleaving records both consistently:
+    the published verdict can end up paired with the other round's dispositions.
+    The second invocation is refused outright rather than queued.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    log = tmp_path / "inner.log"
+
+    result = run_review(
+        repo,
+        tmp_path,
+        FAKE_CODEX_THREAD_ID="thread-outer",
+        FAKE_CODEX_PRE_CMD=_nested_review_cmd(tmp_path, "adversarial", log),
+    )
+
+    assert Path(f"{log}.rc").read_text().strip() != "0"
+    assert "already running in this" in log.read_text()
+    # The first round is untouched by the refusal, and owns the whole record.
+    assert result.returncode == 0
     thread = next(iter((repo / ".review" / "session").glob("*.adversarial.thread")))
-    assert thread.read_text().strip() == "thread-inner"
+    assert thread.read_text().strip() == "thread-outer"
+    sha = _git(repo, "rev-parse", "HEAD")
+    assert _field(_provenance(repo, sha), "thread_id") == "thread-outer"
