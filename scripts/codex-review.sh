@@ -650,11 +650,12 @@ _write_snapshot() {
     awk 'NF{last=NR} {l[NR]=$0} END{for(i=1;i<=NR;i++) if(i!=last) print l[i]}' \
         "$out" >"${work}/body"
     # Split into finding blocks at each TOP-LEVEL ranked list item ("1.", "2)",
-    # …) — anchored at column 0, so an indented numbered line (a finding's own
-    # reproduction steps) stays part of its finding rather than being mistaken for
-    # a new one. Text before the first item (a preamble) is discarded.
+    # …). Markdown treats 0–3 leading spaces as top-level and 4+ as nested, so
+    # that is the split rule: a finding's own indented reproduction steps stay
+    # part of it, while a top-level list a reviewer happens to indent a couple of
+    # spaces still splits. Text before the first item (a preamble) is discarded.
     awk -v dir="$work" '
-        /^[0-9]+[.)]/ { n++; f=sprintf("%s/cur-%04d", dir, n) }
+        /^ {0,3}[0-9]+[.)]/ { n++; f=sprintf("%s/cur-%04d", dir, n) }
         n>0 { print >> f }
     ' "${work}/body"
     # A review the reviewer did not format as a ranked list yields no blocks
