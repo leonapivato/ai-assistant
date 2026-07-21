@@ -198,7 +198,7 @@ artifact_has_verdict() {
 # the loop the artifact names — a stale snapshot from another path). $1 persona,
 # $2 tree, $3 the artifact's recorded loop_id.
 disposition_snapshot() {
-    local persona="$1" tree="$2" want="$3" f lid
+    local persona="$1" tree="$2" want="$3" want_base="$4" want_sha="$5" f lid
     # No loop_id: not a persistent artifact, so nothing to select. Requiring a
     # non-empty match below is what closes the stale-snapshot case a bypass
     # artifact would otherwise pick up.
@@ -225,6 +225,21 @@ disposition_snapshot() {
      refusing to post a verdict with no disposition evidence (ADR-0025 §4).
      Re-run: just review-codex ${persona}"
     fi
+    # Validate the rest of the full anchor: a snapshot keyed on (loop, persona,
+    # tree) can still have been overwritten by a later round that reviewed the
+    # same tree under a different base or commit. base_sha and the terminal sha
+    # from its header must match the artifact's, or the snapshot belongs to a
+    # different terminal turn and is refused (ADR-0025 §4).
+    local shdr sbase ssha
+    shdr="$(head -n 1 "${matches[0]}")"
+    sbase="$(provenance_field base_sha "$shdr")"
+    ssha="$(provenance_field sha "$shdr")"
+    if [[ "$sbase" != "$want_base" || "$ssha" != "$want_sha" ]]; then
+        die "the disposition snapshot for ${persona} tree ${tree:0:12} was recorded
+     for a different terminal turn (base ${sbase:0:12}/sha ${ssha:0:12}) than the
+     review artifact (base ${want_base:0:12}/sha ${want_sha:0:12}) — refusing to
+     post dispositions from another round (ADR-0025 §4). Re-run: just review-codex ${persona}"
+    fi
     printf '%s\n' "${matches[0]}"
 }
 
@@ -247,7 +262,12 @@ snapshot_finding_text() {
 # positive costs one finding its published proposal (it takes ordinary review), a
 # false negative would publish a secret. $1 the text to scan.
 contains_secret() {
-    grep -qiE '(-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[posur]_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|(api[_-]?key|secret|password|passwd|token|bearer)[[:space:]]*[=:][[:space:]]*[^[:space:]]{6,})' <<<"$1"
+    local t="$1"
+    # Shaped credentials, matched literally.
+    grep -qE '(-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[posur]_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|[Bb]earer[[:space:]]+[A-Za-z0-9._~+/-]{12,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})' <<<"$t" && return 0
+    # A named credential assigned a value, with `=`, `:`, or whitespace between
+    # the name and the value (so `Bearer x`, `api_key: x`, `password = x` match).
+    grep -qiE '(api[_-]?key|secret|passwd|password|token)[[:space:]'\''":]+[^[:space:]'\''"]{6,}' <<<"$t"
 }
 
 # Replaces every fenced block (a Codex proposal patch) with a marker, so an
@@ -289,8 +309,12 @@ render_dispositions() {
         text="$(snapshot_finding_text "$snap" "$id")"
         note=""
         is_proposal=0
-        has_fence=0
-        grep -qiE '^[[:space:]]*```' <<<"$text" && has_fence=1
+        has_proposal=0
+        # A §3 proposal is a fenced patch (diff/patch/suggestion). Only that
+        # bypasses the cumulative budget below — an ordinary finding that happens
+        # to quote a fenced log or reproduction stays bounded, so a large one
+        # cannot blow the comment past its hard limit.
+        grep -qiE '^[[:space:]]*```(diff|patch|suggestion)' <<<"$text" && has_proposal=1
         # The secret scan covers the WHOLE finding, not only a labelled proposal
         # fence: a key Codex read from an ignored file could sit in prose or in a
         # `python`/unlabelled fence too. If any is found, the entire finding text
@@ -299,11 +323,11 @@ render_dispositions() {
         if contains_secret "$text"; then
             text="_(finding content excluded — see note)_"
             note="  "$'\n'"> ⚠ **Content excluded** — this finding may carry a secret, so it is not published; it takes ordinary independent review (ADR-0025 §3, fail-closed)."
-        elif [[ "$has_fence" -eq 1 && "$(printf '%s' "$text" | wc -c)" -gt "$budget" ]]; then
+        elif [[ "$has_proposal" -eq 1 && "$(printf '%s' "$text" | wc -c)" -gt "$budget" ]]; then
             text="$(strip_proposal_fences "$text")"
             note="  "$'\n'"> ⚠ **Codex proposal excluded** — too large to publish in full; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
-        elif [[ "$has_fence" -eq 1 ]]; then
-            # A proposal (any fenced block) appears in full, never bounded away.
+        elif [[ "$has_proposal" -eq 1 ]]; then
+            # A proposal appears in full, never bounded away (ADR-0025 §4).
             is_proposal=1
         fi
         entry="$(printf -- '- **%s** — _%s_ (rounds %s–%s)\n\n%s\n%s\n' \
@@ -473,7 +497,9 @@ for a in "${artifacts[@]}"; do
     a_persona="$(provenance_field persona "$prov")"
     a_tree="$(provenance_field tree "$prov")"
     a_loop="$(provenance_field loop_id "$prov")"
-    snap="$(disposition_snapshot "$a_persona" "$a_tree" "$a_loop")"
+    a_base="$(provenance_field base_sha "$prov")"
+    a_sha="$(provenance_field sha "$prov")"
+    snap="$(disposition_snapshot "$a_persona" "$a_tree" "$a_loop" "$a_base" "$a_sha")"
     [[ -n "$snap" ]] && snapshot["$a_persona"]="$snap"
 done
 

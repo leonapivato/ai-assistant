@@ -258,3 +258,24 @@ def test_two_findings_sharing_a_long_prefix_get_distinct_ids(tmp_path: Path) -> 
     assert text.count("<!-- finding id=") == 2
     assert "case A fails" in text
     assert "case B fails" in text
+
+
+def test_a_finding_quoting_the_frame_marker_is_not_truncated(tmp_path: Path) -> None:
+    """A review OF this script quotes `<!-- /finding -->`; the record must survive.
+
+    The framing markers in the finding text are escaped, so a quoted terminator
+    does not end the block early and drop the grounding that follows it.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    review = "1. **major** the code emits <!-- /finding --> then GROUNDING_TAIL here\nBLOCK\n"
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW=review)
+
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    snap = next(iter((repo / ".review" / "dispositions").glob(f"*-adversarial-{tree}.md")))
+    text = snap.read_text()
+    # Exactly one finding, whole body preserved past the quoted marker.
+    assert text.count("<!-- finding id=") == 1
+    assert "GROUNDING_TAIL" in text
+    # The quoted marker was neutralised, not left as a literal terminator.
+    assert "&lt;!-- /finding --&gt;" in text

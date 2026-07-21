@@ -675,7 +675,12 @@ _write_snapshot() {
         [[ -n "$sev" ]] || sev="unknown"
         cur_order+=("$id")
         cur_sev["$id"]="$sev"
-        cur_text["$id"]="$(cat "$bf")"
+        # Escape the HTML-comment markers so a finding that quotes `<!-- ... -->`
+        # (a review OF this very script does) cannot be mistaken for a finding
+        # header or terminator and truncate the record. Escaped once, here, so a
+        # retired finding carried forward from a prior snapshot is not re-escaped;
+        # GitHub renders the entities back to the literal markers.
+        cur_text["$id"]="$(_escape_markers <"$bf")"
     done
     shopt -u nullglob
 
@@ -703,8 +708,15 @@ _write_snapshot() {
     rm -rf "$work"
 }
 
+# Neutralises the HTML-comment framing markers in finding text so payload can
+# never be read as structure. GitHub renders the entities back to `<!--`/`-->`.
+# Applied once, when a finding is first parsed (not on carry-forward).
+_escape_markers() {
+    sed 's/<!--/\&lt;!--/g; s/-->/--\&gt;/g'
+}
+
 # Emits one finding block: a machine header the renderer parses, then the
-# verbatim finding text, then a terminator.
+# finding text (its markers already escaped at parse time), then a terminator.
 _emit_finding() {
     echo "<!-- finding id=${1} severity=${2} status=${3} first_round=${4} last_round=${5} -->"
     printf '%s\n' "$6"
