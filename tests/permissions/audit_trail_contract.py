@@ -32,6 +32,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     CostBasis,
+    PermissionDecision,
     PermissionOutcome,
     RiskLevel,
     ToolCost,
@@ -39,7 +40,7 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import AuditTrail
-    from ai_assistant.core.types import ActionRequest, PermissionDecision
+    from ai_assistant.core.types import ActionRequest
 
 
 async def _resolved(
@@ -405,6 +406,91 @@ class AuditTrailContract:
         assert await trail.get("d-1") is None
 
     # --- the trail owns what it holds ------------------------------------
+
+    @pytest.mark.parametrize(
+        ("attribute", "value"),
+        [
+            pytest.param("decided_at", datetime(2026, 7, 20, 12, 0), id="naive-timestamp"),  # noqa: DTZ001
+            pytest.param("parameters_digest", "not-a-digest", id="malformed-digest"),
+            pytest.param("id", "", id="blank-identifier"),
+        ],
+    )
+    async def test_a_corrupted_decision_is_refused_rather_than_stored(
+        self, trail: AuditTrail, attribute: str, value: object
+    ) -> None:
+        """ADR-0021 §4 asks for a *validated* snapshot, not merely a detached one.
+
+        Detachment alone copies without checking, so an implementation that only
+        deep-copies conforms to every other clause here and still accepts a
+        decision corrupted past its frozen model's guard. The sharp case is a
+        naive ``decided_at``: ``recent`` sorts on that field, so every later read
+        would raise on comparing it against the aware values beside it — a store
+        that can be put into a state where reads crash has stopped being
+        readable, which is worse than refusing the write.
+
+        Held here rather than only on the fake because it is exactly the clause
+        two implementations would plausibly disagree on: nothing about a
+        deep-copying store *looks* wrong until a corrupted record is in it.
+        """
+        await trail.record(decision("d-1"))
+        corrupted = decision("d-2")
+        object.__setattr__(corrupted, attribute, value)
+
+        with pytest.raises(AuditError):
+            await trail.record(corrupted)
+
+        assert await trail.get("d-2") is None
+        assert [held.id for held in await trail.export()] == ["d-1"]
+
+    async def test_a_decision_corrupted_below_its_own_fields_is_refused(
+        self, trail: AuditTrail
+    ) -> None:
+        """The check has to reach the nested models, not just the top level.
+
+        A revalidation that rebuilt only the decision's own fields would accept
+        an embedded ``ToolDefinition`` whose ``description`` renders as nothing —
+        the visible-text rule ADR-0018 §1 imposes precisely because the trail is
+        read by a human deciding what was approved — and the record would then
+        say a tool was permitted without being able to say which.
+        """
+        corrupted = decision("d-2", ruled=ruling(PermissionOutcome.DENY))
+        object.__setattr__(corrupted.tool, "description", "   ")
+
+        with pytest.raises(AuditError):
+            await trail.record(corrupted)
+
+        assert await trail.get("d-2") is None
+        assert await trail.export() == []
+
+    async def test_detachment_survives_a_caller_supplied_subclass(self, trail: AuditTrail) -> None:
+        """A caller's subclass may not become the object the trail hands back.
+
+        ``PermissionDecision`` is a plain model, so a caller can subclass it and
+        override ``model_copy`` to return ``self``. A store that snapshotted
+        through ``type(decision)`` would then hold that instance and return it
+        from every read, so the detachment above would stop holding without any
+        of its own assertions changing — the caller keeps a live handle on an
+        append-only record.
+
+        The obligation is therefore on the *declared* type: what the trail stores
+        and returns is a ``PermissionDecision``, whatever it was handed.
+        """
+
+        class _Sticky(PermissionDecision):
+            def model_copy(self, **kwargs: object) -> _Sticky:
+                return self
+
+        original = decision("d-1")
+        sticky = _Sticky.model_construct(**dict(original))
+        await trail.record(sticky)
+
+        stored = await trail.get("d-1")
+        assert stored is not None
+        object.__setattr__(stored, "parameters_digest", "rewritten")
+
+        reread = await trail.get("d-1")
+        assert reread is not None
+        assert reread.parameters_digest == original.parameters_digest
 
     async def test_the_stored_snapshot_is_detached_from_the_caller(self, trail: AuditTrail) -> None:
         """The write-path half of ADR-0018 §4's rule.
