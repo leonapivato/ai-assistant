@@ -12,15 +12,16 @@ script selects per environment, without contacting OpenAI.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).parents[2] / "scripts" / "codex-review.sh"
-_BASH = shutil.which("bash")
+sys.path.insert(0, str(Path(__file__).parent))
+from _fake_codex import run_review
+
 _GIT = shutil.which("git")
 
 _BYPASS = "--dangerously-bypass-approvals-and-sandbox"
@@ -41,6 +42,9 @@ def _init_repo(repo: Path) -> str:
     _git(repo, "config", "user.name", "Test")
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
+    # .review/ is git-ignored in the real repo, so the driver's own session and
+    # artifact files under it do not dirty the tree it is reviewing.
+    (repo / ".gitignore").write_text(".review/\n")
     (repo / "f.txt").write_text("one\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
@@ -53,47 +57,19 @@ def _init_repo(repo: Path) -> str:
     return base
 
 
-def _fake_codex(bin_dir: Path, args_file: Path) -> None:
-    """Install a fake ``codex`` that records its args and writes the ``-o`` file."""
-    bin_dir.mkdir()
-    codex = bin_dir / "codex"
-    codex.write_text(
-        "#!/usr/bin/env bash\n"
-        f'printf "%s\\n" "$@" >"{args_file}"\n'
-        'prev=""\n'
-        'for a in "$@"; do\n'
-        # A verdict is part of the rubric's output contract; codex-review.sh
-        # rejects output without one, so the fake must carry it.
-        '  [[ "$prev" == "-o" ]] && printf "review body\\nVerdict: APPROVE\\n" >"$a"\n'
-        '  prev="$a"\n'
-        "done\n"
-    )
-    codex.chmod(0o755)
-
-
 def _run_review(tmp_path: Path, *, env_overrides: dict[str, str]) -> list[str]:
     """Run the review script in a temp repo; return the args the fake codex saw."""
-    assert _BASH is not None
     repo = tmp_path / "repo"
     repo.mkdir()
     base = _init_repo(repo)
     args_file = tmp_path / "codex-args.txt"
-    _fake_codex(tmp_path / "bin", args_file)
 
-    env = os.environ.copy()
-    # Control the CI signal explicitly — the test itself may run under Actions.
-    env.pop("GITHUB_ACTIONS", None)
-    env.pop("CODEX_REVIEW_NO_SANDBOX", None)
-    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
-    env.update(env_overrides)
-
-    subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
-        [_BASH, str(_SCRIPT), "adversarial", base],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
+    run_review(
+        repo,
+        tmp_path,
+        "adversarial",
+        base,
+        env={"FAKE_CODEX_ARGS_FILE": str(args_file), **env_overrides},
     )
     return args_file.read_text().splitlines()
 

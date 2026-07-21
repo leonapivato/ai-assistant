@@ -29,14 +29,15 @@ happens.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-_SCRIPT = Path(__file__).parents[2] / "scripts" / "codex-review.sh"
-_BASH = shutil.which("bash")
+sys.path.insert(0, str(Path(__file__).parent))
+from _fake_codex import run_review
+
 _GIT = shutil.which("git")
 
 
@@ -69,50 +70,29 @@ def _init_repo(repo: Path) -> None:
 
 
 def _fake_codex(bin_dir: Path, prompt_copy: Path) -> None:
-    """A fake ``codex`` that saves the prompt it was given and emits a verdict.
+    """Retained for call-site compatibility; the shared fake is installed by ``_run``.
 
-    The prompt is what carries the §1 preamble, so capturing it is the only way
-    to assert on what the reviewer was actually told.
+    Tests still pass a ``prompt_copy`` path (``tmp_path/"prompt.txt"``) that ``_run``
+    hands the fake via ``FAKE_CODEX_PROMPT_COPY`` — the fake copies the prompt
+    (fed on stdin) there so a test can assert on the §1 preamble it carries.
     """
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    codex = bin_dir / "codex"
-    codex.write_text(
-        "#!/usr/bin/env bash\n"
-        'prev=""\n'
-        'for a in "$@"; do\n'
-        '  [[ "$prev" == "-o" ]] && printf "a finding\\nVerdict: APPROVE\\n" >"$a"\n'
-        '  prev="$a"\n'
-        "done\n"
-        # codex-review.sh feeds the prompt on stdin (`codex exec ... - <"$prompt"`).
-        f'cat >"{prompt_copy}"\n'
-    )
-    codex.chmod(0o755)
 
 
 def _run(
     repo: Path, tmp_path: Path, persona: str = "adversarial", *, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    assert _BASH is not None
-    env = os.environ.copy()
-    env.pop("GITHUB_ACTIONS", None)
-    env.pop("CODEX_REVIEW_NO_SANDBOX", None)
-    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
-    private_tmp = tmp_path / "tmp"
-    private_tmp.mkdir(exist_ok=True)
-    env["TMPDIR"] = str(private_tmp)
-    return subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
-        [_BASH, str(_SCRIPT), persona, "main"],
-        cwd=repo,
+    return run_review(
+        repo,
+        tmp_path,
+        persona,
         check=check,
-        capture_output=True,
-        text=True,
-        env=env,
+        FAKE_CODEX_PROMPT_COPY=str(tmp_path / "prompt.txt"),
     )
 
 
 def _provenance(repo: Path) -> str:
     """The single provenance line of the one artifact recorded."""
-    artifacts = sorted((repo / ".review").iterdir())
+    artifacts = sorted((repo / ".review").glob("*.md"))
     assert len(artifacts) == 1, f"expected one artifact, got {artifacts}"
     return artifacts[0].read_text().splitlines()[0]
 
