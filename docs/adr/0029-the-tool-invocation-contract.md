@@ -551,7 +551,19 @@ committed as `INDETERMINATE` in flat contradiction of the classification above.
 So: an executor whose invocation is cancelled catches the `CancelledError`,
 commits the step by the *same* rule the timeout uses — `FAILED` when the tool is
 not `side_effecting` or its `idempotency` is `NATURAL`, `INDETERMINATE`
-otherwise — and then **re-raises**. Committing is not swallowing: the write is
+otherwise — and then **re-raises**.
+
+**"The tool" there means the registry's definition for the committed
+`bound_tool`, never `call.request.tool`.** This ADR treats a `__dict__` write as
+in scope (§2), and the seam's checks all ran *before* the callable started, so a
+call whose declaration is mutated afterwards is not re-examined by anything. A
+side-effecting, non-`NATURAL` invocation whose definition were flipped to
+read-only mid-flight would then be classified `FAILED` — a possible side effect
+recorded as certainly-nothing-happened, which is the one direction ADR-0014 §4
+refuses to guess in. So the classification reads a trusted value: the registry's
+binding for `bound_tool`, or equivalently the detached copy the seam captured at
+§2's step 1, and never the caller's object. The same applies to the timeout
+branch, which is inside the seam and so already holds the detached copy. Committing is not swallowing: the write is
 the executor's own durable bookkeeping, and the cancellation still propagates,
 which is what keeps shutdown working. An executor that returns normally from a
 cancellation is the bug this clause is not licensing.
@@ -1018,9 +1030,12 @@ ADR makes that are not visible in a signature:
   two tests together are what pin the classification to provenance rather than
   to the exception type. A third pins the shield: a store held mid-commit with a
   second cancellation injected must still land the transition before the
-  `CancelledError` leaves the executor. That test fails against a bare
-  `await asyncio.shield(...)`, which is the point of writing it: shielding the
-  task without absorbing the repeat cancellation looks correct and is not.
+  `CancelledError` leaves the executor; it fails against a bare
+  `await asyncio.shield(...)`, which is the point of writing it, since shielding
+  the task without absorbing the repeat cancellation looks correct and is not.
+  A fourth mutates the call's declaration to read-only *after* invocation begins
+  and asserts the cancelled step is still committed `INDETERMINATE` —
+  classification read from the trusted binding, not from the caller's object.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
   `approval_ref` alone after a simulated restart.
