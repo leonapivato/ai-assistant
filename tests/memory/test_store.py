@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 from memory_store_contract import MemoryStoreContract
+from pydantic import ValidationError
 
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
@@ -204,14 +205,16 @@ async def test_export_is_an_independent_snapshot() -> None:
     assert got.content == "original"
 
 
-async def test_naive_expiry_is_treated_as_utc_not_a_crash() -> None:
-    store = InMemoryMemoryStore(now=_fixed_now)
-    # A naive deadline (accepted by the model, coerced to UTC) must not crash the
-    # aware-vs-naive comparison; here it is in the past, so the record is hidden.
-    await store.add(_semantic("1", "keyword", expires_at=datetime(2026, 1, 2)))  # noqa: DTZ001
+def test_a_naive_expiry_never_reaches_the_store() -> None:
+    """The crash this used to guard against is now impossible to construct.
 
-    assert await store.get("1") is None
-    assert await store.search("keyword") == []
+    A naive ``expires_at`` was previously accepted and coerced, so the store had
+    to tolerate one. ADR-0023 §3 refuses it at the model instead, which is the
+    stronger guarantee: the aware-vs-naive comparison inside ``_is_expired``
+    cannot be reached with a naive deadline at all.
+    """
+    with pytest.raises(ValidationError, match="expires_at must be timezone-aware"):
+        _semantic("1", "keyword", expires_at=datetime(2026, 1, 2))  # noqa: DTZ001 — the subject
 
 
 async def test_purge_expired_removes_only_expired_and_returns_count() -> None:

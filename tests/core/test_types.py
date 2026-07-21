@@ -50,18 +50,71 @@ def test_confidence_is_bounded() -> None:
         Provenance(source=MemorySource.INFERRED, confidence=1.5, last_updated=_WHEN)
 
 
-def test_naive_expires_at_is_coerced_to_utc() -> None:
+def test_naive_expires_at_is_refused() -> None:
+    """Rejected, not assumed UTC (ADR-0023 §3).
+
+    ``core`` cannot know whether the caller meant UTC or their own wall clock,
+    and coercing resolves that ambiguity in the fabricating direction every time.
+    """
     prov = Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN)
-    record = SemanticMemory(
+    with pytest.raises(ValidationError, match="expires_at must be timezone-aware"):
+        SemanticMemory(
+            id="1",
+            content="c",
+            fact="f",
+            provenance=prov,
+            expires_at=datetime(2026, 1, 2),  # noqa: DTZ001 — a naive value is the subject
+        )
+
+
+def test_naive_last_updated_is_refused() -> None:
+    """``Provenance.last_updated`` had no validator at all before ADR-0023."""
+    with pytest.raises(ValidationError, match="last_updated must be timezone-aware"):
+        Provenance(
+            source=MemorySource.INFERRED,
+            confidence=0.4,
+            last_updated=datetime(2026, 1, 2),  # noqa: DTZ001 — a naive value is the subject
+        )
+
+
+def test_naive_occurred_at_is_refused() -> None:
+    """``EpisodicMemory.occurred_at`` had no validator at all before ADR-0023."""
+    prov = Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN)
+    with pytest.raises(ValidationError, match="occurred_at must be timezone-aware"):
+        EpisodicMemory(
+            id="1",
+            content="c",
+            provenance=prov,
+            occurred_at=datetime(2026, 1, 2),  # noqa: DTZ001 — a naive value is the subject
+        )
+
+
+def test_naive_valid_until_is_refused() -> None:
+    """``SemanticMemory.valid_until`` had no validator at all before ADR-0023."""
+    prov = Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=_WHEN)
+    with pytest.raises(ValidationError, match="valid_until must be timezone-aware"):
+        SemanticMemory(
+            id="1",
+            content="c",
+            fact="f",
+            provenance=prov,
+            valid_until=datetime(2026, 1, 2),  # noqa: DTZ001 — a naive value is the subject
+        )
+
+
+def test_previously_unvalidated_fields_convert_an_aware_value_to_utc() -> None:
+    """The three fields that had no rule now get the whole rule, not half of it."""
+    berlin = datetime(2026, 1, 2, 10, tzinfo=ZoneInfo("Europe/Berlin"))  # 09:00 UTC
+    record = EpisodicMemory(
         id="1",
         content="c",
-        fact="f",
-        provenance=prov,
-        expires_at=datetime(2026, 1, 2),  # noqa: DTZ001
+        provenance=Provenance(source=MemorySource.INFERRED, confidence=0.4, last_updated=berlin),
+        occurred_at=berlin,
     )
-    assert record.expires_at == datetime(2026, 1, 2, tzinfo=UTC)
-    assert record.expires_at is not None
-    assert record.expires_at.tzinfo is UTC
+
+    assert record.occurred_at == datetime(2026, 1, 2, 9, tzinfo=UTC)
+    assert record.occurred_at.tzinfo is UTC
+    assert record.provenance.last_updated.tzinfo is UTC
 
 
 def test_aware_expires_at_is_left_unchanged() -> None:
@@ -143,14 +196,30 @@ def test_current_context_constructs_and_forbids_extra_fields() -> None:
         )
 
 
-def test_current_context_now_naive_is_coerced_to_utc() -> None:
+def test_current_context_now_naive_is_refused() -> None:
+    """Advisory or durable makes no difference — ADR-0023 §4 refuses the category.
+
+    ``core`` cannot classify a value's provenance, so the rule follows from where
+    the type sits, not from what the field is later used for.
+    """
+    with pytest.raises(ValidationError, match="now must be timezone-aware"):
+        CurrentContext(
+            now=datetime(2026, 1, 1, 12),  # noqa: DTZ001 — a naive value is the subject
+            time_of_day=TimeOfDay.AFTERNOON,
+            is_weekend=False,
+            within_working_hours=True,
+        )
+
+
+def test_current_context_now_aware_is_converted_to_utc() -> None:
+    """``CurrentContext.now`` used to keep an aware non-UTC value verbatim."""
     ctx = CurrentContext(
-        now=datetime(2026, 1, 1, 12),  # noqa: DTZ001  naive input
-        time_of_day=TimeOfDay.AFTERNOON,
+        now=datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("America/New_York")),
+        time_of_day=TimeOfDay.MORNING,
         is_weekend=False,
         within_working_hours=True,
     )
-    assert ctx.now == datetime(2026, 1, 1, 12, tzinfo=UTC)
+    assert ctx.now == datetime(2026, 1, 1, 14, tzinfo=UTC)
     assert ctx.now.tzinfo is UTC
 
 
@@ -165,15 +234,14 @@ def test_feedback_event_constructs_with_defaults() -> None:
     assert event.evidence == []
 
 
-def test_feedback_event_created_at_naive_is_coerced_to_utc() -> None:
-    event = FeedbackEvent(
-        kind=FeedbackKind.CORRECTION,
-        memory_kind=MemoryKind.SEMANTIC,
-        content="office is in Boston",
-        created_at=datetime(2026, 1, 1, 9),  # noqa: DTZ001  naive input
-    )
-    assert event.created_at == datetime(2026, 1, 1, 9, tzinfo=UTC)
-    assert event.created_at.tzinfo is UTC
+def test_feedback_event_created_at_naive_is_refused() -> None:
+    with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
+        FeedbackEvent(
+            kind=FeedbackKind.CORRECTION,
+            memory_kind=MemoryKind.SEMANTIC,
+            content="office is in Boston",
+            created_at=datetime(2026, 1, 1, 9),  # noqa: DTZ001 — a naive value is the subject
+        )
 
 
 def test_feedback_event_created_at_aware_is_converted_to_utc() -> None:

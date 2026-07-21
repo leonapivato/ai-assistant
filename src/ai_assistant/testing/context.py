@@ -70,7 +70,10 @@ class FakeContextProvider:
             ValueError: If both ``context`` and ``failure`` are given (they
                 describe incompatible outcomes, and silently letting one win would
                 hide a mis-wired test), or if ``context.now`` carries a timezone
-                whose offset is indeterminate.
+                whose offset is indeterminate. Re-validation additionally raises
+                ``ValidationError`` (itself a ``ValueError``) for a ``now``
+                mutated naive after construction — ADR-0023 refuses it rather
+                than assuming UTC.
         """
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
@@ -80,15 +83,12 @@ class FakeContextProvider:
             and context.now.tzinfo is not None
             and context.now.utcoffset() is None
         ):
-            # A *naive* `now` is not this case — revalidation below normalises it to
-            # UTC, as constructing the model would have. This is the narrower one:
-            # `CurrentContext` requires only `tzinfo is not None`, which a custom
-            # tzinfo returning `None` from `utcoffset()` satisfies while still being
-            # indeterminate. Revalidation cannot fix that, so the fake would fail the
-            # tz-aware assertion in its own conformance suite and downstream aware
-            # comparisons would raise. Caught here so the fake cannot be the thing
-            # that breaks the contract; tightening `CurrentContext` itself is a
-            # `core/` change, left as a follow-up rather than widened into this lane.
+            # Redundant since ADR-0023: `CurrentContext.now` is now a `UtcInstant`,
+            # which spells "aware" as `utcoffset() is not None` and so refuses this
+            # case itself (issue #36). Kept because it is the *earlier* and more
+            # specific failure — it names the fake's own parameter rather than
+            # surfacing a pydantic `ValidationError` from the re-validation below —
+            # and removing it is #36's site-by-site cleanup, not this lane's.
             msg = "context.now must have a determinate UTC offset"
             raise ValueError(msg)
         # Snapshotted on ingress as well as egress: the context is fixed *at
@@ -100,8 +100,8 @@ class FakeContextProvider:
         # on assignment, so a caller can hand over a model it mutated into an
         # invalid state (a naive `now`, most likely) — and the fake would then fail
         # the tz-aware assertion in its own conformance suite. Validating here
-        # rejects it at the point the mistake was made, and normalises a naive
-        # `now` to UTC exactly as constructing the model would have.
+        # rejects it at the point the mistake was made, exactly as constructing the
+        # model would have (ADR-0023: refused, not assumed UTC).
         source = context if context is not None else _DEFAULT_CONTEXT
         self._context = CurrentContext.model_validate(source.model_dump())
         self._failure = failure

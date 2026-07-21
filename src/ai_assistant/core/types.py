@@ -23,7 +23,7 @@ from hashlib import sha256
 from math import isfinite
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic.functional_serializers import PlainSerializer
 from pydantic.functional_validators import AfterValidator
 
@@ -32,6 +32,121 @@ _FULL_CONFIDENCE = 1.0
 
 Embedding = Sequence[float]
 """A dense vector embedding of a piece of text (see ADR-0006)."""
+
+
+def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
+    """Reject a value with no determinate offset; return the instant in UTC.
+
+    The two halves of ADR-0023 §§2-3, carried by one function so no field can
+    opt out of either.
+
+    **Rejection (§3).** ``core/types.py`` is the one layer that cannot know a
+    value's provenance. A naive value may be a UTC timestamp read back through a
+    format that dropped its offset, or a wall-clock time a user typed;
+    ``replace(tzinfo=UTC)`` *restores* a fact in the first case and *fabricates*
+    one in the second, and the two are indistinguishable here. Coercing resolves
+    that ambiguity in the fabricating direction, silently, every time — and a
+    stable-and-wrong instant is unfalsifiable afterwards, where a
+    ``ValidationError`` names its cause at entry. Attribution stays legitimate in
+    the adapter that decoded the value and therefore knows what it wrote.
+
+    "Aware" means what Python means (ADR-0023 §5, issue #36): ``utcoffset()``
+    returns a value. A ``tzinfo`` that is *set* but indeterminate is not aware,
+    so ``tzinfo is not None`` was always the wrong spelling.
+
+    **Conversion (§2).** Python compares two aware datetimes sharing a
+    ``tzinfo`` by their naive wall-clock values, ignoring ``fold`` — so during a
+    DST repeated hour ``01:15 fold=1`` (the later instant) compares as *earlier*
+    than ``01:45 fold=0``. A durable, ordered record holding such values is
+    internally consistent and chronologically false, for one hour a year.
+    Converting makes same-``tzinfo`` comparison identical to instant comparison,
+    once, for every field rather than per implementation.
+
+    The failure path is total because the annotation is not: a custom ``tzinfo``
+    whose ``utcoffset()`` raises, and a value near ``datetime.min``/``max`` at a
+    non-UTC offset that overflows ``astimezone``, both reach here. Each becomes
+    the same field-naming ``ValueError`` rather than escaping as a crash pydantic
+    would not report as a validation failure — the "accepted, then unusable"
+    shape a validator exists to close.
+
+    Args:
+        value: The candidate instant.
+        info: Pydantic's field context; supplies the field name for the message.
+
+    Returns:
+        ``value`` expressed in UTC.
+
+    Raises:
+        ValueError: If the value has no determinate UTC offset, its ``tzinfo``
+            fails, or it has no UTC representation.
+    """
+    field = info.field_name or "instant"
+    try:
+        offset = value.utcoffset()
+    except Exception as exc:  # any tzinfo failure is one rejection, not a leaked crash
+        msg = f"{field} must be timezone-aware, but its tzinfo failed: {value!r}"
+        raise ValueError(msg) from exc
+    if offset is None:
+        msg = f"{field} must be timezone-aware with a determinate offset, got {value!r}"
+        raise ValueError(msg)
+    try:
+        return value.astimezone(UTC)
+    except Exception as exc:  # incl. OverflowError, which is not a ValueError
+        msg = f"{field} has no UTC representation, got {value!r}"
+        raise ValueError(msg) from exc
+
+
+type UtcInstant = Annotated[datetime, AfterValidator(_utc_instant)]
+"""An absolute point in time, stored as UTC and never guessed at (ADR-0023).
+
+Every ``datetime`` field in this module is typed with this rather than carrying
+its own validator, because a per-field validator is *opt-in*: the three fields
+that had none — ``Provenance.last_updated``, ``EpisodicMemory.occurred_at``,
+``SemanticMemory.valid_until`` — are exactly how naive values got in. Using the
+type is the enforcement, and ``tests/core/test_instant_coverage.py`` fails the
+gate on a bare ``datetime`` annotation so the omission cannot recur.
+
+Scoped to **instants**. A *civil* time — a recurring "09:00 ``Europe/Berlin``",
+whose meaning is the wall clock rather than a point on the timeline — must not
+be UTC-converted, since that shifts its hour across DST. That would be a
+distinct type with its own decision, which this one neither covers nor pre-empts.
+
+**Five ``planning`` fields do not use it yet**, and the omission is ordering,
+not oversight — see :data:`_ORDERING_DEFERRED`.
+"""
+
+_ORDERING_DEFERRED = frozenset(
+    {
+        ("ActionPlan", "created_at"),
+        ("StepExecution", "started_at"),
+        ("StepExecution", "finished_at"),
+        ("ExecutionState", "updated_at"),
+        ("PlanExport", "exported_at"),
+    }
+)
+"""Clock-fed fields still awaiting ADR-0026's producer guard (ADR-0023 §6).
+
+ADR-0023 §6 binds its own migration: a field a clock feeds is not tightened to
+:data:`UtcInstant` until that clock is guaranteed aware, **or** the existing
+normalisation at the producer boundary is retained as a shim until it is. Six of
+the nine clock-fed fields have such a shim — ``CurrentContext.now`` via
+``ClockContextSource.contribute``, and ``MemoryBase.expires_at``,
+``Goal.created_at`` and ``Provenance.last_updated`` via ``LearningLoop._now_utc``
+and ``MemoryIngestor._now_utc`` — so they are migrated.
+
+These five have none. ``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner``
+and ``FakePlanStore`` pass an injected reading straight into the field, and what
+normalises a naive one today is *the validator below* — the very thing
+:data:`UtcInstant` would remove. Tightening them now would break a naive test or
+config clock with nothing standing behind it, which is precisely what the
+ordering exists to prevent. Manufacturing a shim instead would mean building
+ADR-0026's producer guard, which is unratified and not this change's to build.
+
+So their validators stay as they are — already ADR-0023 §2-conformant on
+conversion, still attributing on a naive value — and the gate check in
+``tests/core/test_instant_coverage.py`` reads this set as its one exemption, so
+the debt is enumerated and shrinks to empty when ADR-0026's producers land.
+"""
 
 
 class Role(StrEnum):
@@ -87,7 +202,7 @@ class Provenance(BaseModel):
         default_factory=list,
         description="References (e.g. episode ids) supporting this record.",
     )
-    last_updated: datetime = Field(description="When this belief was last revised (tz-aware).")
+    last_updated: UtcInstant = Field(description="When this belief was last revised (tz-aware).")
 
     @model_validator(mode="after")
     def _user_asserted_is_certain(self) -> Provenance:
@@ -108,33 +223,20 @@ class MemoryBase(BaseModel):
         default=None,
         description="Relevance score, populated by retrieval; None when stored.",
     )
-    expires_at: datetime | None = Field(
+    expires_at: UtcInstant | None = Field(
         default=None,
         description=(
             "Retention deadline after which the record is forgotten (ADR-0004); "
-            "a naive datetime is interpreted as UTC."
+            "timezone-aware, stored as UTC."
         ),
     )
-
-    @field_validator("expires_at")
-    @classmethod
-    def _expires_at_is_utc_aware(cls, value: datetime | None) -> datetime | None:
-        """Normalise the retention deadline to a UTC-aware datetime.
-
-        Retention is enforced by comparing ``expires_at`` against a UTC clock, so
-        a naive value would either crash the comparison or be read in host-local
-        time. Assuming UTC keeps every store consistent.
-        """
-        if value is not None and value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value
 
 
 class EpisodicMemory(MemoryBase):
     """Something that happened: an event, with who and how it turned out."""
 
     kind: Literal["episodic"] = "episodic"
-    occurred_at: datetime
+    occurred_at: UtcInstant
     participants: list[str] = Field(default_factory=list)
     outcome: str | None = None
     importance: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -145,7 +247,7 @@ class SemanticMemory(MemoryBase):
 
     kind: Literal["semantic"] = "semantic"
     fact: str
-    valid_until: datetime | None = Field(
+    valid_until: UtcInstant | None = Field(
         default=None,
         description="Optional expiry after which the fact is no longer assumed true.",
     )
@@ -286,23 +388,12 @@ class CurrentContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    now: datetime = Field(description="The tz-aware reference instant for this context.")
+    now: UtcInstant = Field(description="The tz-aware reference instant for this context.")
     time_of_day: TimeOfDay
     is_weekend: bool
     within_working_hours: bool = Field(
         description="Whether the local time falls in the configured working-hours window.",
     )
-
-    @field_validator("now")
-    @classmethod
-    def _now_is_utc_aware(cls, value: datetime) -> datetime:
-        """Normalise the reference instant to UTC-aware (a naive value is UTC).
-
-        The context is compared against UTC-aware timestamps downstream, so a
-        naive ``now`` would risk a naive-vs-aware ``TypeError``; assuming UTC
-        keeps it consistent with the rest of the system.
-        """
-        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class FeedbackKind(StrEnum):
@@ -330,7 +421,7 @@ class FeedbackEvent(BaseModel):
         default_factory=list,
         description="Interaction/episode ids supporting this, carried into provenance.",
     )
-    created_at: datetime = Field(description="When the feedback was given (tz-aware).")
+    created_at: UtcInstant = Field(description="When the feedback was given (tz-aware).")
 
     @field_validator("content")
     @classmethod
@@ -341,14 +432,6 @@ class FeedbackEvent(BaseModel):
             msg = "feedback content must not be empty"
             raise ValueError(msg)
         return stripped
-
-    @field_validator("created_at")
-    @classmethod
-    def _created_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC)."""
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
 
 
 type FrozenJson = str | int | float | bool | None | Sequence[FrozenJson] | Mapping[str, FrozenJson]
@@ -526,10 +609,10 @@ class Goal(BaseModel):
     statement: str = Field(description="Canonical text rendering of the objective.")
     status: GoalStatus = GoalStatus.ACTIVE
     provenance: Provenance
-    created_at: datetime = Field(description="When the goal was recorded (tz-aware).")
-    deadline: datetime | None = Field(
+    created_at: UtcInstant = Field(description="When the goal was recorded (tz-aware).")
+    deadline: UtcInstant | None = Field(
         default=None,
-        description="Optional target date; a naive datetime is interpreted as UTC.",
+        description="Optional target date; timezone-aware, stored as UTC.",
     )
 
     @field_validator("statement")
@@ -541,16 +624,6 @@ class Goal(BaseModel):
             msg = "goal statement must not be empty"
             raise ValueError(msg)
         return stripped
-
-    @field_validator("created_at", "deadline")
-    @classmethod
-    def _timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
-        """Normalise timestamps to UTC (a naive value is assumed UTC)."""
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
 
 
 class PlanStep(BaseModel):
@@ -595,7 +668,12 @@ class ActionPlan(BaseModel):
     @field_validator("created_at")
     @classmethod
     def _created_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC)."""
+        """Normalise the timestamp to UTC (a naive value is assumed UTC).
+
+        Not yet :data:`UtcInstant`: this field is clock-fed and its producer has
+        no shim, so ADR-0023 §6's ordering holds it back — see
+        :data:`_ORDERING_DEFERRED`.
+        """
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
@@ -814,7 +892,12 @@ class StepExecution(BaseModel):
     @field_validator("started_at", "finished_at")
     @classmethod
     def _timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
-        """Normalise timestamps to UTC (a naive value is assumed UTC)."""
+        """Normalise timestamps to UTC (a naive value is assumed UTC).
+
+        Not yet :data:`UtcInstant`: these fields are clock-fed and their producer
+        has no shim, so ADR-0023 §6's ordering holds them back — see
+        :data:`_ORDERING_DEFERRED`.
+        """
         if value is None:
             return None
         if value.tzinfo is None:
@@ -879,7 +962,14 @@ class ExecutionState(BaseModel):
     @field_validator("updated_at")
     @classmethod
     def _updated_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC)."""
+        """Normalise the timestamp to UTC (a naive value is assumed UTC).
+
+        Not yet :data:`UtcInstant`: this field is clock-fed and its producer has
+        no shim — ``PlanExecution`` writes an injected reading straight in, and
+        ``_revalidated_state`` puts it back through *this* validator, so removing
+        the attribution here is what would break a naive clock. ADR-0023 §6's
+        ordering holds it back; see :data:`_ORDERING_DEFERRED`.
+        """
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
@@ -996,7 +1086,12 @@ class PlanExport(BaseModel):
     @field_validator("exported_at")
     @classmethod
     def _exported_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC)."""
+        """Normalise the timestamp to UTC (a naive value is assumed UTC).
+
+        Not yet :data:`UtcInstant`: this field is clock-fed and its producer has
+        no shim, so ADR-0023 §6's ordering holds it back — see
+        :data:`_ORDERING_DEFERRED`.
+        """
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value.astimezone(UTC)
@@ -1837,7 +1932,13 @@ class PermissionDecision(BaseModel):
         description="The declaration ruled on, verbatim."
     )
     parameters_digest: Sha256Hex = Field(description="Binds the payload without storing it.")
-    decided_at: datetime = Field(description="When the ruling was made; timezone-aware.")
+    decided_at: UtcInstant = Field(
+        description=(
+            "When the ruling was made; timezone-aware, stored as UTC. The trail "
+            "is durable *and ordered* (ADR-0021 §4), which is why a naive value "
+            "is refused rather than assumed — see :data:`UtcInstant`."
+        )
+    )
     step_id: DurableIdentifier | None = None
     resolves: DurableIdentifier | None = Field(
         default=None, description="The CONFIRM decision this one answers, if any."
@@ -1936,48 +2037,6 @@ class PermissionDecision(BaseModel):
             and request.parameters_digest == self.parameters_digest
             and request.step_id == self.step_id
         )
-
-    @field_validator("decided_at")
-    @classmethod
-    def _decided_at_is_aware(cls, value: datetime) -> datetime:
-        """Reject a naive decision timestamp, and normalise an aware one to UTC.
-
-        The **rejection** is where ADR-0021 §4 departs from the other instants
-        in this module, which assume UTC for a naive value. The trail is durable
-        *and ordered*, so a naive value is reinterpreted against whatever the
-        host's local zone happens to be at read time and sorts incoherently
-        against the aware values beside it. "When was this approved" is a
-        question an audit trail must not answer differently on a laptop that
-        travelled — and unlike a retention deadline, there is no later
-        comparison that would surface the mistake.
-
-        The **normalisation** is what makes ordering mean *instant* rather than
-        wall clock, and it is load-bearing rather than tidiness. Python compares
-        two aware datetimes sharing a ``tzinfo`` by their naive values, ignoring
-        ``fold`` — so during a DST repeated hour, ``01:15 fold=1`` (the later
-        instant) compares as *earlier* than ``01:45 fold=0``. A trail holding
-        such values would accept a resolution that genuinely predates the
-        confirmation it answers, and ``recent()`` would present the pair in that
-        order: an audit record that is internally consistent and chronologically
-        false, for one hour a year. Converting here fixes it once, for every
-        implementation, rather than asking each to remember.
-
-        (Issue #36 tracks a known weakness in these validators — a ``tzinfo``
-        whose ``utcoffset()`` returns ``None`` — and applies here as elsewhere.)
-        """
-        if value.tzinfo is None or value.utcoffset() is None:
-            msg = f"decided_at must be timezone-aware, got {value!r}"
-            raise ValueError(msg)
-        try:
-            return value.astimezone(UTC)
-        except OverflowError as exc:
-            # A datetime within a day of `datetime.min`/`max` at a large offset
-            # is aware and still has no UTC representation. `OverflowError` is
-            # not a `ValueError`, so pydantic would let it escape as a crash
-            # instead of a validation failure -- the same "accepted, then
-            # unusable" shape the payload rules close, at the other end.
-            msg = f"decided_at has no UTC representation, got {value!r}"
-            raise ValueError(msg) from exc
 
     @model_validator(mode="after")
     def _a_resolution_is_not_itself_a_question(self) -> PermissionDecision:

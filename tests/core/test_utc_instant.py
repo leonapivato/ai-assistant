@@ -1,0 +1,157 @@
+"""Behaviour of the shared instant type (ADR-0023 §§2-3).
+
+``tests/core/test_instant_coverage.py`` checks *structure* — that every ``core``
+datetime field uses this type. It cannot check what the type does, so an
+implementation could pass that gate while rejecting naive values and quietly
+failing to convert aware ones. This module pins the behaviour instead, on a
+throwaway model rather than on any one field, because the guarantee belongs to
+the type.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo
+
+import pytest
+from pydantic import BaseModel, ValidationError
+
+from ai_assistant.core.types import UtcInstant
+
+
+class _Instant(BaseModel):
+    """A minimal carrier, so the tests are about the type and not about a field."""
+
+    when: UtcInstant
+
+
+class _NoOffset(tzinfo):
+    """Set, but indeterminate — issue #36's case. Not aware, by ADR-0023 §5."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "indeterminate"
+
+
+class _RaisingOffset(tzinfo):
+    """A ``tzinfo`` whose ``utcoffset()`` raises rather than answering."""
+
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        msg = "no offset available"
+        raise RuntimeError(msg)
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return "raises"
+
+
+def test_a_naive_value_is_rejected_and_the_field_is_named() -> None:
+    """ADR-0023 §3: `core` cannot know the provenance, so it may not guess."""
+    with pytest.raises(ValidationError, match="when must be timezone-aware"):
+        _Instant(when=datetime(2026, 1, 1, 9))  # noqa: DTZ001 — a naive value is the subject
+
+
+def test_an_indeterminate_offset_is_rejected() -> None:
+    """ "Aware" means ``utcoffset()`` returns a value (ADR-0023 §5, issue #36).
+
+    ``tzinfo is not None`` was always the wrong spelling: it accepts this value,
+    which then raises on the first aware comparison downstream.
+    """
+    with pytest.raises(ValidationError, match="when must be timezone-aware"):
+        _Instant(when=datetime(2026, 1, 1, 9, tzinfo=_NoOffset()))
+
+
+def test_a_raising_tzinfo_becomes_a_validation_error_not_a_crash() -> None:
+    """Pydantic reports a ``ValueError`` as a validation failure; a ``RuntimeError``
+    escapes as a crash from wherever the model happened to be constructed.
+    """
+    with pytest.raises(ValidationError, match="its tzinfo failed"):
+        _Instant(when=datetime(2026, 1, 1, 9, tzinfo=_RaisingOffset()))
+
+
+def test_an_aware_non_utc_value_is_converted_not_merely_accepted() -> None:
+    """The half that is easy to omit, and the half ADR-0023 §2 is really about."""
+    made = _Instant(when=datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("America/New_York")))
+
+    assert made.when.tzinfo is UTC
+    assert made.when.utcoffset() == timedelta(0)
+    assert made.when == datetime(2026, 1, 1, 14, tzinfo=UTC)
+
+
+def test_conversion_preserves_the_instant() -> None:
+    """Conversion is information-*preserving*; only the representation changes."""
+    original = datetime(
+        2026, 6, 1, 12, 34, 56, 789, tzinfo=timezone(timedelta(hours=5, minutes=30))
+    )
+
+    assert _Instant(when=original).when == original
+    assert _Instant(when=original).when.timestamp() == original.timestamp()
+
+
+def test_utc_values_survive_unchanged() -> None:
+    already = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    assert _Instant(when=already).when == already
+
+
+def test_conversion_makes_a_dst_repeated_hour_order_by_instant() -> None:
+    """Why §2 makes conversion mandatory rather than merely tidy.
+
+    Python compares two aware datetimes sharing a ``tzinfo`` by their naive
+    wall-clock values, ignoring ``fold`` — so the later instant compares as the
+    earlier one. Converting to UTC makes same-``tzinfo`` comparison identical to
+    instant comparison.
+    """
+    zone = ZoneInfo("America/New_York")
+    earlier = datetime(2026, 11, 1, 1, 45, tzinfo=zone, fold=0)  # 05:45 UTC
+    later = datetime(2026, 11, 1, 1, 15, tzinfo=zone, fold=1)  # 06:15 UTC
+
+    assert later < earlier  # the bug, as stored values with a shared tzinfo
+    assert _Instant(when=earlier).when < _Instant(when=later).when  # fixed by conversion
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param(
+            datetime.min.replace(tzinfo=timezone(timedelta(hours=1))), id="min-at-plus-one"
+        ),
+        pytest.param(
+            datetime.max.replace(tzinfo=timezone(timedelta(hours=-1))), id="max-at-minus-one"
+        ),
+    ],
+)
+def test_a_value_with_no_utc_representation_is_rejected(boundary: datetime) -> None:
+    """Aware, in range, and still unconvertible — ``astimezone`` overflows.
+
+    ``OverflowError`` is not a ``ValueError``, so pydantic would let it escape as
+    a crash rather than reporting it as a validation failure: the "accepted, then
+    unusable" shape a validator exists to close.
+    """
+    with pytest.raises(ValidationError, match="when has no UTC representation"):
+        _Instant(when=boundary)
+
+
+def test_a_json_round_trip_keeps_utc() -> None:
+    """The type has to survive serialisation, since that is how stores use it."""
+    made = _Instant(when=datetime(2026, 1, 1, 9, tzinfo=ZoneInfo("America/New_York")))
+    restored = _Instant.model_validate_json(made.model_dump_json())
+
+    assert restored.when == made.when
+    assert restored.when.utcoffset() == timedelta(0)
+
+
+def test_a_naive_iso_string_is_rejected_on_the_way_in() -> None:
+    """Deserialisation is where naive values actually arrive, not construction.
+
+    ``DTZ`` lint stops a bare ``datetime.now()`` in first-party code; it sees
+    nothing of a JSON payload whose timestamp lost its offset.
+    """
+    with pytest.raises(ValidationError, match="when must be timezone-aware"):
+        _Instant.model_validate_json('{"when": "2026-01-01T09:00:00"}')
