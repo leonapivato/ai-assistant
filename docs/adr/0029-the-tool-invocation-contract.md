@@ -232,22 +232,34 @@ recipient, replace `parameters` with a valid frozen mapping naming another, and
 a seam checking only the definition would execute the second under the first's
 approval.
 
-So the obligation on `invoke` is stated as three checks in one place, before the
-callable is reached:
+So the obligation on `invoke` is three checks in one place, before the callable
+is reached, **and the order is part of the rule**:
 
-1. the definition matches the registry's original (§1);
-2. `call.decision.authorises(call.request)` — re-evaluated on the value as
-   received, not trusted from construction;
-3. the call is **revalidated and detached** on the way in, as ADR-0018 §4
-   requires of anything a registry stores and ADR-0021 §4 of anything the trail
-   records, so a mutation landed after validation cannot survive into execution.
+1. the call is **revalidated and detached** — first, as ADR-0018 §4 requires of
+   anything a registry stores and ADR-0021 §4 of anything the trail records, so
+   a mutation landed after construction cannot survive into execution;
+2. the definition on that detached copy matches the registry's original (§1);
+3. `decision.authorises(request)` on that same copy — re-evaluated, not trusted
+   from construction.
 
-A failed re-check raises `ToolBindingError`, like a mismatched definition: both
-are the same fault — the thing about to run is not the thing that was
-authorised — and neither is a tool failing, so neither may be an ordinary
-`FAILED` result an executor might retry. The validator stays because it catches
-the honest mistake at the point it is made, with a better message and no I/O;
-the seam check is what holds against a deliberate one.
+Every subsequent check reads the revalidated copy, never the argument. Ordering
+it the other way is not a stylistic preference: a `__dict__` write can leave
+`parameters` holding a value `FrozenJson` would never have accepted, and
+`authorises` compares `parameters_digest`, which canonicalises that mapping to
+JSON. Run before revalidation, it raises a raw serialisation error out of a
+method whose contract is that it answers a question — after the executor has
+already committed its `→ RUNNING` claim, so the step is left durably `RUNNING`
+until recovery, which is the exact outcome §4 spends its length avoiding.
+Revalidating first turns that input into a rejection instead.
+
+A failure at any of the three raises `ToolBindingError`, with a revalidation
+failure carrying the underlying `ValidationError` as its cause — the shape
+ADR-0026 §2 uses when `core` translates an arbitrary fault into its own error.
+All three are the same fault: the thing about to run is not the thing that was
+authorised. None is a tool failing, so none may be an ordinary `FAILED` result
+an executor might retry. The `ToolCall` validator stays because it catches the
+honest mistake at the point it is made, with a better message and no I/O; the
+seam checks are what hold against a deliberate one.
 
 **Why this may live in `core`.** The validator compares two values it is given.
 It does not decide whether an action *should* be allowed — that is
@@ -811,10 +823,16 @@ ADR makes that are not visible in a signature:
   `step_id` each refused at construction.
 - **And unauthorised again at the seam** (§2): a call mutated through
   `__dict__` *after* passing construction — parameters swapped for a different
-  valid payload, the decision replaced — refused by `invoke` with the tool never
-  reached. This is the check that survives the bypass `frozen=True` does not
-  cover, so testing only the construction case would certify the door and not
-  the window.
+  valid payload, the decision replaced, the definition substituted — refused by
+  `invoke` with the tool never reached. This is the check that survives the
+  bypass `frozen=True` does not cover, so testing only the construction case
+  would certify the door and not the window.
+- **And the order of those checks**, which only a malformed mutation
+  distinguishes: `parameters` replaced with a mapping `FrozenJson` would have
+  rejected must come back as `ToolBindingError` carrying the `ValidationError`
+  as its cause — not as a raw serialisation error from the digest. A suite that
+  mutates only into *valid* states passes under either order and proves nothing
+  about it.
 - **The timeout rule in §4 in both directions**: a `side_effecting`,
   non-`NATURAL` tool that exceeds its deadline yields `INDETERMINATE`; a
   read-only or `NATURAL` one yields `FAILED`. And that a `timeout` which is
