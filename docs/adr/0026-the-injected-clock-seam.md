@@ -3,9 +3,11 @@
 - Status: Proposed
 - Date: 2026-07-21
 - Decides: what ADR-0023 §6 defers — the *producer* side of the instant
-  convention. **ADR-0023 is not merged.** It is in review on PR #129, and this
-  ADR is written against its §6 as it stands there; if §6 moves, this ADR moves
-  with it. Nothing here restates or reopens ADR-0023's field-side decision.
+  convention. ADR-0023 is **Accepted** (merged in #129), so its §6 ordering
+  constraint is ratified, not provisional. What is *not* yet in the code is its
+  **migration**: `UtcInstant` does not exist in `src/` and no field validator has
+  flipped to rejecting. This ADR is written against the ratified §6 and does not
+  restate or reopen ADR-0023's field-side decision.
 - Amends on ratification: ADR-0008 §§4–5. The edit is **not** made by this
   change — see §6 for its exact form and why it waits.
 
@@ -215,13 +217,27 @@ and the caller sees only a later "could not assemble a valid context" from the
 missing fields — the owner label and the cause both lost. Re-raising on the
 error *type* instead is the wrong fix: a future optional source is entitled to
 raise `ContextError`, and typing the decision would make it abort the request,
-which is the degradation rule §4 keeps. So `ContextSource` — internal to
-`context/` by ADR-0008 §2, hence no `core` change — gains a **`required`**
-property, default `False`. `_safe_contribute` degrades an optional source
-exactly as today and does not degrade a required one; `ClockContextSource` is
-the one required source. Both paths are behaviour a test must pin: a required
-source's failure reaching the caller with its cause intact, and an optional
-source's failure still leaving its facet absent.
+which is the degradation rule §4 keeps. So the marker is **`required`**, a
+property a source may carry, read by the assembler as
+`getattr(source, "required", False)`; `ClockContextSource` is the one source
+that sets it `True`.
+
+It is **not** added to the `ContextSource` Protocol, deliberately. A `Protocol`
+member is mandatory for structural conformance and supplies no default to
+classes that do not inherit it, so declaring it there would make every existing
+source non-conforming — `tests/context/test_context_provider.py`'s
+`_FailingSource` and `_LeakySource` implement `name` and `contribute` only, and
+a bare `source.required` on them raises `AttributeError` inside the very
+degradation path it was meant to select. Absent means optional, which is both
+the safe default and the one that keeps ADR-0008 §2's seam additive. The
+alternative — requiring every present and future source to declare `required` —
+was rejected: it taxes every optional source to mark the one required one.
+
+`_safe_contribute` then degrades an optional source exactly as today and does
+not degrade a required one. Both paths are behaviour a test must pin: a
+required source's failure reaching the caller with its cause intact, and an
+optional source's failure — including one from a source with no `required`
+attribute at all — still leaving its facet absent.
 
 What does **not** change in §4: a conforming clock still performs no I/O and
 still cannot fail per request, a malformed timezone is still a startup
@@ -273,9 +289,10 @@ ADR-0019 forbids. It is recorded here in the exact form to apply on ratification
   `Amended: <ratification date> by ADR-0026 — §4's "a valid CurrentContext can
   always be built" now holds for a *conforming* clock: a reading that is naive,
   indeterminate, or outside the localizable range is a wiring bug and raises
-  ContextError rather than being attributed UTC. §2's internal ContextSource
-  gains a `required` property (default False) so that failure is not degraded;
-  optional sources degrade exactly as §4 says. §5's now: Callable[[], datetime]
+  ContextError rather than being attributed UTC. §2's internal source seam gains
+  an optional `required` marker — carried by a source, read by the assembler,
+  absent meaning optional — so that failure is not degraded; optional sources
+  degrade exactly as §4 says. §5's now: Callable[[], datetime]
   becomes the Clock contract of ADR-0026 §1. The startup-time treatment of a
   malformed timezone, the ContextSource/CurrentContext shapes, and everything
   else in §§2, 4–5 stand.`
@@ -327,10 +344,10 @@ implementation will reject.
   `utcoffset() is None`.
 - **`ContextError` gains a request-time cause** it did not have. Callers that
   treated context assembly as infallible-by-construction (ADR-0008 §4) must
-  handle it, though only a wiring bug can raise it. `context`'s internal
-  `ContextSource` gains a `required` property to carry that distinction (§4);
-  it is internal to the package, so no `core` surface and no producer outside
-  `context/` changes.
+  handle it, though only a wiring bug can raise it. `context`'s internal source
+  seam gains an optional `required` marker to carry that distinction (§4);
+  absent means optional, so no existing source, fixture or `core` surface
+  changes.
 - **Revisit when** a *civil*-time source appears — a recurring "09:00
   Europe/Berlin", which ADR-0023 §2 reserves as a distinct type and which
   `Clock` deliberately does not cover — or when something needs a **monotonic**
