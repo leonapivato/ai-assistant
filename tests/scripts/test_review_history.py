@@ -185,6 +185,25 @@ def test_a_terminal_ship_comment_without_a_summary_does_not_fall_back() -> None:
     assert rh.aggregate_from_comments(bodies, "owner") is None
 
 
+def test_a_summary_shaped_line_in_the_review_body_is_not_the_aggregate() -> None:
+    """Only line 3 is the aggregate; the review prose below it is unconstrained."""
+    body = "\r\n".join(
+        [
+            "<!-- ship:" + "c" * 40 + " -->",
+            "\N{LEFT-POINTING MAGNIFYING GLASS} **Local Codex review** \N{EM DASH} commit `"
+            + "c" * 12
+            + "`",
+            "",
+            "<details><summary><strong>adversarial</strong></summary>",
+            "The author claimed _round 999 \N{MIDDLE DOT} 1 lines net \N{MIDDLE DOT} "
+            "churn 9.9\N{MULTIPLICATION SIGN} (10 touched)_ which is wrong.",
+            "APPROVE",
+            "</details>",
+        ]
+    )
+    assert rh.aggregate_from_comments([_c(body)], "owner") is None
+
+
 def test_the_last_ship_comment_wins() -> None:
     bodies = [_c(_ship("a" * 40, _EXACT)), _c("unrelated chatter"), _c(_ship("b" * 40, _LOWER))]
     agg = rh.aggregate_from_comments(bodies, "owner")
@@ -402,6 +421,11 @@ def test_a_sliced_saved_payload_reports_the_pool_it_cannot_verify(tmp_path: Path
     ]
     assert "the pool this window was ordered within was full" in _run(
         payload, tmp_path, "--limit", "2"
+    )
+    # Equality is the boundary: a payload of exactly the window size may be a
+    # capture capped at that size, so it takes the caveat too.
+    assert "the pool this window was ordered within was full" in _run(
+        payload, tmp_path, "--limit", "3"
     )
     assert "the pool this window was ordered within was full" not in _run(
         payload, tmp_path, "--limit", "5"
