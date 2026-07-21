@@ -99,11 +99,31 @@ so `core` has nothing to distinguish them by, and a diagnostic that cannot name
 which seam received the bad reading is the one thing this guard exists to
 provide. On each reading the wrapper:
 
-1. **rejects** a reading whose `utcoffset()` returns `None` — naive, or a
+1. **rejects** a reading that is not a `datetime` at all;
+2. **rejects** a reading whose `utcoffset()` returns `None` — naive, or a
    `tzinfo` that is set but indeterminate. That is ADR-0023 §5's spelling of
    "aware", and issue #36's rule, applied at the producer;
-2. **rejects** a reading outside §3's range;
-3. **returns** `value.astimezone(UTC)`.
+3. **rejects** a reading outside §3's range;
+4. **returns** `value.astimezone(UTC)`.
+
+**The guard is total over the reading, because the annotation is not.** §1 is
+explicit that `Clock` enforces nothing at runtime, so `now=lambda: None` is a
+reachable wiring bug; unguarded it surfaces as a raw `AttributeError` from
+`None.utcoffset()`, and a custom `tzinfo` whose `utcoffset()` raises escapes as
+whatever it raised. Every step above — the type check, `utcoffset()`, the range
+comparison, `astimezone(UTC)` — therefore runs inside the guard, and any
+`Exception` from any of them becomes the owner-labelled `ValueError` with the
+original attached as its cause. A guard whose own failure modes bypass the
+failure path it specifies would be enforcing nothing at exactly the inputs it
+exists for.
+
+**The guard covers the reading, not the invocation.** An exception raised by the
+clock callable *itself* propagates unwrapped. That is the clock's own failure,
+already carrying its own type and cause, and relabelling it `ValueError` would
+destroy both; `BaseException` (a cancellation, a `KeyboardInterrupt`) must pass
+through for the same reason. The boundary is stated here rather than left to the
+implementation because "which exceptions become the owner-labelled `ValueError`"
+is precisely what §4's failure semantics rest on.
 
 Three properties of that placement are the decision, not incidental.
 
@@ -185,8 +205,23 @@ temporal core is required and `now` has no `None` to fall back to, so a broken
 clock cannot be skipped — `CurrentContext` could not be constructed without it.
 It is also a wiring bug in exactly §4's sense: an injected dependency violating
 its declared contract, which is the class §4 reserves `ContextError` for. So
-`ClockContextSource.contribute()` raises `ContextError` and
-`AssemblingContextProvider.assemble()` propagates it.
+`ClockContextSource.contribute()` raises `ContextError`.
+
+**Propagating it takes a mechanism, and the mechanism is a required-source
+marker on the source, not on the error type.** Today
+`AssemblingContextProvider._safe_contribute` catches `Exception` and degrades
+every source alike, so without a change the clock's `ContextError` is swallowed
+and the caller sees only a later "could not assemble a valid context" from the
+missing fields — the owner label and the cause both lost. Re-raising on the
+error *type* instead is the wrong fix: a future optional source is entitled to
+raise `ContextError`, and typing the decision would make it abort the request,
+which is the degradation rule §4 keeps. So `ContextSource` — internal to
+`context/` by ADR-0008 §2, hence no `core` change — gains a **`required`**
+property, default `False`. `_safe_contribute` degrades an optional source
+exactly as today and does not degrade a required one; `ClockContextSource` is
+the one required source. Both paths are behaviour a test must pin: a required
+source's failure reaching the caller with its cause intact, and an optional
+source's failure still leaving its facet absent.
 
 What does **not** change in §4: a conforming clock still performs no I/O and
 still cannot fail per request, a malformed timezone is still a startup
@@ -233,17 +268,26 @@ ADR-0026" onto ADR-0008 while ADR-0026 is only proposed is the state claim
 ADR-0019 forbids. It is recorded here in the exact form to apply on ratification:
 
 - ADR-0008's `Status` line becomes
-  `- Status: Accepted, §§4–5 amended by ADR-0026`.
+  `- Status: Accepted, §§2, 4–5 amended by ADR-0026`.
 - A dated note is appended to ADR-0008's header, after `Date`:
   `Amended: <ratification date> by ADR-0026 — §4's "a valid CurrentContext can
   always be built" now holds for a *conforming* clock: a reading that is naive,
   indeterminate, or outside the localizable range is a wiring bug and raises
-  ContextError rather than being attributed UTC. §5's
-  now: Callable[[], datetime] becomes the Clock contract of ADR-0026 §1.
-  Graceful degradation of optional sources, the startup-time treatment of a
-  malformed timezone, and everything else in §§4–5 stand.`
-- Nothing else in ADR-0008 is edited. Its §§1–3, §6 and Consequences stand as
+  ContextError rather than being attributed UTC. §2's internal ContextSource
+  gains a `required` property (default False) so that failure is not degraded;
+  optional sources degrade exactly as §4 says. §5's now: Callable[[], datetime]
+  becomes the Clock contract of ADR-0026 §1. The startup-time treatment of a
+  malformed timezone, the ContextSource/CurrentContext shapes, and everything
+  else in §§2, 4–5 stand.`
+- Nothing else in ADR-0008 is edited. Its §1, §3, §6 and Consequences stand as
   ratified.
+
+ADR-0023 §6 anticipates an amendment to "§§4–5". §2 is added because §4's
+propagation rule needs a marker on the source and §2 is where the internal
+`ContextSource` seam is decided — a superset of what §6 anticipated, in the same
+direction, not a departure from it. Nothing in §2's ratified text is withdrawn:
+the seam stays internal to `context/`, and the only data crossing a subsystem
+boundary is still `CurrentContext`.
 
 ### 7. Uniform across every seam; no advisory exemption
 
@@ -283,7 +327,10 @@ implementation will reject.
   `utcoffset() is None`.
 - **`ContextError` gains a request-time cause** it did not have. Callers that
   treated context assembly as infallible-by-construction (ADR-0008 §4) must
-  handle it, though only a wiring bug can raise it.
+  handle it, though only a wiring bug can raise it. `context`'s internal
+  `ContextSource` gains a `required` property to carry that distinction (§4);
+  it is internal to the package, so no `core` surface and no producer outside
+  `context/` changes.
 - **Revisit when** a *civil*-time source appears — a recurring "09:00
   Europe/Berlin", which ADR-0023 §2 reserves as a distinct type and which
   `Clock` deliberately does not cover — or when something needs a **monotonic**
