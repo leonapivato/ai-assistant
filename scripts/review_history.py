@@ -196,6 +196,9 @@ class Comment:
 # missing its *last* ship comment — which is the one this report reads — so the
 # count is checked and the affected PRs are named rather than quietly reported
 # from a stale aggregate (see `render`). Issue #157 tracks paginating properly.
+# Where ship writes the aggregate: marker, header, blank, summary.
+_SUMMARY_LINE = 3
+
 _COMMENT_PAGE = 100
 
 # Extra merged PRs fetched beyond the reported window, so ordering them by merge
@@ -262,11 +265,17 @@ def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggreg
         # comment would then report a SUPERSEDED round as this PR's terminal
         # one — a wrong number, which is worse than the absence. (Rendering the
         # two absences distinctly is issue #155.)
-        for line in comment.body.split("\n"):
-            aggregate = parse_summary(line.rstrip("\r"))
-            if aggregate is not None:
-                return aggregate
-        return None
+        #
+        # Only the fixed position is read, never the whole body. ship writes
+        # marker, header, blank, summary — so the summary is line 3 and nothing
+        # else is one. The rest of the comment is the reviewer's own prose and
+        # fenced code, which nothing constrains: a review that happened to quote
+        # or discuss a summary-shaped line would otherwise be read as this PR's
+        # aggregate and report fabricated figures.
+        lines = comment.body.split("\n")
+        if len(lines) <= _SUMMARY_LINE:
+            return None
+        return parse_summary(lines[_SUMMARY_LINE].rstrip("\r"))
     return None
 
 
@@ -704,7 +713,11 @@ def main() -> int:
         saturated = (
             len(parsed) >= args.limit + _ORDER_SLACK
             if args.from_json is None
-            else len(parsed) > args.limit
+            # `>=`, not `>`: a payload holding exactly the window may be a
+            # capture that was itself capped at that size, and nothing in the
+            # payload distinguishes the two. Equality is the boundary where the
+            # claim stops being provable, so it is where the caveat starts.
+            else len(parsed) >= args.limit
         )
         prs = by_merge_time(parsed, args.limit)
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
