@@ -195,8 +195,14 @@ class MemoryIngestor:
         This is the shim ADR-0023 §6 requires at a clock-fed field's producer
         until ADR-0026's guard lands; it is deliberately not that guard.
 
+        The converted result is re-checked, exactly as ``core``'s ``UtcInstant``
+        does and for the same reason: ``astimezone`` is overridable, this value
+        is installed through ``model_copy`` and so never meets that validator,
+        and a naive expiry that got past here would surface as a ``TypeError``
+        at the first comparison in a store.
+
         Raises:
-            MemoryStoreError: If the clock's reading has no UTC representation.
+            MemoryStoreError: If the clock's reading has no usable UTC form.
         """
         now = self._now()
         if now.tzinfo is None:
@@ -211,9 +217,15 @@ class MemoryIngestor:
         if offset is None:
             raise MemoryStoreError(unusable)
         try:
-            return now.astimezone(UTC)
+            # `object` for the same reason `core`'s `_utc_instant` does it:
+            # `astimezone` is annotated to return a datetime and need not.
+            converted: object = now.astimezone(UTC)
         except Exception as exc:  # incl. OverflowError near datetime.min/max
             raise MemoryStoreError(unusable) from exc
+        if not isinstance(converted, datetime) or converted.tzinfo is not UTC:
+            msg = f"the injected clock did not convert to UTC: {_describe(converted)}"
+            raise MemoryStoreError(msg)
+        return converted
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""

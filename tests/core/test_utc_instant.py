@@ -11,6 +11,8 @@ the type.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from types import SimpleNamespace
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -195,12 +197,28 @@ class _ZeroButNotUtcConversion(datetime):
         return datetime(2026, 1, 1, tzinfo=_MutableOffset())
 
 
+class _NotADatetimeConversion(datetime):
+    """Converts to something that merely *looks* like it carries a timezone."""
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return cast("datetime", SimpleNamespace(tzinfo=UTC))
+
+
+class _NoneConversion(datetime):
+    """Converts to nothing at all."""
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return cast("datetime", None)
+
+
 @pytest.mark.parametrize(
     "hostile",
     [
         pytest.param(_LyingConversion(2026, 1, 2, tzinfo=UTC), id="returns-naive"),
         pytest.param(_NonUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-utc"),
         pytest.param(_ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-zero-not-utc"),
+        pytest.param(_NotADatetimeConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-datetime"),
+        pytest.param(_NoneConversion(2026, 1, 2, tzinfo=UTC), id="returns-none"),
     ],
 )
 def test_a_conversion_that_does_not_produce_utc_is_rejected(hostile: datetime) -> None:
