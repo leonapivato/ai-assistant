@@ -295,14 +295,25 @@ class ToolOutcome(StrEnum):
     SUCCEEDED; FAILED; INDETERMINATE
 
 class ToolFailureKind(StrEnum):
-    INVALID_REQUEST   # the arguments were unacceptable to the tool
-    NOT_AUTHORISED    # the tool's own upstream refused its credential
-    UNAVAILABLE       # the upstream is unreachable or failing
-    RATE_LIMITED      # the upstream throttled us
-    TIMED_OUT         # the deadline passed (§4)
-    CANCELLED         # the call was cancelled before completing (§4)
-    REFUSED           # the operation was attempted and the upstream declined it
-    INTERNAL          # the tool implementation is broken
+    #                          why                                  retryable
+    INVALID_REQUEST   # the arguments were unacceptable to the tool     no
+    NOT_AUTHORISED    # the tool's own upstream refused its credential  no
+    UNAVAILABLE       # the upstream is unreachable or failing          YES
+    RATE_LIMITED      # the upstream throttled us                       YES
+    TIMED_OUT         # the deadline passed (§4)                        YES
+    CANCELLED         # cancelled before completing (§4)                YES
+    REFUSED           # attempted, and the upstream declined it         no
+    INTERNAL          # the tool implementation is broken               no
+
+    @property
+    def retryable(self) -> bool:
+        """Whether a repeat of this same call could plausibly succeed.
+
+        Not whether repeating is *safe* — that is
+        ``ToolDefinition.idempotency``'s answer, and §5 requires both.
+        Exhaustive over the members above; a member added without a value here
+        is a mistake the suite catches.
+        """
 
 class ToolFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -312,7 +323,11 @@ class ToolFailure(BaseModel):
     @field_validator("message")
     @classmethod
     def _message_is_present(cls, value: str) -> str:
-        """Reject a message with nothing visible in it, returning it stripped."""
+        """Return ``value`` stripped, or raise if nothing in it renders.
+
+        The ``_has_visible_text`` test ADR-0018 §1 applies to a tool's
+        description and ADR-0021 §1 to a ruling's reason.
+        """
 
 class ToolResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -322,15 +337,20 @@ class ToolResult(BaseModel):
 
     @model_validator(mode="after")
     def _outcome_fields_match(self) -> ToolResult:
-        """Refuse a result that half-says two things.
+        """Return ``self``, or raise on a result that half-says two things.
 
-        SUCCEEDED: `failure` must be None.
-        FAILED, INDETERMINATE: `failure` is required, and `output` must be None.
+        Raise when ``outcome`` is SUCCEEDED and ``failure`` is set; when it is
+        FAILED or INDETERMINATE and ``failure`` is None; and when it is not
+        SUCCEEDED and ``output`` is not None.
         """
 ```
 
-Annotations do not express those two rules, and a comment does not enforce them,
-so they are written as a validator here rather than described beside the fields —
+**These blocks are shapes, not implementations**, as every contract ADR in this
+repo has written them — ADR-0021 §1 shows `from_request` as a signature and a
+docstring — and the implementation PR writes the bodies. What is *normative* is
+each rule stated here and in the prose below, and §10 requires a rejection test
+for each. Annotations cannot express a cross-field rule and a comment beside a
+field does not enforce one, which is why these are drawn as validators at all:
 the shape `StepExecution._outcome_fields_match_status` already has for the same
 question one layer up.
 
@@ -493,12 +513,22 @@ converse.
 **A cancellation delivered from outside propagates as `CancelledError` and the
 seam does not convert it to a result.** Swallowing it would break structured
 concurrency and shutdown, and there is no return path from a task being torn
-down. The obligation therefore falls on the executor and is stated here rather
-than left to be discovered: a cancelled invocation of a `side_effecting`,
-non-`NATURAL` tool must be committed as `INDETERMINATE`, by the same rule as
-the timeout. The `CANCELLED` failure kind covers the case the seam *can* report
-— a cancellation it observed and unwound from cleanly before the tool started
-work.
+down. The obligation therefore falls on the executor, and it covers **every**
+cancelled invocation rather than only the ambiguous ones — an earlier draft
+stated only the `INDETERMINATE` half, which left a cancelled read with no rule
+at all and therefore stuck in `RUNNING` until recovery, where it would have been
+committed as `INDETERMINATE` in flat contradiction of the classification above.
+So: an executor whose invocation is cancelled catches the `CancelledError`,
+commits the step by the *same* rule the timeout uses — `FAILED` when the tool is
+not `side_effecting` or its `idempotency` is `NATURAL`, `INDETERMINATE`
+otherwise — and then **re-raises**. Committing is not swallowing: the write is
+the executor's own durable bookkeeping, and the cancellation still propagates,
+which is what keeps shutdown working. An executor that returns normally from a
+cancellation is the bug this clause is not licensing.
+
+The `CANCELLED` failure kind covers the narrower case the seam itself *can*
+report — a cancellation it observed and unwound from cleanly before the tool
+started work.
 
 **What one event loop means for a hung tool.** `CLAUDE.md` composes the system
 on a single loop, so three things follow and are worth stating plainly, because
@@ -870,6 +900,12 @@ ADR makes that are not visible in a signature:
   acquiring a watchdog, or a later reader assuming the deadline is hard; a suite
   that only exercises a cooperative tool would leave both open.
 - **A tool that raises becomes `INTERNAL`**, while a `BaseException` propagates.
+- **`retryable` for every member of `ToolFailureKind`**, asserted exhaustively
+  rather than sampled, so a member added later cannot default silently.
+- **External cancellation classified on both branches** (§4): a cancelled
+  read-only or `NATURAL` call committed `FAILED`, a cancelled side-effecting
+  non-`NATURAL` one committed `INDETERMINATE`, and the `CancelledError`
+  re-raised in both.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
   `approval_ref` alone after a simulated restart.
