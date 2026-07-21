@@ -760,6 +760,18 @@ rather than rediscovering them.
   INDETERMINATE` transition ADR-0014 §4 reserves for recovery, now also reachable
   from a live deadline expiry. That is a widening of *when* that transition
   fires, not of the graph.
+- **A raised `ToolBindingError` is committed `RUNNING → FAILED`, and never
+  retried.** The claim precedes the call, so a seam rejection arrives *after*
+  the step is durably `RUNNING`; letting it propagate uncommitted would strand
+  the step until recovery, which would then record `INDETERMINATE` — "we cannot
+  tell whether it acted" — about a call that provably never reached the
+  callable. That is the one thing `INDETERMINATE` must not be used for, since it
+  is the state whose whole meaning is ignorance. `FAILED` is correct and
+  honest: nothing happened, and the reason is that the call was not the one
+  authorised. It is not retryable under §5, because a retry submits the same
+  rejected call and a re-authorisation is a *different* call with a new
+  decision. This is the only outcome an executor must derive from an exception
+  rather than from a `ToolResult`, which is precisely why it is written down.
 - **Failure kind does not survive a restart, and this ADR does not widen
   `StepExecution` to fix it.** `error` is an unstructured `str`, so after a
   restart an executor can read *that* a step failed but not whether it was
@@ -882,6 +894,10 @@ ADR makes that are not visible in a signature:
   `invoke` with the tool never reached. This is the check that survives the
   bypass `frozen=True` does not cover, so testing only the construction case
   would certify the door and not the window.
+- **And the durable state after that rejection** (§8): a claimed step whose
+  `invoke` raised `ToolBindingError` ends `FAILED`, not left `RUNNING` and not
+  `INDETERMINATE`. Asserting only that the tool was never reached would leave
+  the stranding this rule exists to prevent untested.
 - **And the order of those checks**, which only a malformed mutation
   distinguishes: `parameters` replaced with a mapping `FrozenJson` would have
   rejected must come back as `ToolBindingError` carrying the `ValidationError`
