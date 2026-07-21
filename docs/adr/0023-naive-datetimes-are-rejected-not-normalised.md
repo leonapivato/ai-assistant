@@ -1,6 +1,6 @@
 # 23. Naive datetimes are rejected, not normalised
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-20
 - Complements: ADR-0005, ADR-0008, ADR-0009, ADR-0014, ADR-0021 §4 — each types
   a `datetime` field "tz-aware"; only ADR-0009 also fixes UTC storage, which this
