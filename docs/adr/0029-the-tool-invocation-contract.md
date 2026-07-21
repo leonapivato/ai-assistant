@@ -556,9 +556,23 @@ the executor's own durable bookkeeping, and the cancellation still propagates,
 which is what keeps shutdown working. An executor that returns normally from a
 cancellation is the bug this clause is not licensing.
 
+**A `CancelledError` the callable invents is not a cancellation, and the seam
+must tell them apart.** Nothing about the exception's type says where it came
+from, so a tool raising one before it issues its request would otherwise be read
+as an external teardown: the executor would record `INDETERMINATE` for a call
+that did nothing, and re-raise — cancelling a request nobody cancelled, on a
+tool's say-so. The seam therefore classifies on **whether a cancellation was
+actually requested** — of its own deadline, or of the invoking task — rather
+than on catching the type. If one was, the rule above applies and the exception
+propagates. If none was, the tool raised it spuriously and it is a tool that
+raised: `INTERNAL`, like any other escaping exception (§3). This is the same
+move §4 makes for `TIMED_OUT` one clause up, and for the same reason — the seam
+is the only party that knows the difference, and an exception type is not
+evidence of provenance.
+
 The `CANCELLED` failure kind covers the narrower case the seam itself *can*
-report — a cancellation it observed and unwound from cleanly before the tool
-started work.
+report — a genuine cancellation it observed and unwound from cleanly before the
+tool started work.
 
 **What one event loop means for a hung tool.** `CLAUDE.md` composes the system
 on a single loop, so three things follow and are worth stating plainly, because
@@ -975,7 +989,11 @@ ADR makes that are not visible in a signature:
 - **External cancellation classified on both branches** (§4): a cancelled
   read-only or `NATURAL` call committed `FAILED`, a cancelled side-effecting
   non-`NATURAL` one committed `INDETERMINATE`, and the `CancelledError`
-  re-raised in both.
+  re-raised in both. Paired with its opposite: a fake that raises
+  `CancelledError` with nothing cancelled must come back as an `INTERNAL`
+  result, with no cancellation propagated and no `INDETERMINATE` recorded. The
+  two tests together are what pin the classification to provenance rather than
+  to the exception type.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
   `approval_ref` alone after a simulated restart.
