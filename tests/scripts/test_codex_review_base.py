@@ -12,14 +12,15 @@ base is read off the script's own "review of HEAD vs '<base>'" stderr line.
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-_SCRIPT = Path(__file__).parents[2] / "scripts" / "codex-review.sh"
-_BASH = shutil.which("bash")
+sys.path.insert(0, str(Path(__file__).parent))
+from _fake_codex import run_review
+
 _GIT = shutil.which("git")
 
 
@@ -47,6 +48,9 @@ def _init_repo(repo: Path, *, with_origin_main: bool) -> None:
     _git(repo, "config", "user.name", "Test")
     (repo / "docs" / "review").mkdir(parents=True)
     (repo / "docs" / "review" / "adversarial.md").write_text("# rubric\n")
+    # .review/ is git-ignored in the real repo, so the driver's own session and
+    # artifact files under it do not dirty the tree it is reviewing.
+    (repo / ".gitignore").write_text(".review/\n")
     (repo / "f.txt").write_text("one\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
@@ -64,23 +68,6 @@ def _init_repo(repo: Path, *, with_origin_main: bool) -> None:
     _git(repo, "commit", "-qm", "change")
 
 
-def _fake_codex(bin_dir: Path) -> None:
-    """A fake ``codex`` that writes a stub review body to its ``-o`` file."""
-    bin_dir.mkdir()
-    codex = bin_dir / "codex"
-    codex.write_text(
-        "#!/usr/bin/env bash\n"
-        'prev=""\n'
-        'for a in "$@"; do\n'
-        # A verdict is part of the rubric's output contract; codex-review.sh
-        # rejects output without one, so the fake must carry it.
-        '  [[ "$prev" == "-o" ]] && printf "review body\\nVerdict: APPROVE\\n" >"$a"\n'
-        '  prev="$a"\n'
-        "done\n"
-    )
-    codex.chmod(0o755)
-
-
 def _resolved_base(stderr: str) -> str | None:
     match = re.search(r"review of HEAD vs '([^']*)'", stderr)
     return match.group(1) if match else None
@@ -88,25 +75,10 @@ def _resolved_base(stderr: str) -> str | None:
 
 def _run_review(tmp_path: Path, *, with_origin_main: bool, base_arg: str | None) -> str:
     """Run the review script; return the resolved base read off its stderr."""
-    assert _BASH is not None
     repo = tmp_path / "repo"
     _init_repo(repo, with_origin_main=with_origin_main)
-    _fake_codex(tmp_path / "bin")
 
-    env = os.environ.copy()
-    env.pop("GITHUB_ACTIONS", None)
-    env.pop("CODEX_REVIEW_NO_SANDBOX", None)
-    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
-
-    args = ["adversarial"] if base_arg is None else ["adversarial", base_arg]
-    result = subprocess.run(  # noqa: S603  # resolved bash, in-repo script, test-controlled env
-        [_BASH, str(_SCRIPT), *args],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    result = run_review(repo, tmp_path, "adversarial", base_arg)
     resolved = _resolved_base(result.stderr)
     assert resolved is not None, f"no resolved-base line in stderr:\n{result.stderr}"
     return resolved

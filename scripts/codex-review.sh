@@ -326,12 +326,108 @@ fi
 
 prompt="$(mktemp -t "codex-prompt-${persona}.XXXXXX.md")"
 out="$(mktemp -t "codex-review-${persona}.XXXXXX.md")"
-# All three temporaries, on every exit path. `$out` holds the full review text
-# and `$artifact_tmp` a half-written copy of it, so leaving either behind
-# accumulates review content in /tmp and in .review/ — the latter invisible to
-# the dirty-tree check, since .review/ is ignored. ${var:+...} expands to
-# nothing while artifact_tmp is still unset, which it is for most of this script.
-trap 'rm -f "$prompt" "$out" ${artifact_tmp:+"$artifact_tmp"}' EXIT
+# The `--json` event stream from a persistent round is captured here to read the
+# `thread_id` back; `$inject_tmp` holds re-injected prior dispositions on a
+# degraded round. Both are cleaned on every exit path alongside `$out`.
+stream="$(mktemp -t "codex-stream-${persona}.XXXXXX.json")"
+inject_tmp="$(mktemp -t "codex-inject-${persona}.XXXXXX.md")"
+# Every temporary, on every exit path. `$out` holds the full review text and
+# `$artifact_tmp` a half-written copy of it, so leaving either behind accumulates
+# review content in /tmp and in .review/ — the latter invisible to the dirty-tree
+# check, since .review/ is ignored. ${var:+...} expands to nothing while
+# artifact_tmp is still unset, which it is for most of this script.
+trap 'rm -f "$prompt" "$out" "$stream" "$inject_tmp" ${artifact_tmp:+"$artifact_tmp"}' EXIT
+
+# --- Persistent session identity and read-only proof (ADR-0025 §1) -----------
+#
+# A review loop keeps ONE Codex conversation, resumed each round via `codex exec
+# resume`, so the reviewer carries what it already said and what the author
+# already answered (#125's memoryless re-raise is gone at the root). The session,
+# its fallback transcript, and the recorded dispositions are bound to a durable
+# per-loop identity, not the bare branch name — a reused or renamed branch must
+# not inherit another loop's session or findings (#97, now load-bearing).
+#
+# The identity key is `sha1(branch)-sha1(base_sha)`. It is stable across exactly
+# the rewrites the workflow relies on — an amend, a squash, or an in-place rebase
+# all keep both the branch name and the base — so those resume the same warm
+# session. It CHANGES on the two events that must invalidate a session: a rebase
+# onto a moved base (the re-validation ADR-0025 §1 requires — a moved base is a
+# different diff, so a fresh key selects a fresh session and the old base's
+# session simply lingers unreferenced) and a branch cut from a newer base reusing
+# a name (a fresh key, so no stale thread is resumed). The residual — a reused
+# name that happens to share a base — is bounded to soft memory carry-over, never
+# a wrong ship anchor: the shippable artifact is still tree-anchored (§4), and
+# ship matches on `(base, tree)` regardless of which thread produced the verdict.
+# The bypass is CI-only and not the persistent path (see the invocation below):
+# a cold one-shot that keeps no session and runs no read-only proof, today's
+# behaviour preserved. Detected here so no session state is created on that path.
+# GITHUB_ACTIONS is matched exactly against "true", so an inherited
+# GITHUB_ACTIONS=false cannot enable it; CODEX_REVIEW_NO_SANDBOX=1 forces it.
+bypass=0
+if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    bypass=1
+fi
+
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+session_dir="${review_dir}/session"
+disposition_dir="${review_dir}/dispositions"
+branch_key="$(printf '%s' "$branch" | sha1sum | awk '{print $1}')"
+base_key="$(printf '%s' "$base_sha" | sha1sum | awk '{print $1}')"
+loop_key="${branch_key}-${base_key}"
+meta_file="${session_dir}/${loop_key}.meta"
+thread_file="${session_dir}/${loop_key}.${persona}.thread"
+disposition_file="${disposition_dir}/${loop_key}.${persona}.md"
+
+# A durable, opaque per-loop id, minted once and recorded in the artifact so the
+# ship-time snapshot can be selected by the full anchor (loop, persona, base,
+# tree) rather than the tree alone (ADR-0025 §4). Written atomically.
+_mint_id() {
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
+# No session state on the bypass path — it keeps no thread to resume. loop_id
+# stays empty there and is recorded empty, alongside the empty thread_id.
+loop_id=""
+recorded_thread=""
+if [[ "$bypass" -eq 0 ]]; then
+    if [[ -f "$meta_file" ]]; then
+        loop_id="$(sed -n 's/^loop_id=//p' "$meta_file")"
+    fi
+    if [[ -z "$loop_id" ]]; then
+        loop_id="$(_mint_id)"
+        mkdir -p "$session_dir"
+        meta_tmp="${meta_file}.partial.$$"
+        printf 'loop_id=%s\nbranch=%s\nbase_sha=%s\n' \
+            "$loop_id" "$branch" "$base_sha" >"$meta_tmp"
+        mv "$meta_tmp" "$meta_file"
+    fi
+fi
+
+# The thread this persona's session is resumed on, if the loop already has one.
+if [[ "$bypass" -eq 0 && -f "$thread_file" ]]; then
+    recorded_thread="$(head -n 1 "$thread_file")"
+fi
+
+# The effective sandbox for a completed round, read from Codex's own session
+# rollout (`$CODEX_HOME/sessions/.../rollout-*-<thread_id>.jsonl`). Every round's
+# `turn_context` records the sandbox policy it actually ran under, so read-only is
+# *proven from Codex's record*, not assumed from the flags we passed — which is
+# what the driver must show, since a resume takes no `-s` and still honours a
+# widening `$CODEX_HOME/config.toml`. The newest `turn_context` is this round's.
+# Empty output (rollout missing or unparseable) is treated as unproven and fails
+# closed by the caller.
+_effective_sandbox() {
+    local tid="$1" sess
+    [[ -n "$tid" ]] || return 0
+    sess="$(find "${codex_home}/sessions" -type f -name "*${tid}*.jsonl" 2>/dev/null |
+        sort | tail -1)"
+    [[ -n "$sess" && -f "$sess" ]] || return 0
+    grep -E '"type":[[:space:]]*"turn_context"' "$sess" | tail -1 |
+        sed -nE 's/.*"sandbox_policy":[[:space:]]*\{[[:space:]]*"type":[[:space:]]*"([^"]*)".*/\1/p'
+}
 
 # --- What the reviewer is reading (ADR-0020 §1) ------------------------------
 #
@@ -394,7 +490,16 @@ for changed_path in "${changed_paths[@]}"; do
     esac
 done
 
+# Writes the round's prompt to `$prompt`. With a non-empty, non-blank injection
+# file as $1, the recorded prior-round dispositions are prepended (mechanism b,
+# ADR-0025 §1) so a cold round that lost the warm session still sees what was
+# already raised and answered. Round 1 and every resumed round pass nothing.
+_write_prompt() {
 {
+    if [[ -n "${1:-}" && -s "${1:-}" ]]; then
+        cat "$1"
+        echo
+    fi
     cat "$rubric"
     echo
     echo "## Change under review"
@@ -447,21 +552,47 @@ PROSE
     printf '%s\n' "$diff"
     echo '```'
 } >"$prompt"
+}
 
-# Codex sandboxes the shell commands the model runs (file reads, git) with
-# bubblewrap. In CI the runner is already an ephemeral, externally-sandboxed
-# environment where bwrap cannot set up its network namespace
-# ("bwrap: loopback: Failed RTM_NEWADDR"); that failure breaks every file read
-# and degrades the review to an apology. There, skip Codex's own sandbox — the
-# exact case --dangerously-bypass-approvals-and-sandbox documents. Locally the
-# read-only sandbox works and is a real safety layer, so keep it. GITHUB_ACTIONS
-# is "true" on the runner — matched exactly, so an inherited GITHUB_ACTIONS=false
-# cannot silently disable the local sandbox; CODEX_REVIEW_NO_SANDBOX=1 forces the
-# bypass either way. The prompt still instructs a read-only review regardless.
-sandbox_args=(-s read-only)
-if [[ "${CODEX_REVIEW_NO_SANDBOX:-}" == "1" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
-    sandbox_args=(--dangerously-bypass-approvals-and-sandbox)
-fi
+# Renders the recorded per-round dispositions for this loop+persona into $1, with
+# a header telling the reviewer these are its own prior findings, not to be
+# blindly re-raised (a warm re-raise past a seen rejection is a deliberate signal
+# the ADR leaves un-suppressed).
+_render_dispositions() {
+    {
+        echo "## Prior rounds of THIS review (re-injected — the live session was unavailable)"
+        echo
+        echo "You have already reviewed earlier states of this same change in this review"
+        echo "loop. Below are the findings you raised and the verdicts you reached, per"
+        echo "round. Do NOT blindly re-raise a finding you already made that was answered —"
+        echo "engage the answer or withdraw it. You MAY re-raise a finding you still hold"
+        echo "after reading the response; that is a deliberate, informed signal, not noise."
+        echo
+        cat "$disposition_file"
+    } >"$1"
+}
+
+# Appends this round's review to the disposition ledger (ADR-0025 §1, §4): the
+# durable backstop mechanism (b) re-injects when the warm session is gone, and
+# the record §4 requires reach the merge reviewer. Keyed on the reviewed tree, so
+# re-running one commit does not duplicate an entry, and a stable per-state id is
+# recorded. The ledger is git-ignored (under .review/), like the artifacts.
+_append_disposition() {
+    local id
+    id="$(printf '%s' "$tree" | sha1sum | awk '{print $1}')"
+    mkdir -p "$disposition_dir"
+    if grep -q "id=${id} " "$disposition_file" 2>/dev/null; then
+        return 0
+    fi
+    {
+        echo "<!-- disposition loop_id=${loop_id} persona=${persona} round=${round}" \
+            "base_sha=${base_sha} tree=${tree} sha=${sha} id=${id} verdict=${last_line} -->"
+        echo "### Round ${round} — tree ${tree:0:12} — verdict: ${last_line}"
+        echo
+        cat "$out"
+        echo
+    } >>"$disposition_file"
+}
 
 # Unset by default, so local runs keep using the Codex CLI's own default model.
 # CI pins this (CODEX_REVIEW_MODEL in codex-review.yml) so the reviewer model is
@@ -472,9 +603,107 @@ if [[ -n "${CODEX_REVIEW_MODEL:-}" ]]; then
     model_args=(-m "$CODEX_REVIEW_MODEL")
 fi
 
-echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only)…" >&2
-# -o captures just the final review; progress streams to stderr.
-codex exec "${sandbox_args[@]}" "${model_args[@]}" -o "$out" - <"$prompt" >&2
+# On the bypass path (detected above) Codex's own bubblewrap sandbox is skipped:
+# in CI the runner is already an ephemeral, externally-sandboxed environment where
+# bwrap cannot set up its network namespace ("bwrap: loopback: Failed
+# RTM_NEWADDR"), which breaks every file read and degrades the review to an
+# apology — the exact case --dangerously-bypass-approvals-and-sandbox documents.
+# The review loop is local (ADR-0015 §1), so this bypass does not reach a
+# persistent session — a persistent review never widens its sandbox (ADR-0025 §1).
+# When it applies, this is a cold one-shot exactly as before: no thread recorded,
+# no resume, no read-only proof (the sandbox is deliberately off).
+
+# The injection budget bounds `diff + re-injected dispositions` (ADR-0025 §1's
+# graceful-degradation floor): past it, mechanism (b) would not fit, so the round
+# drops to a plain cold review of the diff rather than a truncated injection.
+inject_budget="${CODEX_REVIEW_INJECT_BUDGET:-500000}"
+diff_bytes="$(printf '%s' "$diff" | wc -c)"
+
+# The thread this round actually ran on, recorded afterwards so the next round
+# resumes it. Empty on the bypass path (no persistence).
+round_thread=""
+
+if [[ "$bypass" -eq 1 ]]; then
+    _write_prompt ""
+    echo "Running Codex '${persona}' review of HEAD vs '${base}' (CI bypass, cold)…" >&2
+    # -o captures just the final review; progress streams to stderr.
+    codex exec --dangerously-bypass-approvals-and-sandbox "${model_args[@]}" \
+        -o "$out" - <"$prompt" >&2
+else
+    # Enforced read-only on every round, proven from Codex's own record below.
+    # Resume takes no `-s`, and a widening `$CODEX_HOME/config.toml` is honoured
+    # over a bare invocation, so read-only is forced with `-c sandbox_mode` — a
+    # driver-set `-c` overrides config.toml, on both a fresh start and a resume.
+    # `-s read-only` is kept on the fresh start too: it is redundant with the
+    # `-c`, but it is the flag the CLI documents for the initial sandbox and it
+    # keeps the start invocation self-describing. Neither the sandbox-bypass flag
+    # nor any widening `-s`/`-c sandbox_mode` override is ever passed here.
+    ro_config=(-c sandbox_mode="read-only")
+    used_resume=0
+
+    if [[ -n "$recorded_thread" ]]; then
+        _write_prompt ""
+        echo "Resuming Codex '${persona}' session ${recorded_thread:0:12} vs '${base}'" \
+            "(read-only)…" >&2
+        # `--json` puts the event stream (carrying thread.started) on stdout,
+        # captured to $stream; Codex's human progress stays on stderr. `-o` still
+        # writes just the final review to $out.
+        if codex exec resume "$recorded_thread" --json "${ro_config[@]}" \
+            "${model_args[@]}" -o "$out" - <"$prompt" >"$stream"; then
+            used_resume=1
+            round_thread="$recorded_thread"
+        else
+            # Resume is unavailable — a pruned session, an ephemeral host. Not a
+            # failure: fall through to a fresh read-only session with the prior
+            # dispositions re-injected (mechanism b), the ADR-0025 §1 fallback.
+            echo "resume unavailable; starting a fresh read-only session with prior" \
+                "findings re-injected" >&2
+        fi
+    fi
+
+    if [[ "$used_resume" -eq 0 ]]; then
+        # A fresh start: round 1 of this loop, or a degraded resume. Re-inject the
+        # recorded dispositions when they exist and `diff + injection` fits the
+        # budget; past the budget, drop to a plain cold review of the diff (the
+        # floor) rather than truncating — the dispositions stay on record, never
+        # silently lost, and a re-raise then costs at most one round.
+        inject=""
+        if [[ -s "$disposition_file" ]]; then
+            _render_dispositions "$inject_tmp"
+            inject_bytes="$(wc -c <"$inject_tmp")"
+            if [[ $((inject_bytes + diff_bytes)) -le "$inject_budget" ]]; then
+                inject="$inject_tmp"
+            else
+                echo "prior findings + diff (${inject_bytes}+${diff_bytes} bytes) exceed the" \
+                    "injection budget (${inject_budget}); dropping to a plain cold review of" \
+                    "the diff (the degradation floor). The dispositions remain recorded in" \
+                    "${disposition_file}." >&2
+            fi
+        fi
+        _write_prompt "$inject"
+        echo "Running Codex '${persona}' review of HEAD vs '${base}' (read-only, fresh" \
+            "session)…" >&2
+        codex exec --json -s read-only "${ro_config[@]}" "${model_args[@]}" \
+            -o "$out" - <"$prompt" >"$stream"
+        round_thread="$(grep -o '"thread_id":"[^"]*"' "$stream" | head -1 |
+            sed 's/.*:"//; s/"$//')"
+    fi
+
+    # Read-only proven, not assumed (ADR-0025 §4): read the sandbox Codex actually
+    # ran this round under from its session rollout, and fail closed unless it is
+    # read-only. Empty means the rollout could not be found or parsed — unproven,
+    # which is not the same as read-only, so it fails closed too. This holds even
+    # against a widening config.toml, since the `turn_context` records the
+    # effective policy after all config layering.
+    effective_sandbox="$(_effective_sandbox "$round_thread")"
+    if [[ "$effective_sandbox" != "read-only" ]]; then
+        echo "refusing to record: could not prove the review ran read-only" >&2
+        echo "effective sandbox for thread ${round_thread:-<unknown>} was" \
+            "'${effective_sandbox:-unreadable}' (a widening \$CODEX_HOME/config.toml, a" \
+            "bypass flag, or a missing session rollout can cause this)" >&2
+        exit 1
+    fi
+fi
 
 # Pinning the diff is not enough on its own: Codex reads files from the working
 # tree as it goes, so if the checkout moved *during* the review — another commit,
@@ -591,14 +820,31 @@ artifact_tmp="${artifact}.partial.$$"
     if [[ "$churn_binary" -gt 0 ]]; then
         binary_field="${binary_field}binary_churn=${churn_binary} "
     fi
+    # loop_id and thread_id are recorded for ADR-0025 §4's ship-time snapshot
+    # selection by the full anchor (loop, persona, base, tree, terminal turn).
+    # thread_id is empty on the bypass path, which keeps no session.
     echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha}" \
         "branch=${branch} tree=${tree} round=${round}" \
+        "loop_id=${loop_id} thread_id=${round_thread}" \
         "net_lines=${net_lines} churn_lines=${churn_lines}" \
         "churn_ratio=${churn_ratio} churn_bound=${churn_bound} commits=${commits}" \
         "${binary_field}${supersedes:+supersedes=${supersedes} }-->"
     cat "$out"
 } >"$artifact_tmp"
 mv "$artifact_tmp" "$artifact"
+
+# Persist the session and dispositions only on the persistent path — the bypass
+# path keeps no thread. The thread is written last, after every validation has
+# passed, so a rejected round never advances the session the next round resumes.
+if [[ "$bypass" -eq 0 ]]; then
+    if [[ -n "$round_thread" ]]; then
+        mkdir -p "$session_dir"
+        thread_tmp="${thread_file}.partial.$$"
+        printf '%s\n' "$round_thread" >"$thread_tmp"
+        mv "$thread_tmp" "$thread_file"
+    fi
+    _append_disposition
+fi
 
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
