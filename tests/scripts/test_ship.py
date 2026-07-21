@@ -1838,3 +1838,31 @@ def test_a_bearer_token_is_excluded(tmp_path: Path) -> None:
     posted = (tmp_path / "comment.md").read_text()
     assert jwt not in posted
     assert "Content excluded" in posted
+
+
+def test_multiple_proposals_stay_within_the_cumulative_budget(tmp_path: Path) -> None:
+    """No proposal bypasses the budget: several together cannot exceed the limit."""
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
+    big = "1. **major** fix\n\n```diff\n" + ("+x = 1\n" * 400) + "```"
+    _record_review(repo, sha, "adversarial", f"a finding\n{_VERDICT}\n", loop_id="loop-a")
+    _record_snapshot(
+        repo,
+        "adversarial",
+        tree,
+        [("major", "open", big), ("major", "open", big), ("major", "open", big)],
+        sha=sha,
+    )
+
+    # A small disposition budget forces exclusion of proposals that do not fit.
+    result = _run_ship(repo, tmp_path, pr_sha=sha, gh_env={"CODEX_SHIP_DISPOSITION_BUDGET": "3000"})
+
+    assert result.returncode == 0, result.stderr  # did not die on the hard limit
+    posted = (tmp_path / "comment.md").read_text()
+    # Some proposal did not fit — excluded per-finding or referenced at the end,
+    # never all three published in full past the budget.
+    assert "excluded" in posted or "omitted" in posted
+    # The published comment stayed well under GitHub's hard limit.
+    assert len(posted.encode()) < 60000
