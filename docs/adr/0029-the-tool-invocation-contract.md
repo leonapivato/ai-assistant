@@ -418,9 +418,28 @@ that doubles a charge.
 data.** ADR-0004 §5 already forbids it in logs, and this string is bound for a
 log and for `StepExecution.error`. The rule is stated because an upstream error
 body routinely echoes a recipient or a subject line back, and the tool is the
-only thing positioned to strip it. It is not mechanically enforced here;
-`core.logging`'s redaction processor is the existing safety net, and ADR-0004 §5
-already accepts it as a net rather than a proof. `message` must contain visible
+only thing positioned to strip it.
+
+**There is no safety net under this field, and saying there was would be
+false.** `core/logging.py` names this exact case as the one its redactor cannot
+catch — it redacts by *key*, and its own docstring gives `error=str(exc)`, "where
+the provider quoted the user's prompt", as the canonical Tier 1 leak it does not
+see. `message` lands under precisely such a key, in a log and in
+`StepExecution.error`. So the rule has to hold at the producer, in two halves:
+
+- **An integration authors its message**, mapping the upstream failure to text
+  it chose. Copying an upstream error body into it is the leak, not a shortcut
+  to one.
+- **A message the *seam* generates carries no content it did not author.** The
+  `INTERNAL` failure it synthesises from an escaping exception names the
+  exception's type and the tool's id; it does not interpolate `str(exc)`, which
+  is where a `RuntimeError` quoting a recipient would arrive. The cost is a
+  thinner diagnostic for a broken integration, accepted because the alternative
+  is a Tier 1 disclosure into a Tier 2 store on the failure path of every tool
+  nobody thought about — the same fail-closed direction ADR-0016 §1 took for a
+  forgetful author.
+
+`message` must contain visible
 text, by the `_has_visible_text` test ADR-0018 §1 applies to a description and
 ADR-0021 §1 to a reason, and for the same reason: a failure that renders as
 nothing leaves the executor and the user with nothing to say about it.
@@ -947,7 +966,10 @@ ADR makes that are not visible in a signature:
   a tool returning a value `FrozenJsonValue` rejects — a `set`, a `NaN` — must
   come back as `INTERNAL` rather than as an escaping `ValidationError`; and a
   tool raising Python's own `TimeoutError` well inside its deadline must come
-  back as `INTERNAL`, not `TIMED_OUT`.
+  back as `INTERNAL`, not `TIMED_OUT`. And in the first case the exception's own
+  text — a fake raising `RuntimeError("recipient alice@example.com rejected")` —
+  must appear neither in `failure.message` nor in anything the seam logs (§3).
+  Nothing downstream redacts it, so an untested rule here is an unenforced one.
 - **`retryable` for every member of `ToolFailureKind`**, asserted exhaustively
   rather than sampled, so a member added later cannot default silently.
 - **External cancellation classified on both branches** (§4): a cancelled
