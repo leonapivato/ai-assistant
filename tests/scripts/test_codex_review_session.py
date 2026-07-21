@@ -171,6 +171,41 @@ def test_a_moved_base_does_not_carry_a_stale_session(tmp_path: Path) -> None:
     assert _field(prov, "thread_id") == "thread-two"
 
 
+def test_a_reused_branch_name_does_not_inherit_the_old_loop(tmp_path: Path) -> None:
+    """Same branch name + same base reused for unrelated work resets the loop.
+
+    The loop_key collides exactly, so continuation is decided by ancestry: the old
+    loop's last reviewed state is not an ancestor of the new branch's HEAD, so its
+    session and dispositions are not inherited (ADR-0025 §1's reset on reuse).
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    run_review(
+        repo, tmp_path, FAKE_CODEX_THREAD_ID="thread-one", FAKE_CODEX_REVIEW="OLD finding\nBLOCK\n"
+    )
+
+    # Delete feature and recreate it off the same base with unrelated work.
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "branch", "-qD", "feature")
+    _git(repo, "checkout", "-qb", "feature")
+    (repo / "h.txt").write_text("unrelated\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "unrelated work")
+
+    result = run_review(
+        repo,
+        tmp_path,
+        FAKE_CODEX_THREAD_ID="thread-two",
+        FAKE_CODEX_PROMPT_COPY=str(tmp_path / "prompt.txt"),
+    )
+
+    assert "Resuming Codex" not in result.stderr, "the reused name must not resume the old thread"
+    prov = _provenance(repo, _git(repo, "rev-parse", "HEAD"))
+    assert _field(prov, "thread_id") == "thread-two"
+    # The old loop's findings are not re-injected into the fresh loop's prompt.
+    assert "OLD finding" not in (tmp_path / "prompt.txt").read_text()
+
+
 def test_the_bypass_path_keeps_no_session(tmp_path: Path) -> None:
     """The CI bypass is a cold one-shot: no thread, no read-only proof (ADR-0025 §1)."""
     repo = tmp_path / "repo"

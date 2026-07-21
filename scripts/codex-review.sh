@@ -390,25 +390,40 @@ _mint_id() {
 }
 # No session state on the bypass path — it keeps no thread to resume. loop_id
 # stays empty there and is recorded empty, alongside the empty thread_id.
+#
+# Off the bypass path, decide continuation vs reset. The loop_key
+# (sha1(branch)-sha1(base_sha)) is necessary but not sufficient: a branch name
+# reused for unrelated work off the *same* base collides on it exactly. So a run
+# continues the recorded loop only when the last state that loop reviewed is an
+# ancestor of HEAD — i.e. HEAD builds on it. A reused name (its recorded last
+# state is unrelated to the new HEAD) fails that test and resets: a fresh loop_id
+# and a wipe of any thread and dispositions filed under this key, so no prior
+# loop's session, findings, or proposals bleed into this verdict (ADR-0025 §1's
+# explicit reset on reuse). An amend, squash, or in-place rebase also fails the
+# ancestry test and resets to a fresh cold session — safe, never worse than
+# today's cold loop, and such rewrites usually land at the end of a loop rather
+# than between the warm rounds this is optimising.
 loop_id=""
 recorded_thread=""
 if [[ "$bypass" -eq 0 ]]; then
+    recorded_last_sha=""
     if [[ -f "$meta_file" ]]; then
         loop_id="$(sed -n 's/^loop_id=//p' "$meta_file")"
+        recorded_last_sha="$(sed -n 's/^last_sha=//p' "$meta_file")"
     fi
-    if [[ -z "$loop_id" ]]; then
+    if [[ -n "$loop_id" && -n "$recorded_last_sha" ]] &&
+        git merge-base --is-ancestor "$recorded_last_sha" "$sha" 2>/dev/null; then
+        # Continuing this loop: resume the persona's thread if it has one.
+        if [[ -f "$thread_file" ]]; then
+            recorded_thread="$(head -n 1 "$thread_file")"
+        fi
+    else
+        # New loop, or a reused/rewritten branch: reset the per-loop identity and
+        # clear any session and dispositions filed under this key.
         loop_id="$(_mint_id)"
-        mkdir -p "$session_dir"
-        meta_tmp="${meta_file}.partial.$$"
-        printf 'loop_id=%s\nbranch=%s\nbase_sha=%s\n' \
-            "$loop_id" "$branch" "$base_sha" >"$meta_tmp"
-        mv "$meta_tmp" "$meta_file"
+        rm -f "${session_dir}/${loop_key}."*.thread \
+            "${disposition_dir}/${loop_key}."*.md
     fi
-fi
-
-# The thread this persona's session is resumed on, if the loop already has one.
-if [[ "$bypass" -eq 0 && -f "$thread_file" ]]; then
-    recorded_thread="$(head -n 1 "$thread_file")"
 fi
 
 # The effective sandbox for a completed round, read from Codex's own session
@@ -834,11 +849,16 @@ artifact_tmp="${artifact}.partial.$$"
 mv "$artifact_tmp" "$artifact"
 
 # Persist the session and dispositions only on the persistent path — the bypass
-# path keeps no thread. The thread is written last, after every validation has
-# passed, so a rejected round never advances the session the next round resumes.
+# path keeps no thread. Written last, after every validation has passed, so a
+# rejected round never advances the loop the next round continues: the meta's
+# last_sha (the ancestry anchor above) only moves once a round is fully recorded.
 if [[ "$bypass" -eq 0 ]]; then
+    mkdir -p "$session_dir"
+    meta_tmp="${meta_file}.partial.$$"
+    printf 'loop_id=%s\nbranch=%s\nbase_sha=%s\nlast_sha=%s\n' \
+        "$loop_id" "$branch" "$base_sha" "$sha" >"$meta_tmp"
+    mv "$meta_tmp" "$meta_file"
     if [[ -n "$round_thread" ]]; then
-        mkdir -p "$session_dir"
         thread_tmp="${thread_file}.partial.$$"
         printf '%s\n' "$round_thread" >"$thread_tmp"
         mv "$thread_tmp" "$thread_file"
