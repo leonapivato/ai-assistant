@@ -168,6 +168,16 @@ class MemoryIngestor:
         ``.timestamp()`` several layers down. Same boundary translation
         :meth:`_expiry` already performs for ``OverflowError``.
 
+        **What it deliberately does not guard is the reading's type.** A clock
+        returning something that is not a ``datetime`` at all — ``now=lambda:
+        None`` — still raises ``AttributeError`` here. ``mypy --strict`` reports
+        an ``isinstance`` check on it as unreachable, because reaching it means
+        violating the declared ``Callable[[], datetime]``, so guarding would take
+        a ``type: ignore[unreachable]`` for an input the gate already refuses.
+        Making the guard total over the reading is ADR-0026 §2's decision, still
+        `Proposed`, and taking it at one of ten seams would recreate exactly the
+        per-site divergence that ADR exists to end. Tracked in #169.
+
         This is the shim ADR-0023 §6 requires at a clock-fed field's producer
         until ADR-0026's guard lands; it is deliberately not that guard.
 
