@@ -237,33 +237,35 @@ path appearing as either endpoint — source or destination — is a breach, as 
 its deletion. The same reading applies to the drift record §4 publishes, so the
 file set the merge reviewer reads is the file set the floor tested.
 
-**The `docs/adr/` tree is in the floor for the architecture persona and not for
-the adversarial one — the floor is per-persona, because the standing inputs
-are.** An
-ADR merged under an open lane can contradict the one that lane is writing; the
-gate cannot see it and no path test will catch it. Whether that invalidates a
-review depends on which review:
+**`docs/adr/` is in the floor, for every persona.** An ADR merged under an open
+lane can contradict the one that lane is writing; the gate cannot see it and no
+path test will catch it. `docs/review/guide.md` §1 puts the ADRs at the top of
+the authority hierarchy — "Binding — blocking" — for *every* reviewer, and
+`docs/review/architecture.md` additionally names "relevant files in
+`docs/adr/`" among its inputs and makes ADR adherence a blocking rubric item. A
+review conducted before a decision was ratified is a review under a different
+authority, so it stops covering the content on the same footing as one
+conducted under a superseded rubric.
 
-- **Architecture reads `docs/adr/` and is tasked with ADR adherence.**
-  `docs/review/architecture.md` names "relevant files in `docs/adr/`" as its
-  inputs and makes "ADR adherence" a blocking rubric item. A newly ratified ADR
-  can therefore change that persona's conclusion about an unchanged diff. So for
-  the architecture artifact, a base move touching `docs/adr/**` invalidates
-  outright, exactly like a rubric change.
-- **Adversarial's rubric is edge cases, error paths, concurrency, data integrity
-  and test gaps.** ADRs bind it as authority (`docs/review/guide.md` §1) and its
-  rubric is in the floor already, but its findings are not a function of which
-  decisions were ratified this afternoon. An intervening ADR merge does not
-  change what it would say about an unchanged patch.
+This is the clause that costs the most, and it is taken deliberately. It leaves
+the tax in place for a base move that merges an ADR — common on a repo running
+parallel docs lanes — while removing it for every base move that does not, which
+includes #124's own measured evidence: #118's rebases moved `scripts/ship.sh`
+and `src/ai_assistant/orchestration/loop.py`, and both would now be free. Where
+the residual bites, §5's un-rebased path avoids it entirely, because a branch
+that is not rebased has no moved base to clear.
 
-Splitting it is what keeps both halves honest. Folding `docs/adr/**` into a
-single shared floor would return most of the tax on this repo's dominant
-traffic — parallel docs lanes — to buy a judgement only one persona makes;
-leaving it out of both would reuse an architecture verdict rendered under a
-decision that no longer stands. And the split costs least where it costs at all:
-architecture is only *required* for a contract-surface change (ADR-0015 §1), so
-for the ordinary change nothing is invalidated, and for the contract-surface
-change the adversarial artifact still survives the same base move.
+**A per-persona floor was considered and withdrawn** — `docs/adr/**` binding
+architecture, which reads and judges ADRs, and not adversarial, whose rubric is
+edge cases, error paths, concurrency, data integrity and test gaps. It is
+attractive because architecture is only *required* for a contract-surface change
+(ADR-0015 §1), so the split would have cost almost nothing. It is withdrawn
+because the authority hierarchy in `guide.md` is not scoped by persona: an
+intervening memory, privacy or permission ADR can make an unchanged patch
+structurally wrong, and "adversarial would probably not have noticed" is a
+prediction about a reviewer, not a property of the content. A floor built on
+that prediction fails open, and this floor is the part of §3 that has to be
+sound.
 
 ### 4. A moved base is disclosed, never silently absorbed
 
@@ -279,10 +281,10 @@ unhashable identity: the artifact falls back to (a) and the moved base costs its
 round. Truncating and shipping is the one outcome §4 must not have.
 
 This is the substantive difference from the interim operating rule, not a
-formality. §3's floor is mechanical and sound, and after the per-persona split
-it covers the ADR hazard for the persona that judges ADRs. What it does not
-cover is an intervening ADR bearing on an *adversarial* finding, and no
-automated test will make that sound. What can be made mechanical is
+formality. §3's floor is mechanical and sound, and it now covers the ADR hazard
+outright. What no floor covers is §2's relocation residual and, more generally,
+a base move that clears every listed path and still bears on the change. What
+can be made mechanical is
 the *evidence*: the exact file set, computed rather than assembled by hand, put
 in front of the human who already owns the merge decision. The judgement stays
 human because it is a judgement; what stops being human is the bookkeeping it
@@ -355,11 +357,10 @@ and a dated note is appended to its header, after the existing ADR-0025 one:
 `Amended: <ratification date> by ADR-0027 — §3's acceptance rule no longer
 requires the recorded base to equal the PR's current merge base. Where the base
 has moved, an artifact covers HEAD if its recorded patch identity is unchanged
-and the move clears that persona's floor: for both personas, the contract
-surface (core/protocols.py, core/types.py) and the standing review contracts
-(docs/review/**, CLAUDE.md, CONTRIBUTING.md, scripts/codex-review.sh); for the
-architecture persona additionally docs/adr/**, which it reads and judges
-adherence to. The move is then published in full at ship rather than costing a
+and the move touches none of an enumerated floor: the contract surface
+(core/protocols.py, core/types.py), the standing review contracts
+(docs/review/**, CLAUDE.md, CONTRIBUTING.md, scripts/codex-review.sh), and
+docs/adr/**. The move is then published in full at ship rather than costing a
 round. Where the base has not moved, the recorded-tree
 comparison stands exactly as written. The artifact is named by the anchor it
 is selected by rather than by the commit it is filed under. §§1–2 are
@@ -438,11 +439,12 @@ and unsafe spellings differ by one flag — a patch identity that is *too*
 insensitive silently accepts a review of content that is no longer there, which
 is why §2 fixes `--verbatim` rather than leaving the choice open, and why §2
 keeps the tree comparison whole on the unmoved-base path rather than replacing
-it. The floor is also per-persona (§3), so `ship` holds two floors rather than
-one and an artifact accepted for adversarial may be refused for architecture on
-the same base move. The residual that remains — an intervening ADR bearing on an
-adversarial finding, and §2's relocation case — is a real, gate-invisible hazard
-carried deliberately, mitigated by disclosure rather than by prevention.
+it. The §3 floor also keeps the tax on any base move that merges an ADR (§3),
+which on a repo running parallel docs lanes is a large share of them — the
+saving is concentrated on code lanes and on the cross-lane merges #124 actually
+measured. The residual that remains, §2's relocation case, is a real,
+gate-invisible hazard carried deliberately, mitigated by disclosure rather than
+by prevention.
 
 **#153 is not broken, stated plainly.** `scripts/review_history.py` parses the
 ship comment: the `<!-- ship:<sha> -->` marker and the summary line carrying
@@ -456,10 +458,12 @@ reading those two lines is unaffected; a parser that assumes the body contains
 nothing but persona `<details>` blocks would see one more block.
 
 **Revisit if** an accepted (b) ship is followed by a finding that a re-review
-would have caught — an intervening ADR reaching an adversarial finding, which
-§3's split leaves uncovered — which argues for promoting `docs/adr/**` into the
-adversarial floor too, or for a cheap contradiction check rather than a path
-test. Or if the patch identity is
+would have caught despite the floor being clear, which argues for a cheap
+contradiction check rather than a wider path list. Or, in the other direction,
+if the `docs/adr/**` floor is observed costing rounds for base moves that merged
+an ADR as `Proposed` — a status that binds no reviewer (`guide.md` §1 makes the
+*ratified* ADRs binding) — which argues for narrowing that floor entry to a
+ratification rather than any edit under the tree. Or if the patch identity is
 observed accepting content it should not have — including §2's relocation
 residual, whose remedy is a location-carrying identity, not a narrower (b) —
 which argues the mechanism, not the split in §1.
@@ -480,9 +484,8 @@ prediction — the #117 rebase holds the identity, the #116 rebase moves it); a
 whitespace-only change to a context line inside a reviewed hunk, which must
 invalidate; **each** floor path — the two `core` files, the review documents and
 the driver alike — changed, deleted, renamed *out* of the floor and renamed
-*into* it (§3), and a `docs/adr/**` base move refused for the architecture
-artifact while the adversarial one is accepted, which is the per-persona floor
-in one fixture; a recorded base that is not an ancestor of the merge base, and
+*into* it (§3), `docs/adr/**` included and for both personas; a recorded base
+that is not an ancestor of the merge base, and
 an *unmoved* base whose reviewed edit has been relocated between two identical
 regions — same identity, different tree, refused by (a) because (b) requires a
 proper ancestor; a rename-only and a mode-only diff rebased onto a base that
