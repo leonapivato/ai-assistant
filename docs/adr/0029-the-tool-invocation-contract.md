@@ -5,8 +5,9 @@
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
   the three constraints ADR-0016 §7 sets on this ADR (§1, §2, §6 below).
-- Records for ratification: a dated note on ADR-0016, whose exact form is in §9.
-  The edit is **not** made by this change, for the reason ADR-0026 §6 gives.
+- Records for ratification: dated notes on ADR-0016 and ADR-0014, whose exact
+  forms are in §9. Neither edit is made by this change, and neither `Status`
+  line moves, for the reasons ADR-0026 §6 and §9 give.
 - Does **not** designate the `tools/` egress seam. ADR-0017 §3's conditions are
   not discharged here and `tools/` still transmits nothing (§7).
 
@@ -104,6 +105,28 @@ that produces — "executing an implementation whose risk declaration is not the
 one the user approved". The canonical implementation is therefore **one object
 implementing both Protocols** over one mapping from id to
 `(definition, callable)`.
+
+**What that biconditional does not reach, stated rather than papered over.** It
+binds an implementation, not a wiring. A composition root that injected registry
+A and invoker B — each internally consistent, each holding an *equal* definition
+under the same id — would satisfy both Protocols and both conformance suites
+while B ran a callable A never saw. No Protocol can close that, for the reason
+ADR-0017 §4 gives about import contracts: this is a net, not a proof. Two things
+bound it, and neither is a claim that it is closed:
+
+- **The residue is narrower than it looks.** Any difference in the *declaration*
+  fails closed — B refuses, because the definition it holds must equal the one
+  the decision approved (below). So the pair must agree on every safety field
+  for the mismatch to survive at all, which means ADR-0016 §7's named failure —
+  "executing an implementation whose risk declaration is not the one the user
+  approved" — does not occur. What remains is a callable that does not do what
+  its equal declaration says, and that hazard is **not** created by the split: a
+  single registry does not verify a callable against its declaration either.
+- **The pairing is an obligation on the composition root** (§8), not a detail it
+  may choose. Making it a contract instead would mean one Protocol carrying both
+  capabilities, which the next clause rejects; the enforcement
+  that would actually close it is ADR-0017 §8's injected capability, deferred
+  there and not reopened here.
 
 **Two Protocols rather than one, and the split is a capability distinction, not
 tidiness.** Adding `invoke` to `ToolRegistry` would have made "one registry"
@@ -251,6 +274,26 @@ class ToolResult(BaseModel):
     output: FrozenJsonValue = None       # only meaningful when SUCCEEDED
     failure: ToolFailure | None = None   # required unless SUCCEEDED, forbidden when SUCCEEDED
 ```
+
+**The cross-field invariants are validated, not conventional**, because every
+one of them has a wrong state that reads as plausible:
+
+- `failure` is **required unless `SUCCEEDED` and forbidden when `SUCCEEDED`**.
+  A `FAILED` result with no failure would leave the executor writing
+  `StepExecution.error` — required when `FAILED` (ADR-0014 §3) — with nothing to
+  write, and a `SUCCEEDED` result carrying one is a contradiction a caller reads
+  whichever half it looks at first.
+- `output` must be `None` unless `SUCCEEDED`. "Only meaningful when
+  `SUCCEEDED`" is not enough: a `FAILED` result carrying a partial output is one
+  an executor could record as a step's result, and a partial result stored as a
+  whole one is worse than an absent one.
+- `ToolFailure.message` must contain visible text, per the `_has_visible_text`
+  test below.
+
+This is the shape ADR-0016 §1 used for `idempotency_window` and ADR-0014 §3 for
+the outcome fields on `StepExecution`: make the self-contradictory combinations
+unrepresentable rather than merely discouraged. §10 requires each rejection in
+the suite.
 
 **Failure is returned, not raised, because `INDETERMINATE` cannot be an
 exception.** ADR-0014 §4 makes "we do not know whether the effect happened" a
@@ -583,9 +626,10 @@ Scoping something out is a decision, so each carries its reason.
 
 ### 8. What this asks of `planning` and `orchestration`
 
-Nothing in ADR-0014 or ADR-0021 changes; these are obligations on the executor
-`orchestration` will write, recorded here so that PR inherits them rather than
-rediscovering them.
+No rule in ADR-0014 or ADR-0021 changes; ADR-0014 §4's transition table gains a
+second trigger, recorded as a note in §9. The rest are obligations on the
+executor `orchestration` will write, set down here so that PR inherits them
+rather than rediscovering them.
 
 - **The claim precedes the call.** ADR-0014 §4 already requires the
   `→ RUNNING` transition to be committed before the tool is invoked, so the CAS
@@ -610,8 +654,14 @@ rediscovering them.
   a restart is not auto-retried. Follow-up issue.
 - **The invoker is injected**, like every other implementation the engine
   receives (golden rule 1). `orchestration` holds a `ToolRegistry` and a
-  `ToolInvoker`; that both are one object in practice is a composition-root
-  detail it never sees.
+  `ToolInvoker` and sees only those two contracts.
+- **The composition root must inject one object as both**, and this is an
+  obligation rather than a convenience. §1 is explicit that no Protocol can
+  enforce it and that the residue if it is violated is narrow; it is still the
+  one place ADR-0016 §7's first constraint has to be honoured by hand, so it is
+  written down where the wiring is done rather than left implicit. A root that
+  cannot satisfy it — two registries with genuinely different callables — is
+  wiring the shape that ADR says is not recoverable.
 
 ### 9. What ratification does to ADR-0016
 
@@ -643,14 +693,44 @@ ADR-0019 forbids. Recorded here in the exact form to apply on ratification:
   spent on first use, `latency` stays advisory and `ToolDefinition` gains no
   timeout field (ADR-0029 §4).`
 
-- **Nothing else in ADR-0016 is edited**, and **no other ADR is edited at all.**
-  ADR-0021 §1 and §4 name questions this ADR answers — where `authorises` is
-  called, and whether an approval is single-use — but answering a question an
-  ADR explicitly left to a successor changes none of its text, so it gets no
-  note; the same holds for ADR-0014 §7's idempotency debt and ADR-0017 §3's
-  condition list, which is inherited undischarged (§7). Adding notes to four
-  ADRs to record that they were *read* would make the header of every ratified
-  document a changelog of everything downstream.
+- **Nothing else in ADR-0016 is edited.**
+
+**ADR-0014 §4 gains a note too, and the reason is worth being exact about.**
+§8's result mapping makes `RUNNING → INDETERMINATE` reachable from a live
+deadline expiry, where ADR-0014 §4's table names one trigger: "recovery found it
+running after a crash". No legal move is added or removed — `PlanExecution`
+validates the move and not the trigger, so an implementation built from that
+table needs no change — but the table's trigger column is prose a reader relies
+on, and leaving it naming only crash recovery would make the document wrong
+about when the state occurs. Recording it is cheap and ADR-0019's lesson is that
+an unrecorded widening is the kind that goes unnoticed. So:
+
+- **ADR-0014's `Status` line is not touched**, for §9's reason above: ADR-0001
+  reserves a status update to an ADR that *changes* a past decision, and
+  ADR-0014's decision — that a step which may or may not have acted becomes a
+  durable `INDETERMINATE`, never auto-retried, resolved explicitly — is not
+  changed, narrowed or reversed. It is applied to a second circumstance that
+  meets its own stated test.
+- **A dated note is appended to ADR-0014's header, after `Date`:**
+
+  `Note (<ratification date>): §4's RUNNING → INDETERMINATE transition has a
+  second trigger from ADR-0029 §4 — a tool that exceeds its invocation deadline,
+  or is cancelled, while side_effecting and not NATURAL. §4's rule is unchanged
+  and is what selects it: such a call cannot be distinguished from one that did
+  not act. The transition graph, the retry ceiling, and INDETERMINATE's
+  never-auto-retried, resolved-explicitly treatment all stand as ratified. §7's
+  idempotency-key debt is discharged by ADR-0029 §5; its INDETERMINATE
+  reconciliation deferral is not.`
+
+- **No other ADR is edited.** ADR-0021 §1 and §4 name questions this ADR answers
+  — where `authorises` is called, and whether an approval is single-use — but
+  answering a question an ADR explicitly left to a successor changes none of its
+  text and widens none of its statements, so it gets no note; the same holds for
+  ADR-0017 §3's condition list, which is inherited undischarged (§7). The line
+  between the two cases is whether a sentence in the other ADR would now read as
+  false: ADR-0014 §4's trigger column would, and nothing in ADR-0021 or ADR-0017
+  does. Noting every ADR that was merely *read* would make the header of each
+  one a changelog of everything downstream.
 
 ### 10. The implementation PR owes a triad, and what it must prove
 
@@ -691,6 +771,10 @@ ADR makes that are not visible in a signature:
 - **Both sides of the window**: a `KEYED` fake deduplicating a repeat inside its
   window and acting again outside it; and an executor declining to retry when
   the clock reading is not a positive elapsed duration.
+- **`ToolResult`'s invariants, as rejections** (§3): a non-`SUCCEEDED` result
+  with no `failure`, a `SUCCEEDED` result carrying one, a non-`SUCCEEDED` result
+  carrying an `output`, and a `ToolFailure` whose `message` renders as nothing.
+  Each is a state the annotations alone permit.
 - **`ToolResult` round-trips** `model_dump(mode="json")` unchanged, since
   `output` lands in a durable `StepExecution`.
 
@@ -721,6 +805,15 @@ ADR makes that are not visible in a signature:
   at-most-once with an `INDETERMINATE` state and explicit resolution — ADR-0014
   §4's position, unchanged, because no contract can give a tool a guarantee its
   upstream does not offer.
+- **The single-binding rule binds an implementation, not a wiring** (§1). A
+  composition root that injects two objects holding *equal* declarations under
+  one id satisfies both Protocols and both suites, and no Protocol can prevent
+  it — the same "a net, not a proof" limit ADR-0017 §4 accepts for import
+  contracts, and closable only by ADR-0017 §8's deferred injected capability.
+  The residue is a callable that does not match its own declaration, which one
+  registry does not verify either; every *declaration* mismatch still fails
+  closed. §8 makes the pairing an obligation on the root rather than an
+  assumption.
 - **Every call has a deadline and no call has a hard bound.** §4 removes the
   unbounded call from the contract and is candid that a tool suppressing
   cancellation can outlive its timeout. The system survives it — one stalled
