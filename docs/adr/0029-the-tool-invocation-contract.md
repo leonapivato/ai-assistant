@@ -556,6 +556,19 @@ the executor's own durable bookkeeping, and the cancellation still propagates,
 which is what keeps shutdown working. An executor that returns normally from a
 cancellation is the bug this clause is not licensing.
 
+**That bookkeeping write is itself shielded, and where it cannot be, the
+fallback is named rather than assumed.** A commit awaited inside a handler is an
+await point like any other, so a second cancellation — a shutdown that stops
+waiting politely — lands mid-`commit_transition` and leaves the step `RUNNING`
+with no record of the classification just computed. So the transition is
+committed under `asyncio.shield`, which is what makes "commits, then re-raises"
+a sequence rather than a hope. Shielding is not a guarantee: the process can
+still be killed between the classification and the write, and there the answer
+is ADR-0014 §4's unchanged — recovery finds a durable `RUNNING` and records
+`INDETERMINATE`. For a read that is more pessimistic than the `FAILED` this
+section prescribes, and it is the correct pessimism, because a write nobody can
+confirm landed is exactly the ignorance `INDETERMINATE` means.
+
 **A `CancelledError` the callable invents is not a cancellation, and the seam
 must tell them apart.** Nothing about the exception's type says where it came
 from, so a tool raising one before it issues its request would otherwise be read
@@ -993,7 +1006,9 @@ ADR makes that are not visible in a signature:
   `CancelledError` with nothing cancelled must come back as an `INTERNAL`
   result, with no cancellation propagated and no `INDETERMINATE` recorded. The
   two tests together are what pin the classification to provenance rather than
-  to the exception type.
+  to the exception type. A third pins the shield: a store held mid-commit with a
+  second cancellation injected must still land the transition before the
+  `CancelledError` leaves the executor.
 - **The key derivation in §5**: identical across retries of one call, different
   across two decisions about identical parameters, and reproducible from
   `approval_ref` alone after a simulated restart.
