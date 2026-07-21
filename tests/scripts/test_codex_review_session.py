@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import run_review
+from _fake_codex import SCRIPT, run_review
 
 _GIT = shutil.which("git")
 
@@ -313,3 +313,94 @@ def test_slightly_indented_top_level_findings_still_split(tmp_path: Path) -> Non
     snap = next(iter((repo / ".review" / "dispositions").glob(f"*-adversarial-{tree}.md")))
     text = snap.read_text()
     assert text.count("<!-- finding id=") == 2
+
+
+def _add_architecture_rubric(repo: Path) -> None:
+    """Commit the second persona's rubric, so both personas can review this repo."""
+    (repo / "docs" / "review" / "architecture.md").write_text("# rubric\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "architecture rubric")
+
+
+def _nested_review_cmd(tmp_path: Path, persona: str, log: Path) -> str:
+    """A shell snippet that runs a *second* full review to completion, inline.
+
+    Fed to the fake codex as ``FAKE_CODEX_PRE_CMD``, so it runs at the exact
+    moment the outer invocation is inside its Codex call — after the outer has
+    decided the loop identity and before it has recorded the round. That pins the
+    interleaving by construction instead of by timing, which is what makes the
+    concurrency test deterministic. ``FAKE_CODEX_PRE_CMD`` is cleared for the
+    inner run so it does not recurse, and the exit status is swallowed so the
+    assertions, not the fake's ``set -e``, decide the outcome.
+    """
+    return (
+        f"env -u FAKE_CODEX_PRE_CMD FAKE_CODEX_THREAD_ID=thread-inner "
+        f"bash {SCRIPT} {persona} main >{log} 2>&1; echo $? >{log}.rc"
+    )
+
+
+def test_two_concurrent_fresh_starts_agree_on_one_loop_id(tmp_path: Path) -> None:
+    """A second invocation on a fresh loop adopts the first's identity (#142).
+
+    Both runs observe the loop before either has recorded a round. Without the
+    serialized init they each mint their own ``loop_id`` and the loop's records
+    split across two identities; with it, the second reads the first's reserved
+    identity and adopts it.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _add_architecture_rubric(repo)
+    log = tmp_path / "inner.log"
+
+    run_review(
+        repo,
+        tmp_path,
+        FAKE_CODEX_THREAD_ID="thread-outer",
+        FAKE_CODEX_PRE_CMD=_nested_review_cmd(tmp_path, "architecture", log),
+    )
+
+    assert Path(f"{log}.rc").read_text().strip() == "0", log.read_text()
+    sha = _git(repo, "rev-parse", "HEAD")
+    outer = _field(_provenance(repo, sha), "loop_id")
+    inner_prov = (repo / ".review" / f"{sha}-architecture.md").read_text().splitlines()[0]
+    inner = _field(inner_prov, "loop_id")
+
+    assert outer, "the outer run records a loop id"
+    assert inner, "the inner run records a loop id"
+    assert outer == inner, "concurrent fresh starts must not split the loop identity"
+    # One loop, one meta, and it names that same identity.
+    metas = list((repo / ".review" / "session").glob("*.meta"))
+    assert len(metas) == 1
+    assert f"loop_id={outer}\n" in metas[0].read_text()
+    # Both personas' threads and dispositions are filed under it.
+    threads = sorted(p.name for p in (repo / ".review" / "session").glob("*.thread"))
+    assert len(threads) == 2
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    snaps = sorted(p.name for p in (repo / ".review" / "dispositions").glob("*.md"))
+    assert snaps == sorted([f"{outer}-adversarial-{tree}.md", f"{outer}-architecture-{tree}.md"])
+
+
+def test_a_round_whose_loop_was_reset_in_flight_refuses_to_record(tmp_path: Path) -> None:
+    """Never silent divergence: a round anchored to a dead loop fails loudly (#142).
+
+    The loop identity is replaced while the round is inside its Codex call — what
+    a concurrent reset does. Recording anyway would file this round's thread and
+    dispositions under an identity no later round looks up.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    result = run_review(
+        repo,
+        tmp_path,
+        check=False,
+        FAKE_CODEX_PRE_CMD="sed -i 's/^loop_id=.*/loop_id=hijacked/' .review/session/*.meta",
+    )
+
+    assert result.returncode != 0
+    assert "reset this review loop" in result.stderr
+    # The review itself is not lost — only the session advance is refused.
+    sha = _git(repo, "rev-parse", "HEAD")
+    assert (repo / ".review" / f"{sha}-adversarial.md").exists()
+    assert not list((repo / ".review" / "session").glob("*.thread"))
+    assert not list((repo / ".review" / "dispositions").glob("*.md"))
