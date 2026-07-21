@@ -376,7 +376,11 @@ base_key="$(printf '%s' "$base_sha" | sha1sum | awk '{print $1}')"
 loop_key="${branch_key}-${base_key}"
 meta_file="${session_dir}/${loop_key}.meta"
 thread_file="${session_dir}/${loop_key}.${persona}.thread"
-disposition_file="${disposition_dir}/${loop_key}.${persona}.md"
+# The disposition record is a per-reviewed-state SNAPSHOT (ADR-0025 §4), named by
+# the full anchor `<loop_id>-<persona>-<tree>.md`, so `ship` selects the one
+# belonging to the terminal artifact's tree and fails closed if two loops claim
+# the same (persona, tree). `snapshot_file` and `prior_snapshot` are resolved
+# once loop_id is known, below.
 
 # A durable, opaque per-loop id, minted once and recorded in the artifact so the
 # ship-time snapshot can be selected by the full anchor (loop, persona, base,
@@ -419,11 +423,37 @@ if [[ "$bypass" -eq 0 ]]; then
         fi
     else
         # New loop, or a reused/rewritten branch: reset the per-loop identity and
-        # clear any session and dispositions filed under this key.
+        # clear any session and dispositions filed under it. Threads are keyed by
+        # loop_key so are cleared by that; the disposition snapshots are keyed by
+        # the OUTGOING loop_id, cleared by it (the new loop_id has none of its own).
+        old_loop_id="$loop_id"
         loop_id="$(_mint_id)"
-        rm -f "${session_dir}/${loop_key}."*.thread \
-            "${disposition_dir}/${loop_key}."*.md
+        rm -f "${session_dir}/${loop_key}."*.thread
+        [[ -n "$old_loop_id" ]] && rm -f "${disposition_dir}/${old_loop_id}-"*.md
     fi
+fi
+
+# The disposition snapshot for this reviewed state, and the most recent snapshot
+# from an earlier round of this same loop+persona. The prior snapshot is what a
+# new round both re-injects (mechanism b) and carries forward from (so a finding
+# retired in an earlier round stays visible in this state's snapshot). Empty on
+# the bypass path (no loop_id, no dispositions).
+snapshot_file=""
+prior_snapshot=""
+if [[ "$bypass" -eq 0 && -n "$loop_id" ]]; then
+    snapshot_file="${disposition_dir}/${loop_id}-${persona}-${tree}.md"
+    prior_round=-1
+    shopt -s nullglob
+    for _snap in "${disposition_dir}/${loop_id}-${persona}-"*.md; do
+        [[ "$_snap" == "$snapshot_file" ]] && continue
+        _r="$(sed -n 's/.* round=\([0-9][0-9]*\).*/\1/p' <(head -n 1 "$_snap"))"
+        [[ -n "$_r" ]] || _r=0
+        if [[ "$_r" -gt "$prior_round" ]]; then
+            prior_round="$_r"
+            prior_snapshot="$_snap"
+        fi
+    done
+    shopt -u nullglob
 fi
 
 # The effective sandbox for a completed round, read from Codex's own session
@@ -569,44 +599,138 @@ PROSE
 } >"$prompt"
 }
 
-# Renders the recorded per-round dispositions for this loop+persona into $1, with
-# a header telling the reviewer these are its own prior findings, not to be
-# blindly re-raised (a warm re-raise past a seen rejection is a deliberate signal
-# the ADR leaves un-suppressed).
+# Re-injects the most recent prior snapshot into $1 (mechanism b), with a header
+# telling the reviewer these are its own prior findings, not to be blindly
+# re-raised (a warm re-raise past a seen rejection is a deliberate signal the ADR
+# leaves un-suppressed). The snapshot already carries retired findings, so the
+# reviewer sees the full disposition history, not just the last round.
 _render_dispositions() {
     {
-        echo "## Prior rounds of THIS review (re-injected — the live session was unavailable)"
+        echo "## Prior findings of THIS review (re-injected — the live session was unavailable)"
         echo
         echo "You have already reviewed earlier states of this same change in this review"
-        echo "loop. Below are the findings you raised and the verdicts you reached, per"
-        echo "round. Do NOT blindly re-raise a finding you already made that was answered —"
-        echo "engage the answer or withdraw it. You MAY re-raise a finding you still hold"
-        echo "after reading the response; that is a deliberate, informed signal, not noise."
+        echo "loop. Below are the findings you raised and their current disposition. Do NOT"
+        echo "blindly re-raise a finding marked retired or already answered — engage it or"
+        echo "leave it retired. You MAY re-raise a finding you still hold after reading the"
+        echo "history; that is a deliberate, informed signal, not noise."
         echo
-        cat "$disposition_file"
+        cat "$prior_snapshot"
     } >"$1"
 }
 
-# Appends this round's review to the disposition ledger (ADR-0025 §1, §4): the
-# durable backstop mechanism (b) re-injects when the warm session is gone, and
-# the record §4 requires reach the merge reviewer. Keyed on the reviewed tree, so
-# re-running one commit does not duplicate an entry, and a stable per-state id is
-# recorded. The ledger is git-ignored (under .review/), like the artifacts.
-_append_disposition() {
-    local id
-    id="$(printf '%s' "$tree" | sha1sum | awk '{print $1}')"
+# A stable, unique id for a finding: its text with markdown and case flattened to
+# an alnum key, hashed. Stable across reformatting of the same claim, distinct
+# across different claims (ADR-0025 §4's id uniqueness/stability). The leading
+# list enumerator (`1.`, `2)`, …) is dropped first, so the same finding keeps its
+# id when its rank shifts between rounds. Reads stdin.
+_finding_id() {
+    local key
+    key="$(tr -d '*#`_>~' | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ' |
+        sed 's/^ *//; s/^[0-9][0-9]* //; s/ *$//' | cut -c1-200)"
+    printf '%s-%s' "$persona" "$(printf '%s' "$key" | sha1sum | cut -c1-12)"
+}
+
+# Writes the per-finding disposition snapshot for this reviewed state (ADR-0025
+# §4). This round's findings — parsed from the review body — are recorded status
+# `open`; any finding present in the prior snapshot but absent now is carried
+# forward status `retired` (Codex's own reassessment: it stopped raising it), so
+# the snapshot for the terminal tree is self-contained and `ship` can render the
+# verdict-changing history from it alone. Each finding block is delimited so the
+# renderer can bound, select, and secret-scan it. Written atomically.
+_write_snapshot() {
+    [[ -n "$snapshot_file" ]] || return 0
     mkdir -p "$disposition_dir"
-    if grep -q "id=${id} " "$disposition_file" 2>/dev/null; then
-        return 0
+    local work
+    work="$(mktemp -d -t "codex-snap-${persona}.XXXXXX")"
+
+    # The review body without its trailing verdict line (validated present
+    # already), so the verdict is not folded into the last finding block.
+    awk 'NF{last=NR} {l[NR]=$0} END{for(i=1;i<=NR;i++) if(i!=last) print l[i]}' \
+        "$out" >"${work}/body"
+    # Split into finding blocks at each ranked list item ("1.", "2)", ...). Text
+    # before the first item (a preamble) is discarded — findings only.
+    awk -v dir="$work" '
+        /^[[:space:]]*[0-9]+[.)]/ { n++; f=sprintf("%s/cur-%04d", dir, n) }
+        n>0 { print >> f }
+    ' "${work}/body"
+    # A review the reviewer did not format as a ranked list yields no blocks
+    # above. Rather than silently lose it (a lost finding is exactly what §4
+    # forbids), record the whole body as one finding.
+    if ! compgen -G "${work}/cur-*" >/dev/null; then
+        cp "${work}/body" "${work}/cur-0001"
     fi
+
+    local -A cur_text=() cur_sev=()
+    local -a cur_order=()
+    local bf id sev
+    shopt -s nullglob
+    for bf in "${work}"/cur-*; do
+        id="$(_finding_id <"$bf")"
+        [[ -n "${cur_text[$id]:-}" ]] && continue
+        # `|| true`: no severity word is not an error, and a failing grep in this
+        # bare assignment would trip `set -e` (the pipeline fails under pipefail).
+        sev="$(grep -m1 -oiE 'blocker|major|minor' "$bf" | tr '[:upper:]' '[:lower:]' || true)"
+        [[ -n "$sev" ]] || sev="unknown"
+        cur_order+=("$id")
+        cur_sev["$id"]="$sev"
+        cur_text["$id"]="$(cat "$bf")"
+    done
+    shopt -u nullglob
+
+    local snapshot_tmp="${snapshot_file}.partial.$$"
     {
-        echo "<!-- disposition loop_id=${loop_id} persona=${persona} round=${round}" \
-            "base_sha=${base_sha} tree=${tree} sha=${sha} id=${id} verdict=${last_line} -->"
-        echo "### Round ${round} — tree ${tree:0:12} — verdict: ${last_line}"
-        echo
-        cat "$out"
-        echo
-    } >>"$disposition_file"
+        echo "<!-- snapshot loop_id=${loop_id} persona=${persona} base_sha=${base_sha}" \
+            "tree=${tree} sha=${sha} round=${round} verdict=${last_line} -->"
+        for id in "${cur_order[@]}"; do
+            local first="$round"
+            local prior_first
+            prior_first="$(_snapshot_field "$prior_snapshot" "$id" first_round)"
+            [[ -n "$prior_first" ]] && first="$prior_first"
+            _emit_finding "$id" "${cur_sev[$id]}" open "$first" "$round" "${cur_text[$id]}"
+        done
+        # Findings from the prior snapshot that this round did not raise: retired.
+        local pid psev pfirst plast
+        while IFS=$'\t' read -r pid psev pfirst plast; do
+            [[ -n "$pid" ]] || continue
+            [[ -n "${cur_text[$pid]:-}" ]] && continue
+            _emit_finding "$pid" "$psev" retired "$pfirst" "$plast" \
+                "$(_snapshot_text "$prior_snapshot" "$pid")"
+        done < <(_snapshot_ids "$prior_snapshot")
+    } >"$snapshot_tmp"
+    mv "$snapshot_tmp" "$snapshot_file"
+    rm -rf "$work"
+}
+
+# Emits one finding block: a machine header the renderer parses, then the
+# verbatim finding text, then a terminator.
+_emit_finding() {
+    echo "<!-- finding id=${1} severity=${2} status=${3} first_round=${4} last_round=${5} -->"
+    printf '%s\n' "$6"
+    echo "<!-- /finding -->"
+}
+
+# The `id<TAB>severity<TAB>first_round<TAB>last_round` of every finding in a
+# snapshot file, one per line. Empty when the file is missing.
+_snapshot_ids() {
+    [[ -n "$1" && -f "$1" ]] || return 0
+    sed -n 's/.*<!-- finding id=\([^ ]*\) severity=\([^ ]*\) status=[^ ]* first_round=\([^ ]*\) last_round=\([^ ]*\) -->.*/\1\t\2\t\3\t\4/p' "$1"
+}
+
+# One header field of a specific finding in a snapshot file.
+_snapshot_field() {
+    [[ -n "$1" && -f "$1" ]] || return 0
+    sed -n "s/.*<!-- finding id=${2} .*${3}=\\([^ ]*\\).*/\\1/p" "$1" | head -n 1
+}
+
+# The verbatim text of a specific finding in a snapshot file (between its header
+# and terminator).
+_snapshot_text() {
+    [[ -n "$1" && -f "$1" ]] || return 0
+    awk -v id="$2" '
+        $0 ~ ("<!-- finding id=" id " ") { grab=1; next }
+        grab && /<!-- \/finding -->/ { grab=0 }
+        grab { print }
+    ' "$1"
 }
 
 # Unset by default, so local runs keep using the Codex CLI's own default model.
@@ -683,7 +807,7 @@ else
         # floor) rather than truncating — the dispositions stay on record, never
         # silently lost, and a re-raise then costs at most one round.
         inject=""
-        if [[ -s "$disposition_file" ]]; then
+        if [[ -n "$prior_snapshot" && -s "$prior_snapshot" ]]; then
             _render_dispositions "$inject_tmp"
             inject_bytes="$(wc -c <"$inject_tmp")"
             if [[ $((inject_bytes + diff_bytes)) -le "$inject_budget" ]]; then
@@ -692,7 +816,7 @@ else
                 echo "prior findings + diff (${inject_bytes}+${diff_bytes} bytes) exceed the" \
                     "injection budget (${inject_budget}); dropping to a plain cold review of" \
                     "the diff (the degradation floor). The dispositions remain recorded in" \
-                    "${disposition_file}." >&2
+                    "${prior_snapshot}." >&2
             fi
         fi
         _write_prompt "$inject"
@@ -863,7 +987,7 @@ if [[ "$bypass" -eq 0 ]]; then
         printf '%s\n' "$round_thread" >"$thread_tmp"
         mv "$thread_tmp" "$thread_file"
     fi
-    _append_disposition
+    _write_snapshot
 fi
 
 echo >&2

@@ -179,6 +179,136 @@ artifact_has_verdict() {
     [[ "$body_lines" -ge 2 ]]
 }
 
+# --- Disposition snapshots (ADR-0025 §4) -------------------------------------
+#
+# A persistent review round records a per-finding disposition SNAPSHOT of the
+# state it reviewed, named by the full anchor `<loop_id>-<persona>-<tree>.md`.
+# ship publishes the snapshot belonging to the terminal artifact's tree so the
+# merge reviewer can read the verdict-changing history — which findings were
+# retired, and across which rounds — not only the terminal verdict.
+
+# The snapshot for a terminal artifact, selected by the full anchor. Echoes the
+# path, or nothing when none exists (a bypass or pre-ADR-0025 artifact). Fails
+# closed on ambiguity: if more than one loop recorded a snapshot for this
+# (persona, tree), refuse rather than post dispositions that may not belong
+# beside this verdict; and the one loop found must be the loop the artifact
+# names. $1 persona, $2 tree, $3 expected loop_id.
+disposition_snapshot() {
+    local persona="$1" tree="$2" want="$3" f lid
+    local -a matches=()
+    local -A loops=()
+    shopt -s nullglob
+    for f in .review/dispositions/*-"${persona}-${tree}".md; do
+        lid="$(provenance_field loop_id "$(head -n 1 "$f")")"
+        [[ -n "$lid" ]] || continue
+        loops["$lid"]=1
+        matches+=("$f")
+    done
+    shopt -u nullglob
+    [[ ${#matches[@]} -eq 0 ]] && return 0
+    if [[ ${#loops[@]} -gt 1 ]]; then
+        die "ambiguous disposition snapshots for ${persona} tree ${tree:0:12}:
+     ${#loops[@]} loops recorded one for the same content, so which belongs beside
+     this verdict cannot be determined (ADR-0025 §4). Clear stale
+     .review/dispositions/ and re-run the review."
+    fi
+    if [[ -n "$want" && -z "${loops[$want]:-}" ]]; then
+        die "the disposition snapshot for ${persona} tree ${tree:0:12} names a
+     different loop than the review artifact — refusing to post mismatched
+     dispositions (ADR-0025 §4)"
+    fi
+    printf '%s\n' "${matches[0]}"
+}
+
+# Each finding's header fields as `id<TAB>severity<TAB>status<TAB>first<TAB>last`.
+snapshot_finding_lines() {
+    sed -n 's/.*<!-- finding id=\([^ ]*\) severity=\([^ ]*\) status=\([^ ]*\) first_round=\([^ ]*\) last_round=\([^ ]*\) -->.*/\1\t\2\t\3\t\4\t\5/p' "$1"
+}
+
+# The verbatim text of one finding (between its header and terminator).
+snapshot_finding_text() {
+    awk -v id="$2" '
+        $0 ~ ("<!-- finding id=" id " ") { g = 1; next }
+        g && /<!-- \/finding -->/ { g = 0 }
+        g { print }
+    ' "$1"
+}
+
+# Whether a proposal carries a plausible secret (a key Codex may have read from an
+# ignored file like .env). Deliberately broad and fail-toward-exclude: a false
+# positive costs one finding its published proposal (it takes ordinary review), a
+# false negative would publish a secret. $1 the text to scan.
+contains_secret() {
+    grep -qiE '(-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[posur]_[0-9A-Za-z]{20,}|github_pat_[0-9A-Za-z_]{20,}|(api[_-]?key|secret|password|passwd|token|bearer)[[:space:]]*[=:][[:space:]]*[^[:space:]]{6,})' <<<"$1"
+}
+
+# Replaces a fenced diff/patch/suggestion block (a Codex proposal) with a marker,
+# so an excluded proposal is dropped rather than truncated or redacted in place.
+strip_proposal_fences() {
+    awk '
+        /^[[:space:]]*```(diff|patch|suggestion)/ { infence = 1; print "> _(Codex proposal excluded — see note)_"; next }
+        infence && /^[[:space:]]*```[[:space:]]*$/ { infence = 0; next }
+        !infence { print }
+    ' <<<"$1"
+}
+
+# Renders a disposition snapshot into a collapsible section, bounded by a
+# cumulative published-byte budget so a long loop cannot exceed ship's comment
+# limit (ADR-0025 §4). A §3 Codex proposal is the exception: it appears in full,
+# unless it cannot be published exactly and safely (too large, or carrying a
+# secret), in which case it is excluded — not truncated — and that finding takes
+# ordinary review, fail-closed. $1 snapshot path, $2 persona.
+render_dispositions() {
+    local snap="$1" persona="$2"
+    local budget="${CODEX_SHIP_DISPOSITION_BUDGET:-20000}"
+    local total used=0 hidden=0
+    total="$(grep -c '<!-- finding id=' "$snap" || true)"
+    [[ "${total:-0}" -eq 0 ]] && return 0
+
+    echo "<details><summary><strong>${persona} — dispositions (${total} finding(s))</strong></summary>"
+    echo
+    echo "_Per-finding disposition record from the persistent review session"
+    echo "(ADR-0025 §4). A **retired** finding was raised in an earlier round and,"
+    echo "after the reviewer's own reassessment, not re-raised — the auditable"
+    echo "evidence that a verdict changed._"
+    echo
+    local id sev status first last text note is_proposal entry entry_bytes
+    while IFS=$'\t' read -r id sev status first last; do
+        [[ -n "$id" ]] || continue
+        text="$(snapshot_finding_text "$snap" "$id")"
+        note=""
+        is_proposal=0
+        if grep -qiE '^[[:space:]]*```(diff|patch|suggestion)' <<<"$text"; then
+            if contains_secret "$text"; then
+                text="$(strip_proposal_fences "$text")"
+                note="  "$'\n'"> ⚠ **Codex proposal excluded** — it may carry a secret, so it is not published; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
+            elif [[ "$(printf '%s' "$text" | wc -c)" -gt "$budget" ]]; then
+                text="$(strip_proposal_fences "$text")"
+                note="  "$'\n'"> ⚠ **Codex proposal excluded** — too large to publish in full; this finding takes ordinary independent review (ADR-0025 §3, fail-closed)."
+            else
+                # Published in full: a proposal appears in full, never bounded away.
+                is_proposal=1
+            fi
+        fi
+        entry="$(printf -- '- **%s** — _%s_ (rounds %s–%s)\n\n%s\n%s\n' \
+            "$sev" "$status" "$first" "$last" "$text" "$note")"
+        entry_bytes="$(printf '%s' "$entry" | wc -c)"
+        if [[ "$is_proposal" -eq 0 && $((used + entry_bytes)) -gt "$budget" ]]; then
+            hidden=$((hidden + 1))
+            continue
+        fi
+        printf '%s\n\n' "$entry"
+        used=$((used + entry_bytes))
+    done < <(snapshot_finding_lines "$snap")
+    if [[ "$hidden" -gt 0 ]]; then
+        echo "_…${hidden} more finding(s) omitted to stay within the published-size"
+        echo "budget; the complete record is in \`.review/dispositions/\` (local)._"
+        echo
+    fi
+    echo "</details>"
+    echo
+}
+
 declare -A covering_rank=()
 
 shopt -s nullglob
@@ -318,6 +448,19 @@ for a in "${artifacts[@]}"; do
     fi
 done
 
+# Resolve each artifact's disposition snapshot by the full anchor now, before
+# building the body, so an ambiguity or a loop mismatch fails the ship closed
+# rather than after posting (ADR-0025 §4).
+declare -A snapshot=()
+for a in "${artifacts[@]}"; do
+    prov="$(head -n 1 "$a")"
+    a_persona="$(provenance_field persona "$prov")"
+    a_tree="$(provenance_field tree "$prov")"
+    a_loop="$(provenance_field loop_id "$prov")"
+    snap="$(disposition_snapshot "$a_persona" "$a_tree" "$a_loop")"
+    [[ -n "$snap" ]] && snapshot["$a_persona"]="$snap"
+done
+
 num="$(gh pr view --json number --jq .number)"
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
@@ -410,6 +553,12 @@ agg_binary_churn="$(agg_field binary_churn)"
         echo
         echo "</details>"
         echo
+        # The verdict-changing evidence: the per-finding dispositions belonging to
+        # this terminal artifact's tree (ADR-0025 §4). Rendered into the published
+        # comment so it reaches the merge reviewer, not only git-ignored .review/.
+        if [[ -n "${snapshot[$persona]:-}" ]]; then
+            render_dispositions "${snapshot[$persona]}" "$persona"
+        fi
     done
 } >"$body"
 

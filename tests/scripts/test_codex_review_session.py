@@ -143,7 +143,7 @@ def test_a_failed_resume_degrades_to_a_fresh_session_with_dispositions(tmp_path:
     assert _field(prov, "thread_id") == "thread-two"
     # The prior round's finding was re-injected into the cold prompt.
     prompt = (tmp_path / "prompt.txt").read_text()
-    assert "Prior rounds of THIS review" in prompt
+    assert "Prior findings of THIS review" in prompt
     assert "finding A" in prompt
 
 
@@ -218,16 +218,23 @@ def test_the_bypass_path_keeps_no_session(tmp_path: Path) -> None:
     assert not (repo / ".review" / "session").exists()
 
 
-def test_the_disposition_ledger_is_appended_per_round(tmp_path: Path) -> None:
+def test_each_round_writes_a_per_finding_snapshot_with_retirement(tmp_path: Path) -> None:
+    """The disposition record is a per-tree snapshot; a dropped finding is retired."""
     repo = tmp_path / "repo"
     _init_repo(repo)
-    run_review(repo, tmp_path, FAKE_CODEX_REVIEW="first finding\nBLOCK\n")
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW="1. **blocker** the value is wrong\nBLOCK\n")
+    tree1 = _git(repo, "rev-parse", "HEAD^{tree}")
     _commit(repo, "three\n", "round 2")
-    run_review(repo, tmp_path, FAKE_CODEX_REVIEW="second finding\nAPPROVE\n")
+    # Round 2 does not re-raise the blocker (author fixed it): it retires.
+    run_review(repo, tmp_path, FAKE_CODEX_REVIEW="1. **minor** a small nit\nAPPROVE WITH NITS\n")
+    tree2 = _git(repo, "rev-parse", "HEAD^{tree}")
 
-    ledgers = list((repo / ".review" / "dispositions").glob("*.adversarial.md"))
-    assert len(ledgers) == 1
-    text = ledgers[0].read_text()
-    assert "first finding" in text
-    assert "second finding" in text
-    assert text.count("### Round") == 2
+    disp = repo / ".review" / "dispositions"
+    # One snapshot per reviewed state, named by the anchor <loop>-<persona>-<tree>.
+    assert list(disp.glob(f"*-adversarial-{tree1}.md"))
+    snap2 = next(iter(disp.glob(f"*-adversarial-{tree2}.md"))).read_text()
+    # The round-2 snapshot carries the new open finding and the retired blocker.
+    assert "status=open" in snap2
+    assert "severity=minor status=open" in snap2
+    assert "severity=blocker status=retired" in snap2
+    assert "the value is wrong" in snap2  # retired finding's text is carried forward
