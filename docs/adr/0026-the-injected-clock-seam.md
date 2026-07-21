@@ -1,6 +1,6 @@
 # 26. The injected clock seam: a clock produces an aware instant
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Decides: what ADR-0023 §6 defers — the *producer* side of the instant
   convention. ADR-0023 is **Accepted** (merged in #129), so its §6 ordering

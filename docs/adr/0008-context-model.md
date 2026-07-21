@@ -1,7 +1,17 @@
 # 8. Situational context: `CurrentContext` and a source seam
 
-- Status: Accepted
+- Status: Accepted, §§2, 4–5 amended by ADR-0026
 - Date: 2026-07-17
+- Amended: 2026-07-21 by ADR-0026 — §4's "a valid CurrentContext can always be
+  built" now holds for a *conforming* clock: a reading that is naive,
+  indeterminate, or outside the localizable range is a wiring bug and raises
+  ContextError rather than being attributed UTC. §2's internal source seam gains
+  an optional `required` marker — carried by a source, read by the assembler,
+  absent meaning optional — so that failure is not degraded; optional sources
+  degrade exactly as §4 says. §5's now: Callable[[], datetime] becomes the Clock
+  contract of ADR-0026 §1. The startup-time treatment of a malformed timezone,
+  the ContextSource/CurrentContext shapes, and everything else in §§2, 4–5
+  stand.
 
 ## Context
 
