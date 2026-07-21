@@ -286,28 +286,37 @@ has moved, an artifact covers HEAD if its recorded patch identity is unchanged
 and the move touches neither the contract surface (core/protocols.py,
 core/types.py) nor the standing review contracts (docs/review/**, CLAUDE.md,
 CONTRIBUTING.md, scripts/codex-review.sh); the move is then published at ship
-rather than costing a
-round. Where the base has not moved, the recorded-tree comparison stands exactly
-as written. The artifact is named by the anchor it is selected by rather than by
-the commit it is filed under. §§1–2 are untouched.`
+rather than costing a round. Where the base has not moved, the recorded-tree
+comparison stands exactly as written. The artifact is named by the anchor it
+is selected by rather than by the commit it is filed under. §§1–2 are
+untouched.`
 
-**ADR-0025 takes a dated note and no `Status` qualifier.** Its header records
+**ADR-0025 takes both, with the qualifier scoped to §4.** Its header records
 "the acceptance rule (recorded base and tree both match) is unchanged", and §4
-repeats it — both true of what ADR-0025 did, and both stale as descriptions of
-the live rule once this lands. But the qualified `Status` form announces an
-amendment to *that ADR's own decision*, and there is none: everything ADR-0025
-decides — the persistent session, the retire-only-by-Codex line, the proposal
-guardrail, the terminal-verdict reconciliation — is untouched by a change to
-which anchors count as matching. Recording a `Status` qualifier for a document
-whose decision is intact would be the same category error in the other
-direction. So, appended to ADR-0025's header after `Refs`:
+says the shippable artifact is "pinned to the final `(base, tree)`" — true of
+what ADR-0025 did, and stale as descriptions of the live rule once this lands. A
+reader landing on §4 and relying on that phrasing would be misled, which is the
+whole function of the qualifier: it warns before the text is relied on. So
+ADR-0025's `Status` line becomes
 
-`Amended: <ratification date> by ADR-0027 — the parenthetical "the acceptance
-rule (recorded base and tree both match) is unchanged", in the Amends line and
-in §4, describes the rule as ADR-0025 left it. ADR-0027 amends that rule in
-ADR-0020 §3. Nothing this ADR decides changes: the shippable artifact is still
-the conversation's terminal verdict, pinned to whatever anchor ADR-0020 §3
-defines.`
+`- Status: Accepted, §4's anchor description amended by ADR-0027`
+
+— scoped deliberately, because what changes is §4's *description of the anchor*,
+not what ADR-0025 decides. The persistent session, the retire-only-by-Codex
+line, the proposal guardrail, and §4's own reconciliation — the shippable
+artifact is the conversation's terminal verdict, not a mid-stream turn — all
+stand exactly as ratified. A bare "amended by ADR-0027" would read as though
+that reconciliation had been reopened. Appended to ADR-0025's header after
+`Refs`:
+
+`Amended: <ratification date> by ADR-0027 — §4's "pinned to the final (base,
+tree)", and the Amends line's "the acceptance rule (recorded base and tree both
+match) is unchanged", describe the anchor as ADR-0025 left it. ADR-0027 amends
+that rule in ADR-0020 §3: where the base has moved, a matching non-empty patch
+identity and a clear floor can cover the content instead. §4's decision is
+unchanged — the shippable artifact is still the conversation's terminal verdict,
+pinned to whatever anchor ADR-0020 §3 defines, and its disposition snapshot is
+still selected by the full anchor rather than the tree alone.`
 
 Nothing else in either document is edited.
 
@@ -376,12 +385,15 @@ contradiction check rather than a path test. Or if the patch identity is
 observed accepting content it should not have, which argues the mechanism, not
 the split in §1.
 
-**Follow-on.** Implementation is a separate PR (golden rule 5; ratify before
-building): `scripts/codex-review.sh` records the patch identity and names the
-artifact by its anchor; `scripts/ship.sh` gains acceptance path (b), the §3
-floor check, the §4 drift rendering, and reads the persona from provenance
-rather than from the filename; `CLAUDE.md` and `CONTRIBUTING.md` carry the
-one-line restatement of when a base move costs a round.
+**Follow-on.** Implementation is a separate PR — a review-contract decision
+ratified before anything builds on it, which is the ratify-before-build
+principle ADR-0025's own follow-on invokes, not golden rule 5, which governs
+Protocol and `core` surface: `scripts/codex-review.sh` records the patch
+identity and names the artifact by its anchor; `scripts/ship.sh` gains
+acceptance path (b), the §3 floor check, the §4 drift rendering, and reads the
+persona from provenance rather than from the filename; `CLAUDE.md` and
+`CONTRIBUTING.md` carry the one-line restatement of when a base move costs a
+round.
 
 The acceptance rule is a fail-closed surface, so the implementation owes a test
 per branch of it, not only the happy path: #118's two rebases (§2's falsifiable
