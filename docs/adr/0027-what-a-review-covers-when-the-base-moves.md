@@ -1,6 +1,6 @@
 # 27. What a review covers when the base moves
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Amends on ratification: ADR-0020 §3, the content anchor — the section
   ADR-0025 §4 already amended once. The edit is **not** made by this change; §7

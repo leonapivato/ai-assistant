@@ -1,6 +1,6 @@
 # 25. A persistent Codex review session, with independence guardrails
 
-- Status: Accepted
+- Status: Accepted, §4's anchor description amended by ADR-0027
 - Date: 2026-07-20
 - Supersedes: ADR-0015 §1's one-shot review model — each review round was an
   independent cold `codex exec` with no memory across rounds. §1 below replaces
@@ -15,6 +15,14 @@
   repeats a rejected finding because it never saw the rejection. A warm re-raise
   past a seen rejection is a different thing, left un-suppressed by design (§1).
 - Refs: #124 (the base-anchor tax — related, out of scope)
+- Amended: 2026-07-21 by ADR-0027 — §4's "pinned to the final (base, tree)", and
+  the Amends line's "the acceptance rule (recorded base and tree both match) is
+  unchanged", describe the anchor as ADR-0025 left it. ADR-0027 amends that rule
+  in ADR-0020 §3: where the base has moved, a matching hashable patch identity
+  and a clear floor can cover the content instead. §4's decision is unchanged —
+  the shippable artifact is still the conversation's terminal verdict, pinned to
+  whatever anchor ADR-0020 §3 defines, and its disposition snapshot is still
+  selected by the full anchor rather than the tree alone.
 
 ## Context
 

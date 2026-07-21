@@ -1,7 +1,20 @@
 # 22. The closed learning loop in `orchestration`
 
-- Status: Accepted
+- Status: Accepted, §§4, 4a, 5 amended by ADR-0028
 - Date: 2026-07-20
+- Amended: 2026-07-21 by ADR-0028 — §4's "MERGE is reported but not applied" is
+  withdrawn as a standing limitation. It describes the loop until the
+  MemoryWriter triad lands and learn delegates to it; from then a MERGE is
+  applied by memory's own fold and reported with the target's record id. §4's
+  remaining clauses stand unchanged — ACCEPT, STORE_TEMPORARY, REJECT/ASK_USER,
+  "no proposals is a normal outcome", in-order independent application with no
+  transaction, the non-atomic search → decide → add across calls (issue #104),
+  and last-write-wins on a repeated record id. §4a's conflict-tuning check is
+  relocated, not withdrawn: LearningLoop stops taking conflict_limit and
+  conflict_threshold, and MemoryIngestor's constructor refuses the same values
+  it would have (ADR-0028 §4a). §4a's retrieval_limit check is unaffected. §5's
+  injected clock stops stamping expires_at, which the writer's own clock now
+  does (ADR-0028 §4b); it still stamps the goal.
 
 ## Context
 

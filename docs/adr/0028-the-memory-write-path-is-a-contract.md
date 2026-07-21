@@ -1,6 +1,6 @@
 # 28. The memory write path is a contract: `MemoryWriter`
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Closes the gap ADR-0022 §Consequences item 1 filed as issue #103, and the one
   ADR-0009 §Context named before it. Neither is reopened here: this ADR promotes

@@ -1,11 +1,21 @@
 # 20. Making the review loop terminate
 
-- Status: Accepted, §3 amended by ADR-0025
+- Status: Accepted, §3 amended by ADR-0025 and ADR-0027
 - Date: 2026-07-20
 - Amended: 2026-07-20 by ADR-0025 — §3's content anchor now pins the *terminal
   verdict* of a review conversation rather than the sole output of a one-shot
   `codex exec`. The acceptance rule (recorded base and tree both match the PR's
   merge base and HEAD tree) is unchanged.
+- Amended: 2026-07-21 by ADR-0027 — §3's acceptance rule no longer requires the
+  recorded base to equal the PR's current merge base. Where the base has moved,
+  an artifact covers HEAD if its recorded patch identity is unchanged and the
+  move touches none of an enumerated floor: the contract surface
+  (core/protocols.py, core/types.py), the standing review contracts
+  (docs/review/**, CLAUDE.md, CONTRIBUTING.md, scripts/codex-review.sh), and
+  docs/adr/**. The move is then published in full at ship rather than costing a
+  round. Where the base has not moved, the recorded-tree comparison stands
+  exactly as written. The artifact is named by the anchor it is selected by
+  rather than by the commit it is filed under. §§1–2 are untouched.
 - Supersedes: ADR-0015 §1's freshness clause — that `just ship` "refuses unless
   [a review artifact] exists for the exact commit the PR head is on". §3 below
   replaces the commit with the reviewed *content* as the anchor. The rest of
