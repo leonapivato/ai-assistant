@@ -722,8 +722,13 @@ def test_refuses_an_artifact_that_is_nothing_but_a_verdict(tmp_path: Path) -> No
     predates that change and closing it for one spelling only would leave the
     rule depending on which the reviewer happened to pick.
     """
-    for body in ("APPROVE\n", "Verdict: APPROVE\n"):
-        repo = tmp_path / f"repo-{abs(hash(body))}"
+    for case, body in enumerate(("APPROVE\n", "Verdict: APPROVE\n")):
+        # Each case needs its own parent: _init_repo puts `origin.git` beside
+        # the repo, so a shared parent would have the second case push an
+        # unrelated history onto the first case's `main`.
+        case_dir = tmp_path / f"case-{case}"
+        case_dir.mkdir()
+        repo = case_dir / "repo"
         sha = _init_repo(repo)
         _fake_gh(tmp_path / "bin")
         _record_review(repo, sha, "adversarial", body)
