@@ -182,8 +182,24 @@ The contracts cannot enforce it: a `MemoryWriter` exposes no store, deliberately
 to keep closed — so `orchestration` has nothing to compare. It is therefore a
 **composition-root obligation**, stated here rather than assumed: whoever builds
 the loop passes the same `MemoryStore` instance to the loop and to the writer.
-The integration test that demonstrates the vertical (ADR-0022 §Consequences)
-composes them that way and is what keeps the obligation honest.
+
+It is not left to prose, because an assertion for it already exists.
+`tests/orchestration/test_loop.py::test_a_learned_preference_is_reused_on_a_later_turn`
+is ADR-0022's vertical: it learns a preference and then asserts the planner is
+handed it on the *next* turn, across one store. Once the loop takes a writer,
+that test passes only if the writer's store is the loop's — a `store_b` wiring
+learns successfully and retrieves nothing, which is precisely what it asserts
+against. The implementing change updates its `_loop` helper to build the writer
+over the same store, and the obligation is then enforced rather than requested.
+
+This ADR names no composition root or factory beyond that, and the omission is
+deliberate: none exists to name. The only interface adapter,
+`interfaces/cli.py`, offers `main` and `version` and constructs no
+`LearningLoop`, so the only composers today are tests, and inventing a wiring
+artifact would be
+implementation smuggled into a docs-only contract change (golden rule 5). When a
+real composition root lands it inherits this obligation and the assertion that
+covers it.
 
 ### 4a. The tuning check moves with the tuning; it is not dropped
 
