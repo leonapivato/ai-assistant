@@ -1,6 +1,6 @@
 # 24. The embedding model ships in the wheel, pinned and verified at build time
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-20
 - Supersedes: ADR-0002's build-backend clause only (`uv_build` → `hatchling`,
   §4); its other stack decisions are unchanged. On acceptance, following the
