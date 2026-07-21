@@ -23,6 +23,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     CostBasis,
+    PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
     Reversibility,
@@ -30,7 +31,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import ActionRequest, PermissionDecision
+    from ai_assistant.core.types import ActionRequest
 
 #: Reported when a policy is asked to resolve something nobody was ever shown.
 _NOT_A_CONFIRMATION = "fake: the decision resolved was not a CONFIRM, so it authorises nothing"
@@ -164,6 +165,18 @@ class FakeAuditTrail:
         into a state where reads crash has not merely accepted bad input; it has
         stopped being readable.
 
+        Rebuilt as a :class:`~ai_assistant.core.types.PermissionDecision`
+        specifically, not as ``type(decision)`` — the same correction
+        ``ActionRequest`` makes on the definition it detaches. A caller's
+        subclass could override ``model_copy`` to return ``self``, and storing
+        that instance would hand every later ``get``/``recent``/``export`` the
+        trail's own object, so the read-path detachment below would silently
+        stop holding and an appended entry could be rewritten through it.
+        Rebuilding into the declared type is also what makes the stored record
+        equal to the one that reloads from disk, since ``extra="forbid"`` refuses
+        a subclass's extra fields rather than flattening them away at
+        serialisation.
+
         Raises:
             AuditError: If the decision does not satisfy its own model. Raised
                 as an ``AuditError`` rather than letting pydantic's
@@ -175,7 +188,7 @@ class FakeAuditTrail:
             InvalidResolutionError: If ``resolves`` fails the invariant.
         """
         try:
-            snapshot = type(decision).model_validate(decision.model_dump())
+            snapshot = PermissionDecision.model_validate(decision.model_dump())
         except ValidationError as exc:
             msg = f"decision {decision.id!r} is not a valid record: {exc}"
             raise AuditError(msg) from exc

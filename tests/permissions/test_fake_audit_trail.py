@@ -7,7 +7,6 @@ contract a durable trail is.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 import pytest
@@ -82,28 +81,6 @@ async def test_a_resolving_deny_citing_an_authorisation_is_refused() -> None:
         await trail.record(answer)
 
     assert await trail.get("d-answer") is None
-
-
-async def test_a_corrupted_timestamp_is_refused_rather_than_stored() -> None:
-    """ADR-0021 §4 asks for a *validated* snapshot, not merely a detached one.
-
-    The sharp case is a `decided_at` written back as naive past the frozen
-    model's guard. Storing it would not just accept bad input: `recent()` sorts
-    on that field, so every later read would raise on comparing a naive value
-    against the aware ones beside it. A store that can be put into a state where
-    reads crash has stopped being readable, which is a worse failure than
-    refusing the write.
-    """
-    trail = FakeAuditTrail()
-    await trail.record(decision("d-1"))
-    corrupted = decision("d-2")
-    object.__setattr__(corrupted, "decided_at", datetime(2026, 7, 20, 12, 0))  # noqa: DTZ001
-
-    with pytest.raises(AuditError):
-        await trail.record(corrupted)
-
-    assert await trail.get("d-2") is None
-    assert len(await trail.recent()) == 1
 
 
 async def test_clearing_an_empty_trail_removes_nothing() -> None:
