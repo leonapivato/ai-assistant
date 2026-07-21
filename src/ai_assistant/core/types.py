@@ -65,16 +65,28 @@ def _canonical_utc(value: object) -> datetime | None:
     something other than what it was checked as. A base ``datetime`` with
     ``timezone.utc`` cannot: its offset comes from an immutable singleton.
 
-    The offset is re-read **here**, immediately before the components are
-    copied, rather than relying on the earlier check in :func:`_utc_instant`.
-    Wall-clock components only denote an instant *together with* an offset, so
-    reading them while the value reports something other than zero would stamp
-    one instant's digits with another instant's label — which is precisely what
-    a value that flips its overridden ``utcoffset()`` during ``astimezone`` and
-    returns itself achieves. Checking at the moment of the copy pins the two
-    together.
+    **Only an exact ``datetime`` is canonicalised — never a subclass.** That is
+    what ends the problem rather than deferring it. A subclass can override
+    ``utcoffset()``, ``astimezone()``, the component properties, and
+    ``__getattribute__`` itself, so every check performed on one is a check its
+    subject can invalidate a moment later: verify the offset and it flips while
+    the components are read; verify it again during the read and it flips
+    between two of them. There is no ordering of checks that wins, because the
+    value under inspection is executing code between them. Requiring
+    ``type(value) is datetime`` makes every subsequent read the C
+    implementation, which cannot be intercepted, so the components and the
+    offset are necessarily one consistent snapshot.
+
+    Be exact about the cost, because it is not zero: ``astimezone`` *preserves*
+    the subclass, so this refuses every ``datetime`` subclass, not only a hostile
+    one. That is the intended trade. A stored instant is a value, and something
+    that can run code when its digits are read is not one; pydantic produces a
+    base ``datetime`` for every parsed input, and no ``datetime`` subclass is
+    used anywhere in this project, so nothing legitimate is affected today. A
+    caller that later needs one converts it at its own boundary — one explicit
+    call — rather than ``core`` holding open a hole it has no sound way to close.
     """
-    if not isinstance(value, datetime) or value.tzinfo is not UTC:
+    if type(value) is not datetime or value.tzinfo is not UTC:
         return None
     if value.utcoffset() != _NO_OFFSET:
         return None

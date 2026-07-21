@@ -53,11 +53,13 @@ def _canonical_utc(value: object) -> datetime | None:
     on a *subclass*, so a reading can carry ``tzinfo is UTC``, answer zero while
     it is checked, and answer ``+02:00`` once it is stored. Rebuilding as a base
     ``datetime`` makes the value's UTC-ness a fact about it rather than a claim
-    it keeps making. The offset is re-read immediately before the components are
-    copied, since those digits only denote an instant together with an offset.
-    The clock seams collapse into one guard when ADR-0026 lands (#169).
+    it keeps making, and only an *exact* ``datetime`` is canonicalised: a
+    subclass can execute code between any two checks — flipping its offset while
+    the components are read — so no ordering of checks on one is sound, whereas
+    the C implementation cannot be intercepted. The clock seams collapse into
+    one guard when ADR-0026 lands (#169).
     """
-    if not isinstance(value, datetime) or value.tzinfo is not UTC:
+    if type(value) is not datetime or value.tzinfo is not UTC:
         return None
     if value.utcoffset() != _NO_OFFSET:
         return None
