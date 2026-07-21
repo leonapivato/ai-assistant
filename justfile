@@ -47,6 +47,13 @@ audit:
 status:
     uv run python scripts/project_status.py
 
+# Review aggregate across recently merged PRs — the cross-change view ADR-0020 §2
+# and ADR-0025 §3 both phrase their revisit condition in terms of. Reads the ship
+# comments already on GitHub; adds no instrumentation and gates nothing.
+# Extra args passed through, e.g. `just review-history --limit 40`.
+review-history *args:
+    uv run python scripts/review_history.py "$@"
+
 # Adversarial review by Codex (a different model) vs a base branch; read-only.
 # persona is `architecture` or `adversarial`. Sends the diff to OpenAI. Omit
 # base-ref to let codex-review.sh pick origin/main when known (else local
