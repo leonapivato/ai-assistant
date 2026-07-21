@@ -338,3 +338,31 @@ async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -
         await broken.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
 
     assert await store.get("1") is None
+
+
+class _LyingConversion(datetime):
+    """Aware and well-behaved, until it is asked to convert itself."""
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return datetime(2026, 6, 1)  # noqa: DTZ001 — returning a naive value is the subject
+
+
+async def test_a_clock_whose_conversion_lies_cannot_install_a_naive_expiry() -> None:
+    """`_expiry` writes through ``model_copy``, so `UtcInstant` never sees this.
+
+    A clock returning a ``datetime`` subclass with a valid ``utcoffset()`` but an
+    overridden ``astimezone`` would otherwise put a naive ``expires_at`` straight
+    into the store — raising ``TypeError`` at the first expiry comparison, or
+    persisting JSON that no longer decodes.
+    """
+    store = InMemoryMemoryStore(now=_fixed_now)
+    lying = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=lambda: _LyingConversion(2026, 6, 1, tzinfo=UTC),
+    )
+
+    with pytest.raises(MemoryStoreError, match="did not convert to UTC"):
+        await lying.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+
+    assert await store.get("1") is None

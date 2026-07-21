@@ -86,14 +86,17 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     would then raise ``TypeError`` at the first comparison in a store, far from
     here. Verifying the result costs one comparison and removes the assumption.
 
-    The result is checked by ``tzinfo is UTC``, **not** by a zero ``utcoffset()``.
-    ``utcoffset()`` is a method on an arbitrary object and need not answer the
-    same way twice: a ``tzinfo`` reporting zero here and ``+02:00`` afterwards
-    would pass an offset test and leave a validated model holding a non-UTC
-    instant. Identity is not merely the stricter test but the exactly correct
-    one — ``astimezone(tz)`` sets the result's ``tzinfo`` to the ``tz`` it was
-    given, so every genuine conversion returns ``UTC`` itself, and only an
-    overridden ``astimezone`` can fail this.
+    The result must **be a datetime** and carry ``tzinfo is UTC``. Both halves
+    are load-bearing against an overridden ``astimezone``: one returning an
+    object that merely exposes a ``tzinfo`` attribute would otherwise be stored
+    in a field annotated ``datetime``, and one returning ``None`` would leak an
+    ``AttributeError`` from the check itself. Identity rather than a zero
+    ``utcoffset()``, because ``utcoffset()`` is a method on an arbitrary object
+    and need not answer the same way twice — a ``tzinfo`` reporting zero here and
+    ``+02:00`` afterwards would pass an offset test and leave a validated model
+    holding a non-UTC instant. Identity is not merely stricter but exact:
+    ``astimezone(tz)`` sets the result's ``tzinfo`` to the ``tz`` it was given,
+    so every genuine conversion returns ``UTC`` itself.
 
     The failure path is total because the annotation is not: a custom ``tzinfo``
     whose ``utcoffset()`` raises, a value near ``datetime.min``/``max`` at a
@@ -125,11 +128,14 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
         msg = f"{field} must be timezone-aware with a determinate offset, got {_describe(value)}"
         raise ValueError(msg)
     try:
-        converted = value.astimezone(UTC)
+        # Deliberately typed `object`: `astimezone` is *annotated* to return a
+        # datetime and is not obliged to, so the check below has to be a real one
+        # rather than one the type checker optimises away as always-true.
+        converted: object = value.astimezone(UTC)
     except Exception as exc:  # incl. OverflowError, which is not a ValueError
         msg = f"{field} has no UTC representation, got {_describe(value)}"
         raise ValueError(msg) from exc
-    if converted.tzinfo is not UTC:
+    if not isinstance(converted, datetime) or converted.tzinfo is not UTC:
         msg = f"{field} did not convert to UTC, got {_describe(converted)}"
         raise ValueError(msg)
     return converted
