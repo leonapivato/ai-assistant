@@ -126,12 +126,16 @@ class ShippedPr:
         comments_may_be_truncated: The fetched comment list filled a whole page,
             so GitHub may be holding more — including, possibly, this PR's last
             ship comment. Reported rather than ignored (issue #157).
+        merged_at: The ISO-8601 merge timestamp, which sorts lexicographically.
+            Empty when the payload carries none, in which case the caller's order
+            is preserved.
     """
 
     number: int
     title: str
     aggregate: Aggregate | None
     comments_may_be_truncated: bool = False
+    merged_at: str = ""
 
     @property
     def kind(self) -> str:
@@ -193,6 +197,12 @@ class Comment:
 # from a stale aggregate (see `render`). Issue #157 tracks paginating properly.
 _COMMENT_PAGE = 100
 
+# Extra merged PRs fetched beyond the reported window, so ordering them by merge
+# time (see by_merge_time) has something to reorder. `gh pr list` sorts by
+# creation, so a PR opened well before the window but merged inside it is only
+# recoverable if it was fetched at all.
+_ORDER_SLACK = 30
+
 
 def _is_ship_comment(comment: Comment, ship_author: str) -> bool:
     """Whether a comment is a genuine ship comment from the trusted ship author.
@@ -245,10 +255,17 @@ def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggreg
     for comment in reversed(comments):
         if not _is_ship_comment(comment, ship_author):
             continue
+        # The last ship comment is the terminal record, so the search stops
+        # here whether or not it carries a summary. ship omits the summary for
+        # an artifact predating ADR-0020 §2; falling through to an earlier
+        # comment would then report a SUPERSEDED round as this PR's terminal
+        # one — a wrong number, which is worse than the absence. (Rendering the
+        # two absences distinctly is issue #155.)
         for line in comment.body.split("\n"):
             aggregate = parse_summary(line.rstrip("\r"))
             if aggregate is not None:
                 return aggregate
+        return None
     return None
 
 
@@ -297,6 +314,7 @@ def _pull_request(entry: object, ship_author: str) -> ShippedPr:
         title=str(entry.get("title", "")),
         aggregate=aggregate_from_comments(comments, ship_author),
         comments_may_be_truncated=len(raw) >= _COMMENT_PAGE,
+        merged_at=str(entry.get("mergedAt") or ""),
     )
 
 
@@ -305,6 +323,31 @@ def _comment(raw: dict[str, object]) -> Comment:
     author = raw.get("author")
     login = author.get("login", "") if isinstance(author, dict) else ""
     return Comment(body=str(raw.get("body", "")), author=str(login))
+
+
+def by_merge_time(prs: list[ShippedPr], limit: int) -> list[ShippedPr]:
+    """Return the ``limit`` most recently merged pull requests, newest first.
+
+    ``gh pr list`` orders by *creation*, not by merge, so slicing its output
+    would report the most recently opened merged PRs — a different set, and not
+    the one the report claims. A PR opened long ago and merged yesterday belongs
+    in the window; one opened yesterday and merged last week may not.
+
+    Reordering can only work over what was fetched, which is why
+    :func:`fetch_pull_requests` asks for a pool larger than ``limit``. A PR
+    whose creation rank falls outside that pool is still missed; the pool bounds
+    how far that can reach, and the ordering is at least the documented one.
+
+    Args:
+        prs: The parsed pull requests, in whatever order they arrived.
+        limit: How many to keep.
+
+    Returns:
+        The newest ``limit`` by merge time. Entries carrying no timestamp keep
+        their relative order (the sort is stable), so a payload without
+        ``mergedAt`` — a saved fixture — is passed through unshuffled.
+    """
+    return sorted(prs, key=lambda pr: pr.merged_at, reverse=True)[:limit]
 
 
 def authenticated_login() -> str:
@@ -358,12 +401,13 @@ def fetch_pull_requests(limit: int) -> object:
         "--state",
         "merged",
         "--limit",
-        str(limit),
+        str(limit + _ORDER_SLACK),
         "--json",
         # `comments` carries the author login as well as the body; both are
         # needed, because a ship comment counts only from the account that could
-        # have run ship (see _is_ship_comment).
-        "number,title,comments",
+        # have run ship (see _is_ship_comment). `mergedAt` is what the window is
+        # actually defined by — see by_merge_time.
+        "number,title,comments,mergedAt",
     ]
     stdout = _gh(argv)
     try:
@@ -403,8 +447,13 @@ class _Stats:
         rounds: Every round count (exact for every ship comment).
         exact_churn: Churn ratios measured exactly — the only ones a median may
             be taken over.
-        lower_bound: How many churn figures are understated by a rewrite.
+        lower_bound: How many measurable churn ratios are understated by a
+            rewrite.
         not_applicable: How many diffs had no measurable text lines.
+        rewritten_not_applicable: How many of those ``n/a`` diffs ALSO had their
+            history rewritten, so even the touched-line count behind them is a
+            floor. Tracked separately because a rewrite and an absent ratio are
+            independent facts, and folding one into the other would drop it.
         unshipped: How many merged PRs carry no ship comment at all.
     """
 
@@ -412,6 +461,7 @@ class _Stats:
     exact_churn: list[float]
     lower_bound: int
     not_applicable: int
+    rewritten_not_applicable: int
     unshipped: int
 
 
@@ -419,7 +469,7 @@ def summarize(prs: list[ShippedPr]) -> _Stats:
     """Split the PRs into the figures a median may use and the ones it may not."""
     rounds: list[int] = []
     exact: list[float] = []
-    lower = na = unshipped = 0
+    lower = na = na_rewritten = unshipped = 0
     for pr in prs:
         agg = pr.aggregate
         if agg is None:
@@ -428,6 +478,10 @@ def summarize(prs: list[ShippedPr]) -> _Stats:
         rounds.append(agg.round)
         if agg.churn_ratio is None:
             na += 1
+            # An absent ratio and a rewritten history are independent facts. A
+            # diff can be both, and counting it only as `n/a` would silently drop
+            # the caveat ship itself states separately for exactly this case.
+            na_rewritten += int(agg.churn_is_lower_bound)
         elif agg.churn_is_lower_bound:
             lower += 1
         else:
@@ -437,6 +491,7 @@ def summarize(prs: list[ShippedPr]) -> _Stats:
         exact_churn=exact,
         lower_bound=lower,
         not_applicable=na,
+        rewritten_not_applicable=na_rewritten,
         unshipped=unshipped,
     )
 
@@ -455,6 +510,16 @@ def _caveat_lines(stats: _Stats) -> list[str]:
             f"  {stats.not_applicable} diff(s) report churn n/a — binary- or rename-only,",
             f"    no measurable text lines. Absent, not zero, never counted as 0.0{_TIMES}.",
         ]
+        if stats.rewritten_not_applicable:
+            # The row keeps a bare `n/a` rather than gaining a bound marker, for
+            # the reason ship.sh gives: `n/a` is not a ratio, so it takes neither
+            # the ">=" nor the multiplication sign. The rewrite is stated on its
+            # own instead — dropping it would be the flattening this report
+            # exists to avoid.
+            lines.append(
+                f"    {stats.rewritten_not_applicable} of those also had history rewritten, "
+                "so even the touched-line count is a floor."
+            )
     if stats.unshipped:
         lines += [
             f"  {stats.unshipped} merged PR(s) carry no ship comment — merged before the",
@@ -594,7 +659,7 @@ def main() -> int:
         # --limit, but a saved payload holds whatever it was captured with, and a
         # flag that silently does nothing on one path would report a different
         # window than the one asked for.
-        prs = parse_pull_requests(payload, args.ship_author)[: args.limit]
+        prs = by_merge_time(parse_pull_requests(payload, args.ship_author), args.limit)
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"review-history: {exc}", file=sys.stderr)
         return 1
