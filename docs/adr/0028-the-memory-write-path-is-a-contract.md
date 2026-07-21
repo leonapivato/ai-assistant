@@ -92,9 +92,12 @@ of a real `MemoryIngestor` to the Protocol above under the repository's own
 - `mypy --strict`: `Success: no issues found in 1 source file`.
 - `isinstance(MemoryIngestor(store=…, policy=…), MemoryWriter)` → `True`.
 
-So `memory/ingest.py` is not edited by the implementing change. `MemoryIngestor`
-gains a contract it already satisfies; its constructor, its conflict tuning, its
-merge rule and its error behaviour are untouched.
+So **`ingest` is not edited by the implementing change**. `MemoryIngestor` gains
+a contract it already satisfies; its conflict heuristic, its merge rule and its
+error behaviour are untouched. Its *constructor* gains one thing, and only one —
+the tuning validation §4a below relocates from `LearningLoop`. That is additive
+and outside the method the Protocol names, so it does not weaken the conformance
+claim above.
 
 ### 3. One method suffices, because conflict detection is not a separate stage
 
@@ -144,6 +147,63 @@ This is a breaking constructor change to `LearningLoop`, in the package whose
 whole purpose is wiring. It is called out here so the implementing change is
 expected to carry it, not discover it.
 
+### 4a. The tuning check moves with the tuning; it is not dropped
+
+ADR-0022 §4a validates `conflict_limit` and `conflict_threshold` at construction
+because each bad value *disables a stage while the caller keeps reporting
+health*: `conflict_limit=0` hands the policy no conflicts, so every proposal is
+ruled on as though nothing contradicted it, and a `NaN` threshold compares
+`False` against every score and does the same silently.
+
+`MemoryIngestor` has no such check — its `__init__` (`ingest.py:62–86`) assigns
+`conflict_threshold` and `conflict_limit` straight to attributes and validates
+nothing. Deleting the loop's parameters without saying more would therefore
+*retire* a ratified guarantee rather than move it: a `MemoryIngestor` built with
+`conflict_limit=0` would accept duplicates and report a normal, successful learn,
+which is exactly the failure §4a exists to prevent.
+
+So the check goes where the values now live. **`MemoryIngestor.__init__` gains
+the conflict half of `LearningLoop._check_tuning`**, verbatim in effect —
+`conflict_limit` an `int` (a `bool` is not a count) and at least 1;
+`conflict_threshold` not a `bool`, finite, and within `[0, 1]`, the range a
+`MemoryRecord.score` occupies — raising `TypeError` and `ValueError` as it does
+today. `retrieval_limit`'s check stays on `LearningLoop`, because
+`retrieval_limit` stays on `LearningLoop`.
+
+ADR-0022 §4a's guarantee is thus relocated, not amended: the same values are
+refused at the same moment, by the object that reads them. §6 records the
+relocation on ADR-0022 without withdrawing the clause.
+
+### 4b. Determinism after delegation: the expiry clock is the writer's
+
+ADR-0022 §5 injects a clock and a goal-id factory so a turn is reproducible.
+Delegation splits which stamps are whose, and the split should be stated rather
+than discovered in a test.
+
+`LearningLoop`'s clock keeps stamping `Goal.created_at` and the goal's
+provenance, so §5 holds for everything the loop still mints. It stops stamping
+`expires_at` on a `STORE_TEMPORARY`, because `_expiry` is deleted (§4) and
+`MemoryIngestor` has always had its own `now` for exactly that. A composition
+root — including a test — that wants a deterministic expiry injects its clock
+into **both** objects; injecting it into the loop alone leaves the writer on
+wall-clock time. This is how every other injected collaborator already behaves
+(`FakeMemoryStore`, `FakePlanner` and `FakePlanStore` each take their own
+`now`), so it is the existing convention applied to one more seam, not a new
+rule.
+
+One hazard moves and is **not** solved here. `loop.py:397–408`'s `_now_utc`
+normalises a naive reading before it reaches `expires_at`; `ingest.py:143` writes
+`self._now() + ttl` through `model_copy(update=...)`, which skips validators, and
+does not normalise. ADR-0026 §Context names that precise line as the one
+"bypassing" site and §2 closes it by wrapping the clock in `checked_clock` at
+storage, which fixes `ingest.py` "without being touched". Delegation therefore
+moves the temporary-expiry write from a guarded site to an unguarded one for as
+long as ADR-0026 is unimplemented. Duplicating `_now_utc` into `memory` to cover
+that window would plant a second copy of the normalisation ADR-0026 exists to
+delete — the same mistake as cost 1, in a new place — so this ADR records the
+dependency instead: a naive clock injected into the writer is a wiring bug today
+and a rejected one after ADR-0026.
+
 ### 5. Failure semantics: `MemoryStoreError` crosses the seam
 
 `MemoryStoreError` is the only `AssistantError` the write path raises today, from
@@ -174,7 +234,7 @@ proposed is the state claim ADR-0019 forbids. Its exact form, to apply on
 ratification:
 
 - ADR-0022's `Status` line becomes
-  `- Status: Accepted, §4 amended by ADR-0028`.
+  `- Status: Accepted, §§4, 4a, 5 amended by ADR-0028`.
 - A dated note is appended to ADR-0022's header, after `Date`:
   `Amended: <ratification date> by ADR-0028 — §4's "MERGE is reported but not
   applied" is withdrawn as a standing limitation. It describes the loop until the
@@ -183,10 +243,15 @@ ratification:
   remaining clauses stand unchanged — ACCEPT, STORE_TEMPORARY, REJECT/ASK_USER,
   "no proposals is a normal outcome", in-order independent application with no
   transaction, the non-atomic search → decide → add across calls (issue #104),
-  and last-write-wins on a repeated record id.`
-- Nothing else in ADR-0022 is edited. Its §§1–3, §4a, §5 and Consequences stand
-  as ratified, including Consequences item 1, which named this gap correctly and
-  is answered by this ADR rather than falsified by it.
+  and last-write-wins on a repeated record id. §4a's conflict-tuning check is
+  relocated, not withdrawn: LearningLoop stops taking conflict_limit and
+  conflict_threshold, and MemoryIngestor's constructor refuses the same values
+  it would have (ADR-0028 §4a). §4a's retrieval_limit check is unaffected. §5's
+  injected clock stops stamping expires_at, which the writer's own clock now
+  does (ADR-0028 §4b); it still stamps the goal.`
+- Nothing else in ADR-0022 is edited. Its §§1–3, §5 and Consequences stand as
+  ratified, including Consequences item 1, which named this gap correctly and is
+  answered by this ADR rather than falsified by it.
 
 The note is worded around the implementation because that is when the behaviour
 changes; the amendment is recorded at ratification because that is when the
@@ -236,7 +301,7 @@ and a `MERGE` naming a target absent from the conflicts raises `MemoryStoreError
 rather than storing the proposal as new.
 
 The suite deliberately does **not** fix the conflict threshold, the conflict
-limit, or the fold's own rule. Those are `MemoryIngestor`'s tuning and
+limit, the relocated tuning check (§4a), or the fold's own rule. Those are `MemoryIngestor`'s tuning and
 `memory`'s semantics, and a suite that pinned them would stop being a contract
 and start being a second copy of one implementation — the mistake this ADR exists
 to undo.
@@ -269,8 +334,13 @@ outcome and the reason the triad is named here rather than left to be remembered
   "fewer contracts", it is the same three responsibilities with one of them
   unreachable and duplicated.
 - **`LearningLoop`'s constructor breaks**, and its tests move with it: the
-  conflict-tuning validation tests and the `MERGE`-not-applied test become tests
-  of the writer seam, not of the loop.
+  conflict-tuning validation tests follow the check into
+  `tests/memory/test_ingest.py` (§4a), and the `MERGE`-not-applied test inverts —
+  the loop now asserts that it delegated, and `memory` keeps asserting what a
+  merge does.
+- **Determinism now needs two clocks wired, not one** (§4b), and until ADR-0026
+  lands a naive clock injected into the writer is unguarded where the loop's was
+  guarded.
 - **A conforming writer can be wrong in a way the loop cannot see.** Today the
   loop's write half is inspectable in `loop.py`; afterwards it is an injected
   object, and a writer that never persists conforms structurally. That is the
