@@ -116,9 +116,13 @@ def keyed(tool_id: str = "smtp", window: timedelta = timedelta(hours=1)) -> Tool
     return tool(tool_id, idempotency=Idempotency.KEYED, idempotency_window=window)
 
 
-def call_for(definition: ToolDefinition, *, decision_id: str = "d-1") -> ToolCall:
+def call_for(
+    definition: ToolDefinition, *, decision_id: str = "d-1", step_id: str = STEP
+) -> ToolCall:
     """Build an authorised call, through the path the contract asks callers to use."""
-    request = ActionRequest(tool=definition, parameters={"to": "someone@example.com"}, step_id=STEP)
+    request = ActionRequest(
+        tool=definition, parameters={"to": "someone@example.com"}, step_id=step_id
+    )
     decision = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="because the user said so"),
@@ -703,6 +707,37 @@ async def test_a_call_that_does_not_survive_revalidation_claims_nothing() -> Non
     assert step.status is StepStatus.PENDING, "nothing durable was written"
     assert step.attempts == 0
     assert step.bound_tool is None
+
+
+async def test_a_call_authorised_for_another_step_claims_nothing() -> None:
+    """An approval is bound to its step, and the executor takes the id twice.
+
+    ADR-0021 §1 binds a decision to the tool, the parameters **and** the step,
+    and ``authorises`` compares all three — but against the call's *own*
+    ``step_id``. Nothing in that comparison knows which step this executor was
+    asked to run, so accepting both without checking them would let one step's
+    approval claim another: ADR-0014 §4 requires every claimed step to name the
+    decision that authorised it, and the pointer would lead somewhere else.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store, capability="read_email")
+    implementation = Spy()
+    seam = FakeToolInvoker([(read_only(), implementation)])
+
+    with pytest.raises(ToolBindingError, match="different plan step"):
+        await executor_over(store, seam).execute(
+            state,
+            step_id=STEP,
+            call=call_for(read_only(), step_id="some-other-step"),
+            timeout=PATIENT,
+        )
+
+    assert implementation.calls == []
+    assert seam.invocations == []
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.PENDING
+    assert step.attempts == 0
+    assert step.approval_ref is None
 
 
 async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() -> None:
