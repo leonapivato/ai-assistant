@@ -513,11 +513,32 @@ returns it unchanged.
 between them is pydantic's own.** `"rate_limited"` is a valid `ToolFailureKind`
 value, so validation coerces it to the member and the result is a correct
 `ToolFailure` — the `AttributeError` above is gone, which is the outcome to
-want. A string that names no member, a missing field, an extra one under
-`extra="forbid"`, or a message that renders as nothing does not survive, and
-that is the refusal. Requiring an exact runtime type instead would refuse a
-value pydantic can make correct, for no gain: the seam's obligation is that what
-reaches a `ToolResult` is valid, not that the tool built it in the approved way.
+want. A string that names no member, a missing field, or a message that renders
+as nothing does not survive, and that is the refusal. Requiring an exact runtime
+type instead would refuse a value pydantic can make correct, for no gain: the
+seam's obligation is that what reaches a `ToolResult` is valid, not that the
+tool built it in the approved way.
+
+**What the round-trip is *not* is a fidelity check on the tool's own account of
+itself, and the boundary is worth drawing so that nobody builds one.** Two cases
+sit just outside it, and both are a tool disagreeing with itself rather than
+attacking anything:
+
+- **An extra attribute passed to `model_construct` is silently dropped**, not
+  refused: `extra="forbid"` makes `model_construct` discard it, so it never
+  reaches the dump. There is nothing to refuse and no smuggling channel —
+  `ToolFailure` carries exactly two fields at the far end either way.
+- **A subclass may override `model_dump()` to return something other than its
+  own fields.** The value that crosses is then the dumped one. This is not a
+  hole: the tool authored both accounts, and it could have raised the dumped
+  failure directly. A seam arbitrating between two stories a tool tells about
+  its own failure would be settling a dispute neither side has an interest in,
+  and closing it means refusing subclasses — which buys nothing and forbids a
+  legitimate integration-side base class. **So "by value" means the round-trip's
+  result is what crosses**, and for any failure built through `ToolFailure(...)`
+  that is exactly the failure the tool raised. ADR-0029 §1's residue analysis
+  covers the rest: "a callable that does not do what its equal declaration
+  says."
 
 So the rule is a revalidation, in ADR-0018 §4's own idiom — the one
 `InMemoryToolRegistry` already uses for a definition, `model_dump()` then
@@ -617,10 +638,12 @@ three checks to avoid — and letting it through *silently*, which
 `model_construct` makes possible, is worse: a broken value in a durable
 `StepExecution` rather than a loud rejection.
 
-**A valid failure is unchanged by the round-trip**, so the pass-through §5
-requires is exactly a pass-through: `_message_is_present` strips and returns,
-and `ToolFailure` is frozen with `extra="forbid"`. The cost is one dump and one
-validate on a failure path.
+**A failure built through `ToolFailure(...)` is unchanged by the round-trip**,
+so the pass-through §5 requires is exactly a pass-through: `_message_is_present`
+strips and returns — on a value construction already stripped — and
+`ToolFailure` is frozen with `extra="forbid"`. The qualifier is the one above: a
+subclass that dumps something other than its fields gets what it dumped. The
+cost is one dump and one validate on a failure path.
 
 ### 7. What this does not change
 
@@ -955,6 +978,9 @@ what keeps the fake honest without importing `tools/`.
   `message` carries surrounding whitespace comes back stripped — the same
   normalisation `ToolFailure(...)` performs at the raise site, which is why
   §5's pass-through is a pass-through for every normally-constructed failure.
+  And the limit stated with them: a subclass whose `model_dump()` returns a
+  *different valid* failure yields that one, pinned as a limit in §10's shape so
+  a later implementation cannot close it by refusing subclasses without an ADR.
 
 - **A malformed carrier** (§6), across every shape the attribute can take:
   `failure` set to `None`, to a string, to a `ToolFailure`-shaped object of
