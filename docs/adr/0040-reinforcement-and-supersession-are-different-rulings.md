@@ -329,8 +329,21 @@ suite, which is the divergence §Consequences already requires it to close.
 
 `_refuse_unsafe_fold`'s two refusals — no fold of any kind onto a
 `USER_ASSERTED` target, no `USER_ASSERTED` proposal onto an `EXTERNAL` one — join
-§5a's obligations on the `MemoryWriter` conformance suite. A ruling that names
-either target must raise `MemoryStoreError` and write nothing.
+§5a's obligations on the `MemoryWriter` conformance suite, at exactly the width
+ADR-0038 §2a gave them and no wider. The predicate, stated so it cannot be
+paraphrased into something broader:
+
+> A `REINFORCE` or `SUPERSEDE` must raise `MemoryStoreError` and write nothing
+> when `target.provenance.source is USER_ASSERTED`, **or** when
+> `incoming.provenance.source is USER_ASSERTED` **and**
+> `target.provenance.source is EXTERNAL`. Every other pairing is permitted.
+
+The second clause is source-dependent on *both* records, and the suite must
+exercise the pairing it leaves alone as well as the one it refuses: a
+non-asserted `REINFORCE` onto an `EXTERNAL` target is allowed, and a suite that
+refused it would forbid a ruling ADR-0038 permits — the contract-widening
+mistake §5 and issue #40 name, arriving through a summary rather than through a
+decision.
 
 An earlier draft deferred this as ADR-0038's question rather than this ADR's, on
 the grounds that the refusal is keyed on the records and reads identically under
@@ -389,11 +402,17 @@ semantics, which is what it is actually about.
 and returns it is the mechanism #112 replaces: under a validity window the
 applier closes the target's window and writes a *new* record, so the suite's id
 clause becomes "returns the id of the live record" and `MemoryIngestResult`
-carries a different id than it does today. That belongs to #112 and is the right
-shape for it — it is an obligation about what the applier does, which is #112's
-whole subject, and it is the *only* obligation in either suite that #112 has to
-revisit. The claim being made is that this ADR leaves #112 one clause to rewrite,
-not none. The reverse order costs more: #112 would ratify a decision-kind change as
+carries a different id than it does today. §5b's `EXTERNAL` clause goes with it,
+for the same reason and in the same change: it rests entirely on the target's id
+being inherited, which is what a validity window stops doing, and issue #254 is
+already filed against that.
+
+Both belong to #112 and are the right shape for it — they are obligations about
+what the *applier* does, which is #112's whole subject. Together they are the two
+clauses #112 has to rewrite, both in the `MemoryWriter` suite; the `MemoryPolicy`
+suite, the members and `DefaultMemoryPolicy` survive untouched. The claim being
+made is that this ADR leaves #112 two clauses to rewrite, not none.
+The reverse order costs more: #112 would ratify a decision-kind change as
 a side effect of a records-and-reads change, with the migration of every existing
 `MERGE` site (§2) buried inside it.
 
@@ -515,8 +534,11 @@ why three of the four move and one does not.
   That is contract surface with no shipped consumer, which is the usual cost of
   putting a judgement where it belongs.
 - **Revisit if** #112 ratifies a validity window and `SUPERSEDE`'s applier
-  changes shape (the member and every policy returning it should survive that
-  untouched — if they do not, §1's naming rule was wrong), or if a third relation
+  changes shape. Two `MemoryWriter` obligations go with it and are named as
+  such: §5a's "written at the target's id, which is returned", and §5b's
+  `EXTERNAL` clause (issue #254). The members, `MemoryDecision`,
+  `DefaultMemoryPolicy` and the `MemoryPolicy` suite should survive untouched —
+  if they do not, §1's naming rule was wrong. Also revisit if a third relation
   appears that a target-carrying ruling has to express, at which point the same
   question is asked again with the same answer.
 
