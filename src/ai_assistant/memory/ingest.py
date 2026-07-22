@@ -90,27 +90,34 @@ def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
         raise ValueError(msg)
 
 
-def _refuse_unsafe_fold(target: MemoryRecord) -> None:
-    """Refuse to fold a user assertion onto a target that must not carry one.
+def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
+    """Refuse a ``MERGE`` that would destroy data, whichever direction it runs.
 
-    Applies to a ``USER_ASSERTED`` proposal whatever the target is, because
-    **every** fold keeps the target's id and the two disallowed targets fail in
-    different ways:
+    **Every** fold — reinforcing or superseding — writes at the *target's* id, so
+    the target is always overwritten. Two folds are therefore refused outright:
 
-    - ``EXTERNAL`` — the id is that system's idempotency key, so the correction
-      inherits it and the next routine sync overwrites it, losing the user's
-      words to a background job (ADR-0038 §2a).
-    - ``USER_ASSERTED`` — writing at that id destroys an earlier thing the user
-      said, which no conflict heuristic is ever confident enough to authorise
-      (ADR-0038 §3, §5).
+    - **Any fold onto a ``USER_ASSERTED`` target.** Whatever the proposal's
+      source, the write replaces what the user told us, and for a non-asserted
+      proposal it also downgrades the record's provenance out of the profile.
+      ADR-0038 §3 makes this direction absolute: nothing may supersede an
+      assertion. §5 is the same rule for a second assertion — no conflict
+      heuristic is confident enough to choose between two things the user said.
+    - **A ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target.** The id is
+      that system's idempotency key, so the correction inherits it and the next
+      routine sync overwrites it, losing the user's words to a background job
+      (ADR-0038 §2a).
 
-    ``DefaultMemoryPolicy`` proposes neither, but a policy reaches the ingestor
-    through an injected seam and any conforming implementation may rule
-    differently, so the refusal lives here — at the boundary that performs the
-    write — rather than in the policy that recommends it. Checked before either
-    fold is selected: gating it on "is this a supersession?" would let the
-    assertion-onto-assertion case slip past into the reinforcing merge, which
-    keeps the same id and destroys the earlier assertion just as thoroughly.
+    ``DefaultMemoryPolicy`` proposes none of these — rule 2 defers, and rule 3
+    supersedes only ``OBSERVED``/``INFERRED`` — but a policy reaches the
+    ingestor through an injected seam and any conforming implementation may rule
+    differently. The refusal therefore lives here, at the boundary that performs
+    the write, rather than in the policy that recommends it.
+
+    Checked before either fold is selected, and keyed on the *records* rather
+    than on the relation between them. A check gated on "is this a
+    supersession?" misses both cases above, since neither is one: they slip into
+    the reinforcing merge, which keeps the target's id and destroys it just as
+    thoroughly.
 
     Fail-closed rather than silently downgrading, for the reason that already
     makes an absent ``MERGE`` target raise instead of falling back to storing
@@ -118,14 +125,23 @@ def _refuse_unsafe_fold(target: MemoryRecord) -> None:
     worse than one that stops.
 
     Raises:
-        MemoryStoreError: If ``target`` is not an ``OBSERVED`` or ``INFERRED``
-            record.
+        MemoryStoreError: If the fold is one of the two above.
     """
-    if target.provenance.source not in _SUPERSEDABLE:
+    if target.provenance.source is MemorySource.USER_ASSERTED:
+        msg = (
+            f"refusing to supersede {target.id!r}: a {incoming.provenance.source} record may not "
+            f"be folded onto a user-asserted one, whose id and content it would replace "
+            f"(ADR-0038 §3)"
+        )
+        raise MemoryStoreError(msg)
+    if (
+        incoming.provenance.source is MemorySource.USER_ASSERTED
+        and target.provenance.source not in _SUPERSEDABLE
+    ):
         msg = (
             f"refusing to supersede {target.id!r}: a user assertion may not be folded onto a "
             f"{target.provenance.source} record, whose id it would inherit — only OBSERVED and "
-            f"INFERRED beliefs may be superseded (ADR-0038 §2a, §3)"
+            f"INFERRED beliefs may be superseded (ADR-0038 §2a)"
         )
         raise MemoryStoreError(msg)
 
@@ -261,17 +277,18 @@ class MemoryIngestor:
                     # merge was meant to prevent, while reporting success.
                     msg = f"MERGE target {decision.merge_into!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
+                _refuse_unsafe_fold(target, proposed)
+                # Past the refusal, only a recoverable belief can be overwritten.
                 # Which relation a MERGE expresses — reinforcement or
-                # supersession — is read off the proposal's provenance, because
-                # `MemoryDecisionKind` has one MERGE for both and distinguishing
-                # them in `core` would be a contract change. That reading is a
-                # *precondition*, not a derivation (ADR-0038 §1b): only the
-                # policy knows, and the contract gives it no channel to say so.
-                # It holds for every policy that ships, and issue #256 removes
-                # the need for it. The unrecoverable half does not rely on it —
-                # `_refuse_unsafe_fold` runs before either path, for any policy.
+                # supersession — is then read off the proposal's provenance,
+                # because `MemoryDecisionKind` has one MERGE for both and
+                # distinguishing them in `core` would be a contract change. That
+                # reading is a *precondition*, not a derivation (ADR-0038 §1b):
+                # only the policy knows, and the contract gives it no channel to
+                # say so. It holds for every policy that ships, and issue #256
+                # removes the need for it. Nothing unrecoverable rests on it —
+                # the refusal above runs first, for every policy.
                 if proposed.provenance.source is MemorySource.USER_ASSERTED:
-                    _refuse_unsafe_fold(target)
                     return await self._store.add(_supersede(target, proposed))
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.

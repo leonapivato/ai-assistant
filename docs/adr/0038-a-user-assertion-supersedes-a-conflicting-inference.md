@@ -237,18 +237,20 @@ the `memory` subsystem. So the ingestor refuses such a fold outright — the sam
 treatment it already gives a `MERGE` naming an absent target, and for the same
 reason: the alternative is a write that reports success while losing data.
 
-The refusal covers **both** disallowed targets, and is checked before either
-fold path is chosen:
+The refusal is checked before either fold path is chosen, and covers two folds:
 
-- an `EXTERNAL` target, per the id argument above;
-- a `USER_ASSERTED` target, per §3 and §5 — folding an assertion onto an
-  assertion destroys an earlier thing the user said.
+- **any** fold onto a `USER_ASSERTED` target, whatever the proposal's source
+  (§3, §5) — the write replaces what the user told us, and from a non-asserted
+  proposal it also downgrades the record's provenance out of the profile;
+- a `USER_ASSERTED` proposal onto an `EXTERNAL` target, per the id argument
+  above.
 
-That ordering is load-bearing. Assertion-onto-assertion is *not* a supersession
-under §1's definition, so a refusal gated on "is this a supersession?" lets it
-fall through into the reinforcing merge — which keeps the target's id and
-destroys the earlier assertion just as thoroughly. Gate on the proposal being
-asserted instead, and both cases are caught.
+Keying it on the **records** rather than on the relation between them is
+load-bearing. Neither case is a supersession under §1's definition, so a refusal
+gated on "is this a supersession?" lets both fall through into the reinforcing
+merge — which keeps the target's id and destroys it just as thoroughly. The
+general shape of the mistake: *every* fold overwrites the target, so the target
+is what has to be checked.
 
 It **raises** rather than quietly downgrading to a reinforcing merge, because
 every fold keeps the target's id — a downgrade would hand the correction the
@@ -261,7 +263,9 @@ superseding correction off the external key, or the validity window of issue
 
 ### 3. An inference may never supersede an assertion
 
-Stated even though it is obvious, because the whole rule rests on it. The
+Stated even though it is obvious, because the whole rule rests on it — and §2a
+enforces it at the ingestor for *any* policy, not only for the one whose rule 2
+defers. The
 direction is strictly one-way: an assertion may displace an inference; an
 inference may **never** displace an assertion, silently or otherwise. This is not
 new — `DefaultMemoryPolicy` already returns `ASK_USER` when a non-asserted
