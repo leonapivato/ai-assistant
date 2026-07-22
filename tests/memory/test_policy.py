@@ -114,27 +114,40 @@ async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assert
     assert decision.merge_into == "our-guess"
 
 
-async def test_user_assertion_supersedes_an_external_record_despite_full_confidence() -> None:
-    # EXTERNAL is neither asserted nor derived and may carry confidence 1.0, so
-    # it is the one source where "supersede the non-asserted conflict" needs
-    # arguing rather than assuming. ADR-0038 §2 puts it on the supersedable
-    # side: the integration remains the system of record and re-supplies the
-    # fact, and the user is the authority on a claim about themselves. Pinned
-    # because the alternative reading — treat full confidence as untouchable —
-    # is the plausible mistake a later edit would make.
+async def test_user_assertion_does_not_supersede_an_external_record() -> None:
+    # ADR-0038 §2a: supersedable is an allow-list of OBSERVED/INFERRED, not
+    # "anything that is not USER_ASSERTED". Merging into an external record
+    # would give the correction that system's idempotency key, and the next
+    # sync would overwrite it (see the ingest-level test). Pinned because
+    # `is not MemorySource.USER_ASSERTED` is the natural-looking simplification
+    # that reintroduces the hole.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
     imported = _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
 
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_user_assertion_skips_an_external_conflict_to_supersede_an_inference() -> None:
+    # The allow-list scans, it does not stop at the first entry: an external
+    # record ranked above an inference must be passed over, not treated as a
+    # reason to abandon supersession altogether.
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    conflicts = [
+        _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0),
+        _semantic("our-guess", source=MemorySource.INFERRED, confidence=0.6),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+
     assert decision.kind is MemoryDecisionKind.MERGE
-    assert decision.merge_into == "imported"
+    assert decision.merge_into == "our-guess"
 
 
-async def test_external_proposal_never_supersedes_the_assertion_that_replaced_it() -> None:
-    # The other half of ADR-0038 §2's EXTERNAL argument: supersession leaves the
-    # record USER_ASSERTED, so the next sync meets rule 2 and defers instead of
-    # silently restoring the stale imported value.
+async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
+    # Rule 2, restated for EXTERNAL specifically: a sync is a non-asserted
+    # proposal, so it may not silently overwrite what the user told us.
     proposal = _proposal(_semantic("sync", source=MemorySource.EXTERNAL, confidence=1.0))
     corrected = _semantic("corrected", source=MemorySource.USER_ASSERTED, confidence=1.0)
 
