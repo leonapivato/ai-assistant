@@ -18,13 +18,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
+from tool_invoker_contract import ToolInvokerContract
 from tool_registry_contract import ToolRegistryContract, tool
 
 from ai_assistant.core.errors import ToolRegistrationError
 from ai_assistant.core.types import Reversibility, RiskLevel
+from ai_assistant.testing import succeeds
 from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
+    from tool_invoker_contract import InvocableToolRegistry
     from tool_registry_contract import PopulatableToolRegistry
 
 
@@ -36,12 +39,27 @@ class TestInMemoryToolRegistryContract(ToolRegistryContract):
         return InMemoryToolRegistry()
 
 
+class TestInMemoryToolRegistryInvokerContract(ToolInvokerContract):
+    """Runs the same object through the shared ToolInvoker conformance suite.
+
+    The *same* class, deliberately: ADR-0029 §1's biconditional is a statement
+    about one object holding one binding, so satisfying the two suites with two
+    classes would be satisfying the letter of it.
+    """
+
+    @pytest.fixture
+    def invoker(self) -> InvocableToolRegistry:
+        return InMemoryToolRegistry()
+
+
 # --- construction -------------------------------------------------------
 
 
 async def test_constructor_registers_in_order() -> None:
     """The convenience path is the registration path, not a second one."""
-    registry = InMemoryToolRegistry([tool("smtp"), tool("cal", capability="create_event")])
+    registry = InMemoryToolRegistry(
+        [(tool("smtp"), succeeds), (tool("cal", capability="create_event"), succeeds)]
+    )
 
     assert [each.id for each in await registry.all_tools()] == ["cal", "smtp"]
 
@@ -49,7 +67,12 @@ async def test_constructor_registers_in_order() -> None:
 def test_constructor_refuses_two_definitions_sharing_an_id() -> None:
     """A composition root must not be able to smuggle in a conflict at build time."""
     with pytest.raises(ToolRegistrationError):
-        InMemoryToolRegistry([tool(risk_level=RiskLevel.CRITICAL), tool(risk_level=RiskLevel.LOW)])
+        InMemoryToolRegistry(
+            [
+                (tool(risk_level=RiskLevel.CRITICAL), succeeds),
+                (tool(risk_level=RiskLevel.LOW), succeeds),
+            ]
+        )
 
 
 # --- ADR-0018 §5: the spent-id rule -------------------------------------
@@ -57,19 +80,19 @@ def test_constructor_refuses_two_definitions_sharing_an_id() -> None:
 
 async def test_registering_an_identical_definition_is_idempotent() -> None:
     """So a composition root may run twice without special-casing."""
-    registry = InMemoryToolRegistry([tool()])
+    registry = InMemoryToolRegistry([(tool(), succeeds)])
 
-    registry.register(tool())
+    registry.register(tool(), succeeds)
 
     assert len(await registry.all_tools()) == 1
 
 
 async def test_conflicting_redefinition_is_refused() -> None:
     """Metadata is a security control: CRITICAL must not become LOW in place."""
-    registry = InMemoryToolRegistry([tool(risk_level=RiskLevel.CRITICAL)])
+    registry = InMemoryToolRegistry([(tool(risk_level=RiskLevel.CRITICAL), succeeds)])
 
     with pytest.raises(ToolRegistrationError, match="smtp"):
-        registry.register(tool(risk_level=RiskLevel.LOW))
+        registry.register(tool(risk_level=RiskLevel.LOW), succeeds)
 
     found = await registry.get("smtp")
     assert found is not None
@@ -83,11 +106,11 @@ async def test_a_deregistered_id_cannot_be_reused() -> None:
     approves a REVERSIBLE send, an IRREVERSIBLE definition takes the name, and
     both the approval_ref and the bound_tool id still read as consistent.
     """
-    registry = InMemoryToolRegistry([tool(reversibility=Reversibility.RECOVERABLE)])
+    registry = InMemoryToolRegistry([(tool(reversibility=Reversibility.RECOVERABLE), succeeds)])
     assert registry.deregister("smtp") is True
 
     with pytest.raises(ToolRegistrationError, match="deregistered"):
-        registry.register(tool(reversibility=Reversibility.IRREVERSIBLE))
+        registry.register(tool(reversibility=Reversibility.IRREVERSIBLE), succeeds)
 
     assert await registry.get("smtp") is None
 
@@ -101,15 +124,15 @@ def test_an_identical_definition_cannot_resurrect_a_spent_id() -> None:
     original registration — which is exactly what a composition root re-running
     does.
     """
-    registry = InMemoryToolRegistry([tool()])
+    registry = InMemoryToolRegistry([(tool(), succeeds)])
     registry.deregister("smtp")
 
     with pytest.raises(ToolRegistrationError):
-        registry.register(tool())
+        registry.register(tool(), succeeds)
 
 
 def test_deregistering_an_absent_tool_reports_false() -> None:
-    registry = InMemoryToolRegistry([tool()])
+    registry = InMemoryToolRegistry([(tool(), succeeds)])
 
     assert registry.deregister("nope") is False
     assert registry.deregister("smtp") is True
@@ -117,7 +140,7 @@ def test_deregistering_an_absent_tool_reports_false() -> None:
 
 
 async def test_a_deregistered_tool_leaves_the_capability_vocabulary() -> None:
-    registry = InMemoryToolRegistry([tool()])
+    registry = InMemoryToolRegistry([(tool(), succeeds)])
 
     registry.deregister("smtp")
 
@@ -142,7 +165,7 @@ async def test_a_definition_that_could_not_be_constructed_is_refused() -> None:
     registry = InMemoryToolRegistry()
 
     with pytest.raises(ValidationError):
-        registry.register(smuggled)
+        registry.register(smuggled, succeeds)
 
     assert await registry.get("smtp") is None
 
@@ -155,13 +178,13 @@ async def test_a_tampered_definition_is_refused_under_an_already_bound_id() -> N
     the tampered definition succeeds — what refuses it is that the id is already
     bound to a different definition. The next test pins what that leaves open.
     """
-    registry = InMemoryToolRegistry([tool(risk_level=RiskLevel.CRITICAL)])
+    registry = InMemoryToolRegistry([(tool(risk_level=RiskLevel.CRITICAL), succeeds)])
 
     tampered = tool(risk_level=RiskLevel.CRITICAL)
     object.__setattr__(tampered, "risk_level", RiskLevel.LOW)
 
     with pytest.raises(ToolRegistrationError):
-        registry.register(tampered)
+        registry.register(tampered, succeeds)
 
     stored = await registry.get("smtp")
     assert stored is not None
@@ -182,7 +205,7 @@ async def test_a_tampered_definition_under_a_fresh_id_is_accepted() -> None:
     object.__setattr__(tampered, "risk_level", RiskLevel.LOW)
 
     registry = InMemoryToolRegistry()
-    registry.register(tampered)
+    registry.register(tampered, succeeds)
 
     stored = await registry.get("fresh")
     assert stored is not None
@@ -192,7 +215,7 @@ async def test_a_tampered_definition_under_a_fresh_id_is_accepted() -> None:
 async def test_mutating_the_definition_passed_in_does_not_reach_the_registry() -> None:
     """The detached half of §4's postcondition, on the way in."""
     original = tool(risk_level=RiskLevel.CRITICAL)
-    registry = InMemoryToolRegistry([original])
+    registry = InMemoryToolRegistry([(original, succeeds)])
 
     object.__setattr__(original, "risk_level", RiskLevel.LOW)
 

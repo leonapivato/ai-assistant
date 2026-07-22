@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.testing import FakeToolImplementation, succeeds
 
 
 class PopulatableToolRegistry(ToolRegistry, Protocol):
@@ -53,9 +54,13 @@ class PopulatableToolRegistry(ToolRegistry, Protocol):
     An **arrangement** seam, not a contract: a suite must fill a registry before
     it can query one. Nothing here asserts how ``register`` behaves — that is
     `tools/`'s business (ADR-0018 §4 and §5) and is tested there.
+
+    It takes the callable alongside the declaration because ADR-0029 §1 binds
+    the two at registration, and a real registry has no way to hold one without
+    the other. A query-only implementation ignores it.
     """
 
-    def register(self, tool: ToolDefinition) -> None:
+    def register(self, tool: ToolDefinition, implementation: FakeToolImplementation, /) -> None:
         """Add a tool, so the query tests have something to find."""
         ...
 
@@ -69,7 +74,7 @@ def given(registry: PopulatableToolRegistry, *tools: ToolDefinition) -> Populata
     the triad check inspects to prove the canonical fake is really bound.
     """
     for each in tools:
-        registry.register(each)
+        registry.register(each, succeeds)
     return registry
 
 

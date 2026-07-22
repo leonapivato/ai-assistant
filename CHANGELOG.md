@@ -8,6 +8,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BREAKING** `core`/`tools`/`testing`: the `ToolInvoker` Protocol and the
+  types it exchanges — `ToolCall`, `ToolResult`, `ToolOutcome`, `ToolFailure`,
+  `ToolFailureKind` — plus `ToolBindingError` (ADR-0029). A Protocol change is a
+  breaking change (CLAUDE.md golden rule 5); it is additive at the `core`
+  surface, but `tools/`'s registration shape does change: `register` and the
+  `InMemoryToolRegistry` constructor now take a **callable alongside each
+  declaration**, which ADR-0016 §5 predicted and ADR-0029 §1 requires. This is
+  the seam the pipeline's right half was blocked on: the `LearningLoop` omitted
+  tool selection, permission checking and execution because `Tool.invoke` did
+  not exist, and now it does.
+  **An unauthorised call is unconstructable.** `ToolCall` runs ADR-0021 §1's
+  `authorises` in a model validator, so a `DENY`, an unanswered `CONFIRM`,
+  altered parameters, a substituted definition or a different step cannot
+  produce a value at all — the one call ADR-0021 said "belongs to the invocation
+  contract", placed where an executor cannot forget it. `invoke` then re-runs
+  the same check, in a fixed order: **revalidate and detach, compare the
+  definition against the registry's own original, then re-evaluate
+  `authorises`** — because `frozen=True` does not survive a `__dict__` write,
+  and because a payload mutated into a state `FrozenJson` would refuse must come
+  back as a `ToolBindingError` rather than as a raw serialisation error from the
+  digest. The registry comparison is what closes ADR-0018 §4's
+  tampered-but-still-valid definition, at execution, exactly where ADR-0021 §1
+  predicted it would become detectable.
+  **Failure crosses the seam as data; only seam faults are raised.** Three
+  outcomes map one-to-one onto the three `StepStatus` members a finished
+  invocation can produce, so an executor's mapping needs no default branch, and
+  `INDETERMINATE` — "we do not know whether the effect happened" — can be
+  reported at all, which an exception could not do. `retryable` is declared once
+  per failure kind and answers *could this succeed*, never *may I repeat it*;
+  ADR-0029 §5's conjunction with `ToolDefinition.idempotency` is what an
+  executor must satisfy, and an `Idempotency.NONE` side-effecting tool is never
+  auto-retried whatever the kind.
+  **The seam owns the deadline, and the guarantee is stated weakly on purpose.**
+  `timeout` is required and keyword-only — there is no spelling for "forever" —
+  and is checked rather than trusted, since `asyncio.timeout(None)` is no
+  deadline at all. On expiry a call that may have acted becomes `INDETERMINATE`
+  and one that cannot have becomes `FAILED`, classified from the *registry's*
+  declaration rather than the caller's, which a `__dict__` write could have
+  flipped mid-flight. Both `TIMED_OUT` and cancellation are established rather
+  than inferred from an exception type: an upstream SDK's own `TimeoutError`
+  inside our budget is `INTERNAL`, and a `CancelledError` a tool invents with
+  nothing cancelled is `INTERNAL` too. What the deadline buys is that the seam
+  stops waiting, not that the tool stops working — a tool that suppresses its
+  own cancellation outlives it, and the conformance suite pins that limit
+  deterministically rather than letting a reader assume a hard bound.
+  **The idempotency key is derived, not minted**: `decision.id` for a `KEYED`
+  tool and `None` otherwise, which makes it stable across retries, distinct for
+  a distinct intent, and reproducible after a restart from `approval_ref` alone.
+  **No credential crosses this seam in either direction**, which is stronger
+  than ADR-0017 §3 asks and is what makes `SecretStore`'s deferral safe rather
+  than ambiguous. Implementing this **authorises no egress**: ADR-0017 §3's
+  conditions are inherited whole and none is discharged, so `tools/` still
+  transmits nothing.
+
 - `orchestration`: `LearningLoop`, the first working slice of the request
   pipeline and the roadmap's first closed vertical (ADR-0022). `respond()` runs
   intent → context assembly → memory retrieval → planning; `learn()` turns a
