@@ -1,7 +1,15 @@
 # 23. Naive datetimes are rejected, not normalised
 
-- Status: Accepted
+- Status: Accepted, §2 amended by ADR-0030
 - Date: 2026-07-20
+- Amended: 2026-07-21 by ADR-0030 — §2's conversion is completed by a
+  canonicalisation: the stored value is a plain datetime rebuilt from a
+  conversion result that is exactly a datetime with tzinfo is UTC and a zero
+  offset, so an aware value whose astimezone preserves a subclass is refused
+  rather than stored. §3 is unchanged and is the ground for it: pairing digits
+  and an offset read separately from one value would be core attributing an
+  offset those digits never carried. The naive-rejection rule, the awareness
+  spelling, the conversion-overflow edge and §§4-6 stand as ratified.
 - Complements: ADR-0005, ADR-0008, ADR-0009, ADR-0014, ADR-0021 §4 — each types
   a `datetime` field "tz-aware"; only ADR-0009 also fixes UTC storage, which this
   ADR settles uniformly. Per ADR-0019 the reference runs one way; their statuses

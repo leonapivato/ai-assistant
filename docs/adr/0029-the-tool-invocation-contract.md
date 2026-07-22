@@ -1,7 +1,44 @@
 # 29. The tool invocation contract
 
-- Status: Accepted
+- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031
 - Date: 2026-07-21
+- Amended: 2026-07-21 by ADR-0031 — the corrections first use found
+  (PR #188). §4's interrupted-call rule gains a core home and is
+  ToolDefinition.interrupted_outcome, a read-only property in core/types.py, so
+  the seam, the canonical fake and the executor read one copy of it; the rule's
+  text is unchanged. §4's cancellation provenance is a delta on
+  asyncio.Task.cancelling() captured across the call, evaluated on the
+  normal-return path as well as the raising one, with the deadline established
+  from asyncio.Timeout.expired(), which no callable can reset; a pending
+  cancellation takes precedence over an expired deadline. The delta establishes
+  that a cancellation of this task was requested during this call, not who
+  requested it: cancelling() carries no provenance, so a callable that cancels
+  its own invoking task is propagated as a cancellation, which is the safe
+  direction. §4's CANCELLED is
+  re-scoped — the seam never synthesises it, and it is what an integration
+  reports when its own upstream cancelled the operation. §4 gains a fourth
+  limit, in the form of the cooperative one: a callable that catches its
+  cancellation and calls uncancel() on the invoking task erases the seam's
+  evidence and the call returns an ordinary result (#189). §1 gains the callable
+  half of the rebinding refusal, a tools/ invariant; §3 gains the rule that a
+  validator on these types never interpolates ToolResult.output or
+  ActionRequest.parameters — the tool's output and the call's untrusted input —
+  and names their type instead; whether an identifier may appear in a log-bound message is #197's and
+  is untouched. The new
+  core surface is eight names, not seven. Everything else in §§1, 3-4 stands as
+  ratified: the biconditional, the three seam checks and their order, failure as
+  data, retryable, the seam's ownership of the deadline and its classification
+  rule, and the cooperative limit.
+  Superseded sentences in ADR-0029, which stand in the document unedited: §3's
+  CANCELLED gloss "cancelled before completing" and its retryable rationale
+  "CANCELLED is true because the cancellation was ours" — the value stays True,
+  for §3's general test, that a repeat of the same call could plausibly succeed;
+  §4's paragraph "The CANCELLED failure kind covers the narrower case the seam
+  itself can report — a genuine cancellation it observed and unwound from
+  cleanly before the tool started work", which describes a branch invoke cannot
+  construct and must not grow; §4's "the seam therefore classifies on whether a
+  cancellation was actually requested", which is the delta above rather than a
+  boolean; and the Consequences' "seven".
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
   the three constraints ADR-0016 §7 sets on this ADR (§1, §2, §6 below).

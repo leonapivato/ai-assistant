@@ -1,6 +1,6 @@
 # 30. What counts as a `datetime` at a validating seam
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Decides: issues #174 and #152 — the same question at two seams. #174 asks
   whether the exact-type restriction `UtcInstant` adopted inside an

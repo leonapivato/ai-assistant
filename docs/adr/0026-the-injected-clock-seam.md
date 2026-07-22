@@ -1,7 +1,16 @@
 # 26. The injected clock seam: a clock produces an aware instant
 
-- Status: Accepted
+- Status: Accepted, §2 amended by ADR-0030
 - Date: 2026-07-21
+- Amended: 2026-07-21 by ADR-0030 — §2 step 4 converts and then
+  canonicalises through core's single shared canonicaliser, applying §3's range
+  check to the canonical value; a reading whose conversion is not exactly a
+  datetime carrying tzinfo is UTC is rejected with the owner-labelled ValueError.
+  Step 1's "not a datetime at all" check is unchanged and is deliberately not
+  tightened to an exact type. Everything else in §2 stands: wrapped at storage,
+  checked per reading, converting rather than rejecting, the total failure path,
+  and the reading/invocation boundary. §§1, 3-7 are unaffected, and §6's
+  amendment to ADR-0008 is untouched.
 - Decides: what ADR-0023 §6 defers — the *producer* side of the instant
   convention. ADR-0023 is **Accepted** (merged in #129), so its §6 ordering
   constraint is ratified, not provisional. What is *not* yet in the code is its
