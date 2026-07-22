@@ -11,7 +11,8 @@
   §1b, and the §Consequences entries that depend on it. ADR-0038 §1b nominates
   issue #256 as its own removal; this is that removal. Also amends
   [ADR-0028](0028-the-memory-write-path-is-a-contract.md) §8's conformance list,
-  which excludes fold semantics from the `MemoryWriter` contract — see §5a.
+  which excludes fold semantics from the `MemoryWriter` contract — see §5a and
+  §5b.
   Neither edit is made by this change — see §Consequences for their exact form
   and why they wait.
 - **Follow-up to** [ADR-0005](0005-memory-model.md) §3, which established that a
@@ -324,12 +325,39 @@ survived #112 untouched.
 `FakeMemoryWriter` therefore has to grow a real supersession path to pass its own
 suite, which is the divergence §Consequences already requires it to close.
 
-Whether `_refuse_unsafe_fold`'s two refusals should *also* become `MemoryWriter`
-obligations is a real question, and it is **not** decided here. Its argument is
-ADR-0038 §2a's and it is not caused by splitting the enum — that refusal is keyed
-on the records and would read identically under either contract. Filed on
-ratification rather than answered, so this ADR does not absorb a second
-widening of a contract it is not about.
+### 5b. The two refusals become `MemoryWriter` obligations as well
+
+`_refuse_unsafe_fold`'s two refusals — no fold of any kind onto a
+`USER_ASSERTED` target, no `USER_ASSERTED` proposal onto an `EXTERNAL` one — join
+§5a's obligations on the `MemoryWriter` conformance suite. A ruling that names
+either target must raise `MemoryStoreError` and write nothing.
+
+An earlier draft deferred this as ADR-0038's question rather than this ADR's, on
+the grounds that the refusal is keyed on the records and reads identically under
+either contract. That reasoning was wrong about *where* the gap is. ADR-0038 §2a
+argues the refusal cannot live in the policy because a policy reaches the
+ingestor through an injected seam and any conforming one may rule differently.
+ADR-0028 makes `MemoryWriter` the same kind of seam one level up: `orchestration`
+holds a `MemoryWriter`, not a `MemoryIngestor`, so a second writer is exactly the
+"conforming implementation that rules differently" the argument is about. Left
+out, a conforming writer may fold an inference onto a `USER_ASSERTED` record and
+destroy it — which ADR-0038 §3 forbids "silently or otherwise", and which §3 of
+this ADR calls the only thing standing between a policy and a destructive write.
+A safety property enforced at one seam and not at the next one out is not
+enforced.
+
+It is included here rather than filed because §5a already opens this suite and
+settles the principle it turns on: a `core` ruling means what interchangeable
+writers must honour. Adding the weaker obligations and omitting the strongest
+would be choosing the wrong subset of one decision, not keeping the ADR small.
+
+Two things it does not do. It does not move the refusal out of
+`MemoryIngestor` — §3 keeps it there, keyed on the records, and this makes it an
+obligation on *every* writer rather than a property of one. And it does not
+settle `EXTERNAL`: that refusal rests on ADR-0038 §2a's id argument, which issue
+#112 dissolves along with issue #254, so it is the second clause a validity
+window revisits (§6's first is §5a's id clause). Until then it holds for every
+writer, which is what ADR-0038 §2a asks for and more than it currently gets.
 
 ### 6. Ruling: issue #112 does **not** subsume this, and this narrows #112
 
@@ -391,9 +419,6 @@ why three of the four move and one does not.
   Filed as an issue on ratification; it is a policy-lane question that this
   vocabulary makes askable, and answering it here would smuggle a behavioural
   change into a contract ADR.
-- **Whether `_refuse_unsafe_fold`'s refusals belong on the `MemoryWriter`
-  contract** (§5a). Filed on ratification; its argument is ADR-0038 §2a's and it
-  is not caused by this change.
 - **Anything in #112's scope** — validity fields, store read filtering, as-of
   queries, `export` semantics, schema migration (§6).
 - **The lost-update window** in `MemoryIngestor.ingest` (issue #248). Unaffected
@@ -461,13 +486,16 @@ why three of the four move and one does not.
     `MemoryStoreError` on a target absent from the conflicts" and, per §5a,
     "written at the target's id, which is returned" — the latter marked in the
     docstring as the clause issue #112 rewrites. `REINFORCE` keeps the fold and
-    gains the evidence-retention obligation; `SUPERSEDE` gets §5a's complete
-    one — the live record equals the proposed record but for its id. The module
-    docstring's obligation list is rewritten to match, since it currently states
-    the `MERGE` obligations verbatim.
+    gains the both-records'-evidence obligation; `SUPERSEDE` gets §5a's complete
+    one — the live record equals the proposed record but for its id. §5b's two
+    refusals are added for both rulings, with a `MemoryStoreError` and no write.
+    The module docstring's obligation list is rewritten to match, since it
+    currently states the `MERGE` obligations verbatim and states that fold
+    semantics are excluded.
   - `docs/adr/0028-*.md` — §8's conformance list amended to record that
-    exclusion of the fold's rule now carries §5a's exception. ADR-0028's other
-    rulings are unchanged.
+    exclusion of the fold's rule now carries §5a's exception, and that §5b adds
+    the two refusals to the writer's obligations. ADR-0028's other rulings are
+    unchanged.
   - `tests/memory/test_ingest.py` — delete `_production_memory_policies`,
     `test_the_policy_scan_actually_finds_the_shipped_policies` and
     `test_a_shipped_policy_merges_an_assertion_only_into_a_derived_record`; that
