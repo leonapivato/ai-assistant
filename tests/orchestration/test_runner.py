@@ -454,10 +454,12 @@ async def test_a_trail_that_lost_the_write_stops_the_turn_before_the_claim() -> 
 
 
 async def test_a_trail_answering_about_another_action_is_refused() -> None:
-    """A copy that does not authorise the request cannot become a call.
+    """A copy describing another action is refused, ``ALLOW`` included.
 
-    It carries the id that was asked for, so the identity check passes and
-    ``authorises`` is what refuses it — the two guards are separable.
+    It carries the id that was asked for, so the identity check passes and the
+    subject comparison is what refuses it — the two guards are separable, and
+    the subject one runs on every outcome rather than only where a ``ToolCall``
+    would have caught it.
     """
     elsewhere = ActionRequest(
         tool=tool("other"), parameters={"to": "elsewhere@example.com"}, step_id=STEP
@@ -472,7 +474,7 @@ async def test_a_trail_answering_about_another_action_is_refused() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    with pytest.raises(AuditError, match="does not authorise this request"):
+    with pytest.raises(AuditError, match="rules on a different action"):
         await harness.runner.run(state, STEP, timeout=PATIENT)
 
     assert harness.invoker.invocations == []
@@ -951,6 +953,49 @@ async def test_a_ruling_mutated_while_it_is_recorded_does_not_steer_the_outcome(
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.SUCCEEDED
     assert stored.approval_ref == result.decision_id
+
+
+async def test_a_denial_recorded_about_another_action_is_refused() -> None:
+    """A skip's ``approval_ref`` must describe the step it is written on."""
+    about_something_else = PermissionDecision.from_request(
+        ActionRequest(tool=tool("other"), parameters={"to": "elsewhere@example.com"}, step_id=STEP),
+        PermissionRuling(outcome=PermissionOutcome.DENY, reason="about something else"),
+        id=FIRST_DECISION,
+        decided_at=AT,
+    )
+    harness = Harness(
+        tools=(tool(),),
+        policy=FakeActionPolicy(deny_at=RiskLevel.LOW),
+        trail=SubstitutingTrail(about_something_else),
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    with pytest.raises(AuditError, match="rules on a different action"):
+        await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
+    assert stored.approval_ref is None
+
+
+async def test_a_confirmation_recorded_about_another_action_is_refused() -> None:
+    """Parking on a confirmation about another tool is a step nobody can answer."""
+    about_something_else = PermissionDecision.from_request(
+        ActionRequest(tool=tool("other"), parameters={"to": "elsewhere@example.com"}, step_id=STEP),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="about something else"),
+        id=FIRST_DECISION,
+        decided_at=AT,
+    )
+    harness = Harness(tools=(confirmable(),), trail=SubstitutingTrail(about_something_else))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    with pytest.raises(AuditError, match="rules on a different action"):
+        await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
 
 
 # --- run() only enters at PENDING (ADR-0037 §6) --------------------------

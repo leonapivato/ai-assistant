@@ -504,10 +504,24 @@ class StepRunner:
         trusting `record` on the others would have made the guarantee depend on
         which way the policy ruled.
 
+        **The subject is checked here, not left to ``ToolCall``.** That validator
+        runs ``authorises``, which compares the tool, the digest and the step —
+        but a ``ToolCall`` only exists on the ``ALLOW`` path, so a trail handing
+        back a record with the right id and the wrong *action* would be caught
+        for an approval and waved through for a refusal or a question. The
+        consequences are as durable as the approval's: a ``DENY`` would skip the
+        planned step with an ``approval_ref`` whose record describes something
+        else, and a ``CONFIRM`` would park the step while returning a
+        confirmation about another tool, which :meth:`_check_parked` then refuses
+        for ever — a step that can never be answered. So every outcome gets the
+        same comparison, and ``ToolCall``'s is a second line rather than the
+        first.
+
         Raises:
             AuditError: If the trail refused the append — a duplicate id, or a
                 ``resolves`` pointer that failed its invariant — or if it does
-                not hand back the record under that id (:meth:`_recorded`).
+                not hand back the record under that id (:meth:`_recorded`), or
+                hands back one describing a different action.
             PlanningError: If the injected clock's reading is not conforming.
         """
         decision = PermissionDecision.from_request(
@@ -518,7 +532,18 @@ class StepRunner:
             resolves=resolves,
         )
         await self._trail.record(decision)
-        return await self._recorded(decision.id)
+        recorded = await self._recorded(decision.id)
+        if (
+            recorded.tool != request.tool
+            or recorded.parameters_digest != request.parameters_digest
+            or recorded.step_id != request.step_id
+        ):
+            msg = (
+                f"the trail's copy of decision {recorded.id!r} rules on a different action than "
+                "the one just decided, so it is not a record of what happened"
+            )
+            raise AuditError(msg)
+        return recorded
 
     def _authorised(self, request: ActionRequest, recorded: PermissionDecision) -> ToolCall:
         """Build the call from the trail's copy of the decision (ADR-0037 §3).
@@ -532,11 +557,13 @@ class StepRunner:
         ``AuditError`` from ``get`` itself (ADR-0036 §2), so "never recorded" and
         "corrupted" stay distinguishable.
 
-        The round trip is a real comparison rather than a ceremony:
-        :meth:`_recorded` established that what came back *is* the record that id
-        names, and ``ToolCall``'s validator now runs
-        ``PermissionDecision.authorises``, so a copy describing a different tool,
-        payload or step cannot become a call at all.
+        The round trip is a real comparison rather than a ceremony, and by the
+        time this runs most of it has already happened: :meth:`_record`
+        established that what came back is the record that id names and that it
+        rules on this action. ``ToolCall``'s validator re-runs
+        ``PermissionDecision.authorises`` over the same pair anyway — the type's
+        own invariant, checked by the type, so the call cannot exist unauthorised
+        whatever this method believes.
 
         Raises:
             AuditError: If the recorded decision does not authorise ``request``.
