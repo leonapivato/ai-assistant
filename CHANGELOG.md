@@ -55,6 +55,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `from_auto_update=False` (issue #132), so an upstream change to that default
   fails the gate rather than silently enabling a fetch of
   `raw.githubusercontent.com`.
+- `core`: `ToolDefinition.interrupted_outcome`, a read-only property giving
+  ADR-0029 §4's interrupted-call rule one home (ADR-0031 §1). The rule — `FAILED`
+  when the tool is not `side_effecting` **or** its `idempotency` is `NATURAL`,
+  `INDETERMINATE` otherwise — lived in two places: the seam's
+  `tools.invocation.interrupted_outcome` and the canonical fake's private copy,
+  which exists because the fake must not import the subsystem it stands in for.
+  `orchestration` cannot import `tools/` either, so the executor would have made
+  a third copy of a safety-critical classification — "two copies of a
+  safety-critical ordering, free to disagree, with nothing that fails when they
+  do" (ADR-0016 §2). It is a **plain `property`, deliberately not a
+  `computed_field`**: a computed field enters `model_dump()`, and ADR-0018 §4's
+  registration rebuild is `model_validate(tool.model_dump())` against
+  `extra="forbid"`, so every registration would fail. Both existing copies are
+  deleted rather than aliased. Not a Protocol change and no behaviour moves; the
+  exhaustive table moves to `tests/core/`, beside the type.
+
+- `orchestration`: `StepExecutor`, the pipeline's `execute` stage (ADR-0029 §8).
+  It claims a plan step, runs one authorised `ToolCall` through an injected
+  `ToolInvoker`, and commits what came back — the half the `LearningLoop` has
+  been missing, and the first code to reach ADR-0014 §4's `INDETERMINATE` from a
+  live executor rather than from a restart scan. Everything it knows about tools
+  arrives through `ToolRegistry` and `ToolInvoker`, so it imports no subsystem.
+  **The claim precedes the call**, carrying `bound_tool = call.request.tool.id`
+  and `approval_ref = call.decision.id`, which is what makes the durable record
+  a description of the call that actually ran. Because the claim lands first,
+  every later exit commits something: a `ToolBindingError` is committed
+  `RUNNING → FAILED` rather than left to strand, since recovery would otherwise
+  record `INDETERMINATE` — "we cannot tell whether it acted" — about a call that
+  provably never reached the callable. It is **not re-driven**, and the
+  mechanism is that **retry is scheduled only from a `ToolResult`, never from an
+  exception**: ADR-0029 §5's conjuncts read `result.failure.kind`, and an
+  exception produces no result to read.
+  **The result mapping is total** over `ToolOutcome`, and `RUNNING →
+  INDETERMINATE` is now reachable from a live deadline expiry as well as from
+  recovery — a widening of *when* that transition fires, not of the graph.
+  **A cancellation is committed on both branches and then re-raised**, by
+  `ToolDefinition.interrupted_outcome` read from the *registry's* declaration
+  captured before the call, never from `call.request.tool`, which a `__dict__`
+  write can flip to read-only mid-flight. The commit uses the whole shield
+  idiom rather than a bare `await asyncio.shield(...)` — shield protects the
+  inner task, not the `await` of it, so a repeat cancellation is absorbed until
+  the write has landed. Committing is not swallowing: the cancellation still
+  propagates, which is what keeps shutdown working.
+  **The idempotency window is fail-closed** (ADR-0029 §5): the executor stops
+  retrying once it has elapsed, and any reading that is not a positive elapsed
+  duration — a step backwards, a jump past the window, a reading the clock guard
+  refuses — is treated as *lapsed*. Declining to retry costs a recoverable error
+  surfaced to the user; retrying outside a lapsed window costs a duplicated side
+  effect. A monotonic clock seam is the proper fix and is deferred (#171).
+
 - **BREAKING** `core`/`tools`/`testing`: the `ToolInvoker` Protocol and the
   types it exchanges — `ToolCall`, `ToolResult`, `ToolOutcome`, `ToolFailure`,
   `ToolFailureKind` — plus `ToolBindingError` (ADR-0029). A Protocol change is a
