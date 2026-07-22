@@ -63,9 +63,14 @@ review-codex persona base="":
     scripts/codex-review.sh "$1" "$2"
 
 # Report the local Codex review to the PR — the merge-readiness step (ADR-0015).
-# Refuses unless a review artifact covers the content the PR head carries: its
-# recorded base and tree must both match the PR's merge base and HEAD's tree
-# (ADR-0020 §3), whatever commit the artifact is filed under.
+# Refuses unless a review artifact covers the content the PR head carries,
+# whatever commit the artifact is filed under. Two paths are accepted
+# (ADR-0027 §2). Base unmoved: the recorded base and tree must both match the
+# PR's merge base and HEAD's tree (ADR-0020 §3). Base moved: the recorded base
+# must be a proper ancestor of the merge base, the reviewed patch identity
+# unchanged, and the move must clear ADR-0027 §3's floor — necessary but not
+# sufficient — with the drift published per §4. CONTRIBUTING.md ("Report the
+# review, then mark it ready") carries the full conditions.
 ship:
     scripts/ship.sh
 
