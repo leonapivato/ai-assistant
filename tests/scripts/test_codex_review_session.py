@@ -474,3 +474,23 @@ def test_a_second_concurrent_round_of_one_persona_is_refused(tmp_path: Path) -> 
     assert thread.read_text().strip() == "thread-outer"
     sha = _git(repo, "rev-parse", "HEAD")
     assert _field(_provenance(repo, sha), "thread_id") == "thread-outer"
+
+
+def test_a_malformed_injection_budget_refuses_with_a_configuration_error(
+    tmp_path: Path,
+) -> None:
+    """The third env-supplied budget, same hazard as ship's two (#214).
+
+    ``$(( inject_bytes + diff_bytes )) -le "$inject_budget"`` evaluates the
+    override as an arithmetic *expression*, so ``not-a-number`` or ``1/0``
+    aborted inside the shell with a bash diagnostic naming a line rather than the
+    variable, and a negative value silently forced ADR-0025 §1's degradation
+    floor under a message blaming the dispositions for the operator's typo.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    for bad in ("not-a-number", "1/0", "-1", "1234567890"):
+        result = run_review(repo, tmp_path, check=False, CODEX_REVIEW_INJECT_BUDGET=bad)
+        assert result.returncode != 0, f"{bad!r} was accepted"
+        assert "CODEX_REVIEW_INJECT_BUDGET must be" in result.stderr

@@ -374,9 +374,17 @@ _numstat() {
          END { print a + d + 0, b + 0 }'
 }
 
-read -r net_lines net_binary < <(git diff --numstat "${base_sha}...${sha}" | _numstat)
+# Pinned against config for the same reason as the patch-identity block above,
+# with a much smaller stake: these two feed ADR-0020 §2's advisory aggregate, so
+# a decorated stream that `_numstat`'s `^[0-9]+$` guard then declined to sum
+# would understate a printed figure, not move a gate. Current git colours neither
+# stream, so no number changes here — the reads are pinned because nothing pinned
+# them.
+read -r net_lines net_binary < <(
+    git -c color.ui=false diff --no-color --numstat "${base_sha}...${sha}" | _numstat
+)
 read -r churn_lines churn_binary < <(
-    git log --numstat --format= "${base_sha}..${sha}" | _numstat
+    git -c color.ui=false log --no-color --numstat --format= "${base_sha}..${sha}" | _numstat
 )
 commits="$(git rev-list --count "${base_sha}..${sha}")"
 
@@ -1041,7 +1049,22 @@ fi
 # The injection budget bounds `diff + re-injected dispositions` (ADR-0025 §1's
 # graceful-degradation floor): past it, mechanism (b) would not fit, so the round
 # drops to a plain cold review of the diff rather than a truncated injection.
+#
+# Validated before the `$(( ))` below reads it, for the reason ship.sh's
+# `require_byte_budget` states at length: `$(( ))` evaluates its operand as an
+# ARITHMETIC EXPRESSION, so `not-a-number` or `1/0` aborts inside the shell
+# instead of refusing, and a negative value silently forces the degradation floor
+# under a message blaming the dispositions for the operator's typo. Spelled out
+# here rather than shared: the two scripts have no common library, and the pair
+# that share bytes do so under an explicitly-marked block with a test enforcing
+# it — a third such contract for four lines is not worth its weight.
 inject_budget="${CODEX_REVIEW_INJECT_BUDGET:-500000}"
+if [[ ! "$inject_budget" =~ ^[0-9]{1,9}$ ]]; then
+    echo "CODEX_REVIEW_INJECT_BUDGET must be a non-negative integer of at most 9" \
+        "digits, not '${inject_budget}' — it bounds the bytes of diff plus" \
+        "re-injected dispositions one round may carry (ADR-0025 §1)" >&2
+    exit 2
+fi
 diff_bytes="$(printf '%s' "$diff" | wc -c)"
 
 # The thread this round actually ran on, recorded afterwards so the next round
