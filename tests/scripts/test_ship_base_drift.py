@@ -134,7 +134,9 @@ def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
-def _advance_base(repo: Path, mutate: Callable[[Path], object], *, rebase: bool = True) -> None:
+def _advance_base(
+    repo: Path, mutate: Callable[[Path], object], *, rebase: bool = True, stage: bool = True
+) -> None:
     """Land a commit on `origin/main`, then rebase the feature branch onto it.
 
     This is the sequence branch protection's `strict: true` forces on every open
@@ -145,7 +147,8 @@ def _advance_base(repo: Path, mutate: Callable[[Path], object], *, rebase: bool 
     branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     _git(repo, "checkout", "-q", "main")
     mutate(repo)
-    _git(repo, "add", "-A")
+    if stage:
+        _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "the base moves")
     _git(repo, "push", "-q", "origin", "main")
     _git(repo, "checkout", "-q", branch)
@@ -159,6 +162,7 @@ def _review_then_move(
     mutate: Callable[[Path], object],
     *,
     personas: tuple[str, ...] = ("adversarial",),
+    stage: bool = True,
 ) -> str:
     """Record a review, then move the base under it. Returns the rebased HEAD.
 
@@ -171,7 +175,7 @@ def _review_then_move(
     old_base = _git(repo, "merge-base", "main", sha)
     for persona in personas:
         _record_review(repo, sha, persona, f"a real finding\n{_VERDICT}\n", base_sha=old_base)
-    _advance_base(repo, mutate)
+    _advance_base(repo, mutate, stage=stage)
     return _git(repo, "rev-parse", "HEAD")
 
 
@@ -831,3 +835,96 @@ def test_the_identity_survives_git_config_changing_between_review_and_ship(
     # would corrupt the very set §4 requires published exactly.
     assert "\x1b[" not in posted
     assert _published_paths(posted) == ["src/ai_assistant/orchestration/loop.py"]
+
+
+_GITLINK_A = "1" * 40
+_GITLINK_B = "2" * 40
+
+
+def _set_gitlink(repo: Path, commit: str, path: str = "vendor/lib") -> None:
+    """Stage a submodule gitlink pointing at ``commit``.
+
+    Written through the index rather than by cloning a real submodule: the diff
+    machinery under test reads the gitlink entry, and nothing here needs the
+    pointed-at commit to exist.
+    """
+    _git(repo, "update-index", "--add", "--cacheinfo", f"160000,{commit},{path}")
+
+
+def test_a_submodule_the_base_moved_is_published_under_ignore_submodules(
+    tmp_path: Path,
+) -> None:
+    """`diff.ignoreSubmodules=all` must not delete a path from the §4 record.
+
+    This is the second of the two options that STRIP information rather than
+    re-render it, and the one config can reach two ways: `diff.ignoreSubmodules`
+    and a narrower `submodule.<name>.ignore` that outranks it. Under either, a
+    changed gitlink vanishes from the patch, from `--raw`, and from the
+    `--name-status` listing — so ship would publish as "whole" a drift set with a
+    file missing from it, which is precisely what §4 forbids.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "checkout", "-q", "main")
+    _set_gitlink(repo, _GITLINK_A)
+    _git(repo, "commit", "-qm", "add a gitlink")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "main")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+    _git(repo, "config", "submodule.vendor/lib.ignore", "all")
+
+    rebased = _review_then_move(repo, tmp_path, lambda r: _set_gitlink(r, _GITLINK_B), stage=False)
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased)
+
+    assert result.returncode == 0, result.stderr
+    assert _published_paths((tmp_path / "comment.md").read_text()) == ["vendor/lib"]
+
+
+def test_the_identity_sees_a_gitlink_under_ignore_submodules(tmp_path: Path) -> None:
+    """Two ranges differing only in a gitlink must not share an identity.
+
+    If they did, a base move into the submodule would be absorbed silently: the
+    reviewer read one pointer and the merge would carry another, with the whole
+    difference invisible to the acceptance rule.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "checkout", "-q", "main")
+    _set_gitlink(repo, _GITLINK_A)
+    _git(repo, "commit", "-qm", "add a gitlink")
+    base = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-B", "feature", "main")
+    _git(repo, "config", "diff.ignoreSubmodules", "all")
+
+    _set_gitlink(repo, _GITLINK_B)
+    _git(repo, "commit", "-qm", "bump the gitlink")
+    bumped = _patch_id(repo, base, _git(repo, "rev-parse", "HEAD"))
+
+    assert bumped, "a gitlink change must have an identity, not be invisible"
+    assert bumped != _patch_id(repo, base, base)
+
+
+def test_a_malformed_drift_budget_refuses_with_a_configuration_error(tmp_path: Path) -> None:
+    """`[[ -gt ]]` evaluates an arithmetic *expression*, not a number.
+
+    An operator override of `not-a-number` or `1/0` would otherwise abort inside
+    the shell rather than refuse the ship, and a negative one would make path (b)
+    unavailable under a message blaming the drift set for the operator's typo.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: _edit_line(r, "src/ai_assistant/orchestration/loop.py", 40, "m")
+    )
+
+    for bad in ("not-a-number", "1/0", "-1", ""):
+        result = _run_ship(repo, tmp_path, pr_sha=rebased, gh_env={"CODEX_SHIP_DRIFT_BUDGET": bad})
+        if bad == "":
+            # An empty override is indistinguishable from an unset one to `:-`,
+            # so it takes the default rather than failing — stated, not assumed.
+            assert result.returncode == 0, result.stderr
+            continue
+        assert result.returncode != 0, f"{bad!r} was accepted"
+        assert "CODEX_SHIP_DRIFT_BUDGET must be" in result.stderr

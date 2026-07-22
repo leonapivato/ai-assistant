@@ -243,15 +243,23 @@ def _fake_gh(bin_dir: Path) -> None:
     gh.chmod(0o755)
 
 
+# Kept in step with the scripts' own pinned set; a fixture computing a different
+# identity from the one under test proves nothing (#45).
 _DIFF_OPTS = (
     "-c",
     "core.quotePath=false",
     "-c",
+    "color.ui=false",
+    "-c",
     "diff.renames=true",
+    "-c",
+    "diff.renameLimit=4000",
     "-c",
     "diff.algorithm=myers",
     "-c",
     "diff.context=3",
+    "-c",
+    "diff.interHunkContext=0",
     "-c",
     "diff.indentHeuristic=true",
     "-c",
@@ -259,6 +267,7 @@ _DIFF_OPTS = (
     "-c",
     "diff.mnemonicPrefix=false",
 )
+_DIFF_FLAGS = ("--no-color", "--ignore-submodules=none", "--no-ext-diff", "--no-textconv")
 
 
 def _raw_patch_id(repo: Path, base_sha: str, sha: str, flag: str = "--verbatim") -> str:
@@ -271,7 +280,7 @@ def _raw_patch_id(repo: Path, base_sha: str, sha: str, flag: str = "--verbatim")
     """
     assert _GIT is not None
     diff = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
-        [_GIT, *_DIFF_OPTS, "diff", "--no-ext-diff", "--no-textconv", f"{base_sha}...{sha}"],
+        [_GIT, *_DIFF_OPTS, "diff", *_DIFF_FLAGS, f"{base_sha}...{sha}"],
         cwd=repo,
         check=True,
         capture_output=True,
@@ -298,8 +307,7 @@ def _patch_id(repo: Path, base_sha: str, sha: str) -> str:
             _GIT,
             *_DIFF_OPTS,
             "diff",
-            "--no-ext-diff",
-            "--no-textconv",
+            *_DIFF_FLAGS,
             "--raw",
             "--abbrev=40",
             "-z",
