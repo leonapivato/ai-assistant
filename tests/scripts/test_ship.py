@@ -777,6 +777,102 @@ def test_core_check_survives_a_diff_larger_than_the_pipe_buffer(tmp_path: Path) 
     assert not (tmp_path / "comment.md").exists()
 
 
+def test_the_core_check_survives_a_colored_git_config(tmp_path: Path) -> None:
+    """The contract-surface read must not be a function of the operator's config.
+
+    Honest about what this pins. Under ``color.ui=always`` git decorates output
+    even off a terminal, and an anchored regex over decorated bytes stops
+    matching — which here would leave ``core_change=0`` and silently *not*
+    require the architecture lens, a fail-open on the one guard over ``core/``.
+    But ``--name-only`` is not among the outputs current git colours, so this
+    test passes against the unpinned read as well: it did not fail before the
+    pin, and it is not evidence the pin fixed a live bug. It pins the invariant —
+    the file list is a function of the two commits, not of ``~/.gitconfig`` — and
+    it is the sibling of the rename case below, which is the same fail-open and
+    *does* reproduce.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo, touches_core=True)
+    _git(repo, "config", "color.ui", "always")
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0, result.stdout
+    assert "architecture" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_renaming_the_contract_surface_still_demands_the_architecture_lens(
+    tmp_path: Path,
+) -> None:
+    """Rename detection hid the contract surface from the check entirely.
+
+    With ``diff.renames`` on — the default since git 2.9 — ``git diff
+    --name-only`` renders a rename as the *destination* path alone. So moving
+    ``src/ai_assistant/core/protocols.py`` anywhere else emitted only the new
+    path, the anchored regex found nothing, ``core_change`` stayed 0, and a
+    change relocating the shared contract surface shipped on the adversarial
+    lens alone. Unlike the colour case above, this one fails against the
+    unpinned read.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo, touches_core=True)
+    # Land the contract surface in the base, so the branch's change to it is a
+    # rename rather than an add — rename detection has nothing to detect
+    # otherwise.
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--ff-only", "feature")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "checkout", "-q", "feature")
+
+    _git(repo, "mv", "src/ai_assistant/core/protocols.py", "src/ai_assistant/core/proto.py")
+    _git(repo, "commit", "-qm", "rename the contract surface")
+    sha = _git(repo, "rev-parse", "HEAD")
+    # The premise: git really does render this as one destination path.
+    assert _git(repo, "diff", "--name-only", "main...HEAD").splitlines() == [
+        "src/ai_assistant/core/proto.py"
+    ], "rename detection did not fire; the test is not exercising the fail-open"
+
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    result = _run_ship(repo, tmp_path, pr_sha=sha)
+
+    assert result.returncode != 0, result.stdout
+    assert "architecture" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_malformed_disposition_budget_refuses_with_a_configuration_error(
+    tmp_path: Path,
+) -> None:
+    """Same hazard as the drift budget, same helper, same operator-legible error.
+
+    ``[[ -gt ]]`` and ``$(( ))`` evaluate an arithmetic *expression*, so
+    ``not-a-number`` or ``1/0`` would abort inside the shell rather than refuse
+    the ship, and a negative value would silently shrink the published record
+    under a message blaming the dispositions for the operator's typo.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+    _fake_gh(tmp_path / "bin")
+    _record_review(repo, sha, "adversarial")
+
+    for bad in ("not-a-number", "1/0", "-1", "1234567890", ""):
+        result = _run_ship(
+            repo, tmp_path, pr_sha=sha, gh_env={"CODEX_SHIP_DISPOSITION_BUDGET": bad}
+        )
+        if bad == "":
+            # An empty override is indistinguishable from an unset one to `:-`,
+            # so it takes the default rather than failing — stated, not assumed.
+            assert result.returncode == 0, result.stderr
+            continue
+        assert result.returncode != 0, f"{bad!r} was accepted"
+        assert "CODEX_SHIP_DISPOSITION_BUDGET must be" in result.stderr
+
+
 def test_fails_closed_on_a_review_too_large_to_post_intact(tmp_path: Path) -> None:
     """Truncating would drop the tail — where the findings and verdict live.
 

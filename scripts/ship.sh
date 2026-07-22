@@ -40,6 +40,22 @@ die() {
     exit 1
 }
 
+# Validate an operator-supplied byte budget BEFORE any arithmetic reads it.
+# `[[ x -gt "$b" ]]` and `$(( ))` evaluate their operand as an ARITHMETIC
+# EXPRESSION, not as a number, so `FOO=not-a-number` or `FOO=1/0` would abort
+# mid-script in the shell — a raw bash diagnostic naming a line, not a refusal
+# naming the variable — and a negative value would silently make a path
+# unavailable under a message blaming the content rather than the config.
+# An operator-supplied value gets an operator-legible error.
+#
+# $1 the variable's name (for the message), $2 its value, $3 what it bounds.
+require_byte_budget() {
+    if [[ ! "$2" =~ ^[0-9]{1,9}$ ]]; then
+        die "$1 must be a non-negative integer of at most 9 digits, not '$2' —
+     it bounds $3"
+    fi
+}
+
 command -v gh >/dev/null 2>&1 || die "gh CLI not found on PATH"
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -104,7 +120,30 @@ git fetch --no-tags --quiet origin "$base_ref" ||
 # pipefail` — the whole pipeline reports failure. The `if` would read that as
 # "no core change" and skip the architecture requirement entirely: a fail-open
 # on the one check that guards the shared contract surface.
-changed_files="$(git diff --name-only "FETCH_HEAD...${sha}")"
+#
+# The read is PINNED against repository and user config, same idiom as the
+# listing read below and the patch-identity block above, because this is the
+# one guard over `core/` and every failure of it is a failure to REQUIRE the
+# architecture lens — fail-open, silent, on the shared contract surface:
+#
+#   color.ui   — under a global `color.ui=always` git decorates output even off
+#                a terminal. `--name-only` is not among the outputs current git
+#                colours, so this pin fixes no observed bug; it is here because
+#                nothing pinned it, and an anchored regex over decorated bytes
+#                stops matching without saying so.
+#   diff.renames — this one is NOT hypothetical. With rename detection on (the
+#                default since git 2.9) a rename renders as the DESTINATION path
+#                alone, so renaming `core/protocols.py` to anything else drops
+#                it out of `--name-only` entirely and the architecture lens is
+#                never demanded for a change that moved the contract surface.
+#                Off, git renders the delete and the add separately, so both
+#                paths appear and the regex matches. `false` is the fail-CLOSED
+#                setting here: it can only ever add paths to the list.
+#   core.quotePath — a non-ASCII path renders as a C-quoted string; irrelevant
+#                to these two ASCII paths, pinned for the same reason as the
+#                rest, so the list is a function of the two commits alone.
+changed_files="$(git -c core.quotePath=false -c color.ui=false -c diff.renames=false \
+    diff --no-color --name-only "FETCH_HEAD...${sha}")"
 core_change=0
 if grep -qE '^src/ai_assistant/core/(protocols|types)\.py$' <<<"$changed_files"; then
     core_change=1
@@ -489,18 +528,20 @@ _render_drift() {
 # it IS the decision, so an omitted tail is exactly where the contradicting
 # `docs/adr/` entry hides.
 #
-# Validated before any arithmetic reads it. `[[ x -gt "$b" ]]` and `$(( ))`
-# evaluate their operand as an ARITHMETIC EXPRESSION, not as a number, so an
-# override of `not-a-number` or `1/0` would abort mid-script in the shell rather
-# than refuse the ship, and a negative one would silently make path (b)
-# unavailable under a message blaming the drift set. An operator-supplied value
-# gets an operator-legible error.
+# Both operator-supplied budgets are validated here, in one place, ahead of every
+# arithmetic that reads either (see `require_byte_budget` for why). This is the
+# earliest point that dominates both: the drift budget is read immediately below,
+# and the disposition budget only in `render_dispositions` and the capacity
+# arithmetic, both further down. Reading `CODEX_SHIP_DISPOSITION_BUDGET` once,
+# here, and passing `$disp_cap` on is what keeps the validated value and the used
+# value the same value.
 drift_budget="${CODEX_SHIP_DRIFT_BUDGET:-20000}"
-if [[ ! "$drift_budget" =~ ^[0-9]{1,9}$ ]]; then
-    die "CODEX_SHIP_DRIFT_BUDGET must be a non-negative integer of at most 9 digits,
-     not '${drift_budget}' — it bounds the bytes ADR-0027 §4's drift record may
-     occupy in the ship comment"
-fi
+require_byte_budget CODEX_SHIP_DRIFT_BUDGET "$drift_budget" \
+    "the bytes ADR-0027 §4's drift record may occupy in the ship comment"
+
+disp_cap="${CODEX_SHIP_DISPOSITION_BUDGET:-20000}"
+require_byte_budget CODEX_SHIP_DISPOSITION_BUDGET "$disp_cap" \
+    "the bytes ADR-0025 §4's disposition record may occupy in the ship comment"
 
 # Evaluated once per recorded base and cached: several artifacts commonly share
 # one. `drift_verdict` is `ok`, `floor`, `toobig`, or `unreadable`.
@@ -710,8 +751,8 @@ contains_secret() {
 render_dispositions() {
     local snap="$1" persona="$2"
     # Budget derived from the comment's remaining capacity by the caller; the env
-    # override (default 20000) is the fallback and the cap.
-    local budget="${disp_budget:-${CODEX_SHIP_DISPOSITION_BUDGET:-20000}}"
+    # override (default 20000, validated above) is the fallback and the cap.
+    local budget="${disp_budget:-$disp_cap}"
     local total used=0 hidden=0
     total="$(grep -c '<!-- finding id=' "$snap" || true)"
     [[ "${total:-0}" -eq 0 ]] && return 0
@@ -1055,8 +1096,7 @@ if [[ "$num_snap" -gt 0 ]]; then
     remaining=$((max_bytes - artifacts_bytes - drift_bytes - 4000))
     [[ "$remaining" -lt 0 ]] && remaining=0
     disp_budget=$((remaining / num_snap))
-    cap="${CODEX_SHIP_DISPOSITION_BUDGET:-20000}"
-    [[ "$disp_budget" -gt "$cap" ]] && disp_budget="$cap"
+    [[ "$disp_budget" -gt "$disp_cap" ]] && disp_budget="$disp_cap"
 fi
 
 num="$(gh pr view --json number --jq .number)"
