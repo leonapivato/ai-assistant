@@ -249,3 +249,116 @@ async def test_failing_required_source_surfaces_as_context_error() -> None:
 
     with pytest.raises(ContextError, match="could not assemble a valid context"):
         await provider.assemble()
+
+
+class _RequiredFailingSource(_FailingSource):
+    """A source that carries the ADR-0026 §4 marker and fails."""
+
+    required = True
+
+
+class _RequiredHangingSource(_HangingSource):
+    """A required source that never returns, so the timeout path is covered too."""
+
+    required = True
+
+
+class _RequiredMarkerRaises:
+    """A source whose ``required`` marker itself raises when read."""
+
+    @property
+    def name(self) -> str:
+        return "shifty"
+
+    @property
+    def required(self) -> bool:
+        msg = "even the marker is hostile"
+        raise RuntimeError(msg)
+
+    async def contribute(self) -> Mapping[str, object]:
+        msg = "source down"
+        raise RuntimeError(msg)
+
+
+async def test_a_required_sources_failure_reaches_the_caller_with_its_cause() -> None:
+    """ADR-0026 §4: the clock's failure must not be degraded into silence.
+
+    Without the marker, ``_safe_contribute`` swallows it and the caller sees only
+    a later "could not assemble a valid context" from the missing fields — the
+    owner label and the cause both lost. Asserted on the *original* exception,
+    since preserving it is the whole point.
+    """
+    provider = AssemblingContextProvider([_RequiredFailingSource()])
+
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+
+
+async def test_a_required_sources_timeout_also_reaches_the_caller() -> None:
+    """The other degradation path. A required source cannot be skipped either way."""
+    provider = AssemblingContextProvider([_RequiredHangingSource()], source_timeout=0.01)
+
+    with pytest.raises(TimeoutError):
+        await provider.assemble()
+
+
+async def test_the_clock_sources_context_error_is_not_degraded() -> None:
+    """The concrete case the marker exists for, end to end through the provider."""
+    naive = ClockContextSource(now=lambda: datetime(2026, 1, 1, 14))  # noqa: DTZ001
+    provider = AssemblingContextProvider([naive])
+
+    with pytest.raises(ContextError, match="ClockContextSource"):
+        await provider.assemble()
+
+
+async def test_an_optional_source_with_no_required_attribute_still_degrades() -> None:
+    """Absent means optional, which is why the marker is not a Protocol member.
+
+    ``_FailingSource`` implements ``name`` and ``contribute`` only — exactly the
+    shape a ``Protocol`` member would have made non-conforming, and on which a
+    bare ``source.required`` would raise ``AttributeError`` inside the very
+    degradation path it was meant to select.
+    """
+    assert not hasattr(_FailingSource(), "required")
+    provider = AssemblingContextProvider([_clock(), _FailingSource()])
+
+    ctx = await provider.assemble()
+
+    assert ctx.time_of_day is TimeOfDay.AFTERNOON
+
+
+async def test_an_optional_source_raising_context_error_still_degrades() -> None:
+    """The reason the decision is on the marker and not on the error's type.
+
+    A future optional source is entitled to raise ``ContextError``; typing the
+    decision would make it abort the request, which is the degradation rule
+    ADR-0008 §4 keeps.
+    """
+
+    class _OptionalContextErrorSource:
+        @property
+        def name(self) -> str:
+            return "optional"
+
+        async def contribute(self) -> Mapping[str, object]:
+            msg = "optional, and unhappy"
+            raise ContextError(msg)
+
+    provider = AssemblingContextProvider([_clock(), _OptionalContextErrorSource()])
+
+    ctx = await provider.assemble()
+
+    assert ctx.time_of_day is TimeOfDay.AFTERNOON
+
+
+async def test_a_source_whose_required_marker_raises_is_read_as_optional() -> None:
+    """The degradation path must not itself fail on a misbehaving source.
+
+    Same defensiveness ``_safe_name`` already applies: a marker that cannot
+    answer is absent, and absent means optional.
+    """
+    provider = AssemblingContextProvider([_clock(), _RequiredMarkerRaises()])
+
+    ctx = await provider.assemble()
+
+    assert ctx.time_of_day is TimeOfDay.AFTERNOON

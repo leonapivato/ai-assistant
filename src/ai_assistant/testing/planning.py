@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import (
     ActiveExecutionError,
     IllegalTransitionError,
@@ -36,8 +37,9 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, StepTransition
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
@@ -76,19 +78,38 @@ class FakePlanner:
     Structurally implements :class:`~ai_assistant.core.protocols.Planner`.
     """
 
-    def __init__(
-        self, plan: ActionPlan | None = None, *, now: Callable[[], datetime] = _utcnow
-    ) -> None:
+    def __init__(self, plan: ActionPlan | None = None, *, now: Clock = _utcnow) -> None:
         """Create a planner.
 
         Args:
             plan: The plan to return. When ``None``, a single-step plan is
                 synthesised for whichever goal it is asked about.
             now: Clock for synthesised plans; injectable for deterministic tests.
+                Guarded by :func:`~ai_assistant.core.clock.checked_clock`
+                (ADR-0026 §7): ``ActionPlan.created_at``'s only producer today is
+                this fake, so a fake looser than the contract is the whole gap.
         """
         self._plan = plan
-        self._now = now
+        self._clock = checked_clock(now, owner="FakePlanner")
         self.calls: list[tuple[Goal, CurrentContext, tuple[MemoryRecord, ...]]] = []
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as the error the real planner raises.
+
+        ``PlanningError``, not the raw ``ValueError`` ``core`` raises, for the
+        reason ADR-0026 §4 gives: a fake exists to certify a consumer against its
+        contract, so one that leaked ``ValueError`` where `planning` raises
+        ``PlanningError`` would certify error handling against behaviour the real
+        implementation never produces.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise PlanningError(str(exc)) from exc
 
     async def plan(
         self,
@@ -117,13 +138,33 @@ class FakePlanStore:
     including the compare-and-swap write path and the data-rights operations.
     """
 
-    def __init__(self, *, now: Callable[[], datetime] = _utcnow) -> None:
-        """Create an empty store with an injectable clock."""
+    def __init__(self, *, now: Clock = _utcnow) -> None:
+        """Create an empty store with an injectable clock.
+
+        Args:
+            now: Clock for transition and export timestamps; injectable for
+                deterministic tests. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`, exactly as
+                ``InMemoryPlanStore`` is (ADR-0026 §7).
+        """
         self._goals: dict[str, Goal] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
-        self._now = now
+        self._clock = checked_clock(now, owner="FakePlanStore")
         self._sequence = 0
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as the error the real store raises.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range
+                (ADR-0026 §4).
+        """
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise PlanningError(str(exc)) from exc
 
     async def save_goal(self, goal: Goal) -> str:
         """Persist a goal, or update the parts of one that may change.

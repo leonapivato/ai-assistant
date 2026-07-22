@@ -351,14 +351,21 @@ async def test_expired_records_are_hidden_from_get_and_search(
     assert [r.id for r in await store.search("coffee")] == ["2"]  # expired one filtered out
 
 
-async def test_naive_injected_clock_is_treated_as_utc(
+async def test_a_naive_injected_clock_is_the_subsystems_error(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
+    """Inverted by ADR-0026: the reading used to be attributed UTC here.
+
+    This seam never reaches a `core` validator — the reading becomes a float
+    through ``timestamp()`` — so the producer guard is the whole protection.
+    """
     store = make_store(now=lambda: datetime(2026, 6, 1))  # noqa: DTZ001  naive clock
     await store.add(_semantic("1", "coffee", expires_at=datetime(2026, 1, 2, tzinfo=UTC)))
 
-    assert await store.get("1") is None  # expired under the UTC-normalised clock
-    assert await store.search("coffee") == []
+    with pytest.raises(MemoryStoreError, match="SqliteMemoryStore"):
+        await store.get("1")
+    with pytest.raises(MemoryStoreError, match="SqliteMemoryStore"):
+        await store.search("coffee")
 
 
 async def test_purge_expired_removes_only_expired_and_returns_count(

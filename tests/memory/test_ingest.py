@@ -302,10 +302,10 @@ async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
     """``_expiry`` installs ``expires_at`` through ``model_copy``, which skips
     validators — so the clock is the only place this can be caught.
 
-    ``LearningLoop`` already guards the identical write and says why; this path
-    did not, and since ADR-0023 makes ``MemoryBase.expires_at`` reject a naive
-    value rather than assume UTC, there is no longer a validator behind it. The
-    boundary shim ADR-0023 §6 requires until ADR-0026's producer guard lands.
+    Inverted by ADR-0026: the ADR-0023 §6 shim that stood here attributed UTC to
+    a naive reading. ``checked_clock`` refuses it instead, which is the trade
+    ADR-0023 §3 takes at the producer — a silent fabrication becomes a loud
+    failure naming the seam.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
     naive_clock = MemoryIngestor(
@@ -314,12 +314,10 @@ async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
         now=lambda: datetime(2026, 6, 1),  # noqa: DTZ001 — the naive clock is the subject
     )
 
-    await naive_clock.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+    with pytest.raises(MemoryStoreError, match="MemoryIngestor"):
+        await naive_clock.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
 
-    stored = await store.get("1")
-    assert stored is not None
-    assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
-    assert stored.expires_at.tzinfo is UTC
+    assert await store.get("1") is None
 
 
 async def test_a_non_utc_clock_is_converted_not_merely_accepted() -> None:
@@ -414,7 +412,7 @@ async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -
         now=lambda: datetime(2026, 6, 1, tzinfo=zone),
     )
 
-    with pytest.raises(MemoryStoreError, match="no UTC representation"):
+    with pytest.raises(MemoryStoreError, match="MemoryIngestor"):
         await broken.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
 
     assert await store.get("1") is None

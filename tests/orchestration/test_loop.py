@@ -621,25 +621,23 @@ def _loop_with(*, retrieval_limit: int) -> LearningLoop:
     )
 
 
-async def test_a_naive_clock_still_produces_an_aware_goal() -> None:
-    """``Provenance.last_updated`` has no normalising validator; the clock does.
+async def test_a_naive_clock_is_the_reading_stages_error() -> None:
+    """Inverted by ADR-0026: the loop used to attribute UTC to this reading.
 
-    The loop's clock stamps the goal and nothing else now: ``expires_at`` is the
-    writer's to stamp, and the guard against a naive one moved there with it
-    (ADR-0028 §4b, asserted in ``tests/memory/test_ingest.py``).
+    ``core/errors.py`` defines no error for `orchestration`, so the failure is
+    the *stage*'s: the clock is read while minting the turn's goal, which
+    already raises ``PlanningError`` for a blank utterance.
     """
     naive_now = _NOW.replace(tzinfo=None)
-    memory = FakeMemoryStore(now=lambda: naive_now)
+    memory = FakeMemoryStore(now=_clock)
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: naive_now),
+        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         now=lambda: naive_now,
     )
 
-    result = await loop.respond("book the flight")
-
-    assert result.goal.created_at == _NOW
-    assert result.goal.provenance.last_updated.tzinfo is not None
+    with pytest.raises(PlanningError, match="LearningLoop"):
+        await loop.respond("book the flight")

@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     MemoryDecisionKind,
@@ -28,8 +29,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
 
@@ -82,55 +82,6 @@ def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
         raise ValueError(msg)
 
 
-#: What a value expressed in UTC must report as its offset.
-_NO_OFFSET = timedelta(0)
-
-
-def _canonical_utc(value: object) -> datetime | None:
-    """Rebuild ``value`` as a plain ``datetime`` in UTC, or ``None`` if it is not one.
-
-    The clock-side twin of ``core``'s own check, and separate from it because
-    that one is private to ``core.types`` and reached only through a pydantic
-    validator this write never touches. ``datetime.utcoffset()`` is overridable
-    on a *subclass*, so a reading can carry ``tzinfo is UTC``, answer zero while
-    it is checked, and answer ``+02:00`` once it is stored. Rebuilding as a base
-    ``datetime`` makes the value's UTC-ness a fact about it rather than a claim
-    it keeps making, and only an *exact* ``datetime`` is canonicalised: a
-    subclass can execute code between any two checks — flipping its offset while
-    the components are read — so no ordering of checks on one is sound, whereas
-    the C implementation cannot be intercepted. The clock seams collapse into
-    one guard when ADR-0026 lands (#169).
-    """
-    if type(value) is not datetime or value.tzinfo is not UTC:
-        return None
-    if value.utcoffset() != _NO_OFFSET:
-        return None
-    return datetime(
-        value.year,
-        value.month,
-        value.day,
-        value.hour,
-        value.minute,
-        value.second,
-        value.microsecond,
-        tzinfo=UTC,
-    )
-
-
-def _describe(value: object) -> str:
-    """``repr`` of an untrusted value, for an error message, never raising.
-
-    ``datetime.__repr__`` embeds ``repr(tzinfo)``, so a clock returning a value
-    whose ``tzinfo`` raises from ``__repr__`` would raise from inside the message
-    that reports it — replacing this seam's ``MemoryStoreError`` with whatever
-    that ``__repr__`` threw. The diagnostic must not destroy the diagnosis.
-    """
-    try:
-        return repr(value)
-    except Exception:  # the value cannot describe itself; say so and move on
-        return "<a value whose repr() failed>"
-
-
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
@@ -161,7 +112,7 @@ class MemoryIngestor:
         policy: MemoryPolicy,
         conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
-        now: Callable[[], datetime] = _utcnow,
+        now: Clock = _utcnow,
     ) -> None:
         """Initialise the ingestor.
 
@@ -172,7 +123,11 @@ class MemoryIngestor:
                 count as conflicting with the proposal.
             conflict_limit: Maximum number of conflict candidates to consider.
             now: Clock used to stamp expiry on temporary stores; injectable for
-                deterministic tests.
+                deterministic tests. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`, which is what
+                protects :meth:`_expiry`'s ``model_copy(update=...)`` write —
+                that write skips validators, so the producer is the only place
+                left to catch a non-conforming reading (ADR-0026 §2).
 
         Raises:
             TypeError: If ``conflict_limit`` is not an integer, or
@@ -186,7 +141,7 @@ class MemoryIngestor:
         self._policy = policy
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
-        self._now = now
+        self._clock = checked_clock(now, owner="MemoryIngestor")
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
         """Detect conflicts, apply the policy, and persist the outcome."""
@@ -239,83 +194,29 @@ class MemoryIngestor:
                 return None
 
     def _now_utc(self) -> datetime:
-        """The injected clock's reading, as UTC — attributed if naive, else converted.
+        """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
 
-        Load-bearing for :meth:`_expiry`, and the guard ``LearningLoop._now_utc``
-        already carries on the identical write. ``model_copy(update=...)`` does
-        **not** re-run validators, so an ``expires_at`` installed that way
-        reaches the store exactly as this method left it — and since ADR-0023
-        makes ``MemoryBase.expires_at`` *reject* a naive value rather than assume
-        UTC, there is no longer a validator downstream that would have caught it.
-        A naive deadline then raises ``TypeError`` on the first comparison deep
-        inside the store, or fails to decode after a round trip through the
-        persistent one.
+        Load-bearing for :meth:`_expiry`. ``model_copy(update=...)`` does **not**
+        re-run validators, so an ``expires_at`` installed that way reaches the
+        store exactly as this method left it — and since ADR-0023 makes
+        ``MemoryBase.expires_at`` *reject* a naive value rather than assume UTC,
+        there is no validator downstream that would have caught it. The guard at
+        the producer is therefore the whole protection on this path.
 
-        **Converting, not merely attributing.** ADR-0023 §2 makes UTC storage
-        mandatory and uniform, and the qualifier it attaches is precisely this
-        one: the invariant holds at the validation boundary, so "a write that
-        reaches past it must re-validate". This write does reach past it, so the
-        conversion has to happen here or nowhere — a ``+02:00`` deadline would
-        otherwise be persisted verbatim, and
-        ``SqliteMemoryStore._add_sync``'s expiry index, computed from it, is one
-        of the comparisons §2 exists to keep coherent.
-
-        **The indeterminate offset is checked explicitly, not left to
-        ``astimezone``.** ADR-0023 §5 spells "aware" as ``utcoffset()``
-        returning a value (issue #36), and a ``tzinfo`` that answers ``None``
-        satisfies ``tzinfo is not None`` while satisfying nothing else:
-        ``astimezone(UTC)`` then treats the value as *host-local* and returns a
-        confidently wrong instant, which is precisely the fabrication ADR-0023
-        §3 exists to stop. It becomes ``MemoryStoreError`` here — as does a
-        ``tzinfo`` that raises — rather than a raw ``TypeError`` from
-        ``.timestamp()`` several layers down. Same boundary translation
-        :meth:`_expiry` already performs for ``OverflowError``.
-
-        **What it deliberately does not guard is the reading's type.** A clock
-        returning something that is not a ``datetime`` at all — ``now=lambda:
-        None`` — still raises ``AttributeError`` here. ``mypy --strict`` reports
-        an ``isinstance`` check on it as unreachable, because reaching it means
-        violating the declared ``Callable[[], datetime]``, so guarding would take
-        a ``type: ignore[unreachable]`` for an input the gate already refuses.
-        Making the guard total over the reading is ADR-0026 §2's decision, still
-        `Proposed`, and taking it at one of ten seams would recreate exactly the
-        per-site divergence that ADR exists to end. Tracked in #169.
-
-        This is the shim ADR-0023 §6 requires at a clock-fed field's producer
-        until ADR-0026's guard lands; it is deliberately not that guard.
-
-        The converted result is re-checked, exactly as ``core``'s ``UtcInstant``
-        does and for the same reason: ``astimezone`` is overridable, this value
-        is installed through ``model_copy`` and so never meets that validator,
-        and a naive expiry that got past here would surface as a ``TypeError``
-        at the first comparison in a store.
+        This replaces the ADR-0023 §6 shim that stood here, and the module-local
+        canonicaliser it carried (#169). ADR-0030 §4 permits exactly one
+        implementation of that test, in ``core``; routing this write through
+        :func:`~ai_assistant.core.clock.checked_clock` is what discharges the
+        exception the shim held open.
 
         Raises:
-            MemoryStoreError: If the clock's reading has no usable UTC form.
+            MemoryStoreError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
         """
-        now = self._now()
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=UTC)
-        unusable = (
-            f"the injected clock returned an instant with no UTC representation: {_describe(now)}"
-        )
         try:
-            offset = now.utcoffset()
-        except Exception as exc:  # a tzinfo that raises rather than answering
-            raise MemoryStoreError(unusable) from exc
-        if offset is None:
-            raise MemoryStoreError(unusable)
-        try:
-            # `object` for the same reason `core`'s `_utc_instant` does it:
-            # `astimezone` is annotated to return a datetime and need not.
-            converted: object = now.astimezone(UTC)
-            canonical = _canonical_utc(converted)
-        except Exception as exc:  # incl. OverflowError near datetime.min/max
-            raise MemoryStoreError(unusable) from exc
-        if canonical is None:
-            msg = f"the injected clock did not convert to UTC: {_describe(converted)}"
-            raise MemoryStoreError(msg)
-        return canonical
+            return self._clock()
+        except ValueError as exc:
+            raise MemoryStoreError(str(exc)) from exc
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, failing loudly if it is unrepresentable."""

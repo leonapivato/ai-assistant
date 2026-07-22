@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import (
     IllegalTransitionError,
     PlanningError,
@@ -30,8 +31,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ActionPlan
 
 #: The transition graph from ADR-0014 §4. Anything not listed here is rejected.
@@ -83,10 +83,10 @@ def _revalidated(step: StepExecution) -> StepExecution:
 def _revalidated_state(state: ExecutionState) -> ExecutionState:
     """Re-run ``ExecutionState``'s validators over a state built by ``model_copy``.
 
-    Same reasoning as :func:`_revalidated`, and it also normalises ``updated_at``:
-    an injected clock returning a naive datetime would otherwise be written
-    straight through, leaving a state that violates the tz-aware contract every
-    reader assumes.
+    Same reasoning as :func:`_revalidated`. It no longer carries the tz-awareness
+    of ``updated_at``: that is now the producer's, via
+    :meth:`PlanExecution._now` (ADR-0026 §2), which is what lets ``updated_at``
+    stop depending on a normalising validator downstream.
     """
     return ExecutionState.model_validate(state.model_dump())
 
@@ -96,7 +96,10 @@ class PlanExecution:
 
     Args:
         now: Clock used to stamp transitions; injectable so tests are
-            deterministic, matching `memory` and `context`.
+            deterministic, matching `memory` and `context`. Guarded by
+            :func:`~ai_assistant.core.clock.checked_clock`, so a non-conforming
+            reading is a ``PlanningError`` rather than a silently attributed
+            instant (ADR-0026).
         max_attempts: How many times a single step may be claimed before
             :class:`~ai_assistant.core.errors.RetriesExhaustedError`. The
             ceiling lives here, not in a model's judgement (VISION §7).
@@ -105,15 +108,33 @@ class PlanExecution:
     def __init__(
         self,
         *,
-        now: Callable[[], datetime] = _utcnow,
+        now: Clock = _utcnow,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     ) -> None:
         """Create a tracker with an injectable clock and retry ceiling."""
         if max_attempts < 1:
             msg = "max_attempts must be at least 1"
             raise ValueError(msg)
-        self._now = now
+        self._clock = checked_clock(now, owner="PlanExecution")
         self._max_attempts = max_attempts
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as `planning`'s own error (ADR-0026 §4).
+
+        Every transition timestamp comes through here. ``core`` raises
+        ``ValueError`` — the only option open to a layer that cannot know what
+        its caller will do with the failure — and this seam translates it into
+        the ``AssistantError`` subclass `planning` already owns, the same
+        boundary translation the subsystem performs elsewhere.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise PlanningError(str(exc)) from exc
 
     def start(self, plan: ActionPlan, *, execution_id: str) -> ExecutionState:
         """Open a fresh execution for ``plan``.

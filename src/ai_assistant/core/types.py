@@ -34,7 +34,7 @@ Embedding = Sequence[float]
 """A dense vector embedding of a piece of text (see ADR-0006)."""
 
 
-def _describe(value: object) -> str:
+def describe_untrusted(value: object) -> str:
     """``repr`` of an untrusted value, for an error message, never raising.
 
     ``datetime.__repr__`` embeds ``repr(tzinfo)``, so a hostile ``tzinfo`` can
@@ -42,6 +42,15 @@ def _describe(value: object) -> str:
     field-naming ``ValueError`` this module promises into whatever that
     ``__repr__`` threw, from inside an ``except`` block. The diagnostic must not
     be able to destroy the diagnosis.
+
+    Shared with :func:`ai_assistant.core.clock.checked_clock`, which owes the
+    same promise about its own owner-labelled ``ValueError`` (ADR-0026 §2).
+
+    Args:
+        value: Anything at all, including a value that cannot describe itself.
+
+    Returns:
+        ``repr(value)``, or a fixed placeholder if that raised.
     """
     try:
         return repr(value)
@@ -53,8 +62,19 @@ def _describe(value: object) -> str:
 _NO_OFFSET = timedelta(0)
 
 
-def _canonical_utc(value: object) -> datetime | None:
+def canonical_utc(value: object) -> datetime | None:
     """Rebuild ``value`` as a plain ``datetime`` in UTC, or ``None`` if it is not one.
+
+    **This is `core`'s one canonicaliser** (ADR-0030 §4). Both validating instant
+    seams reach it and neither carries its own: :data:`UtcInstant`'s validator
+    below, and :func:`ai_assistant.core.clock.checked_clock`. A second
+    implementation of this test anywhere in `core` or a subsystem is forbidden —
+    a rule in two places with two test suites is two rules waiting to diverge,
+    which is the condition issues #174 and #152 exist to prevent. It stays in
+    this module because it calls nothing injected: it is a pure function of one
+    value, identical for every consumer, which is ADR-0016 §2's "semantics
+    intrinsic to a type it defines". The import runs ``core/clock.py`` →
+    ``core/types.py``, never the reverse.
 
     Rebuilding rather than returning what ``astimezone`` handed back is what
     makes "stored as UTC" a property of the stored object instead of a claim it
@@ -85,6 +105,15 @@ def _canonical_utc(value: object) -> datetime | None:
     used anywhere in this project, so nothing legitimate is affected today. A
     caller that later needs one converts it at its own boundary — one explicit
     call — rather than ``core`` holding open a hole it has no sound way to close.
+
+    Args:
+        value: The candidate, typed ``object`` deliberately — every caller
+            reaches here with the result of an overridable ``astimezone``, which
+            is *annotated* to return a ``datetime`` and is not obliged to.
+
+    Returns:
+        A fresh base ``datetime`` in UTC, or ``None`` if ``value`` is not
+        exactly a ``datetime`` carrying ``tzinfo is UTC`` and a zero offset.
     """
     if type(value) is not datetime or value.tzinfo is not UTC:
         return None
@@ -140,7 +169,7 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     here. Verifying the result costs one comparison and removes the assumption.
 
     The result must **be a datetime** carrying ``tzinfo is UTC``, and what is
-    stored is a plain ``datetime`` rebuilt from it (:func:`_canonical_utc`).
+    stored is a plain ``datetime`` rebuilt from it (:func:`canonical_utc`).
     Each part answers a way the check could otherwise be talked out of: a
     conversion returning an object that merely exposes a ``tzinfo`` attribute
     would be stored in a field annotated ``datetime``; one returning ``None``
@@ -159,7 +188,7 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     ``ValueError`` rather than escaping as a crash pydantic would not report as a
     validation failure — the "accepted, then unusable" shape a validator exists
     to close. That is also why the messages describe the value through
-    :func:`_describe` rather than ``!r``.
+    :func:`describe_untrusted` rather than ``!r``.
 
     Args:
         value: The candidate instant.
@@ -176,22 +205,23 @@ def _utc_instant(value: datetime, info: ValidationInfo) -> datetime:
     try:
         offset = value.utcoffset()
     except Exception as exc:  # any tzinfo failure is one rejection, not a leaked crash
-        msg = f"{field} must be timezone-aware, but its tzinfo failed: {_describe(value)}"
+        msg = f"{field} must be timezone-aware, but its tzinfo failed: {describe_untrusted(value)}"
         raise ValueError(msg) from exc
     if offset is None:
-        msg = f"{field} must be timezone-aware with a determinate offset, got {_describe(value)}"
+        described = describe_untrusted(value)
+        msg = f"{field} must be timezone-aware with a determinate offset, got {described}"
         raise ValueError(msg)
     try:
         # Deliberately typed `object`: `astimezone` is *annotated* to return a
-        # datetime and is not obliged to, so the check in `_canonical_utc` has to
+        # datetime and is not obliged to, so the check in `canonical_utc` has to
         # be a real one rather than one the type checker folds away as always-true.
         converted: object = value.astimezone(UTC)
-        canonical = _canonical_utc(converted)
+        canonical = canonical_utc(converted)
     except Exception as exc:  # incl. OverflowError, which is not a ValueError
-        msg = f"{field} has no UTC representation, got {_describe(value)}"
+        msg = f"{field} has no UTC representation, got {describe_untrusted(value)}"
         raise ValueError(msg) from exc
     if canonical is None:
-        msg = f"{field} did not convert to UTC, got {_describe(converted)}"
+        msg = f"{field} did not convert to UTC, got {describe_untrusted(converted)}"
         raise ValueError(msg)
     return canonical
 
@@ -229,23 +259,20 @@ _ORDERING_DEFERRED = frozenset(
 ADR-0023 §6 binds its own migration: a field a clock feeds is not tightened to
 :data:`UtcInstant` until that clock is guaranteed aware, **or** the existing
 normalisation at the producer boundary is retained as a shim until it is. Six of
-the nine clock-fed fields have such a shim — ``CurrentContext.now`` via
-``ClockContextSource.contribute``, and ``MemoryBase.expires_at``,
-``Goal.created_at`` and ``Provenance.last_updated`` via ``LearningLoop._now_utc``
-and ``MemoryIngestor._now_utc`` — so they are migrated.
+the nine clock-fed fields were migrated under such a shim; these five had none,
+because ``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner`` and
+``FakePlanStore`` pass an injected reading straight into the field and what
+normalised a naive one was *the validator below* — the very thing
+:data:`UtcInstant` removes.
 
-These five have none. ``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner``
-and ``FakePlanStore`` pass an injected reading straight into the field, and what
-normalises a naive one today is *the validator below* — the very thing
-:data:`UtcInstant` would remove. Tightening them now would break a naive test or
-config clock with nothing standing behind it, which is precisely what the
-ordering exists to prevent. Manufacturing a shim instead would mean building
-ADR-0026's producer guard, which is unratified and not this change's to build.
-
-So their validators stay as they are — already ADR-0023 §2-conformant on
-conversion, still attributing on a naive value — and the gate check in
-``tests/core/test_instant_coverage.py`` reads this set as its one exemption, so
-the debt is enumerated and shrinks to empty when ADR-0026's producers land.
+**ADR-0026's producer guard has since landed**, so the precondition is met and
+these five are unblocked. They are deliberately not migrated in the same change:
+ADR-0026 §5 is explicit that the producers lead and the fields follow, and
+folding the field migration into the producers' change would collapse the very
+ordering the two ADRs exist to keep separable. The set therefore still stands,
+now as *ready* work rather than blocked work, and the gate check in
+``tests/core/test_instant_coverage.py`` reads it as its one exemption — so the
+debt stays enumerated and shrinks to empty when #130 tightens them.
 """
 
 
@@ -1739,11 +1766,12 @@ class ToolDefinition(BaseModel):
         whatever pydantic put inside ``cause``. Interpolating either directly
         would let the diagnostic destroy the diagnosis, raising that object's
         exception out of an ``except`` block instead of the ``ValueError`` this
-        method promises. :func:`_describe` is the helper this module already
+        method promises. :func:`describe_untrusted` is the helper this module already
         keeps for exactly that, and this is the second place it is needed.
         """
-        detail = "" if cause is None else f" ({_describe(cause)})"
-        return f"tool has no JSON encoding, so it could not be stored: {_describe(self.id)}{detail}"
+        detail = "" if cause is None else f" ({describe_untrusted(cause)})"
+        described = describe_untrusted(self.id)
+        return f"tool has no JSON encoding, so it could not be stored: {described}{detail}"
 
 
 class PermissionOutcome(_SeverityScale):
