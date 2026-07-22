@@ -8,8 +8,10 @@ The suite asserts only what is universal to the contract — that ``decide`` is
 total, deterministic, returns an internally coherent decision, and never commits
 secret-tier data. It deliberately does **not** encode *which*
 ruling a given proposal earns: that is each policy's reasoning, and even the
-default's is expected to change (issue #38). ``DefaultMemoryPolicy``'s
-specific rules are tested in ``test_policy.py``.
+default's changes — ADR-0038 rewrote what it returns for a user-asserted
+proposal that meets a conflict, without touching a line here, which is the
+separation working. ``DefaultMemoryPolicy``'s specific rules are tested in
+``test_policy.py``.
 
 Every obligation here traces to something already ratified — determinism to the
 ``MemoryPolicy`` docstring, the secret-tier rule to ADR-0004 §3, the coherence of

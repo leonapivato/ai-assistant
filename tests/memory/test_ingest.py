@@ -31,9 +31,14 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
-def _prov(confidence: float, evidence: tuple[str, ...] = ()) -> Provenance:
+def _prov(
+    confidence: float,
+    evidence: tuple[str, ...] = (),
+    *,
+    source: MemorySource = MemorySource.OBSERVED,
+) -> Provenance:
     return Provenance(
-        source=MemorySource.OBSERVED,
+        source=source,
         confidence=confidence,
         last_updated=_WHEN,
         evidence=list(evidence),
@@ -50,9 +55,24 @@ def _preference(
     *,
     confidence: float = 0.6,
     evidence: tuple[str, ...] = (),
+    source: MemorySource = MemorySource.OBSERVED,
 ) -> MemoryRecord:
     return PreferenceMemory(
-        id=record_id, content=content, preference=content, provenance=_prov(confidence, evidence)
+        id=record_id,
+        content=content,
+        preference=content,
+        provenance=_prov(confidence, evidence, source=source),
+    )
+
+
+def _asserted(record_id: str, content: str, *, evidence: tuple[str, ...] = ()) -> MemoryRecord:
+    """A user-asserted preference — the shape an explicit correction arrives in."""
+    return _preference(
+        record_id,
+        content,
+        confidence=1.0,
+        evidence=evidence,
+        source=MemorySource.USER_ASSERTED,
     )
 
 
@@ -105,6 +125,32 @@ async def test_conflicting_proposal_merges_into_existing() -> None:
     assert merged.provenance.confidence == 0.7  # max of the two
     assert set(merged.provenance.evidence) == {"ev1", "ev2"}
     assert await store.get("new") is None  # merged in place, not duplicated
+
+
+async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
+    # The unlearning path (issue #38, ADR-0038): a correction must take the
+    # stale belief off the read path, not sit beside it. Asserted end to end
+    # rather than on the policy alone, because "the wrong memory is still
+    # retrievable" is a property of the store after ingestion.
+    store = InMemoryMemoryStore()
+    await store.add(
+        _preference("stale", "user prefers morning meetings", confidence=0.6, evidence=("ev1",))
+    )
+
+    result = await _ingestor(store).ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings", evidence=("ev2",)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.MERGE
+    assert result.record_id == "stale"
+    superseded = await store.get("stale")
+    assert superseded is not None
+    assert superseded.content == "user prefers afternoon meetings"
+    assert superseded.provenance.source is MemorySource.USER_ASSERTED
+    assert superseded.provenance.confidence == 1.0
+    assert set(superseded.provenance.evidence) == {"ev1", "ev2"}  # the trail survives
+    assert await store.get("correction") is None  # not stored beside the stale belief
+    assert [record.id for record in await store.export()] == ["stale"]
 
 
 class _RecordingPolicy:
