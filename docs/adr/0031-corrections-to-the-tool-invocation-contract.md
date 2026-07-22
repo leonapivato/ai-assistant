@@ -461,7 +461,7 @@ in the same place and is not covered by that sentence. The rule generalises to
 where it was already needed:
 
 > **No validator on `ToolCall`, `ToolResult` or `ToolFailure` interpolates a
-> value it is validating.** It may name the value's type.
+> value that can carry user content.** It may name such a value's type.
 
 The concrete case is `ToolResult`'s cross-field check: a non-`SUCCEEDED` result
 carrying an output is refused with a message naming
@@ -469,6 +469,32 @@ carrying an output is refused with a message naming
 most while debugging — would put a tool's output, which carries Tier 1 data
 routinely, into a `ValidationError` bound for a log. `ToolCall`'s authorisation
 validator is under the same rule, where the tempting value is `parameters`.
+
+**"User content" is the boundary, and it is drawn by the field's type rather
+than left to judgement.** A field typed `FrozenJsonValue` or `FrozenJsonMapping`
+— `ToolResult.output`, `ActionRequest.parameters` — is unbounded content the
+system did not author, and is what the rule forbids. An **identifier** and a
+**`StrEnum` member** are not: three outcome constants and a decision id are the
+system's own vocabulary, and both are already written to logs, to the audit
+trail (ADR-0021 §4) and into `StepExecution.approval_ref` and `error`
+(ADR-0014 §3) by ratified decisions. A rule forbidding them here would be one
+that only these three types observed, while the same values flowed to the same
+places from everywhere else.
+
+Stating it the blanket way — *never interpolate a value you are validating* —
+was the first draft and is wrong on the code as it stands: `ToolCall._authorised`
+names `decision.id` and `ToolResult._outcome_fields_match` names `self.outcome`,
+both deliberately, because a rejection that cannot say *which* decision or
+*which* outcome is a rejection nobody can act on. The narrower rule is the one
+the implementation already satisfies, which is why §5(b) is a ratification and
+not a change.
+
+**The residual question is not this ADR's and has a home.** `Identifier` refuses
+only a blank, so an id is an unbounded string in the type system even though
+nothing mints one from user text; whether ids need a canonical syntax that would
+bound them is **issue #62**, which ADR-0018 §2 already opened for the adjacent
+reason. Narrowing it here would be a cross-lane change argued from one
+validator.
 
 The cost is the same one §3 already accepted for the seam's `INTERNAL` message,
 and it is accepted here for the same reason: a thinner diagnostic beats a
@@ -547,7 +573,9 @@ records that the ADR was amended, not how many times.
   cancellation and calls uncancel() on the invoking task erases the seam's
   evidence and the call returns an ordinary result (#189). §1 gains the callable
   half of the rebinding refusal, a tools/ invariant; §3 gains the rule that a
-  validator on these types names a value's type and never the value. The new
+  validator on these types names the type of a value that can carry user
+  content, never the value; ids and enum members are the system's own
+  vocabulary and may be named. The new
   core surface is eight names, not seven. Everything else in §§1, 3-4 stands as
   ratified: the biconditional, the three seam checks and their order, failure as
   data, retryable, the seam's ownership of the deadline and its classification
