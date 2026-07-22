@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.types import (
     CostBasis,
@@ -48,6 +48,12 @@ def _definition(**overrides: object) -> ToolDefinition:
     }
     fields.update(overrides)
     return ToolDefinition(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+
+class _Recorded(BaseModel):
+    """The smallest thing that embeds a definition by value, as a record does."""
+
+    tool: ToolDefinition
 
 
 # --- severity ordering --------------------------------------------------
@@ -479,3 +485,45 @@ def test_every_constructible_definition_survives_a_json_round_trip() -> None:
     reloaded = ToolDefinition.model_validate_json(definition.model_dump_json())
 
     assert reloaded == definition
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pytest.param({"maximum": 10**5000}, id="top-level"),
+        pytest.param({"maximum": -(10**5000)}, id="negative"),
+        pytest.param({"properties": {"n": {"enum": [1, 10**5000]}}}, id="nested-in-a-list"),
+    ],
+)
+def test_a_definition_with_an_unrenderable_integer_is_refused(schema: dict[str, object]) -> None:
+    """The other value that satisfies its type and has no JSON rendering.
+
+    ``json.dumps`` renders an integer through ``str()``, and CPython refuses
+    that past its integer-string conversion limit. ``_digestible`` already
+    covers this class for a request's parameters; a declaration reaches it
+    through ``parameters_schema`` in exactly the same way, and must fail with
+    the same diagnostic rather than with a runtime-specific one.
+    """
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _definition(parameters_schema=schema)
+
+
+def test_a_large_but_renderable_integer_is_still_accepted() -> None:
+    """The check is the render, not a size policy of this type's own."""
+    definition = _definition(parameters_schema={"maximum": 10**100})
+
+    assert ToolDefinition.model_validate_json(definition.model_dump_json()) == definition
+
+
+def test_a_definition_tampered_to_hold_an_unserialisable_value_is_refused() -> None:
+    """The third way the render fails, reachable only past ``frozen=True``.
+
+    ``model_dump(mode="json")`` raises ``PydanticSerializationError`` — itself a
+    ``ValueError`` — rather than returning something ``json.dumps`` chokes on,
+    so it has to be caught around the dump and not only around the render.
+    """
+    tampered = _definition()
+    object.__setattr__(tampered, "parameters_schema", {"x": object()})
+
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _Recorded(tool=tampered)
