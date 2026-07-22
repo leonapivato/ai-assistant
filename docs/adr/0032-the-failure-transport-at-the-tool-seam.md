@@ -351,10 +351,29 @@ unchanged and neither reads the carrier; ranks 1 and 2 are simply checked first.
 The `ClassifiedToolError` handler sits exactly where the `except Exception`
 handler sits today — after the interruption check, not before it.
 
-**ADR-0031 §2(b)'s normal-return postcondition is untouched.** A classified
-raise is not a normal return, so the postcondition's subject does not change. A
-callable that catches its own cancellation *and* raises a `ClassifiedToolError`
-is covered by rank 1, which reads the same delta on the same path.
+**ADR-0031 §2(b)'s postcondition is untouched and gains a second subject.** As
+ratified it reads: "before a `SUCCEEDED` result is constructed, the seam
+re-reads the deadline and the cancellation delta, and an interruption found
+there wins over the returned value." That sentence names `SUCCEEDED` because a
+normal return was the only path that constructed a result from something the
+callable produced. This ADR adds a second, so the rule is stated in the form
+that covers both:
+
+> **Before *any* result is constructed, the seam re-reads the deadline and the
+> cancellation delta**, and an interruption found there wins.
+
+**This is not pedantry: §6's revalidation is tool-supplied code, and it runs
+after the check.** A `ToolFailure` subclass whose `model_dump()` calls
+`cancel()` on the invoking task and then returns a perfectly valid mapping
+raises the delta *between* the interruption check and the result — so a seam
+that checked only on entry to the handler would return a `FAILED` result from a
+task carrying a pending cancellation, which is rank 1 violated by the mechanism
+§6 introduced. Reading the carrier at all is what creates the window, so the
+re-read closes it where it is opened.
+
+A callable that catches its own cancellation *and* raises a
+`ClassifiedToolError` is covered by rank 1 on the first read; this second read
+is for what the carrier does while being read.
 
 ### 5. The message crosses the seam by value and unedited, or not at all
 
@@ -589,6 +608,10 @@ rather than asserted:
   it has — a pending cancellation, then this seam's expired deadline, then the
   tool's classification — and §4's cancellation and expiry branches are
   themselves unchanged: neither reads the carrier, and both discard it. The
+  postcondition ADR-0031 §2(b) states before a SUCCEEDED result is constructed
+  holds before any result is constructed, because reading the carrier is itself
+  tool-supplied code that can raise the cancellation delta after the handler's
+  first check. The
   carrier is revalidated before it is read, in ADR-0018 §4's model_dump() then
   model_validate() idiom, because isinstance is not evidence a pydantic model
   was validated — model_construct bypasses every validator — and a carrier that
@@ -639,7 +662,12 @@ rather than asserted:
   CANCELLED stands and ADR-0032 §3 depends on it: an integration may raise
   CANCELLED, and the seam still never synthesises it. §2's provenance rule and
   §2(d)'s precedence stand and outrank the new transport, which is ranked below
-  both. §4's declared limits and §5's rules are untouched, and §5(b)'s
+  both. §2(b)'s postcondition is unchanged and acquires a second subject: it
+  names SUCCEEDED because a normal return was the only path that built a result
+  from what the callable produced, and ADR-0032 §4 states it for any result,
+  since reading the carrier is tool-supplied code that can raise the delta after
+  the handler's first check. §4's declared limits and §5's rules are untouched,
+  and §5(b)'s
   enumerated no-interpolation rule is joined by a second enumeration in
   ADR-0032 §5 rather than widened. The Consequences' "five of the eight failure
   kinds still have no carrier (#192)" and "ADR-0029 §5's retry algebra stays
@@ -777,6 +805,13 @@ what keeps the fake honest without importing `tools/`.
   Both must come back `INTERNAL`. Paired with a subclass whose `model_dump()`
   raises a `BaseException`, which must propagate, so the guard is not written as
   a bare `except BaseException`.
+
+- **A carrier that cancels while being read** (§4's re-read): a `ToolFailure`
+  subclass whose `model_dump()` calls `cancel()` on the invoking task and then
+  returns valid data. `invoke` must raise `CancelledError`, not return the
+  classified result. Nothing else pins it — every other carrier case leaves the
+  delta alone, so an implementation that checks interruption once on entry to
+  the handler passes all of them.
 
 - **The plain case still holds.** A tool raising an ordinary `RuntimeError` is
   still `INTERNAL` and a `BaseException` still propagates — ADR-0029 §10's
