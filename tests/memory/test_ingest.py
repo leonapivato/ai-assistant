@@ -218,6 +218,86 @@ async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:
     assert stored.expires_at == datetime(2026, 6, 8, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"conflict_limit": 0}, "conflict_limit must be at least 1"),
+        ({"conflict_limit": -1}, "conflict_limit must be at least 1"),
+        ({"conflict_threshold": float("nan")}, "finite value in"),
+        ({"conflict_threshold": 1.5}, "finite value in"),
+        ({"conflict_threshold": -0.1}, "finite value in"),
+    ],
+)
+def test_tuning_that_would_silently_disable_a_stage_is_refused(
+    kwargs: dict[str, float], match: str
+) -> None:
+    """Relocated from ``LearningLoop`` with the values it guards (ADR-0028 §4a).
+
+    ADR-0022 §4a's guarantee is moved, not retired: ``conflict_limit=0`` hands
+    the policy no conflicts, so a duplicate is accepted while the caller reports
+    a healthy write, and a ``NaN`` threshold compares ``False`` against every
+    score and does the same. Refused at construction, by the object that now
+    reads them.
+    """
+    with pytest.raises(ValueError, match=match):
+        MemoryIngestor(
+            store=InMemoryMemoryStore(),
+            policy=DefaultMemoryPolicy(),
+            now=_fixed_now,
+            **kwargs,  # type: ignore[arg-type]  # deliberately invalid tuning
+        )
+
+
+@pytest.mark.parametrize(("threshold", "limit"), [(0.0, 1), (1.0, 1)])
+async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) -> None:
+    """0 and 1 bound the score range, and 1 is the smallest useful limit."""
+    store = InMemoryMemoryStore()
+    ingestor = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        conflict_threshold=threshold,
+        conflict_limit=limit,
+        now=_fixed_now,
+    )
+
+    result = await ingestor.ingest(_proposal(_semantic("1", "unique fact", confidence=0.9)))
+
+    assert result.record_id == "1"
+
+
+@pytest.mark.parametrize("limit", [1.5, float("inf"), True, "5"])
+def test_tuning_refuses_a_conflict_limit_that_is_not_an_integer(limit: object) -> None:
+    """A non-integral limit reaches ``MemoryStore.search``, where slicing raises."""
+    with pytest.raises(TypeError, match="must be an integer"):
+        MemoryIngestor(
+            store=InMemoryMemoryStore(),
+            policy=DefaultMemoryPolicy(),
+            conflict_limit=limit,  # type: ignore[arg-type]  # deliberately invalid tuning
+            now=_fixed_now,
+        )
+
+
+@pytest.mark.parametrize("threshold", [True, False])
+def test_tuning_refuses_a_boolean_threshold(threshold: bool) -> None:
+    """A flag is not a threshold, just as it is not a count (#111).
+
+    ``bool`` is an ``int`` subclass, so both values clear the finite-and-in-range
+    test and are read silently as ``1.0`` and ``0.0``. ``True`` is the one that
+    bites — it restricts conflicts to perfect-score matches while looking like
+    deliberate tuning.
+    """
+    with pytest.raises(TypeError, match="must be a real number"):
+        MemoryIngestor(
+            store=InMemoryMemoryStore(),
+            policy=DefaultMemoryPolicy(),
+            # No `type: ignore` needed, and that is the point: `bool` is a
+            # `float` to the type checker, so nothing but this runtime check
+            # stands between a flag and the threshold it would be read as.
+            conflict_threshold=threshold,
+            now=_fixed_now,
+        )
+
+
 async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
     """``_expiry`` installs ``expires_at`` through ``model_copy``, which skips
     validators — so the clock is the only place this can be caught.

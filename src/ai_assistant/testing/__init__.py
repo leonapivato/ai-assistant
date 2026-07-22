@@ -21,6 +21,7 @@ from ai_assistant.testing.permissions import FakeActionPolicy, FakeAuditTrail
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 from ai_assistant.testing.tools import FakeToolRegistry
+from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
     "FakeActionPolicy",
@@ -30,6 +31,7 @@ __all__ = [
     "FakeFeedbackProcessor",
     "FakeMemoryPolicy",
     "FakeMemoryStore",
+    "FakeMemoryWriter",
     "FakeModelProvider",
     "FakePlanStore",
     "FakePlanner",

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         Goal,
         GoalDeletion,
         MemoryDecision,
+        MemoryIngestResult,
         MemoryKind,
         MemoryRecord,
         MemoryUpdateProposal,
@@ -208,6 +209,39 @@ class MemoryPolicy(Protocol):
         Returns:
             The decision to accept, reject, merge, defer to the user, or store
             the proposal temporarily.
+        """
+        ...
+
+
+@runtime_checkable
+class MemoryWriter(Protocol):
+    """The memory write path: conflicts, policy, persistence, in one call.
+
+    The "persist" half of propose/dispose/persist (ADR-0028). It exists so a
+    consumer of memory — the `orchestration` pipeline, above all — can commit a
+    proposal without re-deriving `memory`'s own semantics: how a conflict is
+    found, and what folding two records into one means.
+
+    A writer holds its own :class:`MemoryPolicy` and its own store, and exposes
+    neither. **The store it writes to must be the one its caller retrieves
+    from** — a composition-root obligation, unenforceable here precisely because
+    no store is on this seam (ADR-0028 §4).
+    """
+
+    async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+        """Resolve conflicts, ask the policy to rule, and apply its ruling.
+
+        Args:
+            proposal: The candidate memory and why it was proposed. Its
+                ``conflicts`` are resolved here, not supplied by the caller.
+
+        Returns:
+            The policy's decision and the id written, or ``None`` if nothing
+            was.
+
+        Raises:
+            MemoryStoreError: If reading conflicts or writing a record failed,
+                or a ``MERGE`` named a target that is not among the conflicts.
         """
         ...
 

@@ -16,6 +16,7 @@ concrete store or policy is wired in.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import MemoryStoreError
@@ -38,6 +39,47 @@ _DEFAULT_CONFLICT_LIMIT = 5
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
+    """Reject conflict tuning that would disable a stage while looking healthy.
+
+    Relocated from ``LearningLoop`` with the values themselves (ADR-0028 §4a),
+    so ADR-0022 §4a's guarantee is moved rather than retired: the same values
+    are refused at the same moment, by the object that reads them. Each is a
+    *silent* misconfiguration, which is why it is refused at construction rather
+    than left to surface as behaviour. ``conflict_limit=0`` hands the policy no
+    conflicts, so every proposal is ruled on as though nothing contradicted it,
+    and a duplicate is accepted while the caller reports a healthy write. A
+    ``NaN`` threshold compares ``False`` against every score and does the same.
+
+    Raises:
+        TypeError: If ``conflict_limit`` is not an integer, or
+            ``conflict_threshold`` is a ``bool``.
+        ValueError: If ``conflict_limit`` is below 1, or ``conflict_threshold``
+            is not a finite value in ``[0, 1]`` — the range a
+            ``MemoryRecord.score`` occupies.
+    """
+    # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both survive
+    # — and a non-integral limit reaches `MemoryStore.search`, where a store
+    # slicing by it raises `TypeError` far from the mistake. `bool` is excluded
+    # because it is an `int` subclass and a flag is not a count.
+    if isinstance(conflict_limit, bool) or not isinstance(conflict_limit, int):
+        msg = f"conflict_limit must be an integer, got {conflict_limit!r}"
+        raise TypeError(msg)
+    if conflict_limit < 1:
+        msg = f"conflict_limit must be at least 1, got {conflict_limit}"
+        raise ValueError(msg)
+    # Checked before the range test, which a `bool` silently survives: `bool` is
+    # an `int` subclass, so `isfinite(True)` holds and `0.0 <= True <= 1.0` is
+    # true — a flag would be read as the threshold 1.0, restricting conflicts to
+    # perfect-score matches. Rejected for the same reason the limit rejects one.
+    if isinstance(conflict_threshold, bool):
+        msg = f"conflict_threshold must be a real number, got {conflict_threshold!r}"
+        raise TypeError(msg)
+    if not isfinite(conflict_threshold) or not 0.0 <= conflict_threshold <= 1.0:
+        msg = f"conflict_threshold must be a finite value in [0, 1], got {conflict_threshold!r}"
+        raise ValueError(msg)
 
 
 #: What a value expressed in UTC must report as its offset.
@@ -105,7 +147,12 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
 
 
 class MemoryIngestor:
-    """Runs a proposed memory through conflict detection, policy, and storage."""
+    """Runs a proposed memory through conflict detection, policy, and storage.
+
+    Structurally satisfies :class:`~ai_assistant.core.protocols.MemoryWriter`
+    (ADR-0028 §2), which is how `orchestration` reaches this write path without
+    importing it.
+    """
 
     def __init__(
         self,
@@ -126,7 +173,15 @@ class MemoryIngestor:
             conflict_limit: Maximum number of conflict candidates to consider.
             now: Clock used to stamp expiry on temporary stores; injectable for
                 deterministic tests.
+
+        Raises:
+            TypeError: If ``conflict_limit`` is not an integer, or
+                ``conflict_threshold`` is a ``bool`` (see :func:`_check_tuning`).
+            ValueError: If ``conflict_limit`` is below 1, or
+                ``conflict_threshold`` is not a finite value in ``[0, 1]`` (see
+                :func:`_check_tuning`).
         """
+        _check_tuning(conflict_threshold=conflict_threshold, conflict_limit=conflict_limit)
         self._store = store
         self._policy = policy
         self._conflict_threshold = conflict_threshold
