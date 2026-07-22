@@ -102,16 +102,32 @@ The asymmetry is about what the two cost to be wrong about:
   the strength of a 0.75 lexical or embedding score is a loss with no recovery
   path.
 
-So the existing machinery is good enough for this destructive action *against
-inferences specifically* — not because the threshold is trustworthy, but because
-the blast radius on that side is bounded and recoverable. It is not good enough
-against assertions, and rule 3 below is what keeps it away from them.
+So the existing machinery is good enough for this destructive action *against a
+belief we were not given by the user* — not because the threshold is
+trustworthy, but because the blast radius on that side is bounded and
+recoverable. It is not good enough against assertions, and rule 3 below is what
+keeps it away from them.
 
-### 3. An inference may never supersede an assertion
+**`EXTERNAL` is on the supersedable side, deliberately.** ADR-0005 §2 makes it a
+provenance source of its own, and unlike `OBSERVED`/`INFERRED` it may carry
+confidence 1.0 — so it is worth saying why it is not treated like an assertion.
+It passes the recoverability test above and for a stronger reason: the external
+system is still the system of record and will re-supply the fact on the next
+sync, where an inference has only the evidence that produced it. And on the
+substance, a user is the authority on a claim about themselves; a stale
+integration record losing to an explicit correction is the outcome we want, not
+a regrettable side effect. The re-sync direction is protected by rule 3 rather
+than by luck: once superseded, the record is `USER_ASSERTED`, so a later
+`EXTERNAL` proposal contradicting it is a non-asserted proposal against an
+asserted record and earns `ASK_USER` — a sync cannot silently undo the
+correction.
+
+### 3. A non-assertion may never supersede an assertion
 
 Stated even though it is obvious, because the whole rule rests on it. The
-direction is strictly one-way: an assertion may displace an inference; an
-inference may **never** displace an assertion, silently or otherwise. This is not
+direction is strictly one-way: an assertion may displace anything we were not
+told; nothing we were not told may **ever** displace an assertion, silently or
+otherwise. This is not
 new — `DefaultMemoryPolicy` already returns `ASK_USER` when a non-asserted
 proposal conflicts with a user-asserted record — and this ADR ratifies that rule
 as the counterpart of §1 rather than an incidental precaution.

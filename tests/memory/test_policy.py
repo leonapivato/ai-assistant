@@ -114,6 +114,35 @@ async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assert
     assert decision.merge_into == "our-guess"
 
 
+async def test_user_assertion_supersedes_an_external_record_despite_full_confidence() -> None:
+    # EXTERNAL is neither asserted nor derived and may carry confidence 1.0, so
+    # it is the one source where "supersede the non-asserted conflict" needs
+    # arguing rather than assuming. ADR-0038 §2 puts it on the supersedable
+    # side: the integration remains the system of record and re-supplies the
+    # fact, and the user is the authority on a claim about themselves. Pinned
+    # because the alternative reading — treat full confidence as untouchable —
+    # is the plausible mistake a later edit would make.
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    imported = _semantic("imported", source=MemorySource.EXTERNAL, confidence=1.0)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[imported])
+
+    assert decision.kind is MemoryDecisionKind.MERGE
+    assert decision.merge_into == "imported"
+
+
+async def test_external_proposal_never_supersedes_the_assertion_that_replaced_it() -> None:
+    # The other half of ADR-0038 §2's EXTERNAL argument: supersession leaves the
+    # record USER_ASSERTED, so the next sync meets rule 2 and defers instead of
+    # silently restoring the stale imported value.
+    proposal = _proposal(_semantic("sync", source=MemorySource.EXTERNAL, confidence=1.0))
+    corrected = _semantic("corrected", source=MemorySource.USER_ASSERTED, confidence=1.0)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[corrected])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
 async def test_user_assertion_conflicting_only_with_assertions_is_accepted() -> None:
     # Two things the user said, both at confidence 1.0: nothing ranks them, and
     # the conflict signal is not strong enough to destroy either. Accept beside
