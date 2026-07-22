@@ -1,6 +1,6 @@
 # 31. Corrections to the tool invocation contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Amends on ratification: ADR-0029 §§1, 3–4 and its Consequences. The edits are
   **not** made by this change — §7 records their exact form and why they wait,
