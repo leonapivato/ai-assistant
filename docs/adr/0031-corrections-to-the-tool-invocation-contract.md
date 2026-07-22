@@ -487,28 +487,34 @@ than left to judgement.** A field typed `FrozenJsonValue` or `FrozenJsonMapping`
 system did not author, and is what the rule forbids. A **`StrEnum` member** is not: three outcome
 constants are a closed set the type declares.
 
-**An identifier is the hard case, and the exemption is argued rather than
-asserted.** `Identifier` refuses only a blank, so the *type* does not bound what
-an id holds — a caller that minted a decision id from an email address would put
-that address into `ToolCall._authorised`'s rejection, which is a `ValidationError`
-bound for a log the key-based redactor cannot see. That is true, and it is not a
-reason to strike the id from this message, for two reasons:
+**An identifier is the hard case, and it is answered by adding an obligation
+rather than by claiming an exemption.** `Identifier` refuses only a blank, so
+the *type* bounds nothing, and `PermissionDecision.from_request` takes the id as
+an argument — "minted by the caller that records". So the safety of naming
+`decision.id` in `ToolCall._authorised`'s rejection is a property of the minting
+caller, not of the type, and ADR-0029 never says so. This ADR says it:
 
-- **The exposure is systemic and this validator is not where it is decided.**
-  The same id is written to the audit trail by ADR-0021 §4, to
-  `StepExecution.approval_ref` by ADR-0014 §3, and to every log line that names
-  a tool id, a step id or a capability. Refusing it in three validators would
-  close a door beside an open window — ADR-0018 §3's shape — while making a
-  rejection unable to say *which* decision failed, which is a rejection nobody
-  can act on.
-- **The rule that governs it already exists and is not weakened here.**
-  ADR-0004 §5 forbids Tier 0/1 content in logs. A caller that mints an
-  identifier from user text violates that rule at the point of minting, in every
-  store the id reaches, and this ADR neither licenses nor detects it.
+> **An identifier this contract names must be Tier 2-safe**: minted from system
+> vocabulary, never derived from Tier 0 or Tier 1 content. This binds whoever
+> mints a `PermissionDecision.id`, a step id, or a tool id.
+
+**That is a restatement of where the burden already sits, not a new one.**
+ADR-0021 §4 writes the decision — id included — into the audit trail, and
+ADR-0014 §3 writes it into `StepExecution.approval_ref` and names it in `error`.
+An id derived from user content is therefore a Tier 1 disclosure in two durable
+stores *before* any validator sees it, and ADR-0004 §5 already forbids it there.
+What was missing is a sentence making the obligation checkable at the point a
+caller mints one, which is the only point where it can be honoured.
+
+**With that stated, stripping the id from the message closes nothing and costs
+something.** It leaves the id in both stores and in every log line naming a
+tool, a step or a capability, while making the rejection unable to say *which*
+decision failed — a door closed beside an open window (ADR-0018 §3), in exchange
+for a rejection nobody can act on.
 
 So the boundary this clause draws is over **fields whose declared type is
-unbounded content** — the ones a tool fills in — and it deliberately does not
-re-decide what an identifier may contain.
+unbounded content** — the ones a tool fills in — with identifiers held to the
+obligation above rather than exempted from the concern.
 
 Stating it the blanket way — *never interpolate a value you are validating* —
 was the first draft and is wrong on the code as it stands: `ToolCall._authorised`
@@ -518,12 +524,14 @@ both deliberately, because a rejection that cannot say *which* decision or
 the implementation already satisfies, which is why §5(b) is a ratification and
 not a change.
 
-**The residual has a home, and naming it is the honest close.** Whether ids need
-a canonical syntax that would bound them mechanically — turning the argument
-above into a type guarantee — is **issue #62**, which ADR-0018 §2 opened for the
-adjacent reason and expects to let `VisibleIdentifier` collapse back into
+**The obligation is not mechanical, and that residual has a home.** Nothing
+checks that a minted id carries no user content; a canonical identifier syntax
+that would bound it in the type is **issue #62**, which ADR-0018 §2 opened for
+the adjacent reason and expects to let `VisibleIdentifier` collapse back into
 `Identifier`. Deciding it here would be a cross-lane change to a type `planning`
-shares, argued from one validator in a tools ADR.
+shares, argued from one validator in a tools ADR — and it would not be an
+excuse to defer the obligation, since ADR-0021's and ADR-0014's durable stores
+need it today whether or not a type enforces it.
 
 The cost is the same one §3 already accepted for the seam's `INTERNAL` message,
 and it is accepted here for the same reason: a thinner diagnostic beats a
@@ -602,9 +610,10 @@ records that the ADR was amended, not how many times.
   cancellation and calls uncancel() on the invoking task erases the seam's
   evidence and the call returns an ordinary result (#189). §1 gains the callable
   half of the rebinding refusal, a tools/ invariant; §3 gains the rule that a
-  validator on these types names the type of a value that can carry user
-  content, never the value; ids and enum members are the system's own
-  vocabulary and may be named. The new
+  validator on these types names the type of a value whose declared type is
+  unbounded content, never the value; an enum member may be named, and so may an
+  identifier, which this ADR obliges its minting caller to keep Tier 2-safe. The
+  new
   core surface is eight names, not seven. Everything else in §§1, 3-4 stands as
   ratified: the biconditional, the three seam checks and their order, failure as
   data, retryable, the seam's ownership of the deadline and its classification
@@ -723,6 +732,13 @@ inventing it.
   classify its own failure: today an upstream 429 arrives as `INTERNAL`, which
   is not retryable. This ADR does not decide that transport, and says so where
   it would otherwise be assumed.
+- **Whoever mints an identifier now owes it being Tier 2-safe** (§5(b)). Nothing
+  enforces it — `Identifier` refuses only a blank, and #62 is where a type-level
+  answer lives — but the obligation was load-bearing and unstated: ADR-0021 §4
+  and ADR-0014 §3 already put decision and step ids into durable stores and log
+  lines, so an id derived from user content was a disclosure before this
+  contract existed. Writing it down is what makes naming an id in a rejection
+  defensible rather than assumed.
 - **#189 closes as a declared limit rather than a fix**, and the conformance
   suite pins it, so an implementation that later closes it by isolating the
   callable fails the suite and has to come back through an ADR. That is a real
