@@ -860,7 +860,10 @@ def test_a_malformed_disposition_budget_refuses_with_a_configuration_error(
     _fake_gh(tmp_path / "bin")
     _record_review(repo, sha, "adversarial")
 
-    for bad in ("not-a-number", "1/0", "-1", "1234567890", ""):
+    # `08` and `000010000` are the leading-zero cases: bash arithmetic reads them
+    # as octal, so the first is a syntax error that leaves the guard *false* rather
+    # than refusing, and the second silently means 4096.
+    for bad in ("not-a-number", "1/0", "-1", "1234567890", "08", "000010000", ""):
         result = _run_ship(
             repo, tmp_path, pr_sha=sha, gh_env={"CODEX_SHIP_DISPOSITION_BUDGET": bad}
         )

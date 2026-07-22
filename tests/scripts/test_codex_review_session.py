@@ -490,7 +490,10 @@ def test_a_malformed_injection_budget_refuses_with_a_configuration_error(
     repo = tmp_path / "repo"
     _init_repo(repo)
 
-    for bad in ("not-a-number", "1/0", "-1", "1234567890"):
+    # `08` and `0500000` are the leading-zero cases: bash reads them as octal, so
+    # the first is a syntax error leaving the guard *false* rather than refusing,
+    # and the second silently means 163840.
+    for bad in ("not-a-number", "1/0", "-1", "1234567890", "08", "0500000"):
         result = run_review(repo, tmp_path, check=False, CODEX_REVIEW_INJECT_BUDGET=bad)
         assert result.returncode != 0, f"{bad!r} was accepted"
         assert "CODEX_REVIEW_INJECT_BUDGET must be" in result.stderr

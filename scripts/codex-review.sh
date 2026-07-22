@@ -1054,15 +1054,19 @@ fi
 # `require_byte_budget` states at length: `$(( ))` evaluates its operand as an
 # ARITHMETIC EXPRESSION, so `not-a-number` or `1/0` aborts inside the shell
 # instead of refusing, and a negative value silently forces the degradation floor
-# under a message blaming the dispositions for the operator's typo. Spelled out
-# here rather than shared: the two scripts have no common library, and the pair
-# that share bytes do so under an explicitly-marked block with a test enforcing
-# it — a third such contract for four lines is not worth its weight.
+# under a message blaming the dispositions for the operator's typo. A leading zero
+# is rejected for the reason stated there too: bash reads it as octal, so `08` is
+# a syntax error that leaves the guard FALSE rather than refusing, and `0500000`
+# silently means 163840. Spelled out here rather than shared: the two scripts have
+# no common library, and the pair that share bytes do so under an explicitly-marked
+# block with a test enforcing it — a third such contract for a few lines is not
+# worth its weight.
 inject_budget="${CODEX_REVIEW_INJECT_BUDGET:-500000}"
-if [[ ! "$inject_budget" =~ ^[0-9]{1,9}$ ]]; then
-    echo "CODEX_REVIEW_INJECT_BUDGET must be a non-negative integer of at most 9" \
-        "digits, not '${inject_budget}' — it bounds the bytes of diff plus" \
-        "re-injected dispositions one round may carry (ADR-0025 §1)" >&2
+if [[ ! "$inject_budget" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+    echo "CODEX_REVIEW_INJECT_BUDGET must be a non-negative decimal integer of at" \
+        "most 9 digits with no leading zero (bash reads a leading zero as octal)," \
+        "not '${inject_budget}' — it bounds the bytes of diff plus re-injected" \
+        "dispositions one round may carry (ADR-0025 §1)" >&2
     exit 2
 fi
 diff_bytes="$(printf '%s' "$diff" | wc -c)"
