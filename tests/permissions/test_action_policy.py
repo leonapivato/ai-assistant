@@ -215,3 +215,23 @@ async def test_the_configured_rules_are_inspectable_without_deciding() -> None:
 
     assert len(bare.rules) == 2
     assert len(ThresholdActionPolicy().rules) == 4
+
+
+@pytest.mark.parametrize("truthy", ["false", 1, object()], ids=["string", "int", "object"])
+async def test_only_true_counts_as_consent(truthy: object) -> None:
+    """An unparsed value handed on by an adapter must not read as an approval.
+
+    ``approved`` is annotated ``bool`` and mypy runs strict over ``src`` and
+    ``tests``, so this is a type error before it is a runtime one. It is pinned
+    anyway because the mistake produces a *truthy* value — a form field's
+    ``"false"`` is the sharp case — and the failure it would cause is the one
+    failure this subsystem must not have: a decline rendered as an
+    authorisation.
+    """
+    resolved = await ThresholdActionPolicy().resolve(
+        decision("d-confirm"),
+        approved=truthy,  # type: ignore[arg-type]  # a caller ignoring the annotation is the case
+    )
+
+    assert resolved.outcome is PermissionOutcome.DENY
+    assert resolved.authorised_by is None
