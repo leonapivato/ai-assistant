@@ -271,3 +271,22 @@ async def test_opening_an_unusable_path_is_reported_as_an_audit_error(tmp_path: 
     """A failure to open is this layer's error, not a bare ``sqlite3`` one."""
     with pytest.raises(AuditError):
         SqliteAuditTrail(path=tmp_path / "no_such_dir" / "audit.db")
+
+
+async def test_a_limit_wider_than_sqlite_can_bind_returns_everything(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """A Python int has no width; SQLite's bound parameter does.
+
+    ``limit=10**1000`` is strictly positive, so it passes the contract's only
+    check, and binding it raises ``OverflowError`` — neither ``ValueError`` nor
+    ``AuditError``, so it would leave this layer's error boundary through a
+    hole. A bound above any possible row count means "all of them", which is
+    what a caller asking for it wants.
+    """
+    await ephemeral.record(decision("d-1"))
+    await ephemeral.record(decision("d-2", decided_at=AT + timedelta(hours=1)))
+
+    found = await ephemeral.recent(limit=10**1000)
+
+    assert [each.id for each in found] == ["d-2", "d-1"]
