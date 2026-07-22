@@ -11,8 +11,10 @@ These stay offline in two different ways, and the difference matters:
   properties that could regress on a fastembed version bump or a refactor of this
   module, and until the backend seam existed none of them ran in the gate.
 
-Real embedding still downloads a model, so it is exercised when the persistent
-store is wired, not here.
+Since ADR-0024 the model is no longer downloaded at all — it is vendored into the
+distribution and loaded from a packaged path. The tests that prove *that* end to
+end (a real build, a real wheel, a real offline embed) live in
+``test_embedding_artifact_packaging.py``; this file stays about the adapter.
 """
 
 from __future__ import annotations
@@ -27,22 +29,34 @@ from typing import TYPE_CHECKING
 
 import pytest
 from embedder_contract import EmbedderContract
+from network_guard import network_denied
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.protocols import Embedder
+from ai_assistant.models import fastembed_embedder
+from ai_assistant.models.embedding_artifact import (
+    EXECUTION_PROVIDERS,
+    VENDORED_MODEL_NAME,
+    embedding_space_id,
+    packaged_artifact_dir,
+)
 from ai_assistant.models.fastembed_embedder import (
     FastEmbedBackend,
     FastEmbedEmbedder,
     FastEmbedTextModel,
-    _FastEmbedBackend,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
+    from pathlib import Path
 
 _BGE_SMALL_DIMENSIONS = 384
 
-_STUB_MODEL = "stub/embedding-model"
+# The vendored model is the *only* name this embedder accepts (ADR-0024 §6), so
+# the stub backend reports a dimension for that name rather than inventing one.
+# The width is deliberately not 384: a test that passed only because the stub
+# agreed with the real model would prove nothing about the adapter.
+_STUB_MODEL = VENDORED_MODEL_NAME
 _STUB_DIMENSIONS = 16
 
 # Nothing waits this long on a passing run — every rendezvous below completes as
@@ -161,57 +175,87 @@ class _FixedSizeModel:
         return ([0.5] * self._dimensions for _ in documents)
 
 
-async def test_the_default_backend_loads_through_text_embedding(
+async def test_the_default_backend_loads_the_vendored_artifact_offline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The default backend really does construct fastembed's ``TextEmbedding``.
+    """The default backend constructs ``TextEmbedding`` against the packaged files.
 
     Everything else here injects a stub *instead of* fastembed, which leaves the
-    default backend's one line of wiring — ``TextEmbedding(model_name=...)`` —
-    covered by nothing: swap it for the wrong keyword, or for a different class,
-    and every stub-backed test stays green while production breaks on its first
-    embed.
+    default backend's one call — the call that decides whether this product
+    downloads a model or not — covered by nothing: drop ``specific_model_path``
+    and every stub-backed test stays green while production goes back to fetching
+    64 MiB from the Hub on first use.
 
     This is the one place patching ``TextEmbedding`` is the right tool rather
     than the rejected shortcut. The rejected version patches it out and then
     asserts *embedding* properties, which become properties of the patch. This
-    asserts only the call shape we are responsible for — that we hand fastembed
-    the configured model name and return what it gives back — which is exactly
-    what a patch can honestly witness.
+    asserts only the call shape we are responsible for — the arguments that carry
+    ADR-0024 §§3 and 5 — which is exactly what a patch can honestly witness.
     """
-    # Deliberately *not* the default model: with the default, an implementation
-    # that ignored `model` and hardcoded `_DEFAULT_MODEL` would pass. (It did,
-    # in the first version of this test.)
-    supported = _FastEmbedBackend().dimensions_by_model()
-    default_model = FastEmbedEmbedder().model_id
-    alternative, alternative_dimensions = next(
-        (name, dimensions) for name, dimensions in supported.items() if name != default_model
-    )
+    embedder = FastEmbedEmbedder()  # real metadata, no download
+    loaded = _FixedSizeModel(embedder.dimensions)
+    calls: list[dict[str, object]] = []
 
-    embedder = FastEmbedEmbedder(model=alternative)  # real metadata, still no download
-    loaded = _FixedSizeModel(alternative_dimensions)
-    model_names: list[str] = []
-
-    def fake_text_embedding(*, model_name: str) -> _FixedSizeModel:
-        model_names.append(model_name)
+    def fake_text_embedding(**kwargs: object) -> _FixedSizeModel:
+        calls.append(kwargs)
         return loaded
 
-    monkeypatch.setattr("ai_assistant.models.fastembed_embedder.TextEmbedding", fake_text_embedding)
+    monkeypatch.setattr(fastembed_embedder, "TextEmbedding", fake_text_embedding)
 
-    vectors = await embedder.embed(["alpha"])
+    with network_denied():
+        vectors = await embedder.embed(["alpha"])
 
-    assert model_names == [alternative]
-    assert len(vectors[0]) == alternative_dimensions
+    (call,) = calls
+    assert call["model_name"] == VENDORED_MODEL_NAME
+    # The packaged path, and only local files: together these are what make the
+    # load offline. `download_model` returns `specific_model_path` before it
+    # consults any source, so this is not merely a hint.
+    assert call["specific_model_path"] == str(packaged_artifact_dir())
+    assert call["local_files_only"] is True
+    # ADR-0024 §3: CPU, not `Device.AUTO` — a machine gaining a GPU must not
+    # silently move the embedding space of a store built on this embedder.
+    assert call["providers"] == list(EXECUTION_PROVIDERS)
+    assert call["cuda"] is False
+    assert len(vectors[0]) == embedder.dimensions
 
 
-def test_unknown_model_raises() -> None:
-    with pytest.raises(ModelError, match="unknown fastembed model"):
+class _ExplodingBackend:
+    """A backend that fails the test if it is touched at all."""
+
+    def dimensions_by_model(self) -> Mapping[str, int]:
+        raise AssertionError("a non-vendored name must be refused before the backend is consulted")
+
+    def load(self, model: str) -> FastEmbedTextModel:
+        raise AssertionError("a non-vendored name must be refused before any load")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "not-a-real-model",
+        # A *real* fastembed model, and the dangerous case: it would construct
+        # fine and then download itself, unpinned and unverified, on first embed.
+        "sentence-transformers/all-MiniLM-L6-v2",
+    ],
+)
+def test_a_non_vendored_model_is_refused_before_any_backend_or_socket(name: str) -> None:
+    # ADR-0024 §6: there is one build input, not a family. The refusal has to
+    # come before the backend is consulted, because consulting it is already the
+    # first step towards fastembed's own unpinned download path.
+    with network_denied(), pytest.raises(ModelError, match="serves only the vendored model"):
+        FastEmbedEmbedder(model=name, backend=_ExplodingBackend())
+
+
+def test_a_non_vendored_model_is_refused_with_the_real_backend_too() -> None:
+    with network_denied(), pytest.raises(ModelError, match="serves only the vendored model"):
         FastEmbedEmbedder(model="not-a-real-model")
 
 
-def test_unknown_model_raises_against_a_stub_backend() -> None:
+def test_a_backend_that_does_not_know_the_vendored_model_raises() -> None:
+    # The dimension lookup still has to fail closed: a fastembed release that
+    # dropped this model must not leave the embedder with no width at all.
     with pytest.raises(ModelError, match="unknown fastembed model"):
-        FastEmbedEmbedder(model="not-a-real-model", backend=_StubBackend())
+        FastEmbedEmbedder(backend=_HostileMappingBackend({}))
 
 
 @pytest.mark.parametrize("dimensions", [0, -1])
@@ -222,8 +266,14 @@ def test_non_positive_dimension_is_rejected(dimensions: int) -> None:
         _stub_embedder(_StubBackend(dimensions=dimensions))
 
 
-def test_model_id_is_the_configured_model() -> None:
-    assert _stub_embedder().model_id == _STUB_MODEL
+def test_model_id_is_the_embedding_space_identity_not_the_bare_name() -> None:
+    # ADR-0024 §2. On `main` this returned the bare name, so a re-pin of the
+    # weights left every stored vector tagged with an identifier that no longer
+    # described them. It now carries the shipped bytes and the audited stack.
+    identity = _stub_embedder().model_id
+
+    assert identity == embedding_space_id()
+    assert identity != _STUB_MODEL
 
 
 def test_construction_does_not_load_the_model() -> None:
@@ -745,3 +795,51 @@ def test_the_stub_model_is_batch_independent() -> None:
         return [tuple(int(value) for value in vector) for vector in result]
 
     assert vectors("zulu", "alpha") == [vectors("zulu")[0], vectors("alpha")[0]]
+
+
+# --------------------------------------------------------------------------- #
+# ADR-0024 §5 — a missing artifact fails; it never fetches
+# --------------------------------------------------------------------------- #
+
+
+def _artifactless_embedder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FastEmbedEmbedder:
+    """A real-backend embedder whose packaged artifact is simply not there."""
+    monkeypatch.setattr(fastembed_embedder, "packaged_artifact_dir", lambda: tmp_path / "absent")
+    return FastEmbedEmbedder()
+
+
+async def test_a_missing_artifact_raises_model_error_without_a_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The failure mode ADR-0024 §5 names: an incomplete installation must say so,
+    # not quietly reach for the Hub the way `main` did on every cold cache.
+    embedder = _artifactless_embedder(monkeypatch, tmp_path)
+
+    with network_denied(), pytest.raises(ModelError, match="artifact is missing"):
+        await embedder.embed(["alpha"])
+
+
+async def test_a_missing_artifact_names_the_files_it_wanted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    embedder = _artifactless_embedder(monkeypatch, tmp_path)
+
+    with network_denied(), pytest.raises(ModelError) as caught:
+        await embedder.embed(["alpha"])
+
+    assert "model_optimized.onnx" in str(caught.value)
+    # Not re-wrapped as "could not load model": the precise cause is the message
+    # a user sees, not something buried in `__cause__`.
+    assert "could not load model" not in str(caught.value)
+
+
+async def test_an_empty_batch_stays_offline_even_with_no_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ADR-0024 §5 fixes the order: the empty-batch contract is answered *before*
+    # the artifact is looked for, so a store that indexes nothing is never made
+    # to fail by a model it did not need.
+    embedder = _artifactless_embedder(monkeypatch, tmp_path)
+
+    with network_denied():
+        assert await embedder.embed([]) == []

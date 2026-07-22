@@ -6,8 +6,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`models` + packaging: the on-device embedding model is now a build input,
+  not a runtime download (ADR-0024).** `fastembed` used to fetch its 64 MiB ONNX
+  model from `huggingface.co` on first `embed`, with no revision pin and no
+  integrity pin, into the system temp directory — so it recurred whenever `/tmp`
+  was cleared, and whatever served the artifact got to choose what the embedder
+  computed (issue #89). The artifact is now pinned to an immutable commit,
+  verified file-by-file against a recorded SHA-256 manifest **at build time**,
+  and shipped inside the wheel *and* the sdist, so no PyPI install path fetches
+  anything and first run works offline. The artifact is never committed to git;
+  a build from a git checkout is the only build that fetches.
+  - **The build backend changes from `uv_build` to `hatchling`**, which
+    ADR-0024 §4 records as superseding ADR-0002's build-backend clause:
+    `uv_build` supports no build hooks, and `hatch_build.py` is the hook that
+    acquires and verifies. Acquisition stays owned by `models/`; only its
+    trigger moved, and the import-linter contract now forbids `huggingface_hub`
+    (and `onnxruntime`, `tokenizers`) outside that layer.
+  - **`FastEmbedEmbedder.model_id` is no longer the bare model name.** It now
+    composes the name, a digest over the *shipped bytes*, and a digest over the
+    audited behaviour-affecting versions, so ADR-0006 §4's "the model changed,
+    re-embed" can actually fire: re-pinned weights or a bumped `fastembed` /
+    `tokenizers` / `onnxruntime` / `numpy` move it, where before both left it
+    identical and the store silently ranked old vectors against new queries.
+    An implementation change within the existing `Embedder` contract, not a
+    Protocol change (ADR-0024 §2). A dev store will report that re-embedding is
+    required, which is the existing signal, not a new one.
+  - **Those four packages are exact-pinned in the published metadata**
+    (ADR-0024 §3), and the ONNX execution provider is pinned to CPU rather than
+    `Device.AUTO`, so a machine gaining a GPU cannot move an existing store's
+    embedding space.
+  - **`FastEmbedEmbedder` serves only the vendored model** (ADR-0024 §6). Any
+    other name is refused before a backend is consulted or a socket opened;
+    there is no arbitrary-model path, because an arbitrary fastembed model has
+    no pinnable identity. A missing artifact raises `ModelError` naming the
+    cause instead of downloading, while `embed([])` still returns `[]` offline.
+
 ### Added
 
+- Acceptance tests that build a real wheel, a real sdist, and a wheel *from that
+  sdist*, all with the network denied, and check that each carries the artifact
+  at the packaged path with every file's SHA-256 matching the manifest — the
+  gap ADR-0024 §5 named, where "a hook that verifies the wrong bytes, requests
+  the wrong revision, packages the wrong path, or configures only the wheel
+  ships green".
+- A test asserting the `genai-prices` snapshot in use reports
+  `from_auto_update=False` (issue #132), so an upstream change to that default
+  fails the gate rather than silently enabling a fetch of
+  `raw.githubusercontent.com`.
 - **BREAKING** `core`/`tools`/`testing`: the `ToolInvoker` Protocol and the
   types it exchanges — `ToolCall`, `ToolResult`, `ToolOutcome`, `ToolFailure`,
   `ToolFailureKind` — plus `ToolBindingError` (ADR-0029). A Protocol change is a

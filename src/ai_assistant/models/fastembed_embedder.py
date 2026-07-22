@@ -7,6 +7,18 @@ place ``fastembed`` is imported; it is intentionally *not* re-exported from
 ``fastembed`` pulls in ONNX runtime). Import this class directly when wiring the
 real store.
 
+The model is the **vendored** artifact ADR-0024 makes a build input: packaged
+inside this distribution, loaded from that path with ``local_files_only=True``,
+and pinned to the CPU execution provider. Nothing here fetches anything, and
+there is no arbitrary-model path (ADR-0024 §6) — this class serves the one
+verified model and rejects any other name before it touches a backend.
+
+:attr:`model_id` is not the bare model name. It is the embedding-space identity
+of ADR-0024 §2: the name, a digest over the shipped bytes, and a digest over the
+audited behaviour-affecting versions, so a store detects re-pinned weights or an
+upgraded stack as "re-embedding is required" (ADR-0006 §4) instead of ranking old
+vectors against new queries.
+
 The model files are loaded lazily on first :meth:`embed` — construction and
 :attr:`dimensions` stay offline, resolved from ``fastembed``'s model metadata.
 
@@ -37,13 +49,19 @@ from typing import TYPE_CHECKING, Protocol
 from fastembed import TextEmbedding
 
 from ai_assistant.core.errors import ModelError
+from ai_assistant.models.embedding_artifact import (
+    EXECUTION_PROVIDERS,
+    VENDORED_MODEL_NAME,
+    ArtifactError,
+    embedding_space_id,
+    missing_files,
+    packaged_artifact_dir,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
     from ai_assistant.core.types import Embedding
-
-_DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 class _ContractViolationError(Exception):
@@ -91,12 +109,12 @@ class FastEmbedBackend(Protocol):
         ...
 
     def load(self, model: str) -> FastEmbedTextModel:
-        """Load a model by name, downloading it if it is not already cached."""
+        """Load a model by name from files already present on this machine."""
         ...
 
 
 class _FastEmbedBackend:
-    """The real backend: ``fastembed``'s ``TextEmbedding``."""
+    """The real backend: ``fastembed``'s ``TextEmbedding``, pointed at the vendored files."""
 
     def dimensions_by_model(self) -> Mapping[str, int]:
         """The vector dimension of every model ``fastembed`` supports."""
@@ -106,8 +124,39 @@ class _FastEmbedBackend:
         }
 
     def load(self, model: str) -> FastEmbedTextModel:
-        """Load the named model, downloading it on first use."""
-        return TextEmbedding(model_name=model)
+        """Load the vendored model from the packaged artifact, offline.
+
+        ``specific_model_path`` short-circuits ``fastembed``'s download path
+        entirely, and ``local_files_only=True`` is belt to that braces. The
+        artifact's presence is checked here first so an incomplete install fails
+        with a message naming the cause rather than as an ONNX Runtime error
+        about a file that is not there.
+
+        Args:
+            model: The model name; always the vendored one, enforced upstream.
+
+        Returns:
+            The loaded fastembed model.
+
+        Raises:
+            ModelError: If the packaged artifact is missing or incomplete.
+        """
+        directory = packaged_artifact_dir()
+        absent = missing_files(directory)
+        if absent:
+            msg = (
+                f"the packaged embedding model artifact is missing from {directory} "
+                f"({', '.join(absent)}); it is a build input (ADR-0024) and is never "
+                f"downloaded at runtime, so this installation is incomplete"
+            )
+            raise ModelError(msg)
+        return TextEmbedding(
+            model_name=model,
+            specific_model_path=str(directory),
+            local_files_only=True,
+            providers=list(EXECUTION_PROVIDERS),
+            cuda=False,
+        )
 
 
 def _resolve_dimensions(backend: FastEmbedBackend, model: str) -> int:
@@ -151,28 +200,41 @@ class FastEmbedEmbedder:
     """A local, on-device embedder backed by fastembed."""
 
     def __init__(
-        self, *, model: str = _DEFAULT_MODEL, backend: FastEmbedBackend | None = None
+        self, *, model: str = VENDORED_MODEL_NAME, backend: FastEmbedBackend | None = None
     ) -> None:
         """Initialise the embedder without loading the model.
 
         Args:
-            model: A fastembed model name. Its dimension is resolved from
-                fastembed's offline metadata.
+            model: Must be the vendored model name. The parameter exists so a
+                mistaken name fails loudly rather than being ignored; it is not
+                a selection point.
             backend: The fastembed surface to run against. Defaults to the real
                 ``fastembed``; a test may inject a deterministic offline stub to
-                exercise this adapter without a model download (see the module
+                exercise this adapter without loading ONNX (see the module
                 docstring).
 
         Raises:
-            ModelError: If the backend cannot report its supported models or
-                reports them malformed, if ``model`` is not one of them, or if
-                the reported dimension is not a positive number — a vector
-                length of zero or less cannot satisfy the ``Embedder`` contract,
-                and accepting it would defer the failure to the store that sized
-                its vector column from it.
+            ModelError: If ``model`` is not the vendored model, if the backend
+                cannot report its supported models or reports them malformed, if
+                ``model`` is absent from them, or if the reported dimension is
+                not a positive number — a vector length of zero or less cannot
+                satisfy the ``Embedder`` contract, and accepting it would defer
+                the failure to the store that sized its vector column from it.
         """
+        # First, and before `backend` is even resolved: ADR-0024 §6 requires a
+        # non-vendored name to be refused ahead of any backend load or socket,
+        # because fastembed's own download path is exactly what that name would
+        # re-enable — unpinned, unverified, and unidentifiable in `model_id`.
+        if model != VENDORED_MODEL_NAME:
+            msg = (
+                f"FastEmbedEmbedder serves only the vendored model "
+                f"{VENDORED_MODEL_NAME!r}, not {model!r}: the embedding model is a "
+                f"build input (ADR-0024), so there is no arbitrary-model path"
+            )
+            raise ModelError(msg)
         self._backend = _FastEmbedBackend() if backend is None else backend
         self._model_name = model
+        self._model_id = self._resolved_model_id()
         self._dimensions = _resolve_dimensions(self._backend, model)
         self._model: FastEmbedTextModel | None = None
         # Guards the lazy load only. Without it two concurrent `embed` calls —
@@ -180,10 +242,29 @@ class FastEmbedEmbedder:
         # download/load the model twice.
         self._load_lock = threading.Lock()
 
+    @staticmethod
+    def _resolved_model_id() -> str:
+        """The embedding-space identity, or a ``ModelError`` explaining why not.
+
+        Raises:
+            ModelError: If the audited stack cannot be identified — which means
+                the identity would be a lie, and a store tagging vectors with a
+                lie is the corruption ADR-0024 §2 exists to prevent.
+        """
+        try:
+            return embedding_space_id()
+        except ArtifactError as exc:
+            msg = f"could not determine the embedding space identity: {exc}"
+            raise ModelError(msg) from exc
+
     @property
     def model_id(self) -> str:
-        """The fastembed model name, identifying the embedding space."""
-        return self._model_name
+        """The identity of the embedding space: model, shipped bytes, audited stack.
+
+        Not the bare model name. Re-pinned weights or a bumped audited version
+        move this, so a store detects that its vectors are stale (ADR-0024 §2).
+        """
+        return self._model_id
 
     @property
     def dimensions(self) -> int:
@@ -194,13 +275,19 @@ class FastEmbedEmbedder:
         """Embed a batch of texts, returning one vector per input, in order.
 
         The model is loaded on first use; the embedding itself runs in a worker
-        thread so it does not block the event loop. An empty batch is answered
-        without loading anything.
+        thread so it does not block the event loop.
+
+        **An empty batch is answered before anything else** — before the
+        packaged artifact is even looked for. ADR-0024 §5 requires that order:
+        ``embed([])`` returns ``[]`` and stays offline whatever the state of the
+        installation, so a store that indexes nothing is not made to fail by an
+        artifact it never needed.
 
         Raises:
-            ModelError: If the model cannot be loaded (a download failure, an
-                unwritable cache), the backend fails to embed the batch, or it
+            ModelError: If the packaged artifact is missing or the model cannot
+                otherwise be loaded, the backend fails to embed the batch, or it
                 returns a result that does not satisfy the ``Embedder`` contract.
+                Never by fetching and failing: nothing here reaches the network.
         """
         documents = list(texts)
         if not documents:
@@ -298,6 +385,11 @@ class FastEmbedEmbedder:
             if self._model is None:
                 try:
                     self._model = self._backend.load(self._model_name)
+                except ModelError:
+                    # Already precise — "the packaged artifact is missing" names
+                    # the cause, which ADR-0024 §5 requires; re-wrapping it as
+                    # "could not load model" would bury it in `__cause__`.
+                    raise
                 except Exception as exc:
                     msg = f"fastembed could not load model {self._model_name!r}"
                     raise ModelError(msg) from exc
