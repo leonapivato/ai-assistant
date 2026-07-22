@@ -209,7 +209,7 @@ def test_a_reused_branch_name_does_not_inherit_the_old_loop(tmp_path: Path) -> N
 
 
 def test_the_bypass_path_keeps_no_session(tmp_path: Path) -> None:
-    """The CI bypass is a cold one-shot: no thread, no read-only proof (ADR-0025 §1)."""
+    """The bypass path is a cold one-shot: no thread, no read-only proof (ADR-0025 §1)."""
     repo = tmp_path / "repo"
     _init_repo(repo)
 

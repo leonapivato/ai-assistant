@@ -506,7 +506,8 @@ trap 'rm -f "$prompt" "$out" "$stream" "$inject_tmp" ${artifact_tmp:+"$artifact_
 # name that happens to share a base — is bounded to soft memory carry-over, never
 # a wrong ship anchor: the shippable artifact is still tree-anchored (§4), and
 # ship matches on `(base, tree)` regardless of which thread produced the verdict.
-# The bypass is CI-only and not the persistent path (see the invocation below):
+# The bypass path (no sandbox, or CI) is not the persistent path (see the
+# invocation below):
 # a cold one-shot that keeps no session and runs no read-only proof, today's
 # behaviour preserved. Detected here so no session state is created on that path.
 # GITHUB_ACTIONS is matched exactly against "true", so an inherited
@@ -1093,7 +1094,7 @@ round_thread=""
 
 if [[ "$bypass" -eq 1 ]]; then
     _write_prompt ""
-    echo "Running Codex '${persona}' review of HEAD vs '${base}' (CI bypass, cold)…" >&2
+    echo "Running Codex '${persona}' review of HEAD vs '${base}' (bypass, cold)…" >&2
     # -o captures just the final review; progress streams to stderr.
     codex exec --dangerously-bypass-approvals-and-sandbox "${model_args[@]}" \
         -o "$out" - <"$prompt" >&2
@@ -1264,8 +1265,9 @@ fi
 # same mechanism as the patch identity, not a second one; once selection is by
 # content, naming by content is the identity function.
 #
-# `noloop` stands in for a run with no loop identity — the CI bypass path, which
-# keeps no session — so the field is never empty and the segments never collapse.
+# `noloop` stands in for a run with no loop identity — the bypass path (no
+# sandbox, or CI), which keeps no session — so the field is never empty and the
+# segments never collapse.
 # The name is an identity and nothing parses it: `ship` reads the persona from
 # the recorded provenance field, never off the filename.
 mkdir -p "$review_dir"

@@ -26,6 +26,8 @@ GitHub.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -243,31 +245,86 @@ def _fake_gh(bin_dir: Path) -> None:
     gh.chmod(0o755)
 
 
-# Kept in step with the scripts' own pinned set; a fixture computing a different
-# identity from the one under test proves nothing (#45).
-_DIFF_OPTS = (
-    "-c",
-    "core.quotePath=false",
-    "-c",
-    "color.ui=false",
-    "-c",
-    "diff.renames=true",
-    "-c",
-    "diff.renameLimit=4000",
-    "-c",
-    "diff.algorithm=myers",
-    "-c",
-    "diff.context=3",
-    "-c",
-    "diff.interHunkContext=0",
-    "-c",
-    "diff.indentHeuristic=true",
-    "-c",
-    "diff.noprefix=false",
-    "-c",
-    "diff.mnemonicPrefix=false",
-)
-_DIFF_FLAGS = ("--no-color", "--ignore-submodules=none", "--no-ext-diff", "--no-textconv")
+def _shared_patch_identity_block(script: str = "ship.sh") -> str:
+    """The `# >>> shared-patch-identity` region of a script.
+
+    Defaults to `ship.sh` because
+    `test_the_patch_identity_block_is_byte_identical_in_both_scripts` already
+    proves `codex-review.sh` carries the same bytes, so one of the two is the
+    definition of both.
+    """
+    text = (_SCRIPT.parent / script).read_text(encoding="utf-8")
+    begin, end = "# >>> shared-patch-identity", "# <<< shared-patch-identity"
+    assert text.count(begin) == 1, f"{script} must carry exactly one shared block"
+    return text.split(begin, 1)[1].split(end, 1)[0]
+
+
+def _pinned_diff_opts(script: str = "ship.sh") -> tuple[str, ...]:
+    """The `_diff_opts` array as the scripts actually pin it.
+
+    DERIVED, never copied. A hand-mirrored constant lets a production re-pin —
+    `-C`, or `diff.renames=copies` — leave every identity test here passing
+    against a set no script uses any more, so the assertions quietly stop being
+    about production (#227). Parsing the array makes the re-pin reach the tests
+    in the same change that makes it.
+    """
+    block = _shared_patch_identity_block(script)
+    match = re.search(r"^_diff_opts=\(\n(.*?)^\)\n", block, re.MULTILINE | re.DOTALL)
+    assert match is not None, "no `_diff_opts=(...)` array found in the shared block"
+    opts = tuple(shlex.split(match.group(1), comments=True))
+    assert opts, "the pinned option list parsed as empty"
+    return opts
+
+
+def _pinned_diff_flags(script: str = "ship.sh") -> tuple[str, ...]:
+    """The command-line diff flags `patch_identity` passes alongside `_diff_opts`.
+
+    Taken from the `patch_identity` invocation — the one that renders the patch
+    whose id is hashed — and cross-checked against `_range_has_pathless_entry`,
+    which passes the same set plus its own `--raw --abbrev=40 -z` listing flags.
+    A flag reaching only one of the two would mean the listing the guard reads
+    and the patch the id is taken over no longer describe the same range, so the
+    shared prefix is asserted rather than assumed.
+
+    Derived for the same reason as the options above: `--ignore-submodules=none`
+    is a flag precisely because it must outrank config, and any re-pin here —
+    `-C` included, which is why a single leading `-` is enough to be picked up —
+    has to reach the fixtures in the change that makes it (#227).
+    """
+    block = _shared_patch_identity_block(script)
+    found = re.findall(r'git "\$\{_diff_opts\[@\]\}" diff ((?:-\S+ )+)', block)
+    expected_invocations = 2  # _range_has_pathless_entry, then patch_identity
+    assert len(found) == expected_invocations, f"expected two diff invocations, got {found}"
+    listing, identity = (tuple(group.split()) for group in found)
+    assert listing[: len(identity)] == identity, (
+        "the listing and the hashed patch no longer share their flag set"
+    )
+    return identity
+
+
+_DIFF_OPTS = _pinned_diff_opts()
+_DIFF_FLAGS = _pinned_diff_flags()
+
+
+def test_the_pinned_diff_set_is_derived_from_both_scripts_not_mirrored() -> None:
+    """The derivation is the fixture's only source, and it reads production.
+
+    A hand-copied `_DIFF_OPTS` would let a re-pin (`-C`, `diff.renames=copies`)
+    land in the scripts while every identity test here kept computing the old
+    set — including `test_the_pinned_options_cannot_emit_a_copy_status`, which
+    exists to catch exactly that re-pin (#227). Both scripts are parsed, rather
+    than only the one the constants come from, so a partial regex match that
+    silently dropped an option in one of them cannot pass as agreement.
+    """
+    assert _pinned_diff_opts("codex-review.sh") == _DIFF_OPTS
+    assert _pinned_diff_flags("codex-review.sh") == _DIFF_FLAGS
+    # Well-formed: `-c` and its `key=value`, alternating, nothing dangling.
+    assert len(_DIFF_OPTS) % 2 == 0
+    assert set(_DIFF_OPTS[::2]) == {"-c"}
+    assert all("=" in value for value in _DIFF_OPTS[1::2])
+    # `-` rather than `--`: a re-pin adding `-C` must be *derived*, not rejected.
+    assert _DIFF_FLAGS
+    assert all(flag.startswith("-") for flag in _DIFF_FLAGS)
 
 
 def _raw_patch_id(repo: Path, base_sha: str, sha: str, flag: str = "--verbatim") -> str:
