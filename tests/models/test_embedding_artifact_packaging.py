@@ -43,6 +43,7 @@ from network_guard import network_denied
 from ai_assistant.models import embedding_artifact, fastembed_embedder
 from ai_assistant.models.embedding_artifact import (
     ARTIFACT_MANIFEST,
+    ARTIFACT_REVISION,
     AUDITED_PACKAGES,
     packaged_artifact_dir,
 )
@@ -57,6 +58,10 @@ _PROJECT_ROOT = Path(embedding_artifact.__file__).resolve().parents[3]
 #: the runtime uses. Asserting the built distributions carry this exact path is
 #: what makes "packages the wrong path" a failure rather than dead weight.
 _ARTIFACT_IN_PACKAGE = packaged_artifact_dir().relative_to(_PROJECT_ROOT / "src" / "ai_assistant")
+
+#: The third-party notices for the redistributed model (ADR-0024, Consequences).
+#: Its basename is what a consumer looks for, so the assertions below pin it.
+_NOTICES = "THIRD-PARTY-NOTICES.md"
 
 _REASONS = []
 if not (_PROJECT_ROOT / "pyproject.toml").is_file():
@@ -169,6 +174,52 @@ def test_the_sdist_carries_the_build_hook(sdist: Path) -> None:
     # fetch. The two files travel together or the `--no-binary` path is broken.
     with tarfile.open(sdist) as archive:
         assert any(name.endswith("/hatch_build.py") for name in archive.getnames())
+
+
+def _notices_in_the_checkout() -> bytes:
+    return (_PROJECT_ROOT / _NOTICES).read_bytes()
+
+
+def test_the_notices_name_the_revision_that_ships() -> None:
+    """The notices describe *these* bytes, not the model in general.
+
+    A re-pin that moved the artifact without moving the notices would leave the
+    file naming a commit the distribution no longer carries, which is the one way
+    an accurate notice goes stale on its own.
+    """
+    notices = _notices_in_the_checkout().decode()
+    assert ARTIFACT_REVISION in notices
+
+
+def test_the_wheel_carries_the_third_party_notices(checkout_wheel: Path) -> None:
+    """ADR-0024's Consequences: redistributing the weights means shipping notices.
+
+    PEP 639 puts declared licence files under ``.dist-info/licenses/`` and lists
+    them in METADATA, so both are asserted — a wheel that carried the bytes but
+    did not declare them would not be discoverable by a licence scanner.
+    """
+    members = _wheel_members(checkout_wheel)
+    (entry,) = [name for name in members if name.endswith(f"/licenses/{_NOTICES}")]
+    assert members[entry] == _notices_in_the_checkout()
+
+    (metadata_entry,) = [name for name in members if name.endswith(".dist-info/METADATA")]
+    metadata = email.parser.BytesParser().parsebytes(members[metadata_entry])
+    assert _NOTICES in (metadata.get_all("License-File") or [])
+
+
+def test_the_sdist_carries_the_third_party_notices(sdist: Path) -> None:
+    # The `--no-binary` install path ships the same weights, so it owes the same
+    # notices; the sdist carries them at its root and declares them in PKG-INFO.
+    with tarfile.open(sdist) as archive:
+        root = Path(archive.getnames()[0]).parts[0]
+        extracted = archive.extractfile(str(Path(root) / _NOTICES))
+        assert extracted is not None, f"{_NOTICES} is not in the sdist"
+        assert extracted.read() == _notices_in_the_checkout()
+
+        pkg_info = archive.extractfile(str(Path(root) / "PKG-INFO"))
+        assert pkg_info is not None
+        metadata = email.parser.BytesParser().parsebytes(pkg_info.read())
+        assert _NOTICES in (metadata.get_all("License-File") or [])
 
 
 @pytest.mark.parametrize("wheel_fixture", ["checkout_wheel", "sdist_wheel"])
