@@ -480,17 +480,44 @@ So the rule is a revalidation, in ADR-0018 §4's own idiom — the one
 `InMemoryToolRegistry` already uses for a definition, `model_dump()` then
 `model_validate()`, which is what forces the validators to run:
 
-> **`invoke` revalidates the carrier before reading it.** The failure it
-> translates is `ToolFailure.model_validate(exc.failure.model_dump())` — a
-> validated, detached value — and `effect_may_have_committed` must be a `bool`.
-> If `failure` is absent, is not a `ToolFailure`, or does not survive that
-> round-trip; or if `effect_may_have_committed` is absent or is not a `bool`;
-> then the carrier is treated as an ordinary escaping exception and becomes
-> `INTERNAL` (ADR-0029 §3), with the seam's own message.
+> **`invoke` revalidates the carrier before reading it, and validates its two
+> attributes independently.** The failure it translates is
+> `ToolFailure.model_validate(exc.failure.model_dump())` — a validated, detached
+> value. `effect_may_have_committed` must be a `bool`.
+>
+> - **If the failure is absent, is not a `ToolFailure`, or does not survive the
+>   round-trip**, the payload is refused: the seam synthesises its own
+>   `INTERNAL` failure, with its own message, exactly as for an ordinary
+>   escaping exception (ADR-0029 §3).
+> - **If `effect_may_have_committed` is absent or is not a `bool`**, there is no
+>   fact to read and the outcome is `FAILED` — which is what a plain raise
+>   produces today, and the only honest answer when the tool said nothing
+>   legible.
+> - **A `bool` that validates is honoured either way.** §2's outcome rule runs
+>   on it even when the payload was refused.
 >
 > Nothing derived from the `ValidationError` that refusal produces enters a
 > message or a log, under §5's enumeration — it is raised *about* the payload
 > and would render it.
+
+**The fact survives a refused payload, for §3's reason applied twice.** §3
+already keeps `effect_may_have_committed` when it discards a `TIMED_OUT`
+failure, because "a tool that got the kind wrong may still be telling the truth
+about its side effect, and discarding that would record a possible commit as
+certainly-nothing-happened". A tool that built its `ToolFailure` with
+`model_construct` is in precisely that position, and its request may still have
+landed. Dropping the fact would make §6 the one path in this ADR that resolves
+an ambiguity in the direction ADR-0014 §4 refuses — and would do so on the
+malformed input most likely to come from a *careless* integration rather than an
+adversarial one. So a side-effecting, non-`NATURAL` tool that raises a garbage
+payload with `effect_may_have_committed=True` gets `INDETERMINATE` with an
+`INTERNAL` kind: the seam says "this tool is broken *and* we do not know whether
+it acted", which is both of the true things.
+
+**Reading the two independently is what makes that possible**, and it is the
+second reason the fact is a field on the exception rather than on `ToolFailure`
+(§2). A `failure` property that explodes must not take the `bool` down with it,
+so each attribute is fetched under its own guard and judged on its own.
 
 **Absent, not merely wrong**, because `del exc.failure` on a constructed carrier
 is as reachable as assigning `None` to it, and an implementation that reads the
@@ -657,8 +684,12 @@ rather than asserted:
   carrier is revalidated before it is read, in ADR-0018 §4's model_dump() then
   model_validate() idiom, because isinstance is not evidence a pydantic model
   was validated — model_construct bypasses every validator — and a carrier that
-  is absent, is not a ToolFailure, does not survive the round-trip, or does not
-  hold a bool is an ordinary escaping exception and becomes INTERNAL. Reading
+  is absent, is not a ToolFailure, or does not survive the round-trip has its
+  payload refused for the seam's own INTERNAL. The two attributes are validated
+  independently, so a bool that validates is honoured under the outcome rule
+  even when the payload was refused — the same preservation §3 makes when it
+  refuses a reserved kind — and only a fact that is absent or not a bool leaves
+  the outcome at FAILED. Reading
   and revalidating the carrier is itself guarded, since isinstance admits a
   subclass and both the attribute access and model_dump() are then tool-supplied
   code: any Exception they raise is INTERNAL, BaseException still propagates,
@@ -851,6 +882,15 @@ what keeps the fake honest without importing `tools/`.
   escaping `invoke`. The deletion cases are the ones a natural implementation
   fails — reading `exc.failure` directly raises where the rule requires a result
   — and a suite testing only `None` certifies it.
+
+- **The fact outliving a refused payload** (§6): each of those malformed
+  carriers raised with `effect_may_have_committed=True` from a side-effecting
+  non-`NATURAL` tool comes back `INDETERMINATE` with kind `INTERNAL`, and with
+  `False` comes back `FAILED`. Paired with a carrier whose `failure` is an
+  exploding property but whose `bool` is sound, which must still reach
+  `INDETERMINATE` — that is what pins the two attributes being read
+  independently rather than in one `try`. An implementation that refuses the
+  whole carrier on any defect passes every other case in this list.
 
 - **A carrier that fights back** (§6's guard), which is the case every other
   malformed-carrier test passes without: a `ToolFailure` **subclass** whose
