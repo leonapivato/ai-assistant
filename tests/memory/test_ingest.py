@@ -399,6 +399,33 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_another_assertion(
     assert await store.get("says-now") is None
 
 
+@pytest.mark.parametrize(
+    "source", [MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.EXTERNAL]
+)
+async def test_the_ingestor_refuses_to_fold_a_non_assertion_onto_an_assertion(
+    source: MemorySource,
+) -> None:
+    # ADR-0038 §3 in the direction it is usually read: nothing we were not told
+    # may supersede what we were. `DefaultMemoryPolicy` defers here (rule 2), but
+    # that is a policy choice and the invariant has to hold for any injected
+    # policy — a reinforcing merge would replace the assertion's content *and*
+    # downgrade its provenance out of the profile.
+    store = InMemoryMemoryStore()
+    await store.add(_asserted("their-words", "user prefers morning meetings"))
+    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+
+    with pytest.raises(MemoryStoreError, match="refusing to supersede"):
+        await ingestor.ingest(
+            _proposal(_preference("guess", "user prefers afternoon meetings", source=source))
+        )
+
+    theirs = await store.get("their-words")
+    assert theirs is not None
+    assert theirs.content == "user prefers morning meetings"
+    assert theirs.provenance.source is MemorySource.USER_ASSERTED
+    assert await store.get("guess") is None
+
+
 class _RecordingPolicy:
     """A policy that records the conflicts it was offered and rejects everything."""
 
