@@ -101,7 +101,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cancellation landing on the ordinary terminal commit lands the write too,
   rather than abandoning it for recovery to report ignorance over. Committing is
   not swallowing in either case: the cancellation still propagates, which is what
-  keeps shutdown working.
+  keeps shutdown working — and an absorbed cancellation outranks a failure of the
+  write it was protecting, since absorbing one is a promise to re-raise it and
+  letting a `PlanningError` out instead would hand a caller a store fault while
+  the task it belongs to quietly kept running.
   **The idempotency window is fail-closed** (ADR-0029 §5): the executor stops
   retrying once it has elapsed, and any reading that is not a positive elapsed
   duration — a step backwards, a jump past the window, a reading the clock guard
