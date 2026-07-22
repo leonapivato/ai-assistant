@@ -227,12 +227,20 @@ class ThresholdActionPolicy:
         long after it was asked — is deliberately absent, because it needs a
         clock the policy is contracted not to have (ADR-0036 §1).
 
+        **Only ``True`` is consent.** ``approved`` is annotated ``bool`` and
+        mypy runs strict over `src` and `tests`, so a caller passing anything
+        else is a type error before it is a runtime one. The test is written as
+        an identity against ``True`` anyway: it is identical for every value the
+        annotation admits, and for one it does not — an adapter handing on an
+        unparsed ``"false"``, which is truthy — it fails closed rather than
+        converting a decline into an authorisation.
+
         Returns:
             The ruling that resolves ``confirmed``. A resolving ``ALLOW`` cites
             ``confirmed.id``, which is the pointer ``AuditTrail.record``
             verifies.
         """
-        if not approved:
+        if approved is not True:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason="the user declined")
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_NOT_A_CONFIRMATION)

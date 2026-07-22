@@ -109,6 +109,15 @@ since come to refuse outright. A `CONFIRM`-today declaration still resolves to
 `ALLOW`: only a `DENY` withdraws consent, because anything weaker would make the
 prompt's own outcome a reason to ignore its answer.
 
+**Only `True` is consent.** `resolve`'s `approved` is annotated `bool` and mypy
+runs strict over `src` and `tests`, so a caller passing anything else is a type
+error first. The refusal branch is nonetheless written as an identity against
+`True` rather than as `not approved`: it is identical for every value the
+annotation admits, and for one it does not — an adapter handing on an unparsed
+`"false"`, which is truthy — it fails closed instead of rendering a decline as an
+authorisation. That is the single worst failure available to this subsystem, and
+one character is not a price worth negotiating over.
+
 **Rejected: a confirmation TTL.** "Answered long after it was asked" is the other
 staleness ADR-0021 §3 mentions, and it needs a clock. ADR-0021 §3 removed the
 clock from the policy deliberately — it is what leaves `decide` a genuine
