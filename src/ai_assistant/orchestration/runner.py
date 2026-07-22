@@ -570,16 +570,35 @@ class StepRunner:
         caller's word for it. Detached on the way out (:func:`_detached`), since
         ``PlanStore`` contracts no snapshot.
 
+        **Which plan comes from the *stored* execution, not from the argument.**
+        Reading ``state.plan_id`` would have taken the association on the
+        caller's word while every write took ``state.id`` and ``state.version``:
+        a hand-built ``ExecutionState`` carrying execution A's id and version
+        with execution B's ``plan_id`` would have had the gate rule on B's step
+        and the claim, the invocation and the durable record land on A's. Nothing
+        else notices — the store commits by execution id and step id, and the
+        trail records what it was handed. The version stays the caller's, because
+        that is what the compare-and-swap is *for*: a stale snapshot is the
+        store's to reject, an inconsistent one is not.
+
         Raises:
-            PlanningError: If the plan is missing, or holds no such step. Missing
-                is not "nothing to do": an execution whose plan has gone is a
-                store that cannot say what was meant to happen, and running
-                anything under it would be inventing the intent.
+            PlanningError: If the execution is unknown, its plan is missing, or
+                the plan holds no such step. Missing is not "nothing to do": an
+                execution whose plan has gone is a store that cannot say what was
+                meant to happen, and running anything under it would be
+                inventing the intent.
         """
-        plan = await self._plans.get_plan(state.plan_id)
+        opened = await self._plans.get_execution(state.id)
+        if opened is None:
+            msg = (
+                f"the store holds no execution {state.id!r}, so there is nothing that says "
+                "which plan this step belongs to"
+            )
+            raise PlanningError(msg)
+        plan = await self._plans.get_plan(opened.plan_id)
         if plan is None:
             msg = (
-                f"execution {state.id!r} names plan {state.plan_id!r}, which the store does "
+                f"execution {opened.id!r} names plan {opened.plan_id!r}, which the store does "
                 "not hold, so there is nothing that says what this step should do"
             )
             raise PlanningError(msg)

@@ -218,6 +218,25 @@ class LeakyPlanStore(FakePlanStore):
         return detached
 
 
+class ForgetfulPlanStore(FakePlanStore):
+    """A store whose execution outlives the plan it names.
+
+    ``delete_goal`` cascades, so the combination is not reachable through the
+    contract — which is exactly why the branch that refuses it needs a double.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        """Start out holding plans normally."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]  # passthrough for the fake's kwargs
+        self.forget_plans = False
+
+    async def get_plan(self, plan_id: str) -> ActionPlan | None:
+        """Answer ``None`` once the store has been told to forget."""
+        if self.forget_plans:
+            return None
+        return await super().get_plan(plan_id)
+
+
 class RewritingPolicy(FakeActionPolicy):
     """A policy that rewrites the store's step id while ruling on it.
 
@@ -727,14 +746,51 @@ async def test_a_step_the_plan_does_not_hold_is_refused() -> None:
     assert await harness.trail.export() == []
 
 
-async def test_an_execution_whose_plan_is_gone_runs_nothing() -> None:
-    """With no plan there is nothing that says what the step should do."""
+async def test_a_state_naming_another_execution_s_plan_does_not_redirect_the_step() -> None:
+    """The plan comes from the stored execution, not from the argument."""
+    harness = Harness(tools=(tool(),))
+    state = await a_two_step_execution(harness.plans)
+    # A second plan, whose `step-1` does something else entirely, and a state
+    # carrying this execution's id and version with that plan's id.
+    await harness.plans.save_plan(
+        ActionPlan(
+            id="p-2",
+            goal_id="g-1",
+            steps=(plan_step(capability="delete_everything"),),
+            created_at=AT,
+        )
+    )
+    forged = state.model_copy(update={"plan_id": "p-2"})
+
+    result = await harness.runner.run(forged, STEP, timeout=PATIENT)
+
+    # Selection asked about the *stored* execution's capability, not "p-2"'s.
+    assert result.disposition is Disposition.EXECUTED
+    assert [request.tool.capability for request in harness.policy.requests] == [CAPABILITY]
+
+
+async def test_an_execution_the_store_does_not_hold_runs_nothing() -> None:
+    """A state naming no stored execution says nothing about any plan."""
     harness = Harness(tools=(tool(),))
     step = plan_step()
     state = await an_execution(harness.plans, step)
-    await harness.plans.delete_goal("g-1")
+    invented = state.model_copy(update={"id": "execution-invented"})
 
-    with pytest.raises(PlanningError, match="does not hold"):
+    with pytest.raises(PlanningError, match="holds no execution"):
+        await harness.runner.run(invented, STEP, timeout=PATIENT)
+
+    assert harness.invoker.invocations == []
+
+
+async def test_an_execution_whose_plan_is_gone_runs_nothing() -> None:
+    """With no plan there is nothing that says what the step should do."""
+    forgetful = ForgetfulPlanStore(now=lambda: AT)
+    harness = Harness(tools=(tool(),), plans=forgetful)
+    step = plan_step()
+    state = await an_execution(forgetful, step)
+    forgetful.forget_plans = True
+
+    with pytest.raises(PlanningError, match="which the store does not hold"):
         await harness.runner.run(state, STEP, timeout=PATIENT)
 
     assert harness.invoker.invocations == []
