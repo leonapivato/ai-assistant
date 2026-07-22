@@ -232,7 +232,11 @@ class StepExecutor:
         try:
             started = self._reading()
         except BaseException:
-            await self._close_unstarted(state, step_id)
+            if await self._close_unstarted(state, step_id):
+                # Absorbed while closing, so it outranks the reason for closing:
+                # the caller's teardown must still be observable.
+                msg = f"step {step_id!r} was closed unstarted; its task was cancelled"
+                raise asyncio.CancelledError(msg) from None
             raise
         while True:
             try:
@@ -292,11 +296,16 @@ class StepExecutor:
         if not cancelled:
             return claimed
 
-        await self._close_unstarted(claimed, step_id)
+        # The reason for closing is itself a cancellation, so it wins whatever
+        # the close does: a store fault must not hide a teardown in progress.
+        try:
+            await self._close_unstarted(claimed, step_id)
+        except PlanningError:
+            _log.warning("executor_unstarted_close_failed", step_id=step_id, exc_info=True)
         msg = f"step {step_id!r} was claimed and closed unstarted; its task was cancelled"
         raise asyncio.CancelledError(msg)
 
-    async def _close_unstarted(self, state: ExecutionState, step_id: str) -> None:
+    async def _close_unstarted(self, state: ExecutionState, step_id: str) -> bool:
         """Close a claimed step the callable was never reached from (ADR-0034 §1).
 
         ``FAILED`` rather than ``INDETERMINATE``, on ADR-0029 §8's own reasoning
@@ -305,16 +314,31 @@ class StepExecutor:
         not retried, for §8's reason too — retry is scheduled only from a
         ``ToolResult``, and no exit through here produces one.
 
-        A failure of this write is logged rather than raised, because whatever
-        sent us here is what the caller must see: replacing it would hide a
-        cancellation, a broken clock or a wiring fault behind a store fault.
+        **Two precedence rules, because this runs while another exception is
+        already on its way out** (ADR-0034 §1). An **absorbed cancellation wins
+        over everything**: absorbing one is a promise to re-raise it, and a
+        teardown the caller cannot observe is worse than a diagnosis it loses. A
+        **rejected close beats the reason for closing**, chained to it, because
+        the step is now durably wrong in the exact way this rule exists to
+        prevent — a `RUNNING` a recovery scan will read as `INDETERMINATE` — and
+        that is the more urgent of the two facts. The one exception is where the
+        reason for closing is *itself* a cancellation, in which case the first
+        rule already applies and the caller logs instead.
+
+        Returns:
+            Whether a cancellation was absorbed while the close was in flight,
+            which the caller owes a re-raise for.
+
+        Raises:
+            PlanningError: If the store rejected the close, so the step is left
+                ``RUNNING`` and somebody has to be told.
+            CancelledError: If a cancellation was absorbed and the close then
+                failed — :meth:`_commit_shielded`'s own precedence.
         """
-        try:
-            await self._commit_shielded(
-                self._closing(state, step_id, StepStatus.FAILED, error=_UNSTARTED)
-            )
-        except PlanningError:
-            _log.warning("executor_unstarted_close_failed", step_id=step_id, exc_info=True)
+        _, cancelled = await self._commit_shielded(
+            self._closing(state, step_id, StepStatus.FAILED, error=_UNSTARTED)
+        )
+        return cancelled
 
     async def _refuse(self, state: ExecutionState, step_id: str) -> ExecutionState:
         """Commit ``RUNNING → FAILED`` for a seam rejection, and schedule nothing.
