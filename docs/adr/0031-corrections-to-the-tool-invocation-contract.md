@@ -473,13 +473,31 @@ validator is under the same rule, where the tempting value is `parameters`.
 **"User content" is the boundary, and it is drawn by the field's type rather
 than left to judgement.** A field typed `FrozenJsonValue` or `FrozenJsonMapping`
 — `ToolResult.output`, `ActionRequest.parameters` — is unbounded content the
-system did not author, and is what the rule forbids. An **identifier** and a
-**`StrEnum` member** are not: three outcome constants and a decision id are the
-system's own vocabulary, and both are already written to logs, to the audit
-trail (ADR-0021 §4) and into `StepExecution.approval_ref` and `error`
-(ADR-0014 §3) by ratified decisions. A rule forbidding them here would be one
-that only these three types observed, while the same values flowed to the same
-places from everywhere else.
+system did not author, and is what the rule forbids. A **`StrEnum` member** is not: three outcome
+constants are a closed set the type declares.
+
+**An identifier is the hard case, and the exemption is argued rather than
+asserted.** `Identifier` refuses only a blank, so the *type* does not bound what
+an id holds — a caller that minted a decision id from an email address would put
+that address into `ToolCall._authorised`'s rejection, which is a `ValidationError`
+bound for a log the key-based redactor cannot see. That is true, and it is not a
+reason to strike the id from this message, for two reasons:
+
+- **The exposure is systemic and this validator is not where it is decided.**
+  The same id is written to the audit trail by ADR-0021 §4, to
+  `StepExecution.approval_ref` by ADR-0014 §3, and to every log line that names
+  a tool id, a step id or a capability. Refusing it in three validators would
+  close a door beside an open window — ADR-0018 §3's shape — while making a
+  rejection unable to say *which* decision failed, which is a rejection nobody
+  can act on.
+- **The rule that governs it already exists and is not weakened here.**
+  ADR-0004 §5 forbids Tier 0/1 content in logs. A caller that mints an
+  identifier from user text violates that rule at the point of minting, in every
+  store the id reaches, and this ADR neither licenses nor detects it.
+
+So the boundary this clause draws is over **fields whose declared type is
+unbounded content** — the ones a tool fills in — and it deliberately does not
+re-decide what an identifier may contain.
 
 Stating it the blanket way — *never interpolate a value you are validating* —
 was the first draft and is wrong on the code as it stands: `ToolCall._authorised`
@@ -489,12 +507,12 @@ both deliberately, because a rejection that cannot say *which* decision or
 the implementation already satisfies, which is why §5(b) is a ratification and
 not a change.
 
-**The residual question is not this ADR's and has a home.** `Identifier` refuses
-only a blank, so an id is an unbounded string in the type system even though
-nothing mints one from user text; whether ids need a canonical syntax that would
-bound them is **issue #62**, which ADR-0018 §2 already opened for the adjacent
-reason. Narrowing it here would be a cross-lane change argued from one
-validator.
+**The residual has a home, and naming it is the honest close.** Whether ids need
+a canonical syntax that would bound them mechanically — turning the argument
+above into a type guarantee — is **issue #62**, which ADR-0018 §2 opened for the
+adjacent reason and expects to let `VisibleIdentifier` collapse back into
+`Identifier`. Deciding it here would be a cross-lane change to a type `planning`
+shares, argued from one validator in a tools ADR.
 
 The cost is the same one §3 already accepted for the seam's `INTERNAL` message,
 and it is accepted here for the same reason: a thinner diagnostic beats a
