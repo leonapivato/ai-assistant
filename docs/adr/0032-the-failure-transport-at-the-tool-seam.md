@@ -520,10 +520,9 @@ So the rule is a revalidation, in ADR-0018 §4's own idiom — the one
 >   round-trip**, the payload is refused: the seam synthesises its own
 >   `INTERNAL` failure, with its own message, exactly as for an ordinary
 >   escaping exception (ADR-0029 §3).
-> - **If `effect_may_have_committed` is absent or is not a `bool`**, there is no
->   fact to read and the outcome is `FAILED` — which is what a plain raise
->   produces today, and the only honest answer when the tool said nothing
->   legible.
+> - **If `effect_may_have_committed` is absent or is not a `bool`**, the *whole
+>   carrier* is refused: the seam synthesises its own `INTERNAL` failure and the
+>   outcome is `FAILED`, whatever the payload said.
 > - **A `bool` that validates is honoured either way.** §2's outcome rule runs
 >   on it even when the payload was refused.
 >
@@ -549,6 +548,27 @@ it acted", which is both of the true things.
 second reason the fact is a field on the exception rather than on `ToolFailure`
 (§2). A `failure` property that explodes must not take the `bool` down with it,
 so each attribute is fetched under its own guard and judged on its own.
+
+**The converse does not hold, and the asymmetry is the rule rather than an
+inconsistency in it.** A bad payload costs the *kind*; a bad fact costs the
+*carrier*. Each defect resolves in its own pessimistic direction, and the two
+directions are not the same:
+
+- **Losing the fact would be unsafe**, because the lost value might be `True`
+  and the loss records a possible commit as certainly-nothing-happened —
+  ADR-0014 §4's forbidden guess. So it is kept.
+- **Losing the kind is safe**, because what a refused kind costs is a
+  `retryable=True` the seam has no reason to trust. A carrier missing a
+  *required, keyword-only* argument never went through `__init__`, so nothing
+  about it was checked — and reporting a confident `RATE_LIMITED` from it is the
+  seam authorising a retry on the strength of an object that was assembled
+  around its own constructor. `INTERNAL` is not retryable, which is the
+  fail-closed answer.
+
+So the fact is preserved when the payload is bad, and the payload is discarded
+when the fact is bad. Both rules point the same way — toward the outcome that
+retries less and knows less — which is the direction every other unclosable
+question in this contract resolves (ADR-0031 §2, §4).
 
 **Absent, not merely wrong**, because `del exc.failure` on a constructed carrier
 is as reachable as assigning `None` to it, and an implementation that reads the
@@ -721,8 +741,11 @@ rather than asserted:
   payload refused for the seam's own INTERNAL. The two attributes are validated
   independently, so a bool that validates is honoured under the outcome rule
   even when the payload was refused — the same preservation §3 makes when it
-  refuses a reserved kind — and only a fact that is absent or not a bool leaves
-  the outcome at FAILED. Reading
+  refuses a reserved kind — while a fact that is absent or not a bool refuses
+  the whole carrier for INTERNAL and FAILED, since a carrier missing a required
+  keyword-only argument never went through its constructor and its kind would
+  otherwise authorise a retry. Each defect resolves toward retrying less and
+  knowing less. Reading
   and revalidating the carrier is itself guarded, since isinstance admits a
   subclass and both the attribute access and model_dump() are then tool-supplied
   code: any Exception they raise is INTERNAL, BaseException still propagates,
