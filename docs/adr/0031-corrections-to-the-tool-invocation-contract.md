@@ -463,79 +463,55 @@ refused.
   carve-out — the fake refuses two bindings under one id, because that is the
   arrangement mistake a consumer could plausibly make — is unchanged.
 
-**(b) A validator on these types names a value's type, never the value** (amends
-§3). §3 already forbids the *seam* from interpolating `str(exc)` into a message,
-with a specific reason: `core/logging.py` redacts by key, its own docstring
-names `error=str(exc)` as the Tier 1 leak it cannot see, and `message` lands
-under exactly such a key. A `ValidationError` raised by a `core` validator lands
-in the same place and is not covered by that sentence. The rule generalises to
-where it was already needed:
+**(b) A validator does not interpolate the fields a tool fills** (amends §3).
+§3 already forbids the *seam* from interpolating `str(exc)` into a message, with
+a specific reason: `core/logging.py` redacts by key, its own docstring names
+`error=str(exc)` as the Tier 1 leak it cannot see, and `message` lands under
+exactly such a key. A `ValidationError` raised by a `core` validator lands in the
+same place and is not covered by that sentence. The rule extends to where it was
+already needed, and it is stated by enumeration rather than by a category, so
+that what it binds cannot drift:
 
-> **No validator on `ToolCall`, `ToolResult` or `ToolFailure` interpolates a
-> value that can carry user content.** It may name such a value's type.
+> **No validator on `ToolCall`, `ToolResult` or `ToolFailure` interpolates
+> `ToolResult.output` or `ActionRequest.parameters`.** It may name their type.
 
-The concrete case is `ToolResult`'s cross-field check: a non-`SUCCEEDED` result
-carrying an output is refused with a message naming
+Those two are the fields a *tool* fills, typed `FrozenJsonValue` and
+`FrozenJsonMapping` — unbounded content the system did not author, carrying
+Tier 1 data routinely. The concrete case is `ToolResult`'s cross-field check: a
+non-`SUCCEEDED` result carrying an output is refused with a message naming
 `type(self.output).__name__`, because the natural message — the one that helps
-most while debugging — would put a tool's output, which carries Tier 1 data
-routinely, into a `ValidationError` bound for a log. `ToolCall`'s authorisation
-validator is under the same rule, where the tempting value is `parameters`.
-
-**"User content" is the boundary, and it is drawn by the field's type rather
-than left to judgement.** A field typed `FrozenJsonValue` or `FrozenJsonMapping`
-— `ToolResult.output`, `ActionRequest.parameters` — is unbounded content the
-system did not author, and is what the rule forbids. A **`StrEnum` member** is not: three outcome
-constants are a closed set the type declares.
-
-**An identifier is the hard case, and it is answered by adding an obligation
-rather than by claiming an exemption.** `Identifier` refuses only a blank, so
-the *type* bounds nothing, and `PermissionDecision.from_request` takes the id as
-an argument — "minted by the caller that records". So the safety of naming
-`decision.id` in `ToolCall._authorised`'s rejection is a property of the minting
-caller, not of the type, and ADR-0029 never says so. This ADR says it:
-
-> **An identifier this contract names must be Tier 2-safe**: minted from system
-> vocabulary, never derived from Tier 0 or Tier 1 content. This binds whoever
-> mints a `PermissionDecision.id`, a step id, or a tool id.
-
-**That is a restatement of where the burden already sits, not a new one.**
-ADR-0021 §4 writes the decision — id included — into the audit trail, and
-ADR-0014 §3 writes it into `StepExecution.approval_ref` and names it in `error`.
-An id derived from user content is therefore a Tier 1 disclosure in two durable
-stores *before* any validator sees it, and ADR-0004 §5 already forbids it there.
-What was missing is a sentence making the obligation checkable at the point a
-caller mints one, which is the only point where it can be honoured.
-
-**With that stated, stripping the id from the message closes nothing and costs
-something.** It leaves the id in both stores and in every log line naming a
-tool, a step or a capability, while making the rejection unable to say *which*
-decision failed — a door closed beside an open window (ADR-0018 §3), in exchange
-for a rejection nobody can act on.
-
-So the boundary this clause draws is over **fields whose declared type is
-unbounded content** — the ones a tool fills in — with identifiers held to the
-obligation above rather than exempted from the concern.
-
-Stating it the blanket way — *never interpolate a value you are validating* —
-was the first draft and is wrong on the code as it stands: `ToolCall._authorised`
-names `decision.id` and `ToolResult._outcome_fields_match` names `self.outcome`,
-both deliberately, because a rejection that cannot say *which* decision or
-*which* outcome is a rejection nobody can act on. The narrower rule is the one
-the implementation already satisfies, which is why §5(b) is a ratification and
-not a change.
-
-**The obligation is not mechanical, and that residual has a home.** Nothing
-checks that a minted id carries no user content; a canonical identifier syntax
-that would bound it in the type is **issue #62**, which ADR-0018 §2 opened for
-the adjacent reason and expects to let `VisibleIdentifier` collapse back into
-`Identifier`. Deciding it here would be a cross-lane change to a type `planning`
-shares, argued from one validator in a tools ADR — and it would not be an
-excuse to defer the obligation, since ADR-0021's and ADR-0014's durable stores
-need it today whether or not a type enforces it.
+most while debugging — would put a tool's output into a `ValidationError` bound
+for a log. `ToolCall`'s authorisation validator is under the same rule, where
+the tempting value is `parameters`.
 
 The cost is the same one §3 already accepted for the seam's `INTERNAL` message,
 and it is accepted here for the same reason: a thinner diagnostic beats a
 disclosure on the failure path of every tool nobody thought about.
+
+**What this deliberately does not decide: whether an identifier may appear in a
+log-bound message — issue #197.** `ToolCall._authorised` names `decision.id` in
+its rejection today, and `Identifier` refuses only a blank while
+`PermissionDecision.from_request` takes the id as an argument, "minted by the
+caller that records". So nothing in the type system says that message is
+Tier 2-safe.
+
+**It is a real question and it is not this ADR's**, on ADR-0018 §2's own
+reasoning. Every available resolution reaches outside `tools/`: bounding the
+type is a change to an identifier `planning` shares, which ADR-0018 §2 refused
+to make from a tools ADR and deferred to **#62**; obliging every caller that
+mints a decision or step id binds `planning` and `permissions` from a document
+that decides neither; and stripping ids from messages closes the smallest share
+of the exposure, since ADR-0021 §4 writes the same id into the audit trail and
+ADR-0014 §3 into `StepExecution.approval_ref` and `error`. A blanket rule here —
+*never interpolate a value you are validating* — was an earlier draft of this
+clause and quietly picked the third, while also falsifying itself:
+`ToolResult._outcome_fields_match` names `self.outcome`, one of three declared
+constants, deliberately.
+
+So the enumerated rule above is exactly what first use produced, and #197
+carries the identifier question to a cross-lane ADR that can amend the contracts
+it touches. Nothing in this ADR ratifies the `decision.id` message, and nothing
+forbids it; it predates this decision and outlives it unchanged.
 
 ### 6. What this does not change
 
@@ -610,10 +586,10 @@ records that the ADR was amended, not how many times.
   cancellation and calls uncancel() on the invoking task erases the seam's
   evidence and the call returns an ordinary result (#189). §1 gains the callable
   half of the rebinding refusal, a tools/ invariant; §3 gains the rule that a
-  validator on these types names the type of a value whose declared type is
-  unbounded content, never the value; an enum member may be named, and so may an
-  identifier, which this ADR obliges its minting caller to keep Tier 2-safe. The
-  new
+  validator on these types never interpolates ToolResult.output or
+  ActionRequest.parameters — the fields a tool fills — and names their type
+  instead; whether an identifier may appear in a log-bound message is #197's and
+  is untouched. The new
   core surface is eight names, not seven. Everything else in §§1, 3-4 stands as
   ratified: the biconditional, the three seam checks and their order, failure as
   data, retryable, the seam's ownership of the deadline and its classification
@@ -732,13 +708,14 @@ inventing it.
   classify its own failure: today an upstream 429 arrives as `INTERNAL`, which
   is not retryable. This ADR does not decide that transport, and says so where
   it would otherwise be assumed.
-- **Whoever mints an identifier now owes it being Tier 2-safe** (§5(b)). Nothing
-  enforces it — `Identifier` refuses only a blank, and #62 is where a type-level
-  answer lives — but the obligation was load-bearing and unstated: ADR-0021 §4
-  and ADR-0014 §3 already put decision and step ids into durable stores and log
-  lines, so an id derived from user content was a disclosure before this
-  contract existed. Writing it down is what makes naming an id in a rejection
-  defensible rather than assumed.
+- **A second privacy question is now named and open** (#197): `Identifier`
+  bounds nothing, so `ToolCall._authorised` naming `decision.id` in a log-bound
+  rejection rests on an assumption no type carries. §5(b) deliberately does not
+  answer it — every resolution amends a contract this ADR does not own, which is
+  ADR-0018 §2's reason for deferring the shared identifier to #62 in the first
+  place. The cost of naming it rather than fixing it is that the assumption
+  stays live; the cost of fixing it here would have been a tools ADR narrowing
+  `planning`'s type.
 - **#189 closes as a declared limit rather than a fix**, and the conformance
   suite pins it, so an implementation that later closes it by isolating the
   callable fails the suite and has to come back through an ADR. That is a real
