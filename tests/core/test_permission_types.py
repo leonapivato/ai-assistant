@@ -562,6 +562,22 @@ def test_a_decision_identifier_with_no_utf8_encoding_is_refused(field: str) -> N
         )
 
 
+def _unstorable_tool(**overrides: Any) -> ToolDefinition:
+    r"""A definition holding a lone surrogate, built past the type's own guard.
+
+    ``ToolDefinition`` refuses one at construction since issue #156, so the only
+    way to obtain such a value is the ``object.__setattr__`` bypass ADR-0018 §3
+    and ADR-0021 §4 keep inside this repository's threat model. That is exactly
+    the input these boundary tests need: it lets them pin the *permissions*
+    boundary's refusal (PR #119) on its own, rather than passing because the
+    definition could never be built in the first place.
+    """
+    definition = tool()
+    for field, value in overrides.items():
+        object.__setattr__(definition, field, value)
+    return definition
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -581,9 +597,14 @@ def test_a_request_whose_definition_has_no_utf8_encoding_is_refused(
     holder of one. A lone surrogate anywhere the definition reaches would be
     accepted here and fail at the store — the round-trip guarantee broken
     through the one field a decision copies verbatim rather than authors.
+
+    Stronger than the version PR #119 shipped: the definition is tampered past
+    ``frozen=True`` rather than honestly constructed, so this still exercises
+    *this* boundary now that ``ToolDefinition`` itself would have refused an
+    honestly built one first.
     """
     with pytest.raises(ValidationError, match="JSON encoding"):
-        ActionRequest(tool=tool(**override))
+        ActionRequest(tool=_unstorable_tool(**override))
 
 
 def test_a_hand_built_decision_with_an_unencodable_definition_is_refused() -> None:
@@ -592,13 +613,38 @@ def test_a_hand_built_decision_with_an_unencodable_definition_is_refused() -> No
     ADR-0021 §1 leaves hand construction open — it is a caller falsifying its own
     trail, not a policy subverting a gate — but an unstorable record is a
     different failure from a false one, and it is the store that would break.
+
+    A ``PermissionDecision`` receives an already-built ``ToolDefinition``, which
+    pydantic passes through without re-running its *field* validators. This is
+    the test that proves the refusal survives issue #156 dropping this field's
+    own ``_durable_tool`` annotation: what catches it now is the type's ``after``
+    model validator, which pydantic *does* re-run on an instance.
     """
     with pytest.raises(ValidationError, match="JSON encoding"):
         PermissionDecision(
             id="d-1",
             ruling=PermissionRuling(outcome=PermissionOutcome.DENY, reason="no"),
-            tool=tool(description="Send \ud800 mail."),
+            tool=_unstorable_tool(description="Send \ud800 mail."),
             parameters_digest="0" * 64,
+            decided_at=AT,
+        )
+
+
+def test_a_decision_transcribed_from_a_tampered_request_is_refused() -> None:
+    """The factory path, not only the hand-built one.
+
+    ``from_request`` deep-copies the request's definition, and a deep copy of an
+    unstorable value is still unstorable — so the refusal has to happen when the
+    copy lands on the field, not when the copy was made.
+    """
+    request = ActionRequest(tool=tool())
+    object.__setattr__(request.tool, "parameters_schema", {"to": "\ud800"})
+
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        PermissionDecision.from_request(
+            request,
+            PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
+            id="d-1",
             decided_at=AT,
         )
 

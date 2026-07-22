@@ -1370,6 +1370,20 @@ _BLANK_RENDERING = frozenset(
 )
 
 
+def _is_encodable(text: str) -> bool:
+    r"""Whether ``text`` has a UTF-8 encoding.
+
+    A lone surrogate (``"\ud800"``) is a ``str`` Python is happy to hold but
+    that no UTF-8 encoder will accept, because it is half of a character rather
+    than a character.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _has_visible_text(value: str) -> bool:
     """Whether ``value`` contains at least one character that renders.
 
@@ -1644,6 +1658,67 @@ class ToolDefinition(BaseModel):
             raise ValueError(msg)
         return value
 
+    @model_validator(mode="after")
+    def _is_storable(self) -> ToolDefinition:
+        r"""Refuse a declaration that has no JSON encoding (issue #156).
+
+        A lone surrogate — a ``str`` Python holds happily and no UTF-8 encoder
+        accepts — satisfies every other rule here. ``id`` and ``capability`` are
+        :data:`VisibleIdentifier`, which asks only that something renders;
+        ``description`` asks the same; ``parameters_schema`` is
+        :data:`FrozenJsonMapping`, which refuses a non-finite float and says
+        nothing about text. So ``ToolDefinition(description="Send \ud800 mail.")``
+        is a *valid model that cannot be serialised*, and the failure arrives as
+        a ``PydanticSerializationError`` from whatever tries to store it.
+
+        **Why the constraint sits on the type rather than on each holder.**
+        ADR-0016 §6 keeps the registry in memory and rebuilds it each run, so
+        nothing forced the question while the registry was the only holder.
+        ADR-0021 §4 made the audit trail the first durable one and PR #119
+        closed the gap at the permissions boundary; ADR-0029 then embedded a
+        definition in :class:`ToolCall` and had the seam revalidate it, which is
+        the same work a second time. A holder-by-holder rule is a list someone
+        has to keep complete as holders are added, and the property being
+        protected — "this value can be written down" — is intrinsic to the
+        declaration rather than to who is holding it (ADR-0016 §2's test).
+        Checked here, every present and future holder gets it for nothing, and
+        an integration author learns at registration rather than at the trail.
+
+        **The predicate is the serialisation itself, not an enumeration of the
+        strings a definition reaches.** That is what makes it depth-independent:
+        ``parameters_schema`` is a JSON Schema of arbitrary shape and a
+        surrogate can sit in a key or a value at any nesting, so a rule written
+        against the top level, or against the text fields, would be complete
+        only until the next schema. Running the real encoding cannot be
+        incomplete, and it keeps "accepted" and "storable" the same predicate as
+        the model grows fields — the reason :func:`_canonical_json` is shared
+        with the digest rather than restated.
+
+        A ``model_validator`` specifically, and that is load-bearing rather than
+        stylistic: pydantic re-runs an ``after`` model validator when an
+        existing instance is assigned to a model-typed field, and does *not*
+        re-run field validators. So this also catches a definition tampered past
+        ``frozen=True`` with ``object.__setattr__`` on its way into a
+        :class:`PermissionDecision` — the bypass ADR-0018 §3 and ADR-0021 §4 put
+        inside this repository's threat model — which is what lets the
+        permissions boundary drop its own copy of this check.
+
+        Raises:
+            ValueError: If the definition has no JSON encoding.
+        """
+        try:
+            encodable = _is_encodable(json.dumps(self.model_dump(mode="json"), ensure_ascii=False))
+        except UnicodeEncodeError:
+            # An unencodable *key* fails inside the dump rather than after it,
+            # because pydantic encodes a mapping key on the way to JSON. Caught
+            # here so both halves of the same defect raise the same error rather
+            # than one arriving as a bare codec failure.
+            encodable = False
+        if not encodable:
+            msg = f"tool has no JSON encoding, so it could not be stored: {self.id!r}"
+            raise ValueError(msg)
+        return self
+
 
 class PermissionOutcome(_SeverityScale):
     """What a policy ruled about an action (ADR-0021 §2).
@@ -1663,20 +1738,6 @@ class PermissionOutcome(_SeverityScale):
     ALLOW = "allow"
     CONFIRM = "confirm"
     DENY = "deny"
-
-
-def _is_encodable(text: str) -> bool:
-    r"""Whether ``text`` has a UTF-8 encoding.
-
-    A lone surrogate (``"\ud800"``) is a ``str`` Python is happy to hold but
-    that no UTF-8 encoder will accept, because it is half of a character rather
-    than a character.
-    """
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
 
 
 def _durable_identifier(value: str) -> str:
@@ -1775,51 +1836,15 @@ def _detached_tool(value: ToolDefinition) -> ToolDefinition:
     request it was made about. ``extra="forbid"`` turns that into a refusal at
     construction instead — the divergence surfaces where it can be fixed rather
     than after a restart.
+
+    Rebuilding is also what makes the request's copy *storable*, and no separate
+    durability validator is layered here for it: ADR-0021 §4 requires a recorded
+    decision to survive a ``model_dump(mode="json")`` round trip, and
+    :meth:`ToolDefinition._is_storable` refuses a definition with no JSON
+    encoding on every path into that type — including an already-built instance
+    handed straight to :class:`PermissionDecision` (issue #156).
     """
-    return _durable_tool(ToolDefinition.model_validate(value.model_dump()))
-
-
-def _durable_tool(value: ToolDefinition) -> ToolDefinition:
-    """Reject a declaration the recorded decision could not be stored as.
-
-    The same durability rule :func:`_durable_identifier` applies to a decision's
-    own identifiers, applied to the definition it embeds. A ``ToolDefinition``
-    admits any ``str`` in its text fields and any JSON-safe value in its schema,
-    so a lone surrogate — a ``str`` Python holds happily and no UTF-8 encoder
-    accepts — reaches the trail through ``description``, ``capability`` or
-    ``parameters_schema`` and fails at the store boundary, one field family
-    short of the guarantee ADR-0021 §4 makes about a record reloading.
-
-    Checked *here* rather than on :class:`ToolDefinition` because ADR-0016 §6
-    makes the registry in-memory and rebuilt each run: it never serialises a
-    definition, so nothing forced the question until this ADR made the audit
-    trail the first durable holder of one. Tightening the shared type is the
-    tools lane's change (issue #156); requiring a decision to be storable is
-    this one's, and it is the same boundary :func:`_durable_identifier` drew.
-
-    The predicate is the serialisation itself rather than an enumeration of
-    reachable strings, so "accepted" and "storable" cannot come apart as the
-    definition grows fields — the reason :func:`_canonical_json` is shared with
-    the digest instead of being restated. It runs over the field a decision
-    actually keeps, which is why it is not simply :func:`_is_encodable` on the
-    text fields: ``parameters_schema`` carries strings too, in both its keys and
-    its values.
-
-    Raises:
-        ValueError: If the definition has no JSON encoding.
-    """
-    try:
-        encodable = _is_encodable(json.dumps(value.model_dump(mode="json"), ensure_ascii=False))
-    except UnicodeEncodeError:
-        # An unencodable *key* fails inside the dump rather than after it,
-        # because pydantic encodes a mapping key on the way to JSON. Caught here
-        # so both halves of the same defect raise the same error rather than one
-        # arriving as a bare codec failure.
-        encodable = False
-    if not encodable:
-        msg = f"tool has no JSON encoding, so the decision could not be stored: {value.id!r}"
-        raise ValueError(msg)
-    return value
+    return ToolDefinition.model_validate(value.model_dump())
 
 
 def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
@@ -2021,16 +2046,17 @@ class PermissionDecision(BaseModel):
     Every field is serialisable, and that is load-bearing rather than
     incidental: a decision that could not survive a ``model_dump(mode="json")``
     round-trip would make the pin worthless across exactly the restart issue #54
-    is about.
+    is about. The identifiers carry that as :data:`DurableIdentifier` and the
+    digest as :data:`Sha256Hex`; ``tool`` needs no annotation of its own because
+    :meth:`ToolDefinition._is_storable` makes it a property of the declaration
+    rather than of this record (issue #156).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: DurableIdentifier
     ruling: PermissionRuling = Field(description="What the policy said.")
-    tool: Annotated[ToolDefinition, AfterValidator(_durable_tool)] = Field(
-        description="The declaration ruled on, verbatim."
-    )
+    tool: ToolDefinition = Field(description="The declaration ruled on, verbatim.")
     parameters_digest: Sha256Hex = Field(description="Binds the payload without storing it.")
     decided_at: UtcInstant = Field(
         description=(
