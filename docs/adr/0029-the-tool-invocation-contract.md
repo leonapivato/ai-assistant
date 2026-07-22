@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032
+- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032; §8 amended by ADR-0034
 - Date: 2026-07-21
 - Amended: 2026-07-21 by ADR-0031 — the corrections first use found
   (PR #188). §4's interrupted-call rule gains a core home and is
@@ -106,6 +106,34 @@
   ClassifiedToolError ever escapes invoke. §3's "A message the seam generates
   carries no content it did not author" is not superseded either — it binds the
   seam's own messages, which are unchanged.
+- Amended: 2026-07-22 by ADR-0034 — §8's pre-invocation rule is scoped to the
+  circumstance rather than to one exception. §8 states that a raised
+  ToolBindingError is committed RUNNING → FAILED and never retried, because
+  stranding a claimed step has recovery record INDETERMINATE "about a call that
+  provably never reached the callable", which is "the one thing INDETERMINATE
+  must not be used for". That reasoning covers the whole window between the
+  committed claim and the callable, and two further exits occupy it: a
+  cancellation absorbed while the claim's own write was in flight, and a failure
+  of the clock read that fixes the first attempt's instant. Both take the same
+  outcome, on the same grounds, by the same mechanism — retry is scheduled only
+  from a ToolResult, and no exit through the window produces one. The rule
+  qualifies an exit only where nothing could have run under it, established
+  either because invoke was never entered or because this ADR's §2 states the
+  exit precedes the callable; once invoke has been entered the executor holds no
+  such fact, ToolInvoker exposes none, and §4's classification governs
+  unchanged. §5's fail-closed rule is confirmed as scoped to a **reading** that
+  is not a positive elapsed duration: a clock that raises produced none, and is
+  ADR-0026 §2's wiring bug, translated at the orchestration boundary under
+  ADR-0026 §4 rather than absorbed as a lapsed window. §4's cancellation rule,
+  its shield idiom, its "correct pessimism" passage, and §5's key derivation and
+  retry algebra are unchanged. ADR-0034 §4 also applies a dated note to
+  ADR-0014's header for §4's second RUNNING → FAILED trigger, in §9's form.
+  Superseded sentence in ADR-0029, which stands in the document unedited: §8's
+  "This is the only outcome an executor must derive from an exception rather
+  than from a ToolResult, which is precisely why it is written down" — false
+  when it was written rather than falsified by ADR-0034, since §4 of this same
+  document already mandates a second such outcome for a cancelled invocation.
+  ADR-0034 §3 replaces it with an enumeration.
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
   the three constraints ADR-0016 §7 sets on this ADR (§1, §2, §6 below).
