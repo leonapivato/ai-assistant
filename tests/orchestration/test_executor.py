@@ -706,6 +706,49 @@ async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() ->
     assert implementation.calls == [], "the tool was never reached"
 
 
+async def test_a_cancellation_requested_after_the_claim_still_reaches_the_tool() -> None:
+    """There is no gap between the claim and the callable for one to land in.
+
+    A cancellation requested while the executor is *running* — here by the
+    injected clock, the last thing called before ``invoke`` — sets the task's
+    pending flag rather than raising, and a directly awaited coroutine does not
+    suspend. So ``invoke``'s body runs, the seam reaches the callable without an
+    await of its own, and the ``CancelledError`` is delivered at the **tool's**
+    first suspension: the callable was entered.
+
+    What the executor then sees is an ordinary result, not a cancellation, and
+    that is ADR-0031 §2's provenance rule rather than an accident. The seam reads
+    a *delta* on ``Task.cancelling()`` captured across the call, so a cancellation
+    requested before it was entered is not this call's; the seam rules the
+    absorbed error ``INTERNAL`` and returns. The step is therefore committed
+    ``FAILED`` — nothing ambiguous is recorded — and the executor's cancellation
+    handler is never reached.
+
+    Both halves are pinned because both are load-bearing: the callable *was*
+    reached, so ``INDETERMINATE`` would be honest if the handler had run; and in
+    this window it does not run at all, so no side-effecting tool acquires a
+    false ambiguity here.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Blocking()
+    seam = FakeToolInvoker([(tool(), implementation)])
+
+    def cancelling_clock() -> datetime:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        return AT
+
+    await executor_over(store, seam, now=cancelling_clock).execute(
+        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+    )
+
+    assert implementation.calls == 1, "the callable was entered before the error landed"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "no false ambiguity is recorded in this window"
+
+
 async def test_a_clock_that_raises_leaves_no_step_running() -> None:
     """ADR-0026 §2 lets a clock's own exception propagate unwrapped.
 
