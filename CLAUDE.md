@@ -120,7 +120,7 @@ reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
 re-running or it is invisible. Each run records an artifact under `.review/`,
 named by the anchor it is selected by —
 `<loop_id-or-noloop>-<persona>-<base_sha>-<tree>.md` (ADR-0027 §6; `noloop`
-stands in on the CI bypass path, which keeps no loop identity). `just ship`
+stands in on the bypass path — no sandbox, or CI — which keeps no loop identity). `just ship`
 refuses to post unless one covers the **content** the PR head carries. Amending,
 squashing, or reverting to a reviewed tree therefore costs no round; changing a
 reviewed byte does. **A base move does not cost a round on its own:** where it leaves the
