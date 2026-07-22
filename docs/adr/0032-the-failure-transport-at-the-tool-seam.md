@@ -454,6 +454,27 @@ is as reachable as assigning `None` to it, and an implementation that reads the
 attribute directly raises a raw `AttributeError` out of `invoke` where the rule
 requires a result. The reads are by sentinel, so the total path is total.
 
+**And the reading itself is guarded, because every step of it is code the tool
+supplies.** `isinstance` admits a subclass, so `exc.failure.model_dump()` is a
+dispatch to a method a tool may have overridden, and `exc.failure` is an
+attribute access a tool may have made a property. Either can raise — and an
+exception raised inside an `except` body is **not** caught by the sibling
+`except` clauses of the same `try`, so it leaves `invoke` uncaught, which is
+exactly the outcome §6 exists to prevent, reached by the mechanism §6
+introduced.
+
+> **Reading, revalidating and translating the carrier happens inside its own
+> guard.** Any `Exception` raised by the attribute access or by the round-trip
+> is an ordinary escaping exception: `INTERNAL`, with the seam's own message,
+> and nothing derived from it rendered (§5). `BaseException` propagates
+> unchanged, as ADR-0029 §3 requires everywhere else.
+
+The general form of the rule, which is the durable part: **the seam's total
+failure path may not itself contain an unguarded call into tool-supplied code.**
+ADR-0029 §3 draws the same boundary one layer up — "a guard whose own failure
+modes bypass the failure path it specifies is enforcing nothing" — and this is
+that sentence applied to the guard this ADR adds.
+
 This is ADR-0029 §2's own ordering rule applied one layer down: revalidate and
 detach *first*, then read, because "a mutation landed after construction cannot
 survive into execution". Letting an unvalidated value through into `ToolResult`
@@ -572,7 +593,11 @@ rather than asserted:
   model_validate() idiom, because isinstance is not evidence a pydantic model
   was validated — model_construct bypasses every validator — and a carrier that
   is absent, is not a ToolFailure, does not survive the round-trip, or does not
-  hold a bool is an ordinary escaping exception and becomes INTERNAL.
+  hold a bool is an ordinary escaping exception and becomes INTERNAL. Reading
+  and revalidating the carrier is itself guarded, since isinstance admits a
+  subclass and both the attribute access and model_dump() are then tool-supplied
+  code: any Exception they raise is INTERNAL, BaseException still propagates,
+  and the seam's total failure path contains no unguarded call into a tool.
   ToolImplementation's signature does not move and its
   shape stays tools/-internal. The new core surface is nine names, not eight.`
 
@@ -743,6 +768,15 @@ what keeps the fake honest without importing `tools/`.
   escaping `invoke`. The deletion cases are the ones a natural implementation
   fails — reading `exc.failure` directly raises where the rule requires a result
   — and a suite testing only `None` certifies it.
+
+- **A carrier that fights back** (§6's guard), which is the case every other
+  malformed-carrier test passes without: a `ToolFailure` **subclass** whose
+  `model_dump()` raises, and a carrier whose `failure` is a property that
+  raises. `isinstance` admits both, so the revalidation itself is the thing that
+  raises — from inside an `except` body, where no sibling clause catches it.
+  Both must come back `INTERNAL`. Paired with a subclass whose `model_dump()`
+  raises a `BaseException`, which must propagate, so the guard is not written as
+  a bare `except BaseException`.
 
 - **The plain case still holds.** A tool raising an ordinary `RuntimeError` is
   still `INTERNAL` and a `BaseException` still propagates — ADR-0029 §10's
