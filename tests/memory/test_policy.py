@@ -85,6 +85,61 @@ async def test_user_asserted_is_accepted() -> None:
     assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
+async def test_user_assertion_supersedes_a_conflicting_inference() -> None:
+    # ADR-0038: the correction must displace the stale belief, not land beside
+    # it. Before this rule the ACCEPT above fired first and both stayed live.
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    stale = _semantic("stale", source=MemorySource.INFERRED, confidence=0.6)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[stale])
+
+    assert decision.kind is MemoryDecisionKind.MERGE
+    assert decision.merge_into == "stale"
+
+
+async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assertion() -> None:
+    # `conflicts` is score-ordered, so the highest-ranked conflict can be a
+    # user-asserted record. Superseding it would destroy something the user
+    # said on the strength of a lexical match; the rule skips to the first
+    # non-asserted candidate instead (ADR-0038 §3).
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    conflicts = [
+        _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("our-guess", source=MemorySource.OBSERVED, confidence=0.6),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+
+    assert decision.kind is MemoryDecisionKind.MERGE
+    assert decision.merge_into == "our-guess"
+
+
+async def test_user_assertion_conflicting_only_with_assertions_is_accepted() -> None:
+    # Two things the user said, both at confidence 1.0: nothing ranks them, and
+    # the conflict signal is not strong enough to destroy either. Accept beside
+    # (ADR-0038 §5) — deliberately unchanged from the pre-ADR behaviour.
+    proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
+    earlier = _semantic("earlier", source=MemorySource.USER_ASSERTED, confidence=1.0)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_secret_tier_assertion_still_defers_before_superseding() -> None:
+    # Rule 1 outranks supersession: a secret-tier correction must not silently
+    # overwrite a record on its way to being confirmed.
+    proposal = _proposal(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        sensitivity=DataTier.SECRET,
+    )
+    stale = _semantic("stale", source=MemorySource.INFERRED, confidence=0.6)
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[stale])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
 async def test_conflict_with_non_asserted_merges() -> None:
     proposal = _proposal(_semantic("new"))
     existing = _semantic("existing")

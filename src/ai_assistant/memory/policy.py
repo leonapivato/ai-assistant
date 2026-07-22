@@ -28,6 +28,31 @@ _DEFAULT_MIN_CONFIDENCE = 0.3
 _DEFAULT_TEMPORARY_TTL = timedelta(days=7)
 
 
+def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
+    """Rule on a user-asserted proposal: supersede a stale inference, or accept.
+
+    Supersession targets the best-ranked *non-asserted* conflict rather than
+    ``conflicts[0]``. The sequence is ordered by retrieval score, so the top
+    entry may itself be user-asserted, and merging over it would destroy a
+    record the user gave us on the strength of a lexical or embedding
+    near-match. An assertion may displace a belief we derived; it may not
+    displace one we were told (ADR-0038 §3). With nothing derived to displace —
+    no conflicts, or only asserted ones — the assertion is simply accepted, and
+    two things the user said are left to stand side by side (ADR-0038 §5).
+    """
+    superseded = next(
+        (c for c in conflicts if c.provenance.source is not MemorySource.USER_ASSERTED),
+        None,
+    )
+    if superseded is None:
+        return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="user-asserted")
+    return MemoryDecision(
+        kind=MemoryDecisionKind.MERGE,
+        merge_into=superseded.id,
+        reason="user assertion supersedes a conflicting inference",
+    )
+
+
 class DefaultMemoryPolicy:
     """A conservative default policy for memory writes.
 
@@ -36,12 +61,19 @@ class DefaultMemoryPolicy:
 
     1. Secret-tier proposals always defer to the user.
     2. An inference never silently overrides a user-asserted memory — defer.
-    3. User-asserted proposals are trusted and accepted.
-    4. A proposal that conflicts with an existing (non-asserted) record merges
+    3. A user-asserted proposal *supersedes* a conflicting inference: it merges
+       over the best-ranked non-asserted conflict rather than landing beside it,
+       so a correction takes the stale belief off the read path (ADR-0038).
+    4. A user-asserted proposal with nothing to supersede is trusted and
+       accepted.
+    5. A proposal that conflicts with an existing (non-asserted) record merges
        into it.
-    5. Weak evidence (below ``min_confidence``) is stored temporarily, with an
+    6. Weak evidence (below ``min_confidence``) is stored temporarily, with an
        expiry, rather than committed.
-    6. Otherwise the proposal is accepted.
+    7. Otherwise the proposal is accepted.
+
+    Rules 2 and 3 are the same asymmetry read in both directions: an assertion
+    outranks an inference, and never the reverse.
     """
 
     def __init__(
@@ -98,7 +130,7 @@ class DefaultMemoryPolicy:
             )
 
         if is_asserted:
-            return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="user-asserted")
+            return _rule_on_assertion(conflicts)
 
         if conflicts:
             return MemoryDecision(
