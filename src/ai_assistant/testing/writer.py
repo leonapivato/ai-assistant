@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import MemoryDecisionKind, MemoryIngestResult, MemoryKind, Provenance
 
@@ -149,7 +149,7 @@ class FakeMemoryWriter:
             return None
         try:
             now = self._clock()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
         try:
             return now + ttl

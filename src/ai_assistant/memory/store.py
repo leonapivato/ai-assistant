@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ class InMemoryMemoryStore:
         """
         try:
             return self._clock()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
 
     def _is_expired(self, record: MemoryRecord) -> bool:

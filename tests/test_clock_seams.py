@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.context.sources import ClockContextSource
+from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.errors import ContextError, MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     ActionPlan,
@@ -54,6 +55,8 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
+    from ai_assistant.core.clock import Clock
+
 #: A naive reading: the one every seam used to accept and now must refuse.
 _NAIVE = datetime(2026, 7, 21, 12)  # noqa: DTZ001 — the naive reading is the subject
 _AWARE = datetime(2026, 7, 21, 12, tzinfo=UTC)
@@ -61,6 +64,12 @@ _AWARE = datetime(2026, 7, 21, 12, tzinfo=UTC)
 
 def _naive_clock() -> datetime:
     return _NAIVE
+
+
+def _failing_clock() -> datetime:
+    """A clock that fails on its own account, with the type seams must not steal."""
+    msg = "the clock provider is down"
+    raise ValueError(msg)
 
 
 def _record(*, expires_at: datetime | None = None) -> SemanticMemory:
@@ -109,56 +118,58 @@ class Seam:
     """One injected-clock seam and the error its subsystem owes on a bad reading.
 
     Attributes:
-        label: The seam, as named in ADR-0026's table.
-        read: Builds the object with a naive clock and drives it to read that
-            clock, through the seam's real entry point rather than by reaching
-            into a private method. Async uniformly, so the one synchronous seam
-            needs no separate branch.
+        label: The seam, as named in ADR-0026's table. Also its ``owner`` string,
+            so a label that drifts from the constructor fails the assertion.
+        drive: Builds the object with the given clock and drives it to *read*
+            that clock, through the seam's real entry point rather than by
+            reaching into a private method. Taking the clock as a parameter is
+            what lets one table assert both halves of ADR-0026 §2's
+            reading/invocation boundary. Async uniformly, so the one synchronous
+            seam needs no separate branch.
         error: The ``AssistantError`` subclass ADR-0026 §4 assigns the seam.
     """
 
     label: str
-    read: Callable[[], Coroutine[None, None, None]]
+    drive: Callable[[Clock], Coroutine[None, None, None]]
     error: type[Exception]
 
 
-async def _in_memory_store() -> None:
-    store = InMemoryMemoryStore(now=_naive_clock)
+async def _in_memory_store(now: Clock) -> None:
+    store = InMemoryMemoryStore(now=now)
     await store.add(_record(expires_at=_AWARE))
     await store.get("m1")
 
 
-async def _sqlite_store() -> None:
-    store = SqliteMemoryStore(path=":memory:", embedder=FakeEmbedder(), now=_naive_clock)
+async def _sqlite_store(now: Clock) -> None:
+    store = SqliteMemoryStore(path=":memory:", embedder=FakeEmbedder(), now=now)
     await store.get("m1")
 
 
-async def _ingestor() -> None:
+async def _ingestor(now: Clock) -> None:
     # STORE_TEMPORARY is the ruling whose expiry stamp reads the clock, and it
     # reaches the store through `model_copy(update=...)`, past every validator.
     await MemoryIngestor(
         store=InMemoryMemoryStore(now=lambda: _AWARE),
         policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY),
-        now=_naive_clock,
+        now=now,
     ).ingest(_proposal())
 
 
-async def _fake_store() -> None:
-    store = FakeMemoryStore(now=_naive_clock)
+async def _fake_store(now: Clock) -> None:
+    store = FakeMemoryStore(now=now)
     await store.add(_record(expires_at=_AWARE))
     await store.get("m1")
 
 
-async def _fake_writer() -> None:
-    store = FakeMemoryStore(now=lambda: _AWARE)
+async def _fake_writer(now: Clock) -> None:
     await FakeMemoryWriter(
-        store=store,
+        store=FakeMemoryStore(now=lambda: _AWARE),
         policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY),
-        now=_naive_clock,
+        now=now,
     ).ingest(_proposal())
 
 
-async def _learning_loop() -> None:
+async def _learning_loop(now: Clock) -> None:
     memory = FakeMemoryStore(now=lambda: _AWARE)
     await LearningLoop(
         context=FakeContextProvider(),
@@ -166,28 +177,28 @@ async def _learning_loop() -> None:
         writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
         planner=FakePlanner(now=lambda: _AWARE),
         feedback=FakeFeedbackProcessor(),
-        now=_naive_clock,
+        now=now,
     ).respond("book the flight")
 
 
-async def _clock_source() -> None:
-    await ClockContextSource(now=_naive_clock).contribute()
+async def _clock_source(now: Clock) -> None:
+    await ClockContextSource(now=now).contribute()
 
 
-async def _fake_planner() -> None:
-    await FakePlanner(now=_naive_clock).plan(_goal(), context=_context())
+async def _fake_planner(now: Clock) -> None:
+    await FakePlanner(now=now).plan(_goal(), context=_context())
 
 
-async def _fake_plan_store() -> None:
-    await FakePlanStore(now=_naive_clock).export()
+async def _fake_plan_store(now: Clock) -> None:
+    await FakePlanStore(now=now).export()
 
 
-async def _in_memory_plan_store() -> None:
-    await InMemoryPlanStore(now=_naive_clock).export()
+async def _in_memory_plan_store(now: Clock) -> None:
+    await InMemoryPlanStore(now=now).export()
 
 
-async def _plan_execution() -> None:
-    PlanExecution(now=_naive_clock).start(_plan(), execution_id="e1")
+async def _plan_execution(now: Clock) -> None:
+    PlanExecution(now=now).start(_plan(), execution_id="e1")
 
 
 #: Every seam ADR-0026 §7 covers, verified against the code rather than the table:
@@ -221,9 +232,27 @@ async def test_every_seam_refuses_a_naive_reading_as_its_own_error(seam: Seam) -
     handling against behaviour it never meets in production.
     """
     with pytest.raises(seam.error) as caught:
-        await seam.read()
+        await seam.drive(_naive_clock)
 
     assert seam.label in str(caught.value)
+
+
+@pytest.mark.parametrize("seam", SEAMS, ids=[seam.label for seam in SEAMS])
+async def test_no_seam_steals_a_failure_of_the_clock_itself(seam: Seam) -> None:
+    """ADR-0026 §2's reading/invocation boundary, asserted where it can be lost.
+
+    ``checked_clock`` keeps the invocation outside its guard, but that only
+    survives if the seams can tell a refused *reading* from the clock's own
+    failure. A boundary catching bare ``ValueError`` cannot, and would report
+    "your clock returned a bad reading" for a clock provider that was simply
+    down — destroying the type and cause §2 exists to preserve. Every rejection
+    is therefore a ``ClockReadingError``, and every seam catches that.
+    """
+    with pytest.raises(ValueError, match="the clock provider is down") as caught:
+        await seam.drive(_failing_clock)
+
+    assert not isinstance(caught.value, ClockReadingError)
+    assert not isinstance(caught.value, seam.error)
 
 
 def test_the_seam_table_is_the_whole_set() -> None:
