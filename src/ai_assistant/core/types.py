@@ -1703,18 +1703,31 @@ class ToolDefinition(BaseModel):
         inside this repository's threat model — which is what lets the
         permissions boundary drop its own copy of this check.
 
+        Every way the render can fail is caught, not only the surrogate that
+        prompted the issue, and that is the same clause :func:`_digestible`
+        writes for the same reason: a surrogate is one of *two* values reachable
+        here that satisfy their Python type and have no JSON rendering, and the
+        other is a very large integer, which ``json.dumps`` renders through
+        ``str()`` and CPython refuses past its integer-string conversion limit.
+        A definition tampered past ``frozen=True`` supplies a third — a value
+        pydantic cannot serialise at all, which surfaces as a
+        ``PydanticSerializationError``. All three are ``ValueError``, so one
+        clause covers them and the definition is refused with the same
+        diagnostic rather than with a runtime-specific one.
+
         Raises:
             ValueError: If the definition has no JSON encoding.
         """
         try:
-            encodable = _is_encodable(json.dumps(self.model_dump(mode="json"), ensure_ascii=False))
-        except UnicodeEncodeError:
-            # An unencodable *key* fails inside the dump rather than after it,
+            rendered = json.dumps(self.model_dump(mode="json"), ensure_ascii=False)
+        except ValueError as exc:
+            # An unencodable *key* fails inside the render rather than after it,
             # because pydantic encodes a mapping key on the way to JSON. Caught
-            # here so both halves of the same defect raise the same error rather
-            # than one arriving as a bare codec failure.
-            encodable = False
-        if not encodable:
+            # here so every half of the same defect raises the same error rather
+            # than one arriving as a bare codec or limit failure.
+            msg = f"tool has no JSON encoding, so it could not be stored: {self.id!r} ({exc})"
+            raise ValueError(msg) from exc
+        if not _is_encodable(rendered):
             msg = f"tool has no JSON encoding, so it could not be stored: {self.id!r}"
             raise ValueError(msg)
         return self
