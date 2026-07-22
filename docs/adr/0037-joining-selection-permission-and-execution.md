@@ -201,6 +201,24 @@ because the call that produced it was built out of what the trail returned.
 There is no execution path that reaches `ToolInvoker.invoke` from an unrecorded
 decision, because there is no other constructor of a `ToolCall`.
 
+**Every branch reads back, not only the authorising one.** The read-back began as
+the `ALLOW` path's guard, and confining it there would have made the guarantee
+depend on which way the policy ruled: a `DENY` writes the decision's id onto the
+skipped step as `approval_ref`, and a `CONFIRM` hands that id to the caller as
+the thing `resume` must be called with. A trail that accepted the write and lost
+it would leave the first dangling — the pointer ADR-0014 §4 requires precisely so
+that a silent, automatic action can still be correlated with its authorisation —
+and the second unanswerable for good. So `_record` returns what `get` gives back,
+and no branch sees the object it wrote.
+
+**And the branch reads the *recorded* ruling, not the policy's own.** The
+decision deep-copies the ruling (ADR-0021 §1) and the trail round-trips it, but
+the policy still holds the value it returned and the append is an `await` —
+`frozen=True` refuses `ruling.outcome = ...` and does nothing about
+`ruling.__dict__` (ADR-0018 §3). Branching on the caller's object would let an
+`ALLOW` be recorded and a `DENY` be committed against it, leaving `approval_ref`
+on a skipped step pointing at an authorisation to act.
+
 It is stronger than checking that `record` did not raise, and the difference is
 exactly the ambiguity ADR-0036 §2 built the trail to expose. A trail that
 accepted the write and lost it answers `None`, and `StepRunner` refuses with
@@ -349,6 +367,30 @@ shorter.
 
 The denial therefore satisfies ADR-0014 §4's own rule for the automatic case: a
 decision was recorded and can be pointed at.
+
+### 6. `run` enters only at `PENDING`, and `FAILED` is not a second entry
+
+`run` checks the stored step's status before it asks the policy anything. Only
+`PENDING` proceeds; `AWAITING_APPROVAL` is refused pointing at `resume`, and
+everything else is refused as having nothing left to dispose of.
+
+**The check is before the policy, and that placement is the whole point.**
+Recording precedes every transition (§2), so a `run` against an already-parked
+step would consult the policy, append a *second* `CONFIRM` to the trail, and only
+then be refused by the transition graph. That decision is unusable in a
+particular way: nobody was shown it, `resume` binds a resolution to the parked
+step's own confirmation so it can never be answered, and ADR-0021 §4 offers no
+selective erasure — the trail is append-only by design, so a decision written by
+mistake is written for good. A guard that costs one comparison prevents a
+permanent entry in a Tier 1 store.
+
+**`FAILED` is deliberately not a second entry point.** ADR-0014 §4 permits
+`FAILED → RUNNING` while attempts remain, so admitting it would make an `ALLOW`
+succeed and a `CONFIRM` or `DENY` fail — the same call working or not depending
+on which way the policy ruled, which is the least predictable rule available.
+Re-driving a failed step is plan-level work; in-process retry already belongs to
+`StepExecutor` (ADR-0029 §5), and cross-turn retry belongs to whatever drives a
+whole `ActionPlan`. This object disposes of one step, once.
 
 ## Consequences
 
