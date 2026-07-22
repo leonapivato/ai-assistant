@@ -2,6 +2,36 @@
 
 - Status: Accepted
 - Date: 2026-07-21
+- Note (2026-07-22): §1's ToolDefinition.interrupted_outcome gains a third
+  reader from ADR-0032 §2 — the seam, ruling the outcome of a failure a tool
+  classified and raised. The property's text, its home, its form and its
+  single-copy purpose are unchanged, and the new reader is what §1 exists for:
+  the tool reports whether its effect may have committed and the seam conjoins
+  that fact with this property, so no further copy of the two-field comparison
+  is created. Its docstring's "cut short by a deadline or a cancellation"
+  describes two of the three circumstances that now read it. §3's re-scoping of
+  CANCELLED stands and ADR-0032 §3 depends on it: an integration may raise
+  CANCELLED, and the seam still never synthesises it. §3's sentence that an
+  integration reporting CANCELLED "chooses its outcome by the same test §4
+  applies to the seam" is honoured by the mechanism rather than by the
+  integration: it reports effect_may_have_committed and the seam rules from it,
+  so "FAILED only if it can establish the effect did not happen, INDETERMINATE
+  otherwise" is what ADR-0032 §2 computes. §3's quotation of ADR-0029 §4's "may
+  return FAILED with TIMED_OUT" is a citation of a sentence ADR-0032 §3
+  supersedes in its kind and preserves in its substance; ADR-0031 ratifies
+  nothing about it. §2's provenance rule and §2(d)'s precedence stand and
+  outrank the new transport, which is ranked below both. §2(b)'s postcondition
+  is unchanged and acquires a second subject: it names SUCCEEDED because a
+  normal return was the only path that built a result from what the callable
+  produced, and ADR-0032 §4 states it for any result, since reading the carrier
+  is tool-supplied code that can raise the delta after the handler's first
+  check. §4's declared limits and §5's rules are untouched, and §5(b)'s
+  enumerated no-interpolation rule is joined by a second enumeration in
+  ADR-0032 §5 rather than widened. The Consequences' "five of the eight failure
+  kinds still have no carrier (#192)" and "ADR-0029 §5's retry algebra stays
+  inert" record the state at ratification, and ADR-0032 is the integration
+  decision §3 named as their owner; the eighth-name count in §7's note and in
+  the Consequences becomes nine.
 - Amends on ratification: ADR-0029 §§1, 3–4 and its Consequences. The edits are
   **not** made by this change — §7 records their exact form and why they wait,
   following ADR-0026 §6 and ADR-0030 §6.

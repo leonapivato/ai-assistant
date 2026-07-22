@@ -10,6 +10,15 @@
   never-auto-retried, resolved-explicitly treatment all stand as ratified. §7's
   idempotency-key debt is discharged by ADR-0029 §5; its INDETERMINATE
   reconciliation deferral is not.
+- Note (2026-07-22): §4's RUNNING → INDETERMINATE transition has a third
+  trigger from ADR-0032 §2 — a tool that classifies its own failure and reports
+  that its effect may have committed, on a tool whose registry declaration is
+  side_effecting and not NATURAL. Unlike the second trigger this one involves
+  neither a deadline nor a cancellation: the seam's deadline never fired and
+  the failure came back as a value. §4's rule is unchanged and is what selects
+  it — such a call cannot be distinguished from one that did not act. The
+  transition graph, the retry ceiling, and INDETERMINATE's never-auto-retried,
+  resolved-explicitly treatment all stand as ratified.
 
 ## Context
 
