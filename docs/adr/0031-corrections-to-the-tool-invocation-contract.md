@@ -658,12 +658,16 @@ records that the ADR was amended, not how many times.
 
 `ToolDefinition.interrupted_outcome` is a `core` addition rather than a new
 Protocol, so `CONTRIBUTING.md`'s triad requirement is not re-triggered — there
-is no new contract to fake. What is owed is the move, the deletions, and three
-suite obligations:
+is no new contract to fake. What is owed is the move, the deletions, and the
+suite obligations that come with them:
 
-- **The exhaustive table moves to `tests/core/`**, beside the type: all four
-  combinations of `side_effecting` and `idempotency`, asserted rather than
-  sampled, so the rule has one test as well as one definition.
+- **The exhaustive table moves to `tests/core/`**, beside the type: **all six
+  combinations** of `side_effecting` and the three `Idempotency` members,
+  asserted rather than sampled. Six and not four: the rule reads `NATURAL`
+  specially, so `NONE` and `KEYED` are an equivalence class the *rule* creates
+  and a table must not assume — a four-case table that sampled one of them would
+  pass against an implementation that classified the other wrongly, which is the
+  failure mode "asserted rather than sampled" exists to prevent.
 - **Both seams keep their behavioural tests** — §10's "the timeout rule in §4 in
   both directions" is a statement about `invoke`, and it stays where it can
   observe one.
@@ -682,9 +686,19 @@ suite obligations:
   in `orchestration` needs to import `tools/`, which is the outcome this ADR
   exists to produce.
 
-§5's two clauses are already implemented and tested on `main`; ratification adds
-no work for them, which is the point of ratifying behaviour rather than
-inventing it.
+- **§5(b)'s parameters half gains the regression test its output half already
+  has.** `ToolResult`'s type-only message is pinned today; `ToolCall._authorised`
+  is not, because nothing interpolates `parameters` and the existing
+  altered-parameters case asserts only that the call is refused. It would
+  therefore keep passing if a later change put the payload into the message. The
+  test carries a unique sensitive value in `parameters` and asserts it appears
+  in neither the rendered `ValidationError` nor anything logged — the shape §10
+  already requires of the seam's `INTERNAL` message, applied to the validator
+  §5(b) binds.
+
+§5(a) and the output half of §5(b) are implemented and tested on `main`;
+ratification adds no work for them, which is the point of ratifying behaviour
+rather than inventing it.
 
 ## Consequences
 
