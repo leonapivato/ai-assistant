@@ -19,6 +19,17 @@
   it — such a call cannot be distinguished from one that did not act. The
   transition graph, the retry ceiling, and INDETERMINATE's never-auto-retried,
   resolved-explicitly treatment all stand as ratified.
+- Note (2026-07-22): §4's RUNNING → FAILED transition has a second trigger from
+  ADR-0034 §1 — an attempt that ends after the claim is committed and before the
+  callable is reached, which ADR-0029 §8 already stated for a ToolBindingError
+  and ADR-0034 states over the window rather than over one exception. §4's rule
+  is unchanged and is what selects it: nothing ran, so the step ended without
+  succeeding and carries an error saying so. The transition graph is unchanged —
+  PlanExecution validates the move and not the trigger — as are the retry
+  ceiling and FAILED's terminal-unless-retried treatment. Such a step is not
+  auto-retried, but that is ADR-0029 §8's mechanism rather than a new property
+  of this state: retry is scheduled only from a ToolResult, and no exit through
+  that window produces one.
 
 ## Context
 

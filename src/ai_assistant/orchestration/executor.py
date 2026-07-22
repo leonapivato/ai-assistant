@@ -82,9 +82,9 @@ _REFUSED = (
 _CANCELLED = "the invocation was cancelled before it completed"
 
 #: What a claim closed before the tool could be reached records. ``FAILED``
-#: rather than ``INDETERMINATE`` for §8's reason: nothing happened, and
+#: rather than ``INDETERMINATE`` for ADR-0029 §8's reason: nothing happened, and
 #: ``INDETERMINATE`` is the state whose whole meaning is ignorance.
-_UNSTARTED = "the executing task was cancelled after the claim and before the tool was reached"
+_UNSTARTED = "the attempt ended after the claim and before the tool was reached, so nothing ran"
 
 #: Stands in when a non-``SUCCEEDED`` result somehow carries no failure.
 #: ``ToolResult``'s own validator makes that unconstructable; this exists so the
@@ -144,9 +144,10 @@ class StepExecutor:
             ADR-0016 §7 calls unrecoverable.
         now: Clock used to measure the idempotency window; injectable so retry
             tests are deterministic. Guarded by
-            :func:`~ai_assistant.core.clock.checked_clock`, and a non-conforming
-            reading is treated as *the window has lapsed* rather than raised —
-            see :meth:`_window_is_open`.
+            :func:`~ai_assistant.core.clock.checked_clock`. A *reading* that is
+            not a positive elapsed duration lapses the window
+            (:meth:`_window_is_open`); a clock that *raises* is a wiring bug and
+            is translated at this boundary (:meth:`_reading`, ADR-0034 §2).
     """
 
     def __init__(
@@ -202,11 +203,19 @@ class StepExecutor:
                 terminal write, the outcome already established, since by then
                 the answer is known and discarding it would have recovery report
                 ignorance over it (:meth:`_finish`).
-            PlanningError: If a transition is rejected or the store is stale.
+            PlanningError: If a transition is rejected, the store is stale, or
+                the injected clock's reading is not a conforming one — a wiring
+                bug rather than a pessimistic measurement (:meth:`_reading`).
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
                 Checked **before** the claim, so a deadline the seam would
                 refuse never leaves a step durably ``RUNNING``
                 (:func:`_checked_timeout`).
+
+        **Nothing that fails between the claim and the callable leaves a step
+        durably ``RUNNING``** (ADR-0034 §1). A cancelled claim, a raising clock
+        and a ``ToolBindingError`` all close it ``FAILED`` before propagating:
+        nothing ran, and recovery would otherwise record ``INDETERMINATE`` about
+        a call that provably never started.
         """
         _checked_timeout(timeout)
         trusted = await self._registry.get(call.request.tool.id)
@@ -215,7 +224,16 @@ class StepExecutor:
         # Read *after* the claim, because ADR-0029 §5 measures from "the first
         # attempt of this call" — a slow `commit_transition` is not part of the
         # window, and counting it could consume one before the tool was reached.
-        started = self._reading()
+        #
+        # Anything that goes wrong here is between the claim and the callable, so
+        # the step is closed before it leaves: ADR-0034 §1's rule, and the same
+        # one §8 states for a `ToolBindingError`. Nothing ran, and leaving a
+        # durable `RUNNING` would have recovery record `INDETERMINATE` about it.
+        try:
+            started = self._reading()
+        except BaseException:
+            await self._close_unstarted(state, step_id)
+            raise
         while True:
             try:
                 result = await self._invoker.invoke(call, timeout=timeout)
@@ -274,14 +292,29 @@ class StepExecutor:
         if not cancelled:
             return claimed
 
+        await self._close_unstarted(claimed, step_id)
+        msg = f"step {step_id!r} was claimed and closed unstarted; its task was cancelled"
+        raise asyncio.CancelledError(msg)
+
+    async def _close_unstarted(self, state: ExecutionState, step_id: str) -> None:
+        """Close a claimed step the callable was never reached from (ADR-0034 §1).
+
+        ``FAILED`` rather than ``INDETERMINATE``, on ADR-0029 §8's own reasoning
+        for the other pre-invocation exit: nothing happened, and
+        ``INDETERMINATE`` is "the state whose whole meaning is ignorance". It is
+        not retried, for §8's reason too — retry is scheduled only from a
+        ``ToolResult``, and no exit through here produces one.
+
+        A failure of this write is logged rather than raised, because whatever
+        sent us here is what the caller must see: replacing it would hide a
+        cancellation, a broken clock or a wiring fault behind a store fault.
+        """
         try:
             await self._commit_shielded(
-                self._closing(claimed, step_id, StepStatus.FAILED, error=_UNSTARTED)
+                self._closing(state, step_id, StepStatus.FAILED, error=_UNSTARTED)
             )
         except PlanningError:
             _log.warning("executor_unstarted_close_failed", step_id=step_id, exc_info=True)
-        msg = f"step {step_id!r} was claimed and closed unstarted; its task was cancelled"
-        raise asyncio.CancelledError(msg)
 
     async def _refuse(self, state: ExecutionState, step_id: str) -> ExecutionState:
         """Commit ``RUNNING → FAILED`` for a seam rejection, and schedule nothing.
@@ -447,7 +480,7 @@ class StepExecutor:
     # --- the retry decision (ADR-0029 §5) -------------------------------
 
     def _may_retry(
-        self, result: ToolResult, trusted: ToolDefinition | None, started: datetime | None
+        self, result: ToolResult, trusted: ToolDefinition | None, started: datetime
     ) -> bool:
         """Whether ADR-0029 §5's two conjuncts both hold.
 
@@ -465,7 +498,7 @@ class StepExecutor:
             return False
         return self._repeat_is_safe(trusted, started)
 
-    def _repeat_is_safe(self, trusted: ToolDefinition | None, started: datetime | None) -> bool:
+    def _repeat_is_safe(self, trusted: ToolDefinition | None, started: datetime) -> bool:
         """Whether repeating this call cannot act twice (ADR-0029 §5).
 
         Read from the registry's declaration for the same reason the interrupted
@@ -484,7 +517,7 @@ class StepExecutor:
         window = trusted.idempotency_window
         return window is not None and self._window_is_open(started, window)
 
-    def _window_is_open(self, started: datetime | None, window: timedelta) -> bool:
+    def _window_is_open(self, started: datetime, window: timedelta) -> bool:
         """Whether the idempotency window has not yet elapsed — fail-closed.
 
         Past the window "the tool is free to act again" (ADR-0016 §4) and the
@@ -495,60 +528,55 @@ class StepExecutor:
         that measuring across a DST transition or an NTP step is a different
         contract it should not be stretched to. So the rule is made fail-closed
         instead: any reading that is **not a positive elapsed duration** — a step
-        backwards, a jump past the window, a reading the guard refuses — is
-        treated as *the window has lapsed*. Declining to retry costs a
-        recoverable error surfaced to the user; retrying outside a lapsed window
-        costs a duplicated side effect. A monotonic clock seam is the proper fix
-        and is #171, deferred by ADR-0029 §5 itself.
+        backwards, a jump past the window — is treated as *the window has
+        lapsed*. Declining to retry costs a recoverable error surfaced to the
+        user; retrying outside a lapsed window costs a duplicated side effect. A
+        monotonic clock seam is the proper fix and is #171, deferred by ADR-0029
+        §5 itself.
+
+        This is scoped to a **reading**, and deliberately: a clock that raises
+        produced none, and is a wiring bug rather than a pessimistic measurement
+        (:meth:`_reading`, ADR-0034 §2).
         """
-        if started is None:
-            return False
-        now = self._reading()
-        if now is None:
-            return False
-        elapsed = now - started
+        elapsed = self._reading() - started
         if elapsed <= timedelta(0):
             return False
         return elapsed < window
 
-    def _reading(self) -> datetime | None:
-        """The clock's reading, or ``None`` if there is no usable one.
+    def _reading(self) -> datetime:
+        """The clock's reading, as `orchestration`'s own error (ADR-0026 §4).
 
-        ``None`` rather than a raised ``PlanningError``, and the asymmetry with
-        ``LearningLoop`` is deliberate: this clock is read *only* to measure the
-        idempotency window, where ADR-0029 §5 already prescribes what an unusable
-        measurement means — the window has lapsed, and the retry is not taken.
-        Every reading here happens between the claim and a resolution, so letting
-        one out would leave a step durably ``RUNNING`` over a measurement whose
-        whole design is to degrade toward retrying less.
+        **A reading and an invocation are different failures, and only one of
+        them is ADR-0029 §5's** (ADR-0034 §2). §5's fail-closed rule is scoped to
+        a *reading*: "any **reading** that is not a positive elapsed duration — a
+        step backwards, a jump past the window — is treated as the window has
+        lapsed". A clock that *raises* produced no reading to be pessimistic
+        about, and ADR-0026 §2 is explicit that this is a different thing: "The
+        guard covers the reading, not the invocation. An exception raised by the
+        clock callable itself propagates unwrapped."
 
-        **Any ``Exception``, not only a non-conforming reading.** ADR-0026 §2 is
-        explicit that an exception raised by the clock callable *itself*
-        propagates unwrapped, so ``ClockReadingError`` is not the whole of what
-        can arrive: an injected clock reading a provider can raise anything at
-        all. ADR-0026 §4 leaves the failure policy to each subsystem's own
-        boundary, and this boundary's policy is §5's. ``BaseException`` still
-        propagates — a ``CancelledError`` here is a teardown, not a bad reading.
+        So a raising clock is a **wiring bug**, and ADR-0026 §4 requires the
+        owning subsystem to translate it at its own boundary. That is what this
+        does for the guard's own rejection, exactly as ``LearningLoop`` and
+        ``PlanExecution`` do; anything the callable raises on its own account
+        propagates untouched, carrying its type and cause.
 
-        The exception's *type* is logged and never its text: a clock wrapping a
-        provider can quote a URL or a credential, and this line is bound for a
-        log the key-based redactor cannot see into (ADR-0004 §5).
+        Swallowing it instead would let a broken clock become a log line and a
+        retry quietly not taken — the silent degradation ADR-0026 §4 rejected
+        when it chose to convert a fabrication into a loud failure. It costs the
+        execution: the caller sees a ``PlanningError`` where a lapsed window
+        would have let the turn finish. That is the trade ADR-0034 §2 takes,
+        because a clock this broken makes *every* window measurement wrong and
+        the next one is a duplicated side effect rather than an aborted turn.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
         """
         try:
             return self._clock()
         except ClockReadingError as exc:
-            _log.warning(
-                "executor_clock_unusable_window_treated_as_lapsed",
-                error_type=type(exc).__name__,
-            )
-        except Exception as exc:
-            # Broad deliberately: §5's measurement fails closed whatever broke,
-            # and the alternative is a step left RUNNING over a clock.
-            _log.warning(
-                "executor_clock_raised_window_treated_as_lapsed",
-                error_type=type(exc).__name__,
-            )
-        return None
+            raise PlanningError(str(exc)) from exc
 
 
 def _interrupted(trusted: ToolDefinition | None) -> ToolOutcome:

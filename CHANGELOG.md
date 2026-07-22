@@ -106,23 +106,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   letting a `PlanningError` out instead would hand a caller a store fault while
   the task it belongs to quietly kept running.
   **The idempotency window is fail-closed** (ADR-0029 §5): the executor stops
-  retrying once it has elapsed, and any reading that is not a positive elapsed
-  duration — a step backwards, a jump past the window, a reading the clock guard
-  refuses — is treated as *lapsed*. Declining to retry costs a recoverable error
-  surfaced to the user; retrying outside a lapsed window costs a duplicated side
-  effect. It is measured from the first *attempt*, not from before the claim, so
-  a slow `commit_transition` cannot consume a window before the tool was
-  reached. A monotonic clock seam is the proper fix and is deferred (#171).
-  **No path leaves a step durably `RUNNING` before the tool was reachable**,
-  because recovery reads that as `INDETERMINATE` — "we cannot tell whether it
-  acted" — about a call that provably never started, which is the one thing
-  ADR-0029 §8 says that state must not be used for. So `timeout` is checked
-  before the claim rather than left to the seam; a claim cancelled while in
-  flight is closed `FAILED` rather than left standing; and a clock that *raises*
-  between the claim and the invocation is treated as §5's lapsed measurement
-  rather than allowed out — ADR-0026 §2 lets an injected clock's own exception
-  propagate unwrapped, so `ClockReadingError` was never the whole of what could
-  arrive, and ADR-0026 §4 leaves the policy to this boundary.
+  retrying once it has elapsed, and any *reading* that is not a positive elapsed
+  duration — a step backwards, a jump past the window — is treated as *lapsed*.
+  Declining to retry costs a recoverable error surfaced to the user; retrying
+  outside a lapsed window costs a duplicated side effect. It is measured from the
+  first *attempt*, not from before the claim, so a slow `commit_transition`
+  cannot consume a window before the tool was reached. A monotonic clock seam is
+  the proper fix and is deferred (#171).
+  **No path leaves a step durably `RUNNING` before the tool was reachable**
+  (ADR-0034 §1), because recovery reads that as `INDETERMINATE` — "we cannot tell
+  whether it acted" — about a call that provably never started, which is the one
+  thing ADR-0029 §8 says that state must not be used for. So `timeout` is checked
+  before the claim rather than left to the seam, and a claim cancelled while in
+  flight — watched landing through the shield — is closed `FAILED` rather than
+  left standing.
+  **A clock that raises is a wiring bug, not a pessimistic measurement**
+  (ADR-0034 §2). ADR-0029 §5's fail-closed rule is scoped to a *reading*, and
+  ADR-0026 §2 keeps the callable's own exception outside the guard, so the two
+  are handled apart: a refused reading becomes `PlanningError` at this boundary
+  (ADR-0026 §4), anything the callable raises on its own account propagates with
+  its own type, and the claimed step is closed either way. It costs a turn where
+  swallowing would have let one finish — accepted, because a clock this broken
+  makes every later window measurement wrong and the next failure is a duplicated
+  side effect rather than an aborted turn.
 
 - **BREAKING** `core`/`tools`/`testing`: the `ToolInvoker` Protocol and the
   types it exchanges — `ToolCall`, `ToolResult`, `ToolOutcome`, `ToolFailure`,
