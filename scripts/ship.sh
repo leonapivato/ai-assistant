@@ -160,16 +160,35 @@ head_tree="$(git rev-parse "${sha}^{tree}")"
 # time. Same reasoning as `artifact_has_verdict`, duplicated across the pair for
 # the same reason.
 #
+# >>> shared-patch-identity (ADR-0027 §2) — kept byte-identical in both scripts
 # The diff options are PINNED rather than inherited from the repository or user
 # config. Every one of them changes the rendered patch text and therefore the
 # identity, so leaving them to config would make the identity a function of when
-# and where it was computed rather than of the two commits.
-# >>> shared-patch-identity (ADR-0027 §2) — kept byte-identical in both scripts
+# and where it was computed rather than of the two commits. `diff.context` and
+# `diff.interHunkContext` decide how much surrounding text a hunk carries and
+# whether two nearby hunks render as one; `diff.renameLimit` decides whether
+# rename detection completes at all, and a silent fallback to no detection is a
+# different patch; `color.ui=always` emits ANSI escapes even off a terminal,
+# which would land in the hashed bytes and in what the reviewer reads.
+#
+# THE LIST IS NOT CLAIMED EXHAUSTIVE, and the residual is stated rather than
+# argued away: git exposes further rendering inputs (`diff.orderFile`, an
+# attribute-selected diff driver) that a `-c` cannot neutralise. What bounds the
+# damage is the DIRECTION of the failure. An unpinned knob differing between the
+# recording run and the ship run reorders, merges or decorates the rendered
+# patch, so the two identities differ and the artifact is REFUSED — one spurious
+# round, which is the cost this decision removes, not a review reused for content
+# nobody read. The unsafe direction would be an option that strips information
+# until two different patches collide, and whitespace is the case that does: §2
+# closes it by fixing the `patch-id` flag, not by config.
 _diff_opts=(
     -c core.quotePath=false
+    -c color.ui=false
     -c diff.renames=true
+    -c diff.renameLimit=4000
     -c diff.algorithm=myers
     -c diff.context=3
+    -c diff.interHunkContext=0
     -c diff.indentHeuristic=true
     -c diff.noprefix=false
     -c diff.mnemonicPrefix=false
@@ -198,7 +217,7 @@ _range_has_pathless_entry() {
     local -a rec=()
     local raw
     raw="$(mktemp -t patch-raw.XXXXXX)" || return 0
-    if ! git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv --raw --abbrev=40 -z \
+    if ! git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv --raw --abbrev=40 -z \
         "$1...$2" >"$raw"; then
         rm -f "$raw"
         return 0
@@ -245,7 +264,7 @@ patch_identity() {
     if _range_has_pathless_entry "$1" "$2"; then
         return 0
     fi
-    git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv "$1...$2" |
+    git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv "$1...$2" |
         git patch-id --verbatim | awk 'NR == 1 { print $1 }' || return 0
 }
 # <<< shared-patch-identity
@@ -313,8 +332,8 @@ _read_base_move() {
     # not. Both are what §§3-4 fail closed against, so any failure is unreadable.
     local listing
     listing="$(mktemp -t ship-drift.XXXXXX)" || return 1
-    if ! git -c core.quotePath=false diff --no-ext-diff --name-status -M -z \
-        "$1" "$2" >"$listing"; then
+    if ! git -c core.quotePath=false -c color.ui=false -c diff.renameLimit=4000 \
+        diff --no-color --no-ext-diff --name-status -M -z "$1" "$2" >"$listing"; then
         rm -f "$listing"
         return 1
     fi

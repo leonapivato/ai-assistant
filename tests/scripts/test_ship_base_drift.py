@@ -789,3 +789,45 @@ def test_a_drift_listing_that_fails_with_no_output_refuses(tmp_path: Path) -> No
 
     assert result.returncode != 0
     assert "could not be parsed" in result.stderr
+
+
+def test_the_identity_survives_git_config_changing_between_review_and_ship(
+    tmp_path: Path,
+) -> None:
+    """The identity must be a function of the two commits, not of local config.
+
+    `diff.interHunkContext` merges two nearby hunks into one, `color.ui=always`
+    emits ANSI escapes even off a terminal, and `diff.renameLimit` can silently
+    disable rename detection — each renders a different patch from the same pair
+    of commits. Set here *after* the review is recorded, so the recording run and
+    the ship run genuinely disagree about config; the pinned options are what make
+    them agree about the patch anyway.
+
+    The diff carries two hunks a few lines apart precisely so the inter-hunk
+    setting has something to merge.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _edit_line(repo, _REVIEWED, _REVIEWED_LINE + 6, "line 66 — a second hunk")
+    _git(repo, "commit", "-qam", "a second nearby hunk")
+
+    rebased = _review_then_move(
+        repo,
+        tmp_path,
+        lambda r: _edit_line(r, "src/ai_assistant/orchestration/loop.py", 40, "moved"),
+    )
+    _git(repo, "config", "diff.interHunkContext", "10")
+    _git(repo, "config", "color.ui", "always")
+    _git(repo, "config", "diff.renameLimit", "1")
+    _git(repo, "config", "diff.algorithm", "histogram")
+    _git(repo, "config", "diff.context", "7")
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased)
+
+    assert result.returncode == 0, result.stderr
+    posted = (tmp_path / "comment.md").read_text()
+    assert "base drift" in posted
+    # And the drift listing itself is not decorated by `color.ui=always`, which
+    # would corrupt the very set §4 requires published exactly.
+    assert "\x1b[" not in posted
+    assert _published_paths(posted) == ["src/ai_assistant/orchestration/loop.py"]
