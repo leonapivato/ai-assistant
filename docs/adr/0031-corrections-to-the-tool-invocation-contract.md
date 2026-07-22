@@ -599,32 +599,39 @@ records that the ADR was amended, not how many times.
   data, retryable, the seam's ownership of the deadline and its classification
   rule, and the cooperative limit.`
 
-- **The Consequences' `New core surface` bullet is corrected**, since it is the
-  sentence the implementation honoured and this ADR changes. It reads:
+- **The note ends by enumerating the sentences it supersedes**, because a reader
+  who consults ADR-0029 alone must not be able to act on one of them. Appended
+  to the note above, in the same block:
 
-  ```markdown
-  - **New `core` surface:** the `ToolInvoker` Protocol, `ToolCall`, `ToolResult`,
-    `ToolFailure`, `ToolOutcome`, `ToolFailureKind`, and `ToolBindingError` in
-    `core/errors.py` — seven, and **one triad** in the implementation PR (§10).
-  ```
+  `Superseded sentences in ADR-0029, which stand in the document unedited: §3's
+  CANCELLED gloss "cancelled before completing" and its retryable rationale
+  "CANCELLED is true because the cancellation was ours" — the value stays True,
+  for §3's general test, that a repeat of the same call could plausibly succeed;
+  §4's paragraph "The CANCELLED failure kind covers the narrower case the seam
+  itself can report — a genuine cancellation it observed and unwound from
+  cleanly before the tool started work", which describes a branch invoke cannot
+  construct and must not grow; §4's "the seam therefore classifies on whether a
+  cancellation was actually requested", which is the delta above rather than a
+  boolean; and the Consequences' "seven".`
 
-  and becomes:
+- **No ratified text is rewritten**, which is the form ADR-0018 set for
+  ADR-0016, ADR-0026 §6 restated, ADR-0030 §6 followed, and ADR-0016's own
+  header carries today: a `Status` line and a dated note, with the superseded
+  clauses named in the header rather than edited in the body. An earlier draft
+  of this clause rewrote the Consequences' enumeration in place while leaving
+  three other sentences standing, which is both a second amendment vocabulary —
+  the thing ADR-0017 §7 warns against — and the worse half of one, since it
+  makes a reader assume the un-edited sentences were checked. The cost is
+  ADR-0018's, accepted there and here: "a reader must consult both."
 
-  ```markdown
-  - **New `core` surface:** the `ToolInvoker` Protocol, `ToolCall`, `ToolResult`,
-    `ToolFailure`, `ToolOutcome`, `ToolFailureKind`, `ToolBindingError` in
-    `core/errors.py`, and `ToolDefinition.interrupted_outcome` (ADR-0031 §1) —
-    eight, and **one triad** in the implementation PR (§10).
-  ```
+- **"The strongest case against this decision" is not edited either, and the
+  reason is recorded rather than left to be rediscovered.** Its first sentence
+  already reads "Eight new `core` names", which contradicted the Consequences'
+  enumeration when ADR-0029 was ratified and is correct after this amendment.
+  The contradiction was in the ratified document, not introduced here.
 
-- **"The strongest case against this decision" is not edited, and the reason is
-  recorded rather than left to be rediscovered.** Its first sentence already
-  reads "Eight new `core` names", which contradicted the enumeration when
-  ADR-0029 was ratified and is correct after this amendment. Fixing the
-  enumeration resolves the inconsistency; rewriting the argument section would
-  edit ratified reasoning to no effect.
-
-- **Nothing else in ADR-0029 is edited.**
+- **Nothing in ADR-0029 is edited at all.** The `Status` line and the dated note
+  are the whole operation.
 
 - **No other ADR is edited, and ADR-0016 in particular gets nothing** — not even
   a note. §1 adds a *property* to `ToolDefinition`, not a field: ADR-0016 §1's
@@ -654,6 +661,11 @@ suite obligations:
   limit, in the shape §10 uses for the cooperative one. Both `InMemoryToolRegistry`
   and `FakeToolInvoker` must agree, since the point is that neither quietly
   closes it.
+- **`ToolFailureKind.CANCELLED`'s docstring is retargeted** from "Cancelled
+  before completing" to §3's meaning — the tool's own upstream cancelled the
+  operation, and the seam never synthesises it. A member docstring in `core` is
+  where an integration author reads the vocabulary, so leaving it describing a
+  seam branch that cannot exist is how the branch gets written anyway.
 - **`tools.invocation.interrupted_outcome` and `testing.invoker._interrupted_outcome`
   are deleted**, and `lint-imports` still passes without a new contract: nothing
   in `orchestration` needs to import `tools/`, which is the outcome this ADR
