@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ConfigurationError, ContextError
 from ai_assistant.core.types import TimeOfDay
 
@@ -147,7 +147,7 @@ class ClockContextSource:
         """
         try:
             instant = self._now()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise ContextError(str(exc)) from exc
         local = instant.astimezone(self._zone)
         return {

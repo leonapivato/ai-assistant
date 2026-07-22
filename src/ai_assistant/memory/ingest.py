@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     MemoryDecisionKind,
@@ -215,7 +215,7 @@ class MemoryIngestor:
         """
         try:
             return self._clock()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:

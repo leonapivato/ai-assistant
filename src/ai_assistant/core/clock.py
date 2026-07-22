@@ -63,8 +63,23 @@ _MIN_READING = datetime.min.replace(tzinfo=UTC) + _LOCALIZATION_MARGIN
 _MAX_READING = datetime.max.replace(tzinfo=UTC) - _LOCALIZATION_MARGIN
 
 
-def _rejected(owner: str, reason: str, value: object) -> ValueError:
-    """Build the owner-labelled ``ValueError`` every rejection raises.
+class ClockReadingError(ValueError):
+    """A clock reading that does not conform to :data:`Clock` (ADR-0026 §4).
+
+    A ``ValueError``, as ADR-0026 §4 requires of `core` — which cannot know what
+    its caller will do with the failure — and a *distinct* one, which the ADR's
+    reading/invocation boundary requires of the implementation. §2 is explicit
+    that an exception raised by the clock callable **itself** propagates
+    unwrapped, carrying its own type and cause; a subsystem catching bare
+    ``ValueError`` at its boundary would relabel a clock's own ``ValueError`` as
+    a non-conforming *reading*, destroying exactly the diagnosis §2 preserves.
+    Catching this type instead keeps the two apart, and costs nothing: it is a
+    ``ValueError``, so a caller that only knows the ADR's promise still catches it.
+    """
+
+
+def _rejected(owner: str, reason: str, value: object) -> ClockReadingError:
+    """Build the owner-labelled error every rejection raises.
 
     Args:
         owner: The caller-supplied label naming the seam that read the clock.
@@ -75,7 +90,9 @@ def _rejected(owner: str, reason: str, value: object) -> ValueError:
     Returns:
         The exception to raise; the caller attaches any cause.
     """
-    return ValueError(f"the clock injected into {owner} {reason}: {describe_untrusted(value)}")
+    return ClockReadingError(
+        f"the clock injected into {owner} {reason}: {describe_untrusted(value)}"
+    )
 
 
 def _checked_reading(reading: object, *, owner: str) -> datetime:
@@ -122,7 +139,7 @@ def _checked_reading(reading: object, *, owner: str) -> datetime:
         A fresh base ``datetime`` in UTC, within §3's range.
 
     Raises:
-        ValueError: If the reading fails any step, labelled with ``owner``.
+        ClockReadingError: If the reading fails any step, labelled with ``owner``.
     """
     if not isinstance(reading, datetime):
         raise _rejected(owner, "did not return a datetime", reading)
@@ -179,9 +196,13 @@ def checked_clock(now: Callable[[], datetime], *, owner: str) -> Clock:
 
     **The guard covers the reading, not the invocation.** An exception raised by
     ``now`` *itself* propagates unwrapped: that is the clock's own failure,
-    already carrying its own type and cause, and relabelling it ``ValueError``
-    would destroy both. ``BaseException`` — a cancellation, a
-    ``KeyboardInterrupt`` — passes through for the same reason.
+    already carrying its own type and cause, and relabelling it would destroy
+    both. ``BaseException`` — a cancellation, a ``KeyboardInterrupt`` — passes
+    through for the same reason. That boundary only holds downstream if the
+    seams can tell the two apart, which is why a rejection is a
+    :class:`ClockReadingError` and not a bare ``ValueError``: a subsystem
+    catching ``ValueError`` at its boundary would translate a clock's own
+    ``ValueError("provider down")`` into "your clock returned a bad reading".
 
     Args:
         now: The injected clock. Anything callable; the guard disbelieves the
@@ -194,6 +215,12 @@ def checked_clock(now: Callable[[], datetime], *, owner: str) -> Clock:
 
     Returns:
         A :data:`Clock` returning ``now``'s reading, canonicalised to UTC.
+
+    Raises:
+        ClockReadingError: From the returned clock, on a non-conforming reading.
+            A ``ValueError``, so ADR-0026 §4 holds as written, and a distinct one
+            so a seam can translate a bad *reading* without also relabelling the
+            clock's own failure.
     """
 
     def _read() -> datetime:

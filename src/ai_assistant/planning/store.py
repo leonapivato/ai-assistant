@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError
 from ai_assistant.core.types import GoalDeletion, PlanExport, StepStatus
 from ai_assistant.planning.execution import PlanExecution
@@ -73,7 +73,7 @@ class InMemoryPlanStore:
         """
         try:
             return self._clock()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
 
     async def save_goal(self, goal: Goal) -> str:

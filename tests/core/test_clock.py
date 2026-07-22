@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from hostile_instants import HOSTILE_IDS, HOSTILE_INSTANTS
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -162,8 +162,7 @@ def test_a_failure_of_the_invocation_propagates_unwrapped() -> None:
     """ADR-0026 §2: the guard covers the reading, not the invocation.
 
     An exception raised by the clock *itself* is the clock's own failure,
-    already carrying its own type and cause; relabelling it ``ValueError`` would
-    destroy both.
+    already carrying its own type and cause; relabelling it would destroy both.
     """
 
     def _broken() -> datetime:
@@ -174,6 +173,36 @@ def test_a_failure_of_the_invocation_propagates_unwrapped() -> None:
 
     with pytest.raises(RuntimeError, match="the clock source is down"):
         now()
+
+
+def test_a_value_error_from_the_invocation_is_not_a_reading_error() -> None:
+    """The case that makes the reading/invocation boundary *survive* the seams.
+
+    A clock is entitled to raise ``ValueError`` on its own account, and a seam
+    translating a bad reading has to be able to tell that apart from a reading
+    the guard refused. A bare ``ValueError`` at the boundary cannot, so every
+    rejection is a :class:`ClockReadingError` — still a ``ValueError``, as
+    ADR-0026 §4 requires of `core`, but distinguishable.
+    """
+
+    def _broken() -> datetime:
+        msg = "the clock provider is down"
+        raise ValueError(msg)
+
+    with pytest.raises(ValueError, match="the clock provider is down") as caught:
+        checked_clock(_broken, owner="Seam")()
+
+    assert not isinstance(caught.value, ClockReadingError)
+
+
+def test_every_rejection_is_a_clock_reading_error_and_still_a_value_error() -> None:
+    """Both halves of the type's contract, so neither can be dropped quietly."""
+    naive = _clock(datetime(2026, 1, 2, 9))  # noqa: DTZ001
+
+    with pytest.raises(ClockReadingError) as caught:
+        checked_clock(naive, owner="Seam")()
+
+    assert isinstance(caught.value, ValueError)
 
 
 def test_a_base_exception_from_the_invocation_is_not_swallowed() -> None:

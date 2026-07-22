@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 import sqlite_vec
 from pydantic import TypeAdapter, ValidationError
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import MemoryRecord
 
@@ -256,7 +256,7 @@ class SqliteMemoryStore:
         """
         try:
             return self._clock().timestamp()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
 
     @staticmethod

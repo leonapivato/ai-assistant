@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     Goal,
@@ -346,5 +346,5 @@ class LearningLoop:
         """
         try:
             return self._clock()
-        except ValueError as exc:
+        except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
