@@ -169,6 +169,20 @@ def _interruption(
     the seam's own knowledge and the only form in which ``INDETERMINATE`` can be
     delivered at all.
 
+    **What this does not close, stated rather than papered over.** The deadline
+    half is tool-proof — ``Timeout.expired()`` is the seam's own state and no
+    callable can reset it. The cancellation half is not: a callable that catches
+    an *external* cancellation and then calls ``uncancel()`` on the invoking task
+    restores the count to its baseline, and the call comes back as an ordinary
+    result. That is the same family ADR-0029 §4 already calls unclosable from
+    this side — "a tool that suppresses its own cancellation can outlive its
+    deadline, and no seam can prevent that" — and the mitigation it names, one
+    stalled turn on a loop that keeps running, applies unchanged. Closing it
+    would mean running the callable in a child task, which is the shape §10
+    warns against ("an implementation quietly acquiring a watchdog") and would
+    make ``invoke``'s cooperative limit a different, weaker thing. Tracked as an
+    issue rather than fixed here, because the fix is a contract question.
+
     Returns:
         The expiry result if this deadline expired, or ``None`` if the call was
         not interrupted.
