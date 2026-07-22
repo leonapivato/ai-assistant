@@ -115,7 +115,18 @@ hand over one sharing the planned step's id and naming a different capability or
 different arguments: the gate would rule on *that* action and the executor would
 run it, while the `ActionPlan` the execution belongs to went on recording an
 action nobody performed. Nothing downstream notices, because `PlanStore` accepts
-a transition by step id and version. Naming the step removes the substitution
+a transition by step id and version.
+
+**Which plan is read from the *stored* execution, not from the `ExecutionState`
+argument**, for the same reason one level up. Every write takes `state.id` and
+`state.version`, so trusting `state.plan_id` would let a hand-built state
+carrying execution A's id and version with execution B's `plan_id` have the gate
+rule on B's step while the claim, the invocation and the durable record all
+landed on A. The version stays the caller's, because that is what the
+compare-and-swap is for: a *stale* snapshot is the store's to reject, an
+*inconsistent* one is not, and only the second is a substitution.
+
+Naming the step removes the substitution
 rather than checking for it — the same move ADR-0021 §3 made when it took the
 subject out of `PermissionRuling`, "removing the capability rather than
 forbidding it". The step is still detached on the way out, because `PlanStore` —
@@ -345,6 +356,25 @@ decision was recorded and can be pointed at.
 - **A parked confirmation needs its id carried by the caller** until #242 lands.
   A restart loses the pointer, and the step sits in `AWAITING_APPROVAL` until it
   is cancelled or the id is recovered from `AuditTrail.recent()` by hand.
+- **A recorded ruling can outlive the transition that should have applied it,
+  and this change does not close that** (#257). Recording precedes every
+  transition (§2), `PlanStore` offers no multi-step transaction, and
+  `AuditTrail.record` makes a resolution single-use — so a failure or
+  cancellation between the two leaves the step `AWAITING_APPROVAL` with its
+  ruling durable and unapplied, in three places: a resolved `ALLOW` whose claim
+  failed, a resolved `DENY` whose skip failed, and an initial `DENY` whose skip
+  failed after the queue transition landed. `resume` cannot retry any of them —
+  the first two because the confirmation is already resolved, the third because
+  a `DENY` was never a question.
+
+  **Nothing has acted in any of those windows**, which is what makes this a
+  recoverable gap rather than the one ADR-0014 §4 reserves `INDETERMINATE` for:
+  no tool is reached, no side effect is in doubt, the state is durable and
+  visible, and every fact needed to finish it is in the trail. What is missing
+  is a way back to it, and both candidates — carrying `approval_ref` on the
+  `→ AWAITING_APPROVAL` transition, or a by-step query on `AuditTrail` — are
+  changes to contracts this change does not own. It is the same missing
+  capability as #242, which is an argument for settling them together.
 - **`StepRunner` does not drive a whole plan.** It disposes of one step. Step
   ordering, dependencies (`UNMET_DEPENDENCY` has no producer yet), cancellation
   and the loop over `ActionPlan.steps` are the next slice, and keeping them out
