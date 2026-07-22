@@ -407,14 +407,26 @@ message the *seam* generates "carries no content it did not author", explicitly
 never interpolating `str(exc)`, which `core/logging.py`'s docstring names as the
 Tier 1 leak its key-based redactor cannot see. Both halves stand. What changes
 is that a **tool-authored** message now crosses the seam directly, where
-previously every message on the failure path was the seam's own. It reaches a
-log always, and `StepExecution.error` when the outcome is `FAILED`.
+previously every message on the failure path was the seam's own.
 
-**Not when the outcome is `INDETERMINATE`, and that asymmetry is inherited
-rather than chosen.** `StepExecution` refuses an `error` on any status but
-`FAILED` — "error is only valid for a FAILED step" (ADR-0014 §3) — so the
-message a tool wrote for the case where its effect *may have landed*, which is
-the case an operator most needs to read, survives only in the log. Widening
+**Where it goes, stated precisely, because "reaches a log" is the imprecision
+that would license the seam to log it.** The message lands in
+`ToolResult.failure.message` on every translated failure, and nowhere else *by
+the seam's hand*: the seam's own log line for a translated failure carries the
+tool's id and `failure.kind`, per the enumeration below, and never the message.
+Its onward destinations are the executor's — `StepExecution.error` when the
+outcome is `FAILED`, and whatever an interface renders. That is exactly what
+ADR-0029 §3 means when it says the string "is bound for a log and for
+`StepExecution.error`", and it is why the Tier 2 obligation on the producer is
+the only defence: the seam declining to log it does not stop it being logged one
+frame away.
+
+**And it does not reach `StepExecution.error` when the outcome is
+`INDETERMINATE`, an asymmetry inherited rather than chosen.** `StepExecution`
+refuses an `error` on any status but `FAILED` — "error is only valid for a
+FAILED step" (ADR-0014 §3) — so the message a tool wrote for the case where its
+effect *may have landed*, which is the case an operator most needs to read,
+survives only in whatever the executor logged. Widening
 `StepExecution` is an ADR-0014 change, breaking under golden rule 5 and
 belonging to the planning lane; making it from a tools ADR is what ADR-0018 §2
 refused and ADR-0031 §5(b) refused again. It is also not new — a deadline expiry
@@ -921,6 +933,13 @@ what keeps the fake honest without importing `tools/`.
   `INTERNAL` path. This is the regression test for §5's enumeration, in the
   shape ADR-0031 §8 gave §5(b)'s parameters half.
 
+- **And the seam's log line for a translated failure, asserted positively and
+  negatively**: it carries the tool's id and `failure.kind`, and it does **not**
+  carry `failure.message`, even though that message is Tier 2 and the tool's own.
+  Only the negative half is a rule an implementation can violate silently — the
+  natural log line includes the message, because it is the useful part — so a
+  suite asserting only that the *cause* text is absent passes it.
+
 - **A blank message never reaches a result, by both routes.** A tool raising
   with a message that renders as nothing fails `ToolFailure`'s own validator in
   its own frame and comes back `INTERNAL`; and a tool that evades that validator
@@ -1010,8 +1029,11 @@ what keeps the fake honest without importing `tools/`.
   ADR-0029 §4's deadline expiry gives. That is a weaker guarantee than "never
   the outcome" and a stronger one than either rejected option in #192 offers,
   both of which let the tool name the field outright.
-- **A tool-authored string now reaches a log, and a durable
-  `StepExecution.error` when the outcome is `FAILED`.** ADR-0029 §3's Tier 2
+- **A tool-authored string now reaches every `ToolResult`, and through the
+  executor a log and a durable `StepExecution.error` when the outcome is
+  `FAILED`.** The seam does not log it — its own line carries the tool id and
+  the kind — but declining to log it one frame from where it will be logged is
+  not a mitigation. ADR-0029 §3's Tier 2
   obligation on integration authors becomes load-bearing, and no type enforces
   it. This is a real widening of the Tier 1 exposure surface, mitigated only by
   the fact that no integration exists yet and that the first one arrives with
