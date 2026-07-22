@@ -255,9 +255,40 @@ provably did nothing, escalated to `INDETERMINATE` and out of retry — is refus
 by reading the seam's state rather than by inspecting what was raised.
 
 **The cancellation half has no equivalent, and §4 should not imply that it
-does.** `cancelling()` is task state, and the callable runs on the task; the
+does.** `cancelling()` is task state, and the callable runs on the task, so the
 delta is evidence a cooperative callable cannot fake and an adversarial one can
-erase. That is §4 below.
+move in **both** directions. Erasing it is §4 below. Manufacturing it is the
+mirror case and is stated here so the rule is not read as stronger than it is:
+
+> A callable that calls `cancel()` on its own invoking task, awaits, catches the
+> resulting `CancelledError` and returns raises the delta with nothing outside
+> having cancelled anything. The seam propagates a cancellation the caller never
+> requested, and the executor commits the interrupted-call classification for a
+> call that ran to completion.
+
+**No signal distinguishes them, because `cancelling()` carries no provenance** —
+it is a count of requests, not a record of who made them, and CPython exposes
+nothing else. Three things make this the acceptable side of an unclosable
+question rather than a defect to fix:
+
+- **It fails in the safe direction**, unlike the three defects §2 corrects.
+  Those reported `SUCCEEDED` for a genuinely cancelled or timed-out
+  side-effecting call. This reports `INDETERMINATE` for a call that succeeded —
+  pessimistic, never auto-retried, resolved explicitly (ADR-0014 §4), which is
+  the ignorance-preserving direction that ADR refuses to guess against.
+- **The task really is marked cancelling**, and that is not a fiction the seam
+  invented. An unbalanced count is a damaged task: an enclosing `asyncio.timeout`
+  or `TaskGroup` compares `uncancel()` against its own baseline, so returning
+  normally and leaving the count raised corrupts every outer scope. Propagating
+  is the more honest of the two available answers.
+- **It is the same family as §4's declared limits** — a first-party callable
+  sabotaging the seam that invoked it — and §1's residue analysis already covers
+  it: "a callable that does not do what its equal declaration says".
+
+So the delta establishes that *a cancellation of this task was requested during
+this call*, which is what the rule may claim. It does not establish who
+requested it, and §4's sentence is corrected to the first form rather than the
+second.
 
 ### 3. `CANCELLED` is re-scoped to the tool's own upstream; the seam never synthesises it
 
@@ -292,6 +323,24 @@ describes a case its own contract cannot reach, and an implementer reading it
 would look for the branch that produces one. There is none, and there should not
 be: constructing a `CANCELLED` result at the seam would mean answering a
 cancellation with a value, which is the thing §4 forbids everywhere else.
+
+**No integration can report this kind today, and neither can it report five of
+its peers — issue #192.** `ToolImplementation` returns `FrozenJson` and nothing
+else, so an integration's only channel is to raise, which the seam turns into
+`INTERNAL`. `INVALID_REQUEST`, `NOT_AUTHORISED`, `UNAVAILABLE`, `RATE_LIMITED`
+and `REFUSED` are in exactly the same position: ADR-0029 §3 ratified the
+vocabulary and ADR-0029 §1 deliberately left the callable's shape to `tools/`
+("How the callable is reached is `tools/`-internal, and this ADR does not
+contract it"), so the transport is a future integration ADR's — which is what
+`ToolImplementation`'s own docstring already says. **This clause therefore moves
+`CANCELLED` from unreachable-by-construction to unreachable-pending-a-decision,
+and those are different states.** The first is a contract describing something it
+forbids; the second is a deferral with an owner. Deferring the re-scoping until
+that transport exists was the alternative and is rejected: it would leave §4
+describing a seam branch that cannot be written, which is the defect. Nothing
+here decides the transport, and #192 records that the retry algebra in §5 is
+inert until it lands — an upstream 429 arrives as `INTERNAL`, which is not
+retryable, where `RATE_LIMITED` is.
 
 ### 4. The `uncancel()` residue is a declared limit, and `SUCCEEDED` is qualified accordingly
 
@@ -487,7 +536,11 @@ records that the ADR was amended, not how many times.
   asyncio.Task.cancelling() captured across the call, evaluated on the
   normal-return path as well as the raising one, with the deadline established
   from asyncio.Timeout.expired(), which no callable can reset; a pending
-  cancellation takes precedence over an expired deadline. §4's CANCELLED is
+  cancellation takes precedence over an expired deadline. The delta establishes
+  that a cancellation of this task was requested during this call, not who
+  requested it: cancelling() carries no provenance, so a callable that cancels
+  its own invoking task is propagated as a cancellation, which is the safe
+  direction. §4's CANCELLED is
   re-scoped — the seam never synthesises it, and it is what an integration
   reports when its own upstream cancelled the operation. §4 gains a fourth
   limit, in the form of the cooperative one: a callable that catches its
@@ -592,7 +645,15 @@ inventing it.
   The deadline half is tool-proof; the cancellation half is not. That is a
   weaker guarantee than §4 as ratified implies, and stating it is the whole
   value: the alternative was a stronger sentence that a first-party callable can
-  falsify.
+  falsify. The mirror case is stated too — a callable can *manufacture* a
+  cancellation delta as well as erase one — so provenance is bounded on both
+  sides rather than on the side that happened to be found first.
+- **Five of the eight failure kinds still have no carrier** (#192), and
+  re-scoping `CANCELLED` puts it in that group rather than outside it. ADR-0029
+  §5's retry algebra stays inert until an integration ADR gives a tool a way to
+  classify its own failure: today an upstream 429 arrives as `INTERNAL`, which
+  is not retryable. This ADR does not decide that transport, and says so where
+  it would otherwise be assumed.
 - **#189 closes as a declared limit rather than a fix**, and the conformance
   suite pins it, so an implementation that later closes it by isolating the
   callable fails the suite and has to come back through an ADR. That is a real
