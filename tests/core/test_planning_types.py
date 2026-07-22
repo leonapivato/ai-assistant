@@ -103,32 +103,47 @@ def test_goal_converts_aware_timestamps_to_utc() -> None:
     assert goal.deadline.tzinfo is UTC
 
 
-def test_the_clock_fed_planning_fields_still_attribute_utc() -> None:
-    """ADR-0023 §6's ordering: these five wait for ADR-0026's producer guard.
+def test_the_clock_fed_planning_fields_refuse_a_naive_reading() -> None:
+    """ADR-0026 §5's second half: the producer led, so these five followed.
 
-    Their producers (``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner``,
-    ``FakePlanStore``) pass an injected reading straight in with no shim, and
-    what normalises a naive one today is the validator itself. Tightening them
-    before the producer is guaranteed aware would break a naive test or config
-    clock — the exact failure the ordering exists to prevent. Pinned so the
-    remaining debt is visible rather than merely absent.
+    They were the last fields in ``core`` still attributing UTC to a naive
+    value, held back by ADR-0023 §6 only until every producer
+    (``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner``,
+    ``FakePlanStore``) stored a guarded clock. They all do now, so a naive
+    reading is refused at the seam by its named owner — and refused here too,
+    which is what makes the deferral closed rather than merely unenforced.
     """
-    naive = datetime(2026, 1, 1)  # noqa: DTZ001 — the deferral is the subject
+    naive = datetime(2026, 1, 1)  # noqa: DTZ001 — the refusal is the subject
 
-    assert ActionPlan(id="p1", goal_id="g1", steps=(), created_at=naive).created_at.tzinfo is UTC
-    running = _step(
-        status=StepStatus.RUNNING,
-        approval_ref="perm-1",
-        bound_tool="smtp",
-        attempts=1,
-        started_at=naive,
-    )
-    assert running.started_at is not None
-    assert running.started_at.tzinfo is UTC
-    assert (
-        ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=naive).updated_at.tzinfo is UTC
-    )
-    assert PlanExport(exported_at=naive).exported_at.tzinfo is UTC
+    with pytest.raises(ValidationError, match="created_at must be timezone-aware"):
+        ActionPlan(id="p1", goal_id="g1", steps=(), created_at=naive)
+    with pytest.raises(ValidationError, match="started_at must be timezone-aware"):
+        _claimed(StepStatus.RUNNING, started_at=naive)
+    with pytest.raises(ValidationError, match="finished_at must be timezone-aware"):
+        _claimed(StepStatus.SUCCEEDED, finished_at=naive)
+    with pytest.raises(ValidationError, match="updated_at must be timezone-aware"):
+        ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=naive)
+    with pytest.raises(ValidationError, match="exported_at must be timezone-aware"):
+        PlanExport(exported_at=naive)
+
+
+def test_the_clock_fed_planning_fields_convert_an_aware_reading_to_utc() -> None:
+    """The other half of the type: an offset it *was* given is honoured, not kept."""
+    berlin = datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2)))
+
+    plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=berlin)
+    assert plan.created_at == _WHEN
+    assert plan.created_at.tzinfo is UTC
+
+    finished = _claimed(StepStatus.SUCCEEDED, started_at=berlin, finished_at=berlin)
+    assert finished.started_at == _WHEN
+    assert finished.finished_at == _WHEN
+
+    state = ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=berlin)
+    assert state.updated_at == _WHEN
+    assert state.updated_at.tzinfo is UTC
+
+    assert PlanExport(exported_at=berlin).exported_at == _WHEN
 
 
 # --- PlanStep parameters are frozen all the way down --------------------

@@ -25,7 +25,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 import ai_assistant.core
-from ai_assistant.core.types import _ORDERING_DEFERRED, UtcInstant
+from ai_assistant.core.types import UtcInstant
 
 
 def _instant_leaves(
@@ -111,16 +111,12 @@ def test_the_scan_actually_finds_the_core_models() -> None:
 def test_every_core_datetime_field_uses_the_instant_type(model: type[BaseModel]) -> None:
     """A bare ``datetime`` on a ``core`` field fails the gate (ADR-0023 §2).
 
-    The one exemption is ``_ORDERING_DEFERRED``: five clock-fed ``planning``
-    fields ADR-0023 §6 holds back until ADR-0026's producer guard exists. It is
-    an explicit, enumerated set precisely so the debt shrinks to empty rather
-    than dissolving into "the check has always been advisory".
+    There is no exemption left. The five clock-fed ``planning`` fields ADR-0023
+    §6 once held back followed their producers once ADR-0026's ``checked_clock``
+    guarded them (ADR-0026 §5), so the enumerated deferral shrank to empty and
+    was deleted rather than becoming a standing opt-out.
     """
-    offenders = {
-        name
-        for name in bare_datetime_fields(model)
-        if (model.__name__, name) not in _ORDERING_DEFERRED
-    }
+    offenders = set(bare_datetime_fields(model))
     assert not offenders, f"{model.__name__} has bare datetime field(s) {sorted(offenders)}"
 
 
@@ -129,17 +125,18 @@ def test_no_core_instant_field_has_an_unvalidated_default(model: type[BaseModel]
     assert not unvalidated_datetime_defaults(model)
 
 
-def test_the_ordering_exemption_lists_exactly_what_is_still_bare() -> None:
-    """The exemption may not outlive the deferral it records.
+def test_no_core_field_is_exempt_from_the_instant_type() -> None:
+    """Stated once over the whole package, not model by model.
 
-    Asserted as equality, not containment: a stale entry would silently
-    re-open the opt-out for a field that had since been migrated, which is the
-    failure mode that turns an enumerated exemption back into a blanket one.
+    The per-model check above fails on the offending model; this one asserts the
+    property the exemption set used to carry — that *nothing* in ``core`` opts
+    out. Keeping it explicit is what stops a future deferral from re-appearing
+    as an exemption argument threaded back through the per-model check.
     """
     bare = {
         (model.__name__, name) for model in _core_models() for name in bare_datetime_fields(model)
     }
-    assert bare == set(_ORDERING_DEFERRED)
+    assert bare == set()
 
 
 # --- negative fixtures: the check must catch each omission independently ----

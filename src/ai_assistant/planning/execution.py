@@ -83,10 +83,13 @@ def _revalidated(step: StepExecution) -> StepExecution:
 def _revalidated_state(state: ExecutionState) -> ExecutionState:
     """Re-run ``ExecutionState``'s validators over a state built by ``model_copy``.
 
-    Same reasoning as :func:`_revalidated`. It no longer carries the tz-awareness
-    of ``updated_at``: that is now the producer's, via
-    :meth:`PlanExecution._now` (ADR-0026 §2), which is what lets ``updated_at``
-    stop depending on a normalising validator downstream.
+    Same reasoning as :func:`_revalidated`, and still load-bearing now that
+    ``updated_at`` is :data:`~ai_assistant.core.types.UtcInstant`. It never
+    carried that field's tz-awareness — the producer does, via
+    :meth:`PlanExecution._now` (ADR-0026 §2) — but ``model_copy(update=...)``
+    replaces ``steps`` wholesale without validating, so this is what re-runs
+    ``ExecutionState``'s own step-id uniqueness check and every nested
+    ``StepExecution`` validator over the rebuilt tuple.
     """
     return ExecutionState.model_validate(state.model_dump())
 
