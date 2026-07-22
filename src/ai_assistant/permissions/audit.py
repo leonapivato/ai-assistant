@@ -96,14 +96,17 @@ class SqliteAuditTrail:
     clause exists for.
     """
 
-    def __init__(self, *, path: Path | str = ":memory:") -> None:
+    def __init__(self, *, path: Path | str) -> None:
         """Open (or create) the trail at ``path``.
 
         Args:
             path: Database file path, or ``":memory:"`` for an ephemeral trail.
-                The default is ephemeral so a test or a throwaway composition
-                needs no filesystem; a deployment passes a path, which is what
-                makes the trail outlive the process.
+                **Required, with no default.** Durability is the whole reason
+                this implementation exists (ADR-0036 §2), so a default would let
+                the ordinary construction produce a trail that forgets
+                everything on restart — the failure the ADR argues against,
+                reachable by omitting an argument. An ephemeral trail is
+                available and has to be asked for.
 
         Raises:
             AuditError: If the database cannot be opened or initialised.

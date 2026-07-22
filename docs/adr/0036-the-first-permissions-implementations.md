@@ -127,10 +127,16 @@ conformance suite relies on. The composition root passes them in. Wiring
 
 ### 2. The audit trail persists
 
-`SqliteAuditTrail` writes to a local SQLite file — `:memory:` by default so a
-test or a throwaway composition needs no filesystem, a path in a real
-deployment. One table: the decision's JSON dump, plus an id, an ordering key and
-the `resolves` pointer as columns SQLite can constrain and sort by.
+`SqliteAuditTrail` writes to a local SQLite file. One table: the decision's JSON
+dump, plus an id, an ordering key and the `resolves` pointer as columns SQLite
+can constrain and sort by.
+
+**`path` is required and has no default.** `":memory:"` is accepted, so a test
+or a throwaway composition needs no filesystem — but it has to be asked for.
+Defaulting to it would put the failure this section argues against one omitted
+argument away: an ordinary-looking construction producing a trail that forgets
+everything on restart, in the implementation whose entire justification is that
+it does not.
 
 **Why not an in-process trail, which the Protocol would have accepted.** Two
 ratified decisions are about records that outlive the process, and a volatile

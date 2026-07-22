@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 @pytest.fixture
 def ephemeral() -> Iterator[SqliteAuditTrail]:
     """An in-memory trail, closed after the test."""
-    trail = SqliteAuditTrail()
+    trail = SqliteAuditTrail(path=":memory:")
     try:
         yield trail
     finally:
