@@ -811,7 +811,13 @@ what keeps the fake honest without importing `tools/`.
   returns valid data. `invoke` must raise `CancelledError`, not return the
   classified result. Nothing else pins it — every other carrier case leaves the
   delta alone, so an implementation that checks interruption once on entry to
-  the handler passes all of them.
+  the handler passes all of them. **And the same carrier on the guard's fallback
+  path**: `model_dump()` cancels the task and *then* raises an ordinary
+  exception, so the `INTERNAL` §6 synthesises is itself a result the re-read
+  must precede. An implementation that re-reads only after a successful
+  translation passes both cases above and still returns a result from a
+  cancelled task — which is the whole failure §4's "before *any* result" exists
+  to name.
 
 - **The plain case still holds.** A tool raising an ordinary `RuntimeError` is
   still `INTERNAL` and a `BaseException` still propagates — ADR-0029 §10's
