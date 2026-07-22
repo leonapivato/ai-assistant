@@ -1044,6 +1044,53 @@ async def test_a_keyed_tool_is_retried_inside_its_window() -> None:
     assert step.status is StepStatus.SUCCEEDED
 
 
+async def test_a_keyed_tool_is_not_retried_at_the_exact_window_boundary() -> None:
+    """ADR-0029 §5 permits a retry only *strictly* inside the window.
+
+    At the boundary "the tool is free to act again" (ADR-0016 §4), so the
+    comparison is `<` and not `<=`. One minute inside and two hours outside both
+    pass under either operator; only the exact instant distinguishes them, and
+    the wrong one costs a duplicated side effect.
+    """
+    window = timedelta(hours=1)
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = ScriptedInvoker(keyed(window=window), [unavailable(), succeeded()])
+    clock = stepping_clock([AT, AT + window])
+
+    await executor_over(store, seam, now=clock).execute(
+        state, step_id=STEP, call=call_for(keyed(window=window)), timeout=PATIENT
+    )
+
+    assert seam.calls == 1, "the window is closed at the instant it elapses"
+    step = await stored_step(store, state)
+    assert step.attempts == 1
+    assert step.status is StepStatus.FAILED
+
+
+async def test_a_natural_tool_is_retried_without_a_window() -> None:
+    """A side-effecting tool idempotent by nature is safe to repeat (ADR-0016 §4).
+
+    ADR-0029 §5's second conjunct has three disjuncts, and this is the one no
+    other test reaches: `natural()` appears elsewhere only for cancellation
+    classification. Dropping `NATURAL` from the retry-safe condition would leave
+    every idempotent side-effecting call permanently failed and pass the rest of
+    this suite.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = ScriptedInvoker(natural(), [unavailable(), succeeded()])
+
+    await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(natural()), timeout=PATIENT
+    )
+
+    assert seam.calls == 2
+    step = await stored_step(store, state)
+    assert step.attempts == 2
+    assert step.status is StepStatus.SUCCEEDED
+
+
 async def test_retrying_stops_once_the_window_has_elapsed() -> None:
     """Past the window "the tool is free to act again" (ADR-0016 §4).
 
