@@ -92,30 +92,34 @@ def _uuid() -> str:
 
 
 def _detached_request(request: ActionRequest) -> ActionRequest:
-    """Take a private copy of the request once the policy has seen it.
+    """The copy the policy rules on, so it never holds the one that is executed.
 
-    **``decide`` is handed the request, and a policy may keep it.** From the
-    moment it returns, the object this stage goes on using is one another
-    subsystem holds a reference to, across the ``await`` on
-    ``AuditTrail.record`` — and ``frozen=True`` refuses ``request.tool = ...``
-    while doing nothing about ``request.__dict__`` (ADR-0018 §3). Everything
-    afterwards reads the request again: the subject comparison in
-    :meth:`StepRunner._record`, and ``ToolCall``'s own ``authorises``.
+    **This is what keeps ADR-0021 §3's central guarantee true at the seam.**
+    ``PermissionRuling`` has no field naming a tool, a payload or a step
+    precisely so a policy cannot substitute the subject of the decision it is
+    answering about; the ADR calls that absence "the security property, not an
+    economy", and says splitting the types "removes the capability rather than
+    forbidding it". Handing ``decide`` the very object that is then bound into
+    the ``PermissionDecision`` and executed hands the capability straight back:
+    ``frozen=True`` refuses ``request.tool = ...`` and does nothing about
+    ``request.__dict__`` (ADR-0018 §3), so a policy could rule ``ALLOW`` on a
+    harmless declaration and swap in another registered one before returning.
+    Everything downstream would then agree with itself — the decision, the
+    ``ToolCall`` and the invoker all describe the substitute — and the tool the
+    user's policy actually approved would never have run.
 
-    Nothing unsafe follows from the mutation — the decision transcribed its
-    subject *before* the await (``PermissionDecision.from_request``), so a
-    rewritten request no longer matches it and every comparison fails closed.
-    What follows is worse than useless: a turn that refuses a perfectly good
-    action **after** its decision is durable, leaving an entry in an append-only
-    Tier 1 store that no transition corresponds to and ADR-0021 §4 offers no way
-    to erase. Copying here means the comparisons are made against a value nobody
-    else can reach, so they answer the question they are actually asking.
+    **The timing is the whole of it: the copy is taken before ``decide`` is
+    reached, not after it returns.** A copy taken afterwards faithfully preserves
+    a substitution already made, which is the same hole one instruction later.
+
+    A policy that keeps its copy and mutates it *later* is then harmless — it
+    holds a value nothing reads — so the comparisons that follow (the subject
+    check in :meth:`StepRunner._record`, and ``ToolCall``'s own ``authorises``)
+    answer about the request that was really ruled on.
 
     Raises:
         ValueError: If the request does not survive revalidation. Not reachable
-            through the constructed value — it was valid a moment ago — so this
-            is the mutation itself surfacing, and it surfaces before anything is
-            recorded.
+            through a value this module has just constructed.
     """
     return ActionRequest.model_validate(request.model_dump())
 
@@ -329,10 +333,9 @@ class StepRunner:
 
         tool = candidates[0]
         request = ActionRequest(tool=tool, parameters=step.parameters, step_id=step.id)
-        ruling = await self._policy.decide(request)
-        # The policy has now seen the request and may have kept it; everything
-        # after this reads a copy nothing else can reach (`_detached_request`).
-        request = _detached_request(request)
+        # The policy rules on its *own* copy, and never on the object that is
+        # then bound and executed (`_detached_request`).
+        ruling = await self._policy.decide(_detached_request(request))
         decision = await self._record(request, ruling)
 
         # Branch on the *recorded* ruling, never the policy's own object. The
@@ -435,8 +438,9 @@ class StepRunner:
         self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmation_id)
 
         request = ActionRequest(tool=confirmed.tool, parameters=step.parameters, step_id=step.id)
-        ruling = await self._policy.resolve(confirmed, approved=approved)
-        request = _detached_request(request)
+        # Its own copy again, for `run`'s reason: `confirmed.id` is read after
+        # this returns, and it is what `resolves` will point at.
+        ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
         decision = await self._record(request, ruling, resolves=confirmed.id)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(state, step, request, decision, timeout=timeout)
