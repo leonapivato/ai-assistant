@@ -5,7 +5,11 @@ description = "A model-agnostic AI operating system that orchestrates language m
 readme = "README.md"
 requires-python = ">=3.14"
 license = "MIT"
-license-files = ["LICENSE"]
+# `THIRD-PARTY-NOTICES.md` is here because the distributions redistribute the
+# vendored embedding model (ADR-0024): shipping the weights under our package
+# name means shipping the upstream notices with them, in the wheel and in the
+# sdist. `LICENSE` covers this project's own code only.
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 authors = [
     { name = "Leonardo Pivato", email = "pivato.l@northeastern.edu" },
 ]
