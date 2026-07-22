@@ -75,6 +75,22 @@ class ClockReadingError(ValueError):
     a non-conforming *reading*, destroying exactly the diagnosis §2 preserves.
     Catching this type instead keeps the two apart, and costs nothing: it is a
     ``ValueError``, so a caller that only knows the ADR's promise still catches it.
+
+    **What that separation does not, and cannot, cover.** A clock that raises
+    *this* type on its own account is reported as a non-conforming reading,
+    because an exception is a value any caller may raise and no producer-side
+    guard can tell a forged one from its own. That residue is deliberate and it
+    is small: nothing raises this type by accident — it exists for one purpose,
+    in one module, and no third-party library knows it — so reaching it takes a
+    first-party clock deliberately impersonating ``core``'s rejection. ADR-0030
+    §3 rules that case out by name: a guard is answerable for the well-formedness
+    of the value it hands on and for not composing a claim its source never made,
+    not for the truth of a claim its source *did* make. A clock raising
+    ``ClockReadingError("provider down")`` is claiming its own reading is
+    non-conforming; the seam passes that claim on and composes nothing. The case
+    the separation does cover is the one a real clock reaches by accident: a
+    provider raising a plain ``ValueError``, which no longer becomes "your clock
+    returned a bad reading".
     """
 
 

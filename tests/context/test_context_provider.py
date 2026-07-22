@@ -362,3 +362,44 @@ async def test_a_source_whose_required_marker_raises_is_read_as_optional() -> No
     ctx = await provider.assemble()
 
     assert ctx.time_of_day is TimeOfDay.AFTERNOON
+
+
+class _WatchedHangingSource:
+    """An optional source that blocks forever and records being cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    @property
+    def name(self) -> str:
+        return "slow"
+
+    async def contribute(self) -> Mapping[str, object]:
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return {}
+
+
+async def test_a_required_failure_cancels_its_still_running_siblings() -> None:
+    """``asyncio.gather`` propagates the first failure but does not cancel the rest.
+
+    Unreachable before ADR-0026 §4's required sources — ``_safe_contribute``
+    degraded everything, so gather never raised. Now a fast-failing required
+    source beside an optional one blocked in I/O would leave that source running
+    after the caller has its failure: to its own timeout, or forever with
+    ``source_timeout=None``, still able to perform a late side effect for a
+    request that is over.
+    """
+    slow = _WatchedHangingSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), slow], source_timeout=None)
+
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+
+    assert slow.started.is_set()  # it really was running, so cancelling it meant something
+    assert slow.cancelled  # and it is finished, not merely abandoned

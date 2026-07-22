@@ -92,9 +92,7 @@ class AssemblingContextProvider:
                 (ADR-0026 §4). A required source's failure of any other type
                 propagates as itself, unwrapped.
         """
-        contributions = await asyncio.gather(
-            *(self._safe_contribute(source) for source in self._sources)
-        )
+        contributions = await self._gather_contributions()
         merged: dict[str, object] = {}
         for source, contribution in zip(self._sources, contributions, strict=True):
             for key, value in contribution.items():
@@ -110,6 +108,34 @@ class AssemblingContextProvider:
         except ValidationError as exc:
             msg = f"could not assemble a valid context: {exc}"
             raise ContextError(msg) from exc
+
+    async def _gather_contributions(self) -> list[Mapping[str, object]]:
+        """Run every source concurrently, leaving nothing running behind a failure.
+
+        ``asyncio.gather`` propagates the first exception but does **not** cancel
+        its siblings, and that only became reachable with ADR-0026 §4's required
+        sources: before them ``_safe_contribute`` degraded everything and gather
+        never raised. A required source failing fast beside an optional one
+        blocked in I/O would otherwise return to the caller while that source ran
+        on — to its own timeout, or forever when ``source_timeout`` is ``None`` —
+        still able to perform a late side effect for a request that is over.
+
+        Siblings are therefore cancelled and *awaited* before the failure is
+        re-raised, so the method never returns or raises with work outstanding.
+
+        Raises:
+            BaseException: Whatever a ``required`` source raised, unchanged.
+        """
+        tasks = [asyncio.ensure_future(self._safe_contribute(source)) for source in self._sources]
+        try:
+            return await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            # `return_exceptions` so one sibling's fault cannot mask the original,
+            # and awaited so cancellation has actually finished when this returns.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def _safe_contribute(self, source: ContextSource) -> Mapping[str, object]:
         """Return a source's contribution, degrading an *optional* failure to an empty one.
