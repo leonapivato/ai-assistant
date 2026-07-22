@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "review_history.py"
@@ -768,6 +769,135 @@ def test_repaging_leaves_a_malformed_entry_for_the_parser_to_report() -> None:
     assert rh._repage_comments(payload) is payload
     with pytest.raises(ValueError, match="not an integer"):
         rh.parse_pull_requests(payload, "owner")
+
+
+# --- the live fetch, end to end (#229) ---------------------------------------
+#
+# Everything above drives `--from-json`, which enters the module *past* the
+# network seam: `fetch_pull_requests` and its repaging are unreachable from it.
+# So the pieces were each covered while the wiring between them was not, and a
+# regression dropping `_repage_comments(payload)` from `fetch_pull_requests`, or
+# `headRefOid` from the requested fields, would leave the suite green. These
+# tests monkeypatch the one seam that touches the network — `_gh` — and drive
+# the real call path over it.
+
+
+def _fake_gh(
+    payload: list[dict[str, object]],
+    comment_lines: dict[int, str],
+    seen: list[list[str]],
+) -> Callable[[list[str]], str]:
+    """A `_gh` answering both calls the live path makes, recording every argv.
+
+    `gh pr list` returns ``payload`` as JSON; `gh api --paginate` returns the
+    REST lines registered for the PR number named in its endpoint — the one
+    output shape `fetch_comments` parses, one compact object per line.
+    """
+
+    def run(argv: list[str]) -> str:
+        seen.append(argv)
+        if argv[:3] == ["gh", "pr", "list"]:
+            return json.dumps(payload)
+        if argv[:3] == ["gh", "api", "--paginate"]:
+            number = int(argv[3].rsplit("/", 2)[-2])
+            return comment_lines[number]
+        raise AssertionError(f"unexpected gh call: {argv}")
+
+    return run
+
+
+def _rest_line(body: str, author: str = "owner") -> str:
+    """One comment as `fetch_comments`'s jq filter emits it: compact, one line."""
+    return json.dumps({"body": body, "author": {"login": author}}, separators=(",", ":"))
+
+
+def test_the_live_fetch_repages_a_boundary_pr_and_reports_it_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wiring, not the pieces: `pr list` → boundary → REST → parsed complete.
+
+    PR 1 comes back at the page boundary with a *stale* last ship comment, which
+    is precisely the #157 failure: `gh pr list` does not page the nested
+    connection, so the comment the report reads may not be in it. The live path
+    must refetch it through the paginated REST endpoint, replace the list, and
+    hand on a payload the caller may parse with ``comments_complete=True``.
+
+    A regression bypassing `_repage_comments` reports the stale round here and
+    suppresses the truncation warning at the same time — the report would name
+    an earlier ship aggregate with nothing flagging it as possibly short.
+    """
+    seen: list[list[str]] = []
+    payload = [
+        _pr(
+            1,
+            "fix: a",
+            [*[_comment("chatter") for _ in range(rh._COMMENT_PAGE - 1)], _ship("0" * 40, _EXACT)],
+        ),
+        _pr(2, "fix: b", [_ship("2" * 40, _EXACT)]),
+    ]
+    lines = {
+        1: "".join(
+            f"{line}\n"
+            for line in [
+                *[_rest_line("chatter") for _ in range(rh._COMMENT_PAGE)],
+                _rest_line(_ship("1" * 40, _LOWER)),
+            ]
+        )
+    }
+    monkeypatch.setattr(rh, "_gh", _fake_gh(payload, lines, seen))
+
+    fetched = rh.fetch_pull_requests(5)
+    prs = rh.parse_pull_requests(fetched, "owner", comments_complete=True)
+
+    listed = seen[0]
+    assert listed[:3] == ["gh", "pr", "list"]
+    # `headRefOid` is only reachable from the live path; `--from-json` cannot
+    # notice it being dropped from the request (see _head_differs_from_marker).
+    assert "headRefOid" in listed[-1].split(",")
+    assert "comments" in listed[-1].split(",")
+    api = [argv for argv in seen if argv[:3] == ["gh", "api", "--paginate"]]
+    assert [argv[3] for argv in api] == ["repos/{owner}/{repo}/issues/1/comments"]
+
+    assert prs[0].aggregate is not None
+    assert prs[0].aggregate.round == 29, "the boundary PR kept the comments gh had truncated"
+    assert prs[0].comments_may_be_truncated is False
+    assert prs[1].aggregate is not None
+    assert prs[1].aggregate.round == 3
+
+
+def test_a_failed_repage_aborts_the_live_fetch_rather_than_reporting_a_short_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `gh` failure on the refetch must not degrade into a partial answer.
+
+    A truncated comment set that did not raise looks exactly like a PR whose
+    last ship comment is missing — the reading #157 exists to close — so the
+    error propagates out of the whole fetch instead.
+    """
+
+    def failing(argv: list[str]) -> str:
+        if argv[:3] == ["gh", "pr", "list"]:
+            return json.dumps([_pr(1, "fix: a", [_comment("c") for _ in range(rh._COMMENT_PAGE)])])
+        raise RuntimeError("`gh api --paginate` failed: 502")
+
+    monkeypatch.setattr(rh, "_gh", failing)
+    with pytest.raises(RuntimeError, match="502"):
+        rh.fetch_pull_requests(5)
+
+
+def test_an_unparseable_fetched_comment_names_the_pr_and_returns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Half a page parsed is not half an answer — it raises, naming the PR."""
+
+    def garbled(argv: list[str]) -> str:
+        if argv[:3] == ["gh", "pr", "list"]:
+            return json.dumps([_pr(7, "fix: a", [_comment("c") for _ in range(rh._COMMENT_PAGE)])])
+        return f"{_rest_line('one')}\n{{not json\n"
+
+    monkeypatch.setattr(rh, "_gh", garbled)
+    with pytest.raises(RuntimeError, match="PR 7: could not parse a fetched comment"):
+        rh.fetch_pull_requests(5)
 
 
 def test_the_report_states_it_does_not_gate(tmp_path: Path) -> None:

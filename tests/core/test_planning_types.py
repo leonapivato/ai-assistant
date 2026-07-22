@@ -128,7 +128,14 @@ def test_the_clock_fed_planning_fields_refuse_a_naive_reading() -> None:
 
 
 def test_the_clock_fed_planning_fields_convert_an_aware_reading_to_utc() -> None:
-    """The other half of the type: an offset it *was* given is honoured, not kept."""
+    """The other half of the type: an offset it *was* given is honoured, not kept.
+
+    Every field carries the ``.tzinfo is UTC`` assertion as well as the instant
+    one, because the instant alone does not distinguish the two behaviours:
+    aware datetimes compare by instant, so a regression storing the supplied
+    ``UTC+02:00`` reading verbatim satisfies ``== _WHEN`` while the conversion
+    this test is named for never happened (issue #236).
+    """
     berlin = datetime(2026, 1, 1, 2, tzinfo=timezone(timedelta(hours=2)))
 
     plan = ActionPlan(id="p1", goal_id="g1", steps=(), created_at=berlin)
@@ -137,13 +144,19 @@ def test_the_clock_fed_planning_fields_convert_an_aware_reading_to_utc() -> None
 
     finished = _claimed(StepStatus.SUCCEEDED, started_at=berlin, finished_at=berlin)
     assert finished.started_at == _WHEN
+    assert finished.started_at is not None
+    assert finished.started_at.tzinfo is UTC
     assert finished.finished_at == _WHEN
+    assert finished.finished_at is not None
+    assert finished.finished_at.tzinfo is UTC
 
     state = ExecutionState(id="e1", plan_id="p1", steps=(), updated_at=berlin)
     assert state.updated_at == _WHEN
     assert state.updated_at.tzinfo is UTC
 
-    assert PlanExport(exported_at=berlin).exported_at == _WHEN
+    exported = PlanExport(exported_at=berlin).exported_at
+    assert exported == _WHEN
+    assert exported.tzinfo is UTC
 
 
 # --- PlanStep parameters are frozen all the way down --------------------
