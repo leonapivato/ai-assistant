@@ -164,11 +164,24 @@ _diff_opts=(
 # Read from `--raw -z` rather than by scanning the rendered patch text: the blob
 # pair is the structural fact, where a text scan would have to guess at entry
 # boundaries in a format where a pathname may itself contain a newline.
+# A LISTING THAT COULD NOT BE READ IS REPORTED AS PATHLESS. The producer's exit
+# status has to be captured rather than read through a process substitution,
+# which discards it: `git diff` can fail *after* emitting a prefix — an
+# unreadable blob in a partial clone, a broken pipe — and a truncated listing
+# read as a complete one would say "no pathless entry" about a range it never
+# finished describing. So it is written to a file whose write is checked, and any
+# failure answers the fail-closed way rather than the convenient way.
 _range_has_pathless_entry() {
     local -a rec=()
-    mapfile -d '' -t rec < <(
-        git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv --raw --abbrev=40 -z "$1...$2"
-    )
+    local raw
+    raw="$(mktemp -t patch-raw.XXXXXX)" || return 0
+    if ! git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv --raw --abbrev=40 -z \
+        "$1...$2" >"$raw"; then
+        rm -f "$raw"
+        return 0
+    fi
+    mapfile -d '' -t rec <"$raw"
+    rm -f "$raw"
     local i=0 meta old new status
     while [[ $i -lt ${#rec[@]} ]]; do
         meta="${rec[$i]}"

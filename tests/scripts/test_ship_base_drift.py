@@ -724,3 +724,68 @@ def test_the_patch_identity_block_is_byte_identical_in_both_scripts() -> None:
     assert blocks[0] == blocks[1]
     assert "--verbatim" in blocks[0]
     assert "--stable" not in blocks[0].replace("`--stable`", "")
+
+
+def _failing_drift_git(bin_dir: Path, *, emit_prefix: bool) -> None:
+    """A `git` that fails the drift listing, optionally after emitting a prefix.
+
+    The producer failing *after* output is the case a process substitution
+    cannot report: `mapfile` succeeds, and a truncated listing is read as a
+    complete one. Only the `--name-status` call is intercepted; everything else
+    is the real git, so the rest of `ship` behaves normally.
+    """
+    real = shutil.which("git")
+    assert real is not None
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    prefix = r"""printf 'M\0notes/thing.md\0'""" if emit_prefix else ":"
+    shim = bin_dir / "git"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        'for a in "$@"; do\n'
+        '  if [[ "$a" == "--name-status" ]]; then\n'
+        f"    {prefix}\n"
+        '    echo "fatal: unable to read blob" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+        f'exec {real} "$@"\n'
+    )
+    shim.chmod(0o755)
+
+
+def test_a_drift_listing_that_fails_partway_refuses(tmp_path: Path) -> None:
+    """A truncated listing must never be read as a complete one.
+
+    `git diff` can fail after emitting a prefix — an unreadable blob in a partial
+    clone, a broken pipe — and the failure is invisible through a process
+    substitution. Accepting the prefix would clear the floor whenever the
+    breaching path was in the part that never arrived, and publish as "whole" a
+    set that is not: both are exactly what §§3-4 fail closed against.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: _edit_line(r, "src/ai_assistant/orchestration/loop.py", 40, "m")
+    )
+    _failing_drift_git(tmp_path / "bin", emit_prefix=True)
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased)
+
+    assert result.returncode != 0
+    assert "could not be parsed" in result.stderr
+    assert not (tmp_path / "comment.md").exists()
+
+
+def test_a_drift_listing_that_fails_with_no_output_refuses(tmp_path: Path) -> None:
+    """The same failure with an empty stream — which reads as "nothing moved"."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: _edit_line(r, "src/ai_assistant/orchestration/loop.py", 40, "m")
+    )
+    _failing_drift_git(tmp_path / "bin", emit_prefix=False)
+
+    result = _run_ship(repo, tmp_path, pr_sha=rebased)
+
+    assert result.returncode != 0
+    assert "could not be parsed" in result.stderr
