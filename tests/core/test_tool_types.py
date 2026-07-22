@@ -403,3 +403,79 @@ def test_an_identifier_with_nothing_visible_is_refused(field: str, invisible: st
 @pytest.mark.parametrize("field", ["id", "capability"])
 def test_an_identifier_is_stripped(field: str) -> None:
     assert getattr(_definition(**{field: "  smtp  "}), field) == "smtp"
+
+
+# --- storability (issue #156) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        pytest.param({"id": "smtp_\ud800"}, id="id"),
+        pytest.param({"capability": "send_\ud800"}, id="capability"),
+        pytest.param({"description": "Send \ud800 mail."}, id="description"),
+        pytest.param({"parameters_schema": {"to": "\ud800"}}, id="schema-value"),
+        pytest.param({"parameters_schema": {"\ud800": "string"}}, id="schema-key"),
+        pytest.param(
+            {"parameters_schema": {"properties": {"to": {"title": "\ud800"}}}},
+            id="schema-value-nested",
+        ),
+        pytest.param(
+            {"parameters_schema": {"properties": {"\ud800": {"type": "string"}}}},
+            id="schema-key-nested",
+        ),
+        pytest.param(
+            {"parameters_schema": {"properties": {"to": {"enum": ["ok", "\ud800"]}}}},
+            id="schema-value-in-a-list",
+        ),
+    ],
+)
+def test_a_definition_with_no_json_encoding_is_refused(override: dict[str, object]) -> None:
+    r"""A valid model that cannot be serialised is not a valid declaration.
+
+    A lone surrogate satisfies ``str``, renders as something to
+    ``_has_visible_text``, and has no UTF-8 encoding — so before this it passed
+    every rule the type had and failed at whatever tried to store it, with a
+    ``PydanticSerializationError`` from the serialiser rather than a
+    ``ValidationError`` from the author's own call.
+    """
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _definition(**override)
+
+
+def test_the_schema_check_reaches_arbitrary_depth() -> None:
+    """The predicate is the encoding itself, so nesting cannot outrun it.
+
+    A JSON Schema is arbitrarily deep, and a rule written against the top level
+    — or against the text fields only — would be complete until the next schema.
+    """
+    nested: dict[str, object] = {"a": {"b": {"c": {"d": {"e": ["fine", {"f": "\ud800"}]}}}}}
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _definition(parameters_schema=nested)
+
+
+def test_a_real_supplementary_character_is_still_accepted() -> None:
+    """Only *lone* surrogates are refused, not everything outside the BMP.
+
+    U+1F600 is encoded as a surrogate *pair* in UTF-16 and as four bytes in
+    UTF-8; a check written against the surrogate range rather than against the
+    encoding would reject it, which would make emoji unusable in a description.
+    """
+    definition = _definition(
+        description="Send \U0001f600 mail.",
+        parameters_schema={"properties": {"to": {"title": "\U0001f600"}}},
+    )
+
+    assert "\U0001f600" in definition.model_dump_json()
+
+
+def test_every_constructible_definition_survives_a_json_round_trip() -> None:
+    """What the constraint buys: any definition the type accepts can be stored."""
+    definition = _definition(
+        parameters_schema={"properties": {"to": {"type": "string", "enum": ["a", "b"]}}},
+        latency=timedelta(seconds=2),
+    )
+
+    reloaded = ToolDefinition.model_validate_json(definition.model_dump_json())
+
+    assert reloaded == definition
