@@ -5,7 +5,7 @@ wires four injected contracts — :class:`~ai_assistant.core.protocols.ContextPr
 :class:`~ai_assistant.core.protocols.MemoryStore`,
 :class:`~ai_assistant.core.protocols.Planner` and
 :class:`~ai_assistant.core.protocols.FeedbackProcessor`, plus the
-:class:`~ai_assistant.core.protocols.MemoryPolicy` that guards the write path —
+:class:`~ai_assistant.core.protocols.MemoryWriter` that owns the write path —
 into the roadmap's first vertical:
 
 .. code-block:: text
@@ -32,7 +32,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from math import isfinite
 from typing import TYPE_CHECKING
 
 import structlog
@@ -40,31 +39,26 @@ import structlog
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     Goal,
-    MemoryDecisionKind,
-    MemoryIngestResult,
-    MemoryKind,
     MemorySource,
     Provenance,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import timedelta
 
     from ai_assistant.core.protocols import (
         ContextProvider,
         FeedbackProcessor,
-        MemoryPolicy,
         MemoryStore,
+        MemoryWriter,
         Planner,
     )
     from ai_assistant.core.types import (
         ActionPlan,
         CurrentContext,
         FeedbackEvent,
-        MemoryDecision,
+        MemoryIngestResult,
         MemoryRecord,
-        MemoryUpdateProposal,
     )
 
 _log = structlog.get_logger(__name__)
@@ -74,8 +68,6 @@ _log = structlog.get_logger(__name__)
 _FULL_CONFIDENCE = 1.0
 
 _DEFAULT_RETRIEVAL_LIMIT = 5
-_DEFAULT_CONFLICT_THRESHOLD = 0.75
-_DEFAULT_CONFLICT_LIMIT = 5
 
 
 def _utcnow() -> datetime:
@@ -86,44 +78,33 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _check_tuning(*, retrieval_limit: int, conflict_threshold: float, conflict_limit: int) -> None:
-    """Reject tuning that would disable a stage while looking healthy.
+def _check_tuning(*, retrieval_limit: int) -> None:
+    """Reject tuning that would disable retrieval while looking healthy.
 
-    Each of these is a *silent* misconfiguration, which is why it is refused at
-    construction rather than left to surface as behaviour. ``retrieval_limit=0``
-    makes ``MemoryStore.search`` return nothing by contract, so every turn would
-    be unpersonalised with ``memory_degraded`` reading ``False`` — a generic
-    answer presented as a healthy personal one, the exact failure
-    :attr:`TurnResult.memory_degraded` exists to expose. ``conflict_limit=0``
-    hands the policy no conflicts, so every proposal is ruled on as though
-    nothing contradicted it. A ``NaN`` threshold compares ``False`` against
-    every score, silently doing the same.
+    A *silent* misconfiguration, which is why it is refused at construction
+    rather than left to surface as behaviour: ``retrieval_limit=0`` makes
+    ``MemoryStore.search`` return nothing by contract, so every turn would be
+    unpersonalised with ``memory_degraded`` reading ``False`` — a generic answer
+    presented as a healthy personal one, the exact failure
+    :attr:`TurnResult.memory_degraded` exists to expose.
+
+    The conflict half of this check went where the conflict tuning went, into
+    ``MemoryIngestor.__init__`` (ADR-0028 §4a): relocated with the values, not
+    retired.
 
     Raises:
-        TypeError: If a limit is not an integer, or the threshold is a ``bool``.
-        ValueError: If a limit is not positive, or the threshold is not a finite
-            value in ``[0, 1]`` — the range a ``MemoryRecord.score`` occupies.
+        TypeError: If ``retrieval_limit`` is not an integer.
+        ValueError: If ``retrieval_limit`` is not positive.
     """
-    for name, limit in (("retrieval_limit", retrieval_limit), ("conflict_limit", conflict_limit)):
-        # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both
-        # survive — and a non-integral limit reaches `MemoryStore.search`, where
-        # a store slicing by it raises `TypeError` far from the mistake. `bool`
-        # is excluded because it is an `int` subclass and a flag is not a count.
-        if isinstance(limit, bool) or not isinstance(limit, int):
-            msg = f"{name} must be an integer, got {limit!r}"
-            raise TypeError(msg)
-        if limit < 1:
-            msg = f"{name} must be at least 1, got {limit}"
-            raise ValueError(msg)
-    # Checked before the range test, which a `bool` silently survives: `bool` is
-    # an `int` subclass, so `isfinite(True)` holds and `0.0 <= True <= 1.0` is
-    # true — a flag would be read as the threshold 1.0, restricting conflicts to
-    # perfect-score matches. Rejected for the same reason the limits reject one.
-    if isinstance(conflict_threshold, bool):
-        msg = f"conflict_threshold must be a real number, got {conflict_threshold!r}"
+    # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both survive
+    # — and a non-integral limit reaches `MemoryStore.search`, where a store
+    # slicing by it raises `TypeError` far from the mistake. `bool` is excluded
+    # because it is an `int` subclass and a flag is not a count.
+    if isinstance(retrieval_limit, bool) or not isinstance(retrieval_limit, int):
+        msg = f"retrieval_limit must be an integer, got {retrieval_limit!r}"
         raise TypeError(msg)
-    if not isfinite(conflict_threshold) or not 0.0 <= conflict_threshold <= 1.0:
-        msg = f"conflict_threshold must be a finite value in [0, 1], got {conflict_threshold!r}"
+    if retrieval_limit < 1:
+        msg = f"retrieval_limit must be at least 1, got {retrieval_limit}"
         raise ValueError(msg)
 
 
@@ -170,51 +151,51 @@ class LearningLoop:
         *,
         context: ContextProvider,
         memory: MemoryStore,
-        policy: MemoryPolicy,
+        writer: MemoryWriter,
         planner: Planner,
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
-        conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
-        conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
         now: Callable[[], datetime] = _utcnow,
         id_factory: Callable[[], str] = _uuid,
     ) -> None:
         """Wire the loop from injected contracts.
 
+        **``writer`` must persist to ``memory``.** Nothing in the type system
+        can say so — a ``MemoryWriter`` exposes no store, deliberately — so it
+        is a composition-root obligation (ADR-0028 §4): whoever builds the loop
+        passes the same ``MemoryStore`` instance to it and to the writer. Wired
+        to two stores, learning reports a real record id and the next turn
+        retrieves nothing, with ``memory_degraded`` reading ``False`` — the
+        closed loop silently open.
+
         Args:
             context: Assembles the situational "right now" for each turn.
-            memory: Long-term memory — read for retrieval, written by the
-                learning half.
-            policy: Rules on every proposed memory update before it is written.
+            memory: Long-term memory, read for retrieval. The store ``writer``
+                writes to.
+            writer: The memory write path — conflicts, policy and persistence in
+                one call. It holds the policy; this loop does not.
             planner: Turns the turn's goal into an ``ActionPlan``.
             feedback: Turns a ``FeedbackEvent`` into memory-update proposals.
             retrieval_limit: How many memories a turn retrieves.
-            conflict_threshold: Minimum retrieval score for an existing record
-                to be offered to the policy as conflicting with a proposal.
-            conflict_limit: Maximum number of conflict candidates considered.
-            now: Clock for goal timestamps and temporary-store expiry;
-                injectable so turns are deterministic in tests.
+            now: Clock for goal timestamps; injectable so turns are
+                deterministic in tests. It no longer stamps temporary-store
+                expiry — that is the writer's own clock (ADR-0028 §4b), so a
+                test wanting a deterministic expiry injects one there too.
             id_factory: Supplies goal ids; injectable for the same reason.
 
         Raises:
-            TypeError: If a limit is not an integer, or ``conflict_threshold`` is
-                a ``bool`` (see :func:`_check_tuning`).
-            ValueError: If a limit is below 1, or ``conflict_threshold`` is not a
-                finite value in ``[0, 1]`` (see :func:`_check_tuning`).
+            TypeError: If ``retrieval_limit`` is not an integer (see
+                :func:`_check_tuning`).
+            ValueError: If ``retrieval_limit`` is below 1 (see
+                :func:`_check_tuning`).
         """
-        _check_tuning(
-            retrieval_limit=retrieval_limit,
-            conflict_threshold=conflict_threshold,
-            conflict_limit=conflict_limit,
-        )
+        _check_tuning(retrieval_limit=retrieval_limit)
         self._context = context
         self._memory = memory
-        self._policy = policy
+        self._writer = writer
         self._planner = planner
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
-        self._conflict_threshold = conflict_threshold
-        self._conflict_limit = conflict_limit
         self._now = now
         self._id_factory = id_factory
 
@@ -260,9 +241,11 @@ class LearningLoop:
     async def learn(self, event: FeedbackEvent) -> tuple[MemoryIngestResult, ...]:
         """Fold one piece of feedback back into memory.
 
-        Runs the propose/dispose/persist path for each proposal the feedback
-        implies: conflicts are resolved from the store, the policy rules on the
-        proposal given them, and only then is anything written. The model never
+        Process, then delegate: the feedback becomes proposals, and each is
+        handed to the injected :class:`~ai_assistant.core.protocols.MemoryWriter`
+        (ADR-0028 §4). Conflicts, the policy's ruling and the write itself all
+        happen behind that seam — including a ``MERGE``, which is *applied* by
+        `memory`'s own fold rather than reported and dropped. The model never
         writes memory directly (VISION §7).
 
         Proposals are applied in order and independently; there is no
@@ -287,10 +270,11 @@ class LearningLoop:
             nothing was).
 
         Raises:
-            MemoryStoreError: If reading conflicts or writing a record failed.
+            MemoryStoreError: If the writer failed to read conflicts or write a
+                record, or a ``MERGE`` named a target that is not among them.
         """
         proposals = await self._feedback.process(event)
-        return tuple([await self._ingest(proposal) for proposal in proposals])
+        return tuple([await self._writer.ingest(proposal) for proposal in proposals])
 
     def _goal_from(self, utterance: str) -> Goal:
         """Mint the turn's goal from what the user said.
@@ -340,79 +324,14 @@ class LearningLoop:
             return (), True
         return tuple(memories), False
 
-    async def _ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        """Resolve conflicts, ask the policy, and apply its ruling."""
-        conflicts = await self._conflicts_for(proposal.proposed)
-        proposal = proposal.model_copy(update={"conflicts": [record.id for record in conflicts]})
-        decision = await self._policy.decide(proposal, conflicts=conflicts)
-        record_id = await self._apply(decision, proposal.proposed)
-        return MemoryIngestResult(decision=decision, record_id=record_id)
-
-    async def _conflicts_for(self, record: MemoryRecord) -> list[MemoryRecord]:
-        """Return the stored records ``record`` plausibly contradicts.
-
-        Same kind, similar enough to clear ``conflict_threshold``, and never the
-        proposal itself — a record cannot conflict with the version of it being
-        re-proposed, and offering it as one would invite a merge into itself.
-        """
-        # Over-fetch by one, because the store applies the limit before this
-        # method can drop the proposal's own record: a re-proposal would
-        # otherwise spend a slot on a record that is then discarded, hiding a
-        # genuine conflict ranked just below it. One extra suffices — ids are
-        # unique in a store, so at most one match can be the proposal itself.
-        matches = await self._memory.search(
-            record.content,
-            limit=self._conflict_limit + 1,
-            kinds=[MemoryKind(record.kind)],
-        )
-        conflicts = [
-            match
-            for match in matches
-            if match.id != record.id and (match.score or 0.0) >= self._conflict_threshold
-        ]
-        return conflicts[: self._conflict_limit]
-
-    async def _apply(self, decision: MemoryDecision, proposed: MemoryRecord) -> str | None:
-        """Write what the decision calls for, and return the id written.
-
-        ``MERGE`` is reported but **not applied** (ADR-0022 §4). Folding two
-        records into one is `memory`'s own semantics — it lives in
-        ``MemoryIngestor``, which golden rule 1 forbids this package from
-        importing — and re-deriving that fold here would fork it. The decision
-        and a ``None`` record id are returned instead, so the caller sees
-        exactly what was ruled and that nothing was stored.
-        """
-        match decision.kind:
-            case MemoryDecisionKind.ACCEPT:
-                return await self._memory.add(proposed)
-            case MemoryDecisionKind.STORE_TEMPORARY:
-                expires_at = self._expiry(decision.ttl)
-                return await self._memory.add(
-                    proposed.model_copy(update={"expires_at": expires_at})
-                )
-            case _:  # MERGE, REJECT, ASK_USER — nothing is written.
-                _log.info("memory_update_not_applied", decision=decision.kind.value)
-                return None
-
     def _now_utc(self) -> datetime:
         """The injected clock's time, normalising a naive reading to UTC.
 
-        Load-bearing for :meth:`_expiry`. ``model_copy(update=...)`` does **not**
-        re-run validators, so a naive ``expires_at`` written that way keeps the
-        naive value ``MemoryBase`` would otherwise have normalised — and every
-        later read compares it against an aware UTC now, raising ``TypeError``
-        deep inside the store. Normalising the clock at the source closes that
-        rather than trusting every caller to inject an aware one.
+        Load-bearing for :meth:`_goal_from`: ``Provenance.last_updated`` has no
+        normalising validator, so a naive clock would otherwise leave the goal's
+        two timestamps disagreeing about awareness. The same guard on the
+        temporary-store expiry moved into the write path with the write itself
+        (ADR-0028 §4b), where ``model_copy(update=...)`` still skips validators.
         """
         now = self._now()
         return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
-
-    def _expiry(self, ttl: timedelta | None) -> datetime | None:
-        """Stamp an expiry ``ttl`` from now, failing loudly if unrepresentable."""
-        if ttl is None:
-            return None
-        try:
-            return self._now_utc() + ttl
-        except OverflowError as exc:
-            msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
-            raise MemoryStoreError(msg) from exc

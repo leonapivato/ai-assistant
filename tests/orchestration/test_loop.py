@@ -41,6 +41,7 @@ from ai_assistant.testing import (
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
+    FakeMemoryWriter,
     FakePlanner,
 )
 
@@ -52,9 +53,10 @@ if TYPE_CHECKING:
         FeedbackProcessor,
         MemoryPolicy,
         MemoryStore,
+        MemoryWriter,
         Planner,
     )
-    from ai_assistant.core.types import ActionPlan, Goal, MemoryDecision, MemoryRecord
+    from ai_assistant.core.types import ActionPlan, Goal, MemoryIngestResult, MemoryRecord
 
 _NOW = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
 
@@ -104,23 +106,33 @@ class _FailingPlanner:
         raise PlanningError(msg)
 
 
-def _loop(
+def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all optional
     *,
     context: ContextProvider | None = None,
     memory: MemoryStore | None = None,
     policy: MemoryPolicy | None = None,
     planner: Planner | None = None,
     feedback: FeedbackProcessor | None = None,
+    writer: MemoryWriter | None = None,
 ) -> LearningLoop:
     """Build a loop from canonical fakes, with a fixed clock and stable ids.
 
     Parameters are typed by the Protocols, not the fakes, so a test can swap in
     a narrower double (see :class:`_FailingPlanner`) without a cast.
+
+    **The writer is built over the same store the loop retrieves from**, which
+    is the composition-root obligation ADR-0028 §4 states and cannot put in the
+    type system. It is enforced here rather than requested: wired to two stores,
+    :func:`test_a_learned_preference_is_reused_on_a_later_turn` learns
+    successfully and retrieves nothing on the next turn. ``policy`` reaches the
+    loop only through that writer — the loop holds no policy of its own.
     """
+    store = memory or FakeMemoryStore(now=_clock)
     return LearningLoop(
         context=context or FakeContextProvider(),
-        memory=memory or FakeMemoryStore(now=_clock),
-        policy=policy or FakeMemoryPolicy(),
+        memory=store,
+        writer=writer
+        or FakeMemoryWriter(store=store, policy=policy or FakeMemoryPolicy(), now=_clock),
         planner=planner or FakePlanner(now=_clock),
         feedback=feedback or FakeFeedbackProcessor(),
         now=_clock,
@@ -245,7 +257,7 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        policy=FakeMemoryPolicy(),
+        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=2,
@@ -323,6 +335,11 @@ async def test_learn_reports_a_rejection_without_writing() -> None:
 
 
 async def test_learn_stamps_expiry_on_a_temporary_store() -> None:
+    """Stamped by the *writer's* clock, which is why the helper fixes both.
+
+    A test that fixed only the loop's would get a wall-clock expiry here
+    (ADR-0028 §4b).
+    """
     memory = FakeMemoryStore(now=_clock)
     ttl = timedelta(hours=6)
     loop = _loop(
@@ -337,167 +354,69 @@ async def test_learn_stamps_expiry_on_a_temporary_store() -> None:
     assert stored.expires_at == _NOW + ttl
 
 
-async def test_learn_reports_a_merge_without_applying_it() -> None:
-    """MERGE is memory's own semantics; this loop reports it rather than forking it.
+async def test_learn_applies_a_merge_through_the_writer() -> None:
+    """ADR-0028 §4: the ruling that consolidates is now *applied*, not reported.
 
-    Documented in ADR-0022 §4 and tracked as issue #103: folding two records
-    lives in ``MemoryIngestor``, which golden rule 1 forbids importing here.
+    The loop still knows nothing about what a merge is — the writer's fold
+    lands it on the target's id and the loop reports what it was told. This test
+    replaces ADR-0022 §4's ``test_learn_reports_a_merge_without_applying_it``,
+    which described the gap issue #103 tracked.
     """
     memory = FakeMemoryStore(now=_clock)
-    existing = PreferenceMemory(
-        id="pref-existing",
-        content="prefers concise replies",
-        preference="prefers concise replies",
-        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW),
+    await memory.add(
+        PreferenceMemory(
+            id="pref-existing",
+            content="prefers concise replies always",
+            preference="prefers concise replies always",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
+            ),
+        )
     )
-    await memory.add(existing)
     loop = _loop(memory=memory, policy=FakeMemoryPolicy(MemoryDecisionKind.MERGE))
 
     [outcome] = await loop.learn(_preference_feedback())
 
     assert outcome.decision.kind is MemoryDecisionKind.MERGE
     assert outcome.decision.merge_into == "pref-existing"
-    assert outcome.record_id is None
+    assert outcome.record_id == "pref-existing"  # the target's id, not a new one
     assert [record.id for record in await memory.export()] == ["pref-existing"]
+    merged = await memory.get("pref-existing")
+    assert merged is not None
+    assert merged.content == "prefers concise replies"  # folded, not left alone
 
 
-async def test_learn_offers_the_policy_the_conflicting_records() -> None:
-    memory = FakeMemoryStore(now=_clock)
-    await memory.add(
-        PreferenceMemory(
-            id="pref-existing",
-            content="prefers concise replies",
-            preference="prefers concise replies",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
-            ),
-        )
-    )
-    policy = FakeMemoryPolicy()
-    loop = _loop(memory=memory, policy=policy)
+async def test_learn_hands_every_proposal_to_the_writer() -> None:
+    """What the loop now owns of the write path: delegation, in order.
 
-    await loop.learn(_preference_feedback())
-
-    assert [record.id for record in policy.calls[0].conflicts] == ["pref-existing"]
-    # The proposal handed to the policy names them too, so a decision is
-    # auditable against what it ruled on.
-    assert policy.last_proposal.conflicts == ["pref-existing"]
-
-
-async def test_learn_ignores_a_conflict_below_the_threshold() -> None:
-    memory = FakeMemoryStore(now=_clock)
-    await memory.add(
-        PreferenceMemory(
-            id="pref-unrelated",
-            content="prefers window seats on long flights",
-            preference="prefers window seats on long flights",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
-            ),
-        )
-    )
-    policy = FakeMemoryPolicy()
-    loop = _loop(memory=memory, policy=policy)
-
-    await loop.learn(_preference_feedback())
-
-    assert policy.calls[0].conflicts == ()
-
-
-async def test_learn_does_not_treat_the_proposal_itself_as_a_conflict() -> None:
-    """A record cannot conflict with the version of it being re-proposed."""
-    memory = FakeMemoryStore(now=_clock)
-    event = _preference_feedback()
-    policy = FakeMemoryPolicy()
-    loop = _loop(memory=memory, policy=policy)
-
-    await loop.learn(event)  # writes the record under a derived id
-    await loop.learn(event)  # the same feedback again, so the same id
-
-    assert policy.calls[1].conflicts == ()
-
-
-async def test_learn_does_not_let_the_proposal_itself_consume_a_conflict_slot() -> None:
-    """Excluding the proposal must not cost a slot the limit already spent (#110).
-
-    The store applies ``conflict_limit`` before the loop can drop the proposal's
-    own record, so at ``conflict_limit=1`` a re-proposal used to leave the policy
-    seeing no conflict at all — while a genuine one sat just below it.
+    Conflict resolution, the policy's ruling and the write itself are the
+    writer's, so this is the whole of the loop's obligation (ADR-0028 §4) — and
+    the write half of the loop no longer has a copy of any of them to test.
     """
     memory = FakeMemoryStore(now=_clock)
-    content = "prefers concise replies"
-    # Added self-first so the equally-scoring pair ranks it above the rival: the
-    # exact order in which the old code discarded the only slot it fetched.
-    for record_id in ("pref-self", "pref-rival"):
-        await memory.add(
-            PreferenceMemory(
-                id=record_id,
-                content=content,
-                preference=content,
-                provenance=Provenance(
-                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
-                ),
-            )
-        )
-    policy = FakeMemoryPolicy()
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=memory,
-        policy=policy,
-        planner=FakePlanner(now=_clock),
-        feedback=FakeFeedbackProcessor(
-            [
-                MemoryUpdateProposal(
-                    proposed=PreferenceMemory(
-                        id="pref-self",
-                        content=content,
-                        preference=content,
-                        provenance=Provenance(
-                            source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
-                        ),
-                    ),
-                    rationale="user preference",
-                )
-            ]
-        ),
-        conflict_limit=1,
-        now=_clock,
-    )
-
-    await loop.learn(_preference_feedback())
-
-    assert [record.id for record in policy.calls[0].conflicts] == ["pref-rival"]
-
-
-async def test_learn_offers_the_policy_no_more_conflicts_than_the_limit() -> None:
-    """Over-fetching to make room for the exclusion must not widen the limit."""
-    memory = FakeMemoryStore(now=_clock)
-    content = "prefers concise replies"
-    for index in range(3):
-        await memory.add(
-            PreferenceMemory(
+    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)
+    proposals = [
+        MemoryUpdateProposal(
+            proposed=PreferenceMemory(
                 id=f"pref-{index}",
-                content=content,
-                preference=content,
+                content=f"preference {index}",
+                preference=f"preference {index}",
                 provenance=Provenance(
                     source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
                 ),
-            )
+            ),
+            rationale="user preference",
         )
-    policy = FakeMemoryPolicy()
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=memory,
-        policy=policy,
-        planner=FakePlanner(now=_clock),
-        feedback=FakeFeedbackProcessor(),
-        conflict_limit=2,
-        now=_clock,
-    )
+        for index in range(2)
+    ]
+    loop = _loop(memory=memory, writer=writer, feedback=FakeFeedbackProcessor(proposals))
 
     await loop.learn(_preference_feedback())
 
-    assert len(policy.calls[0].conflicts) == 2
+    assert [call.proposed.id for call in writer.calls] == ["pref-0", "pref-1"]
+    # The loop resolves no conflicts of its own: what it hands over is the
+    # proposal as proposed, ids and all.
+    assert [call.conflicts for call in writer.calls] == [[], []]
 
 
 async def test_learn_applies_every_proposal_in_order() -> None:
@@ -586,49 +505,27 @@ async def test_learn_propagates_a_processor_failure_without_writing() -> None:
     assert await memory.export() == []
 
 
-async def test_learn_propagates_a_policy_failure_without_writing() -> None:
-    """A proposal nobody ruled on is not one to write.
+async def test_learn_propagates_a_writer_failure_without_writing() -> None:
+    """A proposal the write path refused is not one this loop rescues.
 
-    The policy is the gate on the write path (VISION §7), so a policy that
-    raises must stop the write rather than default the proposal into memory.
+    The writer holds the policy that gates the write (VISION §7), so whatever it
+    raises — a policy that cannot rule, a store that cannot be read — propagates
+    as itself rather than being swallowed or defaulted into memory (ADR-0028 §5:
+    no error type is invented at this seam).
     """
 
-    class _FailingPolicy:
-        """A ``MemoryPolicy`` that cannot rule."""
+    class _FailingWriter:
+        """A ``MemoryWriter`` that cannot ingest."""
 
-        async def decide(
-            self,
-            proposal: MemoryUpdateProposal,
-            *,
-            conflicts: Sequence[MemoryRecord],
-        ) -> MemoryDecision:
-            """Fail the way a policy handed an unrepresentable proposal fails."""
+        async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
+            """Fail the way a writer whose policy cannot rule fails."""
             msg = "fake: cannot rule on this"
             raise AssistantError(msg)
 
     memory = FakeMemoryStore(now=_clock)
-    loop = _loop(memory=memory, policy=_FailingPolicy())
+    loop = _loop(memory=memory, writer=_FailingWriter())
 
     with pytest.raises(AssistantError, match="cannot rule on this"):
-        await loop.learn(_preference_feedback())
-
-    assert await memory.export() == []
-
-
-async def test_learn_reports_an_unrepresentable_temporary_ttl_without_writing() -> None:
-    """A ttl past the representable date range fails loudly, not silently.
-
-    ``_expiry`` converts the ``OverflowError`` into a ``MemoryStoreError``, so
-    the caller sees a memory failure rather than an arithmetic one leaking from
-    the loop's internals — and no record is stored with a bogus expiry.
-    """
-    memory = FakeMemoryStore(now=_clock)
-    loop = _loop(
-        memory=memory,
-        policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY, ttl=timedelta.max),
-    )
-
-    with pytest.raises(MemoryStoreError, match="overflows the representable date range"):
         await loop.learn(_preference_feedback())
 
     assert await memory.export() == []
@@ -683,47 +580,20 @@ async def test_learn_leaves_earlier_proposals_applied_when_a_later_write_fails()
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "match"),
-    [
-        ({"retrieval_limit": 0}, "retrieval_limit must be at least 1"),
-        ({"retrieval_limit": -1}, "retrieval_limit must be at least 1"),
-        ({"conflict_limit": 0}, "conflict_limit must be at least 1"),
-        ({"conflict_threshold": float("nan")}, "finite value in"),
-        ({"conflict_threshold": 1.5}, "finite value in"),
-        ({"conflict_threshold": -0.1}, "finite value in"),
-    ],
-)
-def test_tuning_that_would_silently_disable_a_stage_is_refused(
-    kwargs: dict[str, float], match: str
-) -> None:
-    """A stage turned off while the loop still reports health is refused up front."""
-    with pytest.raises(ValueError, match=match):
-        LearningLoop(
-            context=FakeContextProvider(),
-            memory=FakeMemoryStore(now=_clock),
-            policy=FakeMemoryPolicy(),
-            planner=FakePlanner(now=_clock),
-            feedback=FakeFeedbackProcessor(),
-            now=_clock,
-            **kwargs,  # type: ignore[arg-type]  # deliberately invalid tuning
-        )
+@pytest.mark.parametrize("retrieval_limit", [0, -1])
+def test_tuning_that_would_silently_disable_retrieval_is_refused(retrieval_limit: int) -> None:
+    """A stage turned off while the loop still reports health is refused up front.
+
+    The conflict half of this check moved to ``MemoryIngestor`` with the values
+    it guards (ADR-0028 §4a); ``tests/memory/test_ingest.py`` asserts it there.
+    """
+    with pytest.raises(ValueError, match="retrieval_limit must be at least 1"):
+        _loop_with(retrieval_limit=retrieval_limit)
 
 
-@pytest.mark.parametrize(("threshold", "limit"), [(0.0, 1), (1.0, 1)])
-async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) -> None:
-    """0 and 1 bound the score range, and 1 is the smallest useful limit."""
-    loop = LearningLoop(
-        context=FakeContextProvider(),
-        memory=FakeMemoryStore(now=_clock),
-        policy=FakeMemoryPolicy(),
-        planner=FakePlanner(now=_clock),
-        feedback=FakeFeedbackProcessor(),
-        retrieval_limit=limit,
-        conflict_threshold=threshold,
-        conflict_limit=limit,
-        now=_clock,
-    )
+async def test_tuning_accepts_the_smallest_useful_limit() -> None:
+    """1 is the smallest retrieval limit that retrieves anything at all."""
+    loop = _loop_with(retrieval_limit=1)
 
     result = await loop.respond("hello")
 
@@ -734,76 +604,36 @@ async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) 
 def test_tuning_refuses_a_limit_that_is_not_an_integer(limit: object) -> None:
     """A non-integral limit reaches the store, where slicing by it raises."""
     with pytest.raises(TypeError, match="must be an integer"):
-        LearningLoop(
-            context=FakeContextProvider(),
-            memory=FakeMemoryStore(now=_clock),
-            policy=FakeMemoryPolicy(),
-            planner=FakePlanner(now=_clock),
-            feedback=FakeFeedbackProcessor(),
-            retrieval_limit=limit,  # type: ignore[arg-type]  # deliberately invalid tuning
-            now=_clock,
-        )
+        _loop_with(retrieval_limit=limit)  # type: ignore[arg-type]  # deliberately invalid
 
 
-@pytest.mark.parametrize("threshold", [True, False])
-def test_tuning_refuses_a_boolean_threshold(threshold: bool) -> None:
-    """A flag is not a threshold, just as it is not a count (#111).
-
-    ``bool`` is an ``int`` subclass, so both values clear the finite-and-in-range
-    test and are read silently as ``1.0`` and ``0.0``. ``True`` is the one that
-    bites — it restricts conflicts to perfect-score matches while looking like
-    deliberate tuning.
-    """
-    with pytest.raises(TypeError, match="must be a real number"):
-        LearningLoop(
-            context=FakeContextProvider(),
-            memory=FakeMemoryStore(now=_clock),
-            policy=FakeMemoryPolicy(),
-            planner=FakePlanner(now=_clock),
-            feedback=FakeFeedbackProcessor(),
-            # No `type: ignore` needed, and that is the point: `bool` is a
-            # `float` to the type checker, so nothing but this runtime check
-            # stands between a flag and the threshold it would be read as.
-            conflict_threshold=threshold,
-            now=_clock,
-        )
-
-
-async def test_a_naive_clock_still_produces_an_aware_expiry() -> None:
-    """``model_copy`` skips validators, so the clock is normalised at the source.
-
-    A naive ``expires_at`` would survive the copy and then raise ``TypeError``
-    against an aware "now" on every later read, deep inside the store.
-    """
-    naive_now = _NOW.replace(tzinfo=None)
-    memory = FakeMemoryStore(now=lambda: naive_now)
-    ttl = timedelta(hours=6)
-    loop = LearningLoop(
+def _loop_with(*, retrieval_limit: int) -> LearningLoop:
+    """Build a loop with the given retrieval tuning and canonical everything else."""
+    memory = FakeMemoryStore(now=_clock)
+    return LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        policy=FakeMemoryPolicy(MemoryDecisionKind.STORE_TEMPORARY, ttl=ttl),
+        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
-        now=lambda: naive_now,
+        retrieval_limit=retrieval_limit,
+        now=_clock,
     )
-
-    [outcome] = await loop.learn(_preference_feedback())
-
-    assert outcome.record_id is not None
-    stored = await memory.get(outcome.record_id)  # would raise TypeError if naive
-    assert stored is not None
-    assert stored.expires_at == _NOW + ttl
-    assert stored.expires_at is not None
-    assert stored.expires_at.tzinfo is not None
 
 
 async def test_a_naive_clock_still_produces_an_aware_goal() -> None:
-    """``Provenance.last_updated`` has no normalising validator; the clock does."""
+    """``Provenance.last_updated`` has no normalising validator; the clock does.
+
+    The loop's clock stamps the goal and nothing else now: ``expires_at`` is the
+    writer's to stamp, and the guard against a naive one moved there with it
+    (ADR-0028 §4b, asserted in ``tests/memory/test_ingest.py``).
+    """
     naive_now = _NOW.replace(tzinfo=None)
+    memory = FakeMemoryStore(now=lambda: naive_now)
     loop = LearningLoop(
         context=FakeContextProvider(),
-        memory=FakeMemoryStore(now=lambda: naive_now),
-        policy=FakeMemoryPolicy(),
+        memory=memory,
+        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: naive_now),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         now=lambda: naive_now,
