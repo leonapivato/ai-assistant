@@ -21,9 +21,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import run_review
+from _fake_codex import artifact_for, require_artifact, run_review
 
 _GIT = shutil.which("git")
+assert _GIT is not None
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -69,7 +70,7 @@ def test_review_is_recorded_under_the_reviewed_commit_sha(tmp_path: Path) -> Non
 
     run_review(repo, tmp_path)
 
-    assert (repo / ".review" / f"{sha}-adversarial.md").is_file()
+    assert require_artifact(repo, sha).is_file()
 
 
 def test_recorded_review_keeps_the_body_after_the_provenance_header(tmp_path: Path) -> None:
@@ -78,7 +79,7 @@ def test_recorded_review_keeps_the_body_after_the_provenance_header(tmp_path: Pa
 
     run_review(repo, tmp_path, FAKE_CODEX_REVIEW="finding one\nfinding two\nVerdict: APPROVE\n")
 
-    lines = (repo / ".review" / f"{sha}-adversarial.md").read_text().splitlines()
+    lines = require_artifact(repo, sha).read_text().splitlines()
     assert lines[0].startswith("<!--")
     assert sha in lines[0]
     # ship.sh strips exactly the first line; everything after it is the review.
@@ -94,7 +95,7 @@ def test_empty_codex_output_is_refused_rather_than_recorded(tmp_path: Path) -> N
 
     assert result.returncode != 0
     assert "empty review" in result.stderr
-    assert not (repo / ".review" / f"{_git(repo, 'rev-parse', 'HEAD')}-adversarial.md").exists()
+    assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
 
 
 def test_whitespace_only_codex_output_is_refused(tmp_path: Path) -> None:
@@ -127,8 +128,8 @@ def test_records_nothing_when_the_checkout_moves_mid_review(tmp_path: Path) -> N
     assert moved_sha != reviewed_sha, "fake codex should have advanced HEAD"
     assert result.returncode != 0
     assert "changed while the review was running" in result.stderr
-    assert not (repo / ".review" / f"{reviewed_sha}-adversarial.md").exists()
-    assert not (repo / ".review" / f"{moved_sha}-adversarial.md").exists()
+    assert artifact_for(repo, reviewed_sha) is None
+    assert artifact_for(repo, moved_sha) is None
 
 
 def test_a_refusal_without_a_verdict_is_not_recorded_as_a_review(tmp_path: Path) -> None:
@@ -142,7 +143,7 @@ def test_a_refusal_without_a_verdict_is_not_recorded_as_a_review(tmp_path: Path)
 
     assert result.returncode != 0
     assert "does not end in a verdict" in result.stderr
-    assert not (repo / ".review" / f"{_git(repo, 'rev-parse', 'HEAD')}-adversarial.md").exists()
+    assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
 
 
 def test_a_verdict_with_no_review_body_is_not_recorded(tmp_path: Path) -> None:
@@ -207,7 +208,7 @@ def test_leaves_no_temporary_files_behind(tmp_path: Path) -> None:
     assert list(_private_tmpdir(tmp_path).iterdir()) == []
     # The artifact is present; session/ and dispositions/ subdirs are expected
     # alongside it now (ADR-0025), so this checks for the artifact, not exclusivity.
-    assert (repo / ".review" / f"{sha}-adversarial.md").is_file()
+    assert require_artifact(repo, sha).is_file()
     assert not list((repo / ".review").glob("*.partial.*"))
 
 
@@ -240,7 +241,7 @@ def test_records_the_base_it_reviewed_when_the_base_ref_moves(tmp_path: Path) ->
     run_review(repo, tmp_path, FAKE_CODEX_PRE_CMD=pre)
 
     assert _git(repo, "rev-parse", "main") != reviewed_base, "fake should have moved main"
-    header = (repo / ".review" / f"{sha}-adversarial.md").read_text().splitlines()[0]
+    header = require_artifact(repo, sha).read_text().splitlines()[0]
     assert f"base_sha={reviewed_base}" in header
 
 
@@ -251,5 +252,66 @@ def test_each_persona_records_a_separate_artifact_for_one_commit(tmp_path: Path)
     run_review(repo, tmp_path, "adversarial")
     run_review(repo, tmp_path, "architecture")
 
-    recorded = sorted(p.name for p in (repo / ".review").glob("*.md"))
-    assert recorded == [f"{sha}-adversarial.md", f"{sha}-architecture.md"]
+    adversarial = require_artifact(repo, sha, "adversarial")
+    architecture = require_artifact(repo, sha, "architecture")
+    assert adversarial != architecture
+    assert len(list((repo / ".review").glob("*.md"))) == 2
+
+
+def test_the_artifact_records_the_reviewed_patch_identity(tmp_path: Path) -> None:
+    """ADR-0027 §2's coverage anchor is pinned with the other three edges.
+
+    `ship` recomputes it against the PR's current merge base, so an artifact that
+    did not record it cannot say what it read once the base has moved.
+    """
+    repo = tmp_path / "repo"
+    sha = _init_repo(repo)
+
+    run_review(repo, tmp_path)
+
+    header = require_artifact(repo, sha).read_text().splitlines()[0]
+    recorded = next(f for f in header.split() if f.startswith("patch_id="))
+    expected = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [str(_GIT), "patch-id", "--verbatim"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        input=subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+            [str(_GIT), "diff", f"{_git(repo, 'merge-base', 'main', sha)}...{sha}"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        ).stdout,
+    ).stdout.decode()
+    assert recorded == f"patch_id={expected.split()[0]}"
+
+
+def test_two_reviews_of_one_sha_against_different_bases_do_not_collide(tmp_path: Path) -> None:
+    """Issue #149, made unconstructible by ADR-0027 §6 rather than unlikely.
+
+    The artifact used to be named by the commit, which stopped being what it is
+    *selected* by when ADR-0020 §3 re-anchored acceptance onto content. Two runs
+    of one SHA against different bases therefore wrote one path: the older-base
+    run finishing last replaced the current-base artifact, and `ship` rejected a
+    valid review as stale. Naming by the anchor the rule selects on is the
+    identity function, so the two runs can no longer occupy one path.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "f.txt").write_text("three\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "second")
+    sha = _git(repo, "rev-parse", "HEAD")
+
+    run_review(repo, tmp_path, base="main")
+    run_review(repo, tmp_path, base="HEAD~1")
+
+    recorded = sorted((repo / ".review").glob("*.md"))
+    assert len(recorded) == 2, "the narrower-base run must not have overwritten the other"
+    bases = {
+        next(f for f in a.read_text().splitlines()[0].split() if f.startswith("base_sha="))
+        for a in recorded
+    }
+    assert len(bases) == 2
+    for artifact in recorded:
+        assert f" sha={sha} " in artifact.read_text().splitlines()[0]

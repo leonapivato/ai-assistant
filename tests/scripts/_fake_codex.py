@@ -160,6 +160,32 @@ def review_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     return env
 
 
+def artifact_for(repo: Path, sha: str, persona: str = "adversarial") -> Path | None:
+    """The review artifact recorded for ``(sha, persona)``, or ``None``.
+
+    ADR-0027 §6 names an artifact by the anchor it is *selected* by — the loop
+    identity, persona, base and tree — rather than by the commit it happens to be
+    filed under, so a test cannot construct its path from a SHA. It finds it the
+    way ``ship`` does: by the recorded provenance. That is the point of the
+    rename, so the helper reads the fields rather than reconstructing the name.
+    """
+    review_dir = repo / ".review"
+    if not review_dir.is_dir():
+        return None
+    for candidate in sorted(review_dir.glob("*.md")):
+        header = candidate.read_text().splitlines()[0]
+        if f" sha={sha} " in header and f" persona={persona} " in header:
+            return candidate
+    return None
+
+
+def require_artifact(repo: Path, sha: str, persona: str = "adversarial") -> Path:
+    """``artifact_for``, asserting the artifact is there."""
+    found = artifact_for(repo, sha, persona)
+    assert found is not None, f"no {persona} artifact recorded for {sha}"
+    return found
+
+
 def bash() -> str:
     """The bash interpreter path, asserted present."""
     resolved = shutil.which("bash")

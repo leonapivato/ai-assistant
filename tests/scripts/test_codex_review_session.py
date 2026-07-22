@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import SCRIPT, run_review
+from _fake_codex import SCRIPT, artifact_for, require_artifact, run_review
 
 _GIT = shutil.which("git")
 
@@ -57,7 +57,7 @@ def _commit(repo: Path, content: str, message: str) -> None:
 
 
 def _provenance(repo: Path, sha: str) -> str:
-    return (repo / ".review" / f"{sha}-adversarial.md").read_text().splitlines()[0]
+    return require_artifact(repo, sha).read_text().splitlines()[0]
 
 
 def _field(provenance: str, name: str) -> str | None:
@@ -105,7 +105,7 @@ def test_a_non_read_only_round_fails_closed_and_records_nothing(tmp_path: Path) 
 
     assert result.returncode != 0
     assert "could not prove the review ran read-only" in result.stderr
-    assert not (repo / ".review" / f"{_git(repo, 'rev-parse', 'HEAD')}-adversarial.md").exists()
+    assert artifact_for(repo, _git(repo, "rev-parse", "HEAD")) is None
 
 
 def test_an_unprovable_sandbox_also_fails_closed(tmp_path: Path) -> None:
@@ -362,7 +362,7 @@ def test_two_concurrent_fresh_starts_agree_on_one_loop_id(tmp_path: Path) -> Non
     assert Path(f"{log}.rc").read_text().strip() == "0", log.read_text()
     sha = _git(repo, "rev-parse", "HEAD")
     outer = _field(_provenance(repo, sha), "loop_id")
-    inner_prov = (repo / ".review" / f"{sha}-architecture.md").read_text().splitlines()[0]
+    inner_prov = require_artifact(repo, sha, "architecture").read_text().splitlines()[0]
     inner = _field(inner_prov, "loop_id")
 
     assert outer, "the outer run records a loop id"
@@ -401,7 +401,7 @@ def test_a_round_whose_loop_was_reset_in_flight_refuses_to_record(tmp_path: Path
     assert "reset this review loop" in result.stderr
     # The review itself is not lost — only the session advance is refused.
     sha = _git(repo, "rev-parse", "HEAD")
-    assert (repo / ".review" / f"{sha}-adversarial.md").exists()
+    assert artifact_for(repo, sha) is not None
     assert not list((repo / ".review" / "session").glob("*.thread"))
     assert not list((repo / ".review" / "dispositions").glob("*.md"))
 

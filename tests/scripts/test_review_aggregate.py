@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _fake_codex import run_review
+from _fake_codex import require_artifact, run_review
 
 _GIT = shutil.which("git")
 
@@ -264,7 +264,7 @@ def test_round_counts_reviewed_states_of_the_branch(tmp_path: Path) -> None:
     # A second commit: the first now carries an artifact, so this is round 2.
     _commit(repo, "f.txt", "three\n", "c2")
     _run(repo, tmp_path)
-    second = (repo / ".review" / f"{_git(repo, 'rev-parse', 'HEAD')}-adversarial.md").read_text()
+    second = require_artifact(repo, _git(repo, "rev-parse", "HEAD")).read_text()
     assert _field(second.splitlines()[0], "round") == "2"
 
 
@@ -283,8 +283,8 @@ def test_a_second_persona_on_one_commit_stays_the_same_round(tmp_path: Path) -> 
     _run(repo, tmp_path, "architecture")
 
     sha = _git(repo, "rev-parse", "HEAD")
-    adversarial = (repo / ".review" / f"{sha}-adversarial.md").read_text().splitlines()[0]
-    architecture = (repo / ".review" / f"{sha}-architecture.md").read_text().splitlines()[0]
+    adversarial = require_artifact(repo, sha, "adversarial").read_text().splitlines()[0]
+    architecture = require_artifact(repo, sha, "architecture").read_text().splitlines()[0]
     assert _field(adversarial, "round") == "1"
     assert _field(architecture, "round") == "1"
 
@@ -312,7 +312,7 @@ def test_round_survives_a_squash(tmp_path: Path) -> None:
     _run(repo, tmp_path)
 
     squashed = _git(repo, "rev-parse", "HEAD")
-    provenance = (repo / ".review" / f"{squashed}-adversarial.md").read_text().splitlines()[0]
+    provenance = require_artifact(repo, squashed).read_text().splitlines()[0]
     assert _field(provenance, "round") == "2", "the squash must not reset the round count"
 
 
@@ -337,7 +337,7 @@ def test_churn_is_marked_a_lower_bound_when_history_was_rewritten(tmp_path: Path
     result = _run(repo, tmp_path)
 
     squashed = _git(repo, "rev-parse", "HEAD")
-    provenance = (repo / ".review" / f"{squashed}-adversarial.md").read_text().splitlines()[0]
+    provenance = require_artifact(repo, squashed).read_text().splitlines()[0]
     assert _field(provenance, "churn_bound") == "lower"
     assert "LOWER BOUND" in result.stderr
     # Matched on an unwrapped fragment: the caveat is hard-wrapped, so a longer
@@ -357,7 +357,7 @@ def test_churn_is_exact_when_no_history_was_rewritten(tmp_path: Path) -> None:
     result = _run(repo, tmp_path)
 
     head = _git(repo, "rev-parse", "HEAD")
-    provenance = (repo / ".review" / f"{head}-adversarial.md").read_text().splitlines()[0]
+    provenance = require_artifact(repo, head).read_text().splitlines()[0]
     assert _field(provenance, "churn_bound") == "exact"
     assert "LOWER BOUND" not in result.stderr
 
@@ -384,7 +384,7 @@ def test_another_branchs_rounds_do_not_leak_into_a_fresh_one(tmp_path: Path) -> 
     _run(repo, tmp_path)
 
     head = _git(repo, "rev-parse", "HEAD")
-    provenance = (repo / ".review" / f"{head}-adversarial.md").read_text().splitlines()[0]
+    provenance = require_artifact(repo, head).read_text().splitlines()[0]
     assert _field(provenance, "round") == "1", "the first branch's rounds are not this branch's"
 
 
@@ -410,7 +410,7 @@ def test_a_detached_review_does_not_inherit_the_branchs_rounds(tmp_path: Path) -
     _run(repo, tmp_path)
 
     head = _git(repo, "rev-parse", "HEAD")
-    provenance = (repo / ".review" / f"{head}-adversarial.md").read_text().splitlines()[0]
+    provenance = require_artifact(repo, head).read_text().splitlines()[0]
     assert _field(provenance, "round") == "1"
     assert _field(provenance, "branch") == f"detached-{head}"
 
