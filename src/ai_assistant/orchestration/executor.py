@@ -188,11 +188,15 @@ class StepExecutor:
             committed.
 
         Raises:
-            CancelledError: If the invocation is cancelled from outside. The step
-                is committed first — ``FAILED`` or ``INDETERMINATE`` by
-                :attr:`~ai_assistant.core.types.ToolDefinition.interrupted_outcome`
-                — and the cancellation then propagates, because swallowing it
-                would break structured concurrency and shutdown.
+            CancelledError: If the executing task is cancelled from outside. The
+                step is committed first and the cancellation then propagates,
+                because swallowing it would break structured concurrency and
+                shutdown. What is committed depends on where the cancellation
+                landed: during the invocation, the interrupted-call
+                classification (:meth:`_commit_through_cancellation`); during a
+                terminal write, the outcome already established, since by then
+                the answer is known and discarding it would have recovery report
+                ignorance over it (:meth:`_finish`).
             PlanningError: If a transition is rejected or the store is stale.
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
                 Checked **before** the claim, so a deadline the seam would
@@ -292,10 +296,31 @@ class StepExecutor:
         output: FrozenJsonValue = None,
         error: str | None = None,
     ) -> ExecutionState:
-        """Commit a terminal transition for the claimed step."""
-        return await self._plans.commit_transition(
+        """Commit a terminal transition for the claimed step, through the shield.
+
+        Through the same idiom the cancellation path uses, and for the same
+        reason rather than for symmetry. The claim precedes the call, so by the
+        time this runs the tool has been reached and its outcome is *known*. A
+        cancellation landing on this ``await`` would abandon the write and leave
+        the step ``RUNNING``, and recovery would then record ``INDETERMINATE`` —
+        "we cannot tell whether it acted" — over an answer the executor was
+        holding, discarding a ``SUCCEEDED`` result's output with it. The whole
+        write path is therefore cancellation-aware, not just the handler's.
+
+        Raises:
+            CancelledError: If the executing task was cancelled while this write
+                was in flight. Raised **after** the write has landed, so the
+                cancellation still propagates and shutdown still works, which is
+                the same order ADR-0029 §4 requires of the handler's commit.
+            PlanningError: If the store rejected the transition.
+        """
+        committed, cancelled = await self._commit_shielded(
             self._closing(state, step_id, status, output=output, error=error)
         )
+        if cancelled:
+            msg = f"step {step_id!r} was committed {status}; its executing task was cancelled"
+            raise asyncio.CancelledError(msg)
+        return committed
 
     def _closing(
         self,
@@ -318,50 +343,57 @@ class StepExecutor:
 
     # --- cancellation ---------------------------------------------------
 
-    async def _commit_through_cancellation(
-        self, state: ExecutionState, step_id: str, outcome: ToolOutcome
-    ) -> None:
-        """Land the classification before the ``CancelledError`` leaves (ADR-0029 §4).
+    async def _commit_shielded(self, transition: StepTransition) -> tuple[ExecutionState, bool]:
+        """Land ``transition`` even through a cancellation (ADR-0029 §4).
 
         **Shielding alone is not enough, and this is the part that looks done and
         is not.** ``asyncio.shield`` protects the inner task, not the ``await`` of
-        it: a repeat ``cancel()`` — a shutdown that has stopped waiting politely —
-        raises here immediately while the commit is still in flight, and an
-        executor that re-raised there would re-raise *before* the write landed,
-        leaving the step ``RUNNING`` with no record of the classification just
-        computed. So the rule is the whole idiom: keep the commit as a task, wait
-        on it through the shield, **absorb any further cancellations while it is
-        still running**, and let the caller re-raise only once it has completed.
+        it: a ``cancel()`` — a shutdown that has stopped waiting politely — raises
+        here immediately while the commit is still in flight, and a caller that
+        re-raised there would re-raise *before* the write landed, leaving the step
+        ``RUNNING`` with no record of the outcome just established. So the rule is
+        the whole idiom: keep the commit as a task, wait on it through the shield,
+        **absorb any further cancellations while it is still running**, and let
+        the caller re-raise only once it has completed.
 
-        Even that is not a guarantee — the process can still be killed between
-        the classification and the write, and there ADR-0014 §4's answer is
-        unchanged: recovery finds a durable ``RUNNING`` and records
-        ``INDETERMINATE``.
+        Even that is not a guarantee — the process can still be killed between the
+        outcome and the write, and there ADR-0014 §4's answer is unchanged:
+        recovery finds a durable ``RUNNING`` and records ``INDETERMINATE``.
 
-        A failure of the commit itself is logged rather than raised, because the
-        cancellation is what the caller must see: replacing it with a
-        ``PlanningError`` would strand a shutdown mid-teardown.
+        Returns:
+            The committed state, and whether any cancellation was absorbed —
+            which the caller owes a re-raise for.
         """
-        status = _STATUS_BY_OUTCOME[outcome]
-        error = _CANCELLED if status is StepStatus.FAILED else None
-        transition = self._closing(state, step_id, status, error=error)
-
         commit = asyncio.ensure_future(self._plans.commit_transition(transition))
+        cancelled = False
         while True:
             try:
-                await asyncio.shield(commit)
+                return await asyncio.shield(commit), cancelled
             except asyncio.CancelledError:
                 if commit.done():
                     # Nothing left to protect: the commit itself is over.
                     raise
                 # Absorbed deliberately. The caller re-raises once the write has
                 # landed, so the cancellation still propagates.
-                _log.debug("executor_absorbed_repeat_cancellation", step_id=step_id)
-            except PlanningError:
-                _log.warning("executor_cancellation_commit_failed", step_id=step_id, exc_info=True)
-                return
-            else:
-                return
+                cancelled = True
+                _log.debug("executor_absorbed_cancellation_mid_commit")
+
+    async def _commit_through_cancellation(
+        self, state: ExecutionState, step_id: str, outcome: ToolOutcome
+    ) -> None:
+        """Land the interrupted-call classification, for a cancelled invocation.
+
+        A failure of the commit itself is logged rather than raised, because the
+        cancellation is what the caller must see: replacing it with a
+        ``PlanningError`` would strand a shutdown mid-teardown. The absorbed-flag
+        is ignored for the same reason — the caller re-raises unconditionally.
+        """
+        status = _STATUS_BY_OUTCOME[outcome]
+        error = _CANCELLED if status is StepStatus.FAILED else None
+        try:
+            await self._commit_shielded(self._closing(state, step_id, status, error=error))
+        except PlanningError:
+            _log.warning("executor_cancellation_commit_failed", step_id=step_id, exc_info=True)
 
     # --- the retry decision (ADR-0029 §5) -------------------------------
 
