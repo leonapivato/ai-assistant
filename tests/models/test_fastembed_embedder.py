@@ -212,6 +212,11 @@ async def test_the_default_backend_loads_the_vendored_artifact_offline(
     # consults any source, so this is not merely a hint.
     assert call["specific_model_path"] == str(packaged_artifact_dir())
     assert call["local_files_only"] is True
+    # And the cache directory, which fastembed *creates* before it honours
+    # `specific_model_path`: unset, it would `mkdir` under the system temp
+    # directory on every load, so a read-only `/tmp` would fail an install that
+    # needs nothing from the network.
+    assert call["cache_dir"] == str(packaged_artifact_dir())
     # ADR-0024 §3: CPU, not `Device.AUTO` — a machine gaining a GPU must not
     # silently move the embedding space of a store built on this embedder.
     assert call["providers"] == list(EXECUTION_PROVIDERS)
