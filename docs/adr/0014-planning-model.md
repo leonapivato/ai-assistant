@@ -1,6 +1,6 @@
 # 14. Planning model: `Goal`, `ActionPlan`, and a separate `ExecutionState`
 
-- Status: Accepted
+- Status: Accepted, partially superseded by ADR-0041
 - Date: 2026-07-19
 - Note (2026-07-21): §4's RUNNING → INDETERMINATE transition has a second
   trigger from ADR-0029 §4 — a tool that exceeds its invocation deadline, or is
@@ -30,6 +30,22 @@
   auto-retried, but that is ADR-0029 §8's mechanism rather than a new property
   of this state: retry is scheduled only from a ToolResult, and no exit through
   that window produces one.
+- Partially superseded: 2026-07-22 by ADR-0041 — **§4's transition table, one
+  row.** The `PENDING → SKIPPED` row below enumerates its legal skip reasons as
+  {UNMET_DEPENDENCY, NO_CAPABLE_TOOL, SUPERSEDED}, on the reasoning that "a step
+  that was never queued for approval cannot have been denied one". ADR-0041 adds
+  APPROVAL_DENIED to that set, required to carry an approval_ref, for a
+  permission policy that refuses a step outright with no confirmation ever
+  sought. Unlike this header's other notes, that **adds a legal move** — a
+  transition this document makes illegal becomes legal — which is why it takes a
+  status line where they did not. What ADR-0041 keeps is §4's rule that a denial
+  must name the decision that refused it; what it discards is the assumption
+  that a refusal implies a question, which a policy DENY falsifies. Everything
+  else in §4 stands as ratified: AWAITING_APPROVAL → SKIPPED / APPROVAL_DENIED
+  remains legal and remains the human-denied path, PENDING's other skip reasons
+  are unchanged, every transition into RUNNING still carries an approval_ref,
+  and AWAITING_APPROVAL keeps its durability — now meaning only that a human is
+  being asked.
 
 ## Context
 

@@ -237,11 +237,88 @@ class PlanStoreContract:
                 )
             )
 
-    async def test_a_never_queued_step_cannot_be_denied_approval(self, store: PlanStore) -> None:
-        """A step nobody was asked about cannot have been refused.
+    async def test_a_never_queued_step_can_be_denied_in_one_transition(
+        self, store: PlanStore
+    ) -> None:
+        """A policy refusing outright is a denial, though nobody was asked.
 
-        Allowing it would manufacture a permission record for a decision that
-        never happened — a false audit trail is worse than none.
+        ADR-0041 §1: the record is truthful because it names the decision that
+        refused it, not because a confirmation was put to anyone.
+
+        The version count is asserted, not incidental. A store that satisfied
+        this request by durably writing `AWAITING_APPROVAL` and then `SKIPPED`
+        would return an indistinguishable final state while reopening the very
+        window ADR-0041 closes — a failure between the two writes strands the
+        step (#257). One commit is the obligation; the disposition is not.
+        """
+        state = await self._started(store)
+        before = state.version
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SKIPPED,
+                expected_version=state.version,
+                skip_reason=SkipReason.APPROVAL_DENIED,
+                approval_ref="perm-1",
+            )
+        )
+
+        assert state.version == before + 1
+
+        # Read back rather than trust the return value: a denial that is only
+        # in the returned object is exactly the stranding this edge exists to
+        # prevent, since a restart would resurrect the step as PENDING.
+        stored = await store.get_execution(state.id)
+        assert stored is not None
+        assert stored.version == before + 1
+        step = stored.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.SKIPPED
+        assert step.skip_reason is SkipReason.APPROVAL_DENIED
+        assert step.approval_ref == "perm-1"
+
+    async def test_a_queued_step_is_still_denied_by_a_human(self, store: PlanStore) -> None:
+        """ADR-0041 widens the denial rule; it does not move it (§3).
+
+        This is the genuine human-denied path — a confirmation was shown and
+        answered no — and it stays legal. Without it the suite would admit a
+        store that implements only the direct edge, leaving a real user denial
+        with nowhere to go and the step awaiting approval forever.
+        """
+        state = await self._started(store)
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.AWAITING_APPROVAL,
+                expected_version=state.version,
+                bound_tool="smtp",
+            )
+        )
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.SKIPPED,
+                expected_version=state.version,
+                skip_reason=SkipReason.APPROVAL_DENIED,
+                approval_ref="perm-denied",
+            )
+        )
+
+        step = state.step("s1")
+        assert step is not None
+        assert step.status is StepStatus.SKIPPED
+        assert step.skip_reason is SkipReason.APPROVAL_DENIED
+        assert step.approval_ref == "perm-denied"
+
+    async def test_a_pending_denial_must_point_at_its_decision(self, store: PlanStore) -> None:
+        """The `approval_ref` is the whole guard on the direct edge (ADR-0041 §2).
+
+        Without it, `APPROVAL_DENIED` would be assertable from the status every
+        step starts in, with nothing behind it — the fabricated record the
+        narrower rule was protecting against.
         """
         state = await self._started(store)
         with pytest.raises(IllegalTransitionError):
@@ -252,7 +329,6 @@ class PlanStoreContract:
                     to_status=StepStatus.SKIPPED,
                     expected_version=state.version,
                     skip_reason=SkipReason.APPROVAL_DENIED,
-                    approval_ref="perm-1",
                 )
             )
 
