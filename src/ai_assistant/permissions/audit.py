@@ -317,15 +317,24 @@ class SqliteAuditTrail:
             return await asyncio.to_thread(self._clear_sync)
 
     def _clear_sync(self) -> int:
+        """Delete everything in one statement, counting what the delete removed.
+
+        The count comes from the ``DELETE`` itself rather than from a ``SELECT
+        COUNT(*)`` in front of it. A separate count is read before SQLite opens
+        the write transaction, so a second trail on the same file could append
+        between the two and be erased without being counted — and each instance
+        has its own ``asyncio.Lock``, which arbitrates nothing across them. One
+        statement makes the number exact by construction rather than by
+        transaction discipline.
+        """
         conn = self._conn
         try:
             with conn:
-                (count,) = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()
-                conn.execute("DELETE FROM decisions")
+                removed = conn.execute("DELETE FROM decisions").rowcount
         except sqlite3.Error as exc:
             msg = f"failed to clear the audit trail: {exc}"
             raise AuditError(msg) from exc
-        return int(count)
+        return int(removed)
 
     def close(self) -> None:
         """Close the underlying database connection."""

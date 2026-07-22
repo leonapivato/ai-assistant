@@ -193,8 +193,18 @@ them outside the write lock and a second process free to observe the same
 unresolved `CONFIRM`. Single-user local-first (ADR-0002) makes that unlikely
 rather than impossible, and the cost of closing it is one statement.
 
+**`clear()` counts from the delete, not from a count in front of it.** The same
+reasoning one level down: a `SELECT COUNT(*)` is read before SQLite opens the
+write transaction, so a row another instance on the same file appended in
+between would be erased and not reported, and the lock is per instance. One
+statement makes "the number removed" exact by construction rather than by
+transaction discipline.
+
 The file is created owner-only, the precedent `SqliteMemoryStore` set for a
-Tier 1 store on disk (ADR-0004).
+Tier 1 store on disk (ADR-0004). Its rollback journal holds the same Tier 1
+pages, and inherits the mode because SQLite gives a journal the mode of the
+database it belongs to and the chmod runs before any write — asserted rather
+than assumed, since it is a property of another project's file layer.
 
 ### 3. What this does not do
 
