@@ -563,13 +563,27 @@ class StepExecutor:
             try:
                 return await asyncio.shield(commit), cancelled
             except asyncio.CancelledError:
-                if commit.done():
-                    # Nothing left to protect: the commit itself is over.
+                if not commit.done():
+                    # Absorbed deliberately. The caller re-raises once the write
+                    # has landed, so the cancellation still propagates.
+                    cancelled = True
+                    _log.debug("executor_absorbed_cancellation_mid_commit")
+                    continue
+                if commit.cancelled() or commit.exception() is not None:
+                    # Nothing landed, so there is nothing to hand back and
+                    # nothing to close. The teardown is all that is left.
                     raise
-                # Absorbed deliberately. The caller re-raises once the write has
-                # landed, so the cancellation still propagates.
-                cancelled = True
-                _log.debug("executor_absorbed_cancellation_mid_commit")
+                # **The write landed and the cancellation arrived on the way
+                # back.** `shield` protects the inner task, not the `await` of
+                # it, so a `cancel()` between the commit completing and this
+                # frame resuming raises here with a result already in hand.
+                # Re-raising would throw that result away, and the caller would
+                # be unable to close a claim it did in fact write — leaving the
+                # step durably `RUNNING` for recovery to read as
+                # `INDETERMINATE`, which is the outcome ADR-0034 §1 exists to
+                # prevent. So it is reported as absorbed, like any other.
+                _log.debug("executor_absorbed_cancellation_after_commit")
+                return commit.result(), True
             except PlanningError:
                 if not cancelled:
                     raise
