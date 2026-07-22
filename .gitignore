@@ -29,6 +29,12 @@ coverage.xml
 # into the PR, so committing it would duplicate the record and bloat the tree.
 .review/
 
+# The vendored embedding model (ADR-0024 §4). A build input: fetched from its
+# pinned revision and verified against the recorded manifest by `hatch_build.py`,
+# then packaged into the wheel and the sdist. Never committed — 58 MiB of
+# incompressible binary would be duplicated permanently in every clone.
+src/ai_assistant/models/_vendor/
+
 # Editors / OS
 .idea/
 .vscode/

@@ -61,7 +61,7 @@ ai-assistant/
 
 | Concern             | Tool                         |
 | ------------------- | ---------------------------- |
-| Packaging / env     | uv + `uv_build`              |
+| Packaging / env     | uv + `hatchling` (ADR-0024)  |
 | Task runner         | just                         |
 | Lint + format       | ruff (maximum rule set)      |
 | Static typing       | mypy (strict)                |
