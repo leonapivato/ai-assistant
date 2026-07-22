@@ -379,6 +379,26 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_an_external_record
     assert await store.get("new") is None
 
 
+async def test_the_ingestor_refuses_to_fold_an_assertion_onto_another_assertion() -> None:
+    # The other disallowed target, and the one that slips through most easily:
+    # this is not a supersession, so a refusal gated on "is this a supersession?"
+    # would let it fall into the reinforcing merge — which keeps the target's id
+    # and destroys the earlier assertion just as thoroughly. ADR-0038 §3 and §5:
+    # no conflict heuristic is confident enough to choose between two things the
+    # user said.
+    store = InMemoryMemoryStore()
+    await store.add(_asserted("said-before", "user prefers morning meetings"))
+    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+
+    with pytest.raises(MemoryStoreError, match="refusing to supersede"):
+        await ingestor.ingest(_proposal(_asserted("says-now", "user prefers afternoon meetings")))
+
+    earlier = await store.get("said-before")
+    assert earlier is not None
+    assert earlier.content == "user prefers morning meetings"
+    assert await store.get("says-now") is None
+
+
 class _RecordingPolicy:
     """A policy that records the conflicts it was offered and rejects everything."""
 
