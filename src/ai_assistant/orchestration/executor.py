@@ -81,6 +81,11 @@ _REFUSED = (
 #: ``FAILED``; that a cancelled step carries no durable diagnostic is #208.
 _CANCELLED = "the invocation was cancelled before it completed"
 
+#: What a claim closed before the tool could be reached records. ``FAILED``
+#: rather than ``INDETERMINATE`` for §8's reason: nothing happened, and
+#: ``INDETERMINATE`` is the state whose whole meaning is ignorance.
+_UNSTARTED = "the executing task was cancelled after the claim and before the tool was reached"
+
 #: Stands in when a non-``SUCCEEDED`` result somehow carries no failure.
 #: ``ToolResult``'s own validator makes that unconstructable; this exists so the
 #: mapping stays total against a value tampered past ``frozen=True``.
@@ -240,8 +245,23 @@ class StepExecutor:
         ``bound_tool`` and ``approval_ref`` are pinned to the call being made,
         which is what makes the durable record a description of what ran rather
         than of what was planned (ADR-0029 §8).
+
+        **A claim that lands into a cancellation is closed, not left standing.**
+        The claim is a write like any other, so a cancellation can arrive while
+        it is in flight — and this one lands *before* the tool is reachable. A
+        durable ``RUNNING`` there is the worst available record: recovery reads
+        it as ``INDETERMINATE``, "we cannot tell whether it acted", about a call
+        that provably never started. So the write goes through the same shield
+        idiom, and a claim known to have landed is resolved ``FAILED`` — nothing
+        happened, which is what §8 says of the other pre-invocation exit — before
+        the cancellation is allowed to leave.
+
+        Raises:
+            CancelledError: If the executing task was cancelled while the claim
+                was in flight. Raised after the step has been closed.
+            PlanningError: If the store rejected the claim.
         """
-        return await self._plans.commit_transition(
+        claimed, cancelled = await self._commit_shielded(
             StepTransition(
                 execution_id=state.id,
                 step_id=step_id,
@@ -251,6 +271,17 @@ class StepExecutor:
                 approval_ref=call.decision.id,
             )
         )
+        if not cancelled:
+            return claimed
+
+        try:
+            await self._commit_shielded(
+                self._closing(claimed, step_id, StepStatus.FAILED, error=_UNSTARTED)
+            )
+        except PlanningError:
+            _log.warning("executor_unstarted_close_failed", step_id=step_id, exc_info=True)
+        msg = f"step {step_id!r} was claimed and closed unstarted; its task was cancelled"
+        raise asyncio.CancelledError(msg)
 
     async def _refuse(self, state: ExecutionState, step_id: str) -> ExecutionState:
         """Commit ``RUNNING → FAILED`` for a seam rejection, and schedule nothing.
@@ -481,20 +512,43 @@ class StepExecutor:
         return elapsed < window
 
     def _reading(self) -> datetime | None:
-        """The guarded clock's reading, or ``None`` if it is not a conforming one.
+        """The clock's reading, or ``None`` if there is no usable one.
 
         ``None`` rather than a raised ``PlanningError``, and the asymmetry with
         ``LearningLoop`` is deliberate: this clock is read *only* to measure the
-        idempotency window, where ADR-0029 §5 already prescribes what an
-        unusable reading means. Turning it into an error would fail a step whose
-        tool call has already been recorded, over a measurement whose whole
-        design is to degrade toward retrying less.
+        idempotency window, where ADR-0029 §5 already prescribes what an unusable
+        measurement means — the window has lapsed, and the retry is not taken.
+        Every reading here happens between the claim and a resolution, so letting
+        one out would leave a step durably ``RUNNING`` over a measurement whose
+        whole design is to degrade toward retrying less.
+
+        **Any ``Exception``, not only a non-conforming reading.** ADR-0026 §2 is
+        explicit that an exception raised by the clock callable *itself*
+        propagates unwrapped, so ``ClockReadingError`` is not the whole of what
+        can arrive: an injected clock reading a provider can raise anything at
+        all. ADR-0026 §4 leaves the failure policy to each subsystem's own
+        boundary, and this boundary's policy is §5's. ``BaseException`` still
+        propagates — a ``CancelledError`` here is a teardown, not a bad reading.
+
+        The exception's *type* is logged and never its text: a clock wrapping a
+        provider can quote a URL or a credential, and this line is bound for a
+        log the key-based redactor cannot see into (ADR-0004 §5).
         """
         try:
             return self._clock()
-        except ClockReadingError:
-            _log.warning("executor_clock_unusable_window_treated_as_lapsed", exc_info=True)
-            return None
+        except ClockReadingError as exc:
+            _log.warning(
+                "executor_clock_unusable_window_treated_as_lapsed",
+                error_type=type(exc).__name__,
+            )
+        except Exception as exc:
+            # Broad deliberately: §5's measurement fails closed whatever broke,
+            # and the alternative is a step left RUNNING over a clock.
+            _log.warning(
+                "executor_clock_raised_window_treated_as_lapsed",
+                error_type=type(exc).__name__,
+            )
+        return None
 
 
 def _interrupted(trusted: ToolDefinition | None) -> ToolOutcome:

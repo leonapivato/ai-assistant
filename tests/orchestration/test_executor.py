@@ -243,21 +243,25 @@ class HoldingPlanStore(FakePlanStore):
     whole point is what happens to the write that comes after the tool.
     """
 
-    def __init__(self, *, rejects: bool = False) -> None:
-        """Create a store whose closing commit waits to be released.
+    def __init__(self, *, rejects: bool = False, hold_claim: bool = False) -> None:
+        """Create a store whose commit waits to be released.
 
         Args:
             rejects: Whether the released commit then fails, as a stale-version
                 rejection would.
+            hold_claim: Hold the ``→ RUNNING`` claim instead of the closing
+                write. The claim is the write that lands *before* the tool is
+                reachable, so it is a different hazard and needs its own arm.
         """
         super().__init__()
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self._rejects = rejects
+        self._hold_claim = hold_claim
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
-        """Hold a closing transition until the test lets it through."""
-        if transition.to_status is not StepStatus.RUNNING:
+        """Hold the transition this store was built to hold."""
+        if (transition.to_status is StepStatus.RUNNING) is self._hold_claim:
             self.entered.set()
             await self.release.wait()
             if self._rejects:
@@ -665,6 +669,69 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     step = await stored_step(store, state)
     assert step.status is StepStatus.SUCCEEDED, "the known outcome still landed"
     assert step.output == {"message_id": "m-1"}
+
+
+async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() -> None:
+    """A claim lands *before* the tool is reachable, so it must not stand.
+
+    A durable ``RUNNING`` there is the worst available record: recovery reads it
+    as ``INDETERMINATE`` — "we cannot tell whether it acted" — about a call that
+    provably never started, which ADR-0029 §8 names as the one thing that state
+    must not be used for. Nothing happened, so ``FAILED`` is the honest close.
+    """
+    store = HoldingPlanStore(hold_claim=True)
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker([(tool(), implementation)])
+    task = asyncio.create_task(
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+    )
+
+    await store.entered.wait()
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not task.done(), "the claim is still in flight and must be resolved"
+
+    store.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "not left RUNNING for recovery to misread"
+    assert step.finished_at is not None
+    assert implementation.calls == [], "the tool was never reached"
+
+
+async def test_a_clock_that_raises_leaves_no_step_running() -> None:
+    """ADR-0026 §2 lets a clock's own exception propagate unwrapped.
+
+    So ``ClockReadingError`` is not the whole of what can arrive between the
+    claim and the invocation — an injected clock reading a provider can raise
+    anything. ADR-0026 §4 leaves the failure policy to each subsystem's boundary,
+    and this one's is ADR-0029 §5's: the measurement fails closed, the retry is
+    not taken, and no step is left ``RUNNING`` over a broken clock.
+    """
+
+    def exploding() -> datetime:
+        msg = "the clock's provider is unreachable"
+        raise OSError(msg)
+
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    seam = ScriptedInvoker(keyed(), [unavailable(), succeeded()])
+
+    await executor_over(store, seam, now=exploding).execute(
+        state, step_id=STEP, call=call_for(keyed()), timeout=PATIENT
+    )
+
+    assert seam.calls == 1, "an unusable measurement declines the retry"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED
+    assert step.attempts == 1
 
 
 async def test_an_absorbed_cancellation_outranks_the_commits_own_failure() -> None:

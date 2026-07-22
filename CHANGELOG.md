@@ -113,11 +113,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   effect. It is measured from the first *attempt*, not from before the claim, so
   a slow `commit_transition` cannot consume a window before the tool was
   reached. A monotonic clock seam is the proper fix and is deferred (#171).
-  **`timeout` is checked before the claim**, not left to the seam: `invoke`
-  refuses a non-positive or non-`timedelta` deadline before the callable is
-  created, and letting that `ValueError` surface from inside would leave the
-  step durably `RUNNING` for a call whose coroutine that same guard guarantees
-  never existed.
+  **No path leaves a step durably `RUNNING` before the tool was reachable**,
+  because recovery reads that as `INDETERMINATE` — "we cannot tell whether it
+  acted" — about a call that provably never started, which is the one thing
+  ADR-0029 §8 says that state must not be used for. So `timeout` is checked
+  before the claim rather than left to the seam; a claim cancelled while in
+  flight is closed `FAILED` rather than left standing; and a clock that *raises*
+  between the claim and the invocation is treated as §5's lapsed measurement
+  rather than allowed out — ADR-0026 §2 lets an injected clock's own exception
+  propagate unwrapped, so `ClockReadingError` was never the whole of what could
+  arrive, and ADR-0026 §4 leaves the policy to this boundary.
 
 - **BREAKING** `core`/`tools`/`testing`: the `ToolInvoker` Protocol and the
   types it exchanges — `ToolCall`, `ToolResult`, `ToolOutcome`, `ToolFailure`,
