@@ -29,16 +29,27 @@ _DEFAULT_TEMPORARY_TTL = timedelta(days=7)
 
 
 def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on a user-asserted proposal: supersede a stale inference, or accept.
+    """Rule on a user-asserted proposal: supersede a stale belief, or accept.
 
     Supersession targets the best-ranked *non-asserted* conflict rather than
     ``conflicts[0]``. The sequence is ordered by retrieval score, so the top
     entry may itself be user-asserted, and merging over it would destroy a
     record the user gave us on the strength of a lexical or embedding
-    near-match. An assertion may displace a belief we derived; it may not
-    displace one we were told (ADR-0038 §3). With nothing derived to displace —
-    no conflicts, or only asserted ones — the assertion is simply accepted, and
-    two things the user said are left to stand side by side (ADR-0038 §5).
+    near-match. An assertion may displace anything we were not told; nothing we
+    were not told may displace an assertion (ADR-0038 §3).
+
+    The test is ``source is not USER_ASSERTED``, so ``EXTERNAL`` is supersedable
+    alongside ``OBSERVED``/``INFERRED`` even though it can carry confidence 1.0.
+    That is deliberate, not an oversight of a high-confidence source: the
+    external system remains the system of record and re-supplies the fact on the
+    next sync, and the user is the authority on a claim about themselves
+    (ADR-0038 §2). The reverse direction stays closed — the superseded record is
+    ``USER_ASSERTED`` afterwards, so a later ``EXTERNAL`` proposal contradicting
+    it meets the ``ASK_USER`` rule above.
+
+    With nothing supersedable — no conflicts, or only asserted ones — the
+    assertion is accepted, and two things the user said stand side by side
+    (ADR-0038 §5).
     """
     superseded = next(
         (c for c in conflicts if c.provenance.source is not MemorySource.USER_ASSERTED),
@@ -61,9 +72,10 @@ class DefaultMemoryPolicy:
 
     1. Secret-tier proposals always defer to the user.
     2. An inference never silently overrides a user-asserted memory — defer.
-    3. A user-asserted proposal *supersedes* a conflicting inference: it merges
-       over the best-ranked non-asserted conflict rather than landing beside it,
-       so a correction takes the stale belief off the read path (ADR-0038).
+    3. A user-asserted proposal *supersedes* a conflicting belief we were not
+       told: it merges over the best-ranked non-asserted conflict rather than
+       landing beside it, so a correction takes the stale belief off the read
+       path (ADR-0038).
     4. A user-asserted proposal with nothing to supersede is trusted and
        accepted.
     5. A proposal that conflicts with an existing (non-asserted) record merges
@@ -73,7 +85,7 @@ class DefaultMemoryPolicy:
     7. Otherwise the proposal is accepted.
 
     Rules 2 and 3 are the same asymmetry read in both directions: an assertion
-    outranks an inference, and never the reverse.
+    outranks anything the user did not tell us, and never the reverse.
     """
 
     def __init__(
