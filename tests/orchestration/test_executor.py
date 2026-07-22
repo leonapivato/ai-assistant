@@ -275,6 +275,30 @@ class HoldingPlanStore(FakePlanStore):
         return await super().commit_transition(transition)
 
 
+class LateCancellingPlanStore(FakePlanStore):
+    """Cancels the executing task from *inside* a successful claim commit.
+
+    Reproduces the wakeup race deterministically: the claim write completes, and
+    the cancellation is requested before the executor's frame resumes from the
+    shield. ``asyncio.shield`` protects the inner task, not the ``await`` of it,
+    so the executor wakes to a ``CancelledError`` with a landed claim it has not
+    been handed.
+    """
+
+    def __init__(self) -> None:
+        """Create a store with no target yet; the test assigns one."""
+        super().__init__()
+        self.target: asyncio.Task[ExecutionState] | None = None
+
+    async def commit_transition(self, transition: StepTransition) -> ExecutionState:
+        """Commit, then cancel the executor if this was the claim."""
+        committed = await super().commit_transition(transition)
+        if transition.to_status is StepStatus.RUNNING and self.target is not None:
+            self.target.cancel()
+            self.target = None
+        return committed
+
+
 class TickingClock:
     """A clock that advances by a fixed step on every reading.
 
@@ -707,6 +731,38 @@ async def test_a_call_that_does_not_survive_revalidation_claims_nothing() -> Non
     assert step.status is StepStatus.PENDING, "nothing durable was written"
     assert step.attempts == 0
     assert step.bound_tool is None
+
+
+async def test_a_claim_that_lands_as_the_cancellation_arrives_is_still_closed() -> None:
+    """The wakeup race between a completed commit and a cancellation.
+
+    ``asyncio.shield`` protects the inner task, not the ``await`` of it, so a
+    ``cancel()`` landing between the claim's write completing and this frame
+    resuming raises here with the result already in hand. Re-raising would throw
+    that result away and leave the executor unable to close a claim it did in
+    fact write — a durable ``RUNNING`` for recovery to read as ``INDETERMINATE``
+    about a callable never reached, which is exactly what ADR-0034 §1 exists to
+    prevent. It is treated as an absorbed cancellation like any other.
+    """
+    store = LateCancellingPlanStore()
+    state = await a_claimed_execution(store, capability="read_email")
+    implementation = Spy()
+    seam = FakeToolInvoker([(read_only(), implementation)])
+
+    task = asyncio.create_task(
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call_for(read_only()), timeout=PATIENT
+        )
+    )
+    store.target = task
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert implementation.calls == [], "the tool was never reached"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "the landed claim was closed, not abandoned"
+    assert step.finished_at is not None
 
 
 async def test_a_call_authorised_for_another_step_claims_nothing() -> None:
