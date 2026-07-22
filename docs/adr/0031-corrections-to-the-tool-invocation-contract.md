@@ -402,8 +402,12 @@ limit nobody can act on is not a limit:
   defect §2 corrects. A caller that absorbed an earlier cancellation without
   calling `uncancel()` carries a positive count into an invocation nothing
   cancelled, and that call returns `SUCCEEDED` — correctly, and the conformance
-  suite pins it. So `SUCCEEDED` does not say the task carries no cancellation;
-  it says none was requested *during this call*.
+  suite pins it. So `SUCCEEDED` does not say the task carries no cancellation.
+  Nor does it say none was requested during the call: that is precisely what the
+  next bullet's erasure defeats. **The clause is the observable fact and nothing
+  beyond it** — the seam saw no net increase from its entry baseline — and every
+  inference from that to what happened is the caller's, bounded by the two
+  bullets below.
 - **May not conclude:** that the invoking task was never cancelled during the
   call. A callable that catches its `CancelledError` and uncancels the task
   erases that evidence, and no seam running the callable in its own frame can
