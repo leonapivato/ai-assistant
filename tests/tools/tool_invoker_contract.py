@@ -261,6 +261,37 @@ class Stubborn:
         return None
 
 
+class Swallower:
+    """A tool that *catches* its cancellation and returns a value anyway.
+
+    Nothing forces a callable to let a cancellation through, and this is the
+    shape that makes an implementation trusting the returned value wrong in the
+    worst available direction: a cancelled turn reported ``SUCCEEDED``, or a
+    side-effecting call that outran its deadline reported as though it had met
+    it. ``Stubborn`` does not cover it — that one delays its unwinding and still
+    re-raises.
+    """
+
+    def __init__(self) -> None:
+        """Create the event that reports the callable has been entered."""
+        self.entered = asyncio.Event()
+        self.swallowed = False
+
+    async def __call__(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+    ) -> FrozenJson:
+        """Absorb whatever cancellation arrives and return normally."""
+        self.entered.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.swallowed = True
+        return {"done": True}
+
+
 class KeyedTool:
     """A ``KEYED`` tool that deduplicates a repeat inside its declared window.
 
@@ -640,6 +671,48 @@ class ToolInvokerContract:
 
         with pytest.raises(asyncio.CancelledError):
             await running
+
+    async def test_a_tool_that_absorbs_its_deadline_is_not_reported_successful(
+        self, invoker: InvocableToolRegistry
+    ) -> None:
+        """The deadline is read from the timeout, not inferred from an exception.
+
+        A callable that catches the cancellation ``asyncio.timeout`` injects and
+        returns a value leaves nothing to catch — so an implementation
+        classifying only on what was raised hands back ``SUCCEEDED`` for a
+        side-effecting call that ran past its deadline, which is the one
+        direction ADR-0014 §4 refuses to guess in.
+        """
+        swallower = Swallower()
+        invoker.register(tool(), swallower)
+
+        result = await invoker.invoke(call_for(tool()), timeout=BRIEF)
+
+        assert swallower.swallowed, "the fixture must actually absorb the cancellation"
+        assert result.outcome is ToolOutcome.INDETERMINATE
+        assert result.failure is not None
+        assert result.failure.kind is ToolFailureKind.TIMED_OUT
+
+    async def test_a_tool_that_absorbs_an_external_cancellation_still_cancels_the_call(
+        self, invoker: InvocableToolRegistry
+    ) -> None:
+        """A cancelled task must not be answered with a result.
+
+        The cancellation was requested of the *invoking task*, and a callable
+        catching it does not withdraw the request. Returning normally here would
+        report a cancelled turn as ``SUCCEEDED`` and leave the executor with no
+        cancellation to commit against or re-raise (ADR-0029 §4).
+        """
+        swallower = Swallower()
+        invoker.register(tool(), swallower)
+
+        running = asyncio.ensure_future(invoker.invoke(call_for(tool()), timeout=PATIENT))
+        await swallower.entered.wait()
+        running.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        assert swallower.swallowed
 
     # --- §5: the key is the authorisation --------------------------------
 

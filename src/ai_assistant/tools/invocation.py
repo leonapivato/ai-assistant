@@ -132,6 +132,43 @@ def _expiry_failure(definition: ToolDefinition, timeout: timedelta) -> ToolResul
     )
 
 
+def _interruption(
+    definition: ToolDefinition, timeout: timedelta, deadline: asyncio.Timeout
+) -> ToolResult | None:
+    """Answer what an interruption the tool *absorbed* means, if there was one.
+
+    Nothing forces a callable to let a cancellation through: one that catches
+    ``CancelledError`` and returns a value leaves the seam holding an output and
+    no exception. Trusting that return would be the seam's worst available bug —
+    a cancelled turn reported as ``SUCCEEDED``, or a call that outran the
+    deadline reported as though it had met it. So the state is read from the
+    task and the timeout rather than inferred from what came back.
+
+    A pending external cancellation is re-raised rather than reported, because
+    ADR-0029 §4 keeps that on the executor: swallowing it would break structured
+    concurrency and shutdown. An expired deadline is reported, because that is
+    the seam's own knowledge and the only form in which ``INDETERMINATE`` can be
+    delivered at all.
+
+    Returns:
+        The expiry result if this deadline expired, or ``None`` if the call was
+        not interrupted.
+
+    Raises:
+        CancelledError: If a cancellation of the invoking task is still pending.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling() > 0:
+        # Freshly raised rather than re-raised: the original was consumed inside
+        # the callable. What matters is that the cancellation reaches the
+        # executor rather than being answered with a result.
+        msg = f"tool {definition.id!r} absorbed the cancellation of its invoking task"
+        raise asyncio.CancelledError(msg)
+    if deadline.expired():
+        return _expiry_failure(definition, timeout)
+    return None
+
+
 async def run_bound_call(
     implementation: ToolImplementation,
     *,
@@ -155,6 +192,13 @@ async def run_bound_call(
       the tool invented it, and a tool that raised is ``INTERNAL``. Otherwise it
       propagates: swallowing it would break structured concurrency and shutdown,
       and there is no return path from a task being torn down.
+    - **Neither of those is inferred from what the callable did**, because a
+      callable that catches a cancellation and returns a value leaves the seam
+      holding an output and no exception at all. So the deadline and the task
+      are read directly, on the normal-return path as well as the raising one —
+      see :func:`_interruption`. Without that, a cancelled turn comes back
+      ``SUCCEEDED``, and a side-effecting call that outran its deadline comes
+      back as though it had met it.
 
     ``BaseException`` otherwise propagates unchanged, which is the boundary
     ADR-0026 §2 drew for ``checked_clock``: a guard whose own failure modes
@@ -178,17 +222,20 @@ async def run_bound_call(
             output = await implementation(
                 call.request.parameters, idempotency_key=call.idempotency_key
             )
-    except TimeoutError as exc:
-        if deadline.expired():
-            return _expiry_failure(definition, timeout)
-        return internal_failure(definition, exc)
     except asyncio.CancelledError as exc:
         task = asyncio.current_task()
         if task is not None and task.cancelling() > 0:
             raise
         return internal_failure(definition, exc)
     except Exception as exc:
-        return internal_failure(definition, exc)
+        # Python's own `TimeoutError` arrives here too, and is *not* special:
+        # what makes an expiry an expiry is this deadline having fired, which
+        # only `_interruption` can say.
+        return _interruption(definition, timeout, deadline) or internal_failure(definition, exc)
+
+    interrupted = _interruption(definition, timeout, deadline)
+    if interrupted is not None:
+        return interrupted
 
     try:
         return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=output)
