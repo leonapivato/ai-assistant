@@ -1,6 +1,6 @@
 # 13. Model routing and fallback: a second axis on the failure taxonomy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-19
 
 ## Context

@@ -269,10 +269,13 @@ class RoutingProvider:
         # Only the *class* of each failure is logged, never `str(exc)`. Provider
         # error messages routinely quote the offending request, so the message is
         # attacker- and vendor-controlled text that can carry a prompt — Tier 1
-        # data that ADR-0004 §5 says must never reach a log. The class name is
-        # vendor-independent, sufficient to diagnose which route failed and why,
-        # and cannot carry content by construction. The full message still
-        # travels to the caller on the raised exception.
+        # data that ADR-0004 §5 says must never reach a log. The class name is no
+        # safer on its own: a route may be any ModelProvider, so
+        # `type(exc).__name__` is provider-controlled text too. What keeps the
+        # emitted string content-free is `_classify` mapping it through this
+        # project's own taxonomy by object identity — see its docstring, and
+        # ADR-0013 §5. The full message still travels to the caller on the raised
+        # exception.
         _warn(
             "all routes failed",
             routes=len(self._routes),
