@@ -91,11 +91,16 @@ The reviewer is unchanged: Codex still judges every change, independently of the
 model that wrote it.
 
 Each run records itself to
-`.review/<loop_id>-<persona>-<base_sha>-<tree>.md`, named by the anchor `ship`
-selects it by rather than by the commit it was filed under (ADR-0027 §6). Loop:
-**fix, commit, re-run**. It reviews `HEAD` vs the base — the *committed* diff,
-not your working tree — so an uncommitted fix is invisible to a re-run. Stop
-when it comes back clean or only deliberately-waived findings remain.
+`.review/<loop_id-or-noloop>-<persona>-<base_sha>-<tree>.md`, named by the
+anchor `ship` selects it by rather than by the commit it was filed under
+(ADR-0027 §6). The first field is the ADR-0025 loop identity where the run has
+one. The bypass path — `CODEX_REVIEW_NO_SANDBOX=1`, or `GITHUB_ACTIONS` exactly
+`true` — keeps no session and so has no loop identity; there the sentinel
+`noloop` stands in, so the field is never empty and the segments never collapse.
+
+Loop: **fix, commit, re-run**. It reviews `HEAD` vs the base — the *committed*
+diff, not your working tree — so an uncommitted fix is invisible to a re-run.
+Stop when it comes back clean or only deliberately-waived findings remain.
 
 ### Triage every finding — do not let the PR grow to absorb them
 
