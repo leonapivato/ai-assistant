@@ -97,11 +97,17 @@ Two clauses of it are the decision and neither is decoration:
   returns. Rebuilding makes "stored as UTC" a property of the stored object
   rather than a claim the object makes about itself.
 
-**A subclass on the way *in* is not forbidden.** It is refused exactly when its
-conversion preserves its type — which is the default, so in practice nearly
-always. Where a subclass converts to a base `datetime`, the seam reads every
-fact from that base value and accepts it; the instant it yields is then the one
-the subclass itself stated, which is §3's line.
+**A subclass on the way *in* is not forbidden by this rule.** It still has to
+clear everything the seam already checks *before* converting — ADR-0023 §3's
+awareness test at a field, ADR-0026 §2 steps 1–3 at a clock — so a subclass
+whose `utcoffset()` returns `None` or raises is refused there, unchanged by this
+ADR, however sound its conversion would have been. What §1 adds is the last
+gate: having cleared those, a subclass is refused **iff** its conversion does
+not yield an exact base `datetime` in UTC, which `astimezone` preserving the
+subclass makes the overwhelmingly common case. Where a subclass does convert to
+a base `datetime`, the seam reads every fact from that base value and accepts
+it; the instant it yields is then the one the subclass itself stated, which is
+§3's line.
 
 ### 2. No form keeps subclasses safely; each candidate ruled on
 
@@ -179,6 +185,16 @@ The anti-drift mechanism is not prose. `core/types.py`'s `_canonical_utc` is
 **promoted to a named function of `core`** — one definition, imported by
 `UtcInstant`'s validator and by ADR-0026 §2's `checked_clock`. A second
 implementation of this test anywhere in `core` or a subsystem is forbidden.
+
+**One such implementation exists today and is a bounded exception, not a
+violation.** `memory/ingest.py:47` carries a second `_canonical_utc`: the
+deliberate shim ADR-0023 §6 requires at a clock-fed field's producer until
+ADR-0026's guard lands, tracked in #169 and documented as such in its own
+docstring. The prohibition therefore **binds from the moment `checked_clock`
+exists**, and #169's consolidation — deleting the shim and routing that write
+through the shared function — is the act that discharges it. Ratifying this ADR
+does not put the tree in violation of it; leaving the shim in place *after*
+#169 would.
 
 It stays in `core/types.py`, and that is consistent with ADR-0026 §1 rather
 than a departure from it. §1 puts `checked_clock` in `core/clock.py` because a
@@ -286,9 +302,14 @@ sufficient. That is a change to a past decision in ADR-0001's sense.
 
 ## Consequences
 
-- **`db0a93e` stands.** `UtcInstant`'s behaviour is exactly what §1 ratifies;
-  the shipped tests pin it. No `src/` change is required by the ratification
-  itself.
+- **`db0a93e` stands.** `UtcInstant`'s behaviour is exactly what §1 ratifies and
+  no `src/` change is required by the ratification itself. **One test is owed**:
+  `tests/core/test_utc_instant.py` pins every *refusal* and pins that a plain
+  input canonicalises, but nothing pins the path §1 makes normative — a subclass
+  input whose conversion returns an exact base UTC `datetime` being **accepted**.
+  Today that is emergent behaviour, so a later "refuse every subclass input"
+  change would pass the suite while contradicting this decision. Filed as #183
+  rather than absorbed here, since this change is docs-only.
 - **The follow-on work is narrow and is not this change's**: promoting the
   canonicaliser to a named `core` function, binding `checked_clock` to it (§4),
   and building the shared adversarial table. It belongs to ADR-0026's
