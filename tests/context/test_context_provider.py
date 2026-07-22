@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ import pytest
 from context_provider_contract import ContextProviderContract
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
+from ai_assistant.context import provider as provider_module
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ContextError
 from ai_assistant.core.logging import configure_logging
@@ -403,3 +405,366 @@ async def test_a_required_failure_cancels_its_still_running_siblings() -> None:
 
     assert slow.started.is_set()  # it really was running, so cancelling it meant something
     assert slow.cancelled  # and it is finished, not merely abandoned
+    assert not provider_module._abandoned  # a cooperative source is joined, never abandoned
+
+
+class _StubbornSource:
+    """An optional source that swallows ``CancelledError`` and keeps going.
+
+    Misbehaviour by Python's cancellation contract, and the shape ADR-0033 is
+    about: nothing the assembler does can stop it. ``release`` lets the test
+    retire it afterwards rather than leaving it running across the suite.
+    """
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancels = 0
+
+    @property
+    def name(self) -> str:
+        return "stubborn"
+
+    async def contribute(self) -> Mapping[str, object]:
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                self.cancels += 1
+        return {}
+
+
+async def _retire(source: _StubbornSource) -> None:
+    """Let a stubborn source finish, so it does not outlive its test."""
+    source.release.set()
+    outstanding = tuple(provider_module._abandoned)  # snapshot: the callbacks mutate the set
+    async with asyncio.timeout(2):
+        await asyncio.gather(*outstanding, return_exceptions=True)
+    await asyncio.sleep(0)  # one turn, so the done-callbacks drop their references
+
+
+async def test_a_source_that_suppresses_cancellation_cannot_stall_the_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0033 §1: the required failure reaches the caller within the drain bound.
+
+    Unbounded, this hangs forever — and so does an ``asyncio.timeout`` wrapped
+    around the drain's ``gather``, because that deadline's cancellation is
+    delivered into the gather, which re-cancels the same source and goes on
+    awaiting it. Only ``asyncio.wait``'s observing timeout returns.
+
+    Asserted with a *time bound*, not merely eventual propagation: an
+    implementation that ignored the budget and waited seconds would satisfy
+    "the failure arrives" while violating the thing §1 decides.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0  # a 50 ms budget, with an order of magnitude of slack
+    assert stubborn.started.is_set()
+    assert stubborn.cancels >= 1  # it was cancelled, it simply declined to stop
+    assert len(provider_module._abandoned) == 1  # detached, and held so it cannot vanish
+    await _retire(stubborn)
+    assert not provider_module._abandoned  # the reference is dropped when it finishes
+
+
+class _RequiredStubbornFailingSource(_StubbornSource):
+    """A straggler that fails *after* it has been abandoned.
+
+    Marked ``required`` deliberately: ``_safe_contribute`` degrades an
+    *optional* source's failure to an empty contribution, so an optional
+    straggler's task can never carry an exception at all. Only a required one
+    reaches the done-callback with something to retrieve.
+    """
+
+    required = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = asyncio.Event()
+
+    async def contribute(self) -> Mapping[str, object]:
+        await super().contribute()
+        self.failed.set()
+        msg = "late failure, for a request that is already over"
+        raise RuntimeError(msg)
+
+
+async def test_an_abandoned_tasks_later_failure_is_consumed_and_recorded(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0033 §3: the done-callback consumes an abandoned task's outcome.
+
+    A straggler can still fail long after the request that spawned it. The
+    callback retrieves that outcome and records its *class* — the ADR-0004 §5
+    rule the degradation log already follows, applied to a failure that arrives
+    with no request left to attribute it to.
+    """
+    configure_logging(Settings(log_level="DEBUG"))
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    stubborn = _RequiredStubbornFailingSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
+
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+
+    assert len(provider_module._abandoned) == 1
+    outstanding = tuple(provider_module._abandoned)
+    stubborn.release.set()
+    async with asyncio.timeout(2):
+        await asyncio.wait(outstanding)
+    await asyncio.sleep(0)  # one turn, for the done-callback
+
+    assert stubborn.failed.is_set()  # it really did fail, after being abandoned
+    assert not provider_module._abandoned  # and the reference was still dropped
+    out = capsys.readouterr().out
+    assert "abandoned context source finished" in out
+    assert "RuntimeError" in out  # the class, retrieved from the task
+    assert "late failure, for a request that is already over" not in out  # never the message
+
+
+class _StubbornHostileNameSource(_StubbornSource):
+    """A straggler whose ``name`` raises a ``BaseException`` when the log reads it."""
+
+    @property
+    def name(self) -> str:
+        raise asyncio.CancelledError
+
+
+async def test_a_stragglers_hostile_name_cannot_mask_the_required_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The abandonment log runs while the required failure waits to be re-raised.
+
+    ``_safe_name`` stops at ``Exception``, so a ``name`` raising a
+    ``BaseException`` would escape ``_abandon`` and *replace* the required
+    source's error — the one outcome this whole path exists to deliver.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    stubborn = _StubbornHostileNameSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
+
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+
+    assert len(provider_module._abandoned) == 1  # still abandoned, just unnamed
+    await _retire(stubborn)
+
+
+async def test_an_abandoned_source_is_named_in_a_warning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0033 §3: the log is the only signal a detached task leaves."""
+    configure_logging(Settings())
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
+
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+
+    out = capsys.readouterr().out
+    assert "outlasted the cancellation drain" in out
+    assert "stubborn" in out
+    await _retire(stubborn)
+
+
+class _SlowUnwindingSource:
+    """A source that accepts cancellation but takes a while to unwind.
+
+    Cooperative — it re-raises — and still abandoned if its cleanup outlasts
+    ``_DRAIN_SECONDS``. The budget is enforced on the clock, not on intent
+    (ADR-0033 §1), because the assembler cannot observe intent.
+    """
+
+    def __init__(self, cleanup: float) -> None:
+        self._cleanup = cleanup
+        self.started = asyncio.Event()
+        self.cleaned_up = asyncio.Event()
+
+    @property
+    def name(self) -> str:
+        return "slow-unwind"
+
+    async def contribute(self) -> Mapping[str, object]:
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.shield(asyncio.sleep(self._cleanup))  # an async `finally`
+            self.cleaned_up.set()
+            raise
+        return {}
+
+
+async def test_a_cooperative_source_whose_cleanup_outlasts_the_budget_is_abandoned_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0033 §1: the budget is enforced on the clock, not on intent.
+
+    The reviewer's case and the honest cost of §1: this source honours
+    cancellation, so ADR-0026 §4's join would have completed — just not within
+    the budget. It is abandoned like any other straggler, and the docstring and
+    the log say "outlasted the drain" rather than "ignored cancellation" for
+    exactly this reason.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.02)
+    slow = _SlowUnwindingSource(cleanup=0.15)
+    provider = AssemblingContextProvider([_RequiredFailingSource(), slow], source_timeout=None)
+
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+
+    assert slow.started.is_set()
+    assert not slow.cleaned_up.is_set()  # abandoned mid-cleanup, not joined
+    assert len(provider_module._abandoned) == 1
+    outstanding = tuple(provider_module._abandoned)
+    async with asyncio.timeout(2):
+        await asyncio.gather(*outstanding, return_exceptions=True)
+    await asyncio.sleep(0)
+    assert slow.cleaned_up.is_set()  # it did finish, cooperatively, after being let go
+    assert not provider_module._abandoned
+
+
+async def test_a_caller_cancelling_mid_drain_still_records_the_stragglers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0033 §3's promises must survive the drain being cancelled.
+
+    If the caller cancels ``assemble()`` while ``_drain`` is awaiting, the
+    ``await`` raises and a naive implementation skips registration entirely —
+    leaving a task that outlives the method with no strong reference, no
+    warning, and an outcome nobody retrieves.
+    """
+    configure_logging(Settings())
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 5.0)  # long, so we cancel mid-drain
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
+
+    assembling = asyncio.ensure_future(provider.assemble())
+    async with asyncio.timeout(2):
+        await stubborn.started.wait()
+    await asyncio.sleep(0.05)  # let the required source fail and the drain begin
+    assembling.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await assembling
+
+    assert len(provider_module._abandoned) == 1  # registered despite the cancellation
+    # ...and reported as what it was. The drain spent 50 ms of a 5 s budget, so
+    # blaming the source for outlasting it would point at the wrong party.
+    out = capsys.readouterr().out
+    assert "cancellation drain interrupted" in out
+    assert "outlasted" not in out
+    await _retire(stubborn)
+    assert not provider_module._abandoned
+
+
+class _LoopBlockingCleanupSource:
+    """A source whose cleanup blocks the event loop instead of yielding to it."""
+
+    def __init__(self, cleanup: float) -> None:
+        self._cleanup = cleanup
+        self.cleaned_up = asyncio.Event()
+
+    @property
+    def name(self) -> str:
+        return "blocking"
+
+    async def contribute(self) -> Mapping[str, object]:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            time.sleep(self._cleanup)  # noqa: ASYNC251  the misbehaviour under test
+            self.cleaned_up.set()
+            raise
+        return {}
+
+
+async def test_the_budget_bounds_awaiting_not_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0033 Consequences: the bound is on what the assembler *awaits*.
+
+    A source that blocks the event loop in its cleanup suspends every timer in
+    the process, this drain's deadline included, so the failure is delivered
+    late no matter how small the budget is. Nothing a single-threaded loop
+    offers can pre-empt that — `CONTRIBUTING.md`'s "No blocking calls on async
+    code paths" is what rules it out, not this drain. What the drain still owes
+    is pinned here: the failure does arrive, and a source that finished while it
+    held the loop is *joined*, not abandoned.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.001)
+    blocking = _LoopBlockingCleanupSource(cleanup=0.15)
+    provider = AssemblingContextProvider([_RequiredFailingSource(), blocking], source_timeout=None)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="source down"):
+        await provider.assemble()
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.15  # far beyond the 1 ms budget, and unavoidably so
+    assert blocking.cleaned_up.is_set()
+    assert not provider_module._abandoned  # it completed while holding the loop, so it was joined
+
+
+async def test_a_numeric_source_timeout_is_no_defence_against_a_suppressing_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0033 §4: why forbidding ``source_timeout=None`` would buy nothing.
+
+    ``asyncio.timeout`` delivers exactly one cancellation at its deadline, so a
+    source that swallows it runs on and the deadline never fires again. Asserted
+    with **no required source in the wiring**, so the drain cannot run and the
+    only thing that could free the caller is ``source_timeout`` itself — which
+    is set, fires, and does not.
+
+    Observed through ``asyncio.wait`` on a task rather than by wrapping the
+    ``await`` in a timeout: ``gather`` does not yield to a cancellation until
+    every child has finished, so an outer deadline around ``assemble()`` is
+    itself swallowed by this source (ADR-0033 Consequences).
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_clock(), stubborn], source_timeout=0.02)
+
+    assembling = asyncio.ensure_future(provider.assemble())
+    _done, pending = await asyncio.wait([assembling], timeout=0.2)
+
+    assert pending == {assembling}  # ten times the per-source deadline, still blocked
+    assert stubborn.cancels >= 1  # that deadline fired; it was simply swallowed
+    assert not provider_module._abandoned  # nothing failed, so no drain and no straggler
+    stubborn.release.set()  # let it finish, so it does not outlive the test
+    async with asyncio.timeout(2):
+        await assembling
+
+
+async def test_each_assembly_abandons_its_own_straggler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0033's count bound is **per assembly**, not per process.
+
+    A permanently-suppressing source leaks one task per failing ``assemble()``,
+    and repeated requests grow that set without limit. That is a real cost of
+    §1's bound and is recorded as one: no cap is imposed, because the leak is
+    the *task*, which exists whether or not this module holds a reference to it.
+    Before the bound the count was one only because the first such failure
+    deadlocked the caller and there was never a second request.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
+
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="source down"):
+            await provider.assemble()  # every call still propagates, which is the point
+
+    assert len(provider_module._abandoned) == 3
+    await _retire(stubborn)
+    assert not provider_module._abandoned
