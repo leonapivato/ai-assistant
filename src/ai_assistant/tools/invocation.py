@@ -132,8 +132,27 @@ def _expiry_failure(definition: ToolDefinition, timeout: timedelta) -> ToolResul
     )
 
 
+def _pending_cancellations() -> int:
+    """How many cancellation requests the invoking task is currently carrying.
+
+    Read as a **baseline and a delta**, never as a boolean. ``Task.cancelling()``
+    is a lifetime count that only ``uncancel()`` lowers, so a caller that
+    absorbed an earlier cancellation to finish some work and then invoked a tool
+    still reports a positive count with nothing about *this* call cancelled.
+    Treating that as provenance would fail every subsequent invocation on that
+    task as cancelled — and would convert a tool's invented ``CancelledError``,
+    which ADR-0029 §4 requires to be ``INTERNAL``, into a cancellation on the
+    strength of something that happened before the seam was entered.
+    """
+    task = asyncio.current_task()
+    return 0 if task is None else task.cancelling()
+
+
 def _interruption(
-    definition: ToolDefinition, timeout: timedelta, deadline: asyncio.Timeout
+    definition: ToolDefinition,
+    timeout: timedelta,
+    deadline: asyncio.Timeout,
+    cancellations_on_entry: int,
 ) -> ToolResult | None:
     """Answer what an interruption the tool *absorbed* means, if there was one.
 
@@ -157,8 +176,7 @@ def _interruption(
     Raises:
         CancelledError: If a cancellation of the invoking task is still pending.
     """
-    task = asyncio.current_task()
-    if task is not None and task.cancelling() > 0:
+    if _pending_cancellations() > cancellations_on_entry:
         # Freshly raised rather than re-raised: the original was consumed inside
         # the callable. What matters is that the cancellation reaches the
         # executor rather than being answered with a result.
@@ -216,6 +234,7 @@ async def run_bound_call(
     Raises:
         CancelledError: If the invoking task was cancelled from outside.
     """
+    entered_with = _pending_cancellations()
     deadline = asyncio.timeout(timeout.total_seconds())
     try:
         async with deadline:
@@ -223,17 +242,18 @@ async def run_bound_call(
                 call.request.parameters, idempotency_key=call.idempotency_key
             )
     except asyncio.CancelledError as exc:
-        task = asyncio.current_task()
-        if task is not None and task.cancelling() > 0:
+        if _pending_cancellations() > entered_with:
             raise
         return internal_failure(definition, exc)
     except Exception as exc:
         # Python's own `TimeoutError` arrives here too, and is *not* special:
         # what makes an expiry an expiry is this deadline having fired, which
         # only `_interruption` can say.
-        return _interruption(definition, timeout, deadline) or internal_failure(definition, exc)
+        return _interruption(definition, timeout, deadline, entered_with) or internal_failure(
+            definition, exc
+        )
 
-    interrupted = _interruption(definition, timeout, deadline)
+    interrupted = _interruption(definition, timeout, deadline, entered_with)
     if interrupted is not None:
         return interrupted
 
