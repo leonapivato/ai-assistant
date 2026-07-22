@@ -232,10 +232,12 @@ condition #174 and #152 exist to prevent.
 
 Be exact: this refuses a class of values that are not hostile.
 
-- **A third-party library returning a `datetime` subclass is refused.**
-  `freezegun`'s `FakeDatetime` is the standard case: it is not a dependency
-  today, and under this rule it could not be adopted for anything whose value
-  reaches a `core` field or a clock seam.
+- **A third-party library returning a `datetime` subclass is refused unless its
+  `astimezone` returns a base `datetime`** — which a subclass built to behave
+  like a `datetime` will not do, since inheriting the C implementation preserves
+  the type. `freezegun`'s `FakeDatetime` is the standard case: it is not a
+  dependency today, and under this rule it could not be adopted for anything
+  whose value reaches a `core` field or a clock seam.
 - The workaround is one explicit call at the caller's own boundary, where
   provenance is known — the same layer ADR-0023 §3 assigns attribution to.
 
@@ -314,10 +316,12 @@ sufficient. That is a change to a past decision in ADR-0001's sense.
   canonicaliser to a named `core` function, binding `checked_clock` to it (§4),
   and building the shared adversarial table. It belongs to ADR-0026's
   implementation, which has not landed.
-- **A caller passing an aware, in-range `datetime` subclass gets a
-  `ValidationError` at a field and a `ValueError` at a clock seam**, where
-  nothing in ADR-0023 or ADR-0026 as ratified says it would. Pre-1.0 this is
-  allowed to happen; it is now stated rather than discovered.
+- **A caller passing an aware, in-range `datetime` subclass whose conversion
+  preserves its type** — the inherited behaviour, so all of them bar the
+  deliberately unusual — **gets a `ValidationError` at a field and a
+  `ValueError` at a clock seam**, where nothing in ADR-0023 or ADR-0026 as
+  ratified says it would. Pre-1.0 this is allowed to happen; it is now stated
+  rather than discovered.
 - **`core`'s public surface grows by one function.** Small, and the point: the
   alternative is the same test written twice.
 - **Issues #174 and #152 close on ratification**, #152 with its offered
