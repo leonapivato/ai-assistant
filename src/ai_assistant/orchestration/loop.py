@@ -17,11 +17,13 @@ into the roadmap's first vertical:
       → propose a preference update (policy accepts it)
       → use that preference successfully next time
 
-Tool selection, permission checking and execution are still **not** here. The
-last of the three now exists as :class:`~ai_assistant.orchestration.executor.StepExecutor`
-(ADR-0029 §8), but the two stages between planning and it do not, and a turn
-cannot reach an executor without a selected tool and a ruling on it. They join
-the pipeline when they exist.
+Tool selection, permission checking and execution are still **not** part of this
+object. All three now exist —
+:class:`~ai_assistant.orchestration.runner.StepRunner` disposes of a single
+:class:`~ai_assistant.core.types.PlanStep` through them (ADR-0037) — but nothing
+drives them from a :class:`~ai_assistant.core.types.ActionPlan` yet: ordering,
+dependencies and cancellation across a plan's steps are the next slice, and
+:meth:`LearningLoop.respond` still ends at the plan.
 
 Nothing concrete is imported. Every collaborator arrives by injection and is
 seen only through its Protocol (CLAUDE.md golden rule 1), which is what lets the

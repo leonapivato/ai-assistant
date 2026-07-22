@@ -16,11 +16,25 @@ feedback → proposal → policy → memory).
 
 ``StepExecutor`` is the ``execute`` stage (ADR-0029 §8): it claims a plan step,
 runs one authorised call through an injected ``ToolInvoker``, and commits what
-came back. The two are not yet wired together — tool selection and the
-permission check are the stages still missing between them.
+came back.
+
+``StepRunner`` is the join between them (ADR-0037): the tool-selection and
+permission stages. It takes a ``PlanStep``, finds the tool advertising its
+capability, has an ``ActionPolicy`` rule on it, records the
+``PermissionDecision``, and hands the executor a ``ToolCall`` built from the
+audit trail's own copy of that decision — or disposes of the step without
+running it, saying durably why.
 """
 
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.loop import LearningLoop, TurnResult
+from ai_assistant.orchestration.runner import Disposition, StepDisposition, StepRunner
 
-__all__ = ["LearningLoop", "StepExecutor", "TurnResult"]
+__all__ = [
+    "Disposition",
+    "LearningLoop",
+    "StepDisposition",
+    "StepExecutor",
+    "StepRunner",
+    "TurnResult",
+]
