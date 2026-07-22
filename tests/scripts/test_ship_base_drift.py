@@ -46,6 +46,9 @@ from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_ship import (
+    _DIFF_FLAGS,
+    _DIFF_OPTS,
+    _GIT,
     _VERDICT,
     _fake_gh,
     _git,
@@ -374,6 +377,75 @@ def test_a_mode_only_diff_across_a_moved_base_refuses(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "identity that can be trusted" in result.stderr
+
+
+def _raw_statuses(repo: Path, base_sha: str, sha: str, *extra: str) -> list[str]:
+    """The status letters of the `--raw -z` listing the guard reads for a range.
+
+    Spelled with the scripts' own pinned options and flags, so what it reports is
+    what ``_range_has_pathless_entry`` would see. ``extra`` adds command-line
+    options that outrank the pinned config, which is how the copy-detecting
+    control below is expressed.
+    """
+    assert _GIT is not None
+    out = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [
+            _GIT,
+            *_DIFF_OPTS,
+            "diff",
+            *_DIFF_FLAGS,
+            "--raw",
+            "--abbrev=40",
+            "-z",
+            *extra,
+            f"{base_sha}...{sha}",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    # ":<oldmode> <newmode> <oldsha> <newsha> <status>", then the path(s) as
+    # separate NUL-terminated records.
+    return [rec.split(" ")[4] for rec in out.split("\0") if rec.startswith(":")]
+
+
+def test_the_pinned_options_cannot_emit_a_copy_status(tmp_path: Path) -> None:
+    """The guard's `C*` arm is unreachable here — checked, rather than argued.
+
+    ``_range_has_pathless_entry`` advances three fields for a status matching
+    `R*` **or** `C*`, but both scripts pin `-c diff.renames=true`, which enables
+    rename detection only; copy detection needs `-C`/`--find-copies-harder` or
+    `diff.renames=copies`. So no listing the guard can read carries a `C`, and
+    the arm is defence against a future re-pin rather than a live branch (issue
+    #213).
+
+    The arm stays: its safety property is the `old == new` blob identity, which
+    holds whatever letter git chooses, and it would be live again the moment the
+    pinned set gained copy detection. What this pins is therefore the
+    unreachability itself, against a commit git *would* classify as a copy —
+    asserted first, so the pin is measured against a fixture known to be
+    copy-shaped rather than against one git had nothing to say about.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "reset", "-q", "--hard", "main")
+    (repo / "notes" / "copy.md").write_text((repo / "notes" / "thing.md").read_text())
+    _git(repo, "add", "notes/copy.md")
+    _git(repo, "commit", "-qm", "copy only")
+    sha = _git(repo, "rev-parse", "HEAD")
+    base = _git(repo, "rev-parse", "HEAD~1")
+
+    guard = (Path(__file__).parents[2] / "scripts" / "ship.sh").read_text()
+    assert "R* | C*)" in guard, "the arm this test pins as unreachable is gone"
+
+    assert any(
+        s.startswith("C") for s in _raw_statuses(repo, base, sha, "-C", "--find-copies-harder")
+    ), "the fixture is not copy-shaped, so the pinned run below would prove nothing"
+
+    assert not any(s.startswith("C") for s in _raw_statuses(repo, base, sha)), (
+        "the pinned options emitted a copy status; the guard's C* arm is reachable"
+    )
 
 
 def test_an_artifact_predating_the_patch_id_field_refuses(tmp_path: Path) -> None:
