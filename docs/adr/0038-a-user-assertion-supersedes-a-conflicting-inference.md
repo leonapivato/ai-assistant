@@ -58,14 +58,13 @@ We will make a user-asserted proposal that conflicts with a *derived* record
 (§2a fixes which sources those are) return `MERGE` into that record, rather than
 `ACCEPT` beside it. Concretely, via the machinery that already exists:
 
-- the corrected content and the `USER_ASSERTED` provenance are written **at the
-  stale record's id**, so exactly one record survives and the wrong belief is
-  off the read path immediately;
-- `Provenance.evidence` is unioned by `MemoryIngestor._merge`, so the trail that
-  produced the inference is retained even though its text is not;
+- the correction is written **at the stale record's id**, so exactly one record
+  survives and the wrong belief is off the read path immediately;
 - `confidence` becomes 1.0 and `source` becomes `USER_ASSERTED` — the record
   moves from the user *model* into the user *profile* (ADR-0005 §2), which is
-  the correct classification once the user has stated it.
+  the correct classification once the user has stated it;
+- **nothing else of the overturned record is carried across** — see §1a, which
+  is why supersession does not reuse `MemoryIngestor._merge`.
 
 **We decided against three alternatives.**
 
@@ -75,14 +74,50 @@ We will make a user-asserted proposal that conflicts with a *derived* record
   true" — `expires_at` is a *retention* deadline (ADR-0004 §6) and overloading it
   would conflate a privacy obligation with a truth claim. Building the
   representation is a `core` change, out of this lane.
-- **Delete the stale record.** Strictly worse than merging over it: same loss of
-  the old text, and it also discards the evidence list and the record id that
-  anything holding a reference would use.
+- **Delete the stale record.** Strictly worse than superseding it: the same loss
+  of the old text, and it also discards the record id that anything holding a
+  reference would use.
 - **`ASK_USER` on every assertion-versus-inference conflict.** Safe, and wrong
   for the product: the user has *just told us*. Turning a correction into a
   question is the interaction that makes an assistant feel like it does not
   listen, and it would fire on the common benign case where the "conflict" is
   the user restating something we had merely guessed.
+
+### 1a. A correction does not inherit the evidence of the belief it overturns
+
+Supersession does **not** route through `MemoryIngestor._merge`, and this is the
+part of §1 most likely to be got wrong by someone reaching for the nearest
+existing helper.
+
+`_merge` unions `Provenance.evidence` and takes the maximum `confidence`,
+because it was written for records that **agree** — its own docstring says a
+merge "strengthens rather than weakens what is known." That is reinforcement,
+and supersession is its opposite: the incoming assertion was paired with the
+target precisely because they *contradict*.
+
+ADR-0005 §2 defines `evidence` as references **supporting** the record, and
+ADR-0005's Consequences make it the field callers use to "explain *why* a memory
+exists." So unioning is not a harmless carry-over here. Correct an inferred
+"prefers mornings" — evidence `["morning-event"]` — to "prefers afternoons", and
+the union attaches the observation that produced the *wrong* belief as
+justification for the right one. That is a fabricated warrant, and it is worse
+than the stale record this ADR exists to remove: a stale record is at least
+honestly attributed.
+
+So supersession takes its own path. The superseding record is the incoming
+record rehomed onto the target's id, and nothing else: **a user's assertion is
+its own warrant and does not borrow the support of the belief it overturns.**
+`_merge` keeps its reinforcement-only semantics and now documents that
+precondition, and `MemoryIngestor` picks between the two by reading the pair's
+provenance — a `USER_ASSERTED` record landing on a derived one — rather than by
+the ruling, since `MemoryDecisionKind` has one `MERGE` for both relations and
+splitting it would be a `core` change.
+
+**Discarding is not the same as preserving.** Keeping the displaced evidence as
+*history* — "this is what we once believed, and why" — is a legitimate goal and
+the right one; it simply is not this field's job, and the representation for it
+is what issue #112 proposes. Until that exists the honest choice is to drop the
+evidence rather than to relabel it as support for a claim it never supported.
 
 ### 2. The error we choose: over-supersede inferences, never destroy an assertion
 
@@ -175,10 +210,20 @@ to resolve properly. Filed as issue #245.
 ### 6. Interaction with issue #112 (bi-temporal validity)
 
 Recorded rather than decided. Bi-temporality would keep §1's overwritten text on
-disk with a closed validity window instead of losing it, and would give §5 a
-principled answer. **This decision does not require it** — merging over the
-stale record removes the wrong belief from the read path today, which is the
-defect — and it does not foreclose it: when #112 lands, §1's `MERGE` becomes the
+disk with a closed validity window instead of losing it, would give §1a's
+displaced evidence a home that is *history* rather than forged support, would
+let §2a supersede an `EXTERNAL` record without inheriting its key, and would give
+§5 a principled answer. It is the right answer to four of this ADR's five
+compromises, which is worth saying plainly.
+
+**This decision still does not require it.** Superseding the stale record
+removes the wrong belief from the read path today, which is the defect issue #38
+names, and every compromise above degrades to *less capability*, never to
+incorrectness — the one case where it would have degraded to incorrectness, a
+correction wearing the evidence of what it overturned, is closed in §1a by
+discarding rather than by waiting for #112.
+
+Nor does it foreclose #112: when that lands, §1's supersession becomes the
 natural place to close the target's window, and the rule ordering here is
 unchanged by that.
 
@@ -201,6 +246,16 @@ unchanged by that.
   either a lock or a compare-and-swap on `MemoryStore` — but recorded as issue
   #248 rather than left implicit, because §3's guarantee is about the *ruling*
   and does not survive a lost update.
+- **`MERGE` now means two different things at the ingestor, told apart by
+  provenance.** Reinforcement keeps `_merge`; contradiction takes `_supersede`
+  (§1a). The cost is a second fold path and a precondition on `_merge` that a
+  reader must respect; the benefit is that neither path silently does the
+  other's job. If `MemoryDecisionKind` ever gains an invalidation ruling
+  (issue #112), that discrimination moves back onto the decision where it
+  belongs and this inference disappears.
+- **A correction loses the overturned belief's evidence outright**, because
+  there is nowhere honest to keep it (§1a). This is a real loss of audit trail,
+  chosen over a false one, and it is the first thing #112 should give back.
 - **`conflict_threshold` gets sharper teeth.** It already gated a merge; it now
   gates a merge triggered by the highest-trust source in the system. Lowering it
   is no longer only a precision/recall trade on advisory conflicts.
@@ -208,7 +263,7 @@ unchanged by that.
   asserts no particular ruling — it names issue #38 as the reason — so this
   change lands entirely in `DefaultMemoryPolicy` and its own tests. Any other
   implementation is free to rule differently.
-- **Revisit when** issue #112 ratifies a validity window (§1 and §5 both change
-  shape), when conflict detection becomes contradiction detection rather than
+- **Revisit when** issue #112 ratifies a validity window (§1, §1a, §2a and §5 all
+  change shape), when conflict detection becomes contradiction detection rather than
   similarity (§2's error choice is then re-argued from a better signal), or if
   §4's single-target limit proves to strand stale records in practice.

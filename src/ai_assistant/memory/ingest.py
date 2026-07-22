@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
+    MemorySource,
     Provenance,
 )
 
@@ -82,11 +83,55 @@ def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
         raise ValueError(msg)
 
 
+def _overturns(target: MemoryRecord, incoming: MemoryRecord) -> bool:
+    """Whether folding ``incoming`` into ``target`` overturns it rather than reinforcing it.
+
+    A user assertion landing on a belief we derived is a *contradiction* — the
+    two records were judged to conflict, and the user is telling us the derived
+    one is wrong (ADR-0038 §1). Every other merge is reinforcement: two readings
+    of the same belief, arriving from comparable sources.
+
+    Read off the records rather than the ruling, because ``MemoryDecisionKind``
+    has one ``MERGE`` for both relations and distinguishing them in ``core``
+    would be a contract change. That is sound regardless of which policy ruled:
+    the relation is a property of the two records' provenance, not of the
+    reasoning that paired them.
+    """
+    return (
+        incoming.provenance.source is MemorySource.USER_ASSERTED
+        and target.provenance.source is not MemorySource.USER_ASSERTED
+    )
+
+
+def _supersede(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+    """Replace ``target`` with ``incoming``, keeping only the target's id.
+
+    Nothing of the overturned belief is carried onto the record that overturns
+    it — least of all its ``evidence``. ADR-0005 §2 defines that field as
+    references *supporting* the record, so unioning the contradicted record's
+    evidence into a correction would attach the observations that produced the
+    wrong belief as justification for the right one: a fabricated warrant in the
+    one field callers use to explain why a memory exists (ADR-0038 §1a).
+
+    A user's assertion is its own warrant and needs no borrowed support, so the
+    superseding record is simply ``incoming`` — its provenance is already
+    exactly right — rehomed onto the id the stale record occupied. Preserving
+    the displaced evidence as *history* is a different thing, and needs the
+    representation issue #112 proposes rather than this field.
+    """
+    return incoming.model_copy(update={"id": target.id})
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
     Newer content wins; evidence is unioned and confidence taken as the maximum,
     so a merge strengthens rather than weakens what is known.
+
+    **Reinforcement only.** Both halves of that — the union and the maximum —
+    assume the two records *agree*, so this must not be used where ``incoming``
+    contradicts ``target``: see :func:`_overturns`, which routes that case to
+    :func:`_supersede` instead.
     """
     provenance = Provenance(
         source=incoming.provenance.source,
@@ -189,7 +234,8 @@ class MemoryIngestor:
                     # merge was meant to prevent, while reporting success.
                     msg = f"MERGE target {decision.merge_into!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
-                return await self._store.add(_merge(target, proposed))
+                fold = _supersede if _overturns(target, proposed) else _merge
+                return await self._store.add(fold(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 
