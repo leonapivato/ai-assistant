@@ -170,12 +170,30 @@ operator concern, and operators read logs.
 **The log records each failure's class, never its message.** Provider error text
 routinely quotes the offending request, so `str(exc)` is vendor- and
 attacker-controlled text that can carry a prompt — Tier 1 data that ADR-0004 §5
-forbids in a log. The class name is enough to diagnose which route failed and
-why, and cannot carry content by construction. This is fail-closed *at the call
-site* rather than relying on the redaction processor, which matters because that
-net is key-based and cannot catch this case at all — an `error` key looks
-innocuous, so nothing downstream would flag it. The full message still reaches
-the caller on the raised exception, which is not a log.
+forbids in a log. The class *name* is not safe by construction either: a route
+may be any `ModelProvider`, so `type(exc).__name__` is provider-controlled text,
+the same problem §2 worked through for route labels. The realistic version is
+duller than a spoof — a provider that names its exception after the tenant,
+customer, or record it failed on.
+
+So the router never logs the raised class's own name. It maps each failure
+through **this project's own taxonomy**: the nearest ancestor in the exception's
+MRO that is one of our `ModelError` subclasses, matched by **object identity**
+against a set frozen at import (`_TAXONOMY` and `_classify` in
+`models/routing.py`). Diagnostic value survives — a third-party
+`ProviderQuotaError(ModelRateLimitError)` still logs as `ModelRateLimitError` —
+while the emitted string can only ever be a name we wrote. Identity, not
+`__module__`: an earlier version compared modules, and a class can simply claim
+one, so `type("PATIENT_SSN_...", (ModelRateLimitError,), {"__module__":
+"ai_assistant.core.errors"})` passed that check and had its name logged.
+**It is the taxonomy mapping, not the fact that the string is a class name, that
+makes what reaches the log content-free; removing it reopens the leak.**
+
+That mapping is what makes this fail-closed *at the call site* rather than
+relying on the redaction processor, which matters because that net is key-based
+and cannot catch this case at all — an `error` key looks innocuous, so nothing
+downstream would flag it. The full message still reaches the caller on the raised
+exception, which is not a log.
 
 What is guaranteed of the re-raised failure is its **identity, type, message and
 `__cause__`** — deliberately *not* its traceback. Propagating through the router
@@ -261,9 +279,12 @@ described the risk without constraining anything.
   pipeline — which is the moment to re-read them, not merge time.
 - **A dead primary is re-tried on every request** (§2) — bounded by that route's
   own deadline, but a real per-request latency cost until circuit breaking lands.
-- **Failures are noisier to read.** An exhausted-routes error carries every
-  candidate's failure. Deliberate: the alternative is knowing only that "the
-  model failed" while three different causes hide behind it.
+- **Failures are noisier to read, and the aggregate lives in the log, not on the
+  exception.** An exhausted-routes error *is* the last candidate's failure,
+  re-raised untouched (§5); every candidate and why it failed is logged
+  alongside it. So a caller inspecting only the exception sees one cause where
+  there were several, and an operator reading the log sees all of them.
+  Deliberate: the aggregate is state the router owns, and the exception is not.
 - **Revisit when** cost/latency data exists (turning static order into real
   ranking), or when a deployment runs enough traffic that re-probing a dead
   primary on every request becomes the dominant cost.
