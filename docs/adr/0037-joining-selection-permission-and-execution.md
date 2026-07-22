@@ -226,17 +226,28 @@ that a silent, automatic action can still be correlated with its authorisation �
 and the second unanswerable for good. So `_record` returns what `get` gives back,
 and no branch sees the object it wrote.
 
-**The subject is compared on every branch too, not left to `ToolCall`.** That
-validator runs `authorises`, which compares the tool, the digest and the step —
-but a `ToolCall` exists only where the ruling was `ALLOW`, so a trail handing
-back a record with the right id and the wrong *action* would be caught for an
-approval and waved through for a refusal or a question. Both consequences are as
-durable as the approval's: a `DENY` skips the planned step with an
-`approval_ref` whose record describes something else, and a `CONFIRM` parks the
-step while handing out a confirmation about another tool, which §4's parked check
-then refuses for ever — a step nobody can answer. So `_record` compares the
-subject for every outcome, and `ToolCall`'s check becomes the type defending its
-own invariant rather than this stage's only guard.
+**And what comes back must *equal* what was written — the whole record, not its
+subject.** Comparing the tool, the digest and the step is the obvious check and
+it is the wrong one: it leaves `ruling` unexamined, so a trail returning a
+same-subject record with the outcome flipped has this stage act on an answer the
+policy never gave. A `DENY` read back as an `ALLOW` runs a side-effecting tool
+the user's policy refused; an `ALLOW` read back as a `DENY` writes a durable
+refusal that never happened. Equality is also the simpler statement of what this
+path is for — the trail is holding what was decided — and it is total over the
+fields, so a field added to `PermissionDecision` later is covered without anyone
+remembering to extend a list. It costs nothing for a conforming trail: ADR-0021
+§4 requires a decision to survive a `model_dump(mode="json")` round trip and the
+shared suite asserts it, which is exactly the claim that the stored form reloads
+equal.
+
+Leaving any of this to `ToolCall` would not do. That validator runs `authorises`,
+which compares the subject and requires an `ALLOW` — but a `ToolCall` exists only
+where the ruling *was* `ALLOW`, so every check it makes is one a refusal or a
+question never reaches, and the consequences there are just as durable: a `DENY`
+skipping the planned step with an `approval_ref` whose record describes something
+else, or a `CONFIRM` parking the step while handing out a confirmation about
+another tool, which §4's parked check then refuses for ever. `ToolCall`'s check
+stays as the type defending its own invariant, not as this stage's guard.
 
 **And the branch reads the *recorded* ruling, not the policy's own.** The
 decision deep-copies the ruling (ADR-0021 §1) and the trail round-trips it, but
