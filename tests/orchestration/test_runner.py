@@ -46,7 +46,7 @@ from ai_assistant.orchestration import Disposition, StepExecutor, StepRunner
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore, FakeToolInvoker
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ExecutionState, StepExecution
@@ -243,18 +243,42 @@ class TurncoatPolicy(FakeActionPolicy):
         self.issued.__dict__["outcome"] = PermissionOutcome.DENY
 
 
+class RetentivePolicy(FakeActionPolicy):
+    """A policy that keeps the request it was handed and rewrites it later.
+
+    ``decide`` receives the caller's ``ActionRequest``; nothing stops a policy
+    holding on to it, and ``frozen=True`` does not stop ``__dict__``
+    (ADR-0018 §3).
+    """
+
+    def __init__(self) -> None:
+        """Allow everything, and remember what was asked."""
+        super().__init__(confirm_at=None)
+        self.held: ActionRequest | None = None
+
+    async def decide(self, request: ActionRequest) -> PermissionRuling:
+        """Rule as the fake does, keeping the request."""
+        self.held = request
+        return await super().decide(request)
+
+    def rewrite(self, definition: ToolDefinition) -> None:
+        """Point the retained request at another declaration."""
+        assert self.held is not None
+        self.held.__dict__["tool"] = definition
+
+
 class TurncoatTrail(FakeAuditTrail):
     """A trail that lets the policy defect while the write is in flight."""
 
-    def __init__(self, policy: TurncoatPolicy) -> None:
-        """Give ``policy`` its chance mid-``record``."""
+    def __init__(self, defect: Callable[[], None]) -> None:
+        """Run ``defect`` mid-``record``, as an interleaving would."""
         super().__init__()
-        self._policy = policy
+        self._defect = defect
 
     async def record(self, decision: PermissionDecision) -> str:
         """Append, giving the policy the await it needs to change its mind."""
         recorded = await super().record(decision)
-        self._policy.defect()
+        self._defect()
         return recorded
 
 
@@ -940,7 +964,7 @@ async def test_a_ruling_mutated_while_it_is_recorded_does_not_steer_the_outcome(
     ``ALLOW`` recorded and a ``DENY`` committed against it.
     """
     policy = TurncoatPolicy()
-    harness = Harness(tools=(tool(),), policy=policy, trail=TurncoatTrail(policy))
+    harness = Harness(tools=(tool(),), policy=policy, trail=TurncoatTrail(policy.defect))
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
@@ -996,6 +1020,35 @@ async def test_a_confirmation_recorded_about_another_action_is_refused() -> None
 
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
+
+
+async def test_a_request_rewritten_while_it_is_recorded_does_not_fail_the_turn() -> None:
+    """The comparison is against what was written, over a private copy.
+
+    A policy may keep the ``ActionRequest`` it was handed and rewrite it through
+    ``__dict__`` during the trail's await. Nothing unsafe follows — the decision
+    transcribed its subject first, so a mismatch fails closed — but failing here
+    would refuse a good action *after* its decision is durable, leaving an
+    un-erasable orphan in an append-only store (ADR-0021 §4).
+    """
+    policy = RetentivePolicy()
+    harness = Harness(
+        tools=(tool(),),
+        policy=policy,
+        trail=TurncoatTrail(lambda: policy.rewrite(tool("somebody-else"))),
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert result.tool_id == "smtp"
+    recorded = await harness.trail.get(str(result.decision_id))
+    assert recorded is not None
+    assert recorded.tool.id == "smtp"
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.SUCCEEDED
 
 
 # --- run() only enters at PENDING (ADR-0037 §6) --------------------------

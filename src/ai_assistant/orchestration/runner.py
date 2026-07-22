@@ -91,7 +91,36 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _detached(step: PlanStep) -> PlanStep:
+def _detached_request(request: ActionRequest) -> ActionRequest:
+    """Take a private copy of the request once the policy has seen it.
+
+    **``decide`` is handed the request, and a policy may keep it.** From the
+    moment it returns, the object this stage goes on using is one another
+    subsystem holds a reference to, across the ``await`` on
+    ``AuditTrail.record`` — and ``frozen=True`` refuses ``request.tool = ...``
+    while doing nothing about ``request.__dict__`` (ADR-0018 §3). Everything
+    afterwards reads the request again: the subject comparison in
+    :meth:`StepRunner._record`, and ``ToolCall``'s own ``authorises``.
+
+    Nothing unsafe follows from the mutation — the decision transcribed its
+    subject *before* the await (``PermissionDecision.from_request``), so a
+    rewritten request no longer matches it and every comparison fails closed.
+    What follows is worse than useless: a turn that refuses a perfectly good
+    action **after** its decision is durable, leaving an entry in an append-only
+    Tier 1 store that no transition corresponds to and ADR-0021 §4 offers no way
+    to erase. Copying here means the comparisons are made against a value nobody
+    else can reach, so they answer the question they are actually asking.
+
+    Raises:
+        ValueError: If the request does not survive revalidation. Not reachable
+            through the constructed value — it was valid a moment ago — so this
+            is the mutation itself surfacing, and it surfaces before anything is
+            recorded.
+    """
+    return ActionRequest.model_validate(request.model_dump())
+
+
+def _detached_step(step: PlanStep) -> PlanStep:
     """Revalidate and detach the stored step before anything durable names it.
 
     **The step is read across four awaits** — the registry lookup, the policy's
@@ -301,6 +330,9 @@ class StepRunner:
         tool = candidates[0]
         request = ActionRequest(tool=tool, parameters=step.parameters, step_id=step.id)
         ruling = await self._policy.decide(request)
+        # The policy has now seen the request and may have kept it; everything
+        # after this reads a copy nothing else can reach (`_detached_request`).
+        request = _detached_request(request)
         decision = await self._record(request, ruling)
 
         # Branch on the *recorded* ruling, never the policy's own object. The
@@ -404,6 +436,7 @@ class StepRunner:
 
         request = ActionRequest(tool=confirmed.tool, parameters=step.parameters, step_id=step.id)
         ruling = await self._policy.resolve(confirmed, approved=approved)
+        request = _detached_request(request)
         decision = await self._record(request, ruling, resolves=confirmed.id)
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(state, step, request, decision, timeout=timeout)
@@ -534,9 +567,9 @@ class StepRunner:
         await self._trail.record(decision)
         recorded = await self._recorded(decision.id)
         if (
-            recorded.tool != request.tool
-            or recorded.parameters_digest != request.parameters_digest
-            or recorded.step_id != request.step_id
+            recorded.tool != decision.tool
+            or recorded.parameters_digest != decision.parameters_digest
+            or recorded.step_id != decision.step_id
         ):
             msg = (
                 f"the trail's copy of decision {recorded.id!r} rules on a different action than "
@@ -688,7 +721,7 @@ class StepRunner:
 
         The execution names its plan and the plan owns the steps, so this is the
         one place the capability and the parameters can come from without a
-        caller's word for it. Detached on the way out (:func:`_detached`), since
+        caller's word for it. Detached on the way out (:func:`_detached_step`), since
         ``PlanStore`` contracts no snapshot.
 
         ``opened`` is the *stored* execution (:meth:`_opened`), so the plan is
@@ -715,7 +748,7 @@ class StepRunner:
         if planned is None:
             msg = f"plan {plan.id!r} has no step {step_id!r}"
             raise PlanningError(msg)
-        return _detached(planned)
+        return _detached_step(planned)
 
     # --- the dispositions -----------------------------------------------
 
