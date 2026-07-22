@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031
+- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032
 - Date: 2026-07-21
 - Amended: 2026-07-21 by ADR-0031 — the corrections first use found
   (PR #188). §4's interrupted-call rule gains a core home and is
@@ -39,6 +39,73 @@
   construct and must not grow; §4's "the seam therefore classifies on whether a
   cancellation was actually requested", which is the delta above rather than a
   boolean; and the Consequences' "seven".
+- Amended: 2026-07-22 by ADR-0032 — §3's "an exception escaping the tool
+  implementation becomes INTERNAL" now holds for every exception but one. A
+  ToolImplementation that can classify its own failure raises
+  ClassifiedToolError, an AssistantError in core/errors.py — deliberately not
+  under ToolError, whose branch holds seam faults an executor must never retry
+  — carrying a constructed ToolFailure and the keyword-only, undefaulted fact
+  effect_may_have_committed; invoke translates it into a ToolResult rather than
+  into INTERNAL. §3's message rule is unchanged and gains a second half: the
+  seam passes a raised ToolFailure through by value or discards it whole,
+  adding no rule of its own beyond the revalidation below — which applies
+  ToolFailure's own validators and is a no-op on any failure constructed
+  normally — and renders nothing derived from the exception — str(), repr(),
+  args, __cause__, __context__, __notes__ — into a message or a log. Kind is
+  what the tool knows; outcome stays the seam's ruling. The outcome is
+  INDETERMINATE when the tool reports the effect may have committed and the
+  registry's definition.interrupted_outcome is INDETERMINATE, and FAILED
+  otherwise, so a tool's report can only make an outcome more ignorant, never
+  less, and never reaches SUCCEEDED. TIMED_OUT is reserved to the seam: a
+  raised failure naming it is refused, the tool-authored ToolFailure discarded
+  whole for the seam's own INTERNAL, with effect_may_have_committed carried
+  through. CANCELLED is the integration's by ADR-0031 §3 and is accepted; every
+  other member is accepted as raised. §4's permission for a tool that can
+  establish it did not act to return FAILED with TIMED_OUT is withdrawn in its
+  kind and kept in its substance: the outcome no longer rides on the kind, so
+  such a tool reports effect_may_have_committed=False with an honest kind —
+  UNAVAILABLE for an upstream that did not answer — and §2's rule gives it the
+  FAILED that sentence was protecting, while TIMED_OUT keeps meaning that this
+  seam's deadline expired. §4's precedence gains a third rank below the two it
+  has — a pending cancellation, then this seam's expired deadline, then the
+  tool's classification — and §4's cancellation and expiry branches are
+  themselves unchanged: neither reads the carrier, and both discard it. The
+  postcondition ADR-0031 §2(b) states before a SUCCEEDED result is constructed
+  holds before any result is constructed, because reading the carrier is itself
+  tool-supplied code that can raise the cancellation delta after the handler's
+  first check. The carrier is revalidated before it is read, in ADR-0018 §4's
+  model_dump() then model_validate() idiom, because isinstance is not evidence
+  a pydantic model was validated — model_construct bypasses every validator —
+  and a carrier that is absent, is not a ToolFailure, or does not survive the
+  round-trip has its payload refused for the seam's own INTERNAL. The two
+  attributes are validated independently, so a bool that validates is honoured
+  under the outcome rule even when the payload was refused — the same
+  preservation §3 makes when it refuses a reserved kind — while a fact that is
+  absent or not a bool refuses the whole carrier for INTERNAL and FAILED, since
+  a carrier missing a required keyword-only argument never went through its
+  constructor and its kind would otherwise authorise a retry. Each defect
+  resolves toward retrying less and knowing less. Reading and revalidating the
+  carrier is itself guarded, since isinstance admits a subclass and both the
+  attribute access and model_dump() are then tool-supplied code: any Exception
+  they raise is INTERNAL, BaseException still propagates, and the seam's total
+  failure path contains no unguarded call into a tool. ToolImplementation's
+  signature does not move and its shape stays tools/-internal. The new core
+  surface is nine names, not eight.
+  Superseded sentences in ADR-0029, which stand in the document unedited: §3's
+  "An exception escaping the tool implementation becomes INTERNAL", which now
+  excepts a ClassifiedToolError carrying a ToolFailure; §4's "A tool that can
+  establish it did not act may return FAILED with TIMED_OUT", whose FAILED is
+  now reached by reporting effect_may_have_committed=False and whose TIMED_OUT
+  is refused to INTERNAL, that member being reserved to the seam — the clause
+  that follows it, "nothing can make it prove the converse", is unchanged and
+  is why the fact is required rather than defaulted; and the Consequences'
+  count of the new core surface, "seven" as ratified and "eight" as corrected
+  by ADR-0031's note above, now nine. §3's "What is raised instead:
+  ToolBindingError … It is the only error this ADR adds" is not superseded and
+  stays exactly true: ADR-0032 adds an error, ADR-0029 does not, and no
+  ClassifiedToolError ever escapes invoke. §3's "A message the seam generates
+  carries no content it did not author" is not superseded either — it binds the
+  seam's own messages, which are unchanged.
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
   the three constraints ADR-0016 §7 sets on this ADR (§1, §2, §6 below).

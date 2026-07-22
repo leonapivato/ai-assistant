@@ -1,6 +1,6 @@
 # 32. The failure transport at the tool seam
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-21
 - Decides what ADR-0031 §3 named and declined — issue #192. ADR-0029 §3
   ratified a vocabulary of eight `ToolFailureKind`s; six of them have no
