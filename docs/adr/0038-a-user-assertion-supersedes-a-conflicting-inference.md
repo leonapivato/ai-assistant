@@ -119,6 +119,54 @@ the right one; it simply is not this field's job, and the representation for it
 is what issue #112 proposes. Until that exists the honest choice is to drop the
 evidence rather than to relabel it as support for a claim it never supported.
 
+### 1b. This decision rests on a precondition the contract cannot express
+
+§1a has the ingestor decide *which relation a `MERGE` expresses* by reading the
+two records' provenance. That is not where the answer belongs. The only party
+that knows whether a merge reinforces or overturns is the policy that ruled, and
+`MemoryDecision` has no field in which to say it — one `MERGE` serves both
+relations. Both review personas identified this independently, and they are
+right.
+
+**So this decision is sound only while every `MemoryPolicy` that can reach the
+ingestor in production returns `MERGE` for a `USER_ASSERTED` proposal solely to
+mean supersession.** That is a real precondition of ADR-0038, not an incidental
+property of the code that implements it, and it is stated here so that a future
+policy author meets it as a constraint on their design rather than discovering
+it as data loss.
+
+Inside the quadrant that matters — asserted proposal, non-asserted target,
+ruling `MERGE` — **no rule available to `memory` can distinguish the two
+relations**, because the distinguishing fact lives in the policy and has no
+channel. Any implementation choice here picks one reading. Narrowing which
+sources are supersedable (§2a) moves the boundary; it does not remove the
+ambiguity, and a later attempt to fix this by narrowing further will not
+converge either.
+
+Two things make it acceptable to decide this inside the policy lane rather than
+stopping for the contract change:
+
+- **The misclassification is unreachable for every policy that exists.**
+  `DefaultMemoryPolicy` has exactly two `MERGE` sites, partitioned by whether
+  the proposal is user-asserted, so no ruling of its can be read the wrong way.
+- **The precondition is guarded rather than merely written down.**
+  `tests/memory/test_ingest.py` enumerates the `MemoryPolicy` implementations in
+  the `memory` subsystem and fails if any returns `MERGE` for an assertion onto
+  a record that is not `OBSERVED` or `INFERRED`. Writing the policy that would
+  trigger the loss therefore fails the gate, naming this section, instead of
+  silently destroying evidence at runtime.
+
+The guard is deliberately **not** in the `MemoryPolicy` conformance suite. A
+conformance suite is contract; the Protocol states no such obligation, so
+asserting it there would widen the contract without an ADR and would refuse a
+policy that genuinely conforms (issue #40). It is a precondition over what this
+repository ships, and it is tested as one.
+
+Issue #256 carries the removal: represent supersession on the decision itself —
+most likely folded into issue #112's invalidation ruling, which needs a ruling
+of its own regardless. When that lands, the inference in §1a and the guard here
+both go away, and the relation is read from the decision where it belongs.
+
 ### 2. The error we choose: over-supersede inferences, never destroy an assertion
 
 The conflict signal is topical, not contradictory, so both errors are live: a
@@ -256,6 +304,11 @@ unchanged by that.
 - **A correction loses the overturned belief's evidence outright**, because
   there is nowhere honest to keep it (§1a). This is a real loss of audit trail,
   chosen over a false one, and it is the first thing #112 should give back.
+- **Writing a new `MemoryPolicy` now carries a constraint that is not on the
+  Protocol** (§1b): its `MERGE` rulings for user-asserted proposals must mean
+  supersession. The gate enforces this for policies in the `memory` subsystem,
+  so the constraint is discovered at author time; it is still a seam that
+  should not exist, and issue #256 is what removes it.
 - **`conflict_threshold` gets sharper teeth.** It already gated a merge; it now
   gates a merge triggered by the highest-trust source in the system. Lowering it
   is no longer only a precision/recall trade on advisory conflicts.
@@ -263,7 +316,8 @@ unchanged by that.
   asserts no particular ruling — it names issue #38 as the reason — so this
   change lands entirely in `DefaultMemoryPolicy` and its own tests. Any other
   implementation is free to rule differently.
-- **Revisit when** issue #112 ratifies a validity window (§1, §1a, §2a and §5 all
-  change shape), when conflict detection becomes contradiction detection rather than
+- **Revisit when** issue #256 puts the reinforce/supersede distinction on the
+  decision contract (§1b's precondition and its guard both retire), when issue
+  #112 ratifies a validity window (§1, §1a, §2a and §5 all change shape), when conflict detection becomes contradiction detection rather than
   similarity (§2's error choice is then re-argued from a better signal), or if
   §4's single-target limit proves to strand stale records in practice.

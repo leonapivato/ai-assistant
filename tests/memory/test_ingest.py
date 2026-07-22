@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import pkgutil
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from importlib import import_module
+from itertools import product
 from typing import TYPE_CHECKING
 
 import pytest
 
+import ai_assistant.memory
 from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
     DataTier,
     MemoryDecision,
@@ -62,6 +67,17 @@ def _preference(
         content=content,
         preference=content,
         provenance=_prov(confidence, evidence, source=source),
+    )
+
+
+def _semantic_from(source: MemorySource, record_id: str, content: str) -> MemoryRecord:
+    """A semantic record from ``source``, at the confidence that source permits."""
+    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
+    return SemanticMemory(
+        id=record_id,
+        content=content,
+        fact=content,
+        provenance=_prov(confidence, source=source),
     )
 
 
@@ -202,6 +218,96 @@ async def test_a_correction_survives_the_next_external_re_sync() -> None:
     assert imported is not None
     assert imported.content == "user works from the london office"
     assert imported.provenance.source is MemorySource.EXTERNAL
+
+
+# --- ADR-0038 §1b: the precondition supersession rests on -------------------
+#
+# `MemoryIngestor` routes a `MERGE` to `_supersede` (discard the target's
+# evidence) or `_merge` (union it) by reading the pair's provenance, because
+# `MemoryDecisionKind` has one `MERGE` for both relations. That inference is
+# only sound while every policy that can reach the ingestor in production
+# returns `MERGE` for a `USER_ASSERTED` proposal *only* to mean supersession.
+# The checks below are what stop that precondition from being merely asserted.
+
+
+def _production_memory_policies() -> list[type[MemoryPolicy]]:
+    """Every ``MemoryPolicy`` implementation in the ``memory`` subsystem.
+
+    ``ai_assistant.testing.FakeMemoryPolicy`` is deliberately out of scope, and
+    not because it is inconvenient: it returns a *configured* ruling rather than
+    reasoning about the proposal, so its ``MERGE`` expresses no relation between
+    the records at all — there is nothing for this precondition to bind. It also
+    cannot reach the ingestor in production, which ``lint-imports`` enforces by
+    forbidding production code to import ``ai_assistant.testing``.
+    """
+    found: dict[str, type[MemoryPolicy]] = {}
+    package = ai_assistant.memory
+    for info in pkgutil.walk_packages(package.__path__, f"{package.__name__}."):
+        module = import_module(info.name)
+        for value in vars(module).values():
+            if (
+                isinstance(value, type)
+                and value.__module__.startswith(f"{package.__name__}.")
+                and issubclass(value, MemoryPolicy)
+            ):
+                found[f"{value.__module__}.{value.__qualname__}"] = value
+    return list(found.values())
+
+
+def test_the_policy_scan_actually_finds_the_shipped_policies() -> None:
+    # A discovery check that silently found nothing would pass forever, taking
+    # the precondition check below with it.
+    assert DefaultMemoryPolicy in _production_memory_policies()
+
+
+@pytest.mark.parametrize("policy_cls", _production_memory_policies(), ids=lambda cls: cls.__name__)
+async def test_a_shipped_policy_merges_an_assertion_only_into_a_derived_record(
+    policy_cls: type[MemoryPolicy],
+) -> None:
+    """No production policy may return ``MERGE`` for an assertion onto a non-derived record.
+
+    This is the guard on ADR-0038 §1b. ``_overturns`` reads a ``MERGE`` from a
+    ``USER_ASSERTED`` proposal as *supersession* and discards the target's
+    evidence, so a policy that used the same ruling to mean reinforcement — or
+    that named an ``EXTERNAL`` target, whose id is an integrating system's
+    idempotency key (§2a) — would have this ingestor silently destroy data.
+
+    Written over the shipped policies rather than added to
+    ``memory_policy_contract.py`` on purpose: a conformance suite *is* the
+    contract, and the ``MemoryPolicy`` Protocol states no such obligation, so
+    asserting it there would widen the contract without an ADR and would refuse
+    a policy that genuinely conforms (issue #40). Issue #256 is what moves this
+    onto the contract properly, at which point this check is redundant.
+    """
+    policy = policy_cls()
+    sources = list(MemorySource)
+    observed_a_superseding_merge = False
+
+    for proposal_source, *conflict_sources in product(sources, sources, sources):
+        proposed = _semantic_from(proposal_source, "new", "user prefers afternoon meetings")
+        conflicts = [
+            _semantic_from(source, f"c{index}", "user prefers morning meetings")
+            for index, source in enumerate(conflict_sources)
+        ]
+
+        decision = await policy.decide(_proposal(proposed), conflicts=conflicts)
+
+        if decision.kind is not MemoryDecisionKind.MERGE:
+            continue
+        target = next(c for c in conflicts if c.id == decision.merge_into)
+        if proposal_source is not MemorySource.USER_ASSERTED:
+            continue
+        observed_a_superseding_merge = True
+        assert target.provenance.source in {MemorySource.OBSERVED, MemorySource.INFERRED}, (
+            f"{policy_cls.__name__} merged a USER_ASSERTED proposal into a "
+            f"{target.provenance.source} record; MemoryIngestor would read that as "
+            f"supersession and discard the target's evidence (ADR-0038 §1b, issue #256)"
+        )
+
+    assert observed_a_superseding_merge, (
+        f"{policy_cls.__name__} never merged an assertion over a derived record in this "
+        "sweep, so the assertion above proved nothing — widen the sweep or drop the check"
+    )
 
 
 class _RecordingPolicy:
