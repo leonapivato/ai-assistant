@@ -117,14 +117,20 @@ run it, while the `ActionPlan` the execution belongs to went on recording an
 action nobody performed. Nothing downstream notices, because `PlanStore` accepts
 a transition by step id and version.
 
-**Which plan is read from the *stored* execution, not from the `ExecutionState`
-argument**, for the same reason one level up. Every write takes `state.id` and
-`state.version`, so trusting `state.plan_id` would let a hand-built state
-carrying execution A's id and version with execution B's `plan_id` have the gate
-rule on B's step while the claim, the invocation and the durable record all
-landed on A. The version stays the caller's, because that is what the
-compare-and-swap is for: a *stale* snapshot is the store's to reject, an
-*inconsistent* one is not, and only the second is a substitution.
+**The execution is loaded from the store, and the argument supplies exactly one
+field.** A caller's `ExecutionState` is a value it can build, so this stage
+splits it: everything it decides about *what has already happened* — which plan
+the step comes from, and whether a step is genuinely parked (§4) — is read from
+`PlanStore.get_execution(state.id)`, and the only thing taken from the argument
+is `version`, because that is the compare-and-swap token and the store is what
+adjudicates it.
+
+Trusting `state.plan_id` would have let a hand-built state carrying execution A's
+id and version with execution B's `plan_id` have the gate rule on B's step while
+the claim, the invocation and the durable record all landed on A. The tempting
+defence — "a snapshot that disagrees with the store is rejected by the commit" —
+is *false in general*, and §4 records where: it holds for a stale version and not
+for an inconsistent one, and only the second is a substitution.
 
 Naming the step removes the substitution
 rather than checking for it — the same move ADR-0021 §3 made when it took the
@@ -268,9 +274,21 @@ parked in execution A, replayed against execution B where the same step is still
 would run on an answer given about A's, while A stayed parked. Nothing
 downstream catches it, because the tool, the digest and the step id all match —
 it is the same step of the same plan. So `resume` requires the step to be
-`AWAITING_APPROVAL` **in the state it was handed**, bound to the confirmation's
-own tool. The residue is named rather than closed: two executions of one plan
-*both* parked on the same step are mutually substitutable, and closing that
+`AWAITING_APPROVAL` **in the stored execution**, bound to the confirmation's own
+tool.
+
+**Checking the caller's `ExecutionState` instead would not have worked, and the
+reason is specific rather than cautious.** The natural defence is that a snapshot
+disagreeing with the store is rejected by the commit it is heading for — and that
+is false for exactly this transition. If the stored step is `PENDING`, the claim
+`StepExecutor` makes is `PENDING → RUNNING`, which ADR-0014 §4 permits outright;
+a `state` forged to read `AWAITING_APPROVAL` would clear the check and then be
+claimed at its own real version. The transition graph rejects a *stale* version,
+not an *inconsistent* snapshot, and only the second is a substitution. This is
+the general rule §2 states, in the one place where getting it wrong runs a tool.
+
+The residue is named rather than closed: two executions of one plan *both*
+genuinely parked on the same step are mutually substitutable, and closing that
 needs an execution id on the permission record, which is a `core` change with
 its own ADR (#253). The trail's single-resolution index bounds it — one
 confirmation authorises one resolution — so what is at stake is which of two
