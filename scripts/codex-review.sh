@@ -155,9 +155,22 @@ fi
 # recording run and the ship run reorders, merges or decorates the rendered
 # patch, so the two identities differ and the artifact is REFUSED — one spurious
 # round, which is the cost this decision removes, not a review reused for content
-# nobody read. The unsafe direction would be an option that strips information
-# until two different patches collide, and whitespace is the case that does: §2
-# closes it by fixing the `patch-id` flag, not by config.
+# nobody read.
+#
+# The dangerous direction is an option that STRIPS information until two
+# different patches collide, and there are exactly two, both closed by a flag
+# rather than by config — config is what an option like this is usually set from,
+# and a `-c` can be outranked by a narrower one:
+#
+#   whitespace       — closed by `patch-id --verbatim` over `--stable` (§2);
+#   submodules       — closed by `--ignore-submodules=none`. Under
+#                      `diff.ignoreSubmodules=all`, or a narrower
+#                      `submodule.<name>.ignore=all` that outranks it, a changed
+#                      gitlink vanishes from the patch, from `--raw`, and from
+#                      the `--name-status` listing — so an identity would omit a
+#                      submodule bump the reviewer never saw, and §4 would publish
+#                      as "whole" a drift set missing one. The command-line flag
+#                      is used because it outranks both config forms.
 _diff_opts=(
     -c core.quotePath=false
     -c color.ui=false
@@ -194,7 +207,7 @@ _range_has_pathless_entry() {
     local -a rec=()
     local raw
     raw="$(mktemp -t patch-raw.XXXXXX)" || return 0
-    if ! git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv --raw --abbrev=40 -z \
+    if ! git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv --raw --abbrev=40 -z \
         "$1...$2" >"$raw"; then
         rm -f "$raw"
         return 0
@@ -241,12 +254,12 @@ patch_identity() {
     if _range_has_pathless_entry "$1" "$2"; then
         return 0
     fi
-    git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv "$1...$2" |
+    git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv "$1...$2" |
         git patch-id --verbatim | awk 'NR == 1 { print $1 }' || return 0
 }
 # <<< shared-patch-identity
 
-diff="$(git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv "${base_sha}...${sha}")"
+diff="$(git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv "${base_sha}...${sha}")"
 if [[ -z "$diff" ]]; then
     echo "no changes between ${base_sha} and ${sha} to review" >&2
     exit 0
@@ -761,7 +774,7 @@ _effective_sandbox() {
 # Classification is then a glob rather than a regex, since there is no longer a
 # text stream to match against.
 mapfile -d '' -t changed_paths < <(
-    git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv -z --name-only "${base_sha}...${sha}"
+    git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv -z --name-only "${base_sha}...${sha}"
 )
 
 # One list item per path. Reading NUL-delimited keeps a path with a newline in

@@ -178,9 +178,22 @@ head_tree="$(git rev-parse "${sha}^{tree}")"
 # recording run and the ship run reorders, merges or decorates the rendered
 # patch, so the two identities differ and the artifact is REFUSED — one spurious
 # round, which is the cost this decision removes, not a review reused for content
-# nobody read. The unsafe direction would be an option that strips information
-# until two different patches collide, and whitespace is the case that does: §2
-# closes it by fixing the `patch-id` flag, not by config.
+# nobody read.
+#
+# The dangerous direction is an option that STRIPS information until two
+# different patches collide, and there are exactly two, both closed by a flag
+# rather than by config — config is what an option like this is usually set from,
+# and a `-c` can be outranked by a narrower one:
+#
+#   whitespace       — closed by `patch-id --verbatim` over `--stable` (§2);
+#   submodules       — closed by `--ignore-submodules=none`. Under
+#                      `diff.ignoreSubmodules=all`, or a narrower
+#                      `submodule.<name>.ignore=all` that outranks it, a changed
+#                      gitlink vanishes from the patch, from `--raw`, and from
+#                      the `--name-status` listing — so an identity would omit a
+#                      submodule bump the reviewer never saw, and §4 would publish
+#                      as "whole" a drift set missing one. The command-line flag
+#                      is used because it outranks both config forms.
 _diff_opts=(
     -c core.quotePath=false
     -c color.ui=false
@@ -217,7 +230,7 @@ _range_has_pathless_entry() {
     local -a rec=()
     local raw
     raw="$(mktemp -t patch-raw.XXXXXX)" || return 0
-    if ! git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv --raw --abbrev=40 -z \
+    if ! git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv --raw --abbrev=40 -z \
         "$1...$2" >"$raw"; then
         rm -f "$raw"
         return 0
@@ -264,7 +277,7 @@ patch_identity() {
     if _range_has_pathless_entry "$1" "$2"; then
         return 0
     fi
-    git "${_diff_opts[@]}" diff --no-color --no-ext-diff --no-textconv "$1...$2" |
+    git "${_diff_opts[@]}" diff --no-color --ignore-submodules=none --no-ext-diff --no-textconv "$1...$2" |
         git patch-id --verbatim | awk 'NR == 1 { print $1 }' || return 0
 }
 # <<< shared-patch-identity
@@ -333,7 +346,7 @@ _read_base_move() {
     local listing
     listing="$(mktemp -t ship-drift.XXXXXX)" || return 1
     if ! git -c core.quotePath=false -c color.ui=false -c diff.renameLimit=4000 \
-        diff --no-color --no-ext-diff --name-status -M -z "$1" "$2" >"$listing"; then
+        diff --no-color --ignore-submodules=none --no-ext-diff --name-status -M -z "$1" "$2" >"$listing"; then
         rm -f "$listing"
         return 1
     fi
@@ -475,7 +488,19 @@ _render_drift() {
 # one outcome it must not have: here the file set is not context for a decision,
 # it IS the decision, so an omitted tail is exactly where the contradicting
 # `docs/adr/` entry hides.
+#
+# Validated before any arithmetic reads it. `[[ x -gt "$b" ]]` and `$(( ))`
+# evaluate their operand as an ARITHMETIC EXPRESSION, not as a number, so an
+# override of `not-a-number` or `1/0` would abort mid-script in the shell rather
+# than refuse the ship, and a negative one would silently make path (b)
+# unavailable under a message blaming the drift set. An operator-supplied value
+# gets an operator-legible error.
 drift_budget="${CODEX_SHIP_DRIFT_BUDGET:-20000}"
+if [[ ! "$drift_budget" =~ ^[0-9]{1,9}$ ]]; then
+    die "CODEX_SHIP_DRIFT_BUDGET must be a non-negative integer of at most 9 digits,
+     not '${drift_budget}' — it bounds the bytes ADR-0027 §4's drift record may
+     occupy in the ship comment"
+fi
 
 # Evaluated once per recorded base and cached: several artifacts commonly share
 # one. `drift_verdict` is `ok`, `floor`, `toobig`, or `unreadable`.
