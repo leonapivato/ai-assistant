@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     RiskLevel,
     ToolCost,
     ToolDefinition,
+    ToolOutcome,
 )
 
 if TYPE_CHECKING:
@@ -337,6 +338,61 @@ def test_a_keyed_window_must_be_strictly_positive(window: timedelta) -> None:
 def test_an_unkeyed_tool_carries_no_window(guarantee: Idempotency) -> None:
     with pytest.raises(ValidationError, match="only valid for a KEYED"):
         _definition(idempotency=guarantee, idempotency_window=timedelta(hours=1))
+
+
+# --- the interrupted-call rule (ADR-0029 §4, homed by ADR-0031 §1) ------
+
+
+@pytest.mark.parametrize(
+    ("side_effecting", "guarantee", "expected"),
+    [
+        (False, Idempotency.NONE, ToolOutcome.FAILED),
+        (False, Idempotency.NATURAL, ToolOutcome.FAILED),
+        (False, Idempotency.KEYED, ToolOutcome.FAILED),
+        (True, Idempotency.NONE, ToolOutcome.INDETERMINATE),
+        (True, Idempotency.NATURAL, ToolOutcome.FAILED),
+        (True, Idempotency.KEYED, ToolOutcome.INDETERMINATE),
+    ],
+)
+def test_interrupted_outcome_is_exhaustive_over_both_fields(
+    side_effecting: bool,
+    guarantee: Idempotency,
+    expected: ToolOutcome,
+) -> None:
+    """All six combinations, asserted rather than sampled (ADR-0031 §8).
+
+    Six and not four: the rule reads ``NATURAL`` specially, so ``NONE`` and
+    ``KEYED`` are an equivalence class the *rule* creates and a table must not
+    assume. A four-case table sampling one of them would pass against an
+    implementation that classified the other wrongly.
+    """
+    definition = _definition(
+        side_effecting=side_effecting,
+        idempotency=guarantee,
+        idempotency_window=timedelta(hours=1) if guarantee is Idempotency.KEYED else None,
+        # A tool with no side effect discloses nothing and has nothing to
+        # reverse — the other two invariants this table has to stay inside.
+        discloses=() if not side_effecting else (DataTier.PERSONAL,),
+        reversibility=Reversibility.IRREVERSIBLE if side_effecting else Reversibility.REVERSIBLE,
+    )
+
+    assert definition.interrupted_outcome is expected
+
+
+def test_interrupted_outcome_stays_out_of_model_dump() -> None:
+    """A plain ``property``, never a ``computed_field`` (ADR-0031 §1).
+
+    The distinction is load-bearing rather than stylistic: a computed field
+    enters ``model_dump()``, and ADR-0018 §4's registration rebuild is
+    ``model_validate(tool.model_dump())`` against ``extra="forbid"`` — so every
+    registration would fail. This asserts the round-trip that rebuild performs.
+    """
+    definition = _definition()
+
+    dumped = definition.model_dump()
+
+    assert "interrupted_outcome" not in dumped
+    assert ToolDefinition.model_validate(dumped) == definition
 
 
 # --- latency ------------------------------------------------------------

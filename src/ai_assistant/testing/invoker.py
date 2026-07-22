@@ -29,7 +29,6 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import (
-    Idempotency,
     ToolCall,
     ToolFailure,
     ToolFailureKind,
@@ -295,17 +294,10 @@ def _interruption(
     return None
 
 
-def _interrupted_outcome(definition: ToolDefinition) -> ToolOutcome:
-    """ADR-0029 §4's rule, read from the *registry's* declaration."""
-    if not definition.side_effecting or definition.idempotency is Idempotency.NATURAL:
-        return ToolOutcome.FAILED
-    return ToolOutcome.INDETERMINATE
-
-
 def _expired(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
     """Describe this seam's own deadline expiring."""
     return ToolResult(
-        outcome=_interrupted_outcome(definition),
+        outcome=definition.interrupted_outcome,
         failure=ToolFailure(
             kind=ToolFailureKind.TIMED_OUT,
             message=f"tool {definition.id!r} did not finish within {timeout}",
