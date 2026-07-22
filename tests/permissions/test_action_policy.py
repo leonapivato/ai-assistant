@@ -209,14 +209,6 @@ async def test_resolving_something_never_shown_grants_nothing() -> None:
     assert resolved.authorised_by is None
 
 
-async def test_the_configured_rules_are_inspectable_without_deciding() -> None:
-    """A caller may render the gate to the user; the floors are always in it."""
-    bare = ThresholdActionPolicy(confirm_at_risk=None, confirm_at_reversibility=None)
-
-    assert len(bare.rules) == 2
-    assert len(ThresholdActionPolicy().rules) == 4
-
-
 @pytest.mark.parametrize("truthy", ["false", 1, object()], ids=["string", "int", "object"])
 async def test_only_true_counts_as_consent(truthy: object) -> None:
     """An unparsed value handed on by an adapter must not read as an approval.

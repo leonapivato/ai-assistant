@@ -162,15 +162,11 @@ class ThresholdActionPolicy:
             rules.append(_reversibility_rule(deny_at_reversibility, PermissionOutcome.DENY))
         self._rules: tuple[_Rule, ...] = tuple(rules)
 
-    @property
-    def rules(self) -> tuple[_Rule, ...]:
-        """The clauses this policy evaluates, floors first.
-
-        Exposed so a caller can render the configured gate to the user without
-        provoking a decision. Reading it is not a substitute for
-        :meth:`decide`, which is the only thing that rules.
-        """
-        return self._rules
+    # The rule table stays private. Rendering a configured gate to the user is
+    # a plausible want and is not on `ActionPolicy`, so a public accessor would
+    # invite a consumer to depend on this class and on `_Rule` — the
+    # implementation coupling golden rule 1 forbids. If it is ever needed it
+    # goes through the Protocol, as a contract.
 
     def _grounds(self, tool: ToolDefinition) -> list[tuple[PermissionOutcome, str]]:
         """Every clause that fires for ``tool``, in table order."""
