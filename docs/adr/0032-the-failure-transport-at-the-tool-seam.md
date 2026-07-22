@@ -5,7 +5,7 @@
 - Decides what ADR-0031 §3 named and declined — issue #192. ADR-0029 §3
   ratified a vocabulary of eight `ToolFailureKind`s; six of them have no
   carrier, so an integration cannot report any of them. This gives them one.
-- Amends on ratification: ADR-0029 §3 and its Consequences, with dated notes on
+- Amends on ratification: ADR-0029 §§3–4 and its Consequences, with dated notes on
   ADR-0031 and ADR-0014. The edits are **not** made by this change — §8 records
   their exact form and why they wait, following ADR-0026 §6, ADR-0030 §6 and
   ADR-0031 §7.
@@ -289,6 +289,30 @@ upstream reports its own timeout has an honest kind available — `UNAVAILABLE`,
 "the upstream is unreachable or failing" — carrying the same `retryable=True`.
 Nothing in the retry algebra is lost by the redirection.
 
+**One ratified sentence points the other way, and it is reconciled rather than
+ignored.** ADR-0029 §4 ends its interrupted-call rule with: "A tool that *can*
+establish it did not act may return `FAILED` with `TIMED_OUT`; nothing can make
+it prove the converse." Written when a tool could return nothing but
+`FrozenJson`, it described a capability the contract did not yet grant — part of
+the same #192 gap — and this ADR is what grants one, so the sentence has to be
+answered rather than left standing.
+
+**Its substance survives; its spelling does not.** What it protects is that a
+tool which *knows* it did not act should get `FAILED` rather than the
+`INDETERMINATE` the seam's own expiry rule would impose. That is exactly
+`effect_may_have_committed=False`, and §2 makes it load-bearing: a
+side-effecting, non-`NATURAL` tool reporting `False` gets `FAILED`, which is the
+outcome §4's sentence asks for and could not previously produce. What does not
+survive is the *kind*: the tool says `UNAVAILABLE` and not `TIMED_OUT`, because
+under §2 the outcome no longer rides on the kind at all. §4's sentence pairs
+them only because, before a transport existed, the kind was the only field a
+tool could conceivably have set. Separating them is what lets `TIMED_OUT` keep
+meaning "this seam's deadline expired" — the property ADR-0029 §4 spends its
+longest paragraph establishing, one clause above the sentence in question.
+
+So §4 is amended, and §8 records it: the sentence is superseded in its naming of
+`TIMED_OUT` and honoured in what it was protecting.
+
 **The effect fact survives the refusal, and that is why it is a field on the
 exception rather than a field on `ToolFailure`.** A tool that got the kind wrong
 may still be telling the truth about its side effect, and discarding that would
@@ -516,10 +540,13 @@ Named because a transport ADR reads like an invitation to redesign the seam.
   `idempotency_key`, and the `FrozenJson` return type are unchanged and remain
   `tools/`-internal (ADR-0029 §1). Only the docstring's deferral sentence is
   retargeted (§9).
-- **Everything in ADR-0029 §4 and ADR-0031 §2.** The seam's ownership of the
-  deadline, the strictly-positive check, `Timeout.expired()` as the tool-proof
-  signal, the cancellation delta on both paths, and the four declared limits —
-  including ADR-0031 §4's `uncancel()` residue and its pinned suite case.
+- **Everything in ADR-0029 §4 and ADR-0031 §2 bar one sentence.** The seam's
+  ownership of the deadline, the strictly-positive check, the interrupted-call
+  rule, `TIMED_OUT` meaning *this* deadline, `Timeout.expired()` as the
+  tool-proof signal, the cancellation delta on both paths, and the four declared
+  limits — including ADR-0031 §4's `uncancel()` residue and its pinned suite
+  case. The exception is §4's "may return `FAILED` with `TIMED_OUT`", withdrawn
+  in its kind and preserved in its substance by §3 above.
 - **ADR-0031 §1's `interrupted_outcome`**, which this ADR reads and does not
   restate, and ADR-0031 §3's re-scoping of `CANCELLED`, which it relies on.
 - **`ToolResult`'s invariants and `retryable`'s values** (ADR-0029 §3). Six
@@ -552,9 +579,18 @@ rather than asserted:
 - **ADR-0029.** ADR-0030 §6's case. §3 ratifies a classification rule — "An
   exception escaping the tool implementation becomes `INTERNAL`" — stated
   without qualification, and this ADR narrows the set of exceptions it covers.
-  Its Consequences ratify an enumeration of the `core` surface, already
-  corrected once by ADR-0031 and corrected again here. Two ratified sentences
-  now read as false. That is a change to a past decision in ADR-0001's sense.
+  §4 ratifies a permission — "A tool that *can* establish it did not act may
+  return `FAILED` with `TIMED_OUT`" — and §3 above withdraws the kind it names
+  while §2 preserves what it protects. Its Consequences ratify an enumeration of
+  the `core` surface, already corrected once by ADR-0031 and corrected again
+  here. Three ratified sentences now read as false. That is a change to a past
+  decision in ADR-0001's sense.
+
+  **§4 is amended in that one sentence and in nothing else**, which is worth
+  stating because §4 is long and mostly about the seam's deadline. Its ownership
+  of the deadline, its strictly-positive check, its interrupted-call rule, its
+  `TIMED_OUT`-means-*this*-deadline rule, its provenance rule and its four
+  declared limits all stand exactly as ratified and as ADR-0031 amended them.
 - **ADR-0031.** ADR-0029 §9's case, and specifically the ADR-0014 half of it.
   Nothing ADR-0031 *decides* changes: §1's property is read by a new caller
   without its text moving, and §3's re-scoping is relied on rather than altered.
@@ -576,7 +612,7 @@ rather than asserted:
 #### ADR-0029
 
 - **ADR-0029's `Status` line becomes**
-  `- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §3 and Consequences amended by ADR-0032`.
+  `- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032`.
 
   ADR-0031's clause is carried forward unchanged rather than replaced: it is not
   withdrawn, and a `Status` line that dropped it would make ADR-0031's amendment
@@ -604,7 +640,13 @@ rather than asserted:
   failure naming it is refused, the tool-authored ToolFailure discarded whole
   for the seam's own INTERNAL, with effect_may_have_committed carried through.
   CANCELLED is the integration's by ADR-0031 §3 and is accepted; every other
-  member is accepted as raised. §4's precedence gains a third rank below the two
+  member is accepted as raised. §4's permission for a tool that can establish it
+  did not act to return FAILED with TIMED_OUT is withdrawn in its kind and kept
+  in its substance: the outcome no longer rides on the kind, so such a tool
+  reports effect_may_have_committed=False with an honest kind — UNAVAILABLE for
+  an upstream that did not answer — and §2's rule gives it the FAILED that
+  sentence was protecting, while TIMED_OUT keeps meaning that this seam's
+  deadline expired. §4's precedence gains a third rank below the two
   it has — a pending cancellation, then this seam's expired deadline, then the
   tool's classification — and §4's cancellation and expiry branches are
   themselves unchanged: neither reads the carrier, and both discard it. The
@@ -630,7 +672,12 @@ rather than asserted:
 
   `Superseded sentences in ADR-0029, which stand in the document unedited: §3's
   "An exception escaping the tool implementation becomes INTERNAL", which now
-  excepts a ClassifiedToolError carrying a ToolFailure; and the Consequences'
+  excepts a ClassifiedToolError carrying a ToolFailure; §4's "A tool that can
+  establish it did not act may return FAILED with TIMED_OUT", whose FAILED is
+  now reached by reporting effect_may_have_committed=False and whose TIMED_OUT
+  is refused to INTERNAL, that member being reserved to the seam — the clause
+  that follows it, "nothing can make it prove the converse", is unchanged and is
+  why the fact is required rather than defaulted; and the Consequences'
   count of the new core surface, "seven" as ratified and "eight" as corrected by
   ADR-0031's note above, now nine. §3's "What is raised instead: ToolBindingError
   … It is the only error this ADR adds" is not superseded and stays exactly true:
@@ -660,7 +707,15 @@ rather than asserted:
   is created. Its docstring's "cut short by a deadline or a cancellation"
   describes two of the three circumstances that now read it. §3's re-scoping of
   CANCELLED stands and ADR-0032 §3 depends on it: an integration may raise
-  CANCELLED, and the seam still never synthesises it. §2's provenance rule and
+  CANCELLED, and the seam still never synthesises it. §3's sentence that an
+  integration reporting CANCELLED "chooses its outcome by the same test §4
+  applies to the seam" is honoured by the mechanism rather than by the
+  integration: it reports effect_may_have_committed and the seam rules from it,
+  so "FAILED only if it can establish the effect did not happen, INDETERMINATE
+  otherwise" is what ADR-0032 §2 computes. §3's quotation of ADR-0029 §4's "may
+  return FAILED with TIMED_OUT" is a citation of a sentence ADR-0032 §3
+  supersedes in its kind and preserves in its substance; ADR-0031 ratifies
+  nothing about it. §2's provenance rule and
   §2(d)'s precedence stand and outrank the new transport, which is ranked below
   both. §2(b)'s postcondition is unchanged and acquires a second subject: it
   names SUCCEEDED because a normal return was the only path that built a result
