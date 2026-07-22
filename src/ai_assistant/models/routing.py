@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -35,7 +36,7 @@ from ai_assistant.core import errors as _errors
 from ai_assistant.core.errors import ConfigurationError, ModelError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import Message
@@ -46,9 +47,22 @@ _log = structlog.get_logger(__name__)
 # later-defined class cannot join the set by claiming our __module__. Read out
 # of the errors module's own namespace rather than listed by name, so a class
 # added to the taxonomy is picked up without editing this file.
-_TAXONOMY: Final[frozenset[type[ModelError]]] = frozenset(
-    obj for obj in vars(_errors).values() if isinstance(obj, type) and issubclass(obj, ModelError)
+#
+# Each member maps to its diagnostic string, snapshotted here rather than read
+# from the live class: `__name__` is writable, so `cls.__name__` at call time
+# would hand the emitted string back to whatever last assigned it. The mapping —
+# not a hand-written list — is what keeps the auto-pickup above.
+_TAXONOMY: Final[Mapping[type[ModelError], str]] = MappingProxyType(
+    {
+        obj: obj.__name__
+        for obj in vars(_errors).values()
+        if isinstance(obj, type) and issubclass(obj, ModelError)
+    }
 )
+
+# The default for an exception whose MRO holds nothing we know — snapshotted for
+# the same reason, so the fallback path is not the one live read left open.
+_UNKNOWN: Final[str] = _TAXONOMY[ModelError]
 
 
 def _classify(exc: ModelError) -> str:
@@ -59,25 +73,37 @@ def _classify(exc: ModelError) -> str:
     that name reaches a Tier 2 log under a key the ADR-0004 §5 redactor treats
     as innocuous. Walking the MRO for the nearest *known* class keeps the
     diagnostic value — a third-party ``ProviderQuotaError(ModelRateLimitError)``
-    still logs as ``ModelRateLimitError`` — while the emitted string can only
-    ever be one we wrote.
+    still logs as ``ModelRateLimitError`` — while the emitted string is one of
+    the strings this module snapshotted from its own taxonomy at import.
 
-    Membership is by **object identity** against :data:`_TAXONOMY`, a set frozen
-    at import. An earlier version compared ``cls.__module__`` to this project's
-    errors module, which a class can simply claim:
+    Membership is by **object identity** against :data:`_TAXONOMY`, a mapping
+    frozen at import. An earlier version compared ``cls.__module__`` to this
+    project's errors module, which a class can simply claim:
     ``type("PATIENT_SSN_...", (ModelRateLimitError,), {"__module__":
     "ai_assistant.core.errors"})`` passed that check and had its name logged.
     ``__module__`` is a writable attribute; identity is not forgeable.
 
-    The threat model is narrow — a provider spoofing ``__module__`` to smuggle
-    text into a log already runs in this process and could log directly. The
-    realistic version is duller: a provider that names its exception after the
-    tenant, customer, or record it failed on.
+    Identity settles *which* class matches, not what gets emitted for it.
+    ``__name__`` is writable on our classes too, so an earlier version returning
+    ``cls.__name__`` let ``ModelRateLimitError.__name__ = "PATIENT_SSN_..."``
+    put that text in the log through a class the taxonomy trusts. The value is
+    therefore read from the import-time snapshot, never from the live class, and
+    so is the no-match default.
+
+    The bound that buys: the emitted string is whatever the taxonomy's names
+    were **when this module was imported**. It is not a sandbox — code that
+    mutated one of those names *before* that import is captured by the snapshot.
+    That residue is deliberately outside the threat model, on the same reasoning
+    as the rest: a provider spoofing ``__module__``, or in-process code renaming
+    our classes, already runs here and could call the logger directly. The
+    realistic threat is duller and is closed — a provider that names its
+    exception after the tenant, customer, or record it failed on.
     """
     for cls in type(exc).__mro__:
-        if cls in _TAXONOMY:
-            return cls.__name__
-    return ModelError.__name__
+        known = _TAXONOMY.get(cls)
+        if known is not None:
+            return known
+    return _UNKNOWN
 
 
 def _warn(event: str, **fields: object) -> None:

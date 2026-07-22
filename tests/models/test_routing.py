@@ -7,14 +7,16 @@ one routing rule.
 
 from __future__ import annotations
 
+import contextlib
 import traceback
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import structlog
 from model_provider_contract import ModelProviderContract
 from structlog.testing import capture_logs
 
+from ai_assistant.core import errors
 from ai_assistant.core.errors import (
     ConfigurationError,
     ModelAuthError,
@@ -26,10 +28,11 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import RetryingProvider, Route, RoutingProvider
 from ai_assistant.models.retry import RetryPolicy
+from ai_assistant.models.routing import _classify
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping, Sequence
+    from collections.abc import Iterator, MutableMapping, Sequence
 
     from ai_assistant.core.protocols import ModelProvider
 
@@ -592,6 +595,73 @@ async def test_a_provider_defined_error_class_name_is_not_logged() -> None:
     assert "PATIENT_SSN" not in repr(logs)
     [event] = [e for e in logs if e["event"] == "all routes failed"]
     assert event["failures"] == [{"route": "route[1]", "error": "ModelRateLimitError"}]
+
+
+@contextlib.contextmanager
+def _renamed(cls: type, name: str) -> Iterator[None]:
+    """Give ``cls`` a different ``__name__`` for the block, then put it back.
+
+    Not ``monkeypatch.setattr``: a class's ``__name__`` lives on the metaclass,
+    not in the class ``__dict__``, so monkeypatch reads it as previously-unset
+    and undoes by *deleting* it — which raises ``TypeError`` and leaves the
+    rename in place for every later test. An explicit restore is the tool that
+    actually works here.
+    """
+    original = cls.__name__
+    cls.__name__ = name
+    try:
+        yield
+    finally:
+        cls.__name__ = original
+
+
+async def test_renaming_a_taxonomy_class_does_not_change_what_is_logged() -> None:
+    # Regression (#181): identity membership settles *which* class matches, but
+    # the emitted string used to be read live off that class — and `__name__` is
+    # writable on our own classes too, so assigning to it put arbitrary text in
+    # a Tier 2 log through a class the taxonomy trusts. The names are now
+    # snapshotted at import, so a later assignment cannot reach the log.
+    routes = [Route(AlwaysFailsProvider(ModelRateLimitError("429")))]
+
+    with (
+        _renamed(ModelRateLimitError, "PATIENT_SSN_123_45_6789"),
+        capture_logs() as logs,
+        pytest.raises(ModelRateLimitError),
+    ):
+        await RoutingProvider(routes).complete(PROMPT)
+
+    assert "PATIENT_SSN" not in repr(logs)
+    [event] = [e for e in logs if e["event"] == "all routes failed"]
+    assert event["failures"] == [{"route": "route[1]", "error": "ModelRateLimitError"}]
+
+
+def test_the_no_match_default_is_snapshotted_too() -> None:
+    # The other half of #181: `_classify` ended in `return ModelError.__name__`,
+    # the same live read on the path taken when nothing in the MRO is known.
+    # Unreachable through `RoutingProvider` — it only ever classifies
+    # `ModelError`s, and `ModelError` is itself in the taxonomy — so it is
+    # pinned directly, on a failure deliberately outside the hierarchy.
+    alien = type("ProviderQuotaError", (Exception,), {})
+
+    with _renamed(ModelError, "PATIENT_SSN_123_45_6789"):
+        assert _classify(cast("ModelError", alien("failure"))) == "ModelError"
+
+
+def test_a_class_added_to_the_error_taxonomy_is_picked_up_without_editing_routing() -> None:
+    # The property the `vars(errors)` scan exists for, and which snapshotting
+    # the names had to preserve: every ModelError subclass the errors module
+    # defines is classifiable, with no list in `routing.py` to keep in step. A
+    # hand-written map would let a newly added class fall through to the
+    # generic default instead.
+    defined = {
+        obj
+        for obj in vars(errors).values()
+        if isinstance(obj, type) and issubclass(obj, ModelError)
+    }
+
+    assert defined
+    for cls in defined:
+        assert _classify(cls("failure")) == cls.__name__
 
 
 async def test_no_fallback_is_announced_when_there_is_nowhere_to_fall_back_to() -> None:
