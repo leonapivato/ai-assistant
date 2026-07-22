@@ -37,12 +37,20 @@ subsystem boundaries?**
   expected state for such an ADR, and every ratified ADR in `docs/adr/` is
   `Accepted`.
 
-Where an ADR's header asserts it is not a contract change, that claim is
-falsifiable, so check it rather than either trusting or ignoring it: read the
-diff for `core/protocols.py` and for `core/` types used across subsystems. If
-the diff does move one, the claim is wrong and *that* — the contract change
-itself — is the finding to write. If it does not, the claim stands and the
-`Accepted` status follows from it.
+Answer that test from the ADR's **decision text** — including any normative
+Protocol or type block it states, whether or not code exists for it yet. A
+contract ADR is *supposed* to land before its implementation, so a Proposed-stage
+diff touching no `core/` file is the normal case, not evidence of anything.
+Source changes only corroborate: a diff that does move a Protocol or a
+boundary-crossing `core` type settles the question, and its absence settles
+nothing.
+
+So where an ADR's header asserts it is not a contract change, that claim is
+falsifiable — check it against what the decision actually ratifies rather than
+trusting or ignoring it. If the decision defines or widens a Protocol or a
+boundary-crossing `core` type, the header is wrong and *that* is the finding to
+write. If it genuinely settles something inside one subsystem, the claim stands
+and the `Accepted` status follows from it.
 
 ## What to scrutinise
 
