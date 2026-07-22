@@ -478,7 +478,7 @@ refused.
   carve-out — the fake refuses two bindings under one id, because that is the
   arrangement mistake a consumer could plausibly make — is unchanged.
 
-**(b) A validator does not interpolate the fields a tool fills** (amends §3).
+**(b) A validator does not interpolate the two payload fields** (amends §3).
 §3 already forbids the *seam* from interpolating `str(exc)` into a message, with
 a specific reason: `core/logging.py` redacts by key, its own docstring names
 `error=str(exc)` as the Tier 1 leak it cannot see, and `message` lands under
@@ -490,9 +490,13 @@ that what it binds cannot drift:
 > **No validator on `ToolCall`, `ToolResult` or `ToolFailure` interpolates
 > `ToolResult.output` or `ActionRequest.parameters`.** It may name their type.
 
-Those two are the fields a *tool* fills, typed `FrozenJsonValue` and
-`FrozenJsonMapping` — unbounded content the system did not author, carrying
-Tier 1 data routinely. The concrete case is `ToolResult`'s cross-field check: a
+Those two are the payload the call carries in either direction, and they sit at
+opposite ends of it: `output` is what the *tool produced*, and `parameters` is
+untrusted *call input* — "the arguments the call proposes" — reaching the seam
+from a planner, a model or a user. Both are typed `FrozenJsonValue` /
+`FrozenJsonMapping`, both are unbounded content `core` did not author, and both
+carry Tier 1 data routinely, which is the whole of what the rule turns on;
+neither the direction of travel nor the author changes the answer. The concrete case is `ToolResult`'s cross-field check: a
 non-`SUCCEEDED` result carrying an output is refused with a message naming
 `type(self.output).__name__`, because the natural message — the one that helps
 most while debugging — would put a tool's output into a `ValidationError` bound
@@ -602,8 +606,8 @@ records that the ADR was amended, not how many times.
   evidence and the call returns an ordinary result (#189). §1 gains the callable
   half of the rebinding refusal, a tools/ invariant; §3 gains the rule that a
   validator on these types never interpolates ToolResult.output or
-  ActionRequest.parameters — the fields a tool fills — and names their type
-  instead; whether an identifier may appear in a log-bound message is #197's and
+  ActionRequest.parameters — the tool's output and the call's untrusted input —
+  and names their type instead; whether an identifier may appear in a log-bound message is #197's and
   is untouched. The new
   core surface is eight names, not seven. Everything else in §§1, 3-4 stands as
   ratified: the biconditional, the three seam checks and their order, failure as
@@ -671,6 +675,13 @@ suite obligations that come with them:
 - **Both seams keep their behavioural tests** — §10's "the timeout rule in §4 in
   both directions" is a statement about `invoke`, and it stays where it can
   observe one.
+- **The manufactured-delta case is added to the shared conformance suite** — a
+  callable that calls `cancel()` on its own invoking task, awaits, catches and
+  returns — asserting that `invoke` raises `CancelledError`. §2 makes that
+  normative and nothing currently pins it: an implementation returning
+  `SUCCEEDED`, or classifying the caught exception `INTERNAL`, satisfies every
+  other obligation listed here. It is the mirror of the erasure case below, and
+  the two together are what hold the provenance rule to a delta.
 - **The `catch-and-uncancel-and-return` case is added to the shared conformance
   suite**, asserting the ordinary result, as §4 requires — the limit pinned as a
   limit, in the shape §10 uses for the cooperative one. Both `InMemoryToolRegistry`
