@@ -182,12 +182,21 @@ MRO that is one of our `ModelError` subclasses, matched by **object identity**
 against a set frozen at import (`_TAXONOMY` and `_classify` in
 `models/routing.py`). Diagnostic value survives — a third-party
 `ProviderQuotaError(ModelRateLimitError)` still logs as `ModelRateLimitError` —
-while the emitted string can only ever be a name we wrote. Identity, not
-`__module__`: an earlier version compared modules, and a class can simply claim
-one, so `type("PATIENT_SSN_...", (ModelRateLimitError,), {"__module__":
-"ai_assistant.core.errors"})` passed that check and had its name logged.
-**It is the taxonomy mapping, not the fact that the string is a class name, that
-makes what reaches the log content-free; removing it reopens the leak.**
+while the emitted string is the name of a class *this project* defined, never one
+the provider named. Identity, not `__module__`: an earlier version compared
+modules, and a class can simply claim one, so `type("PATIENT_SSN_...",
+(ModelRateLimitError,), {"__module__": "ai_assistant.core.errors"})` passed that
+check and had its name logged. **It is the taxonomy mapping, not the fact that
+the string is a class name, that keeps what reaches the log content-free;
+removing it reopens the leak.**
+
+The bound this buys is *provider-controlled naming*, which is the realistic
+threat — a third-party subclass named after the tenant, customer, or record it
+failed on. It is not a sandbox: `__name__` is writable, so in-process code could
+still mutate one of our own taxonomy classes and have the mutated name logged.
+That is deliberately outside the threat model, on the same reasoning
+`models/routing.py` records — code running in this process can call the logger
+directly, so no call-site discipline can contain it.
 
 That mapping is what makes this fail-closed *at the call site* rather than
 relying on the redaction processor, which matters because that net is key-based
