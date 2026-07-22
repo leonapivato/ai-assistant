@@ -241,38 +241,13 @@ whose meaning is the wall clock rather than a point on the timeline — must not
 be UTC-converted, since that shifts its hour across DST. That would be a
 distinct type with its own decision, which this one neither covers nor pre-empts.
 
-**Five ``planning`` fields do not use it yet**, and the omission is ordering,
-not oversight — see :data:`_ORDERING_DEFERRED`.
-"""
-
-_ORDERING_DEFERRED = frozenset(
-    {
-        ("ActionPlan", "created_at"),
-        ("StepExecution", "started_at"),
-        ("StepExecution", "finished_at"),
-        ("ExecutionState", "updated_at"),
-        ("PlanExport", "exported_at"),
-    }
-)
-"""Clock-fed fields still awaiting ADR-0026's producer guard (ADR-0023 §6).
-
-ADR-0023 §6 binds its own migration: a field a clock feeds is not tightened to
-:data:`UtcInstant` until that clock is guaranteed aware, **or** the existing
-normalisation at the producer boundary is retained as a shim until it is. Six of
-the nine clock-fed fields were migrated under such a shim; these five had none,
-because ``PlanExecution``, ``InMemoryPlanStore``, ``FakePlanner`` and
-``FakePlanStore`` pass an injected reading straight into the field and what
-normalised a naive one was *the validator below* — the very thing
-:data:`UtcInstant` removes.
-
-**ADR-0026's producer guard has since landed**, so the precondition is met and
-these five are unblocked. They are deliberately not migrated in the same change:
-ADR-0026 §5 is explicit that the producers lead and the fields follow, and
-folding the field migration into the producers' change would collapse the very
-ordering the two ADRs exist to keep separable. The set therefore still stands,
-now as *ready* work rather than blocked work, and the gate check in
-``tests/core/test_instant_coverage.py`` reads it as its one exemption — so the
-debt stays enumerated and shrinks to empty when #130 tightens them.
+**Every ``datetime`` field in this module now uses it.** The five clock-fed
+``planning`` fields ADR-0023 §6 held back — ``ActionPlan.created_at``,
+``StepExecution.started_at``/``finished_at``, ``ExecutionState.updated_at``,
+``PlanExport.exported_at`` — followed once ADR-0026's ``checked_clock`` guarded
+their producers, per ADR-0026 §5's ordering: the producer leads, the field
+follows. The exemption set that enumerated them is gone, and
+``tests/core/test_instant_coverage.py`` now asserts no field is exempt at all.
 """
 
 
@@ -787,23 +762,10 @@ class ActionPlan(BaseModel):
     id: Identifier
     goal_id: Identifier
     steps: tuple[PlanStep, ...]
-    created_at: datetime = Field(description="When the plan was produced (tz-aware).")
+    created_at: UtcInstant = Field(description="When the plan was produced (tz-aware).")
     rationale: str | None = Field(
         default=None, description="Why the planner chose these steps, for transparency."
     )
-
-    @field_validator("created_at")
-    @classmethod
-    def _created_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC).
-
-        Not yet :data:`UtcInstant`: this field is clock-fed and its producer has
-        no shim, so ADR-0023 §6's ordering holds it back — see
-        :data:`_ORDERING_DEFERRED`.
-        """
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
 
     @field_validator("steps")
     @classmethod
@@ -892,8 +854,8 @@ class StepExecution(BaseModel):
     skip_reason: SkipReason | None = Field(
         default=None, description="Why the step was skipped; required when SKIPPED."
     )
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    started_at: UtcInstant | None = None
+    finished_at: UtcInstant | None = None
     error: str | None = Field(default=None, description="Failure detail; required when FAILED.")
 
     @model_validator(mode="after")
@@ -1016,21 +978,6 @@ class StepExecution(BaseModel):
 
         return self
 
-    @field_validator("started_at", "finished_at")
-    @classmethod
-    def _timestamps_are_utc(cls, value: datetime | None) -> datetime | None:
-        """Normalise timestamps to UTC (a naive value is assumed UTC).
-
-        Not yet :data:`UtcInstant`: these fields are clock-fed and their producer
-        has no shim, so ADR-0023 §6's ordering holds them back — see
-        :data:`_ORDERING_DEFERRED`.
-        """
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-
 
 class ExecutionState(BaseModel):
     """The durable, resumable state of one run of an :class:`ActionPlan`.
@@ -1047,7 +994,7 @@ class ExecutionState(BaseModel):
     plan_id: Identifier
     steps: tuple[StepExecution, ...]
     version: int = Field(default=0, ge=0, description="Optimistic-concurrency token.")
-    updated_at: datetime = Field(description="When this state was last written (tz-aware).")
+    updated_at: UtcInstant = Field(description="When this state was last written (tz-aware).")
 
     @property
     def is_active(self) -> bool:
@@ -1085,21 +1032,6 @@ class ExecutionState(BaseModel):
             msg = "execution step ids must be unique within an execution"
             raise ValueError(msg)
         return value
-
-    @field_validator("updated_at")
-    @classmethod
-    def _updated_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC).
-
-        Not yet :data:`UtcInstant`: this field is clock-fed and its producer has
-        no shim — ``PlanExecution`` writes an injected reading straight in, and
-        ``_revalidated_state`` puts it back through *this* validator, so removing
-        the attribution here is what would break a naive clock. ADR-0023 §6's
-        ordering holds it back; see :data:`_ORDERING_DEFERRED`.
-        """
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
 
 
 class StepTransition(BaseModel):
@@ -1205,23 +1137,10 @@ class PlanExport(BaseModel):
         ge=1,
         description="Shape of this export; explicit because an export outlives the code.",
     )
-    exported_at: datetime
+    exported_at: UtcInstant
     goals: tuple[Goal, ...] = ()
     plans: tuple[ActionPlan, ...] = ()
     executions: tuple[ExecutionState, ...] = ()
-
-    @field_validator("exported_at")
-    @classmethod
-    def _exported_at_is_utc(cls, value: datetime) -> datetime:
-        """Normalise the timestamp to UTC (a naive value is assumed UTC).
-
-        Not yet :data:`UtcInstant`: this field is clock-fed and its producer has
-        no shim, so ADR-0023 §6's ordering holds it back — see
-        :data:`_ORDERING_DEFERRED`.
-        """
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
 
     @model_validator(mode="after")
     def _references_resolve_within_the_export(self) -> PlanExport:
