@@ -63,13 +63,25 @@ _ARTIFACT_IN_PACKAGE = packaged_artifact_dir().relative_to(_PROJECT_ROOT / "src"
 #: Its basename is what a consumer looks for, so the assertions below pin it.
 _NOTICES = "THIRD-PARTY-NOTICES.md"
 
-_REASONS = []
-if not (_PROJECT_ROOT / "pyproject.toml").is_file():
-    _REASONS.append("not a source checkout")
-if embedding_artifact.missing_files(packaged_artifact_dir()):
-    _REASONS.append("the vendored artifact is not staged (run `uv sync`)")
+#: Nothing in this module works outside a source checkout, so that skip is
+#: module-wide. Needing the *artifact staged* is a narrower condition — only a
+#: test that builds or loads it does — and it is applied per test below, so that
+#: an assertion needing no model bytes still runs in a clean checkout, where
+#: ADR-0024 §4 guarantees the artifact is absent until something stages it.
+pytestmark = pytest.mark.skipif(
+    not (_PROJECT_ROOT / "pyproject.toml").is_file(), reason="not a source checkout"
+)
 
-pytestmark = pytest.mark.skipif(bool(_REASONS), reason="; ".join(_REASONS) or "buildable")
+_needs_the_staged_artifact = pytest.mark.skipif(
+    bool(embedding_artifact.missing_files(packaged_artifact_dir())),
+    reason="the vendored artifact is not staged (run `uv sync`)",
+)
+
+
+def _require_the_staged_artifact() -> None:
+    """Skip from inside a fixture, which cannot carry a mark."""
+    if embedding_artifact.missing_files(packaged_artifact_dir()):
+        pytest.skip("the vendored artifact is not staged (run `uv sync`)")
 
 
 @contextlib.contextmanager
@@ -82,6 +94,7 @@ def _built_in(directory: Path) -> Iterator[None]:
 @pytest.fixture(scope="session")
 def checkout_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A wheel built from this git checkout, with the network denied throughout."""
+    _require_the_staged_artifact()
     out = tmp_path_factory.mktemp("checkout-wheel")
     with _built_in(_PROJECT_ROOT):
         name = build_wheel(str(out))
@@ -91,6 +104,7 @@ def checkout_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="session")
 def sdist(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """An sdist built from this git checkout, with the network denied throughout."""
+    _require_the_staged_artifact()
     out = tmp_path_factory.mktemp("sdist")
     with _built_in(_PROJECT_ROOT):
         name = build_sdist(str(out))
@@ -149,6 +163,7 @@ def test_the_sdist_derived_wheel_carries_the_verified_artifact(sdist_wheel: Path
     _assert_carries_the_verified_artifact(_wheel_members(sdist_wheel), Path("ai_assistant"))
 
 
+@_needs_the_staged_artifact
 def test_an_editable_wheel_does_not_duplicate_the_artifact(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
@@ -191,14 +206,20 @@ def test_the_notices_name_the_revision_that_ships() -> None:
     assert ARTIFACT_REVISION in notices
 
 
-def test_the_wheel_carries_the_third_party_notices(checkout_wheel: Path) -> None:
+@pytest.mark.parametrize("wheel_fixture", ["checkout_wheel", "sdist_wheel"])
+def test_the_wheel_carries_the_third_party_notices(
+    wheel_fixture: str, request: pytest.FixtureRequest
+) -> None:
     """ADR-0024's Consequences: redistributing the weights means shipping notices.
 
     PEP 639 puts declared licence files under ``.dist-info/licenses/`` and lists
     them in METADATA, so both are asserted — a wheel that carried the bytes but
-    did not declare them would not be discoverable by a licence scanner.
+    did not declare them would not be discoverable by a licence scanner. Both
+    build sources are checked: the ``--no-binary`` install path ships the same
+    weights from a *different* project root, so it owes the same notices.
     """
-    members = _wheel_members(checkout_wheel)
+    wheel: Path = request.getfixturevalue(wheel_fixture)
+    members = _wheel_members(wheel)
     (entry,) = [name for name in members if name.endswith(f"/licenses/{_NOTICES}")]
     assert members[entry] == _notices_in_the_checkout()
 
@@ -208,8 +229,9 @@ def test_the_wheel_carries_the_third_party_notices(checkout_wheel: Path) -> None
 
 
 def test_the_sdist_carries_the_third_party_notices(sdist: Path) -> None:
-    # The `--no-binary` install path ships the same weights, so it owes the same
-    # notices; the sdist carries them at its root and declares them in PKG-INFO.
+    # The sdist carries the notices at its root and declares them in PKG-INFO —
+    # and, being the root of the `--no-binary` build, is also what lets the
+    # wheel built from it carry them (asserted above).
     with tarfile.open(sdist) as archive:
         root = Path(archive.getnames()[0]).parts[0]
         extracted = archive.extractfile(str(Path(root) / _NOTICES))
@@ -293,6 +315,7 @@ def test_the_artifact_is_not_committed_to_git() -> None:
     assert tracked.stdout.strip() == "", "the vendored artifact is tracked by git"
 
 
+@_needs_the_staged_artifact
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 async def test_the_packaged_artifact_loads_without_a_usable_temp_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
