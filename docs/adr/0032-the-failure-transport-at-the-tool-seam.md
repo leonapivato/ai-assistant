@@ -412,10 +412,17 @@ directly, where previously every message on the failure path was the seam's own.
 The seam's obligation is stated by enumeration, following ADR-0031 §5(b), so
 that what it binds cannot drift:
 
-> **`invoke` either passes the raised `ToolFailure` through by value and
-> unmodified, or discards it whole** (§3's reserved kind, and §4's ranks 1 and
-> 2). There is no third behaviour: the seam never edits, wraps, prefixes,
-> truncates or re-authors a tool's message.
+> **`invoke` either passes the raised `ToolFailure` through by value, or
+> discards it whole** (§3's reserved kind, and §4's ranks 1 and 2). There is no
+> third behaviour: the seam never edits, wraps, prefixes, truncates or
+> re-authors a tool's message.
+>
+> "By value" is through §6's revalidation, which applies `ToolFailure`'s **own**
+> validators and nothing else — so a message is stripped exactly as
+> `ToolFailure(...)` would have stripped it at the raise site, and is otherwise
+> untouched. That is a no-op for every failure the tool constructed normally,
+> since construction already normalised it. What is forbidden is content the
+> seam chose.
 >
 > **And nothing derived from the exception object enters a message or a log.**
 > Not `str(exc)`, not `repr(exc)`, not `exc.args`, not `exc.__cause__` or
@@ -451,11 +458,11 @@ bound it, and none is a claim that it is closed:
   producer of a tool-authored message arrives with its own ADR, which is the
   right place to bind the review obligation.
 
-**"Unmodified" is a claim about the seam's own hand, not about validation.** §6
-revalidates the carrier through a `model_dump()`/`model_validate()` round-trip
-before anything reads it, which re-runs `_message_is_present` and is a no-op on
-any message that was validated at the raise site. What §5 forbids is the seam
-*authoring* — a message it edited is one it partly wrote.
+**The carve-out is narrow on purpose: it is `ToolFailure`'s validators or
+nothing.** The seam may not add a rule of its own — no length cap, no character
+filter, no redaction pass — because each would be the seam editing text it did
+not write, and a truncated message is one the seam partly authored. What §6
+re-runs is exactly what the raise site ran.
 
 **Issue #197 is untouched.** Whether an identifier may appear in a log-bound
 message is ADR-0031 §5(b)'s recorded non-decision, and nothing here ratifies or
@@ -475,6 +482,16 @@ rather than a retry decision, and the blank message §1 relies on
 `_message_is_present` to refuse arrives in a result. `model_validate` on the
 instance does not help: pydantic's default `revalidate_instances="never"`
 returns it unchanged.
+
+**The round-trip repairs what it can and refuses what it cannot, and the line
+between them is pydantic's own.** `"rate_limited"` is a valid `ToolFailureKind`
+value, so validation coerces it to the member and the result is a correct
+`ToolFailure` — the `AttributeError` above is gone, which is the outcome to
+want. A string that names no member, a missing field, an extra one under
+`extra="forbid"`, or a message that renders as nothing does not survive, and
+that is the refusal. Requiring an exact runtime type instead would refuse a
+value pydantic can make correct, for no gain: the seam's obligation is that what
+reaches a `ToolResult` is valid, not that the tool built it in the approved way.
 
 So the rule is a revalidation, in ADR-0018 §4's own idiom — the one
 `InMemoryToolRegistry` already uses for a definition, `model_dump()` then
@@ -656,8 +673,10 @@ rather than asserted:
   carrying a constructed ToolFailure and the keyword-only, undefaulted fact
   effect_may_have_committed; invoke translates it into a ToolResult rather than
   into INTERNAL. §3's message rule is unchanged and gains a second half: the
-  seam passes a raised ToolFailure through by value and unmodified or discards
-  it whole, never editing it, and renders nothing derived from the exception —
+  seam passes a raised ToolFailure through by value or discards it whole, adding
+  no rule of its own beyond the revalidation below — which applies ToolFailure's
+  own validators and is a no-op on any failure constructed normally — and
+  renders nothing derived from the exception —
   str(), repr(), args, __cause__, __context__, __notes__ — into a message or a
   log. Kind is what the tool knows; outcome stays the seam's ruling. The outcome
   is INDETERMINATE when the tool reports the effect may have committed and the
@@ -873,12 +892,20 @@ what keeps the fake honest without importing `tools/`.
   against an `isinstance` check, which is what makes it worth writing: the first
   passes against an implementation that trusts the raise site.
 
+- **And what the round-trip repairs rather than refuses**, asserted so that a
+  later implementation cannot tighten it into a refusal without an ADR: a
+  `model_construct`ed failure whose `kind` is the string `"rate_limited"` comes
+  back as a `RATE_LIMITED` result whose `kind` is the enum member, and one whose
+  `message` carries surrounding whitespace comes back stripped — the same
+  normalisation `ToolFailure(...)` performs at the raise site, which is why
+  §5's pass-through is a pass-through for every normally-constructed failure.
+
 - **A malformed carrier** (§6), across every shape the attribute can take:
   `failure` set to `None`, to a string, to a `ToolFailure`-shaped object of
   another class, and **deleted outright**; `effect_may_have_committed` set to a
-  non-`bool` and deleted outright; and a `model_construct`ed `ToolFailure`
-  carrying a raw `str` where the `ToolFailureKind` belongs. Each comes back
-  `INTERNAL`, and specifically not as an `AttributeError` or a `ValidationError`
+  non-`bool` and deleted outright; and a `model_construct`ed `ToolFailure` whose
+  `kind` is a string naming no member, or which is missing a field. Each comes
+  back `INTERNAL`, and specifically not as an `AttributeError` or a `ValidationError`
   escaping `invoke`. The deletion cases are the ones a natural implementation
   fails — reading `exc.failure` directly raises where the rule requires a result
   — and a suite testing only `None` certifies it.
