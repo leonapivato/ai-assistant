@@ -394,9 +394,16 @@ limit nobody can act on is not a limit:
 
 - **May conclude:** the callable returned a value that validates as
   `FrozenJsonValue`; **this seam's deadline had not expired** when it returned;
-  and no cancellation of the invoking task was pending at that moment. The
-  deadline half is unqualified — `Timeout.expired()` is the seam's own state and
-  §2 records why no callable can reset it.
+  and **the invoking task's cancellation count did not rise across the call**.
+  The deadline half is unqualified — `Timeout.expired()` is the seam's own state
+  and §2 records why no callable can reset it.
+
+  The third clause is a delta and must be read as one, on pain of restating the
+  defect §2 corrects. A caller that absorbed an earlier cancellation without
+  calling `uncancel()` carries a positive count into an invocation nothing
+  cancelled, and that call returns `SUCCEEDED` — correctly, and the conformance
+  suite pins it. So `SUCCEEDED` does not say the task carries no cancellation;
+  it says none was requested *during this call*.
 - **May not conclude:** that the invoking task was never cancelled during the
   call. A callable that catches its `CancelledError` and uncancels the task
   erases that evidence, and no seam running the callable in its own frame can
