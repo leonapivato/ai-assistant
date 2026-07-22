@@ -14,6 +14,36 @@ ADRs, does it name a better alternative it rejected, and will its seam extend?
 The "assume the gate is green" note in `guide.md` does not apply — there is no
 code to run yet.
 
+## When an ADR's `Status` is a finding — and when it is not
+
+Only a **substantive contract ADR** is required to ship as its own PR and be
+reviewed while still `Proposed`: one whose decision **adds or changes a
+`Protocol` in `core/protocols.py`, or a `core` type that crosses subsystem
+boundaries** (`CONTRIBUTING.md` → "Contract ADRs land before their
+implementation"; ADR-0015 §5). That qualifier is the whole rule. An ADR whose
+decision stays inside one subsystem — a behaviour, policy, or implementation
+choice within a single package — ships `Accepted` in the same PR as the
+implementation it authorises, and that is correct.
+
+So apply one test, to the *decision*, and not to how consequential the ADR
+reads: **does it add or change a Protocol, or a `core` type that crosses
+subsystem boundaries?**
+
+- **Yes** → it must be `Proposed`, alone in its PR, ahead of the implementation
+  that depends on it. An `Accepted` contract ADR merging together with that
+  implementation is a real finding, and ADR-0015 is binding — `blocker`.
+- **No** → say nothing about its status. Not as a `blocker`, not as a `major`,
+  not as a nit, a question, or "for consistency". `Accepted` on arrival is the
+  expected state for such an ADR, and every ratified ADR in `docs/adr/` is
+  `Accepted`.
+
+Where an ADR's header asserts it is not a contract change, that claim is
+falsifiable, so check it rather than either trusting or ignoring it: read the
+diff for `core/protocols.py` and for `core/` types used across subsystems. If
+the diff does move one, the claim is wrong and *that* — the contract change
+itself — is the finding to write. If it does not, the claim stands and the
+`Accepted` status follows from it.
+
 ## What to scrutinise
 
 **Boundaries (spirit, not just the letter import-linter enforces).**
