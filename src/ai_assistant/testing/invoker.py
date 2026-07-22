@@ -226,29 +226,59 @@ class FakeToolInvoker:
         return await self._run(binding, checked, timeout)
 
     async def _run(self, binding: _Binding, call: ToolCall, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4); wrapping it outside would cancel the invoker mid-await
-        """Await the callable under the deadline and classify what came back."""
+        """Await the callable under the deadline and classify what came back.
+
+        The interruption state is read from the task and the deadline on *every*
+        exit, the normal return included: a callable that catches its
+        cancellation and returns a value would otherwise be reported
+        ``SUCCEEDED`` after a cancelled turn, or after outrunning its deadline.
+        """
         deadline = asyncio.timeout(timeout.total_seconds())
         try:
             async with deadline:
                 output = await binding.implementation(
                     call.request.parameters, idempotency_key=call.idempotency_key
                 )
-        except TimeoutError as exc:
-            if deadline.expired():
-                return _expired(binding.definition, timeout)
-            return _internal(binding.definition, exc)
         except asyncio.CancelledError as exc:
             task = asyncio.current_task()
             if task is not None and task.cancelling() > 0:
                 raise
             return _internal(binding.definition, exc)
         except Exception as exc:
-            return _internal(binding.definition, exc)
+            return _interruption(binding.definition, timeout, deadline) or _internal(
+                binding.definition, exc
+            )
+
+        interrupted = _interruption(binding.definition, timeout, deadline)
+        if interrupted is not None:
+            return interrupted
 
         try:
             return ToolResult(outcome=ToolOutcome.SUCCEEDED, output=output)
         except ValidationError as exc:
             return _internal(binding.definition, exc)
+
+
+def _interruption(
+    definition: ToolDefinition, timeout: timedelta, deadline: asyncio.Timeout
+) -> ToolResult | None:
+    """Report what an interruption the tool *absorbed* means, if there was one.
+
+    A pending external cancellation is re-raised rather than reported — ADR-0029
+    §4 keeps the commit-then-re-raise on the executor — while an expired
+    deadline is reported, because that is the seam's own knowledge and the only
+    form in which ``INDETERMINATE`` can be delivered.
+
+    Raises:
+        CancelledError: If a cancellation of the invoking task is still pending.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling() > 0:
+        msg = f"tool {definition.id!r} absorbed the cancellation of its invoking task"
+        raise asyncio.CancelledError(msg)
+    if deadline.expired():
+        return _expired(definition, timeout)
+    return None
 
 
 def _interrupted_outcome(definition: ToolDefinition) -> ToolOutcome:
