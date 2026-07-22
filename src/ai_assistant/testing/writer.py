@@ -21,12 +21,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import MemoryDecisionKind, MemoryIngestResult, MemoryKind, Provenance
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
 
@@ -55,7 +55,7 @@ class FakeMemoryWriter:
         policy: MemoryPolicy,
         conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
-        now: Callable[[], datetime] = _utcnow,
+        now: Clock = _utcnow,
     ) -> None:
         """Create the fake writer.
 
@@ -69,13 +69,17 @@ class FakeMemoryWriter:
             conflict_limit: Maximum number of conflict candidates considered.
             now: Clock used to stamp expiry on temporary stores; injectable so
                 a consumer's turn is deterministic. The loop's own clock does
-                *not* reach this one (ADR-0028 §4b).
+                *not* reach this one (ADR-0028 §4b). Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`, the same guard
+                ``MemoryIngestor`` carries — which is what closes #186, where
+                this fake accepted a clock whose ``utcoffset()`` is indeterminate
+                and the production writer refused it.
         """
         self._store = store
         self._policy = policy
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
-        self._now = now
+        self._clock = checked_clock(now, owner="FakeMemoryWriter")
         self.calls: list[MemoryUpdateProposal] = []
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
@@ -130,16 +134,23 @@ class FakeMemoryWriter:
         production writer does both — a fake that did neither would let a
         consumer's test pass on state ``MemoryIngestor`` would have refused:
 
-        * a naive reading is attributed and an aware one *converted*, because
-          ADR-0023 §2 makes UTC storage uniform and a ``+02:00`` deadline would
-          otherwise be persisted verbatim; and
+        * the reading is guarded and converted, by the same
+          :func:`~ai_assistant.core.clock.checked_clock` ``MemoryIngestor``
+          uses, so a naive, indeterminate or unlocalizable reading is a
+          ``MemoryStoreError`` here exactly as it is there (#186); and
         * an unrepresentable deadline becomes a ``MemoryStoreError``, not the
           raw ``OverflowError`` the arithmetic raises.
+
+        Raises:
+            MemoryStoreError: If the clock's reading is not conforming, or the
+                deadline is unrepresentable.
         """
         if ttl is None:
             return None
-        now = self._now()
-        now = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+        try:
+            now = self._clock()
+        except ValueError as exc:
+            raise MemoryStoreError(str(exc)) from exc
         try:
             return now + ttl
         except OverflowError as exc:

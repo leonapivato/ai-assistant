@@ -10,48 +10,40 @@ the type.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone, tzinfo
-from types import SimpleNamespace
-from typing import cast
+from datetime import UTC, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import pytest
+from hostile_instants import (
+    HOSTILE_IDS,
+    HOSTILE_INSTANTS,
+    BaseDatetimeConversion,
+    FlipDuringComponentRead,
+    FlipOnConvert,
+    LyingConversion,
+    MutableOffset,
+    NoneConversion,
+    NonUtcConversion,
+    NoOffset,
+    NotADatetimeConversion,
+    RaisingOffset,
+    ShiftySubclass,
+    UnreprableOffset,
+    ZeroButNotUtcConversion,
+)
 from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.types import UtcInstant
+
+if TYPE_CHECKING:
+    from hostile_instants import HostileInstant
 
 
 class _Instant(BaseModel):
     """A minimal carrier, so the tests are about the type and not about a field."""
 
     when: UtcInstant
-
-
-class _NoOffset(tzinfo):
-    """Set, but indeterminate — issue #36's case. Not aware, by ADR-0023 §5."""
-
-    def utcoffset(self, dt: datetime | None) -> timedelta | None:
-        return None
-
-    def dst(self, dt: datetime | None) -> timedelta | None:
-        return None
-
-    def tzname(self, dt: datetime | None) -> str | None:
-        return "indeterminate"
-
-
-class _RaisingOffset(tzinfo):
-    """A ``tzinfo`` whose ``utcoffset()`` raises rather than answering."""
-
-    def utcoffset(self, dt: datetime | None) -> timedelta | None:
-        msg = "no offset available"
-        raise RuntimeError(msg)
-
-    def dst(self, dt: datetime | None) -> timedelta | None:
-        return None
-
-    def tzname(self, dt: datetime | None) -> str | None:
-        return "raises"
 
 
 def test_a_naive_value_is_rejected_and_the_field_is_named() -> None:
@@ -67,7 +59,7 @@ def test_an_indeterminate_offset_is_rejected() -> None:
     which then raises on the first aware comparison downstream.
     """
     with pytest.raises(ValidationError, match="when must be timezone-aware"):
-        _Instant(when=datetime(2026, 1, 1, 9, tzinfo=_NoOffset()))
+        _Instant(when=datetime(2026, 1, 1, 9, tzinfo=NoOffset()))
 
 
 def test_a_raising_tzinfo_becomes_a_validation_error_not_a_crash() -> None:
@@ -75,7 +67,7 @@ def test_a_raising_tzinfo_becomes_a_validation_error_not_a_crash() -> None:
     escapes as a crash from wherever the model happened to be constructed.
     """
     with pytest.raises(ValidationError, match="its tzinfo failed"):
-        _Instant(when=datetime(2026, 1, 1, 9, tzinfo=_RaisingOffset()))
+        _Instant(when=datetime(2026, 1, 1, 9, tzinfo=RaisingOffset()))
 
 
 def test_an_aware_non_utc_value_is_converted_not_merely_accepted() -> None:
@@ -159,66 +151,14 @@ def test_a_naive_iso_string_is_rejected_on_the_way_in() -> None:
         _Instant.model_validate_json('{"when": "2026-01-01T09:00:00"}')
 
 
-class _LyingConversion(datetime):
-    """Aware and well-behaved, until it is asked to convert itself."""
-
-    # Violating `astimezone`'s `Self` return is the whole point of this double:
-    # it is the hostile subclass the validator must not trust.
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return datetime(2026, 1, 1)  # noqa: DTZ001 — returning a naive value is the subject
-
-
-class _NonUtcConversion(datetime):
-    """Converts, but not to UTC."""
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=2)))
-
-
-class _MutableOffset(tzinfo):
-    """Reports UTC when asked at validation time, and something else later."""
-
-    shift = timedelta(0)
-
-    def utcoffset(self, dt: datetime | None) -> timedelta | None:
-        return _MutableOffset.shift
-
-    def dst(self, dt: datetime | None) -> timedelta | None:
-        return None
-
-    def tzname(self, dt: datetime | None) -> str | None:
-        return "mutable"
-
-
-class _ZeroButNotUtcConversion(datetime):
-    """Converts to a zero *offset* that is not the ``UTC`` object."""
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return datetime(2026, 1, 1, tzinfo=_MutableOffset())
-
-
-class _NotADatetimeConversion(datetime):
-    """Converts to something that merely *looks* like it carries a timezone."""
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return cast("datetime", SimpleNamespace(tzinfo=UTC))
-
-
-class _NoneConversion(datetime):
-    """Converts to nothing at all."""
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return cast("datetime", None)
-
-
 @pytest.mark.parametrize(
     "hostile",
     [
-        pytest.param(_LyingConversion(2026, 1, 2, tzinfo=UTC), id="returns-naive"),
-        pytest.param(_NonUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-utc"),
-        pytest.param(_ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-zero-not-utc"),
-        pytest.param(_NotADatetimeConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-datetime"),
-        pytest.param(_NoneConversion(2026, 1, 2, tzinfo=UTC), id="returns-none"),
+        pytest.param(LyingConversion(2026, 1, 2, tzinfo=UTC), id="returns-naive"),
+        pytest.param(NonUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-utc"),
+        pytest.param(ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC), id="returns-zero-not-utc"),
+        pytest.param(NotADatetimeConversion(2026, 1, 2, tzinfo=UTC), id="returns-non-datetime"),
+        pytest.param(NoneConversion(2026, 1, 2, tzinfo=UTC), id="returns-none"),
     ],
 )
 def test_a_conversion_that_does_not_produce_utc_is_rejected(hostile: datetime) -> None:
@@ -235,24 +175,6 @@ def test_a_conversion_that_does_not_produce_utc_is_rejected(hostile: datetime) -
         _Instant(when=hostile)
 
 
-class _UnreprableOffset(tzinfo):
-    """A ``tzinfo`` that raises from ``utcoffset()`` *and* from ``__repr__``."""
-
-    def utcoffset(self, dt: datetime | None) -> timedelta | None:
-        msg = "no offset available"
-        raise RuntimeError(msg)
-
-    def dst(self, dt: datetime | None) -> timedelta | None:
-        return None
-
-    def tzname(self, dt: datetime | None) -> str | None:
-        return "hostile"
-
-    def __repr__(self) -> str:
-        msg = "repr is hostile too"
-        raise RuntimeError(msg)
-
-
 def test_a_value_that_cannot_describe_itself_still_yields_a_validation_error() -> None:
     """The diagnostic must not be able to destroy the diagnosis.
 
@@ -262,43 +184,14 @@ def test_a_value_that_cannot_describe_itself_still_yields_a_validation_error() -
     whatever ``__repr__`` threw.
     """
     with pytest.raises(ValidationError, match="when must be timezone-aware"):
-        _Instant(when=datetime(2026, 1, 1, tzinfo=_UnreprableOffset()))
-
-
-class _ShiftySubclass(datetime):
-    """Returns *itself* from ``astimezone``, and overrides ``utcoffset`` to lie."""
-
-    lie = timedelta(0)
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return self
-
-    def utcoffset(self) -> timedelta | None:
-        return _ShiftySubclass.lie
-
-
-class _FlipDuringComponentRead(datetime):
-    """Flips its offset from inside ``__getattribute__``, as its digits are read."""
-
-    lie = timedelta(0)
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return self
-
-    def utcoffset(self) -> timedelta | None:
-        return _FlipDuringComponentRead.lie
-
-    def __getattribute__(self, name: str) -> object:
-        if name == "year":
-            _FlipDuringComponentRead.lie = timedelta(hours=2)
-        return object.__getattribute__(self, name)
+        _Instant(when=datetime(2026, 1, 1, tzinfo=UnreprableOffset()))
 
 
 @pytest.mark.parametrize(
     "subclass",
     [
-        pytest.param(_ShiftySubclass, id="flips-after-validation"),
-        pytest.param(_FlipDuringComponentRead, id="flips-during-component-read"),
+        pytest.param(ShiftySubclass, id="flips-after-validation"),
+        pytest.param(FlipDuringComponentRead, id="flips-during-component-read"),
     ],
 )
 def test_a_conversion_returning_a_subclass_is_refused_outright(
@@ -338,15 +231,6 @@ def test_even_a_well_behaved_subclass_is_refused_and_that_is_the_trade() -> None
         _Instant(when=_WellBehaved(2026, 1, 2, 9, 0, tzinfo=ZoneInfo("Europe/Berlin")))
 
 
-class _BaseDatetimeConversion(datetime):
-    """Converts to an exact base ``datetime`` in UTC, unlike every subclass above."""
-
-    converted = datetime(1970, 1, 1, tzinfo=UTC)
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return _BaseDatetimeConversion.converted
-
-
 def test_a_subclass_converting_to_a_base_datetime_is_accepted() -> None:
     """ADR-0030 §1: the rule is on the value handed on, not the value received.
 
@@ -358,12 +242,12 @@ def test_a_subclass_converting_to_a_base_datetime_is_accepted() -> None:
     rule from an input-side "refuse every subclass" test, which would satisfy
     every other case in this module while contradicting the decision.
     """
-    stored = _Instant(when=_BaseDatetimeConversion(2026, 7, 21, 12, tzinfo=UTC)).when
+    stored = _Instant(when=BaseDatetimeConversion(2026, 7, 21, 12, tzinfo=UTC)).when
 
     assert type(stored) is datetime
     assert stored.tzinfo is UTC
-    assert stored == _BaseDatetimeConversion.converted  # the conversion, not the input
-    assert stored is not _BaseDatetimeConversion.converted  # rebuilt, not returned
+    assert stored == BaseDatetimeConversion.converted  # the conversion, not the input
+    assert stored is not BaseDatetimeConversion.converted  # rebuilt, not returned
 
 
 def test_a_plain_datetime_is_still_canonicalised_to_a_plain_datetime() -> None:
@@ -372,19 +256,6 @@ def test_a_plain_datetime_is_still_canonicalised_to_a_plain_datetime() -> None:
 
     assert type(stored) is datetime
     assert stored == datetime(2026, 1, 2, 8, 0, tzinfo=UTC)
-
-
-class _FlipOnConvert(datetime):
-    """Flips its overridden offset *during* ``astimezone``, then returns itself."""
-
-    lie = timedelta(0)
-
-    def utcoffset(self) -> timedelta | None:
-        return _FlipOnConvert.lie
-
-    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        _FlipOnConvert.lie = timedelta(hours=2)
-        return self
 
 
 def test_a_value_that_flips_its_offset_during_conversion_is_rejected() -> None:
@@ -396,12 +267,12 @@ def test_a_value_that_flips_its_offset_during_conversion_is_rejected() -> None:
     when the value was, on its own account, ``07:00Z`` — so the offset is
     re-read at the moment of the copy, and this is refused instead.
     """
-    _FlipOnConvert.lie = timedelta(0)
+    FlipOnConvert.lie = timedelta(0)
     try:
         with pytest.raises(ValidationError, match="when did not convert to UTC"):
-            _Instant(when=_FlipOnConvert(2026, 1, 2, 9, 0, tzinfo=UTC))
+            _Instant(when=FlipOnConvert(2026, 1, 2, 9, 0, tzinfo=UTC))
     finally:
-        _FlipOnConvert.lie = timedelta(0)
+        FlipOnConvert.lie = timedelta(0)
 
 
 def test_canonicalisation_preserves_the_instant_exactly() -> None:
@@ -421,12 +292,12 @@ def test_a_zero_offset_that_is_not_utc_cannot_change_its_mind_later() -> None:
     "stored as UTC" guarantee broken after the fact, with no comparison left to
     catch it.
     """
-    _MutableOffset.shift = timedelta(0)
+    MutableOffset.shift = timedelta(0)
     try:
         with pytest.raises(ValidationError, match="when did not convert to UTC"):
-            _Instant(when=_ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC))
+            _Instant(when=ZeroButNotUtcConversion(2026, 1, 2, tzinfo=UTC))
     finally:
-        _MutableOffset.shift = timedelta(0)
+        MutableOffset.shift = timedelta(0)
 
 
 def test_every_genuine_conversion_yields_the_utc_object_itself() -> None:
@@ -443,3 +314,27 @@ def test_every_genuine_conversion_yields_the_utc_object_itself() -> None:
         UTC,
     ):
         assert _Instant(when=datetime(2026, 1, 1, tzinfo=zone)).when.tzinfo is UTC
+
+
+@pytest.mark.parametrize("case", HOSTILE_INSTANTS, ids=HOSTILE_IDS)
+def test_the_shared_adversarial_table_holds_at_the_field_seam(case: HostileInstant) -> None:
+    """ADR-0030 §4's shared table, asserted here and identically in ``test_clock.py``.
+
+    The tests above pin each case with its own reasoning; this one exists so the
+    *list* is shared. `core` has one canonicaliser, and a rule in two places with
+    two test suites is two rules waiting to diverge — so a case added for one
+    seam is automatically owed by the other, and a change to one that the other
+    does not follow fails the gate rather than passing quietly.
+    """
+    case.reset()
+    try:
+        if case.accepted:
+            stored = _Instant(when=case.make()).when
+            assert type(stored) is datetime
+            assert stored.tzinfo is UTC
+            assert stored == case.canonical
+        else:
+            with pytest.raises(ValidationError):
+                _Instant(when=case.make())
+    finally:
+        case.reset()

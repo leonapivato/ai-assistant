@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 
 from ai_assistant.context import ClockContextSource, ContextSource
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.errors import ConfigurationError, ContextError
 from ai_assistant.core.types import TimeOfDay
 
 # 2026-01-01 is a Thursday; 01-03 a Saturday. Anchors for weekday/weekend checks.
@@ -87,11 +87,16 @@ async def test_timezone_shifts_local_day_and_hour() -> None:
     assert contribution["now"] == instant  # the reference instant is unchanged
 
 
-async def test_naive_clock_is_treated_as_utc() -> None:
+async def test_a_naive_clock_is_a_wiring_bug_not_an_attributed_instant() -> None:
+    """Inverted by ADR-0026: this used to yield a UTC-attributed context.
+
+    ``core`` no longer attributes an offset and neither does this source, so the
+    naive reading is refused at the producer — loudly, naming the seam — rather
+    than resolved silently in the fabricating direction (ADR-0023 §3).
+    """
     source = ClockContextSource(now=lambda: datetime(2026, 1, 1, 14))  # noqa: DTZ001  naive
-    contribution = await source.contribute()
-    assert contribution["now"] == _at(14)  # normalised to UTC
-    assert contribution["time_of_day"] is TimeOfDay.AFTERNOON
+    with pytest.raises(ContextError, match="ClockContextSource"):
+        await source.contribute()
 
 
 def test_unknown_timezone_raises_configuration_error() -> None:

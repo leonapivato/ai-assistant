@@ -17,9 +17,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import MemoryStoreError
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryKind, MemoryRecord
 
 
@@ -51,20 +55,31 @@ class InMemoryMemoryStore:
     their id; adding a record whose id already exists overwrites it.
     """
 
-    def __init__(self, *, now: Callable[[], datetime] = _utcnow) -> None:
+    def __init__(self, *, now: Clock = _utcnow) -> None:
         """Create an empty store.
 
         Args:
             now: Clock used to decide whether a record has expired; injectable
-                for deterministic tests. Defaults to UTC wall-clock.
+                for deterministic tests. Defaults to UTC wall-clock. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`, so a naive or
+                indeterminate reading is a ``MemoryStoreError`` rather than a
+                fabricated UTC instant the expiry comparison then trusts
+                (ADR-0026 §2).
         """
         self._records: dict[str, MemoryRecord] = {}
-        self._now = now
+        self._clock = checked_clock(now, owner="InMemoryMemoryStore")
 
     def _now_utc(self) -> datetime:
-        """The clock's current time, normalising a naive result to UTC."""
-        now = self._now()
-        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
+
+        Raises:
+            MemoryStoreError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise MemoryStoreError(str(exc)) from exc
 
     def _is_expired(self, record: MemoryRecord) -> bool:
         return record.expires_at is not None and record.expires_at <= self._now_utc()

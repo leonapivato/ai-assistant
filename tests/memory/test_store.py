@@ -8,6 +8,7 @@ import pytest
 from memory_store_contract import MemoryStoreContract
 from pydantic import ValidationError
 
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
     MemoryKind,
@@ -186,11 +187,13 @@ async def test_expiry_boundary_is_exclusive_at_now() -> None:
     assert await store.get("future") is not None
 
 
-async def test_naive_injected_clock_is_treated_as_utc() -> None:
+async def test_a_naive_injected_clock_is_the_subsystems_error() -> None:
+    """Inverted by ADR-0026: the reading used to be attributed UTC here."""
     store = InMemoryMemoryStore(now=lambda: datetime(2026, 6, 1))  # noqa: DTZ001  naive clock
     await store.add(_semantic("1", "keyword", expires_at=datetime(2026, 1, 2, tzinfo=UTC)))
 
-    assert await store.get("1") is None  # no crash; expired under the UTC-normalised clock
+    with pytest.raises(MemoryStoreError, match="InMemoryMemoryStore"):
+        await store.get("1")
 
 
 async def test_export_is_an_independent_snapshot() -> None:

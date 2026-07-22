@@ -20,9 +20,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import MemoryStoreError
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryKind, MemoryRecord
 
 
@@ -38,20 +42,34 @@ class FakeMemoryStore:
     adding a record whose id already exists overwrites it.
     """
 
-    def __init__(self, *, now: Callable[[], datetime] = _utcnow) -> None:
+    def __init__(self, *, now: Clock = _utcnow) -> None:
         """Create an empty store.
 
         Args:
             now: Clock used to decide whether a record has expired; injectable for
-                deterministic tests. Defaults to the UTC wall clock.
+                deterministic tests. Defaults to the UTC wall clock. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`, exactly as the
+                real stores are: a fake looser than the contract would certify
+                consumers the real implementation rejects (ADR-0026 §7).
         """
         self._records: dict[str, MemoryRecord] = {}
-        self._now = now
+        self._clock = checked_clock(now, owner="FakeMemoryStore")
 
     def _now_utc(self) -> datetime:
-        """The clock's current time, normalising a naive result to UTC."""
-        now = self._now()
-        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        """The guarded clock's reading, as the error the real store raises.
+
+        ``MemoryStoreError``, not the raw ``ValueError`` ``core`` raises: a fake
+        that leaked it would certify a consumer's error handling against
+        behaviour it will never meet in production (ADR-0026 §4).
+
+        Raises:
+            MemoryStoreError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise MemoryStoreError(str(exc)) from exc
 
     def _is_expired(self, record: MemoryRecord) -> bool:
         return record.expires_at is not None and record.expires_at <= self._now_utc()

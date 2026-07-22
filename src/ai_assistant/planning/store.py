@@ -16,13 +16,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError
 from ai_assistant.core.types import GoalDeletion, PlanExport, StepStatus
 from ai_assistant.planning.execution import PlanExecution
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ActionPlan, ExecutionState, Goal, StepTransition
 
 
@@ -41,23 +41,40 @@ class InMemoryPlanStore:
     def __init__(
         self,
         *,
-        now: Callable[[], datetime] = _utcnow,
+        now: Clock = _utcnow,
         tracker: PlanExecution | None = None,
     ) -> None:
         """Create an empty store.
 
         Args:
             now: Clock for export timestamps and execution ids; injectable for
-                deterministic tests.
+                deterministic tests. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`, so a
+                non-conforming reading is a ``PlanningError`` (ADR-0026).
             tracker: The transition tracker to validate writes against. Defaults
-                to a :class:`PlanExecution` sharing this store's clock.
+                to a :class:`PlanExecution` sharing this store's clock. The
+                *unwrapped* clock is handed on: ``PlanExecution`` wraps it under
+                its own owner label, so a bad reading names the seam that read it
+                rather than whichever wrapper happens to be outermost.
         """
         self._goals: dict[str, Goal] = {}
         self._plans: dict[str, ActionPlan] = {}
         self._executions: dict[str, ExecutionState] = {}
-        self._now = now
+        self._clock = checked_clock(now, owner="InMemoryPlanStore")
         self._tracker = tracker or PlanExecution(now=now)
         self._sequence = 0
+
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as `planning`'s own error (ADR-0026 §4).
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
+        """
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise PlanningError(str(exc)) from exc
 
     async def save_goal(self, goal: Goal) -> str:
         """Persist a goal, or update the parts of one that may change.
@@ -169,7 +186,12 @@ class InMemoryPlanStore:
         ]
 
     async def export(self) -> PlanExport:
-        """Return a portable, internally consistent snapshot (ADR-0004 §6)."""
+        """Return a portable, internally consistent snapshot (ADR-0004 §6).
+
+        Raises:
+            PlanningError: If the injected clock's reading is not conforming
+                (ADR-0026 §4).
+        """
         return PlanExport(
             exported_at=self._now(),
             goals=tuple(goal.model_copy(deep=True) for goal in self._goals.values()),

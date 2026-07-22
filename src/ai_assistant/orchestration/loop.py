@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     Goal,
@@ -46,6 +47,7 @@ from ai_assistant.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
         ContextProvider,
         FeedbackProcessor,
@@ -155,7 +157,7 @@ class LearningLoop:
         planner: Planner,
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
-        now: Callable[[], datetime] = _utcnow,
+        now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
     ) -> None:
         """Wire the loop from injected contracts.
@@ -181,6 +183,9 @@ class LearningLoop:
                 deterministic in tests. It no longer stamps temporary-store
                 expiry — that is the writer's own clock (ADR-0028 §4b), so a
                 test wanting a deterministic expiry injects one there too.
+                Guarded by :func:`~ai_assistant.core.clock.checked_clock`, so a
+                non-conforming reading is a ``PlanningError`` from the stage that
+                read it, `orchestration` having no error of its own (ADR-0026 §4).
             id_factory: Supplies goal ids; injectable for the same reason.
 
         Raises:
@@ -196,7 +201,7 @@ class LearningLoop:
         self._planner = planner
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
-        self._now = now
+        self._clock = checked_clock(now, owner="LearningLoop")
         self._id_factory = id_factory
 
     async def respond(self, utterance: str) -> TurnResult:
@@ -218,7 +223,8 @@ class LearningLoop:
             The turn's goal, context, retrieved memories and plan.
 
         Raises:
-            PlanningError: If ``utterance`` is blank, or the planner could not
+            PlanningError: If ``utterance`` is blank, the injected clock's
+                reading is not conforming (:meth:`_now_utc`), or the planner could not
                 produce a plan.
             ContextError: If context assembly failed outright. Assembly already
                 degrades a failing optional source internally (ADR-0008), so
@@ -289,14 +295,16 @@ class LearningLoop:
             PlanningError: If the utterance is blank. Caught here rather than
                 left to ``Goal``'s validator so the failure arrives as an
                 ``AssistantError`` a caller can handle, not a ``ValidationError``.
+                Also if the injected clock's reading is not conforming — see
+                :meth:`_now_utc`.
         """
         statement = utterance.strip()
         if not statement:
             msg = "a turn needs a non-empty utterance"
             raise PlanningError(msg)
-        # `_now_utc` rather than `_now`: `Goal.created_at` has a normalising
-        # validator but `Provenance.last_updated` does not, so a naive clock
-        # would leave the goal's timestamps disagreeing about awareness.
+        # `_now_utc` rather than `self._clock`: the guard raises `core`'s
+        # owner-labelled `ValueError`, and this stage owes its caller an
+        # `AssistantError` (ADR-0026 §4), exactly as the blank check above does.
         now = self._now_utc()
         return Goal(
             id=self._id_factory(),
@@ -325,13 +333,18 @@ class LearningLoop:
         return tuple(memories), False
 
     def _now_utc(self) -> datetime:
-        """The injected clock's time, normalising a naive reading to UTC.
+        """The guarded clock's reading, as the reading stage's own error.
 
-        Load-bearing for :meth:`_goal_from`: ``Provenance.last_updated`` has no
-        normalising validator, so a naive clock would otherwise leave the goal's
-        two timestamps disagreeing about awareness. The same guard on the
-        temporary-store expiry moved into the write path with the write itself
-        (ADR-0028 §4b), where ``model_copy(update=...)`` still skips validators.
+        ``core/errors.py`` defines no error for `orchestration`, so ADR-0026 §4
+        gives the failure to the *stage*: this clock is read only while
+        constructing a turn's goal, which already raises ``PlanningError`` for a
+        blank utterance, so a non-conforming reading raises the same.
+
+        Raises:
+            PlanningError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range.
         """
-        now = self._now()
-        return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        try:
+            return self._clock()
+        except ValueError as exc:
+            raise PlanningError(str(exc)) from exc

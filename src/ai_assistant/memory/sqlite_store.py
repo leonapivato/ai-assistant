@@ -23,12 +23,14 @@ from typing import TYPE_CHECKING
 import sqlite_vec
 from pydantic import TypeAdapter, ValidationError
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import MemoryRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding, MemoryKind
 
@@ -54,7 +56,7 @@ class SqliteMemoryStore:
         *,
         path: Path | str,
         embedder: Embedder,
-        now: Callable[[], datetime] = _utcnow,
+        now: Clock = _utcnow,
     ) -> None:
         """Open (or create) the store at ``path``.
 
@@ -63,14 +65,18 @@ class SqliteMemoryStore:
             embedder: The embedder used for all records; a store is bound to one
                 embedding model for its lifetime.
             now: Clock used to decide whether a record has expired; injectable
-                for deterministic tests. Defaults to UTC wall-clock.
+                for deterministic tests. Defaults to UTC wall-clock. Guarded by
+                :func:`~ai_assistant.core.clock.checked_clock`: this seam never
+                reaches a `core` field validator — the reading becomes a float
+                through ``timestamp()`` — so the producer is the only place a
+                naive or indeterminate reading can be caught (ADR-0026 §7).
 
         Raises:
             MemoryStoreError: If the store was previously built with a different
                 embedding model or dimension.
         """
         self._embedder = embedder
-        self._now = now
+        self._clock = checked_clock(now, owner="SqliteMemoryStore")
         self._path = path if path == ":memory:" else str(Path(path))
         self._lock = asyncio.Lock()
         self._conn = self._setup()
@@ -236,12 +242,22 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg) from exc
 
     def _now_epoch(self) -> float:
-        # Normalise a naive clock result to UTC so expiry is consistent with the
-        # UTC-normalised expires_at stored on each record (rather than host-local).
-        now = self._now()
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=UTC)
-        return now.timestamp()
+        """The guarded clock's reading as a POSIX timestamp, in UTC.
+
+        The guard is what makes this comparable with the UTC ``expires_at``
+        stored on each record: an indeterminate reading would otherwise be read
+        as *host-local* by ``timestamp()`` and silently shift every expiry
+        decision by the host offset.
+
+        Raises:
+            MemoryStoreError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range
+                (ADR-0026 §4).
+        """
+        try:
+            return self._clock().timestamp()
+        except ValueError as exc:
+            raise MemoryStoreError(str(exc)) from exc
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:

@@ -59,25 +59,35 @@ def _claim(execution_id: str, step_id: str, version: int) -> StepTransition:
     )
 
 
-def test_a_naive_clock_cannot_leak_a_naive_timestamp() -> None:
-    """``model_copy`` skips validators, so an unnormalised clock would write through.
+def test_a_naive_clock_is_refused_at_the_producer() -> None:
+    """Inverted by ADR-0026: ``_revalidated_state`` used to normalise this.
 
-    Every reader treats ``updated_at`` as tz-aware; a naive one would raise on
-    the first comparison against a UTC timestamp, far from the cause.
+    ``model_copy`` skips validators, and the validator that caught a naive
+    ``updated_at`` on the re-validation path is exactly what ADR-0023 removes —
+    so the guard is at the producer, and the reading is refused rather than
+    attributed.
     """
     naive = PlanExecution(now=lambda: datetime(2026, 1, 1))  # noqa: DTZ001
 
-    state = naive.start(_plan(1), execution_id="e1")
-    assert state.updated_at.tzinfo is not None
+    with pytest.raises(PlanningError, match="PlanExecution"):
+        naive.start(_plan(1), execution_id="e1")
 
-    claimed = naive.apply(state, _claim("e1", "s1", state.version))
-    assert claimed.updated_at.tzinfo is not None
 
-    recovered = naive.abandon_running(claimed)
-    assert recovered.updated_at.tzinfo is not None
+def test_a_conforming_clock_still_stamps_every_transition_in_utc() -> None:
+    """The other half: nothing about the ordinary path changed."""
+    tracker = PlanExecution(now=lambda: datetime(2026, 1, 1, tzinfo=UTC))
 
-    cancelled = naive.cancel(naive.start(_plan(1), execution_id="e2"))
-    assert cancelled.updated_at.tzinfo is not None
+    state = tracker.start(_plan(1), execution_id="e1")
+    assert state.updated_at.tzinfo is UTC
+
+    claimed = tracker.apply(state, _claim("e1", "s1", state.version))
+    assert claimed.updated_at.tzinfo is UTC
+
+    recovered = tracker.abandon_running(claimed)
+    assert recovered.updated_at.tzinfo is UTC
+
+    cancelled = tracker.cancel(tracker.start(_plan(1), execution_id="e2"))
+    assert cancelled.updated_at.tzinfo is UTC
 
 
 def test_a_pending_step_cannot_be_skipped_as_approval_denied() -> None:
