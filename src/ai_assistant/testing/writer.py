@@ -123,16 +123,28 @@ class FakeMemoryWriter:
                 return None
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
-        """Stamp an expiry ``ttl`` from now, normalising a naive reading to UTC.
+        """Stamp an expiry ``ttl`` from now, in UTC, failing the way a store does.
 
-        ``model_copy(update=...)`` skips validators, so a naive ``expires_at``
-        would reach the store exactly as it left here and raise ``TypeError`` at
-        the first comparison inside it.
+        ``model_copy(update=...)`` skips validators, so whatever this returns
+        reaches the store exactly as it left here. Two things follow, and the
+        production writer does both — a fake that did neither would let a
+        consumer's test pass on state ``MemoryIngestor`` would have refused:
+
+        * a naive reading is attributed and an aware one *converted*, because
+          ADR-0023 §2 makes UTC storage uniform and a ``+02:00`` deadline would
+          otherwise be persisted verbatim; and
+        * an unrepresentable deadline becomes a ``MemoryStoreError``, not the
+          raw ``OverflowError`` the arithmetic raises.
         """
         if ttl is None:
             return None
         now = self._now()
-        return (now if now.tzinfo is not None else now.replace(tzinfo=UTC)) + ttl
+        now = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+        try:
+            return now + ttl
+        except OverflowError as exc:
+            msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
+            raise MemoryStoreError(msg) from exc
 
 
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
