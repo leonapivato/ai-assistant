@@ -1725,12 +1725,25 @@ class ToolDefinition(BaseModel):
             # because pydantic encodes a mapping key on the way to JSON. Caught
             # here so every half of the same defect raises the same error rather
             # than one arriving as a bare codec or limit failure.
-            msg = f"tool has no JSON encoding, so it could not be stored: {self.id!r} ({exc})"
-            raise ValueError(msg) from exc
+            raise ValueError(self._unstorable(exc)) from exc
         if not _is_encodable(rendered):
-            msg = f"tool has no JSON encoding, so it could not be stored: {self.id!r}"
-            raise ValueError(msg)
+            raise ValueError(self._unstorable(None))
         return self
+
+    def _unstorable(self, cause: ValueError | None) -> str:
+        """Say which declaration could not be rendered, without raising.
+
+        ``id`` is a ``str`` on any definition that was *constructed*, and the
+        values that reach the caller above got there past ``frozen=True`` — so
+        it can be an arbitrary object with a hostile ``__repr__``, and so can
+        whatever pydantic put inside ``cause``. Interpolating either directly
+        would let the diagnostic destroy the diagnosis, raising that object's
+        exception out of an ``except`` block instead of the ``ValueError`` this
+        method promises. :func:`_describe` is the helper this module already
+        keeps for exactly that, and this is the second place it is needed.
+        """
+        detail = "" if cause is None else f" ({_describe(cause)})"
+        return f"tool has no JSON encoding, so it could not be stored: {_describe(self.id)}{detail}"
 
 
 class PermissionOutcome(_SeverityScale):

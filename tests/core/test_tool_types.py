@@ -527,3 +527,26 @@ def test_a_definition_tampered_to_hold_an_unserialisable_value_is_refused() -> N
 
     with pytest.raises(ValidationError, match="JSON encoding"):
         _Recorded(tool=tampered)
+
+
+def test_a_hostile_repr_on_a_tampered_identifier_cannot_destroy_the_diagnosis() -> None:
+    """The diagnostic must not be able to raise instead of the diagnosis.
+
+    Every value the refusal path interpolates arrived past ``frozen=True``, so
+    ``id`` need not be a ``str`` at all. A definition whose ``id`` raises from
+    its own ``__repr__`` would otherwise throw that exception out of the
+    ``except`` block, replacing the ``ValidationError`` this type promises with
+    whatever the hostile object chose — the failure ``_describe`` exists for.
+    """
+
+    class _Hostile:
+        def __repr__(self) -> str:
+            msg = "repr() refused"
+            raise RuntimeError(msg)
+
+    tampered = _definition()
+    object.__setattr__(tampered, "id", _Hostile())
+    object.__setattr__(tampered, "parameters_schema", {"x": object()})
+
+    with pytest.raises(ValidationError, match="JSON encoding"):
+        _Recorded(tool=tampered)
