@@ -5,12 +5,18 @@
 - Amends on ratification: ADR-0029 §§1, 3–4 and its Consequences. The edits are
   **not** made by this change — §7 records their exact form and why they wait,
   following ADR-0026 §6 and ADR-0030 §6.
-- **Not breaking for any consumer.** No Protocol signature moves and no ratified
-  type narrows. §1 adds a `core` name, §5's first clause binds `tools/`
-  registration only (ADR-0018's Compatibility split), and the rest are
-  specifications of rules ADR-0029 already states. It is still a substantive
-  contract ADR — it changes the `core` surface — so it merges as its own PR
-  ahead of any implementation (golden rule 5, ADR-0015 §5).
+- **Not breaking for any consumer**, and §3 is the clause that has to earn that.
+  No Protocol signature moves and no type narrows: §1 adds a `core` name, §5's
+  first clause binds `tools/` registration only (ADR-0018's Compatibility split),
+  and §2 and §4 specify rules ADR-0029 already states. §3 **does** change what an
+  exchanged `ToolFailureKind` member means, which would ordinarily be a
+  compatibility concern — and is not one here, because nothing produces or
+  consumes it: no conforming `invoke` can construct a `CANCELLED` result (that is
+  the defect §3 corrects), no executor exists to classify one, and `retryable`
+  keeps its value. Migration cost is nil, in the sense ADR-0018 used the phrase,
+  and there is no implementation to migrate. It is still a substantive contract
+  ADR — it changes the `core` surface — so it merges as its own PR ahead of any
+  implementation (golden rule 5, ADR-0015 §5).
 - Does **not** implement anything. The eighth `core` name is decided here and
   built by a later PR.
 
@@ -105,7 +111,16 @@ class ToolDefinition(BaseModel):
         ``idempotency`` is ``NATURAL``; otherwise ``INDETERMINATE``
         (ADR-0029 §4).
         """
+        if not self.side_effecting or self.idempotency is Idempotency.NATURAL:
+            return ToolOutcome.FAILED
+        return ToolOutcome.INDETERMINATE
 ```
+
+The body is shown rather than elided, against ADR-0029 §3's convention that
+"these blocks are shapes, not implementations". The exception is deliberate:
+this clause's whole content is *where four lines live*, and they already exist
+twice in the repository. Eliding them would leave the one thing being moved
+invisible in the diff that moves it.
 
 A read-only property on `ToolDefinition`, taking nothing beyond `self` and
 returning a `ToolOutcome`. The rule's text is unchanged — this clause moves it,
