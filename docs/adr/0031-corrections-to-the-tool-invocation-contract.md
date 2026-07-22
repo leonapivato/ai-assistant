@@ -675,6 +675,17 @@ suite obligations that come with them:
 - **Both seams keep their behavioural tests** — §10's "the timeout rule in §4 in
   both directions" is a statement about `invoke`, and it stays where it can
   observe one.
+- **Every rule §2 states gets a case in the shared conformance suite**, and the
+  three below are named because each is one an implementation can violate while
+  passing everything else. The general obligation is the durable one: §2 is a
+  classification rule with four clauses, and a suite that pins three of them
+  certifies an implementation that reads the fourth however it likes.
+- **Precedence, with both signals live at once** — a callable that catches the
+  deadline's `CancelledError`, cancels its invoking task, and returns, so
+  `Timeout.expired()` and the delta are both true. `invoke` must raise
+  `CancelledError`, not return a `TIMED_OUT` result. §2(d) makes that normative
+  and each signal is otherwise tested alone, so an implementation checking expiry
+  first passes every other case here.
 - **The manufactured-delta case is added to the shared conformance suite** — a
   callable that calls `cancel()` on its own invoking task, awaits, catches and
   returns — asserting that `invoke` raises `CancelledError`. §2 makes that
