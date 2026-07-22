@@ -4,18 +4,29 @@
 #
 # Review runs locally now, so the PR record depends on someone pasting it. This
 # script is that paste, with the forgettable parts checked rather than trusted:
-# it refuses unless a review artifact exists whose recorded *base* and *tree*
-# both match the PR's current merge base and HEAD's tree (ADR-0020 §3). The
+# it refuses unless a review artifact covers the content the PR head carries. The
 # common failure under a paste-it-yourself norm is a review of stale content —
 # that one is mechanical.
 #
 # The anchor used to be the exact commit SHA (ADR-0015 §1). Content is the
-# stricter thing to check and the cheaper one to satisfy: a review taken against
-# different content, or a different base, still fails exactly as before, while a
-# commit that changes no reviewed byte — an amended message, a squash, an
-# in-place rebase, a revert back to a reviewed tree — no longer forces a fresh
-# round. What is *not* relaxed: an adversarial record is still required, and the
-# architecture lens is still required for a change touching the contract surface.
+# stricter thing to check and the cheaper one to satisfy: a commit that changes
+# no reviewed byte — an amended message, a squash, an in-place rebase, a revert
+# back to a reviewed tree — no longer forces a fresh round (ADR-0020 §3).
+#
+# ADR-0027 then separates the two questions that one rule was answering with one
+# instrument. COVERAGE — did a review actually read this content? — is what the
+# artifact can attest and nothing else can, so it stays here. CURRENCY — does the
+# change still hold on today's base? — is what ruff, mypy, lint-imports and
+# pytest establish on every rebase and every push, so the review is no longer
+# asked to re-certify it. Concretely: where the base has NOT moved, the recorded
+# base and tree must both match and that is unchanged; where it HAS moved, an
+# artifact still covers HEAD if the reviewed patch's identity is unchanged and
+# the move touches none of §3's floor — and the move is then published in full on
+# the PR rather than costing a Codex round.
+#
+# What is *not* relaxed: an adversarial record is still required, the
+# architecture lens is still required for a change touching the contract surface,
+# and every clause of the moved-base path fails closed.
 #
 # Deliberately not a pre-push hook: review is a pre-merge step, not a per-push
 # one. Gating every push would force a full Codex run per WIP commit, which is
@@ -99,11 +110,17 @@ if grep -qE '^src/ai_assistant/core/(protocols|types)\.py$' <<<"$changed_files";
     core_change=1
 fi
 
-# --- Which reviews cover this PR (ADR-0020 §3) -------------------------------
+# --- Which reviews cover this PR (ADR-0020 §3, as amended by ADR-0027 §2) ----
 #
-# An artifact is accepted when its recorded *base* and its recorded *tree* both
-# match this PR's current merge base and HEAD's tree — whatever commit it is
-# filed under. Two independent conditions, and both are load-bearing:
+# An artifact is accepted when EITHER:
+#
+#   (a) its recorded *base* equals this PR's merge base AND its recorded *tree*
+#       equals HEAD's tree — ADR-0020 §3 exactly as written, unmodified; or
+#   (b) its recorded base is a PROPER ANCESTOR of the merge base, both patch
+#       identities are hashable and equal, the base move clears §3's floor, and
+#       the drift is published per §4.
+#
+# Under (a) the two conditions are independent and both load-bearing:
 #
 #   tree: the content reviewed. A scope cut, a fixup, any real edit changes it,
 #         so a review of different content is refused exactly as before. This is
@@ -111,23 +128,363 @@ fi
 #         a squash, an in-place rebase, or a revert back to a reviewed tree
 #         changes the commit but not one reviewed byte.
 #   base: the left edge of the range. A review run against a narrower base
-#         (`just review-codex adversarial HEAD~1`) covers only part of the PR,
-#         and a rebase onto moved origin/main genuinely changes the diff. Both
-#         still force a fresh review.
+#         (`just review-codex adversarial HEAD~1`) covers only part of the PR
+#         and must still force a fresh review.
 #
-# Dropping either check would be a real loss of the guarantee, not a
-# simplification: the tree alone would accept a review of the same content
-# against a different base, and the base alone would accept a review of code
-# that has since changed.
+# The tree comparison is not weakened, it is SCOPED. Under (a) it refuses on any
+# changed byte anywhere in the tree, which is strictly stronger than any identity
+# computed from a diff, and it is untouched. Under (b) the base itself moved, so
+# the whole-repository tree legitimately differs by the base move and a tree
+# comparison has nothing to say — content is pinned by the patch identity instead,
+# and the base by the floor.
+#
+# PROPER is the load-bearing word in (b). An equal base is an ancestor of itself,
+# so a (b) that admitted equality would let the patch identity govern a case (a)
+# already covers, and govern it more weakly: the identity ignores hunk line
+# numbers where the tree does not, so in a file with two identical regions,
+# moving the reviewed edit from one to the other leaves the identity intact and
+# the tree changed. Where the base has not moved, (a) governs and its tree check
+# is the whole test.
+#
+# A recorded base that is NOT an ancestor of the merge base is not drift; it is a
+# different history, and fails closed.
 expected_base="$(git merge-base FETCH_HEAD "$sha")"
 head_tree="$(git rev-parse "${sha}^{tree}")"
 
+# --- The reviewed range's rendering, and its identity (ADR-0027 §2) ----------
+#
+# THIS BLOCK IS DUPLICATED VERBATIM IN scripts/codex-review.sh AND MUST STAY
+# IDENTICAL. One script records the identity and the other recomputes it here, so
+# a divergence between the two spellings would not fail loudly — it would compute
+# two different identities for one patch and quietly cost a review round every
+# time. Same reasoning as `artifact_has_verdict`, duplicated across the pair for
+# the same reason.
+#
+# The diff options are PINNED rather than inherited from the repository or user
+# config. Every one of them changes the rendered patch text and therefore the
+# identity, so leaving them to config would make the identity a function of when
+# and where it was computed rather than of the two commits.
+# >>> shared-patch-identity (ADR-0027 §2) — kept byte-identical in both scripts
+_diff_opts=(
+    -c core.quotePath=false
+    -c diff.renames=true
+    -c diff.algorithm=myers
+    -c diff.context=3
+    -c diff.indentHeuristic=true
+    -c diff.noprefix=false
+    -c diff.mnemonicPrefix=false
+)
+
+# Whether the range carries an entry with NEITHER a hunk NOR an `index` line, so
+# its contribution to the identity is a function of its PATHS ALONE (ADR-0027 §2).
+# That is exactly the set of entries whose pre- and post-image blobs are the same
+# object: a 100%-similarity rename or copy, and a mode-only change. git emits
+# `similarity index 100% / rename from / rename to` or `old mode / new mode` for
+# those and no `index` line at all, so a reviewed rename of `f` to `g`, rebased
+# onto a base that changed `f`'s contents, presents a byte-identical identity
+# while `g` now holds content no reviewer saw.
+#
+# Read from `--raw -z` rather than by scanning the rendered patch text: the blob
+# pair is the structural fact, where a text scan would have to guess at entry
+# boundaries in a format where a pathname may itself contain a newline.
+_range_has_pathless_entry() {
+    local -a rec=()
+    mapfile -d '' -t rec < <(
+        git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv --raw --abbrev=40 -z "$1...$2"
+    )
+    local i=0 meta old new status
+    while [[ $i -lt ${#rec[@]} ]]; do
+        meta="${rec[$i]}"
+        # ":<oldmode> <newmode> <oldsha> <newsha> <status>"
+        read -r _ _ old new status <<<"${meta#:}"
+        case "$status" in
+        R* | C*) i=$((i + 3)) ;;
+        *) i=$((i + 2)) ;;
+        esac
+        # A record that runs off the end is a format this cannot parse, so it is
+        # reported as pathless: unparsed is not the same as safe.
+        if [[ $i -gt ${#rec[@]} || "$old" == "$new" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The identity of the patch `git diff <$1>...<$2>` renders (ADR-0027 §2). Echoes
+# the identity, or NOTHING when the range has no identity that may be trusted.
+#
+# The mechanism is `git patch-id --verbatim`, and specifically NOT `--stable`.
+# Both ignore hunk line numbers — the first property, so a base move elsewhere in
+# a touched file merely renumbers the hunk headers and must not invalidate — but
+# `--stable` also STRIPS WHITESPACE, which fails the second property outright: a
+# base move that re-indents a context line inside a reviewed hunk is semantic in
+# Python, and under `--stable` the identity would not move, so a review of
+# content that is no longer there would be reused. `--verbatim` calculates the id
+# of the input as given and implies `--stable`, so it satisfies both. The two
+# spellings differ by one flag and only one of them is safe; ADR-0027 §2 fixes
+# the choice here rather than leaving it to the implementation.
+#
+# Empty output is the fail-closed answer, never a value to compare: an empty
+# range, an entry anchored on its paths alone, or a `patch-id` that produced
+# nothing all make the moved-base acceptance path UNAVAILABLE rather than
+# satisfied. Two such artifacts must never compare equal to each other.
+patch_identity() {
+    if _range_has_pathless_entry "$1" "$2"; then
+        return 0
+    fi
+    git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv "$1...$2" |
+        git patch-id --verbatim | awk 'NR == 1 { print $1 }' || return 0
+}
+# <<< shared-patch-identity
+
+head_patch_id="$(patch_identity "$expected_base" "$sha")"
+
+# --- The §3 floor ------------------------------------------------------------
+#
+# One class of base move is invisible to the gate AND changes what a reviewer
+# would say. A base move touching any of these invalidates the artifact outright
+# — no patch-identity relief, no drift disclosure:
+#
+#   the contract surface   — a Protocol or type landed on the base breaks no gate,
+#                            and changes what the architecture lens would say
+#                            about a diff that consumes it or now should;
+#   the standing contracts — the rubrics, the guide, the working agreements, and
+#                            the review DRIVER, which assembles the prompt: a base
+#                            move adding a required instruction there conducts
+#                            every later review under different instructions while
+#                            touching no document;
+#   docs/adr/**            — for EVERY persona. docs/review/guide.md §1 puts the
+#                            ADRs at the top of the authority hierarchy for every
+#                            reviewer, so a review conducted before a decision was
+#                            ratified is a review under a different authority.
+#
+# `scripts/ship.sh` is deliberately NOT here. The boundary is "what the reviewer
+# read", not "what the review loop touches": ship shapes no prompt, it applies
+# the acceptance rule, and it applies whatever version of it is on disk at ship
+# time. A stale copy of ship cannot exist to be reused.
+_is_floor_path() {
+    case "$1" in
+    src/ai_assistant/core/protocols.py | src/ai_assistant/core/types.py) return 0 ;;
+    CLAUDE.md | CONTRIBUTING.md | scripts/codex-review.sh) return 0 ;;
+    # A `case` glob is not pathname expansion, so `*` spans `/` and these cover
+    # the whole subtree at any depth.
+    docs/review/* | docs/adr/*) return 0 ;;
+    esac
+    return 1
+}
+
+# The base move, read into parallel arrays plus a floor verdict.
+#
+# BOTH ENDPOINTS OF EVERY ENTRY ARE READ, not a single name. A plain
+# `--name-only` reports only the *destination* of a detected rename, so a base
+# move renaming `docs/review/adversarial.md` out of that tree would clear a floor
+# it plainly breaches — the rubric the review was conducted under is gone, and the
+# listing never says so. So the comparison is rename-aware and NUL-delimited, a
+# floor path appearing as either endpoint is a breach, as is its deletion, and the
+# same reading feeds §4's published record: the file set the merge reviewer reads
+# is the file set the floor tested.
+declare -a drift_status=() drift_src=() drift_dst=()
+drift_floor=0
+_read_base_move() {
+    drift_status=()
+    drift_src=()
+    drift_dst=()
+    drift_floor=0
+    local -a rec=()
+    mapfile -d '' -t rec < <(
+        git -c core.quotePath=false diff --no-ext-diff --name-status -M -z "$1" "$2"
+    )
+    local i=0 st s d
+    while [[ $i -lt ${#rec[@]} ]]; do
+        st="${rec[$i]}"
+        case "$st" in
+        R* | C*)
+            s="${rec[$((i + 1))]:-}"
+            d="${rec[$((i + 2))]:-}"
+            i=$((i + 3))
+            ;;
+        *)
+            s="${rec[$((i + 1))]:-}"
+            d=""
+            i=$((i + 2))
+            ;;
+        esac
+        # A record running off the end means the listing could not be parsed, and
+        # an unparsed drift set cannot be published whole. Fail closed.
+        if [[ $i -gt ${#rec[@]} ]]; then
+            return 1
+        fi
+        drift_status+=("$st")
+        drift_src+=("$s")
+        drift_dst+=("$d")
+        if _is_floor_path "$s"; then
+            drift_floor=1
+        fi
+        if [[ -n "$d" ]] && _is_floor_path "$d"; then
+            drift_floor=1
+        fi
+    done
+    return 0
+}
+
+# --- Publishing a pathname (ADR-0027 §4, issue #165) -------------------------
+#
+# §4 requires the drift set to be published WHOLE. Reading it safely is not the
+# same as rendering it safely: git permits a pathname containing a newline, and
+# Markdown/HTML delimiters. A line-oriented renderer would emit `docs/adr/a<LF>b.md`
+# as two apparent paths, or emit a name that alters the comment's structure — and
+# the merge reviewer would then not receive the exact set that IS the evidence.
+#
+# So a pathname is published through a reversible, single-line, Markdown-safe
+# encoding, applied identically to BOTH endpoints of a rename:
+#
+#   1. Backslash layer, which removes every line break and control byte:
+#      `\` -> `\\`, TAB -> `\t`, LF -> `\n`, CR -> `\r`, any other C0 byte or DEL
+#      -> `\xHH`. Bytes >= 0x80 pass through untouched, so a UTF-8 path stays
+#      readable as itself.
+#   2. Entity layer, which removes every character GitHub's inline Markdown or
+#      HTML would read as structure. `&` goes FIRST, so every `&` remaining in the
+#      output is one this pass introduced and the decode is unambiguous; then
+#      `< > \ ` * _ [ ] | ~`.
+#
+# To decode: HTML-entity-decode, then undo the backslash escapes. The legend is
+# printed alongside the list so a reader can do it by hand.
+#
+# `LC_ALL=C` makes `substr`/`length` operate on bytes, and the value is passed
+# through the environment rather than `-v`: awk's `-v` interprets backslash
+# escapes in the assigned value, which would corrupt a path containing a literal
+# backslash before the encoder ever saw it.
+_encode_path() {
+    _encode_arg="$1" LC_ALL=C awk 'BEGIN {
+        s = ENVIRON["_encode_arg"]
+        for (i = 1; i < 32; i++) ctl = ctl sprintf("%c", i)
+        ctl = ctl sprintf("%c", 127)
+        out = ""
+        n = length(s)
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (c == "\\") { out = out "\\\\"; continue }
+            k = index(ctl, c)
+            if (k == 0) { out = out c; continue }
+            v = (k == 32 ? 127 : k)
+            if (v == 9) out = out "\\t"
+            else if (v == 10) out = out "\\n"
+            else if (v == 13) out = out "\\r"
+            else out = out sprintf("\\x%02x", v)
+        }
+        gsub(/&/, "\\&amp;", out)
+        gsub(/</, "\\&lt;", out)
+        gsub(/>/, "\\&gt;", out)
+        gsub(/\\/, "\\&#92;", out)
+        gsub(/`/, "\\&#96;", out)
+        gsub(/\*/, "\\&#42;", out)
+        gsub(/_/, "\\&#95;", out)
+        gsub(/\[/, "\\&#91;", out)
+        gsub(/\]/, "\\&#93;", out)
+        gsub(/\|/, "\\&#124;", out)
+        gsub(/~/, "\\&#126;", out)
+        printf "%s", out
+    }'
+}
+
+# The §4 drift record for a base move from $1 to the PR's merge base, rendered
+# from the arrays `_read_base_move` last populated.
+_render_drift() {
+    local old="$1" i n
+    n=${#drift_status[@]}
+    echo "<details><summary><strong>base drift — this review is reused across a moved base (ADR-0027 §2b)</strong></summary>"
+    echo
+    echo "The review was taken against base \`${old:0:12}\`; this ships on base"
+    echo "\`${expected_base:0:12}\`. The reviewed patch identity is unchanged and the base"
+    echo "move touches none of ADR-0027 §3's floor, so the artifact still covers this"
+    echo "content and the move is disclosed here rather than costing a review round."
+    echo
+    echo "**${n} file(s) changed by the base move**, published in full and never"
+    echo "truncated (ADR-0027 §4). No floor covers a base move that clears every listed"
+    echo "path and still bears on the change — that judgement is yours at merge:"
+    echo
+    for ((i = 0; i < n; i++)); do
+        if [[ -n "${drift_dst[$i]}" ]]; then
+            printf -- '- `%s` <code>%s</code> → <code>%s</code>\n' \
+                "${drift_status[$i]}" \
+                "$(_encode_path "${drift_src[$i]}")" \
+                "$(_encode_path "${drift_dst[$i]}")"
+        else
+            printf -- '- `%s` <code>%s</code>\n' \
+                "${drift_status[$i]}" "$(_encode_path "${drift_src[$i]}")"
+        fi
+    done
+    echo
+    echo "_Pathnames are encoded so the set survives publication intact (issue #165):"
+    echo "\`\\\\\`, \`\\t\`, \`\\n\`, \`\\r\` and \`\\xHH\` are backslash escapes, and \`&…;\` are"
+    echo "HTML entities. To recover a name, decode the entities first, then the"
+    echo "backslash escapes._"
+    echo
+    echo "</details>"
+    echo
+}
+
+# A drift record that does not fit its budget makes path (b) UNAVAILABLE, on the
+# same footing as an unhashable identity — the artifact falls back to (a) and the
+# moved base costs its round. §4 is explicit that truncating and shipping is the
+# one outcome it must not have: here the file set is not context for a decision,
+# it IS the decision, so an omitted tail is exactly where the contradicting
+# `docs/adr/` entry hides.
+drift_budget="${CODEX_SHIP_DRIFT_BUDGET:-20000}"
+
+# Evaluated once per recorded base and cached: several artifacts commonly share
+# one. `drift_verdict` is `ok`, `floor`, `toobig`, or `unreadable`.
+declare -A drift_verdict=() drift_block=()
+_evaluate_drift() {
+    local old="$1" block
+    if [[ -n "${drift_verdict[$old]:-}" ]]; then
+        return 0
+    fi
+    if ! git cat-file -e "${old}^{commit}" 2>/dev/null; then
+        drift_verdict["$old"]="unreadable"
+        return 0
+    fi
+    if ! _read_base_move "$old" "$expected_base"; then
+        drift_verdict["$old"]="unreadable"
+        return 0
+    fi
+    if [[ "$drift_floor" == "1" ]]; then
+        drift_verdict["$old"]="floor"
+        return 0
+    fi
+    # A set that cannot fit even at the smallest an entry can render (a status,
+    # a wrapped path, a newline — never under 20 bytes) is over budget already,
+    # and rendering it would be wasted work: the path encoder runs once per
+    # pathname, so this is what keeps a pathological base move from spending
+    # thousands of subprocesses to reach a refusal it is already committed to.
+    # A pure short-circuit — anything it rejects the real measurement rejects.
+    if [[ $((${#drift_status[@]} * 20)) -gt "$drift_budget" ]]; then
+        drift_verdict["$old"]="toobig"
+        return 0
+    fi
+    block="$(_render_drift "$old")"
+    if [[ "$(printf '%s' "$block" | wc -c)" -gt "$drift_budget" ]]; then
+        drift_verdict["$old"]="toobig"
+        return 0
+    fi
+    drift_verdict["$old"]="ok"
+    drift_block["$old"]="$block"
+    return 0
+}
+
 declare -A covering=()
-# Why an artifact was rejected, so the failure message can distinguish "content
-# moved" from "base moved". The ADR flags this explicitly: a single generic
-# error would be misread as the old stale-commit one.
+# Why an artifact was rejected. ADR-0020 already required "content moved" to be
+# distinguishable from "base moved"; ADR-0027 adds a third state and the message
+# must now separate all of them — content moved, base moved past what the review
+# can cover, and history diverged — or a refusal reads as the old stale-commit
+# error and the author re-runs the wrong thing.
 saw_tree_mismatch=0
-saw_base_mismatch=0
+saw_diverged_history=0
+saw_identity_mismatch=0
+saw_identity_unhashable=0
+saw_floor_breach=0
+saw_drift_toobig=0
+saw_drift_unreadable=0
 saw_unreadable=0
 saw_persona_mismatch=0
 
@@ -354,6 +711,9 @@ render_dispositions() {
 }
 
 declare -A covering_rank=()
+# The recorded base of the artifact selected for a persona, when it was accepted
+# under (b) — empty under (a). This is what §4 publishes.
+declare -A covering_drift=()
 
 shopt -s nullglob
 for a in .review/*.md; do
@@ -361,10 +721,8 @@ for a in .review/*.md; do
     recorded_base="$(provenance_field base_sha "$provenance")"
     recorded_tree="$(provenance_field tree "$provenance")"
     recorded_persona="$(provenance_field persona "$provenance")"
-
-    # `<sha>-<persona>.md`; personas carry no dash, so the last field is it.
-    name="$(basename "$a" .md)"
-    persona="${name##*-}"
+    recorded_patch="$(provenance_field patch_id "$provenance")"
+    recorded_sha="$(provenance_field sha "$provenance")"
 
     # An artifact predating ADR-0020 records no tree, so its content cannot be
     # verified at all. Fail closed: unverifiable is not the same as matching,
@@ -377,52 +735,97 @@ for a in .review/*.md; do
         continue
     fi
 
-    # Which lens ran is the one claim ship makes on the artifact's behalf, and
-    # until now it read that claim off the *filename* alone — so an architecture
-    # artifact renamed to `<sha>-adversarial.md` satisfied the mandatory
-    # adversarial requirement without that lens ever having run (issue #99).
-    # The field the reviewer recorded is the claim; the filename is a label
-    # anyone can retype. Require them to agree, and require the result to be a
-    # lens this script actually knows.
+    # Which lens ran is the one claim ship makes on the artifact's behalf, and it
+    # is read from the RECORDED FIELD, never from the filename (ADR-0027 §6). The
+    # name is an identity — every field the acceptance rule selects on — not a
+    # parser input, and it never was evidence: an architecture artifact renamed to
+    # claim the adversarial lens used to satisfy the mandatory adversarial
+    # requirement without that lens ever having run (issue #99). Reading the field
+    # closes that outright rather than by requiring the two to agree, because
+    # renaming an artifact now says nothing at all.
     #
     # This does not make the artifact tamper-proof and does not try to be — a
-    # forged file can set both. It closes the case where the two disagree, which
-    # is the one a rename produces, and it is nearly free because the field was
-    # already being recorded.
-    if [[ "$recorded_persona" != "$persona" || -z "${known_persona[$persona]:-}" ]]; then
+    # forged file can set the field. What it requires is that the claim be a lens
+    # this script actually knows, so an artifact naming something else is refused
+    # rather than posted under a heading claiming a lens nobody defined.
+    persona="$recorded_persona"
+    if [[ -z "${known_persona[$persona]:-}" ]]; then
         saw_persona_mismatch=1
         continue
     fi
 
-    if [[ "$recorded_tree" != "$head_tree" ]]; then
-        saw_tree_mismatch=1
-        continue
-    fi
-    if [[ "$recorded_base" != "$expected_base" ]]; then
-        saw_base_mismatch=1
-        continue
+    drifted=""
+    if [[ "$recorded_base" == "$expected_base" ]]; then
+        # (a) — ADR-0020 §3 exactly as written. The tree is the whole test here.
+        if [[ "$recorded_tree" != "$head_tree" ]]; then
+            saw_tree_mismatch=1
+            continue
+        fi
+    else
+        # (b) — the moved-base path, and the moved-base path only. Every clause
+        # below fails CLOSED: the artifact falls back to (a), which will refuse
+        # it, and the moved base costs its round.
+        if ! git merge-base --is-ancestor "$recorded_base" "$expected_base" 2>/dev/null; then
+            saw_diverged_history=1
+            continue
+        fi
+        # An empty identity on either side is "nothing to hash", never a match:
+        # an artifact predating the field, an empty range, or a range carrying an
+        # entry anchored on its paths alone — a 100%-similarity rename, a
+        # mode-only change — whose identity would compare equal across a base
+        # move that rewrote the very content the rename carried.
+        if [[ -z "$recorded_patch" || -z "$head_patch_id" ]]; then
+            saw_identity_unhashable=1
+            continue
+        fi
+        if [[ "$recorded_patch" != "$head_patch_id" ]]; then
+            saw_identity_mismatch=1
+            continue
+        fi
+        _evaluate_drift "$recorded_base"
+        case "${drift_verdict[$recorded_base]}" in
+        floor)
+            saw_floor_breach=1
+            continue
+            ;;
+        toobig)
+            saw_drift_toobig=1
+            continue
+            ;;
+        unreadable)
+            saw_drift_unreadable=1
+            continue
+            ;;
+        esac
+        drifted="$recorded_base"
     fi
 
-    # Several commits can legitimately carry a review of this same tree — that is
-    # the point of the change — so pick between them deterministically rather
-    # than taking whichever the glob yielded first.
+    # Several artifacts can legitimately cover this same content — that is the
+    # point of the change — so pick between them deterministically rather than
+    # taking whichever the glob yielded first.
     #
-    # Completeness outranks being filed under HEAD. Selecting an incomplete
-    # artifact while a valid one covers the same tree would refuse the ship on
-    # the strength of a file the author has already superseded; the verdict check
-    # below is a test of the *review*, not a way to lose one. Among equals,
-    # prefer the artifact named for the current commit, so a reader comparing the
-    # posted comment against the PR head sees no discrepancy.
+    # Completeness outranks everything: selecting an incomplete artifact while a
+    # valid one covers the same content would refuse the ship on the strength of
+    # a file the author has already superseded, and the verdict check below is a
+    # test of the *review*, not a way to lose one. Then an unmoved base outranks
+    # a moved one, because (a)'s whole-tree comparison is strictly stronger than
+    # any identity computed from a diff. Among equals, prefer the artifact
+    # recorded for the current commit, so a reader comparing the posted comment
+    # against the PR head sees no discrepancy.
     rank=0
     if artifact_has_verdict "$a"; then
-        rank=2
+        rank=4
     fi
-    if [[ "$name" == "${sha}-${persona}" ]]; then
+    if [[ -z "$drifted" ]]; then
+        rank=$((rank + 2))
+    fi
+    if [[ "$recorded_sha" == "$sha" ]]; then
         rank=$((rank + 1))
     fi
     if [[ -z "${covering[$persona]:-}" || "$rank" -gt "${covering_rank[$persona]}" ]]; then
         covering["$persona"]="$a"
         covering_rank["$persona"]="$rank"
+        covering_drift["$persona"]="$drifted"
     fi
 done
 shopt -u nullglob
@@ -435,11 +838,48 @@ if [[ "$saw_tree_mismatch" == "1" ]]; then
      reviewed, so it needs a fresh one (this is not the old stale-commit error:
      amending or squashing without editing content no longer costs a round)"
 fi
-if [[ "$saw_base_mismatch" == "1" ]]; then
+if [[ "$saw_diverged_history" == "1" ]]; then
     why="${why}
-     a review exists against a *different base* — the branch was rebased onto a
-     moved '${base_ref}', or the review was run with a narrower base, so it does
-     not cover this PR's full diff"
+     a review exists whose recorded base is *not an ancestor* of this PR's merge
+     base — that is not base drift, it is a different history (a review run with
+     a narrower base such as HEAD~1, or a branch reset onto an unrelated base),
+     so it does not cover this PR's full diff (ADR-0027 §2)"
+fi
+if [[ "$saw_identity_mismatch" == "1" ]]; then
+    why="${why}
+     a review exists against an *earlier base* whose reviewed patch is no longer
+     the patch being shipped — the base moved INTO the region the diff touches,
+     so the context the reviewer read has changed and the review no longer covers
+     it (ADR-0027 §2)"
+fi
+if [[ "$saw_identity_unhashable" == "1" ]]; then
+    why="${why}
+     a review exists against an *earlier base*, but this range has no patch
+     identity that can be trusted — it predates the field, or it carries an entry
+     anchored on its paths alone (a 100%-similarity rename, a mode-only change),
+     whose identity would not move even if the base rewrote that file. Refused
+     rather than guessed at (ADR-0027 §2)"
+fi
+if [[ "$saw_floor_breach" == "1" ]]; then
+    why="${why}
+     a review exists against an *earlier base*, and the base move touches
+     ADR-0027 §3's floor — the contract surface, the standing review contracts
+     (docs/review/**, CLAUDE.md, CONTRIBUTING.md, scripts/codex-review.sh), or
+     docs/adr/**. The gate cannot see those and they change what a reviewer would
+     say, so the move costs its round"
+fi
+if [[ "$saw_drift_toobig" == "1" ]]; then
+    why="${why}
+     a review exists against an *earlier base*, but the base move's file set is
+     too large to publish whole within ${drift_budget} bytes. §4 requires the whole
+     set or nothing — truncating and shipping is the one outcome it must not
+     have — so the moved base costs its round"
+fi
+if [[ "$saw_drift_unreadable" == "1" ]]; then
+    why="${why}
+     a review exists against an *earlier base* that cannot be read from this
+     clone, or whose file listing could not be parsed, so the drift §4 requires
+     published cannot be computed — fetch, or re-run the review"
 fi
 if [[ "$saw_unreadable" == "1" ]]; then
     why="${why}
@@ -448,9 +888,9 @@ if [[ "$saw_unreadable" == "1" ]]; then
 fi
 if [[ "$saw_persona_mismatch" == "1" ]]; then
     why="${why}
-     a review exists whose recorded persona does not match its filename, or
-     names a lens this script does not know — the filename is not evidence that
-     a lens ran, so run the review it claims rather than renaming the record"
+     a review exists whose recorded persona names a lens this script does not
+     know — and the recorded field is the only claim ship reads, so renaming the
+     record changes nothing; run the review the lens actually needs"
 fi
 
 # Adversarial is the required lens before merge. ADR-0020 relaxes neither this
@@ -475,8 +915,12 @@ fi
 # Enumerating the known personas is exhaustive: the loop above rejects anything
 # outside `known_persona`, so nothing else can be in `covering` to be missed.
 artifacts=()
+posting_personas=()
 for persona in adversarial architecture; do
-    [[ -n "${covering[$persona]:-}" ]] && artifacts+=("${covering[$persona]}")
+    if [[ -n "${covering[$persona]:-}" ]]; then
+        artifacts+=("${covering[$persona]}")
+        posting_personas+=("$persona")
+    fi
 done
 
 # Re-check the verdict here, not just when recording. A base and a tree say what
@@ -484,11 +928,11 @@ done
 # interrupt, or edited by hand, keeps valid metadata while losing its body. ship
 # is the last point before this becomes the record, so it verifies rather than
 # trusts.
-for a in "${artifacts[@]}"; do
-    if ! artifact_has_verdict "$a"; then
-        name="$(basename "$a" .md)"
-        die "$(basename "$a") does not end in a verdict — it is incomplete
-     re-run: just review-codex ${name##*-}"
+for persona in "${posting_personas[@]}"; do
+    if ! artifact_has_verdict "${covering[$persona]}"; then
+        die "$(basename "${covering[$persona]}") does not end in a verdict — it is
+     incomplete
+     re-run: just review-codex ${persona}"
     fi
 done
 
@@ -519,10 +963,22 @@ artifacts_bytes=0
 for a in "${artifacts[@]}"; do
     artifacts_bytes=$((artifacts_bytes + $(wc -c <"$a")))
 done
+# §4's drift record is published in full or path (b) is unavailable, so it is
+# not a claimant on the remaining capacity — it is subtracted from it, ahead of
+# the dispositions, which ADR-0025 §4 does allow to be bounded.
+drift_bytes=0
+counted_drift=""
+for persona in "${posting_personas[@]}"; do
+    drifted="${covering_drift[$persona]:-}"
+    [[ -n "$drifted" ]] || continue
+    case "$counted_drift" in *" ${drifted} "*) continue ;; esac
+    counted_drift="${counted_drift} ${drifted} "
+    drift_bytes=$((drift_bytes + $(printf '%s' "${drift_block[$drifted]}" | wc -c)))
+done
 num_snap=${#snapshot[@]}
 disp_budget=0
 if [[ "$num_snap" -gt 0 ]]; then
-    remaining=$((max_bytes - artifacts_bytes - 4000))
+    remaining=$((max_bytes - artifacts_bytes - drift_bytes - 4000))
     [[ "$remaining" -lt 0 ]] && remaining=0
     disp_budget=$((remaining / num_snap))
     cap="${CODEX_SHIP_DISPOSITION_BUDGET:-20000}"
@@ -610,9 +1066,22 @@ agg_binary_churn="$(agg_field binary_churn)"
         echo "_${summary}_"
         echo
     fi
-    for a in "${artifacts[@]}"; do
-        name="$(basename "$a" .md)"
-        persona="${name##*-}"
+    # §4's drift record, when any selected artifact was accepted across a moved
+    # base. Placed after the summary line and before the persona blocks, so the
+    # `<!-- ship:<sha> -->` marker and the header line that must follow it are
+    # untouched and a parser reading those two lines is unaffected (ADR-0027,
+    # Consequences: #153). Deduplicated by base, since two personas commonly
+    # share one.
+    printed_drift=""
+    for persona in "${posting_personas[@]}"; do
+        drifted="${covering_drift[$persona]:-}"
+        [[ -n "$drifted" ]] || continue
+        case "$printed_drift" in *" ${drifted} "*) continue ;; esac
+        printed_drift="${printed_drift} ${drifted} "
+        printf '%s\n' "${drift_block[$drifted]}"
+    done
+    for persona in "${posting_personas[@]}"; do
+        a="${covering[$persona]}"
         echo "<details><summary><strong>${persona}</strong></summary>"
         echo
         # Drop the provenance comment; it is metadata for this script, not for

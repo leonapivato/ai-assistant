@@ -83,6 +83,44 @@ def _init_repo(repo: Path, *, touches_core: bool = False) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
+def _artifact(repo: Path, sha: str, persona: str = "adversarial") -> Path:
+    """The artifact recorded for ``(sha, persona)``, found the way ship finds it.
+
+    ADR-0027 §6 names an artifact by the anchor it is selected by, not by the
+    commit, so a test cannot rebuild the path from a SHA — it reads the recorded
+    provenance, which is the point of the rename.
+    """
+    for candidate in sorted((repo / ".review").glob("*.md")):
+        header = candidate.read_text().splitlines()[0]
+        if f" sha={sha} " in header and f" persona={persona} " in header:
+            return candidate
+    raise AssertionError(f"no {persona} artifact recorded for {sha}")
+
+
+def _move_base(repo: Path, path: str, content: str = "moved\n") -> str:
+    """Advance `origin/main` by a commit touching ``path``, and rebase onto it.
+
+    Returns the base the review was taken against — after the rebase a *proper
+    ancestor* of the PR's merge base, which is the only shape ADR-0027 §2's
+    path (b) applies to. The rebase is what a `strict: true` branch protection
+    forces on every open PR whenever anything merges, and it moves the whole
+    repository tree as well as the base, which is why relaxing the base
+    comparison alone would have been inert.
+    """
+    old_base = _git(repo, "merge-base", "main", "HEAD")
+    branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", f"base moves {path}")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "checkout", "-q", branch)
+    _git(repo, "rebase", "-q", "main")
+    return old_base
+
+
 def _fake_gh(bin_dir: Path) -> None:
     """A fake ``gh`` answering the calls ship.sh makes.
 
@@ -205,6 +243,83 @@ def _fake_gh(bin_dir: Path) -> None:
     gh.chmod(0o755)
 
 
+_DIFF_OPTS = (
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "diff.renames=true",
+    "-c",
+    "diff.algorithm=myers",
+    "-c",
+    "diff.context=3",
+    "-c",
+    "diff.indentHeuristic=true",
+    "-c",
+    "diff.noprefix=false",
+    "-c",
+    "diff.mnemonicPrefix=false",
+)
+
+
+def _raw_patch_id(repo: Path, base_sha: str, sha: str, flag: str = "--verbatim") -> str:
+    """What ``git patch-id`` alone answers for a range, with the guard removed.
+
+    Separate from ``_patch_id`` so a test can show the *hazard* the guard exists
+    for — an entry anchored on its paths alone hashing identically across a base
+    move that rewrote the file it renamed — and, with ``flag="--stable"``, that the
+    unsafe spelling of the mechanism would not have moved where the safe one does.
+    """
+    assert _GIT is not None
+    diff = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [_GIT, *_DIFF_OPTS, "diff", "--no-ext-diff", "--no-textconv", f"{base_sha}...{sha}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout
+    out = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [_GIT, "patch-id", flag], cwd=repo, input=diff, check=True, capture_output=True
+    ).stdout.decode()
+    return out.split()[0] if out.strip() else ""
+
+
+def _patch_id(repo: Path, base_sha: str, sha: str) -> str:
+    """The reviewed patch's identity, exactly as both scripts compute it.
+
+    ``--verbatim``, never ``--stable`` (ADR-0027 §2), and empty — never a value to
+    compare — where the range carries an entry whose pre- and post-image blobs are
+    the same object. Such an entry has neither a hunk nor an ``index`` line, so its
+    contribution to the identity is a function of its paths alone. Reproduced here
+    rather than stubbed so a recorded artifact carries the identity a real run
+    would, the empty one included.
+    """
+    assert _GIT is not None
+    raw = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+        [
+            _GIT,
+            *_DIFF_OPTS,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--raw",
+            "--abbrev=40",
+            "-z",
+            f"{base_sha}...{sha}",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout.decode()
+    fields = raw.split("\0")
+    i = 0
+    while i < len(fields) and fields[i]:
+        meta = fields[i].lstrip(":").split()
+        old_blob, new_blob, status = meta[2], meta[3], meta[4]
+        i += 3 if status[0] in "RC" else 2
+        if old_blob == new_blob:
+            return ""
+    return _raw_patch_id(repo, base_sha, sha)
+
+
 def _record_review(  # noqa: PLR0913  # one parameter per provenance field the real script emits
     repo: Path,
     sha: str,
@@ -218,6 +333,8 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     binary_files: int = 0,
     binary_churn: int = 0,
     loop_id: str | None = None,
+    patch_id: str | None = None,
+    filename: str | None = None,
 ) -> None:
     """Write an artifact exactly as codex-review.sh would.
 
@@ -253,6 +370,8 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
         tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     if recorded_persona is None:
         recorded_persona = persona
+    if patch_id is None:
+        patch_id = _patch_id(repo, base_sha, sha)
     review_dir = repo / ".review"
     review_dir.mkdir(exist_ok=True)
     persona_field = f"persona={recorded_persona} " if recorded_persona else ""
@@ -260,9 +379,16 @@ def _record_review(  # noqa: PLR0913  # one parameter per provenance field the r
     binary_field = f"binary_files={binary_files} " if binary_files else ""
     if binary_churn:
         binary_field = f"{binary_field}binary_churn={binary_churn} "
-    (review_dir / f"{sha}-{persona}.md").write_text(
+    # ADR-0027 §6: the artifact is named by the anchor it is selected by — the
+    # loop identity, the persona, the base and the tree — not by the commit. The
+    # ``persona`` argument names the FILE and ``recorded_persona`` the field, so a
+    # test can still write the renamed artifact of issue #99 and prove the name
+    # claims nothing.
+    name = filename or f"{loop_id or 'noloop'}-{persona}-{base_sha}-{tree}.md"
+    (review_dir / name).write_text(
         f"<!-- {persona_field}base=main base_sha={base_sha} sha={sha} "
-        f"branch=feature tree={tree} round=1 {loop_field}net_lines=2 churn_lines=2 "
+        f"branch=feature tree={tree} patch_id={patch_id} round=1 "
+        f"{loop_field}net_lines=2 churn_lines=2 "
         f"churn_ratio=1.0 churn_bound={churn_bound} commits=1 {binary_field}-->\n{body}"
     )
 
@@ -419,13 +545,13 @@ def test_refuses_when_only_the_architecture_lens_was_run(tmp_path: Path) -> None
     assert "no adversarial review" in result.stderr
 
 
-def test_refuses_an_artifact_whose_filename_contradicts_its_persona(tmp_path: Path) -> None:
-    """Issue #99: the filename is a label, the provenance field is the claim.
+def test_a_filename_claiming_a_lens_is_inert(tmp_path: Path) -> None:
+    """Issue #99, closed at the root by ADR-0027 §6: the name claims nothing.
 
-    An architecture review renamed to ``<sha>-adversarial.md`` carries a matching
-    base, a matching tree and a real verdict, so every other check passes. If the
-    persona is read off the filename alone it satisfies the mandatory adversarial
-    requirement without that lens ever having run.
+    An architecture review filed under a name saying ``adversarial`` carries a
+    matching base, a matching tree and a real verdict, so every other check
+    passes. ship reads the lens from the recorded field alone, so the name is not
+    evidence and the mandatory adversarial requirement is not satisfied.
     """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
@@ -436,7 +562,6 @@ def test_refuses_an_artifact_whose_filename_contradicts_its_persona(tmp_path: Pa
 
     assert result.returncode != 0
     assert "no adversarial review" in result.stderr
-    assert "recorded persona does not match its filename" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 
@@ -549,7 +674,12 @@ def test_refuses_when_an_untracked_file_is_present(tmp_path: Path) -> None:
 
 
 def test_refuses_a_review_run_against_a_narrower_base(tmp_path: Path) -> None:
-    """Right SHA, wrong range — the artifact covers only part of the PR diff."""
+    """Right SHA, wrong range — the artifact covers only part of the PR diff.
+
+    ADR-0027 §2 keeps this refusal explicitly: a narrower base is a *descendant*
+    of the merge base, not an ancestor of it, so it never reaches the moved-base
+    path. This is the alternative "anchor on the tree alone" was rejected for.
+    """
     repo = tmp_path / "repo"
     _init_repo(repo)
     # A second commit, so HEAD~1 is genuinely inside the PR rather than being
@@ -565,7 +695,7 @@ def test_refuses_a_review_run_against_a_narrower_base(tmp_path: Path) -> None:
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
-    assert "different base" in result.stderr
+    assert "not an ancestor" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 
@@ -1185,33 +1315,31 @@ def test_refuses_when_the_tree_changed_even_under_the_same_base(tmp_path: Path) 
     assert not (tmp_path / "comment.md").exists()
 
 
-def test_refuses_when_the_base_moved_even_though_the_tree_matches(tmp_path: Path) -> None:
-    """Both conditions are required; the tree alone is not enough.
+def test_refuses_a_recorded_base_that_is_not_in_this_history(tmp_path: Path) -> None:
+    """A base that is not an ancestor is not drift; it is a different history.
 
-    A rebase onto a moved base genuinely changes the diff under review, so it
-    correctly re-reviews. The artifact here records the right tree and a base
-    that is no longer this PR's merge base.
+    ADR-0027 §2 fails this closed rather than reaching for a patch identity: an
+    unreachable or unrelated base says nothing about what the reviewer read.
     """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, sha, "adversarial", base_sha="0" * 40)
+    _record_review(repo, sha, "adversarial", base_sha="0" * 40, patch_id="deadbeef")
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
 
     assert result.returncode != 0
-    assert "different base" in result.stderr
+    assert "not an ancestor" in result.stderr
     assert not (tmp_path / "comment.md").exists()
 
 
-def test_the_failure_message_distinguishes_content_moved_from_base_moved(
-    tmp_path: Path,
-) -> None:
-    """ADR-0020's "Harder" note: a generic error reads as the old one.
+def test_the_failure_message_distinguishes_the_three_states(tmp_path: Path) -> None:
+    """ADR-0020's "Harder" note, widened by ADR-0027 to three states.
 
-    The tree comparison is a second thing ship can refuse on, and an author who
-    cannot tell which condition failed cannot tell whether to re-review or to
-    rebase.
+    An author who cannot tell which condition failed cannot tell whether to
+    re-review, to rebase, or that the artifact belongs to another branch
+    entirely: content moved, base moved past what the review can cover, and
+    history diverged each name themselves.
     """
     repo = tmp_path / "repo"
     sha = _init_repo(repo)
@@ -1220,13 +1348,24 @@ def test_the_failure_message_distinguishes_content_moved_from_base_moved(
     tree_only = _run_ship(repo, tmp_path, pr_sha=sha).stderr
 
     shutil.rmtree(repo / ".review")
-    _record_review(repo, sha, "adversarial", base_sha="0" * 40)
-    base_only = _run_ship(repo, tmp_path, pr_sha=sha).stderr
+    _record_review(repo, sha, "adversarial", base_sha="0" * 40, patch_id="deadbeef")
+    diverged_only = _run_ship(repo, tmp_path, pr_sha=sha).stderr
+
+    shutil.rmtree(repo / ".review")
+    old_base = _move_base(repo, "unrelated.txt")
+    rebased = _git(repo, "rev-parse", "HEAD")
+    _record_review(repo, rebased, "adversarial", base_sha=old_base, patch_id="deadbeef")
+    identity_only = _run_ship(repo, tmp_path, pr_sha=rebased).stderr
 
     assert "different content" in tree_only
-    assert "different base" not in tree_only
-    assert "different base" in base_only
-    assert "different content" not in base_only
+    assert "not an ancestor" not in tree_only
+
+    assert "not an ancestor" in diverged_only
+    assert "different content" not in diverged_only
+
+    assert "reviewed patch is no longer" in identity_only
+    assert "not an ancestor" not in identity_only
+    assert "different content" not in identity_only
 
 
 def test_refuses_a_genuine_content_change_the_adr_does_not_cover(tmp_path: Path) -> None:
@@ -1441,7 +1580,7 @@ def test_an_unmeasurable_ratio_on_a_rewritten_branch_is_not_rendered_as_a_number
     _record_review(repo, sha, "adversarial", churn_bound="lower")
     # Rewrite the ratio to the unmeasurable form the real script emits when the
     # diff touches no text lines.
-    artifact = repo / ".review" / f"{sha}-adversarial.md"
+    artifact = _artifact(repo, sha)
     artifact.write_text(artifact.read_text().replace("churn_ratio=1.0", "churn_ratio=n/a"))
 
     result = _run_ship(repo, tmp_path, pr_sha=sha)
@@ -1522,7 +1661,7 @@ def test_refuses_a_provenance_field_with_trailing_garbage(tmp_path: Path) -> Non
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
     _record_review(repo, sha, "adversarial")
-    artifact = repo / ".review" / f"{sha}-adversarial.md"
+    artifact = _artifact(repo, sha)
     base_sha = _git(repo, "merge-base", "main", sha)
     artifact.write_text(
         artifact.read_text().replace(f"base_sha={base_sha}", f"base_sha={base_sha}junk")
@@ -1540,7 +1679,7 @@ def test_refuses_a_tree_field_with_trailing_garbage(tmp_path: Path) -> None:
     sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
     _record_review(repo, sha, "adversarial")
-    artifact = repo / ".review" / f"{sha}-adversarial.md"
+    artifact = _artifact(repo, sha)
     tree = _git(repo, "rev-parse", f"{sha}^{{tree}}")
     artifact.write_text(artifact.read_text().replace(f"tree={tree}", f"tree={tree}junk"))
 
@@ -1595,16 +1734,25 @@ def test_prefers_a_complete_artifact_over_an_incomplete_one_for_the_same_tree(
     assert "the complete review" in (tmp_path / "comment.md").read_text()
 
 
-def test_completeness_outranks_being_filed_under_the_head_commit(tmp_path: Path) -> None:
-    """The HEAD-named artifact is preferred only among equally complete ones.
+def test_completeness_outranks_being_recorded_for_the_head_commit(tmp_path: Path) -> None:
+    """The HEAD-recorded artifact is preferred only among equally complete ones.
 
-    Here the HEAD-named one is the truncated one, so the complete review filed
-    under the pre-amend commit must win.
+    Here the HEAD-recorded one is the truncated one, so the complete review
+    recorded for the pre-amend commit must win. Two artifacts can cover one
+    content state whenever a clone carries records from more than one loop or
+    from before ADR-0027 §6 renamed them, which is what the legacy-shaped name
+    below stands in for — the anchor itself is now one path per anchor.
     """
     repo = tmp_path / "repo"
     old_sha = _init_repo(repo)
     _fake_gh(tmp_path / "bin")
-    _record_review(repo, old_sha, "adversarial", f"the complete review\n{_VERDICT}\n")
+    _record_review(
+        repo,
+        old_sha,
+        "adversarial",
+        f"the complete review\n{_VERDICT}\n",
+        filename=f"{old_sha}-adversarial.md",
+    )
     _git(repo, "commit", "-q", "--amend", "-m", "reworded")
     head_sha = _git(repo, "rev-parse", "HEAD")
     _record_review(repo, head_sha, "adversarial", "half a fin\n")

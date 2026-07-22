@@ -124,15 +124,110 @@ fi
 # without mandating it. Not worth building for an advisory number until one of
 # these cases is actually observed.
 
-# `core.quotePath=false` here too, so a non-ASCII path reaches the reviewer as
-# `docs/café.md` rather than `"docs/caf\303\251.md"`. Same reason as the path
-# classification below: the reviewer reads this diff, and an escaped path is a
-# file it cannot find in the tree.
-diff="$(git -c core.quotePath=false diff "${base_sha}...${sha}")"
+# --- The reviewed range's rendering, and its identity (ADR-0027 §2) ----------
+#
+# THIS BLOCK IS DUPLICATED VERBATIM IN scripts/ship.sh AND MUST STAY IDENTICAL.
+# One script records the identity and the other recomputes it to decide whether a
+# review still covers HEAD across a moved base, so a divergence between the two
+# spellings would not fail loudly — it would compute two different identities for
+# one patch and quietly cost a review round every time. Same reasoning as
+# `artifact_has_verdict`, which is duplicated across the pair for the same
+# reason.
+#
+# The diff options are PINNED rather than inherited from the repository or user
+# config. Every one of them changes the rendered patch text and therefore the
+# identity, so leaving them to config would make the identity a function of when
+# and where it was computed rather than of the two commits. `core.quotePath=false`
+# is also what the reviewer's own diff uses, so a non-ASCII path reaches it as
+# `docs/café.md` rather than `"docs/caf\303\251.md"` — an escaped path is a file
+# it cannot find in the tree.
+# >>> shared-patch-identity (ADR-0027 §2) — kept byte-identical in both scripts
+_diff_opts=(
+    -c core.quotePath=false
+    -c diff.renames=true
+    -c diff.algorithm=myers
+    -c diff.context=3
+    -c diff.indentHeuristic=true
+    -c diff.noprefix=false
+    -c diff.mnemonicPrefix=false
+)
+
+# Whether the range carries an entry with NEITHER a hunk NOR an `index` line, so
+# its contribution to the identity is a function of its PATHS ALONE (ADR-0027 §2).
+# That is exactly the set of entries whose pre- and post-image blobs are the same
+# object: a 100%-similarity rename or copy, and a mode-only change. git emits
+# `similarity index 100% / rename from / rename to` or `old mode / new mode` for
+# those and no `index` line at all, so a reviewed rename of `f` to `g`, rebased
+# onto a base that changed `f`'s contents, presents a byte-identical identity
+# while `g` now holds content no reviewer saw.
+#
+# Read from `--raw -z` rather than by scanning the rendered patch text: the blob
+# pair is the structural fact, where a text scan would have to guess at entry
+# boundaries in a format where a pathname may itself contain a newline.
+_range_has_pathless_entry() {
+    local -a rec=()
+    mapfile -d '' -t rec < <(
+        git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv --raw --abbrev=40 -z "$1...$2"
+    )
+    local i=0 meta old new status
+    while [[ $i -lt ${#rec[@]} ]]; do
+        meta="${rec[$i]}"
+        # ":<oldmode> <newmode> <oldsha> <newsha> <status>"
+        read -r _ _ old new status <<<"${meta#:}"
+        case "$status" in
+        R* | C*) i=$((i + 3)) ;;
+        *) i=$((i + 2)) ;;
+        esac
+        # A record that runs off the end is a format this cannot parse, so it is
+        # reported as pathless: unparsed is not the same as safe.
+        if [[ $i -gt ${#rec[@]} || "$old" == "$new" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The identity of the patch `git diff <$1>...<$2>` renders (ADR-0027 §2). Echoes
+# the identity, or NOTHING when the range has no identity that may be trusted.
+#
+# The mechanism is `git patch-id --verbatim`, and specifically NOT `--stable`.
+# Both ignore hunk line numbers — the first property, so a base move elsewhere in
+# a touched file merely renumbers the hunk headers and must not invalidate — but
+# `--stable` also STRIPS WHITESPACE, which fails the second property outright: a
+# base move that re-indents a context line inside a reviewed hunk is semantic in
+# Python, and under `--stable` the identity would not move, so a review of
+# content that is no longer there would be reused. `--verbatim` calculates the id
+# of the input as given and implies `--stable`, so it satisfies both. The two
+# spellings differ by one flag and only one of them is safe; ADR-0027 §2 fixes
+# the choice here rather than leaving it to the implementation.
+#
+# Empty output is the fail-closed answer, never a value to compare: an empty
+# range, an entry anchored on its paths alone, or a `patch-id` that produced
+# nothing all make the moved-base acceptance path UNAVAILABLE rather than
+# satisfied. Two such artifacts must never compare equal to each other.
+patch_identity() {
+    if _range_has_pathless_entry "$1" "$2"; then
+        return 0
+    fi
+    git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv "$1...$2" |
+        git patch-id --verbatim | awk 'NR == 1 { print $1 }' || return 0
+}
+# <<< shared-patch-identity
+
+diff="$(git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv "${base_sha}...${sha}")"
 if [[ -z "$diff" ]]; then
     echo "no changes between ${base_sha} and ${sha} to review" >&2
     exit 0
 fi
+
+# The identity of the patch this review reads, pinned here with the other three
+# edges and for the same reason: everything the artifact certifies is resolved
+# before the review starts, never after it. `ship` recomputes it against the
+# PR's current merge base, and where the base has MOVED it is what says whether
+# the reviewer read this content (ADR-0027 §2). Recorded empty when the range has
+# no trustworthy identity, which is what makes the moved-base path unavailable
+# rather than accepted.
+patch_id="$(patch_identity "$base_sha" "$sha")"
 
 review_dir="${repo_root}/.review"
 
@@ -634,7 +729,7 @@ _effective_sandbox() {
 # Classification is then a glob rather than a regex, since there is no longer a
 # text stream to match against.
 mapfile -d '' -t changed_paths < <(
-    git -c core.quotePath=false diff -z --name-only "${base_sha}...${sha}"
+    git "${_diff_opts[@]}" diff --no-ext-diff --no-textconv -z --name-only "${base_sha}...${sha}"
 )
 
 # One list item per path. Reading NUL-delimited keeps a path with a newline in
@@ -1066,12 +1161,27 @@ fi
 # ADR-0015 §1's commit anchor). `just ship` refuses to report a review whose
 # recorded base and tree do not match the PR's current merge base and HEAD tree,
 # which turns "did you review the current code?" from a matter of care into a
-# check. The filename still carries the SHA — it keeps artifacts from colliding
-# and says which commit the run happened on — but it is no longer what ship
-# matches on, so a commit that changes no reviewed byte no longer costs a round.
-# The artifact is git-ignored: evidence for the local ship step, not history.
+# check. The artifact is git-ignored: evidence for the local ship step, not
+# history.
+#
+# THE ARTIFACT IS NAMED BY THE ANCHOR IT IS SELECTED BY (ADR-0027 §6). The name
+# used to carry the commit, which stopped being what the artifact is selected by
+# when ADR-0020 §3 re-anchored acceptance onto content — and issue #149 is what
+# that vestige cost: two runs of one SHA against different bases collided on one
+# path, so the older-base run finishing last replaced the current-base artifact
+# and `ship` rejected a valid review as stale. Carrying every field the
+# acceptance rule selects on — the loop identity (ADR-0025 §4), the persona, the
+# base and the tree — makes that collision UNCONSTRUCTIBLE rather than unlikely:
+# two runs the rule would distinguish can no longer occupy one path. This is the
+# same mechanism as the patch identity, not a second one; once selection is by
+# content, naming by content is the identity function.
+#
+# `noloop` stands in for a run with no loop identity — the CI bypass path, which
+# keeps no session — so the field is never empty and the segments never collapse.
+# The name is an identity and nothing parses it: `ship` reads the persona from
+# the recorded provenance field, never off the filename.
 mkdir -p "$review_dir"
-artifact="${review_dir}/${sha}-${persona}.md"
+artifact="${review_dir}/${loop_id:-noloop}-${persona}-${base_sha}-${tree}.md"
 # base_sha was pinned before the diff (above), not re-resolved here: ship.sh
 # compares it against the PR's real base, so a review run against a narrower or
 # since-moved base — which still produces a correctly-named artifact — cannot
@@ -1108,8 +1218,12 @@ artifact_tmp="${artifact}.partial.$$"
     # loop_id and thread_id are recorded for ADR-0025 §4's ship-time snapshot
     # selection by the full anchor (loop, persona, base, tree, terminal turn).
     # thread_id is empty on the bypass path, which keeps no session.
+    # patch_id is ADR-0027 §2's coverage anchor across a moved base. Recorded
+    # even when empty, so `ship` can tell "this artifact predates the field" from
+    # "this range had no trustworthy identity" — both make the moved-base path
+    # unavailable, and neither may be read as a match.
     echo "<!-- persona=${persona} base=${base} base_sha=${base_sha} sha=${sha}" \
-        "branch=${branch} tree=${tree} round=${round}" \
+        "branch=${branch} tree=${tree} patch_id=${patch_id} round=${round}" \
         "loop_id=${loop_id} thread_id=${round_thread}" \
         "net_lines=${net_lines} churn_lines=${churn_lines}" \
         "churn_ratio=${churn_ratio} churn_bound=${churn_bound} commits=${commits}" \
@@ -1128,7 +1242,7 @@ mv "$artifact_tmp" "$artifact"
 # longer the loop's. That happens when another invocation reset the loop while
 # this round was in flight — recording anyway would file this round's thread and
 # dispositions under a loop_id no later round will look up, silently orphaning
-# them. The review itself is already on disk at `.review/<sha>-<persona>.md`; only
+# them. The review itself is already on disk at `$artifact`; only
 # the session advance is refused, and re-running the persona records it cleanly.
 #
 # The identity is necessary but not sufficient: the anchor must also only ever
@@ -1182,5 +1296,5 @@ fi
 
 echo >&2
 echo "===== ${persona} review (HEAD vs ${base}) =====" >&2
-echo "(recorded at .review/${sha}-${persona}.md, tree ${tree:0:12}, round ${round})" >&2
+echo "(recorded at ${artifact#"${repo_root}/"}, tree ${tree:0:12}, round ${round})" >&2
 cat "$out"
