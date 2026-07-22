@@ -383,12 +383,28 @@ mirror plumbs `transition.error` today), and the shared conformance suite
   at the bottom of `core/types.py` and `StepExecution` in the middle; the enum
   must move above the planning types. Worth naming because it is the one part of
   this that touches lines nothing else in the diff explains.
-- **`PlanExport.schema_version` becomes 2.** ADR-0014 §5 states the reason
-  itself — "an export outlives the code that wrote it … a reader must be able to
-  tell which shape it is holding" — and `StepExecution` is inside the export.
-  The bump is cheap and correct now: the SQLite `PlanStore` is still deferred
-  (ADR-0014 §7), so no export written under shape 1 exists, and there is no
-  migration to write.
+- **`PlanExport.schema_version` becomes 2**, and it is a signal to an outside
+  reader, not an input to a migration. ADR-0014 §5 states the reason for the
+  field itself — "an export outlives the code that wrote it … a reader must be
+  able to tell which shape it is holding" — and `StepExecution` is inside the
+  export, so its shape changing is exactly what the version exists to announce.
+
+  **No migration is owed, and the reason is not that no v1 export exists.** It
+  might: `PlanStore.export()` returns `PlanExport(schema_version=1)` today from
+  both conforming implementations, and anyone who called it and serialised the
+  result holds one. What is absent is a **read path**. `PlanStore` has no
+  `import`, `restore` or `load` — `export` is one-way, exactly as it is on
+  `MemoryStore` (ADR-0007 §3) and on the permissions trail — so no code in this
+  system ever validates a `PlanExport` it did not just construct, and there is
+  nothing for a v1 document to fail to validate against.
+
+  So the rule, stated so a later change cannot quietly assume otherwise: **a v1
+  export is not readable by this contract at any version**, and if an import
+  path is ever contracted, accepting or refusing v1 is that ADR's to decide, not
+  something this bump has silently settled. The bump is worth taking now for the
+  same reason it is cheap now — the version's whole job is to let a reader tell
+  the two shapes apart, and a shape that changes without it is the case the
+  field was added to prevent.
 - **`planning/execution.py`**: `_to_finished`, the retry reset (which clears the
   last attempt's outcome and must clear `failure`), and `abandon_running` (§7).
 - **`orchestration/executor.py`**: the five write sites in §6, and the two
@@ -510,9 +526,11 @@ and a gap that widens on its own is one to close rather than to carry.
   implementation PR touches `core`, `planning`, `orchestration`, `testing` and
   three test suites — larger than this repo's usual one-subsystem scope, because
   a field on a shared type has no smaller shape.
-- **`PlanExport` gains a schema version**, cheaply, because nothing durable
-  exists to migrate yet. Deferring the bump until the SQLite store lands would
-  make it expensive at exactly the moment it stops being free.
+- **`PlanExport`'s schema version moves for the first time**, and costs nothing,
+  because the export is one-way — nothing in this system reads one back (§10).
+  A v1 document produced before this lands stays readable by whatever produced
+  it and is not readable here, which is what the version is for. The first ADR
+  to contract an import path inherits the question of whether to accept v1.
 - **ADR-0029 §8's "retry only from a `ToolResult`" becomes readable off the
   record** rather than only inferable from the executor's shape — without
   becoming enforced by the tracker, which §8 already rejected and §3 keeps
