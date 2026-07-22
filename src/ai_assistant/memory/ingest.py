@@ -93,9 +93,17 @@ def _overturns(target: MemoryRecord, incoming: MemoryRecord) -> bool:
 
     Read off the records rather than the ruling, because ``MemoryDecisionKind``
     has one ``MERGE`` for both relations and distinguishing them in ``core``
-    would be a contract change. That is sound regardless of which policy ruled:
-    the relation is a property of the two records' provenance, not of the
-    reasoning that paired them.
+    would be a contract change.
+
+    **This is a precondition, not a derivation** (ADR-0038 §1b). Only the policy
+    knows which relation it meant, and the contract gives it no channel to say
+    so, so this reading is sound exactly while every production ``MemoryPolicy``
+    returns ``MERGE`` for a ``USER_ASSERTED`` proposal solely to mean
+    supersession. ``DefaultMemoryPolicy`` does — its two ``MERGE`` sites are
+    partitioned by whether the proposal is asserted — and
+    ``tests/memory/test_ingest.py`` fails the gate if a policy in this subsystem
+    stops doing so. Issue #256 removes the precondition by putting the relation
+    on the decision itself.
     """
     return (
         incoming.provenance.source is MemorySource.USER_ASSERTED
