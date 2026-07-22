@@ -338,6 +338,34 @@ def test_even_a_well_behaved_subclass_is_refused_and_that_is_the_trade() -> None
         _Instant(when=_WellBehaved(2026, 1, 2, 9, 0, tzinfo=ZoneInfo("Europe/Berlin")))
 
 
+class _BaseDatetimeConversion(datetime):
+    """Converts to an exact base ``datetime`` in UTC, unlike every subclass above."""
+
+    converted = datetime(1970, 1, 1, tzinfo=UTC)
+
+    def astimezone(self, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return _BaseDatetimeConversion.converted
+
+
+def test_a_subclass_converting_to_a_base_datetime_is_accepted() -> None:
+    """ADR-0030 §1: the rule is on the value handed on, not the value received.
+
+    "Refuses every subclass" is a *consequence* of ``astimezone`` preserving the
+    subclass, not the rule — so the rare subclass whose conversion does yield an
+    exact base ``datetime`` in UTC is accepted, and what is stored is rebuilt
+    from that conversion rather than from the received value's own components.
+    Pinned deliberately: this is the one case that separates the output-side
+    rule from an input-side "refuse every subclass" test, which would satisfy
+    every other case in this module while contradicting the decision.
+    """
+    stored = _Instant(when=_BaseDatetimeConversion(2026, 7, 21, 12, tzinfo=UTC)).when
+
+    assert type(stored) is datetime
+    assert stored.tzinfo is UTC
+    assert stored == _BaseDatetimeConversion.converted  # the conversion, not the input
+    assert stored is not _BaseDatetimeConversion.converted  # rebuilt, not returned
+
+
 def test_a_plain_datetime_is_still_canonicalised_to_a_plain_datetime() -> None:
     """The path everything real takes: parsed input is always a base datetime."""
     stored = _Instant(when=datetime(2026, 1, 2, 9, 0, tzinfo=ZoneInfo("Europe/Berlin"))).when
