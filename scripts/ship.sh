@@ -48,11 +48,22 @@ die() {
 # unavailable under a message blaming the content rather than the config.
 # An operator-supplied value gets an operator-legible error.
 #
+# A LEADING ZERO IS REJECTED, and that is the whole reason this is not simply
+# `^[0-9]+$`. Bash arithmetic reads a leading-zero literal as OCTAL, so `08` is
+# not a large-ish number but a syntax error — `[[ 100 -gt 08 ]]` prints a raw
+# bash diagnostic and returns FALSE, so the guarded branch is skipped and the
+# script carries on: the exact fail-open this check exists to close, reintroduced
+# by the check itself. `000010000` is worse because it is silent — it evaluates
+# to 4096, so the budget enforced is not the budget written. Rejecting the form
+# outright, rather than normalising it with `10#`, means every value that reaches
+# the arithmetic is unambiguous decimal at every later site, including ones added
+# after this one.
+#
 # $1 the variable's name (for the message), $2 its value, $3 what it bounds.
 require_byte_budget() {
-    if [[ ! "$2" =~ ^[0-9]{1,9}$ ]]; then
-        die "$1 must be a non-negative integer of at most 9 digits, not '$2' —
-     it bounds $3"
+    if [[ ! "$2" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+        die "$1 must be a non-negative decimal integer of at most 9 digits with no
+     leading zero (bash reads a leading zero as octal), not '$2' — it bounds $3"
     fi
 }
 

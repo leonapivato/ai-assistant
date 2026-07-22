@@ -919,7 +919,9 @@ def test_a_malformed_drift_budget_refuses_with_a_configuration_error(tmp_path: P
         repo, tmp_path, lambda r: _edit_line(r, "src/ai_assistant/orchestration/loop.py", 40, "m")
     )
 
-    for bad in ("not-a-number", "1/0", "-1", ""):
+    # `08` and `000020000` are the leading-zero cases the shared helper also
+    # closes: bash arithmetic reads a leading zero as octal.
+    for bad in ("not-a-number", "1/0", "-1", "08", "000020000", ""):
         result = _run_ship(repo, tmp_path, pr_sha=rebased, gh_env={"CODEX_SHIP_DRIFT_BUDGET": bad})
         if bad == "":
             # An empty override is indistinguishable from an unset one to `:-`,
