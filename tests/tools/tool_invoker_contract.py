@@ -714,6 +714,48 @@ class ToolInvokerContract:
             await running
         assert swallower.swallowed
 
+    @pytest.mark.parametrize(
+        ("implementation", "expected"),
+        [
+            (Spy(), ToolOutcome.SUCCEEDED),
+            (Raiser(asyncio.CancelledError()), ToolOutcome.FAILED),
+        ],
+        ids=["succeeds", "invents-a-cancellation"],
+    )
+    async def test_a_caller_that_absorbed_an_earlier_cancellation_is_not_treated_as_cancelled(
+        self,
+        invoker: InvocableToolRegistry,
+        implementation: FakeToolImplementation,
+        expected: ToolOutcome,
+    ) -> None:
+        """Provenance is a delta, not a count.
+
+        ``Task.cancelling()`` is a lifetime total that only ``uncancel()``
+        lowers, so a caller that caught an earlier cancellation to finish some
+        work still carries a positive count with nothing about *this* call
+        cancelled. An implementation reading it as a boolean fails every
+        subsequent invocation on that task, and turns a tool's invented
+        ``CancelledError`` — which §4 requires to be ``INTERNAL`` — into a
+        cancellation on the strength of something that predates the seam.
+        """
+        invoker.register(tool(), implementation)
+        reached_the_sleep = asyncio.Event()
+
+        async def caller() -> ToolOutcome:
+            try:
+                reached_the_sleep.set()
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass  # absorbed, and deliberately not `uncancel()`-ed
+            result = await invoker.invoke(call_for(tool()), timeout=PATIENT)
+            return result.outcome
+
+        running = asyncio.ensure_future(caller())
+        await reached_the_sleep.wait()
+        running.cancel()
+
+        assert await running is expected
+
     # --- §5: the key is the authorisation --------------------------------
 
     async def test_a_keyed_tool_receives_the_decision_id_as_its_key(

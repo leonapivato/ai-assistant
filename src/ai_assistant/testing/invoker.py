@@ -233,6 +233,7 @@ class FakeToolInvoker:
         cancellation and returns a value would otherwise be reported
         ``SUCCEEDED`` after a cancelled turn, or after outrunning its deadline.
         """
+        entered_with = _pending_cancellations()
         deadline = asyncio.timeout(timeout.total_seconds())
         try:
             async with deadline:
@@ -240,16 +241,15 @@ class FakeToolInvoker:
                     call.request.parameters, idempotency_key=call.idempotency_key
                 )
         except asyncio.CancelledError as exc:
-            task = asyncio.current_task()
-            if task is not None and task.cancelling() > 0:
+            if _pending_cancellations() > entered_with:
                 raise
             return _internal(binding.definition, exc)
         except Exception as exc:
-            return _interruption(binding.definition, timeout, deadline) or _internal(
+            return _interruption(binding.definition, timeout, deadline, entered_with) or _internal(
                 binding.definition, exc
             )
 
-        interrupted = _interruption(binding.definition, timeout, deadline)
+        interrupted = _interruption(binding.definition, timeout, deadline, entered_with)
         if interrupted is not None:
             return interrupted
 
@@ -259,8 +259,23 @@ class FakeToolInvoker:
             return _internal(binding.definition, exc)
 
 
+def _pending_cancellations() -> int:
+    """How many cancellation requests the invoking task is currently carrying.
+
+    Read as a baseline and a delta, never as a boolean: ``Task.cancelling()`` is
+    a lifetime count that only ``uncancel()`` lowers, so a caller that absorbed
+    an earlier cancellation still reports a positive one with nothing about
+    *this* call cancelled.
+    """
+    task = asyncio.current_task()
+    return 0 if task is None else task.cancelling()
+
+
 def _interruption(
-    definition: ToolDefinition, timeout: timedelta, deadline: asyncio.Timeout
+    definition: ToolDefinition,
+    timeout: timedelta,
+    deadline: asyncio.Timeout,
+    cancellations_on_entry: int,
 ) -> ToolResult | None:
     """Report what an interruption the tool *absorbed* means, if there was one.
 
@@ -272,8 +287,7 @@ def _interruption(
     Raises:
         CancelledError: If a cancellation of the invoking task is still pending.
     """
-    task = asyncio.current_task()
-    if task is not None and task.cancelling() > 0:
+    if _pending_cancellations() > cancellations_on_entry:
         msg = f"tool {definition.id!r} absorbed the cancellation of its invoking task"
         raise asyncio.CancelledError(msg)
     if deadline.expired():
