@@ -231,10 +231,11 @@ class StepExecutor:
         # durable `RUNNING` would have recovery record `INDETERMINATE` about it.
         try:
             started = self._reading()
-        except BaseException:
-            if await self._close_unstarted(state, step_id):
+        except BaseException as cause:
+            cancelling = isinstance(cause, asyncio.CancelledError)
+            if await self._resolve_unstarted(state, step_id, cancelling=cancelling):
                 # Absorbed while closing, so it outranks the reason for closing:
-                # the caller's teardown must still be observable.
+                # the caller's teardown must still be observable (ADR-0034 §1).
                 msg = f"step {step_id!r} was closed unstarted; its task was cancelled"
                 raise asyncio.CancelledError(msg) from None
             raise
@@ -298,12 +299,39 @@ class StepExecutor:
 
         # The reason for closing is itself a cancellation, so it wins whatever
         # the close does: a store fault must not hide a teardown in progress.
-        try:
-            await self._close_unstarted(claimed, step_id)
-        except PlanningError:
-            _log.warning("executor_unstarted_close_failed", step_id=step_id, exc_info=True)
+        await self._resolve_unstarted(claimed, step_id, cancelling=True)
         msg = f"step {step_id!r} was claimed and closed unstarted; its task was cancelled"
         raise asyncio.CancelledError(msg)
+
+    async def _resolve_unstarted(
+        self, state: ExecutionState, step_id: str, *, cancelling: bool
+    ) -> bool:
+        """Close the claimed step, applying ADR-0034 §1's precedence to the close.
+
+        One place, because all three pre-invocation exits reach it and the
+        ordering is the part that is easy to get subtly different at each site.
+
+        Args:
+            state: The claimed execution.
+            step_id: The step to close.
+            cancelling: Whether the reason for closing is *itself* a
+                cancellation. If it is, §1's first rule already governs — the
+                teardown is what the caller must see — so a rejected close is
+                logged rather than raised over it. If it is not, the rejected
+                close is the more urgent fact and propagates.
+
+        Returns:
+            Whether a cancellation was absorbed by the close, which the caller
+            owes a re-raise for. Always ``False`` when ``cancelling``, since the
+            caller is already raising one.
+        """
+        if not cancelling:
+            return await self._close_unstarted(state, step_id)
+        try:
+            await self._close_unstarted(state, step_id)
+        except PlanningError:
+            _log.warning("executor_unstarted_close_failed", step_id=step_id, exc_info=True)
+        return False
 
     async def _close_unstarted(self, state: ExecutionState, step_id: str) -> bool:
         """Close a claimed step the callable was never reached from (ADR-0034 §1).

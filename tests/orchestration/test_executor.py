@@ -846,6 +846,32 @@ async def test_a_rejected_unstarted_close_is_raised_not_logged_away() -> None:
     )
 
 
+async def test_a_cancelled_reason_survives_a_rejected_unstarted_close() -> None:
+    """Where the reason for closing is itself a cancellation, it wins (ADR-0034 §1).
+
+    The second precedence rule — a rejected close beats the reason for closing —
+    is scoped by the first. A store fault must not hide a teardown in progress:
+    the caller would handle a ``PlanningError`` while the task it belongs to
+    quietly kept going.
+    """
+    store = HoldingPlanStore(rejects=True)
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker([(tool(), implementation)])
+    store.release.set()
+
+    def cancelled_clock() -> datetime:
+        """A clock whose own ``BaseException`` the guard lets through (ADR-0026 §2)."""
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor_over(store, seam, now=cancelled_clock).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+
+    assert implementation.calls == []
+
+
 async def test_a_clock_callables_own_exception_propagates_unwrapped() -> None:
     """ADR-0026 §2: "an exception raised by the clock callable itself propagates".
 
