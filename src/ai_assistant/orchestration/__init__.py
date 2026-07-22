@@ -12,10 +12,15 @@ Contract: this package *consumes* contracts; it wires implementations together.
 
 ``LearningLoop`` is the first working slice of that pipeline: the closed
 learning loop of ADR-0022 (intent → context → retrieval → planning, then
-feedback → proposal → policy → memory). Tool selection, permission checking and
-execution join it when those subsystems can actually invoke something.
+feedback → proposal → policy → memory).
+
+``StepExecutor`` is the ``execute`` stage (ADR-0029 §8): it claims a plan step,
+runs one authorised call through an injected ``ToolInvoker``, and commits what
+came back. The two are not yet wired together — tool selection and the
+permission check are the stages still missing between them.
 """
 
+from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.loop import LearningLoop, TurnResult
 
-__all__ = ["LearningLoop", "TurnResult"]
+__all__ = ["LearningLoop", "StepExecutor", "TurnResult"]
