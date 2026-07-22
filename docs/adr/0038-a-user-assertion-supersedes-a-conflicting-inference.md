@@ -231,15 +231,28 @@ later is not silently enrolled in a destructive rule by omission.
 
 **And it is enforced at the ingestor, not only chosen by the policy.** This is a
 safety property, and a policy reaches `MemoryIngestor` through an injected seam:
-any conforming implementation may rule `MERGE` for an assertion against an
-`EXTERNAL` conflict, and the guard in §1b cannot see a policy defined outside
+any conforming implementation may rule `MERGE` for an assertion against a
+disallowed conflict, and the guard in §1b cannot see a policy defined outside
 the `memory` subsystem. So the ingestor refuses such a fold outright — the same
 treatment it already gives a `MERGE` naming an absent target, and for the same
 reason: the alternative is a write that reports success while losing data.
 
+The refusal covers **both** disallowed targets, and is checked before either
+fold path is chosen:
+
+- an `EXTERNAL` target, per the id argument above;
+- a `USER_ASSERTED` target, per §3 and §5 — folding an assertion onto an
+  assertion destroys an earlier thing the user said.
+
+That ordering is load-bearing. Assertion-onto-assertion is *not* a supersession
+under §1's definition, so a refusal gated on "is this a supersession?" lets it
+fall through into the reinforcing merge — which keeps the target's id and
+destroys the earlier assertion just as thoroughly. Gate on the proposal being
+asserted instead, and both cases are caught.
+
 It **raises** rather than quietly downgrading to a reinforcing merge, because
 every fold keeps the target's id — a downgrade would hand the correction the
-external key just as surely, and lose it to the next sync just as silently,
+external key just as surely, and lose the earlier record just as silently,
 while looking like it worked.
 
 Resolving `EXTERNAL` properly needs either an id discipline that keeps a
