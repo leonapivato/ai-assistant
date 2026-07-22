@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from datetime import timedelta
 
     from ai_assistant.core.types import (
         ActionPlan,
@@ -44,7 +45,9 @@ if TYPE_CHECKING:
         PermissionRuling,
         PlanExport,
         StepTransition,
+        ToolCall,
         ToolDefinition,
+        ToolResult,
     )
 
 
@@ -478,6 +481,124 @@ class ToolRegistry(Protocol):
 
     async def all_tools(self) -> list[ToolDefinition]:
         """Return every registered definition, ordered by ``id``."""
+        ...
+
+
+@runtime_checkable
+class ToolInvoker(Protocol):
+    """Performs an authorisation it is handed, against a definition it holds (ADR-0029 §1).
+
+    The other face of the registry. ``ToolRegistry`` answers questions; this one
+    acts, and the split is a capability distinction rather than tidiness:
+    handing every holder of a lookup the ability to execute is the shape
+    ADR-0017 §8 wants to move away from, and a consumer that only reads is one a
+    test can double without stubbing execution.
+
+    **An id is invocable if and only if it is registered.** ``all_tools()`` and
+    the set of ids :meth:`invoke` will act on are the same set, always. The
+    callable is bound to its definition at registration, inside `tools/`, and
+    this Protocol resolves through that same binding — so the canonical
+    implementation is **one object implementing both Protocols** over one
+    mapping from id to ``(definition, callable)``. Two tables keyed by the same
+    id could be rebound independently, which is ADR-0016 §7's named failure:
+    "executing an implementation whose risk declaration is not the one the user
+    approved".
+
+    That binds an implementation, not a wiring. A composition root injecting
+    registry A and invoker B — each internally consistent, each holding an
+    *equal* definition under one id — satisfies both Protocols and both
+    conformance suites. No Protocol can close that (ADR-0029 §1); **the
+    composition root must inject one object as both** (ADR-0029 §8), and the
+    residue if it does not is narrow, since every *declaration* mismatch still
+    fails closed.
+
+    **This does not consult :class:`ActionPolicy`.** It verifies an
+    authorisation it is handed and never obtains one: a seam that ruled and then
+    executed would be judge and executioner in one object, and a ``CONFIRM``'s
+    human round-trip would have nowhere to happen.
+
+    **No credential crosses this seam, in either direction, ever** (ADR-0029
+    §6). A tool that needs one obtains it itself, inside `tools/`.
+    """
+
+    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4); wrapping it outside would cancel the invoker mid-await
+        """Run the authorised ``call``, waiting no longer than ``timeout``.
+
+        **Three checks happen first, in this order, before the callable is
+        reached, and the order is part of the rule** (ADR-0029 §2):
+
+        1. the call is **revalidated and detached**, so a mutation landed after
+           construction cannot survive into execution;
+        2. the definition on that detached copy equals the registry's own
+           original — the check that closes ADR-0018 §4's tampered-but-valid
+           definition, since the registry is the only holder of an untampered
+           one;
+        3. ``decision.authorises(request)`` on that same copy, re-evaluated
+           rather than trusted from construction.
+
+        Every subsequent check reads the revalidated copy, never the argument.
+        Ordering it the other way is not a stylistic preference: a ``__dict__``
+        write can leave ``parameters`` holding a value ``FrozenJson`` would never
+        have accepted, and ``authorises`` compares a digest that canonicalises
+        that mapping to JSON — so running it first raises a raw serialisation
+        error out of a method whose contract is that it answers a question,
+        after the executor has already committed its ``→ RUNNING`` claim.
+
+        **Failures of the tool come back as data; only seam faults are raised.**
+        An exception escaping the tool implementation becomes an ``INTERNAL``
+        result, as does a return value :data:`FrozenJsonValue` rejects.
+        ``BaseException`` propagates unchanged — a ``CancelledError`` or a
+        ``KeyboardInterrupt`` must not be swallowed into a result.
+
+        **The seam owns the deadline, and enforcing it is cooperative.** A caller
+        wrapping this in ``asyncio.wait_for`` would cancel the invoker
+        mid-await, so it would never reach the code that classifies the outcome.
+        What the deadline buys is that the seam stops waiting, not that the tool
+        stops working: a tool that suppresses its own cancellation can outlive
+        it, and no seam can prevent that (ADR-0029 §4).
+
+        On expiry the outcome is ``FAILED`` when the tool is not
+        ``side_effecting`` **or** its ``idempotency`` is ``NATURAL``, and
+        ``INDETERMINATE`` otherwise — ADR-0014 §4's case, reached through a
+        deadline rather than through a crash. "The tool" there is the
+        *registry's* definition, never ``call.request.tool``, which a
+        ``__dict__`` write could have flipped to read-only mid-flight.
+
+        ``TIMED_OUT`` means **this** deadline expired, established rather than
+        inferred from an exception type: an upstream SDK raising Python's
+        ``TimeoutError`` for its own reasons, well inside our budget, is an
+        exception like any other and becomes ``INTERNAL``. Likewise a
+        ``CancelledError`` the callable invents, with nothing cancelled, is a
+        tool that raised and not a cancellation.
+
+        Args:
+            call: The authorised call. Its ``idempotency_key`` is passed to the
+                tool when the tool's ``idempotency`` is ``KEYED``.
+            timeout: How long the seam will wait. Keyword-only and required —
+                the contract has no spelling for "forever", because a default
+                would be ``core`` choosing a policy and ``None`` would be a
+                documented route to an unbounded call.
+
+        Returns:
+            The classified outcome. Never ``None``, and never an exception for
+            anything the tool did.
+
+        Raises:
+            ValueError: If ``timeout`` is not a ``timedelta``, or is not
+                strictly positive — checked before the callable is created,
+                because the annotation is not the enforcement and because
+                ``asyncio.timeout(None)`` is no deadline at all. A zero or
+                negative duration is refused rather than treated as an
+                instantly-expired deadline: expiry is delivered at an await
+                point, so a callable performing a synchronous side effect before
+                its first ``await`` would already have acted.
+            ToolBindingError: If any of the three checks above fails.
+            CancelledError: If the invoking task is cancelled from outside. The
+                seam does not convert it to a result — there is no return path
+                from a task being torn down — so committing the step by the same
+                rule the timeout uses, and then re-raising, is the executor's
+                obligation (ADR-0029 §4).
+        """
         ...
 
 

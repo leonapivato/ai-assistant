@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.embeddings import FakeEmbedder
+from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker, succeeds
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
@@ -35,7 +36,10 @@ __all__ = [
     "FakeModelProvider",
     "FakePlanStore",
     "FakePlanner",
+    "FakeToolImplementation",
+    "FakeToolInvoker",
     "FakeToolRegistry",
     "ModelCall",
     "PolicyCall",
+    "succeeds",
 ]

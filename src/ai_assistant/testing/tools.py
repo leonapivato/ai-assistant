@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from ai_assistant.core.types import ToolDefinition
+    from ai_assistant.testing.invoker import FakeToolImplementation
 
 
 class FakeToolRegistry:
@@ -59,11 +60,23 @@ class FakeToolRegistry:
         for tool in tools:
             self.register(tool)
 
-    def register(self, tool: ToolDefinition) -> None:
+    def register(
+        self,
+        tool: ToolDefinition,
+        implementation: FakeToolImplementation | None = None,  # noqa: ARG002 — see below
+        /,
+    ) -> None:
         """Add ``tool`` so the query methods can find it.
 
         An arrangement helper, not a model of `tools/`'s registration rules; see
         the class docstring for why the difference is deliberate.
+
+        ``implementation`` is **accepted and ignored.** A real registry binds a
+        callable at registration (ADR-0029 §1) and this fake is query-only, so
+        the parameter exists purely to keep one arrangement seam usable by the
+        shared ``ToolRegistry`` suite, which must populate both. Holding the
+        callable here would be the beginning of a second invoker; a consumer
+        that wants one uses :class:`~ai_assistant.testing.invoker.FakeToolInvoker`.
 
         Raises:
             ToolRegistrationError: If the id is already taken.

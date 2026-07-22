@@ -2156,3 +2156,239 @@ class PermissionDecision(BaseModel):
             msg = "a resolving decision may not itself be a CONFIRM"
             raise ValueError(msg)
         return self
+
+
+class ToolOutcome(StrEnum):
+    """How an invocation finished (ADR-0029 §3).
+
+    Three members, one for each :class:`StepStatus` a finished invocation can
+    produce, so an executor's mapping is total and needs no default branch. A
+    separate enum rather than reusing :class:`StepStatus` because that type also
+    spells ``RUNNING`` and ``AWAITING_APPROVAL``, which a *result* must not be
+    able to say.
+    """
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    INDETERMINATE = "indeterminate"
+    """The call may or may not have taken effect; ADR-0014 §4's durable ignorance."""
+
+
+class ToolFailureKind(StrEnum):
+    """Why an invocation did not succeed (ADR-0029 §3)."""
+
+    INVALID_REQUEST = "invalid_request"
+    """The arguments were unacceptable to the tool."""
+
+    NOT_AUTHORISED = "not_authorised"
+    """The tool's own upstream refused its credential."""
+
+    UNAVAILABLE = "unavailable"
+    """The upstream is unreachable or failing."""
+
+    RATE_LIMITED = "rate_limited"
+    """The upstream throttled us."""
+
+    TIMED_OUT = "timed_out"
+    """The seam's own deadline passed (ADR-0029 §4)."""
+
+    CANCELLED = "cancelled"
+    """Cancelled before completing (ADR-0029 §4)."""
+
+    REFUSED = "refused"
+    """Attempted, and the upstream declined it."""
+
+    INTERNAL = "internal"
+    """The tool implementation is broken."""
+
+    @property
+    def retryable(self) -> bool:
+        """Whether a repeat of this same call could plausibly succeed.
+
+        Not whether repeating is *safe* — that is
+        :attr:`ToolDefinition.idempotency`'s answer, and ADR-0029 §5 requires
+        both. An executor that read this alone would double a charge on the
+        first ``TIMED_OUT`` send it saw.
+
+        Declared once here rather than per consumer, copying the shape
+        ``core/errors.py`` already ratified for ``ModelError.retryable``: it is
+        computable from the enum's own declaration and is the same answer for
+        every consumer, which is ADR-0016 §2's test for a semantic intrinsic to
+        a type.
+
+        Raises:
+            KeyError: If a member was added without a value in
+                ``_RETRYABLE_BY_KIND``. Loud by construction — a default would
+                let a new kind acquire a retry policy nobody chose.
+        """
+        return _RETRYABLE_BY_KIND[self]
+
+
+#: Exhaustive over :class:`ToolFailureKind`; a missing member raises rather than
+#: defaulting, which is what makes ``retryable`` a declaration rather than a guess.
+_RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
+    ToolFailureKind.INVALID_REQUEST: False,
+    ToolFailureKind.NOT_AUTHORISED: False,
+    ToolFailureKind.UNAVAILABLE: True,
+    ToolFailureKind.RATE_LIMITED: True,
+    ToolFailureKind.TIMED_OUT: True,
+    # True because the cancellation was ours: nothing about the call itself
+    # failed, so the same call could be issued again.
+    ToolFailureKind.CANCELLED: True,
+    ToolFailureKind.REFUSED: False,
+    ToolFailureKind.INTERNAL: False,
+}
+
+
+class ToolFailure(BaseModel):
+    """Why an invocation failed, in a form an executor can record (ADR-0029 §3).
+
+    :attr:`message` is **operator-facing Tier 2 text and must not carry Tier 0 or
+    Tier 1 data**. It is bound for a log and for ``StepExecution.error``, and
+    ADR-0004 §5 forbids Tier 1 data in both. There is no safety net under it:
+    ``core/logging.py`` redacts by *key*, and its own docstring names
+    ``error=str(exc)`` — "where the provider quoted the user's prompt" — as the
+    leak it cannot see. So the rule holds at the producer: an integration
+    *authors* its message rather than copying an upstream error body, and a
+    message the seam generates carries no content the seam did not author.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: ToolFailureKind
+    message: str = Field(description="Operator-facing explanation; Tier 2 only.")
+
+    @field_validator("message")
+    @classmethod
+    def _message_is_present(cls, value: str) -> str:
+        """Reject a message with nothing visible in it, returning it stripped.
+
+        The ``_has_visible_text`` test ADR-0018 §1 applies to a tool's
+        description and ADR-0021 §1 to a ruling's reason, for the same reason: a
+        failure that renders as nothing leaves the executor and the user with
+        nothing to say about it.
+        """
+        stripped = value.strip()
+        if not _has_visible_text(stripped):
+            msg = "tool failure message must contain visible text"
+            raise ValueError(msg)
+        return stripped
+
+
+class ToolResult(BaseModel):
+    """What an invocation produced, as data rather than as an exception (ADR-0029 §3).
+
+    Failure is *returned* because ``INDETERMINATE`` cannot be an exception: an
+    executor that learned "we do not know whether the effect happened" by
+    catching something would be one ``except Exception:`` away from recording a
+    completed action as failed.
+
+    :attr:`output` is :data:`FrozenJsonValue`, matching ``StepExecution.output``
+    exactly, so a result is recordable without translation and a tool cannot
+    return a live object that mutates after the step recorded it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: ToolOutcome
+    output: FrozenJsonValue = Field(default=None, description="Only meaningful when SUCCEEDED.")
+    failure: ToolFailure | None = Field(default=None, description="Required unless SUCCEEDED.")
+
+    @model_validator(mode="after")
+    def _outcome_fields_match(self) -> ToolResult:
+        """Refuse a result that half-says two things.
+
+        Every combination refused here has a wrong state that reads as
+        plausible. A ``FAILED`` result with no failure leaves the executor
+        writing ``StepExecution.error`` — required when ``FAILED`` (ADR-0014 §3)
+        — with nothing to write. A ``SUCCEEDED`` result carrying one is a
+        contradiction a caller reads whichever half it looks at first. And a
+        non-``SUCCEEDED`` result carrying an output is a *partial* result an
+        executor could record as a whole one, which is worse than an absent one.
+        """
+        succeeded = self.outcome is ToolOutcome.SUCCEEDED
+        if succeeded and self.failure is not None:
+            msg = "a SUCCEEDED result carries no failure"
+            raise ValueError(msg)
+        if not succeeded and self.failure is None:
+            msg = f"a {self.outcome} result requires a failure"
+            raise ValueError(msg)
+        if not succeeded and self.output is not None:
+            # The value itself is never interpolated: a tool's output carries
+            # Tier 1 data routinely, and a ValidationError message is bound for
+            # a log the redactor cannot see into (ADR-0029 §3).
+            msg = f"a {self.outcome} result carries no output, got a {type(self.output).__name__}"
+            raise ValueError(msg)
+        return self
+
+
+class ToolCall(BaseModel):
+    """An authorised invocation: the request, and the authority for making it (ADR-0029 §2).
+
+    **An unauthorised call is unconstructable.** The validator below runs
+    ADR-0021 §1's ``authorises`` — the one call that ADR said "belongs to the
+    invocation contract" — at construction, so no conforming caller can hand a
+    seam a call it was not authorised to make, because the value does not exist.
+    A ``DENY`` or an unanswered ``CONFIRM`` cannot construct one; nor can altered
+    arguments, a substituted definition, or a different step.
+
+    **Construction is the first line, not the only one.** ``frozen=True`` refuses
+    ``call.request = ...`` and does nothing about ``call.__dict__["request"]``,
+    and that bypass is inside this repository's threat model (ADR-0018 §3,
+    ADR-0021 §4). :meth:`~ai_assistant.core.protocols.ToolInvoker.invoke`
+    therefore re-runs the same check against a revalidated, detached copy. The
+    validator stays because it catches the honest mistake at the point it is
+    made, with a better message and no I/O; the seam's checks are what hold
+    against a deliberate one.
+
+    **It carries no third field, and the absences are the design**: no credential
+    (ADR-0029 §6), no timeout (it is not part of what was authorised), no
+    idempotency key as data (it is derived, below), and no tool id — the
+    definition is carried by value, so there is no name left to rebind.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request: ActionRequest = Field(description="What to do.")
+    decision: PermissionDecision = Field(description="The authority for doing it.")
+
+    @model_validator(mode="after")
+    def _authorised(self) -> ToolCall:
+        """Refuse a call the decision does not authorise.
+
+        Delegates wholly to :meth:`PermissionDecision.authorises`, which is why
+        this can live in ``core``: the validator compares two values it is given
+        and introduces no new comparison. Whether an action *should* be allowed
+        stays ``ActionPolicy``'s, in ``permissions``.
+        """
+        if not self.decision.authorises(self.request):
+            msg = (
+                f"decision {self.decision.id!r} does not authorise this request: it must be an "
+                "ALLOW for the same tool, the same parameters and the same step"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def idempotency_key(self) -> str | None:
+        """The key a ``KEYED`` tool is called with, or ``None`` (ADR-0029 §5).
+
+        Derived rather than minted, and that is what gives it the three
+        properties a key needs without asking a caller for any of them. It is
+        **stable across retries**, because every retry of an authorised call
+        reuses this same :class:`ToolCall` and hence the same decision — there is
+        deliberately no attempt counter in it. It is **distinct for a distinct
+        intent**, because asking to send the same message again produces a new
+        request and a new decision. And it is **recoverable across a restart**,
+        which is the property that makes it worth anything: a restarted executor
+        reads ``StepExecution.approval_ref``, loads the decision from the durable
+        trail, and derives the identical key.
+
+        Read from the *decision's* copy of the declaration rather than the
+        request's. The two are equal — ``authorises`` compares them — so this
+        changes no answer for a valid call, but the decision's copy is the one
+        the trail holds, which is the copy a restart reconstructs from.
+        """
+        if self.decision.tool.idempotency is not Idempotency.KEYED:
+            return None
+        return self.decision.id

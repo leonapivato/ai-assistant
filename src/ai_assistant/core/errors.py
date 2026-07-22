@@ -145,6 +145,27 @@ class ToolRegistrationError(ToolError):
     """
 
 
+class ToolBindingError(ToolError):
+    """The call about to run is not the one that was authorised (ADR-0029 §1, §2).
+
+    Raised by ``ToolInvoker.invoke`` when the call does not survive
+    revalidation, when its ``tool.id`` is bound to nothing, when the definition
+    it carries is not equal to the registry's own original, or when its decision
+    does not authorise its request.
+
+    All four are the same fault, and none of them is a tool failing — so none
+    may be an ordinary ``FAILED`` :class:`~ai_assistant.core.types.ToolResult`
+    an executor might retry. That is why this is raised where every other
+    invocation outcome is returned: an exception has no
+    ``failure.kind.retryable`` to read, so there is nothing for a retry decision
+    to be made from (ADR-0029 §8).
+
+    A revalidation failure carries the underlying ``ValidationError`` as its
+    cause, the shape ADR-0026 §2 uses when ``core`` translates an arbitrary
+    fault into its own error.
+    """
+
+
 class PermissionDeniedError(AssistantError):
     """An action was blocked by the permission/policy layer."""
 
