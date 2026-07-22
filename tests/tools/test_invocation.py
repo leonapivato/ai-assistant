@@ -14,13 +14,12 @@ from datetime import timedelta
 
 import pytest
 import structlog
-from tool_invoker_contract import PATIENT, Raiser, Spy, call_for, natural, read_only, tool
+from tool_invoker_contract import PATIENT, Raiser, Spy, call_for, tool
 
 from ai_assistant.core.errors import ToolRegistrationError
 from ai_assistant.core.protocols import ToolInvoker, ToolRegistry
-from ai_assistant.core.types import ToolFailureKind, ToolOutcome
+from ai_assistant.core.types import ToolFailureKind
 from ai_assistant.testing import succeeds
-from ai_assistant.tools.invocation import interrupted_outcome
 from ai_assistant.tools.registry import InMemoryToolRegistry, checked_timeout
 
 
@@ -94,21 +93,14 @@ async def test_the_seams_log_carries_no_content_the_seam_did_not_author() -> Non
     assert "RuntimeError" in rendered
 
 
-# --- the two helpers the seam is built from -----------------------------
-
-
-@pytest.mark.parametrize(
-    ("definition", "expected"),
-    [
-        (tool(), ToolOutcome.INDETERMINATE),
-        (read_only(), ToolOutcome.FAILED),
-        (natural(), ToolOutcome.FAILED),
-    ],
-    ids=["side-effecting", "read-only", "natural"],
-)
-def test_the_interrupted_call_rule_is_one_function(definition: object, expected: object) -> None:
-    """Stated once, so the timeout branch and any future caller cannot diverge."""
-    assert interrupted_outcome(definition) is expected  # type: ignore[arg-type]
+# --- the helper the seam is built from ----------------------------------
+#
+# The interrupted-call rule used to be tested here as a second `tools/`
+# function. It is now `ToolDefinition.interrupted_outcome` (ADR-0031 §1) and its
+# exhaustive table lives beside the type, in `tests/core/test_tool_types.py`.
+# The seam keeps its *behavioural* tests — §10's "the timeout rule in §4 in both
+# directions" is a statement about `invoke`, and it stays where one is observable
+# (the shared conformance suite).
 
 
 @pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1), None, 5, "30s"])

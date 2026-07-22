@@ -21,7 +21,6 @@ import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
-    Idempotency,
     ToolFailure,
     ToolFailureKind,
     ToolOutcome,
@@ -67,34 +66,6 @@ class ToolImplementation(Protocol):
         ...
 
 
-def interrupted_outcome(definition: ToolDefinition) -> ToolOutcome:
-    """Classify a call cut short by a deadline or a cancellation (ADR-0029 §4).
-
-    > On timeout or cancellation, the outcome is ``FAILED`` when the tool is not
-    > ``side_effecting``, **or** its ``idempotency`` is ``NATURAL``. Otherwise it
-    > is ``INDETERMINATE``.
-
-    A read that timed out changed nothing, and a ``NATURAL`` tool is idempotent
-    by nature (ADR-0016 §4), so whether it acted does not change what a repeat
-    does. Everything else is exactly ADR-0014 §4's case — "a crash between a
-    tool's side effect and the commit … cannot be distinguished from a crash
-    *before* the effect" — reached through a deadline rather than through a
-    crash, and it gets the same answer, because guessing in either direction is
-    what that ADR refused.
-
-    Args:
-        definition: The **registry's** declaration for the bound tool, never
-            ``call.request.tool``. The seam's checks all ran before the callable
-            started, so a declaration mutated afterwards is re-examined by
-            nothing: a side-effecting, non-``NATURAL`` call whose definition were
-            flipped to read-only mid-flight would be classified ``FAILED``, which
-            is a possible side effect recorded as certainly-nothing-happened.
-    """
-    if not definition.side_effecting or definition.idempotency is Idempotency.NATURAL:
-        return ToolOutcome.FAILED
-    return ToolOutcome.INDETERMINATE
-
-
 def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResult:
     """Describe a broken tool without quoting it (ADR-0029 §3).
 
@@ -124,7 +95,7 @@ def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResu
 def _expiry_failure(definition: ToolDefinition, timeout: timedelta) -> ToolResult:
     """Describe this seam's own deadline expiring."""
     return ToolResult(
-        outcome=interrupted_outcome(definition),
+        outcome=definition.interrupted_outcome,
         failure=ToolFailure(
             kind=ToolFailureKind.TIMED_OUT,
             message=f"tool {definition.id!r} did not finish within {timeout}",
@@ -280,4 +251,4 @@ async def run_bound_call(
         return internal_failure(definition, exc)
 
 
-__all__ = ["ToolImplementation", "internal_failure", "interrupted_outcome", "run_bound_call"]
+__all__ = ["ToolImplementation", "internal_failure", "run_bound_call"]

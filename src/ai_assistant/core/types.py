@@ -1757,6 +1757,50 @@ class ToolDefinition(BaseModel):
             raise ValueError(self._unstorable(None))
         return self
 
+    @property
+    def interrupted_outcome(self) -> ToolOutcome:
+        """What a call of this tool, cut short by a deadline or a cancellation, means.
+
+        ``FAILED`` when the tool is not :attr:`side_effecting`, **or** its
+        :attr:`idempotency` is ``NATURAL``; otherwise ``INDETERMINATE``
+        (ADR-0029 §4).
+
+        A read that timed out changed nothing, and a ``NATURAL`` tool is
+        idempotent by nature (ADR-0016 §4), so whether it acted does not change
+        what a repeat does. Everything else is exactly ADR-0014 §4's case — "a
+        crash between a tool's side effect and the commit … cannot be
+        distinguished from a crash *before* the effect" — reached through a
+        deadline rather than through a crash, and it gets the same answer,
+        because guessing in either direction is what that ADR refused.
+
+        Declared once here rather than per consumer, on the same three-part test
+        :attr:`ToolFailureKind.retryable` passes (ADR-0016 §2, ADR-0031 §1): it
+        reads two of this type's own fields and nothing else, consults no policy,
+        settings, context or clock, and gives one answer for every consumer. It
+        has three readers — the seam on a deadline expiry, the seam again when a
+        tool reports its effect may have committed, and the executor on a
+        cancellation — and two of them are in subsystems that cannot import each
+        other, so a second copy could only be one free to disagree.
+
+        **Read it from the registry's declaration for the committed
+        ``bound_tool``, never from ``call.request.tool``.** The seam's binding
+        checks all ran *before* the callable started, so a declaration mutated
+        mid-flight is re-examined by nothing: a side-effecting, non-``NATURAL``
+        call whose definition were flipped to read-only would then classify as
+        ``FAILED`` — a possible side effect recorded as
+        certainly-nothing-happened, the one direction ADR-0014 §4 refuses to
+        guess in. Written as a property, the wrong version is visible in the
+        expression, on the object, at the point of use.
+
+        A plain ``property`` and specifically **not** a ``computed_field``: a
+        computed field enters ``model_dump()``, and ADR-0018 §4's registration
+        rebuild is ``model_validate(tool.model_dump())`` against
+        ``extra="forbid"``, so every registration would fail (ADR-0031 §1).
+        """
+        if not self.side_effecting or self.idempotency is Idempotency.NATURAL:
+            return ToolOutcome.FAILED
+        return ToolOutcome.INDETERMINATE
+
     def _unstorable(self, cause: ValueError | None) -> str:
         """Say which declaration could not be rendered, without raising.
 
