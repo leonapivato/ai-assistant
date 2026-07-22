@@ -107,6 +107,24 @@ whether the claim landed. A cancellation that arrives before it lands leaves no
 resolved by the rule above. **The cancellation still propagates afterwards**, on
 §4's unchanged terms: committing is not swallowing.
 
+**The close runs while another exception is on its way out, so its precedence is
+part of the rule rather than an implementation detail.** Two orderings, and both
+are chosen against the same test — which fact, if lost, costs more:
+
+- **An absorbed cancellation wins over everything.** ADR-0029 §4's shield idiom
+  absorbs repeat cancellations to let a write land, and absorbing one is a
+  promise to re-raise it. A teardown the caller cannot observe is worse than a
+  diagnosis it loses: the first leaves a task running after shutdown asked it to
+  stop, the second leaves a well-recorded step and a worse log line.
+- **A rejected close beats the reason for closing**, chained to it. If the store
+  refuses the closing write there is nothing further the executor can do about
+  the durable record, so the one thing it must not do is report the original
+  fault and let the wrong state pass unmentioned — the step is now `RUNNING` in
+  exactly the way this section exists to prevent, and a recovery scan will read
+  it as `INDETERMINATE` for a callable never reached. Where the reason for
+  closing is *itself* a cancellation the first rule already governs, and the
+  store failure is logged.
+
 **Why this is not §4's "correct pessimism", which is the reading it is most
 likely to be confused with.** §4 says:
 
@@ -268,6 +286,11 @@ ADR-0026 does.
   callable raises on its own account propagates with its own type — ADR-0026
   §2's line, asserted rather than assumed. Both also assert the claimed step was
   closed.
+- **Both precedence rules are pinned, since each is a case where the close runs
+  under an exception already in flight**: a cancellation absorbed by the closing
+  write leaves as a `CancelledError` rather than as the reason for closing, and a
+  store that rejects the close raises rather than logging, carrying the reason as
+  its cause. Neither is observable without a store a test can hold mid-write.
 - **The lapsed-window cases stay as they are.** §5's rule is unchanged, so the
   table of non-positive elapsed durations — no elapsed time, a clock that went
   backwards — keeps testing exactly what it tested.

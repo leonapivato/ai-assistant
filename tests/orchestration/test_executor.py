@@ -781,6 +781,71 @@ async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> Non
     assert step.finished_at is not None
 
 
+async def test_a_cancellation_absorbed_while_closing_unstarted_outranks_the_cause() -> None:
+    """Absorbing a cancellation is a promise to re-raise it (ADR-0034 §1).
+
+    The pre-invocation close runs while another exception — here a refused clock
+    reading — is already on its way out. A cancellation absorbed by that write
+    still wins: a teardown the caller cannot observe is worse than a diagnosis it
+    loses, and the step lands either way.
+    """
+    store = HoldingPlanStore()
+    state = await a_claimed_execution(store)
+    seam = FakeToolInvoker([(tool(), Spy())])
+
+    def unreadable() -> datetime:
+        return datetime(2026, 7, 20, 12, 0)  # noqa: DTZ001 — naive, so the guard refuses it
+
+    task = asyncio.create_task(
+        executor_over(store, seam, now=unreadable).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+    )
+
+    await store.entered.wait()
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    store.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED
+
+
+async def test_a_rejected_unstarted_close_is_raised_not_logged_away() -> None:
+    """A step left ``RUNNING`` is the state ADR-0034 exists to prevent.
+
+    When the store refuses the close there is nothing further the executor can
+    do about the durable record, so the one thing it must not do is report the
+    original fault and let the wrong state pass unmentioned: recovery would read
+    that ``RUNNING`` as ``INDETERMINATE`` for a callable never reached. The store
+    failure is raised, chained to the reason for closing.
+    """
+    store = HoldingPlanStore(rejects=True)
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker([(tool(), implementation)])
+    store.release.set()
+
+    def unreadable() -> datetime:
+        return datetime(2026, 7, 20, 12, 0)  # noqa: DTZ001 — naive, so the guard refuses it
+
+    with pytest.raises(PlanningError, match="rejected") as caught:
+        await executor_over(store, seam, now=unreadable).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+
+    assert isinstance(caught.value.__context__, PlanningError), "the reason for closing is kept"
+    assert implementation.calls == []
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.RUNNING, (
+        "the store refused; the caller is told rather than not"
+    )
+
+
 async def test_a_clock_callables_own_exception_propagates_unwrapped() -> None:
     """ADR-0026 §2: "an exception raised by the clock callable itself propagates".
 
