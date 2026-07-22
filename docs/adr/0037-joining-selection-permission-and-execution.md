@@ -179,7 +179,7 @@ says nothing about only recording the permitted ones; a refusal the user is neve
 shown a trace of is the half of the trail that answers "what did the assistant
 decline to do", and the step's `approval_ref` needs something to point at (§3).
 
-### 3. The authority handed to the executor is the trail's copy, which closes #107
+### 3. The authority handed to the executor is the trail's copy, which closes #107 for the pipeline
 
 Issue #107 says nothing forces a decision to actually be recorded, and that
 closing it "needs the invocation contract — the executor is the place that has
@@ -450,6 +450,15 @@ planning lane and needs its own ADR. Issue #260 carries it. Until it lands, the
 two-commit path is the only one the ratified graph offers that records the
 denial at all, and this ADR takes recording it as the more important property.
 
+Review pressed the point a second time, asking that #260 land *before* this
+change rather than after. That is a sequencing judgement rather than a defect,
+and it is the dispatcher's: CONTRIBUTING puts ratification with the author and
+review in an advisory role, and the alternative on offer — shipping the join with
+no durable record of a refusal at all — trades a documented state-meaning
+stretch for a silently unrecorded denial, which ADR-0004 §7 likes less. The
+disagreement is on the record here, in #260, and in the PR, so whoever merges can
+hold this behind the planning change if they weigh it the other way.
+
 The denial therefore satisfies ADR-0014 §4's own rule for the automatic case: a
 decision was recorded and can be pointed at.
 
@@ -483,10 +492,12 @@ whole `ActionPlan`. This object disposes of one step, once.
   reaches a tool, or is disposed of with a durable reason, without anything
   outside `orchestration` being imported concretely: `StepRunner` sees five
   Protocols and one same-package collaborator.
-- **Issue #107 closes.** No `ToolCall` in this system can carry an unrecorded
-  authority, because the only constructor of one builds it from a decision the
-  trail returned. The guarantee is a property of the construction path rather
-  than of a check somebody must remember to run.
+- **Issue #107 closes for the pipeline.** No `ToolCall` *this pipeline*
+  constructs can carry an unrecorded authority, because the only place that
+  builds one builds it from a decision the trail returned — a property of the
+  construction path rather than of a check somebody must remember to run. It is
+  not a property of `ToolCall`, and §3 says where the line falls: a caller that
+  hand-builds a call and drives `StepExecutor` directly is outside it (#259).
 - **A trail that will not answer stops the pipeline.** `AuditError` from `get`,
   and a missing record, both refuse before the claim. That is a new way for a
   turn to fail, and it fails with nothing claimed and nothing run.
@@ -524,11 +535,6 @@ whole `ActionPlan`. This object disposes of one step, once.
   ordering, dependencies (`UNMET_DEPENDENCY` has no producer yet), cancellation
   and the loop over `ActionPlan.steps` are the next slice, and keeping them out
   is what let this one be about the join.
-- **Issue #107 closes for the pipeline, not for every caller of the executor.**
-  Nothing that goes through `StepRunner` can execute on an unrecorded authority.
-  A caller that builds its own `ToolCall` and drives `StepExecutor` directly
-  still can, which ADR-0021 §1 already classifies as a caller falsifying its own
-  trail rather than a gate being subverted. #259 is the hardening.
 - **Revisit when** the selection rule lands (#241), when a confirmation acquires
   durable identity (#242) or a lifetime (#243), when an automatic denial gets a
   direct transition (#260), when execution authority becomes unforgeable (#259),
