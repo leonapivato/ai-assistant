@@ -210,11 +210,31 @@ the resolution path would point `resolves` at a decision nobody was shown. So th
 record must call itself what it was asked for, or it is refused.
 
 The in-memory decision is discarded at that point. The consequence is the
-property #107 asks for, by construction rather than by discipline: the
-`approval_ref` on a `RUNNING` step is the id of a decision the trail returned,
-because the call that produced it was built out of what the trail returned.
-There is no execution path that reaches `ToolInvoker.invoke` from an unrecorded
-decision, because there is no other constructor of a `ToolCall`.
+property #107 asks for, along this path and by construction rather than by
+discipline: the `approval_ref` on a step this stage claimed is the id of a
+decision the trail returned, because the call that produced it was built out of
+what the trail returned. `StepRunner` is the only thing in the pipeline that
+constructs a `ToolCall`, so no *pipeline* execution reaches
+`ToolInvoker.invoke` from an unrecorded decision.
+
+**That is a property of the path, not of the type, and the difference is worth
+stating plainly rather than being read as more than it is.** `StepExecutor` is
+exported and takes any valid `ToolCall`; `ToolCall`'s validator runs
+`authorises`, which compares a decision to a request and asks nothing about
+where the decision came from. A caller that hand-builds an `ALLOW`
+`PermissionDecision` with an id nobody recorded can therefore construct a valid
+call, hand it to the executor, and have that id committed as `approval_ref`.
+
+This change does not close that, and ADR-0021 §1 already ruled on the same
+shape one level down: what remains open is "a caller hand-constructing a
+decision field by field — that is a caller falsifying its own audit trail rather
+than a policy subverting a gate, and no producer can prevent it". The gate is
+not being bypassed; the caller *is* the thing the gate protects. Making
+execution authority unforgeable needs the executor to validate trail presence
+before its claim, which is a change to a module this ADR deliberately leaves
+alone (below) and a decision about what `StepExecutor` costs every caller.
+Issue #259 carries it, and §3's guarantee should be read as scoped to the
+pipeline until it lands.
 
 **Every branch reads back, not only the authorising one.** The read-back began as
 the `ALLOW` path's guard, and confining it there would have made the guarantee
@@ -392,16 +412,43 @@ So a denied step is committed twice: `PENDING → AWAITING_APPROVAL` with
 APPROVAL_DENIED` and `approval_ref` naming the recorded `DENY`. Two versions,
 one disposition.
 
-That reads oddly — the step "awaited" an approval nobody was asked for — and it
-is nonetheless the accurate record. What the intermediate state means is *queued
-for the permission gate with a specific tool bound*, which is precisely what
-happened; the gate then answered without needing a human, exactly as it does for
-the automatic `ALLOW` that ADR-0014 §4 insists must still carry an
-`approval_ref`. The alternatives are worse in the way that matters: skipping from
-`PENDING` as `SUPERSEDED` records a false reason and loses the `approval_ref`
-entirely, and widening `_LEGAL_SKIP_REASONS` to admit `APPROVAL_DENIED` from
-`PENDING` edits ADR-0014's graph, in another lane's subsystem, to make a record
-shorter.
+That reads oddly — the step "awaited" an approval nobody was asked for — and
+ADR-0014 §4's trigger column says `PENDING → AWAITING_APPROVAL` fires when
+"permission check requires confirmation", which is not what happened here. The
+objection is real and this section is the answer to it rather than an oversight.
+
+**The graph's own design says an automatic ruling still gets a record.** ADR-0014
+§4 is emphatic that *every* transition into `RUNNING` carries an `approval_ref`
+"including the common case where the permission layer cleared the step
+automatically, without prompting", because otherwise "precisely the silent,
+automatic actions — the ones a user is least able to recall consenting to — would
+be the ones that could not be correlated with their authorisation". The
+symmetrical case is an automatic *refusal*, and `SkipReason.APPROVAL_DENIED`
+exists for it. Reading the trigger column strictly would make that member
+unreachable for every flow in which no human was asked — which cannot be the
+intent of a table that spends a paragraph insisting the automatic path be
+recorded too. So the intermediate state is read as *queued for the permission
+gate with a specific tool bound*, which is exactly what happened; the gate then
+answered without needing a human.
+
+The alternatives are worse in the way that matters. Skipping from `PENDING` as
+`SUPERSEDED` records a false reason and loses the `approval_ref` entirely.
+Committing nothing and leaving the step `PENDING` throws away the durable fact
+that it was refused, and makes a denied step indistinguishable from an
+unattempted one. And widening `_LEGAL_SKIP_REASONS` to admit `APPROVAL_DENIED`
+from `PENDING` edits ADR-0014's graph, in a subsystem this change's fence
+excludes.
+
+**That last one is the reviewable disagreement, and it is recorded rather than
+settled here.** Architecture review of the implementing PR argued the reverse
+priority: that repurposing a ratified state is the greater cost, and the right
+fix is to ratify a planning-contract change letting an approval denial go
+`PENDING → SKIPPED` directly with an `approval_ref`. That is a better end state —
+it removes the odd intermediate commit *and* one of #257's three stranding
+windows — and it is a change to ADR-0014's transition table, which belongs to the
+planning lane and needs its own ADR. Issue #260 carries it. Until it lands, the
+two-commit path is the only one the ratified graph offers that records the
+denial at all, and this ADR takes recording it as the more important property.
 
 The denial therefore satisfies ADR-0014 §4's own rule for the automatic case: a
 decision was recorded and can be pointed at.
@@ -477,6 +524,13 @@ whole `ActionPlan`. This object disposes of one step, once.
   ordering, dependencies (`UNMET_DEPENDENCY` has no producer yet), cancellation
   and the loop over `ActionPlan.steps` are the next slice, and keeping them out
   is what let this one be about the join.
+- **Issue #107 closes for the pipeline, not for every caller of the executor.**
+  Nothing that goes through `StepRunner` can execute on an unrecorded authority.
+  A caller that builds its own `ToolCall` and drives `StepExecutor` directly
+  still can, which ADR-0021 §1 already classifies as a caller falsifying its own
+  trail rather than a gate being subverted. #259 is the hardening.
 - **Revisit when** the selection rule lands (#241), when a confirmation acquires
-  durable identity (#242) or a lifetime (#243), or when standing grants
-  (ADR-0021 §6) make `decide` answer from a stored authorisation.
+  durable identity (#242) or a lifetime (#243), when an automatic denial gets a
+  direct transition (#260), when execution authority becomes unforgeable (#259),
+  or when standing grants (ADR-0021 §6) make `decide` answer from a stored
+  authorisation.
