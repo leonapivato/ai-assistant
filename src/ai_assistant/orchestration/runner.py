@@ -28,7 +28,8 @@ Four rules shape the module and are worth stating before the code:
 - **A ``CONFIRM`` is parked, never answered here** (ADR-0037 §4). The step is
   committed ``AWAITING_APPROVAL`` — durable precisely so a restart preserves it
   (ADR-0014 §4) — and :meth:`StepRunner.resume` takes the human's answer when it
-  arrives.
+  arrives, against the execution that is actually holding the question
+  (:meth:`StepRunner._check_parked`).
 
 Nothing concrete is imported. Five collaborators arrive by injection and are seen
 only through their Protocols (CLAUDE.md golden rule 1); the sixth, the executor,
@@ -52,6 +53,7 @@ from ai_assistant.core.types import (
     ActionRequest,
     PermissionDecision,
     PermissionOutcome,
+    PlanStep,
     SkipReason,
     StepStatus,
     StepTransition,
@@ -72,7 +74,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ExecutionState,
         PermissionRuling,
-        PlanStep,
         ToolDefinition,
     )
     from ai_assistant.orchestration.executor import StepExecutor
@@ -86,6 +87,36 @@ def _utcnow() -> datetime:
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _detached(step: PlanStep) -> PlanStep:
+    """Revalidate and detach the step before anything durable names it.
+
+    **This stage is handed a caller's object and reads it across four awaits** —
+    the registry lookup, the policy's ruling, the trail's write and the trail's
+    read — before the first transition is computed. ``frozen=True`` refuses
+    ``step.id = ...`` and does nothing about ``step.__dict__["id"] = ...``, and
+    ADR-0018 §3, ADR-0018 §4 and ADR-0029 §2 all put that bypass inside this
+    repository's threat model rather than outside it.
+
+    Without the snapshot, an id rewritten while the policy is ruling would have
+    the decision made about one step and the transition committed against
+    another: a second step recorded as denied, or claimed, under an
+    ``approval_ref`` naming a decision that was about its neighbour — the durable
+    audit association silently wrong in the direction ADR-0014 §4's
+    ``approval_ref`` rule exists to make right. The same argument
+    :func:`~ai_assistant.orchestration.executor._detached` makes for a
+    ``ToolCall``, one stage earlier and about the other half of the pair.
+
+    Raises:
+        PlanningError: If the step does not survive revalidation. Raised before
+            any await, so an unusable step touches no durable state at all.
+    """
+    try:
+        return PlanStep.model_validate(step.model_dump())
+    except ValidationError as exc:
+        msg = "the plan step did not survive revalidation, so it is not the step that was planned"
+        raise PlanningError(msg) from exc
 
 
 class Disposition(StrEnum):
@@ -228,11 +259,16 @@ class StepRunner:
             AuditError: If the trail would not accept the decision, or does not
                 hand back a record of it (:meth:`_authorised`). Raised before any
                 claim, so nothing ran and nothing is left ``RUNNING``.
-            PlanningError: If a transition is rejected, the store is stale, or
-                the injected clock's reading is not conforming (:meth:`_now`).
+            PlanningError: If a transition is rejected, the store is stale, the
+                injected clock's reading is not conforming (:meth:`_now`), or
+                ``step`` does not survive revalidation (:func:`_detached`).
             ToolBindingError: From the executor, if the authorised call does not
                 survive its own revalidation.
         """
+        # One snapshot, taken before the first await, and used for the lookup,
+        # the ruling, the record and every transition. See `_detached`: the
+        # caller's object is mutable across all of them.
+        step = _detached(step)
         candidates = await self._registry.find(step.capability)
         if not candidates:
             skipped = await self._skip(state, step, SkipReason.NO_CAPABLE_TOOL)
@@ -291,8 +327,11 @@ class StepRunner:
         executed against arguments nobody approved.
 
         Args:
-            state: The execution as currently stored; ``step`` must be
-                ``AWAITING_APPROVAL`` in it, which the transition graph enforces.
+            state: The execution as currently stored. ``step`` must be parked in
+                *it*, awaiting the confirmation's own tool — checked here rather
+                than left to the transition graph, which would find the same
+                step of a *second* execution of the same plan perfectly claimable
+                (:meth:`_check_parked`).
             step: The step the confirmation was about.
             confirmation_id: The recorded ``CONFIRM``'s id, as returned in the
                 :class:`StepDisposition` that parked it. It is carried by the
@@ -314,11 +353,14 @@ class StepRunner:
                 trail refuses the resolving decision, or if it does not hand back
                 a record of it.
             PermissionDeniedError: If ``confirmation_id`` names something that
-                was not a ``CONFIRM``, or a ``CONFIRM`` about a different step.
-                Refused before anything is authored, so a mismatched answer
-                cannot become a recorded decision.
-            PlanningError: As :meth:`run`.
+                was not a ``CONFIRM``, or a ``CONFIRM`` about a different step,
+                or one this execution is not parked on
+                (:meth:`_check_parked`). Refused before anything is authored, so
+                a mismatched answer cannot become a recorded decision.
+            PlanningError: As :meth:`run`, and if ``step`` does not survive
+                revalidation (:func:`_detached`).
         """
+        step = _detached(step)
         confirmed = await self._trail.get(confirmation_id)
         if confirmed is None:
             msg = (
@@ -342,6 +384,7 @@ class StepRunner:
                 f"here would release step {step.id!r} on somebody else's answer"
             )
             raise PermissionDeniedError(msg)
+        self._check_parked(state, step, confirmed.tool.id, confirmation_id=confirmation_id)
 
         request = ActionRequest(tool=confirmed.tool, parameters=step.parameters, step_id=step.id)
         ruling = await self._policy.resolve(confirmed, approved=approved)
@@ -351,6 +394,64 @@ class StepRunner:
         return await self._deny(state, step, decision, confirmed.tool)
 
     # --- the permission stage -------------------------------------------
+
+    def _check_parked(
+        self,
+        state: ExecutionState,
+        step: PlanStep,
+        tool_id: str,
+        *,
+        confirmation_id: str,
+    ) -> None:
+        """Require ``state`` to hold *this* step, parked, awaiting *this* tool.
+
+        **The transition graph is not enough, and assuming it was is the hole
+        this closes.** ``PlanStore`` opens an execution per ``start_execution``
+        call, so one plan can have several, and a confirmation carries no
+        execution id — ADR-0021 §1 binds an approval to the tool, the parameters
+        and the *step*, and ``ActionRequest`` has no field for anything wider. So
+        a confirmation parked in execution A, replayed against execution B where
+        the same step is still ``PENDING``, would find ``PENDING → RUNNING``
+        perfectly legal and release B's step on an answer given about A's — while
+        A stayed parked, still awaiting the question it had already been asked.
+        Nothing downstream catches it: the digest, the tool and the step id all
+        match, because it is the same step of the same plan.
+
+        Checking the ``bound_tool`` too is not belt-and-braces. It is what makes
+        "this parked step is the one that question was asked about" mean
+        something when the step is awaiting approval for a *different*
+        declaration — the case where the step is in the right status and still
+        the wrong subject.
+
+        The check is against the caller's ``state`` because that is the snapshot
+        the compare-and-swap is computed against: a ``state`` that disagrees with
+        the store is rejected by the transition itself, so the two guards cover
+        the two different lies.
+
+        **What remains is narrow and named** (ADR-0037 §4, #253): two executions
+        of one plan, *both* parked on the same step, are mutually substitutable.
+        The trail's single-resolution index still means one confirmation
+        authorises one resolution, so the residue is which of two identical
+        parked executions proceeds, not whether an unapproved one does.
+
+        Raises:
+            PermissionDeniedError: If the step is absent from ``state``, is not
+                ``AWAITING_APPROVAL``, or is bound to a different tool.
+        """
+        parked = state.step(step.id)
+        if parked is None or parked.status is not StepStatus.AWAITING_APPROVAL:
+            found = "is not in this execution" if parked is None else f"is {parked.status}"
+            msg = (
+                f"step {step.id!r} {found}, not awaiting approval, so decision "
+                f"{confirmation_id!r} answers no question this execution is holding"
+            )
+            raise PermissionDeniedError(msg)
+        if parked.bound_tool != tool_id:
+            msg = (
+                f"step {step.id!r} awaits approval for {parked.bound_tool!r}, but decision "
+                f"{confirmation_id!r} confirms {tool_id!r}"
+            )
+            raise PermissionDeniedError(msg)
 
     async def _record(
         self,

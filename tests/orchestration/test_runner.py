@@ -148,6 +148,27 @@ class LosingTrail(FakeAuditTrail):
         return None
 
 
+class RewritingPolicy(FakeActionPolicy):
+    """A policy that rewrites its *caller's* step id while ruling on it.
+
+    The mutation ADR-0018 §3 puts inside the threat model: ``frozen=True``
+    refuses ``step.id = ...`` and does nothing about ``step.__dict__``. A stage
+    reading the caller's object after this would rule on one step and commit
+    against another.
+    """
+
+    def __init__(self, step: PlanStep, *, becomes: str) -> None:
+        """Deny everything, and rewrite ``step``'s id on the way."""
+        super().__init__(deny_at=RiskLevel.LOW)
+        self._step = step
+        self._becomes = becomes
+
+    async def decide(self, request: ActionRequest) -> PermissionRuling:
+        """Rewrite the caller's step, then rule as the fake policy does."""
+        self._step.__dict__["id"] = self._becomes
+        return await super().decide(request)
+
+
 class SubstitutingTrail(FakeAuditTrail):
     """A trail that hands back a record of a *different* action."""
 
@@ -528,6 +549,91 @@ async def test_parameters_changed_since_the_prompt_are_refused_by_the_trail() ->
         )
 
     assert harness.invoker.invocations == []
+
+
+async def test_a_confirmation_cannot_release_the_same_step_of_another_execution() -> None:
+    """A plan may have several executions, and an approval names no execution."""
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    first = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(first, step, timeout=PATIENT)
+    # A second execution of the same plan: the same step id, still `PENDING`,
+    # for which `PENDING → RUNNING` would be a perfectly legal claim.
+    second = await harness.plans.start_execution("p-1")
+
+    with pytest.raises(PermissionDeniedError, match="not awaiting approval"):
+        await harness.runner.resume(
+            second,
+            step,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    assert harness.policy.resolutions == []
+    assert harness.invoker.invocations == []
+    reloaded = await harness.plans.get_execution(second.id)
+    assert reloaded is not None
+    assert reloaded.step(STEP) is not None
+    assert reloaded.step(STEP).status is StepStatus.PENDING  # type: ignore[union-attr]  # asserted above
+
+
+async def test_a_confirmation_for_another_tool_does_not_release_a_parked_step() -> None:
+    """The parked step must await approval for the declaration being resolved."""
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, step, timeout=PATIENT)
+    # Rebind what the parked step is waiting on, as a registry rebuilt under a
+    # rebound id would (ADR-0016 §5, issue #54).
+    rebound = parked.state.model_copy(
+        update={
+            "steps": (parked.state.steps[0].model_copy(update={"bound_tool": "somebody-else"}),)
+        }
+    )
+
+    with pytest.raises(PermissionDeniedError, match="awaits approval for"):
+        await harness.runner.resume(
+            rebound,
+            step,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    assert harness.policy.resolutions == []
+    assert harness.invoker.invocations == []
+
+
+async def test_a_step_rewritten_mid_ruling_does_not_move_its_neighbour() -> None:
+    """The stage reads its own snapshot, not the caller's mutable object."""
+    step = plan_step()
+    neighbour = PlanStep(id="step-2", intent="send another", capability=CAPABILITY)
+    harness = Harness(tools=(tool(),), policy=RewritingPolicy(step, becomes="step-2"))
+    goal = Goal(
+        id="g-1",
+        statement="send the notes",
+        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT),
+        created_at=AT,
+    )
+    await harness.plans.save_goal(goal)
+    plan = ActionPlan(id="p-2", goal_id=goal.id, steps=(step, neighbour), created_at=AT)
+    await harness.plans.save_plan(plan)
+    state = await harness.plans.start_execution(plan.id)
+
+    result = await harness.runner.run(state, step, timeout=PATIENT)
+
+    assert result.disposition is Disposition.DENIED
+    reloaded = await harness.plans.get_execution(state.id)
+    assert reloaded is not None
+    ruled_on = reloaded.step(STEP)
+    untouched = reloaded.step("step-2")
+    assert ruled_on is not None
+    assert untouched is not None
+    assert ruled_on.status is StepStatus.SKIPPED
+    assert ruled_on.skip_reason is SkipReason.APPROVAL_DENIED
+    assert untouched.status is StepStatus.PENDING
+    assert untouched.approval_ref is None
 
 
 # --- the clock -----------------------------------------------------------

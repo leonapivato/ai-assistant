@@ -222,6 +222,24 @@ what makes the parked step reachable rather than merely honest:
 5. record the resolving decision with `resolves` set;
 6. `ALLOW` → read back and execute (§3); `DENY` → `AWAITING_APPROVAL → SKIPPED`.
 
+Step 2 checks the *execution* as well as the step, and the reason is that the
+transition graph does not. `PlanStore` opens an execution per `start_execution`
+call, so one plan may have several, and a `PermissionDecision` carries no
+execution id — ADR-0021 §1 binds an approval to the tool, the parameters and the
+*step*, and `ActionRequest` has no field for anything wider. A confirmation
+parked in execution A, replayed against execution B where the same step is still
+`PENDING`, would therefore find `PENDING → RUNNING` perfectly legal: B's step
+would run on an answer given about A's, while A stayed parked. Nothing
+downstream catches it, because the tool, the digest and the step id all match —
+it is the same step of the same plan. So `resume` requires the step to be
+`AWAITING_APPROVAL` **in the state it was handed**, bound to the confirmation's
+own tool. The residue is named rather than closed: two executions of one plan
+*both* parked on the same step are mutually substitutable, and closing that
+needs an execution id on the permission record, which is a `core` change with
+its own ADR (#253). The trail's single-resolution index bounds it — one
+confirmation authorises one resolution — so what is at stake is which of two
+identical parked executions proceeds, not whether an unapproved one does.
+
 Step 3 is why the definition is embedded by value at all (ADR-0021 §1, issue
 #54): the tool that runs after the confirmation is the declaration the user was
 shown, read out of the record, never re-resolved through the registry — which
