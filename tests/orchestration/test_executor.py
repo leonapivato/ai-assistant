@@ -623,6 +623,40 @@ async def test_the_transition_lands_before_a_repeat_cancellation_escapes() -> No
     assert step.status is StepStatus.INDETERMINATE
 
 
+async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() -> None:
+    """The whole write path is cancellation-aware, not just the handler's.
+
+    By the time a terminal transition is written the tool has been reached and
+    its outcome is *known*. A cancellation landing on that ``await`` would
+    abandon the write and leave the step ``RUNNING``, and recovery would then
+    record ``INDETERMINATE`` — "we cannot tell whether it acted" — over an answer
+    the executor was holding, discarding a `SUCCEEDED` result's output with it.
+    """
+    store = HoldingPlanStore()
+    state = await a_claimed_execution(store)
+    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
+    task = asyncio.create_task(
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+    )
+
+    await store.entered.wait()
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not task.done(), "an unshielded terminal commit is abandoned here"
+
+    store.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.SUCCEEDED, "the known outcome still landed"
+    assert step.output == {"message_id": "m-1"}
+
+
 async def test_classification_reads_the_trusted_binding_not_the_callers_object() -> None:
     """A declaration mutated *after* invocation begins changes nothing.
 

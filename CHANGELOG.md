@@ -96,8 +96,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   write can flip to read-only mid-flight. The commit uses the whole shield
   idiom rather than a bare `await asyncio.shield(...)` — shield protects the
   inner task, not the `await` of it, so a repeat cancellation is absorbed until
-  the write has landed. Committing is not swallowing: the cancellation still
-  propagates, which is what keeps shutdown working.
+  the write has landed. **The whole write path is cancellation-aware, not just
+  the handler's**: once the tool has been reached the outcome is known, so a
+  cancellation landing on the ordinary terminal commit lands the write too,
+  rather than abandoning it for recovery to report ignorance over. Committing is
+  not swallowing in either case: the cancellation still propagates, which is what
+  keeps shutdown working.
   **The idempotency window is fail-closed** (ADR-0029 §5): the executor stops
   retrying once it has elapsed, and any reading that is not a positive elapsed
   duration — a step backwards, a jump past the window, a reading the clock guard
