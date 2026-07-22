@@ -90,11 +90,12 @@ PR #17 drew 20 hosted reviews across 23 commits — so the hosted path is gone.
 The reviewer is unchanged: Codex still judges every change, independently of the
 model that wrote it.
 
-Each run records itself to `.review/<sha>-<persona>.md`, keyed to the commit it
-reviewed. Loop: **fix, commit, re-run**. It reviews `HEAD` vs the base — the
-*committed* diff, not your working tree — so an uncommitted fix is invisible to
-a re-run. Stop when it comes back clean or only deliberately-waived findings
-remain.
+Each run records itself to
+`.review/<loop_id>-<persona>-<base_sha>-<tree>.md`, named by the anchor `ship`
+selects it by rather than by the commit it was filed under (ADR-0027 §6). Loop:
+**fix, commit, re-run**. It reviews `HEAD` vs the base — the *committed* diff,
+not your working tree — so an uncommitted fix is invisible to a re-run. Stop
+when it comes back clean or only deliberately-waived findings remain.
 
 ### Triage every finding — do not let the PR grow to absorb them
 
@@ -136,16 +137,40 @@ destructive action, or discovering the task itself was wrong. "Is this ready?"
 is not on that list.
 
 `ship` refuses unless an adversarial review exists for **the content the PR head
-carries** — matching the review's recorded base *and* tree against the PR's
-current merge base and `HEAD`'s tree (ADR-0020 §3) — so the record cannot be a
-review of different code. It also refuses on a dirty tree, on `main`, and when
-the PR head is behind local `HEAD`.
+carries**, so the record cannot be a review of different code. Two paths are
+accepted (ADR-0027 §2):
+
+- **The base has not moved** — the review's recorded base equals the PR's merge
+  base *and* its recorded tree equals `HEAD`'s tree. This is ADR-0020 §3 exactly
+  as written, and it is unchanged.
+- **The base has moved** — the recorded base is a *proper* ancestor of the merge
+  base, the reviewed patch identity is unchanged, and the base move clears the
+  floor below. `ship` then publishes the drift — both bases and the whole file
+  set the move touched — in the comment it posts.
+
+It also refuses on a dirty tree, on `main`, and when the PR head is behind local
+`HEAD`.
+
+**A base move costs a review round when it lands in ADR-0027 §3's floor:**
+`src/ai_assistant/core/protocols.py` and `src/ai_assistant/core/types.py` — the
+contract surface — plus `docs/review/**`, `CLAUDE.md`, `CONTRIBUTING.md`,
+`scripts/codex-review.sh` and `docs/adr/**`, the standing contracts the review
+was conducted under. The floor is read rename-aware on **both** endpoints: a
+floor path is breached when it appears as the source or the destination of a
+rename, and when it is deleted. Clearing the floor is necessary but not
+sufficient — the moved-base path above carries the rest of the conditions, and
+a base move that edits the reviewed hunks costs its round whatever the floor
+says. Merging to `main`, meanwhile, does not move a PR's merge base at all;
+rebasing onto it does.
 
 Anchoring on content rather than the commit SHA is what makes squashing,
-amending, and reverting free: a commit that changes no reviewed byte no longer
-costs a review round. A review taken against different content, or against a
-different base, still fails mechanically — and a scope cut is a real content
-change, so it genuinely re-reviews.
+amending, and reverting free: a commit that changes no reviewed byte does not
+cost a review round. Content the review did not read still fails mechanically —
+a scope cut is a real content change, so it genuinely re-reviews. On the
+moved-base path, so does a diverged history, a patch identity with nothing to
+hash (a rename-only or mode-only entry), or a drift record too large to publish
+whole: each makes that path unavailable, leaving the unmoved-base test to judge
+the artifact, which a moved base fails.
 
 ### Stop when the required reviews are green
 
