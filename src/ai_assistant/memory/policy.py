@@ -27,32 +27,36 @@ if TYPE_CHECKING:
 _DEFAULT_MIN_CONFIDENCE = 0.3
 _DEFAULT_TEMPORARY_TTL = timedelta(days=7)
 
+# Sources a user assertion may supersede (ADR-0038 §2). An allow-list rather
+# than "not USER_ASSERTED": adding a `MemorySource` should not silently enrol it
+# in a destructive rule, and `EXTERNAL` is excluded on its own grounds (§2a).
+_SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+
 
 def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on a user-asserted proposal: supersede a stale belief, or accept.
+    """Rule on a user-asserted proposal: supersede a stale inference, or accept.
 
-    Supersession targets the best-ranked *non-asserted* conflict rather than
-    ``conflicts[0]``. The sequence is ordered by retrieval score, so the top
-    entry may itself be user-asserted, and merging over it would destroy a
-    record the user gave us on the strength of a lexical or embedding
-    near-match. An assertion may displace anything we were not told; nothing we
-    were not told may displace an assertion (ADR-0038 §3).
+    Supersession targets the best-ranked conflict whose source is in
+    :data:`_SUPERSEDABLE` — an allow-list of the two *derived* sources, not
+    "anything that is not an assertion". Two exclusions, for different reasons:
 
-    The test is ``source is not USER_ASSERTED``, so ``EXTERNAL`` is supersedable
-    alongside ``OBSERVED``/``INFERRED`` even though it can carry confidence 1.0.
-    That is deliberate, not an oversight of a high-confidence source: the
-    external system remains the system of record and re-supplies the fact on the
-    next sync, and the user is the authority on a claim about themselves
-    (ADR-0038 §2). The reverse direction stays closed — the superseded record is
-    ``USER_ASSERTED`` afterwards, so a later ``EXTERNAL`` proposal contradicting
-    it meets the ``ASK_USER`` rule above.
+    - ``USER_ASSERTED``, because an assertion may displace a belief we derived
+      but may never displace one we were told (ADR-0038 §3). Scanning past it
+      rather than taking ``conflicts[0]`` matters because the sequence is
+      ordered by retrieval score, so the top entry may itself be asserted and
+      merging over it would destroy the user's own words on the strength of a
+      lexical or embedding near-match.
+    - ``EXTERNAL``, because supersession keeps the *target's* id, and an
+      external record's id is that system's idempotency key. A correction
+      merged into it would inherit that key and be silently overwritten by the
+      next routine sync — the user's correction lost, not the stale value
+      (ADR-0038 §2a).
 
-    With nothing supersedable — no conflicts, or only asserted ones — the
-    assertion is accepted, and two things the user said stand side by side
-    (ADR-0038 §5).
+    With nothing supersedable the assertion is accepted and lands beside the
+    conflict, which is the pre-ADR-0038 behaviour (ADR-0038 §5).
     """
     superseded = next(
-        (c for c in conflicts if c.provenance.source is not MemorySource.USER_ASSERTED),
+        (c for c in conflicts if c.provenance.source in _SUPERSEDABLE),
         None,
     )
     if superseded is None:
@@ -72,8 +76,8 @@ class DefaultMemoryPolicy:
 
     1. Secret-tier proposals always defer to the user.
     2. An inference never silently overrides a user-asserted memory — defer.
-    3. A user-asserted proposal *supersedes* a conflicting belief we were not
-       told: it merges over the best-ranked non-asserted conflict rather than
+    3. A user-asserted proposal *supersedes* a conflicting inference: it merges
+       over the best-ranked ``OBSERVED``/``INFERRED`` conflict rather than
        landing beside it, so a correction takes the stale belief off the read
        path (ADR-0038).
     4. A user-asserted proposal with nothing to supersede is trusted and
@@ -85,7 +89,7 @@ class DefaultMemoryPolicy:
     7. Otherwise the proposal is accepted.
 
     Rules 2 and 3 are the same asymmetry read in both directions: an assertion
-    outranks anything the user did not tell us, and never the reverse.
+    outranks an inference, and never the reverse.
     """
 
     def __init__(

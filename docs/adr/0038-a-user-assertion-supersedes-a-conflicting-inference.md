@@ -54,9 +54,9 @@ The forces:
 
 ### 1. Supersession means `MERGE` over the stale record, at its id
 
-We will make a user-asserted proposal that conflicts with a non-asserted record
-return `MERGE` into that record, rather than `ACCEPT` beside it. Concretely, via
-the machinery that already exists:
+We will make a user-asserted proposal that conflicts with a *derived* record
+(§2a fixes which sources those are) return `MERGE` into that record, rather than
+`ACCEPT` beside it. Concretely, via the machinery that already exists:
 
 - the corrected content and the `USER_ASSERTED` provenance are written **at the
   stale record's id**, so exactly one record survives and the wrong belief is
@@ -103,47 +103,64 @@ The asymmetry is about what the two cost to be wrong about:
   path.
 
 So the existing machinery is good enough for this destructive action *against a
-belief we were not given by the user* — not because the threshold is
-trustworthy, but because the blast radius on that side is bounded and
-recoverable. It is not good enough against assertions, and rule 3 below is what
-keeps it away from them.
+derived belief* — not because the threshold is trustworthy, but because the
+blast radius on that side is bounded and recoverable. It is not good enough
+against assertions, and rule 3 below is what keeps it away from them.
 
-**`EXTERNAL` is on the supersedable side, deliberately.** ADR-0005 §2 makes it a
-provenance source of its own, and unlike `OBSERVED`/`INFERRED` it may carry
-confidence 1.0 — so it is worth saying why it is not treated like an assertion.
-It passes the recoverability test above and for a stronger reason: the external
-system is still the system of record and will re-supply the fact on the next
-sync, where an inference has only the evidence that produced it. And on the
-substance, a user is the authority on a claim about themselves; a stale
-integration record losing to an explicit correction is the outcome we want, not
-a regrettable side effect. The re-sync direction is protected by rule 3 rather
-than by luck: once superseded, the record is `USER_ASSERTED`, so a later
-`EXTERNAL` proposal contradicting it is a non-asserted proposal against an
-asserted record and earns `ASK_USER` — a sync cannot silently undo the
-correction.
+### 2a. Supersedable is an allow-list of `OBSERVED` and `INFERRED`
 
-### 3. A non-assertion may never supersede an assertion
+The rule tests membership of those two sources, **not** `is not USER_ASSERTED`.
+Both readings agree on every source ADR-0005 §2 defines except `EXTERNAL`, which
+is neither derived by us nor given by the user, and which may carry confidence
+1.0. It is excluded, for a mechanical reason rather than a philosophical one.
+
+Supersession keeps the *target's* id (§1). An external record's id is the
+integrating system's idempotency key, so a correction merged into one inherits
+that key — and `MemoryIngestor._detect_conflicts` excludes an existing record
+whose id equals the proposal's. The next routine sync therefore proposes that
+same id, sees no conflict, and its upsert restores the external value over the
+user's correction. Verified before excluding it, on the tree that had `EXTERNAL`
+supersedable:
+
+```text
+correction : merge  calendar:1  ->  "user works from the berlin office"  user_asserted
+re-sync    : accept calendar:1  ->  "user works from the london office"  external
+```
+
+That is §2's error direction pointing the wrong way: the unrecoverable thing —
+what the user told us — is the thing destroyed, and silently. Excluding
+`EXTERNAL` means an assertion contradicting an imported record is `ACCEPT`ed
+beside it, which is exactly the pre-existing behaviour and leaves nothing worse
+than issue #38 already described for that source.
+
+An allow-list is also the safer default going forward: a `MemorySource` added
+later is not silently enrolled in a destructive rule by omission.
+
+Resolving `EXTERNAL` properly needs either an id discipline that keeps a
+superseding correction off the external key, or the validity window of issue
+#112 — not a policy rule. Filed as issue #254.
+
+### 3. An inference may never supersede an assertion
 
 Stated even though it is obvious, because the whole rule rests on it. The
-direction is strictly one-way: an assertion may displace anything we were not
-told; nothing we were not told may **ever** displace an assertion, silently or
-otherwise. This is not
+direction is strictly one-way: an assertion may displace an inference; an
+inference may **never** displace an assertion, silently or otherwise. This is not
 new — `DefaultMemoryPolicy` already returns `ASK_USER` when a non-asserted
 proposal conflicts with a user-asserted record — and this ADR ratifies that rule
 as the counterpart of §1 rather than an incidental precaution.
 
 It has a second, less obvious consequence. `conflicts` arrives ordered by
 retrieval score, so the top-ranked conflict may itself be user-asserted. The rule
-therefore supersedes the best-ranked **non-asserted** conflict, skipping asserted
-records rather than taking `conflicts[0]`. Taking the first would have let an
-assertion destroy an assertion by ranking accident, which §2 refuses.
+therefore supersedes the best-ranked **supersedable** conflict, scanning past
+anything else rather than taking `conflicts[0]`. Taking the first would have let
+an assertion destroy an assertion by ranking accident, which §2 refuses.
 
 ### 4. One record is superseded per correction
 
 `MemoryDecision.merge_into` names a single target, and widening it to a list is a
 `core` change. Where a correction conflicts with several inferences, the
 best-ranked one is superseded and the rest remain until they are re-proposed or
-expire. Accepted as a known limit rather than worked around; filed as an issue.
+expire. Accepted as a known limit rather than worked around; filed as issue #244.
 
 ### 5. Assertion-versus-assertion is left as it is
 
@@ -153,7 +170,7 @@ confidence 1.0 and nothing ranks them; §2 forbids the heuristic from choosing,
 and `ASK_USER` would interrogate the user about a "conflict" that is most often
 a restatement. This leaves a real gap — a user who contradicts their own earlier
 statement gets two live records — which needs the validity window of issue #112
-to resolve properly. Filed as an issue.
+to resolve properly. Filed as issue #245.
 
 ### 6. Interaction with issue #112 (bi-temporal validity)
 
@@ -175,6 +192,15 @@ unchanged by that.
   correction, and a false-positive conflict costs an inferred record. That is
   §2's chosen error, and it is the thing to look at first if memories start
   disappearing unexpectedly.
+- **The ingest path's existing lost-update window now spans corrections.**
+  `MemoryIngestor.ingest` is an unsynchronised search-decide-write, so two
+  concurrent merges into the same target already lose one (true on `main`
+  before this decision, for non-asserted proposals). Widening which proposals
+  reach `MERGE` widens what can be lost to include a user correction. Not fixed
+  here — the mechanism is in the ingestor, not the policy, and a sound fix is
+  either a lock or a compare-and-swap on `MemoryStore` — but recorded as issue
+  #248 rather than left implicit, because §3's guarantee is about the *ruling*
+  and does not survive a lost update.
 - **`conflict_threshold` gets sharper teeth.** It already gated a merge; it now
   gates a merge triggered by the highest-trust source in the system. Lowering it
   is no longer only a precision/recall trade on advisory conflicts.

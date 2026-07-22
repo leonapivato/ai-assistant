@@ -153,6 +153,44 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert [record.id for record in await store.export()] == ["stale"]
 
 
+async def test_a_correction_survives_the_next_external_re_sync() -> None:
+    # The regression ADR-0038 §2a exists to prevent, asserted end to end because
+    # the hole is in the interaction, not in either half. Superseding an
+    # EXTERNAL record would write the correction at that record's id, which is
+    # the integrating system's idempotency key. `_detect_conflicts` drops an
+    # existing record whose id equals the proposal's, so the next sync — same id
+    # — would see no conflict, be ACCEPTed, and upsert the stale imported value
+    # back over the user's words. Excluding EXTERNAL from supersession is what
+    # keeps the correction out of that key.
+    store = InMemoryMemoryStore()
+    ingestor = _ingestor(store)
+    await store.add(
+        _preference(
+            "calendar:1",
+            "user works from the london office",
+            confidence=1.0,
+            source=MemorySource.EXTERNAL,
+        )
+    )
+
+    await ingestor.ingest(_proposal(_asserted("new", "user works from the berlin office")))
+    await ingestor.ingest(
+        _proposal(
+            _preference(
+                "calendar:1",
+                "user works from the london office",
+                confidence=1.0,
+                source=MemorySource.EXTERNAL,
+            )
+        )
+    )
+
+    correction = await store.get("new")
+    assert correction is not None
+    assert correction.content == "user works from the berlin office"
+    assert correction.provenance.source is MemorySource.USER_ASSERTED
+
+
 class _RecordingPolicy:
     """A policy that records the conflicts it was offered and rejects everything."""
 
