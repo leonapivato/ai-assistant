@@ -928,3 +928,123 @@ def test_a_malformed_drift_budget_refuses_with_a_configuration_error(tmp_path: P
             continue
         assert result.returncode != 0, f"{bad!r} was accepted"
         assert "CODEX_SHIP_DRIFT_BUDGET must be" in result.stderr
+
+
+def test_the_drift_budget_is_measured_as_the_bytes_actually_posted(tmp_path: Path) -> None:
+    """The boundary is exact, not approximate.
+
+    Command substitution strips the rendered block's trailing newlines and the
+    renderer adds one back, so a budget measured against the captured string
+    alone would let a record sized precisely at the budget ship one byte over it.
+    §4 admits no overshoot: the record is published whole and within budget, or
+    path (b) is unavailable.
+
+    Driven from both sides of the true boundary — the largest budget that must
+    refuse, and the smallest that must accept — so an off-by-one in either
+    direction fails.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    rebased = _review_then_move(
+        repo, tmp_path, lambda r: _edit_line(r, "src/ai_assistant/orchestration/loop.py", 40, "m")
+    )
+
+    assert _run_ship(repo, tmp_path, pr_sha=rebased).returncode == 0
+    block = (tmp_path / "comment.md").read_text()
+    start = block.index("<details><summary><strong>base drift")
+    posted = len(block[start : block.index("</details>", start) + len("</details>\n")].encode())
+
+    (tmp_path / "comment.md").unlink()
+    tight = _run_ship(
+        repo, tmp_path, pr_sha=rebased, gh_env={"CODEX_SHIP_DRIFT_BUDGET": str(posted - 1)}
+    )
+    assert tight.returncode != 0, "one byte under the posted size must refuse"
+    assert "publish whole" in tight.stderr
+
+    exact = _run_ship(
+        repo, tmp_path, pr_sha=rebased, gh_env={"CODEX_SHIP_DRIFT_BUDGET": str(posted)}
+    )
+    assert exact.returncode == 0, exact.stderr
+
+
+def _write_binary(repo: Path, path: str, payload: bytes) -> None:
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+
+
+def test_a_binary_entry_is_anchored_on_its_index_preamble(tmp_path: Path) -> None:
+    """ADR-0027 §2's second measured case, which is why binaries need no special
+    case.
+
+    `git diff` renders a binary change as `Binary files … differ` with no hunks,
+    and there the `index` line IS hashed — so two different binary deltas to one
+    path produce different identities, and a binary-only PR has a real identity
+    rather than the empty one that would make path (b) unavailable.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "checkout", "-q", "main")
+    _write_binary(repo, "assets/blob.bin", b"\x00\x01\x02original")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a binary asset")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    identities = []
+    for i, payload in enumerate((b"\x00\x01\x02first", b"\x00\x01\x02second")):
+        _git(repo, "checkout", "-q", "-B", f"delta-{i}", "main")
+        _write_binary(repo, "assets/blob.bin", payload)
+        _git(repo, "commit", "-qam", f"binary delta {i}")
+        identities.append(_patch_id(repo, base, _git(repo, "rev-parse", "HEAD")))
+
+    assert all(identities), "a binary-only change must have an identity, not an empty one"
+    assert identities[0] != identities[1], "two binary deltas to one path must differ"
+
+
+def test_a_hunked_entrys_blob_ids_do_not_enter_its_identity(tmp_path: Path) -> None:
+    """ADR-0027 §2's first measured case — the property the decision rests on.
+
+    An entry with hunks is anchored on those hunks and its `index <old>..<new>`
+    preamble is ignored, which is what makes a base move elsewhere in a touched
+    file free. An implementation folding the blob IDs in would invalidate on a
+    base edit anywhere in the file and defeat the decision, so the property is
+    asserted directly rather than only through the off-hunk acceptance above.
+
+    The complement is asserted in the same breath: for a binary entry, which has
+    no hunks, that same preamble is the anchor and mutating it *does* move the id.
+    """
+    assert shutil.which("git") is not None
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    def identity_of(diff: bytes) -> str:
+        out = subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+            [str(shutil.which("git")), "patch-id", "--verbatim"],
+            cwd=repo,
+            input=diff,
+            check=True,
+            capture_output=True,
+        ).stdout.decode()
+        return out.split()[0] if out.strip() else ""
+
+    def diff_of(rev: str) -> bytes:
+        return subprocess.run(  # noqa: S603  # resolved git path, test-controlled repo
+            [str(shutil.which("git")), "diff", "--no-color", f"main...{rev}"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        ).stdout
+
+    hunked = diff_of("feature")
+    rewritten = re.sub(rb"(?m)^index [0-9a-f]+\.\.[0-9a-f]+", b"index dead000..beef000", hunked)
+    assert rewritten != hunked, "the rewrite must have taken effect"
+    assert identity_of(rewritten) == identity_of(hunked)
+
+    _git(repo, "checkout", "-q", "-B", "bin", "main")
+    _write_binary(repo, "assets/blob.bin", b"\x00\x01\x02payload")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a binary asset")
+    binary = diff_of("bin")
+    assert b"Binary files" in binary
+    mutated = re.sub(rb"(?m)^index [0-9a-f]+\.\.[0-9a-f]+", b"index dead000..beef000", binary)
+    assert identity_of(mutated) != identity_of(binary)
