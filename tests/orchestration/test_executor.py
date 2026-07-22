@@ -749,32 +749,62 @@ async def test_a_cancellation_requested_after_the_claim_still_reaches_the_tool()
     assert step.status is StepStatus.FAILED, "no false ambiguity is recorded in this window"
 
 
-async def test_a_clock_that_raises_leaves_no_step_running() -> None:
-    """ADR-0026 §2 lets a clock's own exception propagate unwrapped.
+async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> None:
+    """A reading and an invocation are different failures (ADR-0034 §2).
 
-    So ``ClockReadingError`` is not the whole of what can arrive between the
-    claim and the invocation — an injected clock reading a provider can raise
-    anything. ADR-0026 §4 leaves the failure policy to each subsystem's boundary,
-    and this one's is ADR-0029 §5's: the measurement fails closed, the retry is
-    not taken, and no step is left ``RUNNING`` over a broken clock.
+    ADR-0029 §5's fail-closed rule is scoped to a *reading* that is not a
+    positive elapsed duration. A clock that raises produced none, and ADR-0026 §2
+    keeps the invocation outside the guard for exactly that reason — so it is a
+    wiring bug, translated at this boundary per ADR-0026 §4 rather than becoming
+    a log line and a retry quietly not taken.
+
+    It still leaves no step ``RUNNING``: the raise lands between the claim and
+    the callable, so the step is closed ``FAILED`` before the error propagates.
     """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker([(tool(), implementation)])
+
+    def unreadable() -> datetime:
+        """A clock whose reading the guard refuses: naive, so not localizable."""
+        return datetime(2026, 7, 20, 12, 0)  # noqa: DTZ001 — the defect under test
+
+    with pytest.raises(PlanningError):
+        await executor_over(store, seam, now=unreadable).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+
+    assert implementation.calls == [], "the tool was never reached"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "not left RUNNING for recovery to misread"
+    assert step.finished_at is not None
+
+
+async def test_a_clock_callables_own_exception_propagates_unwrapped() -> None:
+    """ADR-0026 §2: "an exception raised by the clock callable itself propagates".
+
+    The guard covers the reading, not the invocation, so this is not the seam's
+    ``PlanningError`` to compose — it keeps its own type and cause. The claimed
+    step is still closed, for the same reason as above.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker([(tool(), implementation)])
 
     def exploding() -> datetime:
         msg = "the clock's provider is unreachable"
         raise OSError(msg)
 
-    store = FakePlanStore()
-    state = await a_claimed_execution(store)
-    seam = ScriptedInvoker(keyed(), [unavailable(), succeeded()])
+    with pytest.raises(OSError, match="unreachable"):
+        await executor_over(store, seam, now=exploding).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
 
-    await executor_over(store, seam, now=exploding).execute(
-        state, step_id=STEP, call=call_for(keyed()), timeout=PATIENT
-    )
-
-    assert seam.calls == 1, "an unusable measurement declines the retry"
+    assert implementation.calls == []
     step = await stored_step(store, state)
     assert step.status is StepStatus.FAILED
-    assert step.attempts == 1
 
 
 async def test_an_absorbed_cancellation_outranks_the_commits_own_failure() -> None:
