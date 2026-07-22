@@ -37,6 +37,13 @@ if TYPE_CHECKING:
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 _DEFAULT_CONFLICT_LIMIT = 5
 
+# The only targets a user assertion may be folded onto (ADR-0038 §2a). Held here
+# as well as in `policy`, deliberately: the policy chooses, but `MemoryIngestor`
+# takes rulings from *any* injected `MemoryPolicy`, so the safety property has to
+# hold at the boundary that performs the write rather than at the one that
+# recommends it.
+_SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -109,6 +116,34 @@ def _overturns(target: MemoryRecord, incoming: MemoryRecord) -> bool:
         incoming.provenance.source is MemorySource.USER_ASSERTED
         and target.provenance.source is not MemorySource.USER_ASSERTED
     )
+
+
+def _refuse_unsafe_supersession(target: MemoryRecord) -> None:
+    """Refuse to fold a user assertion onto a target that must not carry one.
+
+    Every fold keeps the **target's** id, so a correction folded onto an
+    ``EXTERNAL`` record takes over that system's idempotency key and the next
+    routine sync overwrites it — the user's words lost to a background job
+    (ADR-0038 §2a). ``DefaultMemoryPolicy`` never proposes this, but a policy
+    reaches the ingestor through an injected seam and any conforming
+    implementation may rule differently, so the refusal lives here, at the
+    boundary that performs the write.
+
+    Fail-closed rather than silently downgrading to a reinforcing merge, which
+    would keep the same id and lose the correction just as thoroughly while
+    reporting success — the reasoning that already makes an absent ``MERGE``
+    target raise rather than fall back to storing the proposal as new.
+
+    Raises:
+        MemoryStoreError: If ``target`` is not an ``OBSERVED`` or ``INFERRED``
+            record.
+    """
+    if target.provenance.source not in _SUPERSEDABLE:
+        msg = (
+            f"refusing to supersede {target.id!r}: a user assertion may not be folded onto a "
+            f"{target.provenance.source} record, whose id it would inherit (ADR-0038 §2a)"
+        )
+        raise MemoryStoreError(msg)
 
 
 def _supersede(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
@@ -242,8 +277,10 @@ class MemoryIngestor:
                     # merge was meant to prevent, while reporting success.
                     msg = f"MERGE target {decision.merge_into!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
-                fold = _supersede if _overturns(target, proposed) else _merge
-                return await self._store.add(fold(target, proposed))
+                if _overturns(target, proposed):
+                    _refuse_unsafe_supersession(target)
+                    return await self._store.add(_supersede(target, proposed))
+                return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 

@@ -278,12 +278,21 @@ async def test_a_shipped_policy_merges_an_assertion_only_into_a_derived_record(
     asserting it there would widen the contract without an ADR and would refuse
     a policy that genuinely conforms (issue #40). Issue #256 is what moves this
     onto the contract properly, at which point this check is redundant.
+
+    Deliberately conditional — "*if* it merges, the target is derived". A policy
+    that never merges an assertion at all (accepting or deferring instead)
+    conforms and satisfies the precondition vacuously; requiring it to merge
+    would be this check inventing an obligation, which is the same mistake as
+    putting it in the conformance suite. The separate test below keeps that
+    leniency from hiding a `DefaultMemoryPolicy` that quietly stopped
+    superseding.
     """
     policy = policy_cls()
     sources = list(MemorySource)
-    observed_a_superseding_merge = False
 
     for proposal_source, *conflict_sources in product(sources, sources, sources):
+        if proposal_source is not MemorySource.USER_ASSERTED:
+            continue
         proposed = _semantic_from(proposal_source, "new", "user prefers afternoon meetings")
         conflicts = [
             _semantic_from(source, f"c{index}", "user prefers morning meetings")
@@ -295,19 +304,79 @@ async def test_a_shipped_policy_merges_an_assertion_only_into_a_derived_record(
         if decision.kind is not MemoryDecisionKind.MERGE:
             continue
         target = next(c for c in conflicts if c.id == decision.merge_into)
-        if proposal_source is not MemorySource.USER_ASSERTED:
-            continue
-        observed_a_superseding_merge = True
         assert target.provenance.source in {MemorySource.OBSERVED, MemorySource.INFERRED}, (
             f"{policy_cls.__name__} merged a USER_ASSERTED proposal into a "
             f"{target.provenance.source} record; MemoryIngestor would read that as "
             f"supersession and discard the target's evidence (ADR-0038 §1b, issue #256)"
         )
 
-    assert observed_a_superseding_merge, (
-        f"{policy_cls.__name__} never merged an assertion over a derived record in this "
-        "sweep, so the assertion above proved nothing — widen the sweep or drop the check"
+
+async def test_the_default_policy_actually_supersedes_so_the_guard_is_not_vacuous() -> None:
+    # The guard above is conditional on a MERGE happening, which is right for an
+    # arbitrary conforming policy but would let the *default* policy pass by
+    # quietly abandoning supersession. ADR-0038 §1 requires it to supersede, so
+    # pin that separately rather than by constraining every discovered policy.
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic_from(MemorySource.USER_ASSERTED, "new", "afternoon")),
+        conflicts=[_semantic_from(MemorySource.INFERRED, "stale", "morning")],
     )
+
+    assert decision.kind is MemoryDecisionKind.MERGE
+    assert decision.merge_into == "stale"
+
+
+class _MergeEverythingPolicy:
+    """A conforming ``MemoryPolicy`` that merges every proposal into the first conflict.
+
+    Defined outside ``ai_assistant.memory`` on purpose: the scan above cannot see
+    it, which is exactly the case ADR-0038 §1b names as out of the guard's reach.
+    It violates nothing in the ``MemoryPolicy`` Protocol.
+    """
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+    ) -> MemoryDecision:
+        """Merge into the first conflict, or accept when there is none."""
+        if not conflicts:
+            return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="nothing to merge into")
+        return MemoryDecision(
+            kind=MemoryDecisionKind.MERGE,
+            merge_into=conflicts[0].id,
+            reason="merges everything",
+        )
+
+
+async def test_the_ingestor_refuses_to_fold_an_assertion_onto_an_external_record() -> None:
+    # ADR-0038 §2a is a safety property, so it cannot rest on the policy alone:
+    # a policy arrives through an injected seam and any conforming one may rule
+    # differently. Every fold keeps the target's id, so allowing this would hand
+    # the correction the integrating system's idempotency key and let the next
+    # sync overwrite it. The ingestor refuses rather than silently downgrading
+    # to a reinforcing merge, which would lose the correction just as thoroughly
+    # while reporting success.
+    store = InMemoryMemoryStore()
+    await store.add(
+        _preference(
+            "calendar:1",
+            "user works from the london office",
+            confidence=1.0,
+            source=MemorySource.EXTERNAL,
+        )
+    )
+    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+
+    with pytest.raises(MemoryStoreError, match="refusing to supersede"):
+        await ingestor.ingest(_proposal(_asserted("new", "user works from the berlin office")))
+
+    # Fail-closed: the imported record is untouched and nothing was written.
+    imported = await store.get("calendar:1")
+    assert imported is not None
+    assert imported.content == "user works from the london office"
+    assert imported.provenance.source is MemorySource.EXTERNAL
+    assert await store.get("new") is None
 
 
 class _RecordingPolicy:
