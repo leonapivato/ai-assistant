@@ -17,8 +17,9 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
+from pydantic import ValidationError
 
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.errors import PlanningError, ToolBindingError
 from ai_assistant.core.protocols import ToolInvoker, ToolRegistry
 from ai_assistant.core.types import (
     ActionPlan,
@@ -669,6 +670,39 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     step = await stored_step(store, state)
     assert step.status is StepStatus.SUCCEEDED, "the known outcome still landed"
     assert step.output == {"message_id": "m-1"}
+
+
+async def test_a_call_that_does_not_survive_revalidation_claims_nothing() -> None:
+    """The snapshot's own refusal, which happens before any durable state exists.
+
+    ADR-0029 §2 requires the *seam* to refuse a call that does not survive
+    revalidation, and that refusal arrives after the claim, so it is committed
+    ``FAILED``. This one is the executor's, and its placement is the point:
+    taken before the claim, an unusable call leaves the step untouched rather
+    than durably ``RUNNING`` and then closed.
+
+    The mutation is a malformed one rather than a merely different one, because
+    only a malformed one distinguishes revalidation from the substitution check
+    — a valid swap passes revalidation and is caught by the snapshot's timing
+    instead (the test below).
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store, capability="read_email")
+    implementation = Spy()
+    seam = FakeToolInvoker([(read_only(), implementation)])
+    call = call_for(read_only())
+    call.__dict__["request"] = None
+
+    with pytest.raises(ToolBindingError) as caught:
+        await executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
+
+    assert isinstance(caught.value.__cause__, ValidationError), "the fault is carried, not restated"
+    assert implementation.calls == []
+    assert seam.invocations == [], "the seam was never reached either"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.PENDING, "nothing durable was written"
+    assert step.attempts == 0
+    assert step.bound_tool is None
 
 
 async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() -> None:
