@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 from _fake_codex import SCRIPT, artifact_for, require_artifact, run_review
 
@@ -216,6 +218,39 @@ def test_the_bypass_path_keeps_no_session(tmp_path: Path) -> None:
     prov = _provenance(repo, _git(repo, "rev-parse", "HEAD"))
     assert _field(prov, "thread_id") is None, "bypass records no thread"
     assert not (repo / ".review" / "session").exists()
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "060", "-1", "5s", " 5"])
+def test_a_malformed_lock_wait_is_a_configuration_error_not_a_timeout(
+    tmp_path: Path, value: str
+) -> None:
+    """A bad `CODEX_REVIEW_LOCK_WAIT` must not be reported as lock contention.
+
+    `flock` parses `-w` itself and exits non-zero on a value it cannot read, so
+    without validation the `if !` branch reports a timeout that never happened
+    plus advice about another run holding the lock — sending the operator to look
+    for a concurrent review that does not exist (issue #221). A leading zero is
+    refused rather than reinterpreted, because a shell reads one as octal.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    result = run_review(repo, tmp_path, check=False, CODEX_REVIEW_LOCK_WAIT=value)
+
+    assert result.returncode != 0
+    assert "CODEX_REVIEW_LOCK_WAIT" in result.stderr
+    assert "timed out" not in result.stderr
+    assert "holding it" not in result.stderr
+
+
+def test_a_well_formed_lock_wait_is_accepted(tmp_path: Path) -> None:
+    """The validation bounds the malformed case only; a plain integer still runs."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    run_review(repo, tmp_path, CODEX_REVIEW_LOCK_WAIT="5")
+
+    require_artifact(repo, _git(repo, "rev-parse", "HEAD"))
 
 
 def test_each_round_writes_a_per_finding_snapshot_with_retirement(tmp_path: Path) -> None:

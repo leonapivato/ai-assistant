@@ -565,7 +565,23 @@ _mint_id() {
 # or PID lockfile would survive its owner and need a stale-timeout heuristic
 # that either wedges or breaks mutual exclusion. `-w` bounds the wait anyway, so
 # even a live-but-hung holder produces a loud failure instead of a hang.
+#
+# The wait is validated BEFORE `flock` sees it, and unconditionally at the point
+# it is read, the same way `ship.sh`'s `require_byte_budget` validates a budget.
+# A malformed `-w` cannot abort bash arithmetic here — `flock` parses it itself —
+# so what it corrupts is the DIAGNOSTIC: `flock` exits non-zero for a reason that
+# has nothing to do with contention, and the branch below then reports a timeout
+# that never happened and sends the operator hunting for a concurrent review that
+# does not exist (issue #221). A leading zero is refused rather than reinterpreted,
+# because a shell reads one as octal.
 lock_wait="${CODEX_REVIEW_LOCK_WAIT:-60}"
+if [[ ! "$lock_wait" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+    echo "CODEX_REVIEW_LOCK_WAIT must be a non-negative decimal integer of at most" \
+        "9 digits with no leading zero (a shell reads a leading zero as octal)," \
+        "not '${lock_wait}' — it bounds the seconds spent waiting for the" \
+        "review-loop lock" >&2
+    exit 2
+fi
 lock_fd=""
 _lock_session() {
     if [[ -n "$lock_fd" || "$serialized" -eq 0 ]]; then
