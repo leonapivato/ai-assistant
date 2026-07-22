@@ -24,8 +24,10 @@ import contextlib
 import email.parser
 import hashlib
 import importlib.metadata
+import os
 import subprocess
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -238,3 +240,26 @@ def test_the_artifact_is_not_committed_to_git() -> None:
     if tracked.returncode != 0:
         pytest.skip("not a git working tree")
     assert tracked.stdout.strip() == "", "the vendored artifact is tracked by git"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+async def test_the_packaged_artifact_loads_without_a_usable_temp_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wheel that needs nothing from the network must not need `/tmp` either.
+
+    `fastembed` calls `define_cache_dir` — which *creates* the directory — before
+    it honours `specific_model_path`, so an unset `cache_dir` makes every load
+    `mkdir` under the system temp directory. In a read-only container that fails
+    an installation holding every byte it will read. Found by adversarial review
+    of this change; this is the regression test.
+    """
+    unwritable = tmp_path / "readonly"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(unwritable / "denied"))
+
+    with network_denied():
+        vectors = await fastembed_embedder.FastEmbedEmbedder().embed(["the user likes espresso"])
+
+    assert len(vectors) == 1

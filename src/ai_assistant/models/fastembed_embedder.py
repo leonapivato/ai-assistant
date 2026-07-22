@@ -132,6 +132,16 @@ class _FastEmbedBackend:
         with a message naming the cause rather than as an ONNX Runtime error
         about a file that is not there.
 
+        ``cache_dir`` is the packaged directory too, and that is not redundant:
+        ``fastembed`` runs ``define_cache_dir`` — which **creates** the directory
+        — before it honours ``specific_model_path``, so leaving it unset would
+        make every load ``mkdir`` under the system temp directory. A read-only or
+        absent ``/tmp`` would then fail a wheel that needs nothing from the
+        network and already holds every byte it will read. Pointing it at the
+        artifact directory makes that call an ``exist_ok`` no-op on a directory
+        the install already has, and finishes what ADR-0024's Context started by
+        noting the temp-directory cache was never the right place.
+
         Args:
             model: The model name; always the vendored one, enforced upstream.
 
@@ -153,6 +163,7 @@ class _FastEmbedBackend:
         return TextEmbedding(
             model_name=model,
             specific_model_path=str(directory),
+            cache_dir=str(directory),
             local_files_only=True,
             providers=list(EXECUTION_PROVIDERS),
             cuda=False,
