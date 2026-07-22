@@ -2,10 +2,13 @@
 
 - Status: Accepted
 - Date: 2026-07-22
-- Amends on ratification: ADR-0029 §8, with a dated note on ADR-0014. The edits
-  to ADR-0029 are **not** made by this change — §4 records their exact form and
-  why they wait, following ADR-0026 §6, ADR-0030 §6, ADR-0031 §7 and ADR-0032
-  §8. ADR-0014's note **is** applied here, for the reason §4 gives.
+- Amends: ADR-0029 §8, with a dated note on ADR-0014. Both edits **are** applied
+  by this change, because this ADR merges `Accepted` alongside its
+  implementation. ADR-0026 §6, ADR-0030 §6, ADR-0031 §7 and ADR-0032 §8 defer
+  their edits because those ADRs merge `Proposed`, and marking a document
+  "amended by" a proposal is the state claim ADR-0019 forbids; leaving a
+  ratified document unmarked while code runs against the amended rule is the
+  same defect with the sign flipped. §4 records the form and the reasoning.
 - **Not breaking for any consumer.** No Protocol signature moves, no `core` name
   is added or removed, and no legal move is added to ADR-0014 §4's transition
   graph. What changes is which *circumstances* an executor resolves a step from,
@@ -75,21 +78,53 @@ drafting error rather than presented as something this change created.
 
 We will state §8's rule over the circumstance it was always reasoning about:
 
-> **Anything that ends an attempt after the claim is committed and before the
-> callable is reached commits `RUNNING → FAILED`, and is never retried.**
+> **An attempt that ends after the claim is committed, and that nothing could
+> have run under, commits `RUNNING → FAILED`, and is never retried.**
 
 The reasoning is §8's own, unchanged and merely applied where it already
 pointed. Nothing ran. `FAILED` is correct and honest. `INDETERMINATE` is refused
 because it is the state whose whole meaning is ignorance, and there is no
-ignorance here — the executor knows the callable was not reached, because it
-knows it never entered `invoke`, or that `invoke` refused before reaching one.
+ignorance here.
+
+**"Nothing could have run under it" is a fact the executor must *hold*, not one
+it may assume**, and scoping the rule that way is the whole of its precision. An
+exit qualifies on one of exactly two grounds:
+
+- **`invoke` was never entered.** The executor knows this because it had not
+  reached the call yet — the strongest form of the fact, and the one the two new
+  exits below rest on.
+- **The contract says the exit precedes the callable.** ADR-0029 §2 fixes the
+  three binding checks and their order and states they all run "before the
+  callable is reached", so a `ToolBindingError` is proven pre-callable by the
+  seam's contract rather than by the executor's vantage. That is §8's ratified
+  case and it is unchanged.
 
 Three exits occupy the window today and all three take the rule:
 
-- a raised `ToolBindingError` — §8's ratified case, unchanged;
+- a raised `ToolBindingError` — §8's ratified case, on the second ground;
 - a cancellation absorbed while the **claim itself** was in flight, where the
   write is known to have landed;
 - a failure of the clock read that fixes the first attempt's instant (§2).
+
+**Everything else that happens once `invoke` has been entered is outside this
+rule, and that is a limit rather than an oversight.** `ToolInvoker` exposes no
+"the callable was reached" fact and this ADR introduces none: doing so would be
+a Protocol change, which golden rule 5 and ADR-0015 §5 route through a contract
+ADR of its own and which nothing here needs. So a conforming `invoke` that
+suspends during its own pre-call work and is cancelled there yields no fact
+about how far it got, and the executor must not manufacture one. That case stays
+ADR-0029 §4's, with §4's classification: `interrupted_outcome` on the trusted
+declaration, which answers `INDETERMINATE` for a side-effecting non-`NATURAL`
+tool.
+
+**That is the more pessimistic answer, and it is the correct one here** for the
+reason ADR-0014 §4 gives about guessing: recorded `FAILED`, a call that *had*
+reached a callable would be a possible side effect recorded as
+certainly-nothing-happened. The asymmetry between the two cases is exactly the
+asymmetry in what is known, which is what `INDETERMINATE` exists to express. A
+reachability fact on the seam would let more of these resolve honestly, and is
+noted in the Consequences as a thing a later contract ADR could take up — not as
+a debt this one incurs, since ADR-0029 §4 already answers the case.
 
 **"Never retried" needs no new mechanism**, and that is the point of putting
 these together. §8's mechanism already covers them: "retry is scheduled only
@@ -227,19 +262,28 @@ claim that survives review precisely because it reads like a summary.
 
 ### 4. What ratification does to ADR-0029 and ADR-0014
 
-**ADR-0029's `Status` line is not touched**, and its §8 edits are recorded here
-rather than applied, following ADR-0026 §6 and ADR-0031 §7: writing an amendment
-onto a document while the amending ADR is only proposed is the state claim
-ADR-0019 forbids. On ratification:
+**ADR-0029's amendment is applied by this change, not deferred to a later one.**
+ADR-0026 §6 and ADR-0031 §7 defer the edit because those ADRs merge as
+`Proposed`, and writing "amended by" onto a document while the amending ADR is
+only proposed is the state claim ADR-0019 forbids. This one merges `Accepted`
+with its implementation (see the header: no Protocol moves, so golden rule 5's
+separate-PR requirement is not triggered), so the same reasoning points the
+other way — leaving ADR-0029 unmarked while code runs against the amended rule
+is the identical defect with the sign flipped, and it is the one a reader hits
+first, since ADR-0029 is where they will look.
 
+- **ADR-0029's `Status` line gains this ADR**, alongside ADR-0031 and ADR-0032.
+  ADR-0001 reserves a status update to an ADR that *changes* a past decision,
+  and §3 replaces a sentence of §8 outright rather than merely applying it.
 - **A dated note is appended to ADR-0029's header**, in the form the other
-  amending ADRs use, recording §1's widening of §8's pre-invocation rule, §2's
+  amending ADRs use, recording §1's scoping of §8's pre-invocation rule, §2's
   scoping of §5's fail-closed clause to readings, and §3's correction of the
   "only outcome" sentence — with that sentence named as superseded text standing
   in the document unedited, exactly as ADR-0031 and ADR-0032 list theirs.
 - **Nothing else in ADR-0029 is edited.** §4's cancellation rule, its shield
   idiom, its "correct pessimism" passage and §5's derivation and retry algebra
-  all stand as ratified.
+  all stand as ratified, and §4 is what still governs a cancellation once
+  `invoke` has been entered (§1).
 
 **ADR-0014 §4 gains a note, and it is applied by this change** rather than
 deferred, because ADR-0014 is not the document being amended — it is being kept
@@ -303,8 +347,11 @@ ADR-0026 does.
   opposite conclusions about the same window, each citing the same ADR. The rule
   is now stated over the circumstance, so a fourth exit added later inherits it
   rather than reopening the argument.
-- **`INDETERMINATE` keeps its meaning, which is the whole point.** Every
-  additional route by which a never-started call could acquire it is closed.
+- **`INDETERMINATE` keeps its meaning, which is the whole point.** Every route
+  by which a *provably* never-started call could acquire it is closed. The
+  routes that stay open are the ones where the executor genuinely does not know
+  — a cancellation inside `invoke` being the sharp one (§1) — and keeping those
+  is the same decision, not an exception to it.
   What still produces it is unchanged: a deadline expiry or a cancellation on a
   side-effecting non-`NATURAL` tool, a tool reporting its effect may have
   committed (ADR-0032 §2), and recovery finding a durable `RUNNING` after a
@@ -333,6 +380,14 @@ ADR-0026 does.
   four amendments come from first use, which is the mitigation working as
   described. It is still evidence for ADR-0018's lesson — spike before
   ratifying — and against ratifying a seam this large in one document again.
+- **A reachability fact on the seam would let more cancellations resolve
+  honestly**, and this ADR deliberately does not add one. `ToolInvoker` exposes
+  nothing about how far a call got, so a cancellation inside `invoke` is
+  classified by declaration rather than by progress, which is more pessimistic
+  than a side-effecting tool cancelled during the seam's own binding checks
+  deserves. Closing that is a Protocol change and therefore a contract ADR of
+  its own (golden rule 5, ADR-0015 §5); it is worth someone's time only if the
+  case turns out to be common, and nothing observed so far says it is.
 - **Revisit when** a second executor exists (a background or batch one may want
   the pessimistic path deliberately, to avoid closing a step a peer could still
   resolve), when #171's monotonic clock lands and changes what a window
