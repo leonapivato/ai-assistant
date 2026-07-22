@@ -406,8 +406,22 @@ and states the rule in two halves — the integration authors its own text, and 
 message the *seam* generates "carries no content it did not author", explicitly
 never interpolating `str(exc)`, which `core/logging.py`'s docstring names as the
 Tier 1 leak its key-based redactor cannot see. Both halves stand. What changes
-is that a **tool-authored** message now reaches a log and `StepExecution.error`
-directly, where previously every message on the failure path was the seam's own.
+is that a **tool-authored** message now crosses the seam directly, where
+previously every message on the failure path was the seam's own. It reaches a
+log always, and `StepExecution.error` when the outcome is `FAILED`.
+
+**Not when the outcome is `INDETERMINATE`, and that asymmetry is inherited
+rather than chosen.** `StepExecution` refuses an `error` on any status but
+`FAILED` — "error is only valid for a FAILED step" (ADR-0014 §3) — so the
+message a tool wrote for the case where its effect *may have landed*, which is
+the case an operator most needs to read, survives only in the log. Widening
+`StepExecution` is an ADR-0014 change, breaking under golden rule 5 and
+belonging to the planning lane; making it from a tools ADR is what ADR-0018 §2
+refused and ADR-0031 §5(b) refused again. It is also not new — a deadline expiry
+already produces an `INDETERMINATE` whose `TIMED_OUT` message goes nowhere
+durable — so this ADR widens the set of failures that hit it rather than
+creating it. Filed as **issue #208** rather than fixed, beside ADR-0029 §8's related follow-up
+that a failure *kind* does not survive a restart either.
 
 The seam's obligation is stated by enumeration, following ADR-0031 §5(b), so
 that what it binds cannot drift:
@@ -973,12 +987,19 @@ what keeps the fake honest without importing `tools/`.
   ADR-0029 §4's deadline expiry gives. That is a weaker guarantee than "never
   the outcome" and a stronger one than either rejected option in #192 offers,
   both of which let the tool name the field outright.
-- **A tool-authored string now reaches a log and a durable
-  `StepExecution.error`.** ADR-0029 §3's Tier 2 obligation on integration
-  authors becomes load-bearing, and no type enforces it. This is a real widening
-  of the Tier 1 exposure surface, mitigated only by the fact that no integration
-  exists yet and that the first one arrives with the egress ADR ADR-0017 §2
-  requires. §5 says so rather than implying a net that is not there.
+- **A tool-authored string now reaches a log, and a durable
+  `StepExecution.error` when the outcome is `FAILED`.** ADR-0029 §3's Tier 2
+  obligation on integration authors becomes load-bearing, and no type enforces
+  it. This is a real widening of the Tier 1 exposure surface, mitigated only by
+  the fact that no integration exists yet and that the first one arrives with
+  the egress ADR ADR-0017 §2 requires. §5 says so rather than implying a net
+  that is not there.
+- **And an `INDETERMINATE` keeps no durable diagnostic**, because ADR-0014 §3
+  allows `StepExecution.error` only on a `FAILED` step. The case where an
+  operator most needs to know what the tool said is the case where only the log
+  retains it. Pre-existing — a deadline expiry has the same shape — but this ADR
+  makes it reachable far more often, and it is the planning lane's to close (**#208**)
+  (§5), alongside ADR-0029 §8's follow-up on the kind not surviving a restart.
 - **A third route to `INDETERMINATE`**, and the least visible of the three. A
   crash is loud and a deadline expiry is the seam's own event; a transport-layer
   timeout inside an integration is a judgement one author makes in one `except`
