@@ -9,8 +9,11 @@
   changes with it.
 - **Amends on ratification:** [ADR-0038](0038-a-user-assertion-supersedes-a-conflicting-inference.md)
   §1b, and the §Consequences entries that depend on it. ADR-0038 §1b nominates
-  issue #256 as its own removal; this is that removal. The edit to ADR-0038 is
-  **not** made by this change — see §7 for its exact form and why it waits.
+  issue #256 as its own removal; this is that removal. Also amends
+  [ADR-0028](0028-the-memory-write-path-is-a-contract.md) §8's conformance list,
+  which excludes fold semantics from the `MemoryWriter` contract — see §5a.
+  Neither edit is made by this change — see §Consequences for their exact form
+  and why they wait.
 - **Follow-up to** [ADR-0005](0005-memory-model.md) §3, which established that a
   policy disposes and the `memory` subsystem applies. This ADR restores that
   separation where ADR-0038 had to breach it.
@@ -246,6 +249,49 @@ that it deliberately encodes no particular ruling, and that ADR-0038 rewrote
 `DefaultMemoryPolicy`'s answers without touching a line of it — is the property to
 preserve. `DefaultMemoryPolicy`'s specific rules stay in `test_policy.py`.
 
+### 5a. The `MemoryWriter` contract gains one differential obligation
+
+`MemoryPolicy` is only half the seam. `MemoryWriter` (ADR-0028) is how
+`orchestration` reaches this write path, and its shared conformance suite is what
+makes two writers interchangeable. ADR-0028 §8 deliberately excludes "the fold's
+own rule" from that suite, on the grounds that folding is `memory`'s semantics
+and a suite pinning it would stop being a contract. That reasoning was right and
+this ADR breaks one piece of it.
+
+Once `REINFORCE` and `SUPERSEDE` are distinct `core` members, the *difference*
+between the two folds stops being an implementation choice and becomes what the
+members mean. A second `MemoryWriter` could route both rulings through a single
+union-fold, keep the target's id, return it, and pass every obligation ADR-0028
+§8 lists — while doing to a `SUPERSEDE` exactly what ADR-0038 §1a calls a
+fabricated warrant. The distinction would be declarable on the decision and
+unenforceable at the boundary that acts on it: the same defect this ADR removes,
+relocated from the policy side to the applier side.
+
+So the `MemoryWriter` conformance suite gains **one** obligation, stated
+differentially over the two rulings rather than as a fold rule:
+
+> Given the same target and the same proposal, `SUPERSEDE` must not leave
+> evidence on the surviving record that came only from the target, and
+> `REINFORCE` must retain it.
+
+That is the minimum that makes the two members mean anything cross-boundary, and
+it is ratified *here* — it is not the suite inventing an obligation, which is the
+mistake §5 and issue #40 guard against. Everything ADR-0028 §8 excluded stays
+excluded: content precedence, confidence maximisation, `last_updated`, the
+conflict threshold and limit, and the tuning check remain `memory`'s own and
+unasserted. A writer may fold however it likes, as long as the two rulings are
+not the same fold.
+
+`FakeMemoryWriter` therefore has to grow a real supersession path to pass its own
+suite, which is the divergence §Consequences already requires it to close.
+
+Whether `_refuse_unsafe_fold`'s two refusals should *also* become `MemoryWriter`
+obligations is a real question, and it is **not** decided here. Its argument is
+ADR-0038 §2a's and it is not caused by splitting the enum — that refusal is keyed
+on the records and would read identically under either contract. Filed on
+ratification rather than answered, so this ADR does not absorb a second
+widening of a contract it is not about.
+
 ### 6. Ruling: issue #112 does **not** subsume this, and this narrows #112
 
 Issue #112 (bi-temporal validity: invalidate, don't delete) is the right frame
@@ -295,6 +341,9 @@ why three of the four move and one does not.
   Filed as an issue on ratification; it is a policy-lane question that this
   vocabulary makes askable, and answering it here would smuggle a behavioural
   change into a contract ADR.
+- **Whether `_refuse_unsafe_fold`'s refusals belong on the `MemoryWriter`
+  contract** (§5a). Filed on ratification; its argument is ADR-0038 §2a's and it
+  is not caused by this change.
 - **Anything in #112's scope** — validity fields, store read filtering, as-of
   queries, `export` semantics, schema migration (§6).
 - **The lost-update window** in `MemoryIngestor.ingest` (issue #248). Unaffected
@@ -351,8 +400,14 @@ why three of the four move and one does not.
   - `tests/memory/memory_policy_contract.py` — `_COMMITTING` and the three
     target-coherence assertions widen from `MERGE` to both members, and nothing
     else (§5).
-  - `tests/memory/memory_writer_contract.py` — the same widening for whatever it
-    asserts about a target-carrying ruling.
+  - `tests/memory/memory_writer_contract.py` — the same widening for what it
+    asserts about a target-carrying ruling (folds into the named target, keeps
+    and returns the target's id, raises on an absent target), **plus** §5a's one
+    new differential obligation, and the module docstring's obligation list
+    updated to name it.
+  - `docs/adr/0028-*.md` — §8's conformance list amended to record that
+    exclusion of the fold's rule now carries §5a's exception. ADR-0028's other
+    rulings are unchanged.
   - `tests/memory/test_ingest.py` — delete `_production_memory_policies`,
     `test_the_policy_scan_actually_finds_the_shipped_policies` and
     `test_a_shipped_policy_merges_an_assertion_only_into_a_derived_record`; that
@@ -416,6 +471,13 @@ why three of the four move and one does not.
   instructs a `SUPERSEDE` applier to perform the fold `SUPERSEDE` exists not to
   perform. Cheap to keep, and it re-creates in one field the exact conflation the
   enum change removes.
+- **Widen the `MemoryWriter` suite mechanically and leave fold semantics
+  implementation-local**, per ADR-0028 §8 as written. Rejected in §5a: a second
+  writer could then route both rulings through one union-fold and conform, which
+  makes the distinction declarable but unenforceable — this ADR's own defect,
+  moved from the policy side to the applier side. The opposite over-correction —
+  pinning the whole fold rule — is rejected with it, for ADR-0028 §8's original
+  reason; §5a takes neither and asserts only the difference.
 - **Two target fields, `merge_into` and `supersedes`.** Rejected in §1a: one
   concept, two nullable fields, a cross-field validator to keep exactly one
   populated, and a disjunction at every read site.
