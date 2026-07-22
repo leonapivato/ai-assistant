@@ -360,9 +360,21 @@ class StepExecutor:
         outcome and the write, and there ADR-0014 §4's answer is unchanged:
         recovery finds a durable ``RUNNING`` and records ``INDETERMINATE``.
 
+        **An absorbed cancellation outranks the write's own failure.** Absorbing
+        one is a promise to re-raise it, and letting a ``PlanningError`` out
+        instead would break that promise at the one moment it matters: the
+        caller's ``except PlanningError`` would handle a store fault while the
+        task it belongs to quietly kept running, having had its teardown
+        swallowed. The store fault is logged and the cancellation is what leaves.
+
         Returns:
             The committed state, and whether any cancellation was absorbed —
             which the caller owes a re-raise for.
+
+        Raises:
+            CancelledError: If a cancellation was absorbed and the commit then
+                failed, so there is no state to return and a promise to keep.
+            PlanningError: If the commit failed with nothing absorbed.
         """
         commit = asyncio.ensure_future(self._plans.commit_transition(transition))
         cancelled = False
@@ -377,6 +389,12 @@ class StepExecutor:
                 # landed, so the cancellation still propagates.
                 cancelled = True
                 _log.debug("executor_absorbed_cancellation_mid_commit")
+            except PlanningError:
+                if not cancelled:
+                    raise
+                _log.warning("executor_commit_failed_after_absorbing", exc_info=True)
+                msg = "the commit failed; the cancellation of the executing task still stands"
+                raise asyncio.CancelledError(msg) from None
 
     async def _commit_through_cancellation(
         self, state: ExecutionState, step_id: str, outcome: ToolOutcome

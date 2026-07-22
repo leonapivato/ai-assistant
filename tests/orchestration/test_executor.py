@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import pytest
 
+from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.protocols import ToolInvoker, ToolRegistry
 from ai_assistant.core.types import (
     ActionPlan,
@@ -242,17 +243,26 @@ class HoldingPlanStore(FakePlanStore):
     whole point is what happens to the write that comes after the tool.
     """
 
-    def __init__(self) -> None:
-        """Create a store whose closing commit waits to be released."""
+    def __init__(self, *, rejects: bool = False) -> None:
+        """Create a store whose closing commit waits to be released.
+
+        Args:
+            rejects: Whether the released commit then fails, as a stale-version
+                rejection would.
+        """
         super().__init__()
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        self._rejects = rejects
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Hold a closing transition until the test lets it through."""
         if transition.to_status is not StepStatus.RUNNING:
             self.entered.set()
             await self.release.wait()
+            if self._rejects:
+                msg = "the store rejected the write"
+                raise PlanningError(msg)
         return await super().commit_transition(transition)
 
 
@@ -655,6 +665,46 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     step = await stored_step(store, state)
     assert step.status is StepStatus.SUCCEEDED, "the known outcome still landed"
     assert step.output == {"message_id": "m-1"}
+
+
+async def test_an_absorbed_cancellation_outranks_the_commits_own_failure() -> None:
+    """Absorbing a cancellation is a promise to re-raise it.
+
+    A ``PlanningError`` from the write it was protecting must not be what leaves
+    instead: the caller's ``except PlanningError`` would handle a store fault
+    while the task it belongs to quietly kept running, having had its teardown
+    swallowed. The store fault is logged; the cancellation is what propagates.
+    """
+    store = HoldingPlanStore(rejects=True)
+    state = await a_claimed_execution(store)
+    seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
+    task = asyncio.create_task(
+        executor_over(store, seam).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
+    )
+
+    await store.entered.wait()
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    store.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_a_commit_failure_with_nothing_absorbed_is_still_a_planning_error() -> None:
+    """The rule above is about a *conflict*, not about hiding store faults."""
+    store = HoldingPlanStore(rejects=True)
+    state = await a_claimed_execution(store)
+    seam = FakeToolInvoker([(tool(), Spy())])
+    store.release.set()
+
+    with pytest.raises(PlanningError, match="rejected"):
+        await executor_over(store, seam).execute(
+            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        )
 
 
 async def test_classification_reads_the_trusted_binding_not_the_callers_object() -> None:
