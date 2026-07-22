@@ -383,11 +383,27 @@ mirror plumbs `transition.error` today), and the shared conformance suite
   at the bottom of `core/types.py` and `StepExecution` in the middle; the enum
   must move above the planning types. Worth naming because it is the one part of
   this that touches lines nothing else in the diff explains.
-- **`PlanExport.schema_version` becomes 2**, and it is a signal to an outside
-  reader, not an input to a migration. ADR-0014 §5 states the reason for the
-  field itself — "an export outlives the code that wrote it … a reader must be
-  able to tell which shape it is holding" — and `StepExecution` is inside the
-  export, so its shape changing is exactly what the version exists to announce.
+- **`PlanExport.schema_version` becomes 2, and is pinned rather than
+  defaulted.** ADR-0014 §5 states the reason for the field itself — "an export
+  outlives the code that wrote it … a reader must be able to tell which shape it
+  is holding" — and `StepExecution` is inside the export, so its shape changing
+  is exactly what the version exists to announce.
+
+  The field is `int` with `ge=1` and a *default* of 1 today, and a default is not
+  a guarantee: `PlanExport(schema_version=1, executions=...)` would construct a
+  v2-shaped document labelled v1, and the label is the one thing a reader has to
+  go on. That has been harmless only because one shape has ever existed. This
+  change is what makes it a real defect, so it is this change's to close: the
+  field becomes **exactly 2** — `Literal[2]`, refusing every other value — so the
+  advertised version is a fact about the document rather than an unchecked
+  producer's claim.
+
+  This also *enforces* the rule stated below rather than merely asserting it: a
+  v1 document does not validate as a `PlanExport` at all, so "not readable by
+  this contract" is checked at the type rather than left to a reader's
+  discipline. The cost is that every future shape change edits the annotation,
+  which is the intended friction — a version that moves without anyone noticing
+  is the failure this replaces.
 
   **No migration is owed, and the reason is not that no v1 export exists.** It
   might: `PlanStore.export()` returns `PlanExport(schema_version=1)` today from
@@ -445,7 +461,10 @@ Suite cases, asserted rather than sampled:
   `RUNNING` carries none — the `forbidden` half of §2 exercised through the
   transition that most easily leaves it behind.
 - **`PlanExport` round-trips at `schema_version` 2** with an execution whose step
-  carries a failure.
+  carries a failure — **and refuses an explicit `1`, and any other value.** The
+  positive half is what an implementation gets for free from the default; only
+  the rejections pin the version to a fact, and a suite asserting the default
+  alone certifies a producer that can mislabel its own document.
 
 ## Alternatives considered
 
@@ -526,11 +545,12 @@ and a gap that widens on its own is one to close rather than to carry.
   implementation PR touches `core`, `planning`, `orchestration`, `testing` and
   three test suites — larger than this repo's usual one-subsystem scope, because
   a field on a shared type has no smaller shape.
-- **`PlanExport`'s schema version moves for the first time**, and costs nothing,
-  because the export is one-way — nothing in this system reads one back (§10).
-  A v1 document produced before this lands stays readable by whatever produced
-  it and is not readable here, which is what the version is for. The first ADR
-  to contract an import path inherits the question of whether to accept v1.
+- **`PlanExport`'s schema version moves for the first time, and stops being a
+  producer's claim.** Pinning it to exactly 2 (§10) means a v1 document does not
+  validate here at all — which is the right answer while the export is one-way
+  and nothing in this system reads one back. The first ADR to contract an import
+  path inherits the question of whether to widen it, and inherits it as an
+  explicit decision rather than as an accident of `ge=1`.
 - **ADR-0029 §8's "retry only from a `ToolResult`" becomes readable off the
   record** rather than only inferable from the executor's shape — without
   becoming enforced by the tracker, which §8 already rejected and §3 keeps
