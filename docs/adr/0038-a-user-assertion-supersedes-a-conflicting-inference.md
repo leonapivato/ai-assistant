@@ -154,7 +154,17 @@ stopping for the contract change:
   the `memory` subsystem and fails if any returns `MERGE` for an assertion onto
   a record that is not `OBSERVED` or `INFERRED`. Writing the policy that would
   trigger the loss therefore fails the gate, naming this section, instead of
-  silently destroying evidence at runtime.
+  silently destroying evidence at runtime. The guard is *conditional* — "if it
+  merges, the target is derived" — because a policy that never merges an
+  assertion conforms and satisfies the precondition vacuously; requiring a merge
+  would be the guard inventing an obligation, the same mistake as putting it in
+  the conformance suite.
+- **The unrecoverable half does not rely on the guard at all.** A policy defined
+  outside the `memory` subsystem is invisible to the scan, so §2a's refusal is
+  enforced at the ingestor for every policy, guard or no guard. What remains
+  behind the precondition is the *recoverable* residue — an assertion folded
+  onto a derived record that the policy meant as reinforcement, costing that
+  record's evidence.
 
 The guard is deliberately **not** in the `MemoryPolicy` conformance suite. A
 conformance suite is contract; the Protocol states no such obligation, so
@@ -218,6 +228,19 @@ than issue #38 already described for that source.
 
 An allow-list is also the safer default going forward: a `MemorySource` added
 later is not silently enrolled in a destructive rule by omission.
+
+**And it is enforced at the ingestor, not only chosen by the policy.** This is a
+safety property, and a policy reaches `MemoryIngestor` through an injected seam:
+any conforming implementation may rule `MERGE` for an assertion against an
+`EXTERNAL` conflict, and the guard in §1b cannot see a policy defined outside
+the `memory` subsystem. So the ingestor refuses such a fold outright — the same
+treatment it already gives a `MERGE` naming an absent target, and for the same
+reason: the alternative is a write that reports success while losing data.
+
+It **raises** rather than quietly downgrading to a reinforcing merge, because
+every fold keeps the target's id — a downgrade would hand the correction the
+external key just as surely, and lose it to the next sync just as silently,
+while looking like it worked.
 
 Resolving `EXTERNAL` properly needs either an id discipline that keeps a
 superseding correction off the external key, or the validity window of issue
