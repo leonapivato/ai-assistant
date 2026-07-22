@@ -13,9 +13,11 @@ proving the build is offline; and in-process the whole build runs inside
 :func:`network_denied`, so "no fetch" is asserted rather than inferred from a
 warm cache.
 
-They are skipped when the artifact is not staged. A staged artifact is the normal
-state of a working tree — ``uv sync`` builds the project, which runs the hook —
-so on a developer machine and in CI these run.
+The tests that build or load a distribution are skipped when the artifact is not
+staged. A staged artifact is the normal state of a working tree — ``uv sync``
+builds the project, which runs the hook — so on a developer machine and in CI
+these run. The assertions that need no model bytes carry no such skip, so they
+still run in a fresh clone, where ADR-0024 §4 leaves the artifact absent.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import email.parser
 import hashlib
 import importlib.metadata
 import os
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -200,10 +203,23 @@ def test_the_notices_name_the_revision_that_ships() -> None:
 
     A re-pin that moved the artifact without moving the notices would leave the
     file naming a commit the distribution no longer carries, which is the one way
-    an accurate notice goes stale on its own.
+    an accurate notice goes stale on its own. The *declared* commit is what a
+    recipient reads, so this pins that row rather than any mention of the SHA.
     """
     notices = _notices_in_the_checkout().decode()
-    assert ARTIFACT_REVISION in notices
+    declared = re.findall(r"^\|\s*Pinned commit\s*\|\s*`([0-9a-f]+)`\s*\|$", notices, re.MULTILINE)
+    assert declared == [ARTIFACT_REVISION]
+
+
+def test_the_notices_are_declared_as_a_licence_file() -> None:
+    """The declaration is what puts the notices in a distribution.
+
+    Asserted here as well as in the built wheel and sdist because this one needs
+    no model bytes: in a fresh clone, where the artifact is not staged and the
+    build assertions skip, this is what catches `license-files` regressing.
+    """
+    pyproject = tomllib.loads((_PROJECT_ROOT / "pyproject.toml").read_text())
+    assert _NOTICES in pyproject["project"]["license-files"]
 
 
 @pytest.mark.parametrize("wheel_fixture", ["checkout_wheel", "sdist_wheel"])
