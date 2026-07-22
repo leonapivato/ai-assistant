@@ -217,7 +217,10 @@ class StepExecutor:
         Args:
             state: The execution as currently stored. Its ``version`` is what the
                 first claim is computed against.
-            step_id: Which step to run.
+            step_id: Which step to run. It must be the step ``call`` is
+                authorised for: ADR-0021 §1 binds an approval to the step, and
+                accepting the id twice without comparing them would let one
+                step's approval claim another's.
             call: The authorised call. It is revalidated and **detached** first
                 (:func:`_detached`), and every later step reads that snapshot —
                 the caller's object stays mutable across the awaits in between.
@@ -245,9 +248,10 @@ class StepExecutor:
                 the injected clock's reading is not a conforming one — a wiring
                 bug rather than a pessimistic measurement (:meth:`_reading`).
             ToolBindingError: If the call does not survive revalidation
-                (:func:`_detached`). Raised before the claim, so it leaves no
-                durable state — unlike the seam's own refusal, which arrives
-                after it and is committed ``FAILED``.
+                (:func:`_detached`), or is authorised for a different plan step
+                than ``step_id``. Both are raised before the claim, so they
+                leave no durable state — unlike the seam's own refusal, which
+                arrives after it and is committed ``FAILED``.
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
                 Checked **before** the claim, so a deadline the seam would
                 refuse never leaves a step durably ``RUNNING``
@@ -264,6 +268,21 @@ class StepExecutor:
         # for the lookup, the claim, the invocation and the classification. See
         # `_detached`: the caller's object is mutable across every await here.
         authorised = _detached(call)
+        if authorised.request.step_id != step_id:
+            # ADR-0021 §1 binds an approval to the tool, the parameters **and**
+            # the step, and `authorises` compares all three — but it compares
+            # them against the call's own `step_id`, not against the step this
+            # executor was asked to run. Taking the id twice is what reopens
+            # that: the claim would record a decision that authorised a
+            # different step, and ADR-0014 §4's "every executed step must name
+            # the decision that authorised it" would be satisfied by a pointer
+            # to somewhere else. Refused before the claim, so nothing durable
+            # names it (`_detached`).
+            msg = (
+                "the call is authorised for a different plan step, so claiming this one "
+                "would name a decision that approved something else"
+            )
+            raise ToolBindingError(msg)
         trusted = await self._registry.get(authorised.request.tool.id)
 
         state = await self._claim(state, step_id, authorised)
