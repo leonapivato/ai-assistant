@@ -218,6 +218,46 @@ class LeakyPlanStore(FakePlanStore):
         return detached
 
 
+class TurncoatPolicy(FakeActionPolicy):
+    """A policy that rewrites the ruling it already returned.
+
+    It hands back an `ALLOW`, keeps the object, and flips it to `DENY` through
+    ``__dict__`` — the bypass ADR-0018 §3 puts inside the threat model — at the
+    first opportunity, which is the ``await`` on ``AuditTrail.record``.
+    """
+
+    def __init__(self) -> None:
+        """Allow everything, then think better of it."""
+        super().__init__(confirm_at=None)
+        self.issued: PermissionRuling | None = None
+
+    async def decide(self, request: ActionRequest) -> PermissionRuling:
+        """Return an ``ALLOW`` this policy intends to take back."""
+        ruling = await super().decide(request)
+        self.issued = ruling
+        return ruling
+
+    def defect(self) -> None:
+        """Rewrite the returned ruling to a ``DENY``."""
+        assert self.issued is not None
+        self.issued.__dict__["outcome"] = PermissionOutcome.DENY
+
+
+class TurncoatTrail(FakeAuditTrail):
+    """A trail that lets the policy defect while the write is in flight."""
+
+    def __init__(self, policy: TurncoatPolicy) -> None:
+        """Give ``policy`` its chance mid-``record``."""
+        super().__init__()
+        self._policy = policy
+
+    async def record(self, decision: PermissionDecision) -> str:
+        """Append, giving the policy the await it needs to change its mind."""
+        recorded = await super().record(decision)
+        self._policy.defect()
+        return recorded
+
+
 class ForgetfulPlanStore(FakePlanStore):
     """A store whose execution outlives the plan it names.
 
@@ -856,6 +896,94 @@ async def test_a_trail_answering_under_the_wrong_id_is_refused() -> None:
     assert harness.invoker.invocations == []
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
+
+
+# --- every branch reads its decision back --------------------------------
+
+
+async def test_a_lost_denial_is_refused_before_the_step_is_skipped() -> None:
+    """A skipped step's ``approval_ref`` must point at something (ADR-0014 §4)."""
+    harness = Harness(
+        tools=(tool(),), policy=FakeActionPolicy(deny_at=RiskLevel.LOW), trail=LosingTrail()
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    with pytest.raises(AuditError, match="does not hold decision"):
+        await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
+    assert stored.approval_ref is None
+
+
+async def test_a_lost_confirmation_is_refused_before_the_step_is_parked() -> None:
+    """Parking on an id nobody can resolve is a step that can never continue."""
+    harness = Harness(tools=(confirmable(),), trail=LosingTrail())
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    with pytest.raises(AuditError, match="does not hold decision"):
+        await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
+
+
+async def test_a_ruling_mutated_while_it_is_recorded_does_not_steer_the_outcome() -> None:
+    """The branch reads the recorded ruling, not the policy's own object.
+
+    ``frozen=True`` does not stop ``__dict__`` (ADR-0018 §3), and ``record`` is
+    an await — so a policy that rewrote its answer mid-write would have an
+    ``ALLOW`` recorded and a ``DENY`` committed against it.
+    """
+    policy = TurncoatPolicy()
+    harness = Harness(tools=(tool(),), policy=policy, trail=TurncoatTrail(policy))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    recorded = await harness.trail.get(str(result.decision_id))
+    assert recorded is not None
+    assert recorded.ruling.outcome is PermissionOutcome.ALLOW
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.SUCCEEDED
+    assert stored.approval_ref == result.decision_id
+
+
+# --- run() only enters at PENDING (ADR-0037 §6) --------------------------
+
+
+async def test_running_an_already_parked_step_records_no_orphan_decision() -> None:
+    """Answering a parked step is ``resume``'s; ruling again is not an answer."""
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    before = await harness.trail.export()
+
+    with pytest.raises(PlanningError, match="already awaiting approval"):
+        await harness.runner.run(parked.state, STEP, timeout=PATIENT)
+
+    assert await harness.trail.export() == before
+    assert len(harness.policy.requests) == 1
+
+
+async def test_running_a_finished_step_is_refused() -> None:
+    """A disposed step has nothing left for this stage to do."""
+    harness = Harness(tools=(tool(),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    done = await harness.runner.run(state, STEP, timeout=PATIENT)
+    before = await harness.trail.export()
+
+    with pytest.raises(PlanningError, match="nothing here left to dispose of"):
+        await harness.runner.run(done.state, STEP, timeout=PATIENT)
+
+    assert await harness.trail.export() == before
+    assert len(harness.invoker.invocations) == 1
 
 
 # --- the clock -----------------------------------------------------------

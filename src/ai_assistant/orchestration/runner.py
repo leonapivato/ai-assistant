@@ -280,7 +280,9 @@ class StepRunner:
             ToolBindingError: From the executor, if the authorised call does not
                 survive its own revalidation.
         """
-        step = await self._planned(await self._opened(state), step_id)
+        opened = await self._opened(state)
+        step = await self._planned(opened, step_id)
+        self._check_pending(opened, step_id)
         candidates = await self._registry.find(step.capability)
         if not candidates:
             skipped = await self._skip(state, step, SkipReason.NO_CAPABLE_TOOL)
@@ -301,7 +303,13 @@ class StepRunner:
         ruling = await self._policy.decide(request)
         decision = await self._record(request, ruling)
 
-        if ruling.outcome is PermissionOutcome.ALLOW:
+        # Branch on the *recorded* ruling, never the policy's own object. The
+        # decision deep-copied it (ADR-0021 §1) and the trail then round-tripped
+        # it, but the policy still holds the value it returned and the write is
+        # an await — so a ruling mutated through `__dict__` while `record` is
+        # suspended (ADR-0018 §3) would have an `ALLOW` recorded and a `DENY`
+        # committed, leaving `approval_ref` pointing at an authorisation.
+        if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(state, step, request, decision, timeout=timeout)
 
         # Both remaining outcomes pass through `AWAITING_APPROVAL`. For a
@@ -310,7 +318,7 @@ class StepRunner:
         # `PENDING` because "a step that was never queued for approval cannot
         # have been denied one" (ADR-0037 §5).
         queued = await self._queue_for_approval(state, step, tool.id)
-        if ruling.outcome is PermissionOutcome.CONFIRM:
+        if decision.ruling.outcome is PermissionOutcome.CONFIRM:
             return StepDisposition(Disposition.AWAITING_CONFIRMATION, queued, decision.id, tool.id)
         return await self._deny(queued, step, decision, tool)
 
@@ -475,7 +483,7 @@ class StepRunner:
         *,
         resolves: str | None = None,
     ) -> PermissionDecision:
-        """Bind ``ruling`` to ``request`` and append it to the trail.
+        """Bind ``ruling`` to ``request``, append it, and return the trail's copy.
 
         The id and the clock are supplied here because ADR-0021 §3 withholds both
         from the policy — that is what leaves ``decide`` a genuine function of its
@@ -485,9 +493,21 @@ class StepRunner:
         reviewability, and a refusal nobody can find a trace of is the half of
         the trail that answers "what did the assistant decline to do".
 
+        **And every branch gets back what the trail holds, not what was written**
+        (:meth:`_recorded`). The read-back began as the authorisation path's
+        guard, but every outcome puts a decision id into durable state or into a
+        caller's hands: a ``DENY`` writes ``approval_ref`` onto the skipped step,
+        and a ``CONFIRM`` hands out the id :meth:`resume` will be called with. A
+        trail that accepted the write and lost it would leave the first pointing
+        at nothing — the dangling ``approval_ref`` ADR-0014 §4 exists to prevent
+        — and the second unanswerable forever. Reading back on one branch and
+        trusting `record` on the others would have made the guarantee depend on
+        which way the policy ruled.
+
         Raises:
             AuditError: If the trail refused the append — a duplicate id, or a
-                ``resolves`` pointer that failed its invariant.
+                ``resolves`` pointer that failed its invariant — or if it does
+                not hand back the record under that id (:meth:`_recorded`).
             PlanningError: If the injected clock's reading is not conforming.
         """
         decision = PermissionDecision.from_request(
@@ -498,37 +518,34 @@ class StepRunner:
             resolves=resolves,
         )
         await self._trail.record(decision)
-        return decision
+        return await self._recorded(decision.id)
 
-    async def _authorised(self, request: ActionRequest, decision_id: str) -> ToolCall:
+    def _authorised(self, request: ActionRequest, recorded: PermissionDecision) -> ToolCall:
         """Build the call from the trail's copy of the decision (ADR-0037 §3).
 
         **This is what closes issue #107**, and it closes it by construction: the
         only ``ToolCall`` this pipeline can produce is one built out of a record
-        the trail handed back, so the ``approval_ref`` the executor pins is
-        necessarily an id that resolves. Checking that ``record`` did not raise
-        would be weaker — a trail that accepted a write and lost it answers
-        ``None`` here, and a trail whose row no longer validates raises
+        the trail handed back (:meth:`_record`), so the ``approval_ref`` the
+        executor pins is necessarily an id that resolves. Checking that ``record``
+        did not raise would be weaker — a trail that accepted a write and lost it
+        answers ``None``, and a trail whose row no longer validates raises
         ``AuditError`` from ``get`` itself (ADR-0036 §2), so "never recorded" and
         "corrupted" stay distinguishable.
 
         The round trip is a real comparison rather than a ceremony:
-        :meth:`_recorded` establishes that what came back *is* the record that id
-        names, and ``ToolCall``'s validator then runs
+        :meth:`_recorded` established that what came back *is* the record that id
+        names, and ``ToolCall``'s validator now runs
         ``PermissionDecision.authorises``, so a copy describing a different tool,
         payload or step cannot become a call at all.
 
         Raises:
-            AuditError: If the trail holds no such decision, hands back a
-                different one (:meth:`_recorded`), or holds one that does not
-                authorise ``request``.
+            AuditError: If the recorded decision does not authorise ``request``.
         """
-        recorded = await self._recorded(decision_id)
         try:
             return ToolCall(request=request, decision=recorded)
         except ValidationError as exc:
             msg = (
-                f"the trail's copy of decision {decision_id!r} does not authorise this request, "
+                f"the trail's copy of decision {recorded.id!r} does not authorise this request, "
                 "so it is not a record of what was approved"
             )
             raise AuditError(msg) from exc
@@ -575,7 +592,8 @@ class StepRunner:
 
         **Everything this stage decides about *what has already happened* reads
         this, not the argument** — which plan the step comes from
-        (:meth:`_planned`) and whether a step is genuinely parked
+        (:meth:`_planned`), whether the step is still to be disposed of
+        (:meth:`_check_pending`) and whether it is genuinely parked
         (:meth:`_check_parked`). The caller's ``state`` supplies exactly one
         thing, its ``version``, because that is the compare-and-swap token and
         the store is what adjudicates it.
@@ -597,6 +615,46 @@ class StepRunner:
             )
             raise PlanningError(msg)
         return opened
+
+    def _check_pending(self, opened: ExecutionState, step_id: str) -> None:
+        """Require the stored step to be ``PENDING`` before :meth:`run` rules on it.
+
+        **Checked before the policy is asked, because the cost of not checking is
+        a decision nobody can use.** Recording precedes every transition
+        (ADR-0037 §2), so a ``run`` against a step that is already
+        ``AWAITING_APPROVAL`` would consult the policy, append a second
+        ``CONFIRM`` to the trail, and only then be refused by the transition
+        graph — leaving a decision in a Tier 1 append-only store that was never
+        shown to anyone, cannot be resolved (:meth:`_check_parked` binds a
+        resolution to the *parked* step's own confirmation), and cannot be
+        deleted (ADR-0021 §4 offers no selective erasure). The right answer for
+        that step is :meth:`resume`, and this says so.
+
+        ``PENDING`` is the only entry, and ``FAILED`` is deliberately not a
+        second one (ADR-0037 §6). ADR-0014 §4 permits ``FAILED → RUNNING`` while
+        attempts remain, so an ``ALLOW`` would work and a ``CONFIRM`` or ``DENY``
+        would not — the same call succeeding or failing on which way the policy
+        ruled. Re-driving a failed step is plan-level work, and this object
+        disposes of one step.
+
+        Raises:
+            PlanningError: If the step is absent from the stored execution, or is
+                not ``PENDING``.
+        """
+        stored = opened.step(step_id)
+        if stored is None:
+            msg = f"execution {opened.id!r} has no step {step_id!r}"
+            raise PlanningError(msg)
+        if stored.status is StepStatus.PENDING:
+            return
+        if stored.status is StepStatus.AWAITING_APPROVAL:
+            msg = (
+                f"step {step_id!r} is already awaiting approval; answering it is `resume`'s, "
+                "and ruling again would record a decision nobody can use"
+            )
+            raise PlanningError(msg)
+        msg = f"step {step_id!r} is {stored.status}, so there is nothing here left to dispose of"
+        raise PlanningError(msg)
 
     async def _planned(self, opened: ExecutionState, step_id: str) -> PlanStep:
         """Read the step from the plan this execution belongs to (ADR-0037 §2).
@@ -645,12 +703,13 @@ class StepRunner:
     ) -> StepDisposition:
         """Hand the executor an authorised call and report what it committed.
 
-        The call is built first, so a trail that cannot produce the authority
-        stops the turn *before* the executor's claim — leaving the step
-        untouched, rather than durably ``RUNNING`` over a decision nobody can
+        ``decision`` is already the trail's own copy (:meth:`_record`), and the
+        call is built from it before the claim — so a trail that cannot produce
+        the authority has stopped the turn *before* the executor touches durable
+        state, rather than leaving a step ``RUNNING`` over a decision nobody can
         find (ADR-0037 §3).
         """
-        call = await self._authorised(request, decision.id)
+        call = self._authorised(request, decision)
         ran = await self._executor.execute(state, step_id=step.id, call=call, timeout=timeout)
         return StepDisposition(Disposition.EXECUTED, ran, decision.id, call.decision.tool.id)
 
