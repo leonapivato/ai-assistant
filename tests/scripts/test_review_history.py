@@ -5,9 +5,11 @@ with a payload written into a tmp_path, or calls the parsing/rendering functions
 directly. Nothing here invokes ``gh``, so ``uv run pytest`` makes no network call
 and no assertion depends on the live state of this repo's pull requests.
 
-The three cases the report must not flatten each get their own test: a
-lower-bound churn figure, a ``churn n/a`` diff, and a merged PR with no ship
-comment. All three are "absent or understated", never zero.
+The cases the report must not flatten each get their own test: a lower-bound
+churn figure, a ``churn n/a`` diff, a merged PR with no ship comment, and a ship
+comment carrying no aggregate. All of them are "absent or understated", never
+zero — and the last two are different absences that must not share one
+explanation.
 
 The two non-ASCII glyphs ship renders are spelled as escapes (``_TIMES``,
 ``_GE``) so the source stays unambiguous while matching the bytes ship posts.
@@ -60,18 +62,25 @@ def _comment(body: str, author: str = "owner") -> dict[str, object]:
     return {"body": body, "author": {"login": author}, "authorAssociation": "OWNER"}
 
 
+_ABSENT = object()  # `headRefOid` not in the payload at all, vs. present and null.
+
+
 def _pr(
     number: int,
     title: str,
     comments: list[str | dict[str, object]],
     merged_at: str = "",
+    head: object = _ABSENT,
 ) -> dict[str, object]:
-    return {
+    entry: dict[str, object] = {
         "number": number,
         "title": title,
         "mergedAt": merged_at,
         "comments": [_comment(c) if isinstance(c, str) else c for c in comments],
     }
+    if head is not _ABSENT:
+        entry["headRefOid"] = head
+    return entry
 
 
 _TIMES = "\u00d7"
@@ -224,12 +233,40 @@ def test_a_pr_with_no_ship_comment_has_no_aggregate() -> None:
         ({"number": "not-a-number"}, "not an integer"),
         ({"number": 1, "comments": {}}, "'comments' is not a list"),
         ("a string", "expected each pull request"),
+        # A malformed *member* of a well-formed list raises too, naming where.
+        ({"number": 7, "comments": [None]}, r"PR 7: comment at index 0"),
+        ({"number": 7, "comments": ["a string"]}, r"PR 7: comment at index 0"),
     ],
 )
 def test_every_malformed_entry_raises_value_error(entry: object, expected: str) -> None:
     """The documented ValueError, never a bare KeyError or TypeError from inside."""
     with pytest.raises(ValueError, match=expected):
         rh.parse_pull_requests([entry], "owner")
+
+
+def test_a_malformed_comment_member_is_not_silently_dropped() -> None:
+    """Filtering it would report a PR as having fewer comments than it carries.
+
+    In a mixed list that is worse than a wrong count: the dropped member could be
+    the ship comment the report exists to read, and the row would then show an
+    earlier round or none at all (issue #158).
+    """
+    entry = {"number": 7, "comments": [None, _comment(_ship("1" * 40, _EXACT))]}
+    with pytest.raises(ValueError, match=r"PR 7: comment at index 0 is not a JSON object"):
+        rh.parse_pull_requests([entry], "owner")
+
+
+def test_a_malformed_comment_member_is_reported_by_the_cli(tmp_path: Path) -> None:
+    saved = tmp_path / "prs.json"
+    saved.write_text(json.dumps([{"number": 7, "comments": [None]}]), encoding="utf-8")
+    result = subprocess.run(  # noqa: S603  # fixed interpreter + in-repo script
+        [sys.executable, str(_SCRIPT), "--from-json", str(saved), "--ship-author", "owner"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "PR 7: comment at index 0 is not a JSON object" in result.stderr
 
 
 def test_a_full_page_of_comments_is_flagged_as_possibly_truncated(tmp_path: Path) -> None:
@@ -304,7 +341,7 @@ def test_medians_use_only_the_exact_figures(tmp_path: Path) -> None:
     ]
     out = _run(payload, tmp_path)
     # Three PRs have a round; median of {3, 29, 2} is 3. Only one exact churn.
-    assert "3 with a ship comment" in out
+    assert "3 with a review aggregate" in out
     assert "median 3 round(s) over 3 PR(s)" in out
     assert f"median churn 1.1{_TIMES} over 1 exact" in out
     # Each excluded figure is named, and none is silently zero.
@@ -468,6 +505,269 @@ def test_limit_applies_to_a_saved_payload_too(tmp_path: Path) -> None:
     rows = [line for line in out.splitlines() if line.startswith("  #")]
     assert "last 2 merged PR(s)" in out
     assert [r.split()[0] for r in rows] == ["#1", "#2"]
+
+
+# --- the two absences (#155) -------------------------------------------------
+
+
+def test_a_ship_comment_without_an_aggregate_is_not_reported_as_unshipped(
+    tmp_path: Path,
+) -> None:
+    """The marker is there; only the figures are missing.
+
+    Explaining it as "merged before the marker existed, or admin-merged without
+    one" would be a false statement about a correctly-excluded PR (issue #155).
+    """
+    payload = [
+        _pr(1, "fix: shipped, pre-aggregate", [_ship("1" * 40, None)]),
+        _pr(2, "fix: never shipped", ["just a review note"]),
+    ]
+    out = _run(payload, tmp_path)
+    rows = {line.split()[0]: line for line in out.splitlines() if line.startswith("  #")}
+    assert "(ship comment, no aggregate)" in rows["#1"]
+    assert "(no ship comment)" in rows["#2"]
+    assert "1 merged PR(s) carry a ship comment whose summary line is" in out
+    assert "1 merged PR(s) carry no ship comment" in out
+    # Neither contributes a round, and the headline says aggregates, not comments.
+    assert "0 with a review aggregate" in out
+
+
+def test_an_unparseable_summary_is_not_claimed_to_predate_the_aggregate(
+    tmp_path: Path,
+) -> None:
+    """A missing summary and a corrupted one are indistinguishable from here.
+
+    A pre-ADR-0020 §2 artifact is the ordinary cause, but an edited or truncated
+    line 3 lands in the same bucket — so the report offers that cause rather than
+    asserting it, the same over-claim issue #155 is about one level down.
+    """
+    payload = [_pr(1, "fix: a", [_ship("1" * 40, "round x - not a summary at all")])]
+    out = _run(payload, tmp_path)
+    assert "(ship comment, no aggregate)" in out
+    assert "an edited or" in out
+    assert "truncated summary reads the same from here, so neither is asserted." in out
+
+
+def test_the_two_absences_are_counted_separately() -> None:
+    prs = rh.parse_pull_requests(
+        [
+            _pr(1, "fix: a", [_ship("1" * 40, None)]),
+            _pr(2, "fix: b", ["chatter"]),
+        ],
+        "owner",
+    )
+    assert [p.has_ship_comment for p in prs] == [True, False]
+    stats = rh.summarize(prs)
+    assert (stats.no_aggregate, stats.unshipped) == (1, 1)
+
+
+def test_last_ship_record_reports_the_marker_and_the_absence() -> None:
+    found = rh.last_ship_record([rh.Comment(body=_ship("a" * 40, _EXACT), author="owner")], "owner")
+    assert found.found is True
+    assert found.marker_sha == "a" * 40
+    assert found.aggregate is not None
+    missing = rh.last_ship_record([rh.Comment(body="chatter", author="owner")], "owner")
+    assert (missing.found, missing.aggregate, missing.marker_sha) == (False, None, "")
+
+
+# --- head differs from the ship marker (#161) --------------------------------
+
+
+def test_a_head_the_ship_marker_does_not_name_is_marked_but_still_counted(
+    tmp_path: Path,
+) -> None:
+    """The row is marked and the medians still include it.
+
+    The loop each row reports happened whatever the difference means, and this
+    report measures review loops, not merge coverage (issue #161).
+    """
+    payload = [
+        _pr(1, "fix: a", [_ship("a" * 40, _EXACT)], "2026-01-02T00:00Z", head="b" * 40),
+        _pr(2, "fix: b", [_ship("c" * 40, _EXACT)], "2026-01-01T00:00Z", head="c" * 40),
+    ]
+    out = _run(payload, tmp_path)
+    rows = {line.split()[0]: line for line in out.splitlines() if line.startswith("  #")}
+    assert "<- head differs from ship marker" in rows["#1"]
+    assert "head differs" not in rows["#2"]
+    assert "! ship marker names a commit other than the PR head on #1." in out
+    # Not excluded: both PRs are in the median.
+    assert "2 with a review aggregate" in out
+    assert "median 3 round(s) over 2 PR(s)" in out
+
+
+def test_a_differing_head_is_not_reported_as_unreviewed_content(tmp_path: Path) -> None:
+    """A new commit ID is not evidence that unreviewed work merged.
+
+    ADR-0020 §3 keeps a review valid across an amend, squash, rebase or revert
+    that leaves the reviewed tree and base unchanged — each of which produces a
+    different head. Only the trees could tell that apart from an unshipped
+    commit, and this report does not read them, so it claims neither.
+    """
+    payload = [_pr(1, "fix: a", [_ship("a" * 40, _EXACT)], head="b" * 40)]
+    out = _run(payload, tmp_path)
+    assert "is the whole observation." in out
+    assert "Nor does a differing head say" in out
+    assert "ADR-0020 §3 keeps a review valid across an" in out
+    # No wording anywhere that would read as a verdict on the merge.
+    assert "merged past" not in out
+    assert "outran" not in out
+
+
+def test_the_observation_names_the_pr_head_not_the_merge_commit(tmp_path: Path) -> None:
+    """`headRefOid` is the branch head, which is what the ship marker names.
+
+    The merge commit is deliberately not what is compared: GitHub's squash and
+    rebase merges mint a new one for every PR, so that comparison would differ
+    always and observe nothing. The report says which commit it read.
+    """
+    payload = [_pr(1, "fix: a", [_ship("a" * 40, _EXACT)], head="b" * 40)]
+    out = _run(payload, tmp_path)
+    assert "`headRefOid` is the branch head, not the merge" in out
+    assert "commit — a squash or rebase merge mints a new one every time, so that" in out
+
+
+def test_an_abbreviated_marker_of_the_merged_head_is_not_a_difference(tmp_path: Path) -> None:
+    payload = [_pr(1, "fix: a", [_ship("a" * 12, _EXACT)], head="a" * 40)]
+    assert "head differs" not in _run(payload, tmp_path)
+
+
+def test_a_payload_without_a_head_reports_no_difference(tmp_path: Path) -> None:
+    """`headRefOid` absent proves nothing, so nothing is observed."""
+    payload = [_pr(1, "fix: a", [_ship("a" * 40, _EXACT)])]
+    assert "head differs" not in _run(payload, tmp_path)
+
+
+@pytest.mark.parametrize("head", [1, "", "aaaaaaaa", "z" * 40, "a" * 41, None, ["a" * 40]])
+def test_a_head_that_is_not_a_full_object_id_supports_no_observation(
+    head: object, tmp_path: Path
+) -> None:
+    """Even the narrow observation needs a head that can be compared.
+
+    `gh` returns `headRefOid` as a full object ID. Anything else is a payload
+    that cannot support it, and reporting a difference anyway — `"1"` does not
+    match a SHA, so the row would be marked — would be fabricated.
+    """
+    payload = [_pr(1, "fix: a", [_ship("a" * 40, _EXACT)], head=head)]
+    assert "head differs" not in _run(payload, tmp_path)
+
+
+def test_a_head_is_matched_case_insensitively(tmp_path: Path) -> None:
+    payload = [_pr(1, "fix: a", [_ship("A" * 40, _EXACT)], head="a" * 40)]
+    assert "head differs" not in _run(payload, tmp_path)
+
+
+def test_a_pr_with_no_ship_comment_never_reports_a_differing_head(
+    tmp_path: Path,
+) -> None:
+    """There is no marker to compare, so nothing can be observed about the head."""
+    payload = [_pr(1, "fix: a", ["chatter"], head="b" * 40)]
+    assert "head differs" not in _run(payload, tmp_path)
+
+
+# --- paginating a PR's comments (#157) ---------------------------------------
+
+
+def test_fetch_comments_pages_and_renames_the_rest_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gh api --paginate` is asked for the REST endpoint, one object per line.
+
+    The REST payload names the commenter `user.login`, not `author.login`, so the
+    jq filter renames it — this pins both the invocation and the shape returned.
+    """
+    seen: list[list[str]] = []
+
+    def fake_gh(argv: list[str]) -> str:
+        seen.append(argv)
+        return '{"body":"one","author":{"login":"owner"}}\n{"body":"two","author":{"login":"x"}}\n'
+
+    monkeypatch.setattr(rh, "_gh", fake_gh)
+    comments = rh.fetch_comments(42)
+    assert comments == [
+        {"body": "one", "author": {"login": "owner"}},
+        {"body": "two", "author": {"login": "x"}},
+    ]
+    argv = seen[0]
+    assert argv[:3] == ["gh", "api", "--paginate"]
+    assert argv[3] == "repos/{owner}/{repo}/issues/42/comments"
+    assert ".user.login" in argv[-1]
+
+
+def test_fetch_comments_asks_for_only_the_opening_lines_of_each_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whole bodies are megabytes on a long-running PR, and nothing reads them.
+
+    `ship.sh` fetches only the opening lines at this same endpoint for exactly
+    that reason. Everything the parser looks at — marker, header, blank, summary
+    — is in that prefix, so the trim bounds what is retained by the comment count
+    rather than by how much anyone wrote.
+    """
+    seen: list[list[str]] = []
+
+    def fake_gh(argv: list[str]) -> str:
+        seen.append(argv)
+        return ""
+
+    monkeypatch.setattr(rh, "_gh", fake_gh)
+    rh.fetch_comments(42)
+    assert f'split("\\n")[0:{rh._BODY_LINES}]' in seen[0][-1]
+
+
+def test_a_body_trimmed_to_the_opening_lines_still_yields_its_aggregate() -> None:
+    """The trim must not cost the figures — the summary is inside the prefix."""
+    full = _ship("a" * 40, _EXACT)
+    trimmed = "\n".join(full.split("\n")[: rh._BODY_LINES])
+    record = rh.last_ship_record([rh.Comment(body=trimmed, author="owner")], "owner")
+    assert record.aggregate is not None
+    assert record.aggregate.round == 3
+    assert record.marker_sha == "a" * 40
+
+
+def test_a_pr_at_the_page_boundary_is_refetched_in_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full page means the connection may be short of the last ship comment.
+
+    That comment is exactly the one the report reads, so the boundary entry is
+    refetched through the paging endpoint and the whole list replaces it.
+    """
+    calls: list[int] = []
+
+    def fake_fetch(number: int) -> list[dict[str, object]]:
+        calls.append(number)
+        return [_comment("filler"), _comment(_ship("1" * 40, _LOWER))]
+
+    monkeypatch.setattr(rh, "fetch_comments", fake_fetch)
+    payload = [
+        # A full page whose last ship comment is the (stale) one gh returned.
+        _pr(1, "fix: a", [*[_comment("chatter") for _ in range(99)], _ship("0" * 40, _EXACT)]),
+        _pr(2, "fix: b", [_ship("2" * 40, _EXACT)]),
+    ]
+    repaged = rh._repage_comments(payload)
+    assert calls == [1]  # only the boundary PR costs a call
+    prs = rh.parse_pull_requests(repaged, "owner", comments_complete=True)
+    assert prs[0].aggregate is not None
+    assert prs[0].aggregate.round == 29  # the comment gh had truncated away
+    assert prs[1].aggregate is not None
+    assert prs[1].aggregate.round == 3
+
+
+def test_a_paged_payload_raises_no_truncation_warning() -> None:
+    """The detection is kept for saved payloads, whose provenance is unknown."""
+    payload = [_pr(1, "fix: a", [_comment("chatter") for _ in range(rh._COMMENT_PAGE)])]
+    paged = rh.parse_pull_requests(payload, "owner", comments_complete=True)
+    saved = rh.parse_pull_requests(payload, "owner")
+    assert paged[0].comments_may_be_truncated is False
+    assert saved[0].comments_may_be_truncated is True
+
+
+def test_repaging_leaves_a_malformed_entry_for_the_parser_to_report() -> None:
+    """Validation lives in one place; repaging must not raise its own error."""
+    payload = [{"number": "not-a-number", "comments": [{} for _ in range(rh._COMMENT_PAGE)]}]
+    assert rh._repage_comments(payload) is payload
+    with pytest.raises(ValueError, match="not an integer"):
+        rh.parse_pull_requests(payload, "owner")
 
 
 def test_the_report_states_it_does_not_gate(tmp_path: Path) -> None:

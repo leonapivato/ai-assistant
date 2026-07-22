@@ -24,7 +24,24 @@ Three things the per-loop code gets right and this report must not flatten:
   counted and named, never folded in as a measured zero.
 - A merged PR with **no ship comment** (merged before the marker existed, or
   admin-merged without one) is absent too, not a zero-round change. It is listed
-  and excluded from both medians.
+  and excluded from both medians. A PR that *does* carry a ship comment whose
+  summary line is not an aggregate is a **different** absence and is reported as
+  its own case, because the first explanation would be false for it (issue
+  #155). Its own cause — ordinarily an artifact predating ADR-0020 §2 — is
+  offered as the likely one rather than asserted, since an edited summary is
+  indistinguishable from here.
+
+One further observation is recorded but deliberately *not* excluded: a PR whose
+ship marker names a commit other than the PR's head (``headRefOid``, issue
+#161). It is reported as exactly that and nothing more. The head, deliberately,
+not the merge commit: GitHub's squash and rebase merges mint a new commit by
+construction, so comparing that would flag every such PR and observe nothing. And
+a differing head is *not* evidence that unreviewed work merged either — ADR-0020
+§3 lets an amend, squash, rebase or revert keep its review where the reviewed
+tree and base are unchanged, and every one of those produces a new commit ID.
+Deciding between that and a genuinely unshipped commit needs the trees, which
+this report does not read. Either way the loop the row reports happened, so the
+row stays in both medians — this measures review loops, not merge coverage.
 
 This reports; it does not gate. Whether the evidence argues for a soft gate is
 ADR-0020's and ADR-0025's call to make, not this script's (issue #146, "out of
@@ -32,8 +49,8 @@ scope").
 
 Run via ``just review-history`` (or ``python3 scripts/review_history.py``). Pass
 ``--limit`` for a different window, or ``--from-json`` to read a saved
-``gh pr list --json number,title,comments,mergedAt`` payload instead of calling
-``gh`` —
+``gh pr list --json number,title,comments,mergedAt,headRefOid`` payload instead
+of calling ``gh`` —
 which is the seam the tests drive, so they never touch the network. ``--limit``
 applies to either path, so both report the same window.
 
@@ -58,7 +75,7 @@ from pathlib import Path
 # The two opening lines that identify a ship comment (scripts/ship.sh). Both are
 # required: the marker alone is public text anyone can quote into a comment, and
 # ship itself recognises its own comment by this pair.
-_MARKER_RE = re.compile(r"^<!-- ship:[0-9a-fA-F]{7,40} -->$")
+_MARKER_RE = re.compile(r"^<!-- ship:(?P<sha>[0-9a-fA-F]{7,40}) -->$")
 _HEADER_RE = re.compile(r"^🔍 \*\*Local Codex review\*\* — commit `[0-9a-fA-F]{7,40}`$")
 
 # The summary line ship renders from the adversarial artifact's provenance, e.g.
@@ -76,6 +93,11 @@ _CHURN_RE = re.compile(
 # Both spellings ship uses for a figure understated by a history rewrite: the
 # ">=" form carries "lower bound", the n/a form carries only this phrase.
 _LOWER_RE = re.compile(r"lower bound|history rewritten")
+
+# A full Git object ID, which is what `gh` returns for `headRefOid`. Required
+# before the head is compared against a ship marker: anything shorter or
+# non-hexadecimal cannot support even the narrow observation that the two differ.
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 # The Conventional Commits type leading a PR title (`fix(dev): …` → `fix`).
 _KIND_RE = re.compile(r"^(?P<kind>[a-z]+)")
@@ -120,13 +142,28 @@ class ShippedPr:
     Attributes:
         number: The PR number.
         title: The PR title.
-        aggregate: The terminal ship comment's aggregate, or ``None`` when the
-            PR carries no ship comment (merged before the marker existed, or
-            admin-merged without one). ``None`` is absent evidence, not a
-            zero-round change, so it is excluded from every statistic.
+        aggregate: The terminal ship comment's aggregate, or ``None`` when there
+            is none to report. ``None`` is absent evidence, not a zero-round
+            change, so it is excluded from every statistic. Read together with
+            ``has_ship_comment``, which says *which* absence it is.
+        has_ship_comment: A genuine ship comment from the trusted author was
+            found. With ``aggregate is None`` this is the second absence: the
+            marker and header are there but the summary line does not parse.
+            Ordinarily that means an artifact predating ADR-0020 §2, which
+            carries no ``round=`` field — but an edited or truncated summary is
+            indistinguishable, so nothing here asserts which. Explaining it as
+            "no ship comment" would be false either way (issue #155).
         comments_may_be_truncated: The fetched comment list filled a whole page,
             so GitHub may be holding more — including, possibly, this PR's last
-            ship comment. Reported rather than ignored (issue #157).
+            ship comment. Only ever set for a payload this script did not page
+            itself; the live fetch pages the comments (issue #157).
+        head_differs_from_marker: The last ship comment's marker names a commit
+            other than the PR's head commit (``headRefOid`` — the branch head,
+            not the merge commit, which a squash or rebase merge always mints
+            anew). Only that: an amend or rebase onto the same tree keeps its
+            review under ADR-0020 §3 and produces a new head too, so this is not
+            evidence of unreviewed content. An observation, never an exclusion:
+            the loop this row reports happened either way (issue #161).
         merged_at: The ISO-8601 merge timestamp, which sorts lexicographically.
             Empty when the payload carries none, in which case the caller's order
             is preserved.
@@ -135,7 +172,9 @@ class ShippedPr:
     number: int
     title: str
     aggregate: Aggregate | None
+    has_ship_comment: bool = False
     comments_may_be_truncated: bool = False
+    head_differs_from_marker: bool = False
     merged_at: str = ""
 
     @property
@@ -192,12 +231,18 @@ class Comment:
 
 
 # GitHub returns a nested comments connection one page at a time, and `gh pr list`
-# does not paginate it. A PR sitting exactly on the boundary may therefore be
-# missing its *last* ship comment — which is the one this report reads — so the
-# count is checked and the affected PRs are named rather than quietly reported
-# from a stale aggregate (see `render`). Issue #157 tracks paginating properly.
+# does not paginate it. A live run completes any PR at that boundary through the
+# REST endpoint (see `fetch_comments`), so this count is no longer a truncation
+# there. It still is for a saved payload, whose provenance this script cannot
+# know, so the check is kept and the affected PRs are named rather than quietly
+# reported from a stale aggregate (see `render`).
 # Where ship writes the aggregate: marker, header, blank, summary.
 _SUMMARY_LINE = 3
+
+# How much of a body is worth carrying: everything through the summary line, and
+# nothing after it. `fetch_comments` trims to this in its jq filter, so a PR full
+# of long review comments costs the comment count rather than their total length.
+_BODY_LINES = _SUMMARY_LINE + 1
 
 _COMMENT_PAGE = 100
 
@@ -240,8 +285,31 @@ def _is_ship_comment(comment: Comment, ship_author: str) -> bool:
     )
 
 
-def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggregate | None:
-    """Return the aggregate from a PR's *last* ship comment, if it has one.
+@dataclass(frozen=True)
+class ShipRecord:
+    """What a PR's *last* ship comment records — including its own absence.
+
+    Attributes:
+        found: A genuine ship comment from the trusted author was found at all.
+            This is what separates "no ship comment" from "a ship comment with
+            no aggregate": both leave ``aggregate`` at ``None``, and the report
+            must not explain the second as the first (issue #155).
+        aggregate: The aggregate that comment carried, or ``None`` when its
+            summary line did not parse as one. Why it did not is not knowable
+            here — an artifact predating ADR-0020 §2 and an edited summary look
+            the same — so this records only that it did not.
+        marker_sha: The commit named by the comment's ``<!-- ship:<sha> -->``
+            marker — the head that was reviewed — or ``""`` when no ship comment
+            was found.
+    """
+
+    found: bool
+    aggregate: Aggregate | None
+    marker_sha: str = ""
+
+
+def last_ship_record(comments: list[Comment], ship_author: str) -> ShipRecord:
+    """Return what a PR's *last* ship comment records, and whether it has one.
 
     ship posts one comment per commit, so a PR that shipped more than once
     carries several. The last is the one covering the content that merged, so it
@@ -253,18 +321,24 @@ def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggreg
         ship_author: The login whose ship comments count.
 
     Returns:
-        The aggregate, or ``None`` when no ship comment from ``ship_author``
-        carries a summary line.
+        A :class:`ShipRecord`. ``found=False`` means no ship comment from
+        ``ship_author`` at all; ``found=True`` with ``aggregate=None`` means one
+        was found but carries no summary line.
     """
     for comment in reversed(comments):
         if not _is_ship_comment(comment, ship_author):
             continue
+        marker = _MARKER_RE.match(comment.body.split("\n")[0].rstrip("\r"))
+        # _is_ship_comment matched this same line, so the marker is present;
+        # the guard is for mypy, not for a case that can occur.
+        sha = marker.group("sha") if marker else ""
         # The last ship comment is the terminal record, so the search stops
         # here whether or not it carries a summary. ship omits the summary for
         # an artifact predating ADR-0020 §2; falling through to an earlier
         # comment would then report a SUPERSEDED round as this PR's terminal
-        # one — a wrong number, which is worse than the absence. (Rendering the
-        # two absences distinctly is issue #155.)
+        # one — a wrong number, which is worse than the absence. The absence is
+        # returned as `found=True, aggregate=None`, which is what lets the report
+        # explain it as itself rather than as "no ship comment".
         #
         # Only the fixed position is read, never the whole body. ship writes
         # marker, header, blank, summary — so the summary is line 3 and nothing
@@ -274,17 +348,45 @@ def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggreg
         # aggregate and report fabricated figures.
         lines = comment.body.split("\n")
         if len(lines) <= _SUMMARY_LINE:
-            return None
-        return parse_summary(lines[_SUMMARY_LINE].rstrip("\r"))
-    return None
+            return ShipRecord(found=True, aggregate=None, marker_sha=sha)
+        return ShipRecord(
+            found=True,
+            aggregate=parse_summary(lines[_SUMMARY_LINE].rstrip("\r")),
+            marker_sha=sha,
+        )
+    return ShipRecord(found=False, aggregate=None)
 
 
-def parse_pull_requests(payload: object, ship_author: str) -> list[ShippedPr]:
-    """Convert a ``gh pr list --json number,title,comments,mergedAt`` payload to records.
+def aggregate_from_comments(comments: list[Comment], ship_author: str) -> Aggregate | None:
+    """Return the aggregate from a PR's last ship comment, if it carries one.
+
+    A thin view over :func:`last_ship_record` for callers that only need the
+    figures. It cannot tell the two absences apart — use ``last_ship_record``
+    when that distinction matters.
+
+    Args:
+        comments: Every comment on the PR, in chronological order.
+        ship_author: The login whose ship comments count.
+
+    Returns:
+        The aggregate, or ``None`` when there is none to report.
+    """
+    return last_ship_record(comments, ship_author).aggregate
+
+
+def parse_pull_requests(
+    payload: object, ship_author: str, *, comments_complete: bool = False
+) -> list[ShippedPr]:
+    """Convert a ``gh pr list --json number,title,comments,mergedAt,headRefOid`` payload.
 
     Args:
         payload: The decoded JSON — a list of PR objects.
         ship_author: The login whose ship comments count.
+        comments_complete: Every entry's ``comments`` array is the whole list,
+            because the caller paged it (see :func:`fetch_pull_requests`). A
+            full page then means a PR with exactly that many comments, not a
+            truncated read, so the truncation warning is not raised. Left
+            ``False`` for a saved payload, whose provenance this cannot know.
 
     Returns:
         One :class:`ShippedPr` per entry, in the order ``gh`` returned them.
@@ -297,10 +399,10 @@ def parse_pull_requests(payload: object, ship_author: str) -> list[ShippedPr]:
     """
     if not isinstance(payload, list):
         raise ValueError("expected a JSON list of pull requests")
-    return [_pull_request(entry, ship_author) for entry in payload]
+    return [_pull_request(entry, ship_author, complete=comments_complete) for entry in payload]
 
 
-def _pull_request(entry: object, ship_author: str) -> ShippedPr:
+def _pull_request(entry: object, ship_author: str, *, complete: bool) -> ShippedPr:
     """Build one :class:`ShippedPr`, raising ``ValueError`` on any bad field."""
     if not isinstance(entry, dict):
         raise ValueError("expected each pull request to be a JSON object")
@@ -318,14 +420,62 @@ def _pull_request(entry: object, ship_author: str) -> ShippedPr:
         raw = []
     if not isinstance(raw, list):
         raise ValueError(f"PR {number}: 'comments' is not a list")
-    comments = [_comment(c) for c in raw if isinstance(c, dict)]
+    # Every member is validated rather than filtered. Skipping a non-object would
+    # report a hand-edited payload as a PR with fewer comments than it claims —
+    # and in a mixed list could hide the very ship comment being looked for —
+    # while parse_pull_requests documents that a malformed payload raises
+    # (issue #158). The index is named because that is what locates the fault.
+    comments = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"PR {number}: comment at index {index} is not a JSON object")
+        comments.append(_comment(item))
+    record = last_ship_record(comments, ship_author)
     return ShippedPr(
         number=number,
         title=str(entry.get("title", "")),
-        aggregate=aggregate_from_comments(comments, ship_author),
-        comments_may_be_truncated=len(raw) >= _COMMENT_PAGE,
+        aggregate=record.aggregate,
+        has_ship_comment=record.found,
+        comments_may_be_truncated=not complete and len(raw) >= _COMMENT_PAGE,
+        head_differs_from_marker=_head_differs_from_marker(
+            record, str(entry.get("headRefOid") or "")
+        ),
         merged_at=str(entry.get("mergedAt") or ""),
     )
+
+
+def _head_differs_from_marker(record: ShipRecord, head: str) -> bool:
+    """Whether the PR's head commit is not the one the last ship comment named.
+
+    This answers only that question. It is deliberately *not* named for what a
+    difference might mean: ADR-0020 §3 keeps a review valid across an amend,
+    squash, rebase or revert that leaves the reviewed tree and base unchanged,
+    and all of those change the commit ID. Reading a mismatch as "unreviewed work
+    merged" would therefore be an inference the data does not carry, and settling
+    it needs the two trees, which this report does not fetch.
+
+    The head must be a full object ID to be compared at all. ``gh`` returns
+    ``headRefOid`` as one, so anything else is a payload that cannot support even
+    the narrow observation — reporting a difference on the strength of ``"1"``
+    not matching a SHA would be a fabricated one.
+
+    The comparison is case-insensitive and one-directional. Only the *marker* may
+    be abbreviated — ``ship.sh`` writes the full SHA, but the marker pattern
+    admits 7 characters — so a marker that prefixes the head is the same commit,
+    while a head that prefixes the marker cannot arise from a full head.
+
+    Args:
+        record: The PR's last ship record.
+        head: The PR's ``headRefOid`` — the branch head, which is what the ship
+            marker names and so the only thing it can be compared against. Not
+            the merge commit: a squash or rebase merge mints a new one for every
+            PR, so that comparison would differ always and observe nothing.
+            Absent, or anything that is not a full object ID, means nothing can
+            be concluded and this is ``False``.
+    """
+    if not record.marker_sha or _FULL_SHA_RE.match(head) is None:
+        return False
+    return not head.lower().startswith(record.marker_sha.lower())
 
 
 def _comment(raw: dict[str, object]) -> Comment:
@@ -389,11 +539,94 @@ def _gh(argv: list[str]) -> str:
     return result.stdout
 
 
+def fetch_comments(number: int) -> list[dict[str, object]]:
+    """Fetch every comment on one PR, paging properly, via the REST endpoint.
+
+    ``gh pr list --json comments`` reads the nested GraphQL connection one page
+    at a time and does not page it, so a PR sitting on the boundary can be
+    missing its *last* ship comment — the one this report reads. The REST
+    endpoint pages correctly under ``--paginate``, and is what ``ship.sh``
+    already uses for the same lookup.
+
+    The REST field names differ from the GraphQL ones — ``user.login``, not
+    ``author.login`` — so the ``jq`` filter renames as it goes and returns the
+    shape the rest of this module already parses. It also makes the output one
+    compact JSON object per line, which is unambiguous to read back however
+    ``gh`` chooses to join its pages.
+
+    Bodies are truncated to their first ``_BODY_LINES`` lines in the filter, for
+    the reason ``ship.sh`` gives at the same endpoint: whole bodies are megabytes
+    on a long-running PR, and nothing here reads past the summary. Everything the
+    parser looks at — marker, header, blank, summary — is in that prefix, so the
+    trim is invisible to it and the retained data is bounded by the comment count
+    rather than by how much anyone wrote.
+
+    Args:
+        number: The pull request number.
+
+    Returns:
+        Every comment, oldest first, as ``{"body": ..., "author": {"login": ...}}``,
+        each body trimmed to its opening lines.
+
+    Raises:
+        RuntimeError: If ``gh`` is missing, fails, or returns unparseable JSON.
+    """
+    stdout = _gh(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{{owner}}/{{repo}}/issues/{number}/comments",
+            "--jq",
+            f'.[] | {{body: ((.body // "") | split("\\n")[0:{_BODY_LINES}] | join("\\n")),'
+            ' author: {login: (.user.login // "")}}',
+        ]
+    )
+    comments: list[dict[str, object]] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            comments.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"PR {number}: could not parse a fetched comment: {exc}") from exc
+    return comments
+
+
+def _repage_comments(payload: object) -> object:
+    """Refetch the comments of any PR whose list came back at the page boundary.
+
+    Only the boundary entries cost an extra call: below it, ``gh`` returned the
+    whole connection already and there is nothing to complete (issue #157).
+
+    A malformed entry is passed through untouched — :func:`parse_pull_requests`
+    is where a payload is validated, and it reports the fault with context.
+    """
+    if not isinstance(payload, list):
+        return payload
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        comments = entry.get("comments")
+        if not isinstance(comments, list) or len(comments) < _COMMENT_PAGE:
+            continue
+        try:
+            number = int(entry["number"])
+        except KeyError, TypeError, ValueError:
+            continue
+        entry["comments"] = fetch_comments(number)
+    return payload
+
+
 def fetch_pull_requests(limit: int) -> object:
     """Fetch the most recent merged PRs with their comments, via the ``gh`` CLI.
 
     This is the only network access in the module, and it is isolated here so
     the report itself can be exercised from a saved payload (``--from-json``).
+
+    Comments are completed by :func:`_repage_comments` for any PR at the page
+    boundary, so the payload this returns carries every comment — which is why
+    the caller may parse it with ``comments_complete=True``.
 
     Args:
         limit: How many merged PRs to request.
@@ -416,14 +649,16 @@ def fetch_pull_requests(limit: int) -> object:
         # `comments` carries the author login as well as the body; both are
         # needed, because a ship comment counts only from the account that could
         # have run ship (see _is_ship_comment). `mergedAt` is what the window is
-        # actually defined by — see by_merge_time.
-        "number,title,comments,mergedAt",
+        # actually defined by — see by_merge_time. `headRefOid` is the PR's head
+        # commit, checked against the ship marker (see _head_differs_from_marker).
+        "number,title,comments,mergedAt,headRefOid",
     ]
     stdout = _gh(argv)
     try:
-        return json.loads(stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"could not parse the `gh pr list` output as JSON: {exc}") from exc
+    return _repage_comments(payload)
 
 
 def _format_number(value: float) -> str:
@@ -475,6 +710,15 @@ class _Stats:
             floor. Tracked separately because a rewrite and an absent ratio are
             independent facts, and folding one into the other would drop it.
         unshipped: How many merged PRs carry no ship comment at all.
+        no_aggregate: How many carry a ship comment whose summary line does not
+            parse as an aggregate. Distinct from ``unshipped``: the review record
+            exists, only the figures are missing, so the "merged without a
+            review" explanation is false for these (issue #155).
+        head_differs_from_marker: How many rows carry a head commit the last ship
+            comment does not name — the bare fact, carrying no claim about what
+            merged (see :func:`_head_differs_from_marker`). Counted, never
+            subtracted: these PRs are in ``rounds`` like any other, because the
+            loop happened (issue #161).
     """
 
     rounds: list[int]
@@ -484,17 +728,25 @@ class _Stats:
     rewritten_not_applicable: int
     no_churn_clause: int
     unshipped: int
+    no_aggregate: int
+    head_differs_from_marker: int
 
 
 def summarize(prs: list[ShippedPr]) -> _Stats:
     """Split the PRs into the figures a median may use and the ones it may not."""
     rounds: list[int] = []
     exact: list[float] = []
-    lower = na = na_rewritten = no_clause = unshipped = 0
+    lower = na = na_rewritten = no_clause = unshipped = no_aggregate = past = 0
     for pr in prs:
+        past += int(pr.head_differs_from_marker)
         agg = pr.aggregate
         if agg is None:
-            unshipped += 1
+            # Two absences, kept apart: a ship comment with no summary line is
+            # not a PR that merged without a review (issue #155).
+            if pr.has_ship_comment:
+                no_aggregate += 1
+            else:
+                unshipped += 1
             continue
         rounds.append(agg.round)
         if agg.churn_ratio is None and agg.churn_lines is None:
@@ -517,6 +769,8 @@ def summarize(prs: list[ShippedPr]) -> _Stats:
         rewritten_not_applicable=na_rewritten,
         no_churn_clause=no_clause,
         unshipped=unshipped,
+        no_aggregate=no_aggregate,
+        head_differs_from_marker=past,
     )
 
 
@@ -556,13 +810,35 @@ def _caveat_lines(stats: _Stats) -> list[str]:
             "    marker existed, or admin-merged without one. Absent evidence, not a",
             "    zero-round change, so excluded from both medians.",
         ]
+    if stats.no_aggregate:
+        # Deliberately not folded into the line above. That one explains the
+        # absence as a PR that merged without a review record; here the record is
+        # present and only the figures are missing, so borrowing that explanation
+        # would state something false about a correctly-excluded PR.
+        #
+        # And the cause of *this* absence is stated as the likely one, not as
+        # fact. An artifact predating ADR-0020 §2 is the ordinary reason a ship
+        # comment carries no summary, but an edited or truncated one is
+        # indistinguishable from here — asserting the benign provenance would be
+        # the same over-claim one level down.
+        lines += [
+            f"  {stats.no_aggregate} merged PR(s) carry a ship comment whose summary line is",
+            "    not an aggregate. A review was recorded — the marker and header are",
+            "    there — but its figures are not readable, so these are excluded from",
+            "    both medians as missing figures, not as unreviewed changes. Ordinarily",
+            "    an artifact predating ADR-0020 §2, which records no round; an edited or",
+            "    truncated summary reads the same from here, so neither is asserted.",
+        ]
     return lines
 
 
 def _headline(prs: list[ShippedPr], stats: _Stats) -> list[str]:
     """The window line and the two medians it summarises."""
     shipped = len(stats.rounds)
-    header = f"last {len(prs)} merged PR(s) — {shipped} with a ship comment"
+    # "with an aggregate", not "with a ship comment": a ship comment carrying no
+    # summary line is counted in neither the rounds nor this figure, and calling
+    # the count something it is not is the flattening issue #155 is about.
+    header = f"last {len(prs)} merged PR(s) — {shipped} with a review aggregate"
     if not stats.rounds:
         return [header, "  no aggregate to report"]
     median_rounds = _format_number(statistics.median(stats.rounds))
@@ -573,6 +849,83 @@ def _headline(prs: list[ShippedPr], stats: _Stats) -> list[str]:
     else:
         parts.append("median churn n/a (no exact figure)")
     return [header, "  " + " · ".join(parts)]
+
+
+def _warning_lines(
+    prs: list[ShippedPr],
+    *,
+    pool_saturated: bool,
+    undated: list[int] | None,
+) -> list[str]:
+    """The ``!`` blocks: what the report cannot prove, and what it observed.
+
+    Each names the PRs it applies to rather than stating a bound in the
+    abstract, because a reader can only discount a row they can identify.
+
+    Args:
+        prs: The window being reported.
+        pool_saturated: See :func:`render`.
+        undated: See :func:`render`.
+    """
+    lines: list[str] = []
+    # Ordering can only reorder what was fetched, and `gh pr list` orders by
+    # creation. GitHub offers no server-side merge-time ordering to ask for
+    # instead, so the pool is the bound and the report says so rather than
+    # claiming a window it cannot prove.
+    if pool_saturated:
+        lines += [
+            "",
+            "! the pool this window was ordered within was full, so a PR created",
+            "  further back but merged inside the window may never have been",
+            f"  fetched (live: {_ORDER_SLACK} beyond --limit; from a saved payload:",
+            "  whatever it was captured with, which this cannot know). Raise",
+            "  --limit to widen it.",
+        ]
+    if undated is None:
+        undated = [pr.number for pr in prs if not pr.merged_at]
+    if undated:
+        listed = ", ".join(f"#{n}" for n in undated)
+        lines += [
+            "",
+            f"! no merge time on {listed}, so those could not be ordered by merge",
+            "  time and sorted below everything dated — some may have been cut from",
+            "  the window on that basis alone (a payload captured without",
+            "  `mergedAt`).",
+        ]
+    # A PR whose comment list filled a page may be missing its LAST ship comment,
+    # which is the one reported — so the figure above it could be a stale round.
+    # A live run pages the comments itself, so this can only fire on a saved
+    # payload; it is named rather than silently trusted (issue #157).
+    truncated = [pr.number for pr in prs if pr.comments_may_be_truncated]
+    if truncated:
+        listed = ", ".join(f"#{n}" for n in truncated)
+        lines += [
+            "",
+            f"! comment list may be truncated on {listed} — the saved payload holds a",
+            f"  full page ({_COMMENT_PAGE}) and `gh pr list` does not page the nested",
+            "  connection, so the last ship comment may be missing and the row above",
+            "  may report an earlier round — which the medians above then include.",
+            "  Not excluded: the page may well hold the terminal comment, and",
+            "  dropping a probably-correct figure is its own distortion. A live run",
+            "  pages these itself and never reaches this line.",
+        ]
+    differing = [pr.number for pr in prs if pr.head_differs_from_marker]
+    if differing:
+        listed = ", ".join(f"#{n}" for n in differing)
+        lines += [
+            "",
+            f"! ship marker names a commit other than the PR head on {listed}. That",
+            "  is the whole observation. `headRefOid` is the branch head, not the merge",
+            "  commit — a squash or rebase merge mints a new one every time, so that",
+            "  would flag everything and observe nothing. Nor does a differing head say",
+            "  unreviewed work merged: ADR-0020 §3 keeps a review valid across an",
+            "  amend, squash, rebase or revert that leaves the reviewed tree and base",
+            "  unchanged, and each of those changes the commit ID too. Telling that",
+            "  apart from a commit that was never shipped needs the trees, which this",
+            "  does not read. Marked, never excluded: the loop each row reports",
+            "  happened either way, and this measures review loops, not merge coverage.",
+        ]
+    return lines
 
 
 def render(
@@ -612,17 +965,26 @@ def render(
     churn_width = max((len(_churn_cell(p.aggregate)) for p in prs if p.aggregate), default=0)
     for pr in prs:
         cells = f"  #{pr.number:<5} {pr.kind.ljust(kind_width)}  "
-        if pr.aggregate is None:
-            lines.append(f"{cells}(no ship comment)")
-            continue
         agg = pr.aggregate
-        row = (
-            f"{cells}{_round_cell(agg).rjust(round_width)}  "
-            f"{_churn_cell(agg).rjust(churn_width)}  {agg.net_lines:>5} lines net"
-        )
-        if agg.round > threshold:
-            outliers += 1
-            row = f"{row}   <- outlier"
+        if agg is None:
+            # The two absences read differently, because they mean different
+            # things about the change (issue #155).
+            row = cells + (
+                "(ship comment, no aggregate)" if pr.has_ship_comment else "(no ship comment)"
+            )
+        else:
+            row = (
+                f"{cells}{_round_cell(agg).rjust(round_width)}  "
+                f"{_churn_cell(agg).rjust(churn_width)}  {agg.net_lines:>5} lines net"
+            )
+            if agg.round > threshold:
+                outliers += 1
+                row = f"{row}   <- outlier"
+        if pr.head_differs_from_marker:
+            # The bare fact, not a verdict on it — see _head_differs_from_marker.
+            # Marked on the row, and still counted in every median above it: the
+            # loop this row reports happened either way (issue #161).
+            row = f"{row}   <- head differs from ship marker"
         lines.append(row)
 
     lines.append("")
@@ -634,46 +996,7 @@ def render(
     caveats = _caveat_lines(stats)
     if caveats:
         lines += ["", "Not folded into the medians:", *caveats]
-    # A PR whose comment list filled a page may be missing its LAST ship comment,
-    # which is the one reported — so the figure above it could be a stale round.
-    # Named rather than silently trusted (issue #157).
-    # Ordering can only reorder what was fetched, and `gh pr list` orders by
-    # creation. GitHub offers no server-side merge-time ordering to ask for
-    # instead, so the pool is the bound and the report says so rather than
-    # claiming a window it cannot prove.
-    if pool_saturated:
-        lines += [
-            "",
-            "! the pool this window was ordered within was full, so a PR created",
-            "  further back but merged inside the window may never have been",
-            f"  fetched (live: {_ORDER_SLACK} beyond --limit; from a saved payload:",
-            "  whatever it was captured with, which this cannot know). Raise",
-            "  --limit to widen it.",
-        ]
-    if undated is None:
-        undated = [pr.number for pr in prs if not pr.merged_at]
-    if undated:
-        listed = ", ".join(f"#{n}" for n in undated)
-        lines += [
-            "",
-            f"! no merge time on {listed}, so those could not be ordered by merge",
-            "  time and sorted below everything dated — some may have been cut from",
-            "  the window on that basis alone (a payload captured without",
-            "  `mergedAt`).",
-        ]
-    truncated = [pr.number for pr in prs if pr.comments_may_be_truncated]
-    if truncated:
-        listed = ", ".join(f"#{n}" for n in truncated)
-        lines += [
-            "",
-            f"! comment list may be truncated on {listed} — GitHub returned a full",
-            f"  page ({_COMMENT_PAGE}) and `gh pr list` does not page the nested",
-            "  connection, so the last ship comment may be missing and the row above",
-            "  may report an earlier round — which the medians above then include.",
-            "  Not excluded: the page may well hold the terminal comment, and",
-            "  dropping a probably-correct figure is its own distortion. #157",
-            "  fixes it by paging.",
-        ]
+    lines += _warning_lines(prs, pool_saturated=pool_saturated, undated=undated)
     lines += [
         "",
         "Descriptive only — nothing here gates a ship. Whether the distribution",
@@ -699,8 +1022,8 @@ def main() -> int:
         type=Path,
         default=None,
         help=(
-            "Read a saved `gh pr list --json number,title,comments,mergedAt` payload "
-            "from this "
+            "Read a saved `gh pr list --json number,title,comments,mergedAt,headRefOid` "
+            "payload from this "
             "file instead of calling gh (used by the tests, and for offline runs). "
             "--limit still applies, so the window is the same either way."
         ),
@@ -735,7 +1058,12 @@ def main() -> int:
         # --limit, but a saved payload holds whatever it was captured with, and a
         # flag that silently does nothing on one path would report a different
         # window than the one asked for.
-        parsed = parse_pull_requests(payload, args.ship_author)
+        # Only the live path knows its comments are whole — fetch_pull_requests
+        # pages them. A saved payload carries no record of how it was captured,
+        # so it keeps the truncation check.
+        parsed = parse_pull_requests(
+            payload, args.ship_author, comments_complete=args.from_json is None
+        )
         # Saturation is what makes the window unprovable, so it is measured
         # against what was asked for rather than assumed.
         # Live: the pool is known, so saturation is measurable. From a saved
