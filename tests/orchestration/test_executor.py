@@ -671,6 +671,46 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     assert step.output == {"message_id": "m-1"}
 
 
+async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() -> None:
+    """The claim and the invocation read one snapshot, taken before either.
+
+    ``frozen=True`` refuses ``call.request = ...`` and does nothing about
+    ``call.__dict__["request"]``, and ADR-0018 §3 and ADR-0029 §2 put that bypass
+    inside this repository's threat model. The executor holds the caller's object
+    across two awaits before the seam ever sees it, so a substitution landing
+    while the claim is in flight would be claimed as one authorised call and
+    executed as another — the durable record naming the first while the second
+    acted, and the interrupted-call classification reading the first tool's
+    declaration about the second tool's possible side effect.
+
+    Both halves of the substitution are *individually valid*: B is separately
+    authorised and separately registered, so nothing downstream refuses it. Only
+    taking the snapshot first distinguishes them.
+    """
+    store = HoldingPlanStore(hold_claim=True)
+    state = await a_claimed_execution(store, capability="read_email")
+    innocuous, dangerous = Spy(), Spy()
+    seam = FakeToolInvoker([(read_only(), innocuous), (tool(), dangerous)])
+    call = call_for(read_only())
+    substitute = call_for(tool(), decision_id="d-2")
+
+    task = asyncio.create_task(
+        executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
+    )
+    await store.entered.wait()
+    call.__dict__["request"] = substitute.request
+    call.__dict__["decision"] = substitute.decision
+    store.release.set()
+    await task
+
+    assert dangerous.calls == [], "the substituted call never ran"
+    assert innocuous.calls != [], "the authorised call did"
+    assert [invoked.request.tool.id for invoked in seam.invocations] == ["inbox"]
+    step = await stored_step(store, state)
+    assert step.bound_tool == "inbox", "the record describes the call that ran"
+    assert step.approval_ref == "d-1"
+
+
 async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() -> None:
     """A claim lands *before* the tool is reachable, so it must not stand.
 

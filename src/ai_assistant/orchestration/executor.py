@@ -34,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError, RetriesExhaustedError, ToolBindingError
@@ -41,6 +42,7 @@ from ai_assistant.core.types import (
     Idempotency,
     StepStatus,
     StepTransition,
+    ToolCall,
     ToolOutcome,
 )
 
@@ -52,7 +54,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ExecutionState,
         FrozenJsonValue,
-        ToolCall,
         ToolDefinition,
         ToolResult,
     )
@@ -94,6 +95,41 @@ _UNEXPLAINED = "the tool reported a failure with nothing in it"
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _detached(call: ToolCall) -> ToolCall:
+    """Revalidate and detach the call before any durable record names it.
+
+    **The executor is handed a caller's object and holds it across two awaits**
+    — the registry lookup and the claim's own commit — before the seam ever sees
+    it. ``frozen=True`` refuses ``call.request = ...`` and does nothing about
+    ``call.__dict__["request"] = ...``, and ADR-0018 §3, ADR-0018 §4 and
+    ADR-0029 §2 all put that bypass inside this repository's threat model rather
+    than outside it. So a call substituted while the claim is in flight would be
+    claimed as one authorised call and executed as another: ``invoke`` would
+    revalidate at *its* moment and run the second, ADR-0029 §8's "``bound_tool``
+    must equal ``call.request.tool.id``" would name the first, and the
+    interrupted-call classification would read the first tool's declaration
+    about the second tool's possible side effect.
+
+    Taking the snapshot **before** the claim closes that: the registry lookup,
+    the claim, the invocation and the retry classification all read one value
+    nothing else holds a reference to. This does not replace the seam's own
+    revalidation (ADR-0029 §2's first check) and is not meant to — the seam
+    cannot trust its caller either, and each guard is total over what it is
+    handed.
+
+    Raises:
+        ToolBindingError: If the call does not survive revalidation. Raised
+            before the claim, so an unusable call touches no durable state at
+            all — the same placement, and the same reason, as
+            :func:`_checked_timeout`.
+    """
+    try:
+        return ToolCall.model_validate(call.model_dump())
+    except ValidationError as exc:
+        msg = "the call did not survive revalidation, so it is not the call that was authorised"
+        raise ToolBindingError(msg) from exc
 
 
 def _checked_timeout(timeout: object) -> timedelta:
@@ -182,10 +218,12 @@ class StepExecutor:
             state: The execution as currently stored. Its ``version`` is what the
                 first claim is computed against.
             step_id: Which step to run.
-            call: The authorised call. Its ``request.tool.id`` becomes
-                ``bound_tool`` and its ``decision.id`` becomes ``approval_ref``,
-                so the durable record describes the call that actually ran
-                (ADR-0029 §8).
+            call: The authorised call. It is revalidated and **detached** first
+                (:func:`_detached`), and every later step reads that snapshot —
+                the caller's object stays mutable across the awaits in between.
+                Its ``request.tool.id`` becomes ``bound_tool`` and its
+                ``decision.id`` becomes ``approval_ref``, so the durable record
+                describes the call that actually ran (ADR-0029 §8).
             timeout: How long the seam may wait, per attempt. The caller's
                 budget, not the tool's property (ADR-0029 §4).
 
@@ -206,6 +244,10 @@ class StepExecutor:
             PlanningError: If a transition is rejected, the store is stale, or
                 the injected clock's reading is not a conforming one — a wiring
                 bug rather than a pessimistic measurement (:meth:`_reading`).
+            ToolBindingError: If the call does not survive revalidation
+                (:func:`_detached`). Raised before the claim, so it leaves no
+                durable state — unlike the seam's own refusal, which arrives
+                after it and is committed ``FAILED``.
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
                 Checked **before** the claim, so a deadline the seam would
                 refuse never leaves a step durably ``RUNNING``
@@ -218,9 +260,13 @@ class StepExecutor:
         a call that provably never started.
         """
         _checked_timeout(timeout)
-        trusted = await self._registry.get(call.request.tool.id)
+        # One snapshot, taken before anything durable names the call, and used
+        # for the lookup, the claim, the invocation and the classification. See
+        # `_detached`: the caller's object is mutable across every await here.
+        authorised = _detached(call)
+        trusted = await self._registry.get(authorised.request.tool.id)
 
-        state = await self._claim(state, step_id, call)
+        state = await self._claim(state, step_id, authorised)
         # Read *after* the claim, because ADR-0029 §5 measures from "the first
         # attempt of this call" — a slow `commit_transition` is not part of the
         # window, and counting it could consume one before the tool was reached.
@@ -241,7 +287,7 @@ class StepExecutor:
             raise
         while True:
             try:
-                result = await self._invoker.invoke(call, timeout=timeout)
+                result = await self._invoker.invoke(authorised, timeout=timeout)
             except ToolBindingError:
                 return await self._refuse(state, step_id)
             except asyncio.CancelledError:
@@ -252,7 +298,7 @@ class StepExecutor:
             if not self._may_retry(result, trusted, started):
                 return state
             try:
-                state = await self._claim(state, step_id, call)
+                state = await self._claim(state, step_id, authorised)
             except RetriesExhaustedError:
                 # The ceiling is the tracker's (ADR-0014 §4), and hitting it is
                 # an ordinary end to this loop rather than a fault: the step is
