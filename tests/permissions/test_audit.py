@@ -217,6 +217,56 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_the_rollback_journal_is_owner_only_too(tmp_path: Path) -> None:
+    """A sidecar holds the same Tier 1 pages the database does.
+
+    A rollback journal created at the ambient umask would expose recorded
+    decisions to any local account that can traverse the directory, for as long
+    as a write transaction is open. It does not happen — SQLite gives a journal
+    the mode of the database file it belongs to, and the chmod above runs before
+    any write — but that is a property of another project's file layer, so it is
+    asserted rather than assumed.
+    """
+    path = tmp_path / "audit.db"
+    trail = SqliteAuditTrail(path=path)
+    try:
+        trail._conn.execute("BEGIN IMMEDIATE")
+        trail._conn.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+            ("d-1", 0, None, decision("d-1").model_dump_json()),
+        )
+        sidecars = [each for each in tmp_path.iterdir() if each != path]
+        assert sidecars, "expected a rollback journal while a write is open"
+        assert all(each.stat().st_mode & 0o777 == 0o600 for each in sidecars)
+        trail._conn.rollback()
+    finally:
+        trail.close()
+
+
+@pytest.mark.integration
+async def test_clear_counts_what_it_actually_deleted(tmp_path: Path) -> None:
+    """Two trails on one file: the count must cover rows this instance never wrote.
+
+    A ``SELECT COUNT(*)`` in front of the delete reads before SQLite opens the
+    write transaction, so a row appended by the other instance in between would
+    be erased and not counted — and the ``asyncio.Lock`` is per instance, so it
+    arbitrates nothing here. The count therefore comes from the delete itself.
+    """
+    path = tmp_path / "audit.db"
+    first = SqliteAuditTrail(path=path)
+    second = SqliteAuditTrail(path=path)
+    try:
+        await first.record(decision("d-1"))
+        await second.record(decision("d-2", decided_at=AT + timedelta(hours=1)))
+
+        assert await first.clear() == 2
+        assert await second.export() == []
+    finally:
+        first.close()
+        second.close()
+
+
+@pytest.mark.integration
 async def test_opening_an_unusable_path_is_reported_as_an_audit_error(tmp_path: Path) -> None:
     """A failure to open is this layer's error, not a bare ``sqlite3`` one."""
     with pytest.raises(AuditError):
