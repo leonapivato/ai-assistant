@@ -533,7 +533,11 @@ _evaluate_drift() {
         return 0
     fi
     block="$(_render_drift "$old")"
-    if [[ "$(printf '%s' "$block" | wc -c)" -gt "$drift_budget" ]]; then
+    # Measured EXACTLY as it will be posted. Command substitution strips the
+    # block's trailing newlines and the renderer adds one back, so measuring the
+    # captured string alone would undercount by that byte and a record sized
+    # precisely at the budget would ship one byte over it.
+    if [[ "$(printf '%s\n' "$block" | wc -c)" -gt "$drift_budget" ]]; then
         drift_verdict["$old"]="toobig"
         return 0
     fi
@@ -1043,7 +1047,7 @@ for persona in "${posting_personas[@]}"; do
     [[ -n "$drifted" ]] || continue
     case "$counted_drift" in *" ${drifted} "*) continue ;; esac
     counted_drift="${counted_drift} ${drifted} "
-    drift_bytes=$((drift_bytes + $(printf '%s' "${drift_block[$drifted]}" | wc -c)))
+    drift_bytes=$((drift_bytes + $(printf '%s\n' "${drift_block[$drifted]}" | wc -c)))
 done
 num_snap=${#snapshot[@]}
 disp_budget=0
