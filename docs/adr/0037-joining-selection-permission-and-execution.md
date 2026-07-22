@@ -108,6 +108,20 @@ own rulings would put half the trail in `permissions`, since a `CONFIRM` is
 answered long after `decide` returns — and issue #107 records the accepted cost:
 nothing mechanically forces the decision to reach the trail.
 
+**The step itself is read from the plan, not accepted from the caller.** Both
+entry points take a `step_id` and load the `PlanStep` from
+`PlanStore.get_plan(state.plan_id)`. A `PlanStep` parameter would let a caller
+hand over one sharing the planned step's id and naming a different capability or
+different arguments: the gate would rule on *that* action and the executor would
+run it, while the `ActionPlan` the execution belongs to went on recording an
+action nobody performed. Nothing downstream notices, because `PlanStore` accepts
+a transition by step id and version. Naming the step removes the substitution
+rather than checking for it — the same move ADR-0021 §3 made when it took the
+subject out of `PermissionRuling`, "removing the capability rather than
+forbidding it". The step is still detached on the way out, because `PlanStore` —
+unlike `MemoryStore`, `ToolRegistry` and `AuditTrail` — contracts no snapshot,
+and this stage holds the value across four awaits.
+
 `StepRunner` therefore runs, for a single candidate:
 
 1. build the `ActionRequest` from the tool, the step's parameters and the step id;
@@ -148,9 +162,20 @@ back out of the `AuditTrail`**:
 
 ```text
 record(decision) -> id
-get(id)          -> the trail's own copy
+get(id)          -> the trail's own copy, whose own `id` must equal `id`
 ToolCall(request=request, decision=that copy)
 ```
+
+**The identity check on the way back is load-bearing, not tidiness.** `get` is
+contracted to answer the decision *with* that id, and a store keys the row and
+serialises the record separately (ADR-0036 §2) — so a row keyed `d-1` whose
+stored JSON carries `id="d-2"` round-trips and validates. Nothing downstream
+would catch it: `authorises` compares the subject and not the id, the `ToolCall`
+constructs, and the executor commits `approval_ref="d-2"` — an id that need not
+be a key in the trail at all. That is exactly the property this section claims,
+failing silently one field away from where it is established. The same swap on
+the resolution path would point `resolves` at a decision nobody was shown. So the
+record must call itself what it was asked for, or it is refused.
 
 The in-memory decision is discarded at that point. The consequence is the
 property #107 asks for, by construction rather than by discipline: the

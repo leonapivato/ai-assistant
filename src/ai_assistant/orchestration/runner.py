@@ -1,10 +1,10 @@
 """The stages between a plan and a tool: selection, permission, hand-off (ADR-0037).
 
-:class:`StepRunner` is the join `CLAUDE.md`'s pipeline was missing. Given a
-:class:`~ai_assistant.core.types.PlanStep` it asks the registry which tools
-advertise the step's capability, asks the policy whether the one candidate may
-run, records the resulting :class:`~ai_assistant.core.types.PermissionDecision`
-in the audit trail, and hands
+:class:`StepRunner` is the join `CLAUDE.md`'s pipeline was missing. Named one
+step of a stored plan, it asks the registry which tools advertise that step's
+capability, asks the policy whether the one candidate may run, records the
+resulting :class:`~ai_assistant.core.types.PermissionDecision` in the audit
+trail, and hands
 :class:`~ai_assistant.orchestration.executor.StepExecutor` an authorised
 :class:`~ai_assistant.core.types.ToolCall` — or disposes of the step without
 running anything, saying durably why.
@@ -20,11 +20,13 @@ Four rules shape the module and are worth stating before the code:
   ``→ RUNNING`` without an ``approval_ref`` and requires the claim to precede the
   call, so the decision must exist first; recording after the claim would leave a
   live side effect with nothing in the trail.
-- **The authority is the trail's copy, never the one in hand** (ADR-0037 §3).
-  This is the only constructor of a ``ToolCall`` in the pipeline and it builds
-  one solely out of what :meth:`~ai_assistant.core.protocols.AuditTrail.get`
-  returned, which is what closes issue #107 structurally rather than by
-  discipline.
+- **Both subjects are read from a store, never taken on the caller's word**
+  (ADR-0037 §2, §3). The step comes from the plan the execution names, so a
+  substituted capability or substituted arguments are unrepresentable rather
+  than checked for; and the authority comes from the trail, proved to be the
+  record its id names (:meth:`StepRunner._recorded`). This is the only
+  constructor of a ``ToolCall`` in the pipeline, which is what closes issue #107
+  structurally rather than by discipline.
 - **A ``CONFIRM`` is parked, never answered here** (ADR-0037 §4). The step is
   committed ``AWAITING_APPROVAL`` — durable precisely so a restart preserves it
   (ADR-0014 §4) — and :meth:`StepRunner.resume` takes the human's answer when it
@@ -90,14 +92,17 @@ def _uuid() -> str:
 
 
 def _detached(step: PlanStep) -> PlanStep:
-    """Revalidate and detach the step before anything durable names it.
+    """Revalidate and detach the stored step before anything durable names it.
 
-    **This stage is handed a caller's object and reads it across four awaits** —
-    the registry lookup, the policy's ruling, the trail's write and the trail's
-    read — before the first transition is computed. ``frozen=True`` refuses
-    ``step.id = ...`` and does nothing about ``step.__dict__["id"] = ...``, and
-    ADR-0018 §3, ADR-0018 §4 and ADR-0029 §2 all put that bypass inside this
-    repository's threat model rather than outside it.
+    **The step is read across four awaits** — the registry lookup, the policy's
+    ruling, the trail's write and the trail's read — before the first transition
+    is computed, and ``PlanStore.get_plan`` does not *contract* a detached
+    snapshot the way ``MemoryStore``, ``ToolRegistry`` and ``AuditTrail`` do. A
+    conforming store may therefore hand back its own object, and ``frozen=True``
+    refuses ``step.id = ...`` while doing nothing about
+    ``step.__dict__["id"] = ...`` — a bypass ADR-0018 §3, ADR-0018 §4 and
+    ADR-0029 §2 all put inside this repository's threat model rather than
+    outside it.
 
     Without the snapshot, an id rewritten while the policy is ruling would have
     the decision made about one step and the transition committed against
@@ -110,7 +115,7 @@ def _detached(step: PlanStep) -> PlanStep:
 
     Raises:
         PlanningError: If the step does not survive revalidation. Raised before
-            any await, so an unusable step touches no durable state at all.
+            any further await, so an unusable step touches no durable state.
     """
     try:
         return PlanStep.model_validate(step.model_dump())
@@ -230,24 +235,34 @@ class StepRunner:
     async def run(
         self,
         state: ExecutionState,
-        step: PlanStep,
+        step_id: str,
         *,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
     ) -> StepDisposition:
-        """Select a tool for ``step``, rule on it, and run it if allowed.
+        """Select a tool for ``step_id``, rule on it, and run it if allowed.
 
         The stage order is ADR-0037 §2's and each stage can only use what the one
         before it produced: the policy rules on a request naming a *selected*
         tool, the decision is recorded before any transition is committed, and
         the executor is handed an authority read back out of the trail.
 
+        **The step is read from the plan, not accepted from the caller**
+        (ADR-0037 §2). Taking a ``PlanStep`` would let a caller hand over one
+        that shares the planned step's id and names a different capability or
+        different arguments: the gate would rule on *that* action, the executor
+        would run it, and the plan the execution belongs to would still record
+        the action nobody performed. Naming the step instead removes the
+        substitution rather than checking for it, which is the same move
+        ADR-0021 §3 made when it took the subject out of ``PermissionRuling``.
+
         Args:
             state: The execution as currently stored. Its ``version`` is what the
-                first transition is computed against.
-            step: The step to dispose of. Its ``capability`` drives selection and
-                its ``parameters`` are what the policy rules on — unvalidated
-                against the tool's ``parameters_schema``, which ADR-0016 §7
-                defers.
+                first transition is computed against, and its ``plan_id`` is the
+                plan the step is read from.
+            step_id: Which step of that plan to dispose of. Its ``capability``
+                drives selection and its ``parameters`` are what the policy rules
+                on — unvalidated against the tool's ``parameters_schema``, which
+                ADR-0016 §7 defers.
             timeout: How long the seam may wait, per attempt; passed through to
                 the executor. The caller's budget, not the tool's property
                 (ADR-0029 §4).
@@ -257,18 +272,15 @@ class StepRunner:
 
         Raises:
             AuditError: If the trail would not accept the decision, or does not
-                hand back a record of it (:meth:`_authorised`). Raised before any
+                hand back the record of it (:meth:`_recorded`). Raised before any
                 claim, so nothing ran and nothing is left ``RUNNING``.
-            PlanningError: If a transition is rejected, the store is stale, the
-                injected clock's reading is not conforming (:meth:`_now`), or
-                ``step`` does not survive revalidation (:func:`_detached`).
+            PlanningError: If the execution's plan is missing, holds no such step
+                (:meth:`_planned`), a transition is rejected, the store is stale,
+                or the injected clock's reading is not conforming (:meth:`_now`).
             ToolBindingError: From the executor, if the authorised call does not
                 survive its own revalidation.
         """
-        # One snapshot, taken before the first await, and used for the lookup,
-        # the ruling, the record and every transition. See `_detached`: the
-        # caller's object is mutable across all of them.
-        step = _detached(step)
+        step = await self._planned(state, step_id)
         candidates = await self._registry.find(step.capability)
         if not candidates:
             skipped = await self._skip(state, step, SkipReason.NO_CAPABLE_TOOL)
@@ -305,7 +317,7 @@ class StepRunner:
     async def resume(
         self,
         state: ExecutionState,
-        step: PlanStep,
+        step_id: str,
         *,
         confirmation_id: str,
         approved: bool,
@@ -327,12 +339,13 @@ class StepRunner:
         executed against arguments nobody approved.
 
         Args:
-            state: The execution as currently stored. ``step`` must be parked in
+            state: The execution as currently stored. The step must be parked in
                 *it*, awaiting the confirmation's own tool — checked here rather
                 than left to the transition graph, which would find the same
                 step of a *second* execution of the same plan perfectly claimable
                 (:meth:`_check_parked`).
-            step: The step the confirmation was about.
+            step_id: The step the confirmation was about, read from the
+                execution's plan for :meth:`run`'s reason.
             confirmation_id: The recorded ``CONFIRM``'s id, as returned in the
                 :class:`StepDisposition` that parked it. It is carried by the
                 caller because the ``→ AWAITING_APPROVAL`` transition does not
@@ -349,25 +362,19 @@ class StepRunner:
             unconstructable (``PermissionDecision``'s own validator).
 
         Raises:
-            AuditError: If the confirmation is absent from the trail, if the
+            AuditError: If the confirmation is absent from the trail, is not the
+                record ``confirmation_id`` names (:meth:`_recorded`), if the
                 trail refuses the resolving decision, or if it does not hand back
-                a record of it.
+                the record of it.
             PermissionDeniedError: If ``confirmation_id`` names something that
                 was not a ``CONFIRM``, or a ``CONFIRM`` about a different step,
                 or one this execution is not parked on
                 (:meth:`_check_parked`). Refused before anything is authored, so
                 a mismatched answer cannot become a recorded decision.
-            PlanningError: As :meth:`run`, and if ``step`` does not survive
-                revalidation (:func:`_detached`).
+            PlanningError: As :meth:`run`.
         """
-        step = _detached(step)
-        confirmed = await self._trail.get(confirmation_id)
-        if confirmed is None:
-            msg = (
-                f"the trail holds no decision {confirmation_id!r}, so there is no confirmation "
-                "for this answer to resolve"
-            )
-            raise AuditError(msg)
+        step = await self._planned(state, step_id)
+        confirmed = await self._recorded(confirmation_id)
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             msg = (
                 f"decision {confirmation_id!r} is a {confirmed.ruling.outcome} and was never "
@@ -498,21 +505,17 @@ class StepRunner:
         "corrupted" stay distinguishable.
 
         The round trip is a real comparison rather than a ceremony:
-        ``ToolCall``'s validator runs ``PermissionDecision.authorises``, so a copy
-        that came back describing a different tool, payload or step cannot become
-        a call at all.
+        :meth:`_recorded` establishes that what came back *is* the record that id
+        names, and ``ToolCall``'s validator then runs
+        ``PermissionDecision.authorises``, so a copy describing a different tool,
+        payload or step cannot become a call at all.
 
         Raises:
-            AuditError: If the trail holds no such decision, or holds one that
-                does not authorise ``request``.
+            AuditError: If the trail holds no such decision, hands back a
+                different one (:meth:`_recorded`), or holds one that does not
+                authorise ``request``.
         """
-        recorded = await self._trail.get(decision_id)
-        if recorded is None:
-            msg = (
-                f"the trail accepted decision {decision_id!r} and does not hold it, so nothing "
-                "recorded authorises this call"
-            )
-            raise AuditError(msg)
+        recorded = await self._recorded(decision_id)
         try:
             return ToolCall(request=request, decision=recorded)
         except ValidationError as exc:
@@ -521,6 +524,70 @@ class StepRunner:
                 "so it is not a record of what was approved"
             )
             raise AuditError(msg) from exc
+
+    async def _recorded(self, decision_id: str) -> PermissionDecision:
+        """Load the decision ``decision_id`` names, and prove it is that one.
+
+        **The identity check is not redundant with what the caller does with the
+        result**, and leaving it out is how the guarantee in :meth:`_authorised`
+        quietly stops holding. ``AuditTrail.get`` is contracted to answer the
+        decision *with* that id, but a store keys the row and serialises the
+        record separately (ADR-0036 §2), so a row keyed ``d-1`` whose stored JSON
+        carries ``id="d-2"`` round-trips and validates. Everything downstream
+        reads ``decision.id``: ``authorises`` compares the subject and not the
+        id, ``ToolCall`` would construct, and the executor would commit
+        ``approval_ref="d-2"`` — an id that need not be a key in the trail at
+        all, which is precisely the "the ``approval_ref`` resolves" property
+        issue #107 is about. On the resolution path the same swap would point
+        ``resolves`` at a decision nobody was shown.
+
+        Raises:
+            AuditError: If the trail holds nothing under ``decision_id``, or
+                holds a record that calls itself something else.
+        """
+        recorded = await self._trail.get(decision_id)
+        if recorded is None:
+            msg = (
+                f"the trail does not hold decision {decision_id!r}, so nothing recorded "
+                "authorises this call"
+            )
+            raise AuditError(msg)
+        if recorded.id != decision_id:
+            msg = (
+                f"the trail answered for decision {decision_id!r} with a record that calls "
+                f"itself {recorded.id!r}, so it is not the decision that was asked for"
+            )
+            raise AuditError(msg)
+        return recorded
+
+    # --- the plan --------------------------------------------------------
+
+    async def _planned(self, state: ExecutionState, step_id: str) -> PlanStep:
+        """Read the step from the plan this execution belongs to (ADR-0037 §2).
+
+        The execution names its plan and the plan owns the steps, so this is the
+        one place the capability and the parameters can come from without a
+        caller's word for it. Detached on the way out (:func:`_detached`), since
+        ``PlanStore`` contracts no snapshot.
+
+        Raises:
+            PlanningError: If the plan is missing, or holds no such step. Missing
+                is not "nothing to do": an execution whose plan has gone is a
+                store that cannot say what was meant to happen, and running
+                anything under it would be inventing the intent.
+        """
+        plan = await self._plans.get_plan(state.plan_id)
+        if plan is None:
+            msg = (
+                f"execution {state.id!r} names plan {state.plan_id!r}, which the store does "
+                "not hold, so there is nothing that says what this step should do"
+            )
+            raise PlanningError(msg)
+        planned = next((step for step in plan.steps if step.id == step_id), None)
+        if planned is None:
+            msg = f"plan {plan.id!r} has no step {step_id!r}"
+            raise PlanningError(msg)
+        return _detached(planned)
 
     # --- the dispositions -----------------------------------------------
 
