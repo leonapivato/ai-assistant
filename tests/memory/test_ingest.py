@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import pkgutil
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from importlib import import_module
@@ -28,6 +29,8 @@ from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, Memory
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from ai_assistant.core.types import MemoryIngestResult, MemoryKind
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -801,3 +804,80 @@ async def test_a_clock_that_flips_its_offset_during_conversion_is_refused() -> N
         _FlipOnConvert.lie = timedelta(0)
 
     assert await store.get("1") is None
+
+
+class _PauseOnFirstSearch(InMemoryMemoryStore):
+    """A store whose *first* ``search`` waits for ``resume`` before reading.
+
+    This is the interleaving harness for issue #248. The hazard is a
+    read-modify-write: `ingest` searches, the policy rules, and only then does
+    the write land — so a second ingest that searches inside that window folds
+    into the same pre-write snapshot. Holding the first search open until the
+    second ingest has been *scheduled* reproduces exactly that window, with no
+    sleeps and no wall-clock dependence.
+
+    The event is set by the second task *before* it calls ``ingest``, which is
+    what keeps the harness honest under a fix: whatever serialises `ingest`
+    cannot delay the release, so a serialised run drains rather than deadlocks.
+    """
+
+    def __init__(self, *, resume: asyncio.Event) -> None:
+        super().__init__(now=_fixed_now)
+        self._resume = resume
+        self._pending = True
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+    ) -> list[MemoryRecord]:
+        """Delegate, then hold the first search's result until ``resume``."""
+        matches = await super().search(query, limit=limit, kinds=kinds)
+        if self._pending:
+            self._pending = False
+            # After the read, so the caller is left holding a snapshot the
+            # other ingest is about to invalidate — the window issue #248 is
+            # about. Pausing before the read would only re-order the two, which
+            # loses nothing.
+            await self._resume.wait()
+        return matches
+
+
+async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
+    """Two ingests folding into the same record must both survive (issue #248).
+
+    Unsynchronised, both search before either writes, each folds into the same
+    stale snapshot, and the second ``add`` overwrites the first — while both
+    callers are handed a healthy ``MemoryIngestResult`` naming the same id. The
+    dropped write may be a user correction (ADR-0038), so the assertion is that
+    *nothing* is lost: the surviving record must carry both proposals' evidence
+    and the higher of the two confidences.
+    """
+    resume = asyncio.Event()
+    store = _PauseOnFirstSearch(resume=resume)
+    await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
+    ingestor = _ingestor(store)
+
+    async def first() -> MemoryIngestResult:
+        return await ingestor.ingest(
+            _proposal(_preference("a", "prefers concise emails", confidence=0.7, evidence=("evA",)))
+        )
+
+    async def second() -> MemoryIngestResult:
+        # Released outside `ingest`, so serialising `ingest` cannot withhold it.
+        resume.set()
+        return await ingestor.ingest(
+            _proposal(_preference("b", "prefers concise emails", confidence=0.8, evidence=("evB",)))
+        )
+
+    result_a, result_b = await asyncio.gather(first(), second())
+
+    assert result_a.decision.kind is MemoryDecisionKind.MERGE
+    assert result_b.decision.kind is MemoryDecisionKind.MERGE
+    assert result_a.record_id == result_b.record_id == "e"
+    merged = await store.get("e")
+    assert merged is not None
+    assert set(merged.provenance.evidence) == {"ev1", "evA", "evB"}
+    assert merged.provenance.confidence == 0.8

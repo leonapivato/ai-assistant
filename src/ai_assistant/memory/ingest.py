@@ -15,6 +15,7 @@ concrete store or policy is wired in.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import TYPE_CHECKING
@@ -230,9 +231,60 @@ class MemoryIngestor:
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="MemoryIngestor")
+        # Guards the read-modify-write in `ingest` (issue #248). Constructed
+        # here rather than lazily because since Python 3.10 an `asyncio.Lock`
+        # binds no loop until it is first awaited, so an ingestor may be built
+        # before the loop exists.
+        #
+        # One lock for all proposals, deliberately. The finest key that would
+        # still be *correct* is the proposal's `MemoryKind`, since
+        # `_detect_conflicts` searches within one kind and `_apply` refuses a
+        # target outside the conflicts, so two proposals of different kinds can
+        # never contend for a record. It is rejected on cost, not correctness:
+        # it buys concurrency between kinds that nothing has asked for, on a
+        # section whose only awaits are two store calls and a deterministic
+        # policy, and it pays by making the safety property depend on conflict
+        # detection staying kind-scoped — a coupling a later cross-kind
+        # conflict rule would break silently, which is the failure mode this
+        # change exists to remove.
+        self._lock = asyncio.Lock()
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        """Detect conflicts, apply the policy, and persist the outcome."""
+        """Detect conflicts, apply the policy, and persist the outcome.
+
+        The three steps are one **read-modify-write**: a ``MERGE`` folds the
+        proposal into a conflict snapshot taken by the search above it, and
+        writes the result back at that record's id. Interleaved, two ingests
+        both snapshot the same target before either writes, and the second
+        ``add`` silently discards the first — with both callers handed a healthy
+        result. Since ADR-0038 the discarded write may be a user correction, so
+        the whole sequence is serialised on a lock held by this ingestor.
+
+        What that does **not** cover, stated plainly because the guarantee is
+        narrower than "ingestion is safe":
+
+        - **Only this ingestor.** Two ``MemoryIngestor`` instances over one
+          store hold two different locks and race exactly as before.
+        - **Only this process.** An in-process lock says nothing about two
+          processes sharing a store file. Closing that needs a compare-and-swap
+          on the store itself — a ``MemoryStore`` contract change, tracked as
+          issue #104 with issue #248.
+
+        The lock spans the injected policy's ``decide`` as well, because the
+        ruling is what the write is derived from; a policy that blocks on I/O
+        therefore blocks other ingests. That is the cost of the guarantee, not
+        an oversight.
+
+        Args:
+            proposal: The memory update to rule on and persist.
+
+        Returns:
+            The policy's decision and the id written, if anything was written.
+        """
+        async with self._lock:
+            return await self._ingest(proposal)
+
+    async def _ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
         conflicts = await self._detect_conflicts(proposal.proposed)
         proposal = proposal.model_copy(update={"conflicts": [record.id for record in conflicts]})
         decision = await self._policy.decide(proposal, conflicts=conflicts)
