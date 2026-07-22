@@ -148,7 +148,12 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert superseded.content == "user prefers afternoon meetings"
     assert superseded.provenance.source is MemorySource.USER_ASSERTED
     assert superseded.provenance.confidence == 1.0
-    assert set(superseded.provenance.evidence) == {"ev1", "ev2"}  # the trail survives
+    # ADR-0038 §1a: the overturned belief's evidence must NOT follow it across.
+    # `ev1` is what made us think "morning"; presenting it as support for
+    # "afternoon" would be a fabricated warrant in the field ADR-0005 §2 defines
+    # as references *supporting* the record. A user's assertion is its own
+    # warrant.
+    assert set(superseded.provenance.evidence) == {"ev2"}
     assert await store.get("correction") is None  # not stored beside the stale belief
     assert [record.id for record in await store.export()] == ["stale"]
 
@@ -189,6 +194,14 @@ async def test_a_correction_survives_the_next_external_re_sync() -> None:
     assert correction is not None
     assert correction.content == "user works from the berlin office"
     assert correction.provenance.source is MemorySource.USER_ASSERTED
+    # ADR-0038 §2a accepts the correction *beside* the imported record, so the
+    # external record must still be intact — an implementation that clobbered
+    # `calendar:1` while sparing `new` would otherwise satisfy the assertions
+    # above and still be wrong.
+    imported = await store.get("calendar:1")
+    assert imported is not None
+    assert imported.content == "user works from the london office"
+    assert imported.provenance.source is MemorySource.EXTERNAL
 
 
 class _RecordingPolicy:
