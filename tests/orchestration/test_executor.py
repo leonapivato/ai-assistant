@@ -256,6 +256,47 @@ class HoldingPlanStore(FakePlanStore):
         return await super().commit_transition(transition)
 
 
+class TickingClock:
+    """A clock that advances by a fixed step on every reading.
+
+    Advancing rather than frozen, because ADR-0029 §5's window measurement
+    treats a zero elapsed duration as lapsed: a frozen clock would decline every
+    keyed retry and prove nothing about ordering.
+    """
+
+    def __init__(self, tick: timedelta) -> None:
+        """Start at :data:`AT` and move ``tick`` per reading."""
+        self.now = AT
+        self._tick = tick
+
+    def __call__(self) -> datetime:
+        """Advance and return the new instant."""
+        self.now += self._tick
+        return self.now
+
+
+class SlowClaimPlanStore(FakePlanStore):
+    """A store whose ``→ RUNNING`` claim costs measurable time.
+
+    The claim is the one write that happens *before* the first invocation, so a
+    slow one is what distinguishes a window measured from the attempt from one
+    measured from before the claim.
+    """
+
+    def __init__(self, clock: TickingClock, cost: timedelta) -> None:
+        """Charge ``cost`` to ``clock`` on each claim."""
+        super().__init__()
+        # Not `_clock`: `FakePlanStore` already owns that name for its own.
+        self._ticking = clock
+        self._cost = cost
+
+    async def commit_transition(self, transition: StepTransition) -> ExecutionState:
+        """Advance the clock past the claim, then commit it."""
+        if transition.to_status is StepStatus.RUNNING:
+            self._ticking.now += self._cost
+        return await super().commit_transition(transition)
+
+
 class ScriptedInvoker:
     """A ``ToolRegistry``/``ToolInvoker`` pair returning results a test chose.
 
@@ -610,7 +651,65 @@ async def test_classification_reads_the_trusted_binding_not_the_callers_object()
     assert step.status is StepStatus.INDETERMINATE
 
 
+# --- §4: a deadline the seam would refuse never claims the step ---------
+
+
+@pytest.mark.parametrize("bad", [timedelta(0), timedelta(seconds=-1), None, 5, "30s"])
+async def test_a_timeout_the_seam_would_refuse_leaves_no_claim(bad: object) -> None:
+    """Checked before the claim, not after it (ADR-0029 §4, §8).
+
+    ``invoke`` refuses a non-positive or non-``timedelta`` deadline before the
+    callable is created. The claim precedes the call, so letting that
+    ``ValueError`` surface from inside ``invoke`` would leave the step durably
+    ``RUNNING``, and recovery would record ``INDETERMINATE`` — "we cannot tell
+    whether it acted" — about a call whose coroutine that same guard guarantees
+    never existed. Refusing first means no durable state is touched at all.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    implementation = Spy()
+    seam = FakeToolInvoker([(tool(), implementation)])
+
+    with pytest.raises(ValueError, match="timeout"):
+        await executor_over(store, seam).execute(
+            state,
+            step_id=STEP,
+            call=call_for(tool()),
+            timeout=bad,  # type: ignore[arg-type]  # the annotation is not the enforcement
+        )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.PENDING, "the step was never claimed"
+    assert step.attempts == 0
+    assert implementation.calls == []
+
+
 # --- §5: the executor's half of the idempotency window ------------------
+
+
+async def test_the_window_is_measured_from_the_first_attempt_not_the_claim() -> None:
+    """ADR-0029 §5 measures "since the first attempt of this call".
+
+    A slow ``commit_transition`` is not part of the window: counting it could
+    consume a whole one before ``invoke`` was ever reached, and then decline a
+    retry of a tool that had been called moments earlier. Here the claim alone
+    costs two hours against a one-hour window, and the retry must still happen.
+    """
+    clock = TickingClock(timedelta(minutes=1))
+    store = SlowClaimPlanStore(clock, timedelta(hours=2))
+    state = await a_claimed_execution(store)
+    seam = ScriptedInvoker(keyed(window=timedelta(hours=1)), [unavailable(), succeeded()])
+
+    await executor_over(store, seam, now=clock).execute(
+        state,
+        step_id=STEP,
+        call=call_for(keyed(window=timedelta(hours=1))),
+        timeout=PATIENT,
+    )
+
+    assert seam.calls == 2, "the window is measured from the attempt, not from before the claim"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.SUCCEEDED
 
 
 async def test_a_keyed_tool_is_retried_inside_its_window() -> None:

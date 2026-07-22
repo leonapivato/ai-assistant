@@ -91,6 +91,37 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _checked_timeout(timeout: object) -> timedelta:
+    """Refuse a deadline *before* the claim is committed (ADR-0029 §4, §8).
+
+    Not a second copy of the seam's guard, and the difference between them is
+    what each is protecting. ``invoke`` checks the value to protect the
+    **callable** — the annotation is not the enforcement, and
+    ``asyncio.timeout(None)`` is no deadline at all in the one method whose
+    contract is that there is always one. This checks it to protect the
+    **claim**.
+
+    The claim precedes the call, so a ``ValueError`` raised inside ``invoke``
+    would arrive *after* the step is durably ``RUNNING``, and stranding it there
+    has recovery record ``INDETERMINATE`` — "we cannot tell whether it acted" —
+    about a call whose coroutine that same guard guarantees was never created.
+    That is the stranding §8 spells out for ``ToolBindingError``, reached through
+    the other exception ``invoke`` is contracted to raise before the tool is
+    touched. Refusing here means no durable state is touched at all, which is
+    better than committing an honest ``FAILED`` after the fact.
+
+    Raises:
+        ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
+    """
+    if not isinstance(timeout, timedelta):
+        msg = f"timeout must be a timedelta, got {type(timeout).__name__}"
+        raise ValueError(msg)
+    if timeout <= timedelta(0):
+        msg = f"timeout must be strictly positive, got {timeout}"
+        raise ValueError(msg)
+    return timeout
+
+
 class StepExecutor:
     """Runs one claimed plan step through the invocation seam (ADR-0029 §8).
 
@@ -163,13 +194,19 @@ class StepExecutor:
                 — and the cancellation then propagates, because swallowing it
                 would break structured concurrency and shutdown.
             PlanningError: If a transition is rejected or the store is stale.
-            ValueError: If ``timeout`` is not a strictly positive ``timedelta``;
-                raised by the seam before the callable is created.
+            ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
+                Checked **before** the claim, so a deadline the seam would
+                refuse never leaves a step durably ``RUNNING``
+                (:func:`_checked_timeout`).
         """
+        _checked_timeout(timeout)
         trusted = await self._registry.get(call.request.tool.id)
-        started = self._reading()
 
         state = await self._claim(state, step_id, call)
+        # Read *after* the claim, because ADR-0029 §5 measures from "the first
+        # attempt of this call" — a slow `commit_transition` is not part of the
+        # window, and counting it could consume one before the tool was reached.
+        started = self._reading()
         while True:
             try:
                 result = await self._invoker.invoke(call, timeout=timeout)

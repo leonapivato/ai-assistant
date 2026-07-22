@@ -103,7 +103,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   duration — a step backwards, a jump past the window, a reading the clock guard
   refuses — is treated as *lapsed*. Declining to retry costs a recoverable error
   surfaced to the user; retrying outside a lapsed window costs a duplicated side
-  effect. A monotonic clock seam is the proper fix and is deferred (#171).
+  effect. It is measured from the first *attempt*, not from before the claim, so
+  a slow `commit_transition` cannot consume a window before the tool was
+  reached. A monotonic clock seam is the proper fix and is deferred (#171).
+  **`timeout` is checked before the claim**, not left to the seam: `invoke`
+  refuses a non-positive or non-`timedelta` deadline before the callable is
+  created, and letting that `ValueError` surface from inside would leave the
+  step durably `RUNNING` for a call whose coroutine that same guard guarantees
+  never existed.
 
 - **BREAKING** `core`/`tools`/`testing`: the `ToolInvoker` Protocol and the
   types it exchanges — `ToolCall`, `ToolResult`, `ToolOutcome`, `ToolFailure`,
