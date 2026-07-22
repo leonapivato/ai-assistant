@@ -211,6 +211,18 @@ that a silent, automatic action can still be correlated with its authorisation �
 and the second unanswerable for good. So `_record` returns what `get` gives back,
 and no branch sees the object it wrote.
 
+**The subject is compared on every branch too, not left to `ToolCall`.** That
+validator runs `authorises`, which compares the tool, the digest and the step —
+but a `ToolCall` exists only where the ruling was `ALLOW`, so a trail handing
+back a record with the right id and the wrong *action* would be caught for an
+approval and waved through for a refusal or a question. Both consequences are as
+durable as the approval's: a `DENY` skips the planned step with an
+`approval_ref` whose record describes something else, and a `CONFIRM` parks the
+step while handing out a confirmation about another tool, which §4's parked check
+then refuses for ever — a step nobody can answer. So `_record` compares the
+subject for every outcome, and `ToolCall`'s check becomes the type defending its
+own invariant rather than this stage's only guard.
+
 **And the branch reads the *recorded* ruling, not the policy's own.** The
 decision deep-copies the ruling (ADR-0021 §1) and the trail round-trips it, but
 the policy still holds the value it returned and the append is an `await` —
