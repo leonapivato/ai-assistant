@@ -97,11 +97,18 @@ We will replace `MemoryDecisionKind.MERGE` with **two** members, named for the
 relation between the incoming record and the target:
 
 - **`REINFORCE`** — the incoming record agrees with the target and strengthens
-  it. The applier folds: newest content wins, `evidence` is unioned, `confidence`
-  is the maximum. This is `_merge`, unchanged.
+  it. The applier folds the two, and the surviving record carries **both**
+  records' `evidence`. How content and confidence combine is the applier's, not
+  this ruling's (§5a).
 - **`SUPERSEDE`** — the incoming record overturns the belief the target holds.
-  The applier retires what the target held and takes nothing from it. This is
-  `_supersede`, unchanged.
+  The applier retires what the target held and carries **nothing** of it across.
+
+Each member's normative content is exactly the sentence above; §5a is the same
+two statements as conformance obligations, and neither says more than the other.
+`MemoryIngestor` implements them today with `_merge` (newest content wins,
+evidence unioned, confidence maximised) and `_supersede` (the incoming record at
+the target's id), both unchanged — but *that* fold rule is `memory`'s choice, as
+ADR-0028 §8 already holds, and this ADR does not promote it to contract.
 
 `MERGE` is **removed**, not retained with a narrowed meaning (§2 argues why).
 
@@ -275,8 +282,9 @@ ruling *means*, and they are deliberately asymmetric:
 > provenance, its `evidence`, its `confidence` — borrowing from the target only
 > the id it is written at.
 >
-> **`REINFORCE` retains the target's `evidence`.** Everything else about the
-> fold is unasserted.
+> **`REINFORCE` retains both records' `evidence`.** Everything else about the
+> fold — which content wins, how confidence combines, `last_updated` — is
+> unasserted.
 
 The asymmetry is not an oversight, and an earlier draft of this section got it
 wrong by stating only the evidence half of each. `SUPERSEDE` admits a *complete*
@@ -286,9 +294,18 @@ dropping its evidence would pass a differential-on-evidence check and still not
 have overturned anything. `REINFORCE` does not admit one: which content wins and
 how confidence combines is exactly the fold rule ADR-0028 §8 leaves to `memory`,
 and pinning it here would be the over-correction that stops the suite being a
-contract. Evidence retention is singled out because it is the one effect that
-distinguishes the two rulings, and it is ratified *here* rather than invented by
-the suite — the mistake §5 and issue #40 guard against.
+contract. Evidence is singled out because it is the one effect that distinguishes
+the two rulings — one keeps both records', the other keeps neither's but its
+own — and it is ratified *here* rather than invented by the suite, the mistake §5
+and issue #40 guard against.
+
+**§1's definitions say no more than this, deliberately.** A member whose stated
+meaning exceeds what interchangeable writers must honour is a `core` type that
+means one thing in `memory` and another wherever else it is applied, which is
+what ADR-0028 exists to prevent. So `REINFORCE`'s union-and-maximise is described
+in §1 as `MemoryIngestor`'s implementation and not as the ruling's guarantee: a
+writer that combines confidence differently conforms, and must, or ADR-0028 §8's
+exclusion is void.
 
 Everything else ADR-0028 §8 excluded stays excluded: content precedence,
 confidence maximisation, `last_updated`, the conflict threshold and limit, and
@@ -409,9 +426,15 @@ why three of the four move and one does not.
   - `core/types.py` — `MemoryDecisionKind`: drop `MERGE`, add `REINFORCE` and
     `SUPERSEDE`. `MemoryDecision`: rename `merge_into` to `target_id` and widen
     `_outcome_fields_are_consistent` to require it for both members and forbid it
-    for the other four. No change to `MemoryPolicy` or `MemoryWriter` in
-    `core/protocols.py` — the Protocol signatures are untouched; only the type
-    they carry changes.
+    for the other four.
+  - `core/protocols.py` — **signatures unchanged, docstrings not.** Two public
+    docstrings name the ruling that is going away: `MemoryPolicy.decide`'s
+    return description ("accept, reject, **merge**, defer to the user, or store
+    temporarily") and `MemoryWriter.ingest`'s `Raises:` clause ("or a `MERGE`
+    named a target that is not among the conflicts"). Both are the boundary
+    contract a consumer reads, so both are updated to name `REINFORCE` and
+    `SUPERSEDE` and the renamed target field. Leaving them would document a
+    ruling that is no longer representable.
   - `memory/policy.py` — rule 3 → `SUPERSEDE`, rule 5 → `REINFORCE`, and the
     class docstring's numbered rules re-worded to match (§4). No behavioural
     change; `tests/memory/test_policy.py` changes only the kind it asserts.
