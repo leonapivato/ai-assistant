@@ -49,14 +49,23 @@ _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.INDETERMINATE: frozenset(),
 }
 
-#: Which skip reasons are truthful from which status (ADR-0014 §4).
+#: Which skip reasons are truthful from which status (ADR-0014 §4, ADR-0041).
 #:
-#: A step that was never queued for approval cannot have been denied one, so
-#: allowing ``APPROVAL_DENIED`` from ``PENDING`` would manufacture a permission
-#: record for a decision nobody made — worse than no record at all.
+#: ``APPROVAL_DENIED`` is legal from both statuses a refusal can arrive in: a
+#: human answering a confirmation from ``AWAITING_APPROVAL``, and a policy
+#: refusing the step outright while it is still ``PENDING``, with nobody asked.
+#: What keeps either record truthful is not that a question was put but that the
+#: denial names the decision that refused it — so the ``approval_ref`` check in
+#: :meth:`PlanExecution._to_skipped` is unconditional, and it, not this table,
+#: is what stops a denial being manufactured for a decision nobody made.
 _LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
     StepStatus.PENDING: frozenset(
-        {SkipReason.UNMET_DEPENDENCY, SkipReason.NO_CAPABLE_TOOL, SkipReason.SUPERSEDED}
+        {
+            SkipReason.APPROVAL_DENIED,
+            SkipReason.UNMET_DEPENDENCY,
+            SkipReason.NO_CAPABLE_TOOL,
+            SkipReason.SUPERSEDED,
+        }
     ),
     StepStatus.AWAITING_APPROVAL: frozenset({SkipReason.APPROVAL_DENIED, SkipReason.SUPERSEDED}),
 }
@@ -295,7 +304,15 @@ class PlanExecution:
         )
 
     def _to_skipped(self, step: StepExecution, transition: StepTransition) -> StepExecution:
-        """Skip the step, checking the reason is one this status could produce."""
+        """Skip the step, checking the reason is one this status could produce.
+
+        A denial must carry an ``approval_ref`` whichever status it comes from
+        (ADR-0041 §2), so the check is deliberately not conditioned on the step
+        having passed through ``AWAITING_APPROVAL``. What is enforced here is
+        that the reference is *present* — that a denial always names something
+        to look up in ``permissions/``. Whether it resolves to a stored decision
+        is that subsystem's to guarantee and remains open as #107.
+        """
         allowed = _LEGAL_SKIP_REASONS.get(step.status, frozenset())
         if transition.skip_reason not in allowed:
             msg = (

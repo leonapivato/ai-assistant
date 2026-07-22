@@ -57,10 +57,18 @@ _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
     StepStatus.INDETERMINATE: frozenset(),
 }
 
-#: Which skip reasons are truthful from which status; mirrors ADR-0014 §4.
+#: Which skip reasons are truthful from which status; mirrors ADR-0014 §4 as
+#: widened by ADR-0041 — ``APPROVAL_DENIED`` is legal from ``PENDING`` too, for
+#: a policy that refuses with nobody asked, guarded by the unconditional
+#: ``approval_ref`` check below rather than by this table.
 _LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
     StepStatus.PENDING: frozenset(
-        {SkipReason.UNMET_DEPENDENCY, SkipReason.NO_CAPABLE_TOOL, SkipReason.SUPERSEDED}
+        {
+            SkipReason.APPROVAL_DENIED,
+            SkipReason.UNMET_DEPENDENCY,
+            SkipReason.NO_CAPABLE_TOOL,
+            SkipReason.SUPERSEDED,
+        }
     ),
     StepStatus.AWAITING_APPROVAL: frozenset({SkipReason.APPROVAL_DENIED, SkipReason.SUPERSEDED}),
 }

@@ -90,10 +90,44 @@ def test_a_conforming_clock_still_stamps_every_transition_in_utc() -> None:
     assert cancelled.updated_at.tzinfo is UTC
 
 
-def test_a_pending_step_cannot_be_skipped_as_approval_denied() -> None:
+def test_a_pending_step_is_denied_in_a_single_commit() -> None:
+    """A policy `DENY` disposes of the step in one version (ADR-0041).
+
+    The version count is the point of the widening, not a detail. The
+    two-commit path this makes unnecessary can be interrupted between the
+    commits, leaving the step durably `AWAITING_APPROVAL` for a decision that
+    was never a question and that neither `run` nor `resume` will touch
+    (#257). Only a caller that takes this edge escapes that.
+    """
     tracker = _tracker()
     state = tracker.start(_plan(1), execution_id="e1")
-    with pytest.raises(IllegalTransitionError, match="cannot be skipped"):
+    before = state.version
+
+    state = tracker.apply(
+        state,
+        StepTransition(
+            execution_id="e1",
+            step_id="s1",
+            to_status=StepStatus.SKIPPED,
+            expected_version=state.version,
+            skip_reason=SkipReason.APPROVAL_DENIED,
+            approval_ref="perm-1",
+        ),
+    )
+
+    assert state.version == before + 1
+    step = state.step("s1")
+    assert step is not None
+    assert step.status is StepStatus.SKIPPED
+    assert step.skip_reason is SkipReason.APPROVAL_DENIED
+    assert step.approval_ref == "perm-1"
+
+
+def test_a_pending_denial_without_an_approval_ref_is_refused() -> None:
+    """The reference, not the queueing, is what the rule protects (ADR-0041 §2)."""
+    tracker = _tracker()
+    state = tracker.start(_plan(1), execution_id="e1")
+    with pytest.raises(IllegalTransitionError, match="without an approval_ref"):
         tracker.apply(
             state,
             StepTransition(
@@ -102,9 +136,40 @@ def test_a_pending_step_cannot_be_skipped_as_approval_denied() -> None:
                 to_status=StepStatus.SKIPPED,
                 expected_version=state.version,
                 skip_reason=SkipReason.APPROVAL_DENIED,
-                approval_ref="perm-1",
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [SkipReason.UNMET_DEPENDENCY, SkipReason.NO_CAPABLE_TOOL, SkipReason.SUPERSEDED],
+)
+def test_the_other_pending_skip_reasons_are_unchanged(reason: SkipReason) -> None:
+    """ADR-0041 widens `PENDING` by one reason and leaves the rest alone.
+
+    Each still skips without an `approval_ref`, which the denial now requires:
+    the new rule is scoped to `APPROVAL_DENIED` and did not become a general
+    obligation on skipping.
+    """
+    tracker = _tracker()
+    state = tracker.start(_plan(1), execution_id="e1")
+
+    state = tracker.apply(
+        state,
+        StepTransition(
+            execution_id="e1",
+            step_id="s1",
+            to_status=StepStatus.SKIPPED,
+            expected_version=state.version,
+            skip_reason=reason,
+        ),
+    )
+
+    step = state.step("s1")
+    assert step is not None
+    assert step.status is StepStatus.SKIPPED
+    assert step.skip_reason is reason
+    assert step.approval_ref is None
 
 
 def test_an_awaiting_step_cannot_be_skipped_for_a_planning_reason() -> None:
