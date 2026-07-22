@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 
 _OWNER_ONLY = 0o600
 
+#: The widest value SQLite will bind to an INTEGER parameter. A Python int is
+#: unbounded, so ``recent`` clamps to this before binding ``LIMIT``.
+_MAX_SQLITE_INT = 2**63 - 1
+
 #: The epoch the sort key counts from. Any fixed instant would do; this one is
 #: conventional.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -273,8 +277,15 @@ class SqliteAuditTrail:
         if limit <= 0:
             msg = f"limit must be strictly positive, got {limit}"
             raise ValueError(msg)
+        # Clamped *upward* only. A Python int has no width, and binding one
+        # wider than SQLite's signed 64-bit parameter raises `OverflowError` —
+        # neither `ValueError` nor `AuditError`, so it would leave this layer's
+        # error boundary through a hole. Clamping serves what was asked for: a
+        # bound above any possible row count means "all of them", which is what
+        # the query then returns. This is not the `limit=-1` case, where
+        # clamping would have served something the caller did not ask for.
         async with self._lock:
-            rows = await asyncio.to_thread(self._ordered_sync, limit)
+            rows = await asyncio.to_thread(self._ordered_sync, min(limit, _MAX_SQLITE_INT))
         return [_decode(row) for row in rows]
 
     async def export(self) -> list[PermissionDecision]:
