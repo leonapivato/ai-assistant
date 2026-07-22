@@ -280,7 +280,7 @@ class StepRunner:
             ToolBindingError: From the executor, if the authorised call does not
                 survive its own revalidation.
         """
-        step = await self._planned(state, step_id)
+        step = await self._planned(await self._opened(state), step_id)
         candidates = await self._registry.find(step.capability)
         if not candidates:
             skipped = await self._skip(state, step, SkipReason.NO_CAPABLE_TOOL)
@@ -373,7 +373,8 @@ class StepRunner:
                 a mismatched answer cannot become a recorded decision.
             PlanningError: As :meth:`run`.
         """
-        step = await self._planned(state, step_id)
+        opened = await self._opened(state)
+        step = await self._planned(opened, step_id)
         confirmed = await self._recorded(confirmation_id)
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             msg = (
@@ -391,7 +392,7 @@ class StepRunner:
                 f"here would release step {step.id!r} on somebody else's answer"
             )
             raise PermissionDeniedError(msg)
-        self._check_parked(state, step, confirmed.tool.id, confirmation_id=confirmation_id)
+        self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmation_id)
 
         request = ActionRequest(tool=confirmed.tool, parameters=step.parameters, step_id=step.id)
         ruling = await self._policy.resolve(confirmed, approved=approved)
@@ -404,13 +405,13 @@ class StepRunner:
 
     def _check_parked(
         self,
-        state: ExecutionState,
+        opened: ExecutionState,
         step: PlanStep,
         tool_id: str,
         *,
         confirmation_id: str,
     ) -> None:
-        """Require ``state`` to hold *this* step, parked, awaiting *this* tool.
+        """Require the *stored* execution to hold this step, parked, awaiting this tool.
 
         **The transition graph is not enough, and assuming it was is the hole
         this closes.** ``PlanStore`` opens an execution per ``start_execution``
@@ -430,22 +431,29 @@ class StepRunner:
         declaration — the case where the step is in the right status and still
         the wrong subject.
 
-        The check is against the caller's ``state`` because that is the snapshot
-        the compare-and-swap is computed against: a ``state`` that disagrees with
-        the store is rejected by the transition itself, so the two guards cover
-        the two different lies.
+        **The check reads the stored execution, never the caller's ``state``, and
+        the difference is not defensive symmetry.** Deferring to the transition
+        graph — "a snapshot that disagrees with the store is rejected by the
+        commit" — is *false for exactly this move*: if the stored step is
+        ``PENDING``, the executor's claim is ``PENDING → RUNNING``, which
+        ADR-0014 §4 permits, so a ``state`` forged to read ``AWAITING_APPROVAL``
+        would pass this check and then be claimed at its own real version. The
+        graph rejects a stale version, not an inconsistent snapshot, and only the
+        second is what this guard is for. The caller's ``version`` is still the
+        caller's, because that *is* the compare-and-swap's job.
 
         **What remains is narrow and named** (ADR-0037 §4, #253): two executions
-        of one plan, *both* parked on the same step, are mutually substitutable.
-        The trail's single-resolution index still means one confirmation
-        authorises one resolution, so the residue is which of two identical
-        parked executions proceeds, not whether an unapproved one does.
+        of one plan, *both* genuinely parked on the same step, are mutually
+        substitutable. The trail's single-resolution index still means one
+        confirmation authorises one resolution, so the residue is which of two
+        identical parked executions proceeds, not whether an unapproved one does.
 
         Raises:
-            PermissionDeniedError: If the step is absent from ``state``, is not
-                ``AWAITING_APPROVAL``, or is bound to a different tool.
+            PermissionDeniedError: If the step is absent from the stored
+                execution, is not ``AWAITING_APPROVAL``, or is bound to a
+                different tool.
         """
-        parked = state.step(step.id)
+        parked = opened.step(step.id)
         if parked is None or parked.status is not StepStatus.AWAITING_APPROVAL:
             found = "is not in this execution" if parked is None else f"is {parked.status}"
             msg = (
@@ -562,7 +570,35 @@ class StepRunner:
 
     # --- the plan --------------------------------------------------------
 
-    async def _planned(self, state: ExecutionState, step_id: str) -> PlanStep:
+    async def _opened(self, state: ExecutionState) -> ExecutionState:
+        """Load the execution ``state`` names, as the store actually holds it.
+
+        **Everything this stage decides about *what has already happened* reads
+        this, not the argument** — which plan the step comes from
+        (:meth:`_planned`) and whether a step is genuinely parked
+        (:meth:`_check_parked`). The caller's ``state`` supplies exactly one
+        thing, its ``version``, because that is the compare-and-swap token and
+        the store is what adjudicates it.
+
+        Splitting it that way is what makes the two guards honest. A caller's
+        ``ExecutionState`` is a value it can build: fields it asserts about the
+        past are checkable against the store and are checked, and the one field
+        that is a claim about *concurrency* is left to the mechanism designed to
+        settle it.
+
+        Raises:
+            PlanningError: If the store holds no execution with that id.
+        """
+        opened = await self._plans.get_execution(state.id)
+        if opened is None:
+            msg = (
+                f"the store holds no execution {state.id!r}, so there is nothing that says "
+                "which plan this step belongs to or where it stands"
+            )
+            raise PlanningError(msg)
+        return opened
+
+    async def _planned(self, opened: ExecutionState, step_id: str) -> PlanStep:
         """Read the step from the plan this execution belongs to (ADR-0037 §2).
 
         The execution names its plan and the plan owns the steps, so this is the
@@ -570,31 +606,19 @@ class StepRunner:
         caller's word for it. Detached on the way out (:func:`_detached`), since
         ``PlanStore`` contracts no snapshot.
 
-        **Which plan comes from the *stored* execution, not from the argument.**
-        Reading ``state.plan_id`` would have taken the association on the
-        caller's word while every write took ``state.id`` and ``state.version``:
-        a hand-built ``ExecutionState`` carrying execution A's id and version
-        with execution B's ``plan_id`` would have had the gate rule on B's step
-        and the claim, the invocation and the durable record land on A's. Nothing
-        else notices — the store commits by execution id and step id, and the
-        trail records what it was handed. The version stays the caller's, because
-        that is what the compare-and-swap is *for*: a stale snapshot is the
-        store's to reject, an inconsistent one is not.
+        ``opened`` is the *stored* execution (:meth:`_opened`), so the plan is
+        the one this execution really belongs to: taking ``state.plan_id`` would
+        have accepted the association on the caller's word while every write took
+        ``state.id``, letting a hand-built state carrying execution A's id with
+        execution B's ``plan_id`` have the gate rule on B's step and the claim,
+        the invocation and the durable record land on A's.
 
         Raises:
-            PlanningError: If the execution is unknown, its plan is missing, or
-                the plan holds no such step. Missing is not "nothing to do": an
-                execution whose plan has gone is a store that cannot say what was
-                meant to happen, and running anything under it would be
-                inventing the intent.
+            PlanningError: If the plan is missing, or holds no such step. Missing
+                is not "nothing to do": an execution whose plan has gone is a
+                store that cannot say what was meant to happen, and running
+                anything under it would be inventing the intent.
         """
-        opened = await self._plans.get_execution(state.id)
-        if opened is None:
-            msg = (
-                f"the store holds no execution {state.id!r}, so there is nothing that says "
-                "which plan this step belongs to"
-            )
-            raise PlanningError(msg)
         plan = await self._plans.get_plan(opened.plan_id)
         if plan is None:
             msg = (

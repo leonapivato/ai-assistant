@@ -680,17 +680,58 @@ async def test_a_confirmation_for_another_tool_does_not_release_a_parked_step() 
     step = plan_step()
     state = await an_execution(harness.plans, step)
     parked = await harness.runner.run(state, STEP, timeout=PATIENT)
-    # Rebind what the parked step is waiting on, as a registry rebuilt under a
-    # rebound id would (ADR-0016 §5, issue #54).
-    rebound = parked.state.model_copy(
-        update={
-            "steps": (parked.state.steps[0].model_copy(update={"bound_tool": "somebody-else"}),)
-        }
+    # A real, recorded confirmation about the same step and a *different*
+    # declaration — the shape a rebound id produces (ADR-0016 §5, issue #54).
+    about_another_tool = PermissionDecision.from_request(
+        ActionRequest(
+            tool=confirmable("somebody-else"),
+            parameters=step.parameters,
+            step_id=STEP,
+        ),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="a different declaration"),
+        id="d-elsewhere",
+        decided_at=AT,
     )
+    await harness.trail.record(about_another_tool)
 
     with pytest.raises(PermissionDeniedError, match="awaits approval for"):
         await harness.runner.resume(
-            rebound,
+            parked.state,
+            STEP,
+            confirmation_id="d-elsewhere",
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    assert harness.policy.resolutions == []
+    assert harness.invoker.invocations == []
+
+
+async def test_a_forged_parked_state_does_not_release_a_pending_step() -> None:
+    """The parked check reads the store, because the graph cannot cover it.
+
+    A stored ``PENDING`` step is claimable as ``PENDING → RUNNING`` (ADR-0014
+    §4), so a ``state`` forged to read ``AWAITING_APPROVAL`` would be accepted by
+    the transition it is heading for. Only the store settles it.
+    """
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    first = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(first, STEP, timeout=PATIENT)
+    second = await harness.plans.start_execution("p-1")
+    forged = second.model_copy(
+        update={
+            "steps": (
+                second.steps[0].model_copy(
+                    update={"status": StepStatus.AWAITING_APPROVAL, "bound_tool": "smtp"}
+                ),
+            )
+        }
+    )
+
+    with pytest.raises(PermissionDeniedError, match="not awaiting approval"):
+        await harness.runner.resume(
+            forged,
             STEP,
             confirmation_id=str(parked.decision_id),
             approved=True,
@@ -699,6 +740,10 @@ async def test_a_confirmation_for_another_tool_does_not_release_a_parked_step() 
 
     assert harness.policy.resolutions == []
     assert harness.invoker.invocations == []
+    reloaded = await harness.plans.get_execution(second.id)
+    assert reloaded is not None
+    assert reloaded.step(STEP) is not None
+    assert reloaded.step(STEP).status is StepStatus.PENDING  # type: ignore[union-attr]  # asserted above
 
 
 async def test_a_step_rewritten_mid_ruling_does_not_move_its_neighbour() -> None:
