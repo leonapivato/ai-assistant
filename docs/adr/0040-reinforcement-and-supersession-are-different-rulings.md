@@ -267,20 +267,42 @@ fabricated warrant. The distinction would be declarable on the decision and
 unenforceable at the boundary that acts on it: the same defect this ADR removes,
 relocated from the policy side to the applier side.
 
-So the `MemoryWriter` conformance suite gains **one** obligation, stated
-differentially over the two rulings rather than as a fold rule:
+So the `MemoryWriter` conformance suite gains obligations that pin what each
+ruling *means*, and they are deliberately asymmetric:
 
-> Given the same target and the same proposal, `SUPERSEDE` must not leave
-> evidence on the surviving record that came only from the target, and
-> `REINFORCE` must retain it.
+> **`SUPERSEDE` carries nothing of the target onto the surviving record.** After
+> a `SUPERSEDE`, the live record is the proposed record — its content, its
+> provenance, its `evidence`, its `confidence` — borrowing from the target only
+> the id it is written at.
+>
+> **`REINFORCE` retains the target's `evidence`.** Everything else about the
+> fold is unasserted.
 
-That is the minimum that makes the two members mean anything cross-boundary, and
-it is ratified *here* — it is not the suite inventing an obligation, which is the
-mistake §5 and issue #40 guard against. Everything ADR-0028 §8 excluded stays
-excluded: content precedence, confidence maximisation, `last_updated`, the
-conflict threshold and limit, and the tuning check remain `memory`'s own and
-unasserted. A writer may fold however it likes, as long as the two rulings are
-not the same fold.
+The asymmetry is not an oversight, and an earlier draft of this section got it
+wrong by stating only the evidence half of each. `SUPERSEDE` admits a *complete*
+specification because "take nothing across" is complete — there is no fold to
+leave open, so a writer that kept the target's content or confidence while
+dropping its evidence would pass a differential-on-evidence check and still not
+have overturned anything. `REINFORCE` does not admit one: which content wins and
+how confidence combines is exactly the fold rule ADR-0028 §8 leaves to `memory`,
+and pinning it here would be the over-correction that stops the suite being a
+contract. Evidence retention is singled out because it is the one effect that
+distinguishes the two rulings, and it is ratified *here* rather than invented by
+the suite — the mistake §5 and issue #40 guard against.
+
+Everything else ADR-0028 §8 excluded stays excluded: content precedence,
+confidence maximisation, `last_updated`, the conflict threshold and limit, and
+the tuning check remain `memory`'s own and unasserted.
+
+**The id clause is the one mechanism statement here, and it is temporary.** "The
+surviving record is written at the target's id" is ADR-0038 §1's choice, not
+something `SUPERSEDE`'s *name* implies, and §6 is explicit that issue #112
+replaces it with "close the target's window and write a new record". It is
+asserted anyway, because it is true of every writer that can exist today and an
+unasserted id is how a `SUPERSEDE` that silently wrote nowhere would pass. It is
+marked in the suite as the obligation #112 rewrites — see the correction to §6
+below, which an earlier draft of this ADR got wrong by claiming the whole seam
+survived #112 untouched.
 
 `FakeMemoryWriter` therefore has to grow a real supersession path to pass its own
 suite, which is the divergence §Consequences already requires it to close.
@@ -312,10 +334,21 @@ inside a much larger change.
 
 **Landing this first makes #112 smaller and safer.** Because §1 names the member
 for the relation and not the mechanism, `SUPERSEDE` is already the ruling #112
-wants: bi-temporality changes how the applier *executes* it and touches neither
-the member, nor `DefaultMemoryPolicy`, nor the conformance suite. #112 then
-decides record fields and store read semantics, which is what it is actually
-about. The reverse order costs more: #112 would ratify a decision-kind change as
+wants: bi-temporality changes how the applier *executes* it, and leaves the
+member, `MemoryDecision`, `DefaultMemoryPolicy` and the `MemoryPolicy`
+conformance suite untouched. #112 then decides record fields and store read
+semantics, which is what it is actually about.
+
+**One seam does move, and this ADR names it rather than claiming otherwise.**
+§5a's `MemoryWriter` obligation that a `SUPERSEDE` is written at the target's id
+and returns it is the mechanism #112 replaces: under a validity window the
+applier closes the target's window and writes a *new* record, so the suite's id
+clause becomes "returns the id of the live record" and `MemoryIngestResult`
+carries a different id than it does today. That belongs to #112 and is the right
+shape for it — it is an obligation about what the applier does, which is #112's
+whole subject, and it is the *only* obligation in either suite that #112 has to
+revisit. The claim being made is that this ADR leaves #112 one clause to rewrite,
+not none. The reverse order costs more: #112 would ratify a decision-kind change as
 a side effect of a records-and-reads change, with the migration of every existing
 `MERGE` site (§2) buried inside it.
 
@@ -400,11 +433,15 @@ why three of the four move and one does not.
   - `tests/memory/memory_policy_contract.py` — `_COMMITTING` and the three
     target-coherence assertions widen from `MERGE` to both members, and nothing
     else (§5).
-  - `tests/memory/memory_writer_contract.py` — the same widening for what it
-    asserts about a target-carrying ruling (folds into the named target, keeps
-    and returns the target's id, raises on an absent target), **plus** §5a's one
-    new differential obligation, and the module docstring's obligation list
-    updated to name it.
+  - `tests/memory/memory_writer_contract.py` — split what it asserts of `MERGE`
+    across the two rulings rather than widening it uniformly. Both keep "raises
+    `MemoryStoreError` on a target absent from the conflicts" and, per §5a,
+    "written at the target's id, which is returned" — the latter marked in the
+    docstring as the clause issue #112 rewrites. `REINFORCE` keeps the fold and
+    gains the evidence-retention obligation; `SUPERSEDE` gets §5a's complete
+    one — the live record equals the proposed record but for its id. The module
+    docstring's obligation list is rewritten to match, since it currently states
+    the `MERGE` obligations verbatim.
   - `docs/adr/0028-*.md` — §8's conformance list amended to record that
     exclusion of the fold's rule now carries §5a's exception. ADR-0028's other
     rulings are unchanged.
@@ -476,8 +513,11 @@ why three of the four move and one does not.
   writer could then route both rulings through one union-fold and conform, which
   makes the distinction declarable but unenforceable — this ADR's own defect,
   moved from the policy side to the applier side. The opposite over-correction —
-  pinning the whole fold rule — is rejected with it, for ADR-0028 §8's original
-  reason; §5a takes neither and asserts only the difference.
+  pinning both rulings' fold rules — is rejected with it, for ADR-0028 §8's
+  original reason. §5a takes neither: it specifies `SUPERSEDE` completely, since
+  "carries nothing across" is a complete specification and a partial one lets a
+  writer keep the target's content and still pass, and of `REINFORCE` it pins
+  only the evidence retention that distinguishes the two.
 - **Two target fields, `merge_into` and `supersedes`.** Rejected in §1a: one
   concept, two nullable fields, a cross-field validator to keep exactly one
   populated, and a disjunction at every read site.
