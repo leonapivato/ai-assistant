@@ -110,7 +110,10 @@ is useful: `ToolFailure._message_is_present` (ADR-0029 §3) fires inside the
 tool's own frame, at the raise site, where the author can see it. A tool that
 raises with a blank message gets a `ValidationError` before the exception
 exists, which escapes as an ordinary exception and becomes `INTERNAL` — the
-fail-closed direction, at no cost.
+fail-closed direction, at no cost. That is the *ordinary* path and not a
+guarantee: `model_construct` bypasses every validator while still satisfying
+`isinstance`, which is why §6 revalidates at the seam rather than trusting that
+the raise site did.
 
 **It is an ordinary `Exception` by inheritance and specifically not a
 `BaseException`.** ADR-0029 §3 makes `BaseException` propagate unchanged, so a
@@ -405,30 +408,65 @@ bound it, and none is a claim that it is closed:
   producer of a tool-authored message arrives with its own ADR, which is the
   right place to bind the review obligation.
 
-**`_message_is_present` needs no re-run at the seam.** It fired at construction,
-inside the tool's frame, and the value is frozen. §6 covers the case where the
-seam is handed something that is not a `ToolFailure` at all.
+**"Unmodified" is a claim about the seam's own hand, not about validation.** §6
+revalidates the carrier through a `model_dump()`/`model_validate()` round-trip
+before anything reads it, which re-runs `_message_is_present` and is a no-op on
+any message that was validated at the raise site. What §5 forbids is the seam
+*authoring* — a message it edited is one it partly wrote.
 
 **Issue #197 is untouched.** Whether an identifier may appear in a log-bound
 message is ADR-0031 §5(b)'s recorded non-decision, and nothing here ratifies or
 forbids it.
 
-### 6. A malformed carrier is an ordinary escaping exception
+### 6. The carrier is revalidated, and a malformed one is an ordinary escaping exception
 
 ADR-0029 §4 established that "the annotation is not the enforcement", and made
 `invoke` check `timeout`'s runtime value rather than trust its type. The same
-applies here: an exception's attributes are ordinary attributes, and an
-integration is not required to have been type-checked.
+applies here, and more sharply: an exception's attributes are ordinary
+attributes, an integration is not required to have been type-checked, and
+**`isinstance` is not evidence that a pydantic model was validated.**
+`ToolFailure.model_construct(kind="rate_limited", message=" ")` bypasses every
+validator, satisfies `isinstance`, and carries a `str` where a `ToolFailureKind`
+belongs — so a downstream `result.failure.kind.retryable` is an `AttributeError`
+rather than a retry decision, and the blank message §1 relies on
+`_message_is_present` to refuse arrives in a result. `model_validate` on the
+instance does not help: pydantic's default `revalidate_instances="never"`
+returns it unchanged.
 
-> If the caught `ClassifiedToolError` does not carry a `ToolFailure` instance in
-> `failure`, or a `bool` in `effect_may_have_committed`, it is treated as an
-> ordinary escaping exception and becomes `INTERNAL` (ADR-0029 §3), with the
-> seam's own message.
+So the rule is a revalidation, in ADR-0018 §4's own idiom — the one
+`InMemoryToolRegistry` already uses for a definition, `model_dump()` then
+`model_validate()`, which is what forces the validators to run:
 
-Cheap, total, and fail-closed. The alternative — letting a `None` or a string
-through into `ToolResult` construction — produces a `ValidationError` from
-inside `invoke`'s own frame, which is the raw-error-out-of-a-classifying-method
-failure ADR-0029 §2 orders its three checks to avoid.
+> **`invoke` revalidates the carrier before reading it.** The failure it
+> translates is `ToolFailure.model_validate(exc.failure.model_dump())` — a
+> validated, detached value — and `effect_may_have_committed` must be a `bool`.
+> If `failure` is absent, is not a `ToolFailure`, or does not survive that
+> round-trip; or if `effect_may_have_committed` is absent or is not a `bool`;
+> then the carrier is treated as an ordinary escaping exception and becomes
+> `INTERNAL` (ADR-0029 §3), with the seam's own message.
+>
+> Nothing derived from the `ValidationError` that refusal produces enters a
+> message or a log, under §5's enumeration — it is raised *about* the payload
+> and would render it.
+
+**Absent, not merely wrong**, because `del exc.failure` on a constructed carrier
+is as reachable as assigning `None` to it, and an implementation that reads the
+attribute directly raises a raw `AttributeError` out of `invoke` where the rule
+requires a result. The reads are by sentinel, so the total path is total.
+
+This is ADR-0029 §2's own ordering rule applied one layer down: revalidate and
+detach *first*, then read, because "a mutation landed after construction cannot
+survive into execution". Letting an unvalidated value through into `ToolResult`
+construction instead produces a `ValidationError` from inside `invoke`'s own
+frame — the raw-error-out-of-a-classifying-method failure ADR-0029 §2 orders its
+three checks to avoid — and letting it through *silently*, which
+`model_construct` makes possible, is worse: a broken value in a durable
+`StepExecution` rather than a loud rejection.
+
+**A valid failure is unchanged by the round-trip**, so the pass-through §5
+requires is exactly a pass-through: `_message_is_present` strips and returns,
+and `ToolFailure` is frozen with `extra="forbid"`. The cost is one dump and one
+validate on a failure path.
 
 ### 7. What this does not change
 
@@ -529,9 +567,13 @@ rather than asserted:
   member is accepted as raised. §4's precedence gains a third rank below the two
   it has — a pending cancellation, then this seam's expired deadline, then the
   tool's classification — and §4's cancellation and expiry branches are
-  themselves unchanged: neither reads the carrier, and both discard it. A caught
-  carrier not holding a ToolFailure and a bool is an ordinary escaping exception
-  and becomes INTERNAL. ToolImplementation's signature does not move and its
+  themselves unchanged: neither reads the carrier, and both discard it. The
+  carrier is revalidated before it is read, in ADR-0018 §4's model_dump() then
+  model_validate() idiom, because isinstance is not evidence a pydantic model
+  was validated — model_construct bypasses every validator — and a carrier that
+  is absent, is not a ToolFailure, does not survive the round-trip, or does not
+  hold a bool is an ordinary escaping exception and becomes INTERNAL.
+  ToolImplementation's signature does not move and its
   shape stays tools/-internal. The new core surface is nine names, not eight.`
 
 - **The note ends by enumerating the sentences it supersedes**, in the same
@@ -684,12 +726,23 @@ what keeps the fake honest without importing `tools/`.
   `INTERNAL` path. This is the regression test for §5's enumeration, in the
   shape ADR-0031 §8 gave §5(b)'s parameters half.
 
-- **A blank message never reaches a result.** A tool raising with a message that
-  renders as nothing fails `ToolFailure`'s own validator in its own frame and
-  comes back `INTERNAL`.
+- **A blank message never reaches a result, by both routes.** A tool raising
+  with a message that renders as nothing fails `ToolFailure`'s own validator in
+  its own frame and comes back `INTERNAL`; and a tool that evades that validator
+  with `ToolFailure.model_construct(kind=..., message=" ")` comes back
+  `INTERNAL` too, from §6's revalidation. The second is the case that fails
+  against an `isinstance` check, which is what makes it worth writing: the first
+  passes against an implementation that trusts the raise site.
 
-- **A malformed carrier** (§6): the attribute set to `None`, or to a string,
-  comes back `INTERNAL` rather than as a `ValidationError` escaping `invoke`.
+- **A malformed carrier** (§6), across every shape the attribute can take:
+  `failure` set to `None`, to a string, to a `ToolFailure`-shaped object of
+  another class, and **deleted outright**; `effect_may_have_committed` set to a
+  non-`bool` and deleted outright; and a `model_construct`ed `ToolFailure`
+  carrying a raw `str` where the `ToolFailureKind` belongs. Each comes back
+  `INTERNAL`, and specifically not as an `AttributeError` or a `ValidationError`
+  escaping `invoke`. The deletion cases are the ones a natural implementation
+  fails — reading `exc.failure` directly raises where the rule requires a result
+  — and a suite testing only `None` certifies it.
 
 - **The plain case still holds.** A tool raising an ordinary `RuntimeError` is
   still `INTERNAL` and a `BaseException` still propagates — ADR-0029 §10's
@@ -714,9 +767,15 @@ what keeps the fake honest without importing `tools/`.
 - **Failure classification is split between two parties, and the split is
   stated rather than emergent.** The tool owns `kind` and one fact; the seam
   owns `outcome`, the deadline and the cancellation. A reader of a `ToolResult`
-  can therefore say which half of it a tool could have lied about — the kind and
-  the message, never the outcome — which is a stronger property than either
-  rejected option in #192 offers.
+  can therefore say what a tool could have lied about and in which direction:
+  `kind` and `message` freely, and `outcome` **only toward `INDETERMINATE`**,
+  since `effect_may_have_committed` is untrusted input to a ruling rather than
+  the ruling. So `FAILED` is a floor no tool can push below, `SUCCEEDED` is
+  unreachable from a raise, and an `INDETERMINATE` from this path is a tool's
+  claim the seam permitted — not evidence the seam established, which is what
+  ADR-0029 §4's deadline expiry gives. That is a weaker guarantee than "never
+  the outcome" and a stronger one than either rejected option in #192 offers,
+  both of which let the tool name the field outright.
 - **A tool-authored string now reaches a log and a durable
   `StepExecution.error`.** ADR-0029 §3's Tier 2 obligation on integration
   authors becomes load-bearing, and no type enforces it. This is a real widening
