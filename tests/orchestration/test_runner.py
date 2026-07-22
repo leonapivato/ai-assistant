@@ -518,12 +518,59 @@ async def test_a_trail_answering_about_another_action_is_refused() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    with pytest.raises(AuditError, match="rules on a different action"):
+    with pytest.raises(AuditError, match="is not the decision that was recorded"):
         await harness.runner.run(state, STEP, timeout=PATIENT)
 
     assert harness.invoker.invocations == []
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
+
+
+async def test_a_denial_read_back_as_an_approval_runs_nothing() -> None:
+    """A flipped outcome is a reversed policy, and the subject would not show it."""
+    request = ActionRequest(tool=tool(), parameters={"to": "someone@example.com"}, step_id=STEP)
+    flipped = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="the trail says otherwise"),
+        id=FIRST_DECISION,
+        decided_at=AT,
+    )
+    harness = Harness(
+        tools=(tool(),),
+        policy=FakeActionPolicy(deny_at=RiskLevel.LOW),
+        trail=SubstitutingTrail(flipped),
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    with pytest.raises(AuditError, match="is not the decision that was recorded"):
+        await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert harness.invoker.invocations == []
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
+
+
+async def test_an_approval_read_back_as_a_denial_skips_nothing() -> None:
+    """The inverse writes a durable refusal that never happened."""
+    request = ActionRequest(tool=tool(), parameters={"to": "someone@example.com"}, step_id=STEP)
+    flipped = PermissionDecision.from_request(
+        request,
+        PermissionRuling(outcome=PermissionOutcome.DENY, reason="the trail says otherwise"),
+        id=FIRST_DECISION,
+        decided_at=AT,
+    )
+    harness = Harness(tools=(tool(),), trail=SubstitutingTrail(flipped))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+
+    with pytest.raises(AuditError, match="is not the decision that was recorded"):
+        await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert harness.invoker.invocations == []
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.PENDING
+    assert stored.skip_reason is None
 
 
 # --- DENY (ADR-0037 §5) --------------------------------------------------
@@ -1015,7 +1062,7 @@ async def test_a_denial_recorded_about_another_action_is_refused() -> None:
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    with pytest.raises(AuditError, match="rules on a different action"):
+    with pytest.raises(AuditError, match="is not the decision that was recorded"):
         await harness.runner.run(state, STEP, timeout=PATIENT)
 
     stored = await stored_step(harness.plans, state)
@@ -1035,7 +1082,7 @@ async def test_a_confirmation_recorded_about_another_action_is_refused() -> None
     step = plan_step()
     state = await an_execution(harness.plans, step)
 
-    with pytest.raises(AuditError, match="rules on a different action"):
+    with pytest.raises(AuditError, match="is not the decision that was recorded"):
         await harness.runner.run(state, STEP, timeout=PATIENT)
 
     stored = await stored_step(harness.plans, state)

@@ -541,24 +541,38 @@ class StepRunner:
         trusting `record` on the others would have made the guarantee depend on
         which way the policy ruled.
 
-        **The subject is checked here, not left to ``ToolCall``.** That validator
-        runs ``authorises``, which compares the tool, the digest and the step —
-        but a ``ToolCall`` only exists on the ``ALLOW`` path, so a trail handing
-        back a record with the right id and the wrong *action* would be caught
-        for an approval and waved through for a refusal or a question. The
-        consequences are as durable as the approval's: a ``DENY`` would skip the
-        planned step with an ``approval_ref`` whose record describes something
-        else, and a ``CONFIRM`` would park the step while returning a
-        confirmation about another tool, which :meth:`_check_parked` then refuses
-        for ever — a step that can never be answered. So every outcome gets the
-        same comparison, and ``ToolCall``'s is a second line rather than the
-        first.
+        **What comes back must *equal* what was written — the whole record, not
+        its subject.** Comparing the tool, the digest and the step was the
+        obvious check and it is the wrong one: it leaves ``ruling`` unexamined,
+        so a trail returning a same-subject record with the outcome flipped would
+        have this stage act on an answer the policy never gave. A ``DENY`` read
+        back as an ``ALLOW`` runs a side-effecting tool the user's policy
+        refused; an ``ALLOW`` read back as a ``DENY`` writes a durable refusal
+        that never happened. Equality is also the simpler statement of the
+        property this whole path exists for — *the trail is holding what was
+        decided* — and it is total over the fields, so a field added to
+        ``PermissionDecision`` later is covered without anyone remembering to
+        extend a list.
+
+        It costs nothing in correctness for a conforming trail: ADR-0021 §4
+        requires a decision to survive a ``model_dump(mode="json")`` round trip
+        and the shared suite asserts it, which is exactly the claim that the
+        stored form reloads equal.
+
+        Leaving it to ``ToolCall`` would not do either. That validator runs
+        ``authorises``, which compares the subject and requires an ``ALLOW`` — but
+        a ``ToolCall`` only exists on the ``ALLOW`` path, so every check it makes
+        is one a refusal or a question never reaches, and the consequences there
+        are just as durable: a ``DENY`` skipping the planned step with an
+        ``approval_ref`` whose record describes something else, or a ``CONFIRM``
+        parking the step while handing back a confirmation about another tool,
+        which :meth:`_check_parked` then refuses for ever.
 
         Raises:
             AuditError: If the trail refused the append — a duplicate id, or a
                 ``resolves`` pointer that failed its invariant — or if it does
                 not hand back the record under that id (:meth:`_recorded`), or
-                hands back one describing a different action.
+                hands back one that differs from what was written.
             PlanningError: If the injected clock's reading is not conforming.
         """
         decision = PermissionDecision.from_request(
@@ -570,14 +584,10 @@ class StepRunner:
         )
         await self._trail.record(decision)
         recorded = await self._recorded(decision.id)
-        if (
-            recorded.tool != decision.tool
-            or recorded.parameters_digest != decision.parameters_digest
-            or recorded.step_id != decision.step_id
-        ):
+        if recorded != decision:
             msg = (
-                f"the trail's copy of decision {recorded.id!r} rules on a different action than "
-                "the one just decided, so it is not a record of what happened"
+                f"the trail's copy of decision {recorded.id!r} is not the decision that was "
+                "recorded, so it is not a record of what happened"
             )
             raise AuditError(msg)
         return recorded
