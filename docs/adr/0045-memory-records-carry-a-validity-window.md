@@ -226,9 +226,19 @@ Applying `SUPERSEDE(target_id=T)` for a proposed record `P`:
    applier raises `MemoryStoreError`; because the whole `SUPERSEDE` is atomic
    (§8), that abort rolls back the window-close too, so a pathological id factory
    fails loudly with the **target left live and unchanged** rather than hanging or
-   half-applying. Which factory mints the id is `memory`'s own semantics (like the
-   fold rule, ADR-0028 §8); the *obligation* the contract pins is only that the id
-   is absent-and-fresh, or the write fails (§5).
+   half-applying. The injected factory is **guarded at its
+   output**, exactly as ADR-0026's `checked_clock` guards the injected clock: its
+   result is validated to be a non-empty `str` and its raising is caught, both
+   re-raised as `MemoryStoreError` **before** the atomic write. This is
+   load-bearing for the same reason ADR-0026 §2 gives for the clock — the applier
+   installs the id via `model_copy(update=...)`, which skips validators, so a
+   `None` or non-`str` reading would otherwise reach the store unchecked and the
+   two writers would diverge (the in-memory fake storing under a bad key while
+   SQLite rejects it, the exact "consumer test passes on state the production
+   writer refuses" trap `FakeMemoryWriter` names). Which factory mints the id is
+   `memory`'s own semantics (like the fold rule, ADR-0028 §8); the *obligation*
+   the contract pins is only that the id is absent-and-fresh, or the write fails
+   as `MemoryStoreError` with no state change (§5).
 3. **Return the new record's id.** `MemoryIngestResult.record_id` is the id of the
    **live** record, which is now `P`'s new id, not `T`'s — "MemoryIngestResult
    carries a different id than it does today" (ADR-0040 §6).
@@ -267,9 +277,12 @@ record: (a) the proposal's own `id` already names a **live, non-target** record;
 (b) the **minted** id collides with an existing record on the first attempt —
 the applier mints again (insert-if-absent, not upsert) and succeeds; (c) an
 **always-colliding** factory — the applier raises `MemoryStoreError` after its
-bounded retries, and by §8's atomicity the target is left **live and unchanged**.
-The absent-id obligation is what forbids the collisions; the bound is what forbids
-the hang.
+bounded retries, and by §8's atomicity the target is left **live and unchanged**;
+and (d) a factory that **raises** or returns a **non-`str`/empty** id — the
+applier raises `MemoryStoreError` (not the factory's own exception) with no state
+change, so the two writers cannot diverge on a malformed factory. The absent-id
+obligation is what forbids the collisions; the bound forbids the hang; the output
+guard forbids the divergence.
 
 The differential ADR-0040 §5a ratified — **`SUPERSEDE` carries nothing of the
 target onto the surviving record** — is unchanged and still complete; only "at
