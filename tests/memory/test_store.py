@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 from memory_store_contract import MemoryStoreContract
@@ -19,6 +20,9 @@ from ai_assistant.core.types import (
     SemanticMemory,
 )
 from ai_assistant.memory import InMemoryMemoryStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -238,3 +242,7 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store(self) -> MemoryStore:
         return InMemoryMemoryStore(now=_fixed_now)
+
+    @pytest.fixture
+    def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:
+        return lambda now: InMemoryMemoryStore(now=now)

@@ -304,7 +304,13 @@ class Provenance(BaseModel):
         default_factory=list,
         description="References (e.g. episode ids) supporting this record.",
     )
-    last_updated: UtcInstant = Field(description="When this belief was last revised (tz-aware).")
+    last_updated: UtcInstant = Field(
+        description=(
+            "Transaction time: when the system last *revised* this belief (tz-aware). "
+            "This is the clock of the store changing its mind, not the clock of when the "
+            "belief holds — the latter is ``MemoryBase.validity`` (ADR-0045 §3)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _user_asserted_is_certain(self) -> Provenance:
@@ -313,6 +319,74 @@ class Provenance(BaseModel):
             msg = "USER_ASSERTED provenance must have confidence 1.0"
             raise ValueError(msg)
         return self
+
+
+class Validity(BaseModel):
+    """The interval during which a record is the system's live belief (ADR-0045 §2).
+
+    ``valid_from``/``valid_until`` bound a **half-open** window
+    ``[valid_from, valid_until)``: a record is *live at* an instant when
+    ``valid_from <= instant`` (or ``valid_from`` is unset) **and**
+    ``instant < valid_until`` (or ``valid_until`` is unset). ``None`` at either end
+    means unbounded, so the default — both ends open — is a record that is live
+    forever until something retires it by closing ``valid_until``.
+
+    This is the *valid-time* axis ("is this the live belief now?"), orthogonal to
+    ``expires_at`` retention: a window-closed record is off the read path but still
+    retained and returned by ``export``, whereas an expired one is gone from
+    everything (ADR-0045 §6). The window is set *operationally* (by supersession),
+    not by the producer of the belief, which is why it sits on
+    :class:`MemoryBase` beside ``expires_at`` rather than on :class:`Provenance`.
+    """
+
+    valid_from: UtcInstant | None = Field(
+        default=None,
+        description="Inclusive start of the window; None means unbounded in the past.",
+    )
+    valid_until: UtcInstant | None = Field(
+        default=None,
+        description="Exclusive end of the window; None means unbounded in the future.",
+    )
+
+    @model_validator(mode="after")
+    def _window_is_ordered(self) -> Validity:
+        """Reject an inverted or empty window: when both ends are set, end > start.
+
+        A ``valid_until`` at or before ``valid_from`` describes a window that is
+        never live — never what a producer means — so making it unrepresentable
+        here is better than storing a record that is silently invisible forever.
+        """
+        if (
+            self.valid_from is not None
+            and self.valid_until is not None
+            and self.valid_until <= self.valid_from
+        ):
+            msg = "valid_until must be after valid_from"
+            raise ValueError(msg)
+        return self
+
+    def live_at(self, now: datetime) -> bool:
+        """Whether a record carrying this window is the live belief at ``now``.
+
+        The half-open predicate of ADR-0045 §2, defined once here so every
+        ``MemoryStore`` read path enforces *both* ends identically instead of each
+        re-deriving it — the "one rule, one place" discipline ``core`` keeps to
+        stop a predicate diverging between implementations (ADR-0016 §2). It is a
+        pure function of the window and the instant handed in (no clock, no
+        policy, the same answer for every caller), so it is a semantic intrinsic
+        to the type rather than subsystem logic.
+
+        Args:
+            now: The instant to test the window against; the caller reads its own
+                (guarded) clock and passes the reading.
+
+        Returns:
+            ``True`` iff ``valid_from <= now < valid_until``, treating an unset
+            end as unbounded.
+        """
+        if self.valid_from is not None and now < self.valid_from:
+            return False
+        return self.valid_until is None or now < self.valid_until
 
 
 class MemoryBase(BaseModel):
@@ -330,6 +404,15 @@ class MemoryBase(BaseModel):
         description=(
             "Retention deadline after which the record is forgotten (ADR-0004); "
             "timezone-aware, stored as UTC."
+        ),
+    )
+    validity: Validity = Field(
+        default_factory=Validity,
+        description=(
+            "The valid-time window during which this record is the live belief "
+            "(ADR-0045 §2). Defaults to fully open — live forever until retired. "
+            "Read-time filters hide a record not live at ``now`` from ``get``/``search`` "
+            "while ``export`` still returns it; distinct from ``expires_at`` retention."
         ),
     )
 
@@ -487,7 +570,11 @@ class MemoryIngestResult(BaseModel):
     decision: MemoryDecision
     record_id: str | None = Field(
         default=None,
-        description="Id of the record written or merged, or None if nothing was stored.",
+        description=(
+            "Id of the record left live by the write, or None if nothing was stored. "
+            "For a REINFORCE it is the reinforced record's id; for a SUPERSEDE, the id "
+            "of the record now holding the live belief (ADR-0045 §4)."
+        ),
     )
 
 

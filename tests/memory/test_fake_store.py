@@ -17,6 +17,8 @@ from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory
 from ai_assistant.testing import FakeMemoryStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import MemoryStore
 
 
@@ -41,6 +43,10 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store(self) -> MemoryStore:
         return FakeMemoryStore(now=_fixed_now)
+
+    @pytest.fixture
+    def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:
+        return lambda now: FakeMemoryStore(now=now)
 
 
 # Behaviour specific to FakeMemoryStore, beyond the shared contract: the contract

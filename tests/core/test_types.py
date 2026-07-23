@@ -25,9 +25,52 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
     TimeOfDay,
+    Validity,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+_LATER = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+def test_validity_defaults_to_a_fully_open_window() -> None:
+    window = Validity()
+    assert window.valid_from is None
+    assert window.valid_until is None
+    # An open window is live at any instant.
+    assert window.live_at(_WHEN) is True
+
+
+def test_validity_accepts_an_ordered_interval() -> None:
+    window = Validity(valid_from=_WHEN, valid_until=_LATER)
+    assert window.valid_from == _WHEN
+    assert window.valid_until == _LATER
+
+
+def test_validity_rejects_an_inverted_window() -> None:
+    with pytest.raises(ValidationError, match="valid_until must be after valid_from"):
+        Validity(valid_from=_LATER, valid_until=_WHEN)
+
+
+def test_validity_rejects_an_empty_window_with_equal_endpoints() -> None:
+    with pytest.raises(ValidationError, match="valid_until must be after valid_from"):
+        Validity(valid_from=_WHEN, valid_until=_WHEN)
+
+
+@pytest.mark.parametrize(
+    ("window", "instant", "expected"),
+    [
+        # Half-open [from, until): live iff valid_from <= now < valid_until.
+        (Validity(valid_until=_LATER), _WHEN, True),  # before the close: live
+        (Validity(valid_until=_LATER), _LATER, False),  # at valid_until: retired
+        (Validity(valid_from=_LATER), _WHEN, False),  # before it opens: not live
+        (Validity(valid_from=_WHEN), _WHEN, True),  # at valid_from: live
+        (Validity(valid_from=_WHEN, valid_until=_LATER), _WHEN, True),  # inside
+    ],
+)
+def test_validity_live_at_enforces_both_ends_half_open(
+    window: Validity, instant: datetime, *, expected: bool
+) -> None:
+    assert window.live_at(instant) is expected
 
 
 def test_user_asserted_provenance_must_be_certain() -> None:

@@ -1,7 +1,19 @@
 # 7. Memory data rights and retention
 
-- Status: Accepted
+- Status: Accepted, §3 amended by ADR-0045 (export returns window-closed records)
 - Date: 2026-07-17
+- Amended: 2026-07-23 by ADR-0045 — §3's "live (non-expired) snapshot" is
+  widened to a **retained** snapshot. Once a superseded belief is retired by
+  closing its validity window rather than overwritten (ADR-0045), it is data the
+  store still holds, so a data-rights `export` must include it. `export` therefore
+  returns every record whose `expires_at` has not passed, **whether its validity
+  window is open or closed** — only *expired* records are excluded, because
+  retention (a privacy deadline) still wins over history. The one clause this
+  narrows is §3's "an export never resurfaces a memory that `get`/`search` would
+  hide": that now holds only for the *expiry* axis, not the validity window,
+  which `get`/`search` hide but `export` deliberately keeps (ADR-0045 §6). The
+  §3 text below is unchanged (ADR-0001 append-only); every other ruling here —
+  read-time retention, `clear`'s tier scope, the deferrals — stands.
 
 ## Context
 

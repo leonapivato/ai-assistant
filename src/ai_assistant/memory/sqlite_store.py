@@ -98,7 +98,7 @@ class SqliteMemoryStore:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
-                "kind TEXT NOT NULL, data TEXT NOT NULL, expires_at REAL)"
+                "kind TEXT NOT NULL, data TEXT NOT NULL, expires_at REAL, valid_until REAL)"
             )
             self._migrate_records(conn)
             self._verify_or_init_meta(conn)
@@ -118,35 +118,59 @@ class SqliteMemoryStore:
         return conn
 
     def _migrate_records(self, conn: sqlite3.Connection) -> None:
-        """Add and backfill the ``expires_at`` column for a pre-ADR-0007 table.
+        """Add and backfill the ``expires_at`` and ``valid_until`` columns.
 
-        Records written before this slice carry their retention deadline only
-        inside the JSON blob. Adding the column alone would leave it ``NULL`` and
-        resurrect already-expired memories, so we backfill it from each record's
-        stored ``expires_at`` (transactionally, within the setup commit).
+        Records written before a column existed carry the value only inside their
+        JSON blob. Adding a column alone would leave it ``NULL``: for
+        ``expires_at`` that resurrects already-expired memories (pre-ADR-0007
+        tables); for ``valid_until`` ``NULL`` correctly *means* "open" so no row
+        is wrongly hidden, but we still backfill it so an already-retired belief
+        (a closed window persisted in JSON) keeps its column filter after the
+        upgrade. Both backfills run transactionally within the setup commit, from
+        each record's stored value (ADR-0045 §9). The two columns are migrated
+        independently, so a table that has one but not the other is handled.
         """
         columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
-        if "expires_at" in columns:
-            return
-        conn.execute("ALTER TABLE records ADD COLUMN expires_at REAL")
-        for rowid, data in conn.execute("SELECT rowid, data FROM records").fetchall():
-            expires = self._expires_epoch_from_json(data)
-            if expires is not None:
-                conn.execute("UPDATE records SET expires_at = ? WHERE rowid = ?", (expires, rowid))
+        if "expires_at" not in columns:
+            conn.execute("ALTER TABLE records ADD COLUMN expires_at REAL")
+            for rowid, data in conn.execute("SELECT rowid, data FROM records").fetchall():
+                expires = self._epoch_from_json(data, "expires_at")
+                if expires is not None:
+                    conn.execute(
+                        "UPDATE records SET expires_at = ? WHERE rowid = ?", (expires, rowid)
+                    )
+        if "valid_until" not in columns:
+            conn.execute("ALTER TABLE records ADD COLUMN valid_until REAL")
+            for rowid, data in conn.execute("SELECT rowid, data FROM records").fetchall():
+                valid_until = self._epoch_from_json(data, "valid_until", nested="validity")
+                if valid_until is not None:
+                    conn.execute(
+                        "UPDATE records SET valid_until = ? WHERE rowid = ?", (valid_until, rowid)
+                    )
 
-    def _expires_epoch_from_json(self, data: str) -> float | None:
-        """Read a record's retention deadline from its JSON, as an epoch or None."""
+    def _epoch_from_json(self, data: str, key: str, *, nested: str | None = None) -> float | None:
+        """Read a stored ISO instant from a record's JSON, as a UTC epoch or None.
+
+        Reads ``data[key]`` at the top level, or ``data[nested][key]`` when
+        ``nested`` is given (the validity window lives under ``"validity"``). A
+        missing container, a missing key, or a ``null`` value all read as
+        ``None`` — an absent window end is *open*, exactly as an absent
+        ``expires_at`` is *no deadline*.
+        """
         try:
-            raw = json.loads(data).get("expires_at")
+            payload = json.loads(data)
+            if nested is not None:
+                payload = payload.get(nested) or {}
+            raw = payload.get(key)
             if raw is None:
                 return None
-            deadline = datetime.fromisoformat(raw)
+            instant = datetime.fromisoformat(raw)
         except (ValueError, TypeError, AttributeError) as exc:
-            msg = f"failed to read a retention deadline during migration: {exc}"
+            msg = f"failed to read {key!r} from a stored record: {exc}"
             raise MemoryStoreError(msg) from exc
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=UTC)
-        return deadline.timestamp()
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=UTC)
+        return instant.timestamp()
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
         want = {
@@ -215,19 +239,26 @@ class SqliteMemoryStore:
         blob = sqlite_vec.serialize_float32(list(vector))
         data = record.model_dump_json()
         expires = record.expires_at.timestamp() if record.expires_at is not None else None
+        valid_until = (
+            record.validity.valid_until.timestamp()
+            if record.validity.valid_until is not None
+            else None
+        )
         try:
             row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
             if row is None:
                 cursor = conn.execute(
-                    "INSERT INTO records(id, kind, data, expires_at) VALUES (?, ?, ?, ?)",
-                    (record.id, record.kind, data, expires),
+                    "INSERT INTO records(id, kind, data, expires_at, valid_until) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (record.id, record.kind, data, expires, valid_until),
                 )
                 rowid = cursor.lastrowid
             else:
                 rowid = row[0]
                 conn.execute(
-                    "UPDATE records SET kind = ?, data = ?, expires_at = ? WHERE rowid = ?",
-                    (record.kind, data, expires, rowid),
+                    "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ? "
+                    "WHERE rowid = ?",
+                    (record.kind, data, expires, valid_until, rowid),
                 )
                 conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
             conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
@@ -241,13 +272,12 @@ class SqliteMemoryStore:
             msg = f"failed to store memory {record.id!r}: {exc}"
             raise MemoryStoreError(msg) from exc
 
-    def _now_epoch(self) -> float:
-        """The guarded clock's reading as a POSIX timestamp, in UTC.
+    def _now(self) -> datetime:
+        """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
 
-        The guard is what makes this comparable with the UTC ``expires_at``
-        stored on each record: an indeterminate reading would otherwise be read
-        as *host-local* by ``timestamp()`` and silently shift every expiry
-        decision by the host offset.
+        Read once per operation and reused for every comparison in it, so the
+        record-column pre-filter (epoch) and the ``valid_from`` post-filter
+        (datetime) judge every record against one consistent instant.
 
         Raises:
             MemoryStoreError: If the injected clock's reading is not a conforming
@@ -255,9 +285,24 @@ class SqliteMemoryStore:
                 (ADR-0026 §4).
         """
         try:
-            return self._clock().timestamp()
+            return self._clock()
         except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
+
+    def _now_epoch(self) -> float:
+        """The guarded clock's reading as a POSIX timestamp, in UTC.
+
+        The guard is what makes this comparable with the UTC ``expires_at`` and
+        ``valid_until`` stored on each record: an indeterminate reading would
+        otherwise be read as *host-local* by ``timestamp()`` and silently shift
+        every lifecycle decision by the host offset.
+
+        Raises:
+            MemoryStoreError: If the injected clock's reading is not a conforming
+                one — naive, indeterminate, or outside the localizable range
+                (ADR-0026 §4).
+        """
+        return self._now().timestamp()
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:
@@ -269,15 +314,33 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg) from exc
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent or expired."""
+        """Return the record with ``record_id``, or ``None`` if not readable.
+
+        ``None`` when the record is absent, expired, or not live at now. The hot
+        ends — ``expires_at`` and the window's ``valid_until`` — are filtered in
+        SQL; the rarer ``valid_from`` (which no in-scope writer sets to the
+        future) is checked on the decoded record, so both ends of the window are
+        enforced (ADR-0045 §6, §9).
+
+        The clock is read **inside** the lock, and that one reading drives both
+        the SQL filter and ``live_at``: a reading taken before acquiring the lock
+        could go stale while this call waits behind another and then return a
+        record whose retention or validity deadline passed while it blocked.
+        """
         async with self._lock:
-            data = await asyncio.to_thread(self._get_sync, record_id, self._now_epoch())
-        return None if data is None else self._decode(data)
+            now = self._now()
+            data = await asyncio.to_thread(self._get_sync, record_id, now.timestamp())
+        if data is None:
+            return None
+        record = self._decode(data)
+        return record if record.validity.live_at(now) else None
 
     def _get_sync(self, record_id: str, now: float) -> str | None:
         row = self._conn.execute(
-            "SELECT data FROM records WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
-            (record_id, now),
+            "SELECT data FROM records WHERE id = ? "
+            "AND (expires_at IS NULL OR expires_at > ?) "
+            "AND (valid_until IS NULL OR valid_until > ?)",
+            (record_id, now, now),
         ).fetchone()
         return None if row is None else row[0]
 
@@ -299,7 +362,8 @@ class SqliteMemoryStore:
         Returns:
             Matching records, most relevant first, each carrying a ``score``
             that is the cosine similarity to the query, in ``[0, 1]``. Expired
-            records are never returned.
+            records, and records not live at now (a closed or not-yet-open
+            validity window, both ends — ADR-0045 §6), are never returned.
 
         Raises:
             MemoryStoreError: If the embedder fails or returns a wrong-sized
@@ -322,20 +386,28 @@ class SqliteMemoryStore:
         now: float,
     ) -> list[tuple[str, float]]:
         wanted = {str(kind) for kind in kinds} if kinds is not None else None
-        # Over-fetch to leave room for kind- and expiry-filtered rows.
+        # Over-fetch to leave room for kind-, expiry-, and window-filtered rows.
         fetch_k = limit * _RESULT_OVERFETCH
         blob = sqlite_vec.serialize_float32(list(vector))
         rows = self._conn.execute(
-            "SELECT r.data, r.kind, r.expires_at, v.distance FROM vec_records v "
+            "SELECT r.data, r.kind, r.expires_at, r.valid_until, v.distance FROM vec_records v "
             "JOIN records r ON r.rowid = v.rowid "
             "WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
             (blob, fetch_k),
         ).fetchall()
         results: list[tuple[str, float]] = []
-        for data, kind, expires_at, distance in rows:
+        for data, kind, expires_at, valid_until, distance in rows:
             if wanted is not None and kind not in wanted:
                 continue
             if expires_at is not None and expires_at <= now:
+                continue
+            # Window, both ends: the hot ``valid_until`` from its column, and the
+            # rare ``valid_from`` from the JSON blob (ADR-0045 §9). Applied in this
+            # same post-KNN pass so a filtered row still counts against over-fetch.
+            if valid_until is not None and valid_until <= now:
+                continue
+            valid_from = self._epoch_from_json(data, "valid_from", nested="validity")
+            if valid_from is not None and valid_from > now:
                 continue
             # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
             results.append((data, max(0.0, 1.0 - distance)))
@@ -385,7 +457,11 @@ class SqliteMemoryStore:
         return int(count)
 
     async def export(self) -> list[MemoryRecord]:
-        """Return a snapshot of all live (non-expired) records.
+        """Return a snapshot of every retained (non-expired) record.
+
+        Includes records whose validity window is closed — a superseded belief is
+        data the store still holds, so a data-rights export keeps it (ADR-0045 §6,
+        amending ADR-0007 §3); only *expired* records are excluded.
 
         Raises:
             MemoryStoreError: If the store cannot be read or a stored record is
