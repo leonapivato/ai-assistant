@@ -21,12 +21,21 @@
   [ADR-0038](0038-a-user-assertion-supersedes-a-conflicting-inference.md) §6's
   four deferred compromises, and to issue #112.
 - **Amends on ratification:** [ADR-0007](0007-memory-data-rights.md) §3 (the
-  meaning of `export`), and [ADR-0040](0040-reinforcement-and-supersession-are-different-rulings.md)
-  §5a and §5b (the two `MemoryWriter` clauses). [ADR-0028](0028-the-memory-write-path-is-a-contract.md)
-  §8's conformance list is touched a second time, for the same two clauses.
-  None of these edits is made by this change — ADR-0001 keeps ADRs append-only,
-  so each travels with the implementation PR it describes; their exact form is in
-  §Consequences.
+  meaning of `export`); [ADR-0040](0040-reinforcement-and-supersession-are-different-rulings.md)
+  §5a and §5b (the two `MemoryWriter` conformance clauses) **and §3** (the
+  `_refuse_unsafe_fold` `EXTERNAL` arm it pinned — its removal is the ingestor-side
+  half of the §5b change, which §5b itself named as "the second clause a validity
+  window revisits"); and [ADR-0038](0038-a-user-assertion-supersedes-a-conflicting-inference.md)
+  §2a (the policy-side `EXTERNAL` exclusion, which ADR-0038 §6 anticipated a
+  window would lift — "would let §2a supersede an `EXTERNAL` record without
+  inheriting its key"). [ADR-0028](0028-the-memory-write-path-is-a-contract.md)
+  §8's conformance list is touched a second time, for the two `MemoryWriter`
+  clauses. ADR-0040 §4 (`DefaultMemoryPolicy` migrated with no behavioural change)
+  is **not** amended — it describes ADR-0040's own no-op migration and stands as
+  history; the policy's `EXTERNAL` behaviour change is the ADR-0038 §2a amendment,
+  not a §4 one. None of these edits is made by this change — ADR-0001 keeps ADRs
+  append-only, so each travels with the implementation PR it describes; their
+  exact form is in §Consequences.
 
 ## Context
 
@@ -270,7 +279,7 @@ becomes:
 > The target remains fetchable by `export` and, being window-closed, is absent
 > from `get`/`search`.
 
-The conformance suite adds three cases, all driving the injected id factory
+The conformance suite adds four cases, all driving the injected id factory
 deterministically and asserting the `SUPERSEDE` overwrites **no** existing record
 and returns a live-record id equal to neither the target nor any collided-with
 record: (a) the proposal's own `id` already names a **live, non-target** record;
@@ -299,7 +308,10 @@ the supersedable sources (§7 details the resolution). Concretely, the
 `_SUPERSEDABLE` allow-list — held in both `memory/policy.py` and `memory/ingest.py` —
 widens from `{OBSERVED, INFERRED}` to `{OBSERVED, INFERRED, EXTERNAL}`, and the
 `EXTERNAL` arm of `_refuse_unsafe_fold` and the suite obligation for it are
-removed together.
+removed together. These touch two further ratified decisions — ADR-0040 §3 (the
+ingestor refusal it pinned) and ADR-0038 §2a (the policy exclusion) — both of
+which their own authors named a validity window as revisiting; their append-only
+amendment forms are in the header and §Consequences.
 
 **Clause 1 stays.** `_refuse_unsafe_fold`'s *first* refusal — **no fold of any
 kind onto a `USER_ASSERTED` target** — is **not** rewritten by this ADR, and this
@@ -534,9 +546,20 @@ existing `expires_at` pattern covers it with no new machinery.
 - **`MemoryWriter` amendment (ADR-0040 §5a, §5b; ADR-0028 §8).** On ratification,
   ADR-0040 §5a's id clause is annotated rewritten (target retained + closed
   window, new live id returned) and §5b's `EXTERNAL` clause annotated removed;
-  ADR-0028 §8's conformance list records both. ADR-0040's members, `MemoryDecision`,
-  `DefaultMemoryPolicy` and the `MemoryPolicy` suite are confirmed untouched — if
-  any of them had to move, ADR-0040 §1's naming rule was wrong; it was not.
+  ADR-0028 §8's conformance list records both. ADR-0040's members, `MemoryDecision`
+  and the `MemoryPolicy` suite are confirmed untouched — if any of them had to
+  move, ADR-0040 §1's naming rule was wrong; it was not.
+- **`EXTERNAL`-refusal amendment (ADR-0040 §3; ADR-0038 §2a).** On ratification,
+  ADR-0040 §3's "refusals do not move" is annotated to narrow to **clause 1** (no
+  fold onto a `USER_ASSERTED` target, which stays put): the `EXTERNAL` arm of
+  `_refuse_unsafe_fold` is removed, which §5b already named as the clause a
+  validity window revisits, so §3 and §5b move together and consistently. ADR-0038
+  §2a's exclusion of `EXTERNAL` from the supersedable sources is annotated lifted —
+  `_SUPERSEDABLE` widens to `{OBSERVED, INFERRED, EXTERNAL}` in both `policy.py`
+  and `ingest.py` — because supersession no longer inherits the target's id (§4),
+  which is the *sole* ground ADR-0038 §2a gave for the exclusion and which ADR-0038
+  §6 foresaw a window removing. ADR-0038 §2a's `USER_ASSERTED`-target refusal
+  (clause 1) and every other ADR-0038 ruling stand unchanged.
 - **Issue #112's open questions close**: OQ2 was already ADR-0040's; OQ3 (export)
   §6; OQ4 (migration) §9; OQ5 (placement) §2. OQ1 (as-of) is deferred (§10).
 - **#254's destruction bug closes** with the implementation (the correction is no
