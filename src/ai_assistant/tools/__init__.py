@@ -23,7 +23,22 @@ things, and it is not.
 
 from __future__ import annotations
 
+from ai_assistant.tools.builtin import (
+    CURRENT_TIME,
+    RECALL_MEMORY,
+    CurrentTime,
+    RecallMemory,
+    build_default_registry,
+)
 from ai_assistant.tools.invocation import ToolImplementation
 from ai_assistant.tools.registry import InMemoryToolRegistry
 
-__all__ = ["InMemoryToolRegistry", "ToolImplementation"]
+__all__ = [
+    "CURRENT_TIME",
+    "RECALL_MEMORY",
+    "CurrentTime",
+    "InMemoryToolRegistry",
+    "RecallMemory",
+    "ToolImplementation",
+    "build_default_registry",
+]
