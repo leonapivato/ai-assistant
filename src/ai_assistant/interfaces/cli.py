@@ -253,9 +253,18 @@ def _render_error(exc: Exception) -> None:
 
     Accepts any ``Exception`` — an :class:`AssistantError` from a stage, or the
     ``ExceptionGroup`` :meth:`Engine.aclose` raises when an owned resource fails to
-    close — and shows its message rather than a stack trace.
+    close — and shows the actual cause. For a group that means the **contained**
+    messages (recursively), not just the group's summary, so an operator sees
+    *which* resource failed, not merely that one did.
     """
-    console.print(f"[red]Error:[/] {_safe(str(exc))}")
+    console.print(f"[red]Error:[/] {_safe('; '.join(_leaf_messages(exc)))}")
+
+
+def _leaf_messages(exc: BaseException) -> list[str]:
+    """The messages of ``exc``, flattening a (possibly nested) exception group."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [message for sub in exc.exceptions for message in _leaf_messages(sub)]
+    return [str(exc)]
 
 
 if __name__ == "__main__":

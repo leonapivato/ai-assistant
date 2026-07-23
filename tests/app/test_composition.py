@@ -15,6 +15,7 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import AssistantError
 from ai_assistant.orchestration import Engine
 
 if TYPE_CHECKING:
@@ -88,3 +89,14 @@ async def test_build_engine_closes_opened_stores_when_a_later_step_fails(
 
     assert _SpyStore.instances, "both stores should have been opened before the failure"
     assert all(store.closed for store in _SpyStore.instances)  # every opened store was closed
+
+
+async def test_build_engine_converts_a_data_dir_failure_to_an_assistant_error(
+    tmp_path: Path,
+) -> None:
+    """A directory that cannot be created is an AssistantError, not a raw OSError."""
+    # A file occupies the path where a directory is needed, so mkdir fails.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    with pytest.raises(AssistantError, match="data directory"):
+        build_engine(Settings(), data_dir=blocker / "sub")

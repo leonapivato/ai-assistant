@@ -302,11 +302,14 @@ async def _failing_closer() -> None:
 
 
 async def test_close_reports_a_failing_closer_as_nonzero(output: StringIO) -> None:
-    """``aclose`` raises an ExceptionGroup on a closer failure; it is surfaced, exit 1."""
+    """``aclose`` raises an ExceptionGroup on a closer failure; the cause is shown, exit 1."""
     engine = _engine(closers=(_failing_closer,))
     code = await cli._close(engine)
     assert code == cli._EXIT_ERROR
-    assert "Error" in output.getvalue()
+    rendered = output.getvalue()
+    assert "Error" in rendered
+    # The contained cause is surfaced, not just the ExceptionGroup summary.
+    assert "the store would not close" in rendered
 
 
 async def test_a_shutdown_failure_after_a_good_turn_still_exits_nonzero(
