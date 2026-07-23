@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         MemoryKind,
         MemoryRecord,
         MemoryUpdateProposal,
+        MemoryWrite,
         Message,
         PermissionDecision,
         PermissionRuling,
@@ -127,6 +128,12 @@ class MemoryStore(Protocol):
     (a window-closed record is off the read path but **retained** and still
     returned by ``export``). A record can be retired-but-retained or
     still-live-but-expired; each axis is judged on its own terms.
+
+    Writes are one-at-a-time through :meth:`add`, or many-at-once and atomically
+    through :meth:`write_atomic` — a batch that commits in full or not at all
+    (ADR-0046). ``write_atomic`` is the primitive supersession rides: closing a
+    belief's window and inserting its replacement are two writes that must land
+    together, never leaving the first without the second (ADR-0045 §8).
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -135,6 +142,30 @@ class MemoryStore(Protocol):
         Adding a record whose ``id`` already exists overwrites the previous one
         (an upsert), so ``id`` is the caller's idempotency key. All backends share
         this behaviour; the shared conformance suite enforces it.
+        """
+        ...
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Apply every write in one atomic unit — all commit, or none do.
+
+        The batch is ordered and all-or-nothing. On any element's failure — an
+        ``INSERT_IF_ABSENT`` whose id already names a stored record, or any
+        backend error — nothing in the batch is committed: no record it named is
+        added, overwritten, or removed, so no read reflects the batch. ``get``,
+        ``search`` and ``export`` return what they would have had ``write_atomic``
+        not run, under their normal time-based filtering (a record that expires or
+        whose window closes mid-call is hidden by that filter, ADR-0007/ADR-0045
+        §6, not by any batch effect). On success every record is persisted.
+
+        Returns the ids written, in the order of ``writes``. An empty batch is a
+        no-op and returns an empty sequence.
+
+        Raises:
+            MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id already
+                names a stored record. Nothing is written; the caller may re-mint
+                and retry.
+            MemoryStoreError: any other backend failure, or a malformed batch (two
+                writes to the same id, ADR-0046 §3). Nothing is written.
         """
         ...
 

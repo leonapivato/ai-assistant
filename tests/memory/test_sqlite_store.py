@@ -7,19 +7,25 @@ retrieval is reproducible and offline.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+import sqlite_vec
 from memory_store_contract import MemoryStoreContract
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
     MemoryKind,
     MemoryRecord,
     MemorySource,
+    MemoryWrite,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -30,7 +36,6 @@ from ai_assistant.models import HashingEmbedder
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
-    from pathlib import Path
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding
@@ -243,6 +248,78 @@ async def test_rollback_on_mid_transaction_failure(
     got = await store.get("1")
     assert got is not None
     assert got.content == "original content"  # UPDATE/DELETE were rolled back
+
+
+async def test_write_atomic_rolls_back_a_mid_batch_backend_failure(
+    make_store: Callable[..., SqliteMemoryStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fault-injection the shared suite cannot drive (ADR-0046 §Consequences): make
+    # the *second* element's vector write fail mid-transaction and assert the first
+    # element's row AND its vector row did not persist — proving a real rollback,
+    # not per-element commits — and that the raised error is MemoryStoreError with
+    # the sqlite3 exception retained as its cause, never a leaked provider error
+    # (ADR-0028 §5). Without this an accidental per-element commit passes every
+    # logical case while violating §4's all-or-nothing.
+    store = make_store()
+    real = sqlite_vec.serialize_float32
+    calls = {"n": 0}
+
+    def flaky(vector: object) -> bytes:
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the second element's vector: a malformed blob
+            return b"\x00"  # a bad float32 blob makes the vec_records INSERT raise
+        return cast("bytes", real(vector))
+
+    monkeypatch.setattr("ai_assistant.memory.sqlite_store.sqlite_vec.serialize_float32", flaky)
+    with pytest.raises(MemoryStoreError) as exc_info:
+        await store.write_atomic(
+            [
+                MemoryWrite(record=_semantic("a", "first element")),
+                MemoryWrite(record=_semantic("b", "second element")),
+            ]
+        )
+    monkeypatch.undo()
+
+    assert not isinstance(exc_info.value, MemoryStoreConflictError)  # a fault, not a conflict
+    assert isinstance(exc_info.value.__cause__, sqlite3.Error)  # sqlite3 cause retained
+    assert await store.get("a") is None  # the first element rolled back...
+    assert await store.get("b") is None
+    # ...its record row and its vector row both, not just the payload.
+    assert store._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+    assert store._conn.execute("SELECT COUNT(*) FROM vec_records").fetchone()[0] == 0
+
+
+async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Path) -> None:
+    # ADR-0046 §4's durability obligation, which the in-process fault test above
+    # cannot reach: a process killed mid-batch (after the first transactional write,
+    # before COMMIT) must recover, on reopen, to *neither* write committed — never
+    # the window-close alone, the ADR-0045 §8 regression this primitive prevents.
+    db = tmp_path / "crash.db"
+    child = Path(__file__).parent / "_atomic_crash_child.py"
+
+    # Run the child off the event loop: subprocess.run blocks, and the crash test
+    # only needs the child to have finished before it reopens the database.
+    result = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, str(child), str(db)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # 42 is the child's mid-batch injection point; 99 would mean the batch ran to
+    # completion (no crash), 0/other a clean exit — either would void the test.
+    assert result.returncode == 42, f"child did not crash mid-batch: {result.stderr}"
+
+    reopened = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    try:
+        target = await reopened.get("T")
+        assert target is not None  # T not left window-closed: the UPSERT rolled back
+        assert target.validity.valid_until is None  # still the open, pre-batch record
+        assert await reopened.get("P") is None  # the correction never landed
+    finally:
+        reopened.close()
 
 
 async def test_embedder_exception_is_wrapped_as_store_error(

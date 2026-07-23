@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
 
 if TYPE_CHECKING:
@@ -31,6 +32,8 @@ from ai_assistant.core.types import (
     MemoryKind,
     MemoryRecord,
     MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -337,3 +340,182 @@ class MemoryStoreContract:
         results = await store.search("coffee")
 
         assert {r.id for r in results} == {"c0", "c1", "c2"}
+
+    # --- Atomic multi-write obligations (ADR-0046) ----------------------------
+
+    async def test_write_atomic_commits_all_and_returns_ids_in_order(
+        self, store: MemoryStore
+    ) -> None:
+        # An all-UPSERT batch persists every record; the returned ids are exactly
+        # the writes' ids, in order (not sorted, not the store's own order).
+        writes = [MemoryWrite(record=_semantic(f"w{i}", "coffee note")) for i in (2, 0, 1)]
+
+        returned = await store.write_atomic(writes)
+
+        assert list(returned) == ["w2", "w0", "w1"]
+        for wid in ("w0", "w1", "w2"):
+            assert await store.get(wid) is not None
+
+    async def test_write_atomic_empty_batch_is_a_noop(self, store: MemoryStore) -> None:
+        assert list(await store.write_atomic([])) == []
+
+    async def test_write_atomic_upsert_overwrites_a_present_id(self, store: MemoryStore) -> None:
+        # An UPSERT on an existing id overwrites it, exactly as a bare add upsert
+        # does — verified with an open, different-kind replacement so get sees it.
+        await store.add(_semantic("1", "old semantic note"))
+        replacement = _preference("1", "new preference note")
+
+        await store.write_atomic([MemoryWrite(record=replacement, mode=MemoryWriteMode.UPSERT)])
+
+        got = await store.get("1")
+        assert got is not None
+        assert got.kind == "preference"  # the old semantic kind is gone
+        assert got == replacement
+
+    async def test_write_atomic_upsert_window_close_is_kept_by_export_not_get(
+        self, store: MemoryStore, now: datetime
+    ) -> None:
+        # The SUPERSEDE batch's first element: an UPSERT whose replacement is
+        # window-closed (valid_until = now). By ADR-0045 §6 that is asserted
+        # through export (present) and get (None), not get returning it.
+        await store.add(_semantic("t", "coffee target"))
+        closed = _semantic("t", "coffee target", validity=Validity(valid_until=now))
+
+        await store.write_atomic([MemoryWrite(record=closed, mode=MemoryWriteMode.UPSERT)])
+
+        assert await store.get("t") is None
+        assert "t" in {r.id for r in await store.export()}
+
+    async def test_write_atomic_insert_if_absent_writes_a_new_id(self, store: MemoryStore) -> None:
+        await store.write_atomic(
+            [MemoryWrite(record=_semantic("p", "coffee"), mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+        )
+
+        assert await store.get("p") is not None
+
+    async def test_write_atomic_insert_if_absent_rejects_a_present_id(
+        self, store: MemoryStore
+    ) -> None:
+        # A collision is rejected, not upserted: the stored record is untouched
+        # and the colliding write is not applied (nothing from the batch commits).
+        await store.add(_semantic("x", "original content"))
+        collide = _preference("x", "would clobber")
+
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [MemoryWrite(record=collide, mode=MemoryWriteMode.INSERT_IF_ABSENT)]
+            )
+
+        got = await store.get("x")
+        assert got is not None
+        assert got.kind == "semantic"  # the original, not the rejected preference
+        assert got.content == "original content"
+
+    async def test_write_atomic_insert_if_absent_collides_on_a_window_closed_row(
+        self, store: MemoryStore
+    ) -> None:
+        # "Absent" is physical presence, not read-visibility: a window-closed row
+        # is off the read path yet still occupies its id, so an INSERT_IF_ABSENT
+        # whose minted id equals it must fail rather than clobber retained history.
+        await store.add(_semantic("retired", "coffee", validity=Validity(valid_until=_LONG_AGO)))
+        assert await store.get("retired") is None  # invisible to reads...
+
+        with pytest.raises(MemoryStoreConflictError):  # ...but still present
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("retired", "new"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                    )
+                ]
+            )
+
+        assert "retired" in {r.id for r in await store.export()}  # the old row survives
+
+    async def test_write_atomic_insert_if_absent_collides_on_an_expired_row(
+        self, store: MemoryStore
+    ) -> None:
+        # The same physical-presence rule for the other hidden-row axis: an
+        # expired row still blocks an insert on its id.
+        await store.add(_semantic("gone", "coffee", expires_at=_LONG_AGO))
+
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("gone", "new"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                    )
+                ]
+            )
+
+    async def test_write_atomic_supersede_shape_commits_both_atomically(
+        self, store: MemoryStore, now: datetime
+    ) -> None:
+        # The canonical two-element batch: close the target's window (UPSERT) and
+        # insert the correction at a fresh id (INSERT_IF_ABSENT). Both land.
+        await store.add(_semantic("target", "coffee target"))
+        t_closed = _semantic("target", "coffee target", validity=Validity(valid_until=now))
+        correction = _semantic("correction", "coffee correction")
+
+        returned = await store.write_atomic(
+            [
+                MemoryWrite(record=t_closed, mode=MemoryWriteMode.UPSERT),
+                MemoryWrite(record=correction, mode=MemoryWriteMode.INSERT_IF_ABSENT),
+            ]
+        )
+
+        assert list(returned) == ["target", "correction"]
+        assert await store.get("target") is None  # retired
+        assert await store.get("correction") is not None  # live replacement
+        assert {r.id for r in await store.export()} == {"target", "correction"}  # both retained
+
+    async def test_write_atomic_rolls_back_when_a_later_element_conflicts(
+        self, store: MemoryStore
+    ) -> None:
+        # A valid element followed by a colliding one commits nothing: the valid
+        # element's record must not appear (in-call all-or-nothing).
+        await store.add(_semantic("present", "already here"))
+
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=_semantic("fresh", "would be written")),
+                    MemoryWrite(
+                        record=_semantic("present", "collides"),
+                        mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                    ),
+                ]
+            )
+
+        assert await store.get("fresh") is None  # the earlier element rolled back
+
+    async def test_write_atomic_rolls_back_when_an_earlier_element_conflicts(
+        self, store: MemoryStore
+    ) -> None:
+        # The conflict-first order: the later valid element must not commit either.
+        await store.add(_semantic("present", "already here"))
+
+        with pytest.raises(MemoryStoreConflictError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(
+                        record=_semantic("present", "collides"),
+                        mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                    ),
+                    MemoryWrite(record=_semantic("fresh", "would be written")),
+                ]
+            )
+
+        assert await store.get("fresh") is None
+
+    async def test_write_atomic_rejects_a_repeated_id(self, store: MemoryStore) -> None:
+        # Two writes to one id is forbidden as a malformed batch, and nothing is
+        # written — a MemoryStoreError, not a conflict.
+        with pytest.raises(MemoryStoreError):
+            await store.write_atomic(
+                [
+                    MemoryWrite(record=_semantic("dup", "first")),
+                    MemoryWrite(record=_semantic("dup", "second")),
+                ]
+            )
+
+        assert await store.get("dup") is None
