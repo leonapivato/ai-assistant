@@ -16,27 +16,43 @@ concrete store or policy is wired in.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
     MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
     Provenance,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 _DEFAULT_CONFLICT_LIMIT = 5
+
+#: How many times supersession re-mints a colliding id before giving up. A minted
+#: id (``uuid4``) collides with vanishing probability, so a handful of attempts is
+#: already far past any real collision; the bound exists to make a *pathological*
+#: id factory (one that always collides) fail loudly rather than spin (ADR-0045 §4).
+_MAX_SUPERSEDE_ATTEMPTS = 5
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
 
 # The only targets a user assertion may be folded onto (ADR-0038 §2a). Held here
 # as well as in `policy`, deliberately: the policy chooses, but `MemoryIngestor`
@@ -91,36 +107,35 @@ def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
         raise ValueError(msg)
 
 
-def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
-    """Refuse a fold that would destroy data, whichever ruling asks for it.
+def _refuse_unsafe_fold(
+    target: MemoryRecord, incoming: MemoryRecord, kind: MemoryDecisionKind
+) -> None:
+    """Refuse a fold that would destroy data, gated on the ruling where it must be.
 
-    Runs before either a ``REINFORCE`` or a ``SUPERSEDE`` arm is selected and is
-    keyed on the *records*, not on the relation the ruling names (ADR-0040 §3):
-    **every** fold writes at the *target's* id, so the target is always
-    overwritten. Two folds are therefore refused outright:
+    Runs before either a ``REINFORCE`` or a ``SUPERSEDE`` arm is selected. Two
+    folds are refused; they differ in whether the ruling matters, because
+    ADR-0045 §4 made only ``SUPERSEDE`` mint a new id while ``REINFORCE`` still
+    folds at the *target's* id:
 
-    - **Any fold onto a ``USER_ASSERTED`` target.** Whatever the proposal's
-      source, the write replaces what the user told us, and for a non-asserted
-      proposal it also downgrades the record's provenance out of the profile.
-      ADR-0038 §3 makes this direction absolute: nothing may supersede an
-      assertion. §5 is the same rule for a second assertion — no conflict
-      heuristic is confident enough to choose between two things the user said.
-    - **A ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target.** The id is
-      that system's idempotency key, so the correction inherits it and the next
-      routine sync overwrites it, losing the user's words to a background job
-      (ADR-0038 §2a).
+    - **Clause 1 — any fold onto a ``USER_ASSERTED`` target.** Kept **record-keyed
+      for both rulings** (ADR-0045 §5). A window-closing ``SUPERSEDE`` no longer
+      *destroys* the assertion, but the conflict signal is topical similarity, not
+      contradiction (ADR-0038 §5), and is too weak to retire a record the user
+      gave us — a justification the window does not touch. So nothing, of any
+      source, under either ruling, may fold onto an assertion.
+    - **Clause 2 — a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target,
+      ``REINFORCE`` only.** The external id is that system's idempotency key. A
+      ``REINFORCE`` still inherits it, so the correction is overwritten by the next
+      routine sync (ADR-0038 §2a) — the refusal stays. A ``SUPERSEDE`` now gets a
+      *fresh* id (ADR-0045 §4), so that hazard is gone and an ``EXTERNAL``
+      supersession is permitted at the writer boundary (ADR-0045 §5b). The arm is
+      therefore **narrowed to ``REINFORCE``**, not removed.
 
     ``DefaultMemoryPolicy`` proposes none of these — rule 2 defers, and rule 3
     supersedes only ``OBSERVED``/``INFERRED`` — but a policy reaches the
     ingestor through an injected seam and any conforming implementation may rule
     differently. The refusal therefore lives here, at the boundary that performs
     the write, rather than in the policy that recommends it.
-
-    Checked before either fold is selected, and keyed on the *records* rather
-    than on the relation between them. A check gated on "is this a
-    supersession?" misses both cases above, since neither is one: they slip into
-    the reinforcing merge, which keeps the target's id and destroys it just as
-    thoroughly.
 
     Fail-closed rather than silently downgrading, for the reason that already
     makes an absent fold target raise instead of falling back to storing the
@@ -132,25 +147,68 @@ def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
     """
     if target.provenance.source is MemorySource.USER_ASSERTED:
         msg = (
-            f"refusing to supersede {target.id!r}: a {incoming.provenance.source} record may not "
-            f"be folded onto a user-asserted one, whose id and content it would replace "
-            f"(ADR-0038 §3)"
+            f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
+            f"be folded onto a user-asserted one, whose belief it would overwrite "
+            f"(ADR-0038 §3, ADR-0045 §5)"
         )
         raise MemoryStoreError(msg)
     if (
-        incoming.provenance.source is MemorySource.USER_ASSERTED
+        kind is MemoryDecisionKind.REINFORCE
+        and incoming.provenance.source is MemorySource.USER_ASSERTED
         and target.provenance.source not in _SUPERSEDABLE
     ):
         msg = (
-            f"refusing to supersede {target.id!r}: a user assertion may not be folded onto a "
-            f"{target.provenance.source} record, whose id it would inherit — only OBSERVED and "
-            f"INFERRED beliefs may be superseded (ADR-0038 §2a)"
+            f"refusing to reinforce {target.id!r}: a user assertion may not be reinforced onto a "
+            f"{target.provenance.source} record, whose id it would inherit and the next sync "
+            f"overwrite — only OBSERVED and INFERRED beliefs may be reinforced this way "
+            f"(ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
         )
         raise MemoryStoreError(msg)
 
 
-def _supersede(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
-    """Replace ``target`` with ``incoming``, keeping only the target's id.
+def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
+    """Read the injected id factory, guarding its output like the clock (ADR-0045 §4).
+
+    Mirrors :func:`~ai_assistant.core.clock.checked_clock`: the minted id is
+    installed with ``model_copy(update=...)``, which skips validators, so a
+    ``None``, non-``str`` or empty reading would otherwise reach the store
+    unchecked — and the two writers would diverge, the in-memory fake storing
+    under a bad key while SQLite rejects it (the exact "consumer test passes on
+    state the production writer refuses" trap ADR-0045 §4 names). The factory's
+    own raising is caught and re-raised as ``MemoryStoreError`` too, so a
+    malformed factory fails the write loudly rather than propagating an arbitrary
+    exception across the writer seam (ADR-0028 §5).
+
+    Raises:
+        MemoryStoreError: If the factory raises, or returns a non-``str`` or empty
+            id — before any write is attempted.
+    """
+    try:
+        minted = id_factory()
+    except Exception as exc:  # any factory failure is the store's error, not the caller's
+        msg = f"the id factory injected into {owner} raised while minting a supersession id"
+        raise MemoryStoreError(msg) from exc
+    if not isinstance(minted, str) or not minted:
+        msg = f"the id factory injected into {owner} returned a non-str or empty id: {minted!r}"
+        raise MemoryStoreError(msg)
+    return minted
+
+
+def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
+    """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
+
+    The target stays on disk — retained, off the read path — with
+    ``valid_until = now``. Its ``valid_from`` and every other field are preserved:
+    only the window's open end is set. Written with ``model_copy(update=...)``,
+    which skips validators, so ``now`` must already be a guarded, aware-UTC
+    reading (the ingestor's :meth:`MemoryIngestor._now_utc`).
+    """
+    closed = target.validity.model_copy(update={"valid_until": now})
+    return target.model_copy(update={"validity": closed})
+
+
+def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
+    """The superseding record: ``incoming`` at a fresh, target-free id (ADR-0045 §4).
 
     Nothing of the overturned belief is carried onto the record that overturns
     it — least of all its ``evidence``. ADR-0005 §2 defines that field as
@@ -160,12 +218,15 @@ def _supersede(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     one field callers use to explain why a memory exists (ADR-0038 §1a).
 
     A user's assertion is its own warrant and needs no borrowed support, so the
-    superseding record is simply ``incoming`` — its provenance is already
-    exactly right — rehomed onto the id the stale record occupied. Preserving
-    the displaced evidence as *history* is a different thing, and needs the
-    representation issue #112 proposes rather than this field.
+    superseding record is simply ``incoming`` — its provenance is already exactly
+    right — written at a **freshly-minted** id, not the target's. ADR-0045 §4
+    stopped rehoming the correction onto the stale id: the target is retained with
+    a closed window (:func:`_close_window`) and the correction becomes a *new*
+    record. The id is also not ``incoming.id`` — that is caller-supplied and could
+    name an unrelated live record — but the minted id, which is written
+    insert-if-absent so a collision is rejected, not clobbered.
     """
-    return incoming.model_copy(update={"id": target.id})
+    return incoming.model_copy(update={"id": new_id})
 
 
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
@@ -196,7 +257,7 @@ class MemoryIngestor:
     importing it.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus two knobs
         self,
         *,
         store: MemoryStore,
@@ -204,6 +265,7 @@ class MemoryIngestor:
         conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
         now: Clock = _utcnow,
+        id_factory: Callable[[], str] = _uuid,
     ) -> None:
         """Initialise the ingestor.
 
@@ -213,12 +275,19 @@ class MemoryIngestor:
             conflict_threshold: Minimum retrieval score for an existing record to
                 count as conflicting with the proposal.
             conflict_limit: Maximum number of conflict candidates to consider.
-            now: Clock used to stamp expiry on temporary stores; injectable for
-                deterministic tests. Guarded by
-                :func:`~ai_assistant.core.clock.checked_clock`, which is what
-                protects :meth:`_expiry`'s ``model_copy(update=...)`` write —
-                that write skips validators, so the producer is the only place
-                left to catch a non-conforming reading (ADR-0026 §2).
+            now: Clock used to stamp expiry on temporary stores and to close a
+                superseded target's window; injectable for deterministic tests.
+                Guarded by :func:`~ai_assistant.core.clock.checked_clock`, which is
+                what protects :meth:`_expiry`'s and :meth:`_apply_supersede`'s
+                ``model_copy(update=...)`` writes — those skip validators, so the
+                producer is the only place left to catch a non-conforming reading
+                (ADR-0026 §2).
+            id_factory: Mints the fresh id a ``SUPERSEDE`` writes its correction at
+                (ADR-0045 §4); injectable so tests assert exact ids, mirroring the
+                clock and ADR-0022 §5's goal-id factory. Guarded at its output by
+                :func:`_checked_id`, for the same reason the clock is: the id is
+                installed with ``model_copy(update=...)``, so a non-``str`` or empty
+                reading would reach the store unchecked. Defaults to random UUIDs.
 
         Raises:
             TypeError: If ``conflict_limit`` is not an integer, or
@@ -233,6 +302,7 @@ class MemoryIngestor:
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="MemoryIngestor")
+        self._id_factory = id_factory
         # Guards the read-modify-write in `ingest` (issue #248). Constructed
         # here rather than lazily because since Python 3.10 an `asyncio.Lock`
         # binds no loop until it is first awaited, so an ingestor may be built
@@ -332,16 +402,63 @@ class MemoryIngestor:
                     # fold was meant to prevent, while reporting success.
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
-                _refuse_unsafe_fold(target, proposed)
-                # Past the refusal, only a recoverable belief can be overwritten.
-                # The ruling names the relation, so the ingestor no longer reads
-                # provenance to recover it (ADR-0040 §3): SUPERSEDE overturns the
-                # target and carries nothing across, REINFORCE folds the two.
+                _refuse_unsafe_fold(target, proposed, decision.kind)
+                # Past the refusal, the ruling names the relation, so the ingestor
+                # no longer reads provenance to recover it (ADR-0040 §3): SUPERSEDE
+                # retires the target (window-close) and writes the correction as a
+                # new record, REINFORCE folds the two at the target's id.
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    return await self._store.add(_supersede(target, proposed))
+                    return await self._apply_supersede(target, proposed)
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    async def _apply_supersede(self, target: MemoryRecord, proposed: MemoryRecord) -> str:
+        """Close ``target``'s window and write ``proposed`` as a new record (ADR-0045 §4).
+
+        The two writes are one atomic batch — ``[UPSERT(T_closed),
+        INSERT_IF_ABSENT(P_new)]`` — via :meth:`MemoryStore.write_atomic` (ADR-0046),
+        so a failure between them cannot leave the target retired with no live
+        replacement (the regression ADR-0045 §8 refused to ship). The correction's
+        id is minted by the guarded id factory and written insert-if-absent, so a
+        collision with any stored record — the retained target included — is
+        *rejected*, not clobbered; on the resulting
+        :class:`~ai_assistant.core.errors.MemoryStoreConflictError` the applier
+        re-mints and retries, bounded by :data:`_MAX_SUPERSEDE_ATTEMPTS`. Any other
+        ``MemoryStoreError`` aborts with the target left **live and unchanged**,
+        because the atomic batch rolls the window-close back with it.
+
+        Returns:
+            The **live** record's id — the correction's freshly-minted id, not the
+            target's (ADR-0045 §4).
+
+        Raises:
+            MemoryStoreError: If the id factory is malformed (:func:`_checked_id`),
+                if the bounded re-mint cannot find a free id, or on any other store
+                failure — in every case the target is left live and unchanged.
+        """
+        closed_target = _close_window(target, self._now_utc())
+        last_conflict: MemoryStoreConflictError | None = None
+        for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
+            new_id = _checked_id(self._id_factory, owner="MemoryIngestor")
+            batch = [
+                MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT),
+                MemoryWrite(
+                    record=_supersede(proposed, new_id),
+                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                ),
+            ]
+            try:
+                await self._store.write_atomic(batch)
+            except MemoryStoreConflictError as exc:
+                last_conflict = exc
+                continue
+            return new_id
+        msg = (
+            f"supersession could not mint a free id for a correction to {target.id!r} "
+            f"after {_MAX_SUPERSEDE_ATTEMPTS} attempts; the target is left live and unchanged"
+        )
+        raise MemoryStoreError(msg) from last_conflict
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as `memory`'s own error (ADR-0026 §4).
