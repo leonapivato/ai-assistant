@@ -234,6 +234,12 @@ forbidden_modules = ["ai_assistant.orchestration", "ai_assistant.interfaces"]
 [[tool.importlinter.contracts]]
 name = "provider SDKs are confined to the models layer"
 type = "forbidden"
+# Direct imports only: the ban is "do not `import pydantic_ai`; reach models through
+# its seam". The composition root (`ai_assistant.app`) legitimately imports the
+# `models` package to construct `PydanticAIProvider`, so it reaches the SDK only
+# *indirectly, through models* — which is exactly what this contract permits. No
+# other source imports `models` at all, so this keeps the direct ban intact for them.
+allow_indirect_imports = "true"
 source_modules = [
     "ai_assistant.core",
     "ai_assistant.memory",
@@ -244,6 +250,9 @@ source_modules = [
     "ai_assistant.learning",
     "ai_assistant.orchestration",
     "ai_assistant.interfaces",
+    # The composition root wires concrete subsystems but still reaches models only
+    # through the `ModelProvider` seam, never a provider SDK (ADR-0042 §Consequences).
+    "ai_assistant.app",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
@@ -272,5 +281,30 @@ source_modules = [
     "ai_assistant.learning",
     "ai_assistant.orchestration",
     "ai_assistant.interfaces",
+    # The composition root is production code, so the same ban applies (ADR-0042 §Consequences).
+    "ai_assistant.app",
 ]
 forbidden_modules = ["ai_assistant.testing"]
+
+[[tool.importlinter.contracts]]
+# ADR-0042 §6: an interface adapter depends on the composition root's builder and
+# the `orchestration` façade it returns, and on **no subsystem** — the concrete
+# imports are quarantined in `ai_assistant.app`, which is what makes this guard
+# well-formed rather than self-contradictory.
+name = "interface adapters do not import subsystems directly"
+type = "forbidden"
+# Direct imports only (ADR-0042 §6): an adapter reaches a subsystem *only* through
+# the composition root and the façade — never `import ai_assistant.memory` itself.
+# The indirect chain `interfaces -> app -> subsystem` is the sanctioned path and is
+# permitted; a direct `interfaces -> subsystem` edge is what this forbids.
+allow_indirect_imports = "true"
+source_modules = ["ai_assistant.interfaces"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+]
