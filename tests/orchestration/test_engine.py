@@ -520,6 +520,30 @@ async def test_a_colliding_handle_factory_still_yields_distinct_tokens() -> None
     assert resumed_two.step.state.id == second.step.state.id  # type: ignore[union-attr]
 
 
+async def test_a_raising_handle_factory_fails_before_any_step_is_parked() -> None:
+    """The handle is minted before the runner parks, so no step is stranded (§4, #287)."""
+
+    def boom() -> str:
+        msg = "the id factory is broken"
+        raise RuntimeError(msg)
+
+    harness = Harness(tools=(confirmable(),))
+    harness.engine._id_factory = boom
+
+    with pytest.raises(RuntimeError, match="id factory is broken"):
+        await harness.engine.converse("send it", timeout=PATIENT)
+    # No step was left durably parked: the mint failed before `run` could commit
+    # AWAITING_APPROVAL, so nothing awaits an answer that can never be supplied.
+    # (The execution exists with its step still PENDING, which is undriven work,
+    # not a parked confirmation.)
+    executions = await harness.plans.active_executions()
+    assert all(
+        step.status is not StepStatus.AWAITING_APPROVAL
+        for execution in executions
+        for step in execution.steps
+    )
+
+
 async def test_aclose_attempts_every_closer_even_when_one_fails() -> None:
     """A raising closer must not skip the resources after it (§2 releases every one)."""
     closed: list[str] = []

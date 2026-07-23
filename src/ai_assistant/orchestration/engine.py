@@ -414,10 +414,11 @@ class Engine:
         """Return a continuation handle not already naming a parked step.
 
         The injected factory supplies the opacity; the engine supplies the
-        *uniqueness* (:meth:`_confirmation`). A factory that repeats a handle is
-        disambiguated with a suffix rather than trusted or refused, so two parked
-        steps never share a handle and neither is stranded — the loop is bounded by
-        the number of parked steps.
+        *uniqueness*. A factory that repeats a handle is disambiguated with a
+        suffix rather than trusted or refused, so two parked steps never share a
+        handle and neither is stranded — the loop is bounded by the number of
+        parked steps. Called from :meth:`_converse` *before* the runner can park,
+        so a raising factory fails with no durable state yet committed.
         """
         handle = self._id_factory()
         suffix = 0
@@ -433,8 +434,14 @@ class Engine:
             return TurnOutcome(turn=turn)
         first = turn.plan.steps[0]
         state = await self._start_execution(turn)
+        # Mint the continuation handle *before* the runner can park the step, so a
+        # raising or malformed id factory fails here — with no durable state yet —
+        # rather than after `run` has committed AWAITING_APPROVAL, which would
+        # strand a parked step with no token ever offered (ADR-0042 §4; #287). The
+        # handle is a cheap string; if the step is not parked it is simply unused.
+        handle = self._mint_handle()
         disposition = await self._runner.run(state, first.id, timeout=timeout)
-        step = self._step_outcome(turn, disposition)
+        step = self._step_outcome(turn, disposition, handle=handle)
         return TurnOutcome(turn=turn, step=step)
 
     async def _resume(
@@ -463,7 +470,9 @@ class Engine:
             approved=approved,
             timeout=timeout,
         )
-        step = self._step_outcome(parked.turn, disposition)
+        # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
+        # so no new handle is needed here.
+        step = self._step_outcome(parked.turn, disposition, handle=None)
         # Resolved once: a second answer would be refused by the trail's
         # single-resolution index anyway; evicting keeps the table bounded and
         # turns a replay into a clean "unknown token" (ADR-0042 §4).
@@ -481,11 +490,23 @@ class Engine:
         await self._plans.save_plan(turn.plan)
         return await self._plans.start_execution(turn.plan.id)
 
-    def _step_outcome(self, turn: TurnResult, disposition: StepDisposition) -> StepOutcome:
-        """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4)."""
+    def _step_outcome(
+        self, turn: TurnResult, disposition: StepDisposition, *, handle: str | None
+    ) -> StepOutcome:
+        """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4).
+
+        ``handle`` is the continuation handle minted *before* the runner could park
+        (:meth:`_converse`); it is consumed only on the parked branch, and is
+        ``None`` where no park is possible (a resumption).
+        """
         confirmation: Confirmation | None = None
         if disposition.disposition is Disposition.AWAITING_CONFIRMATION:
-            confirmation = self._confirmation(turn, disposition)
+            if handle is None:  # pragma: no cover — _converse pre-mints before any park
+                # Only a resumption passes None, and a resolving disposition is never
+                # AWAITING_CONFIRMATION, so reaching here would be an internal fault.
+                msg = "a parked step reached rendering without a pre-minted continuation handle"
+                raise PlanningError(msg)
+            confirmation = self._confirmation(turn, disposition, handle)
         return StepOutcome(
             disposition=disposition.disposition,
             state=disposition.state,
@@ -493,26 +514,22 @@ class Engine:
             confirmation=confirmation,
         )
 
-    def _confirmation(self, turn: TurnResult, disposition: StepDisposition) -> Confirmation:
-        """Assemble the confirmation content and mint its continuation token.
+    def _confirmation(
+        self, turn: TurnResult, disposition: StepDisposition, handle: str
+    ) -> Confirmation:
+        """Assemble the confirmation content around a pre-minted token (ADR-0042 §4).
 
         The tool declaration and the ruling ``reason`` come from the **recorded**
         ``CONFIRM`` the runner already read back and carried on its disposition
         (:attr:`~ai_assistant.orchestration.runner.StepDisposition.decision`) — the
         decision the user is being shown, which the adapter may not read itself
-        (ADR-0042 §6). Taking it from the disposition rather than re-reading the
-        trail is deliberate: the step is *already durably parked* by the time this
-        runs, so a fallible read here could raise and strand a parked step with no
-        continuation ever offered (#287). There is now **no fallible work between
-        parking and offering the token.** The parameters are the driven step's own,
-        carried as data for the adapter to escape per target (ADR-0042 §4).
-
-        Handle uniqueness is the **engine's** invariant, not the injected factory's:
-        a handle names exactly one parked step (ADR-0042 §4), so a silent overwrite
-        would rebind one prompt's token to a *different* step, releasing consent for
-        the wrong action. The default UUID factory never collides, but rather than
-        trust that — or fail a durably-parked step closed, which would strand it —
-        a colliding handle is disambiguated to a fresh unique one (:meth:`_mint_handle`).
+        (ADR-0042 §6). And ``handle`` was minted before the runner parked
+        (:meth:`_converse`). So **no fallible work remains between parking the step
+        and offering its token**: everything that could raise — reading the
+        decision, calling the id factory — happened before ``run`` committed
+        AWAITING_APPROVAL, so a parked step is never stranded without a continuation
+        (#287). The parameters are the driven step's own, carried as data for the
+        adapter to escape per target (ADR-0042 §4).
         """
         recorded = disposition.decision
         if recorded is None:  # pragma: no cover — StepRunner always sets it on this branch
@@ -520,7 +537,6 @@ class Engine:
             # carry its decision so the step is resumable without a fallible re-read.
             msg = "a parked confirmation carries no recorded decision, so it cannot be rendered"
             raise PlanningError(msg)
-        handle = self._mint_handle()
         self._parked[handle] = _Parked(
             turn=turn,
             execution_id=disposition.state.id,
