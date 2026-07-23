@@ -23,8 +23,8 @@
 - **Does not amend any prior ADR's body.** ADR-0045 §10 anticipated #104 closing
   issue #248 "alongside" this primitive; §5 of this ADR **declines** that,
   grounded in the design, and re-scopes #248 rather than editing ADR-0045 (which
-  is itself `Proposed`, and which delegated the decision to this lane). No
-  ratified text is rewritten; ADR-0001 keeps ADRs append-only.
+  delegated the decision to this lane). No ratified text is rewritten; ADR-0001
+  keeps ADRs append-only.
 
 ## Context
 
@@ -287,9 +287,9 @@ re-scoped from "closed by #104" to "a compare-and-swap extension of `write_atomi
 (a `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode), gated on a real
 cross-process consumer." The in-process lock (#262) remains the answer under the
 one-event-loop composition model. This refines ADR-0045 §10's loose "closes it
-alongside" from the very lane §10 delegated it to; it does not relitigate a
-ratified decision (ADR-0045 is `Proposed`), and it edits no ADR body (§Consequences
-records the re-scoping as issue-tracker work, not an ADR amendment).
+alongside" from the very lane §10 delegated it to; it does not relitigate
+ADR-0045's decision, and it edits no ADR body (§Consequences records the
+re-scoping as issue-tracker work, not an ADR amendment).
 
 ### 6. What this ADR does not decide
 
