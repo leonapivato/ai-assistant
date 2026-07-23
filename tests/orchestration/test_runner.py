@@ -577,7 +577,7 @@ async def test_an_approval_read_back_as_a_denial_skips_nothing() -> None:
 
 
 async def test_a_denied_step_is_skipped_as_denied_and_points_at_the_decision() -> None:
-    """``APPROVAL_DENIED`` is reachable only from ``AWAITING_APPROVAL``."""
+    """A `PENDING` `DENY` skips in one commit, over ADR-0041's direct edge."""
     harness = Harness(tools=(tool(),), policy=FakeActionPolicy(deny_at=RiskLevel.LOW))
     step = plan_step()
     state = await an_execution(harness.plans, step)
@@ -589,7 +589,9 @@ async def test_a_denied_step_is_skipped_as_denied_and_points_at_the_decision() -
     assert stored.status is StepStatus.SKIPPED
     assert stored.skip_reason is SkipReason.APPROVAL_DENIED
     assert stored.approval_ref == result.decision_id
-    assert stored.bound_tool == "smtp"
+    # No `bound_tool`: the step went straight from `PENDING` and never queued
+    # for an approval; the `approval_ref` names the decision that refused it.
+    assert stored.bound_tool is None
     assert harness.invoker.invocations == []
 
 
