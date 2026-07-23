@@ -173,15 +173,19 @@ opened if a later one fails to construct, returning no half-built façade with a
 orphaned connection, and (b) hand the successfully-built façade a close/shutdown
 path (an async context manager, or an `aclose()`), so a long-lived process — an
 API front end above all — has a defined owner that releases every connection on
-shutdown rather than leaking it. The shutdown path is **ordered, not abrupt**: it
-stops accepting new calls, then **awaits the completion of** in-flight ones before
-closing the owned resources, so a store operation cannot run against a connection
-closed out from under it. Draining, not cancelling: a store runs its SQLite work in
-an `asyncio.to_thread` worker, and cancelling the awaiting task abandons the
-coroutine but **not** the worker thread — which would keep using the connection
-`close()` then shuts, the very race this exists to prevent — so the façade must let
-each in-flight operation *finish* before closing, and stopping request delivery is
-not enough on its own. Nothing below the façade enforces this: each store's
+shutdown rather than leaking it. The shutdown path is **ordered, not abrupt**, and
+the rule is stated generally because the race has more than one entry: **the façade
+must not `close()` an owned resource while any underlying operation it started might
+still touch it.** A store runs its SQLite work in an `asyncio.to_thread` worker, and
+cancelling the awaiting coroutine — whether by shutdown *or* by a client cancelling
+its own `converse()`/`resume()` mid-call — abandons the coroutine but **not** the
+worker thread, which keeps using the connection a subsequent `close()` would shut.
+So the façade **tracks the underlying work itself**, not merely its public
+call-tasks: a public call that returns *or is cancelled* is not on its own evidence
+that its worker has finished. Shutdown then (a) stops accepting new calls and (b)
+awaits every tracked underlying operation to quiescence — including work orphaned by
+an already-cancelled call — before closing, shielding that drain from the shutdown's
+own cancellation as needed. Nothing below the façade enforces this: each store's
 `close()` closes its connection directly and takes no lock (its `asyncio.Lock`
 guards its own operations, not `close`), so nothing at the store level serialises
 `close()` against an in-flight operation, and that ordering has to be the façade's.
