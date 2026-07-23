@@ -14,13 +14,18 @@
   absolutely:** the applier stamps `valid_until` from the *ingestor's* clock
   (ADR-0045 §4), and `get`/`search` hide the target once the *store's* read clock is
   at or after that instant — exactly the read-time filter `expires_at` (ADR-0007) and
-  ADR-0045 §6 already use, evaluated against the reader's own `now`. With coherent
-  clocks (production injects one real wall clock to both store and ingestor, so a
-  read after the write reads at or after the close) it is hidden; a store clock
-  injected *behind* the close transiently still returns it. `export` keeps it
-  **unconditionally**. An *absolute*, clock-coherence-independent guarantee — a
-  store-authoritative retirement instant — is a `MemoryStore` contract change
-  deferred to issue #306, not asserted here. **§5b's `EXTERNAL` clause is narrowed
+  ADR-0045 §6 already use, evaluated against the reader's own `now`. In production
+  the store and ingestor each *independently sample* the real wall clock (neither is
+  given a `now` in `build_engine`, so both fall back to `datetime.now(UTC)`), and a
+  `get` **after** `ingest` returns samples at or after the close, so the target is
+  hidden — under the ordinary assumption that the wall clock advances forward
+  between the two reads. A store read that samples *behind* the close — an injected
+  test clock, or the wall clock stepping backward (NTP) between the two samples —
+  transiently still returns it, the same way a backward step un-expires an
+  `expires_at` record; it is a read-time-filtering property, not a supersession bug.
+  `export` keeps the target **unconditionally**. An *absolute*,
+  clock-coherence-independent guarantee — a store-authoritative retirement instant —
+  is a `MemoryStore` contract change deferred to issue #306, not asserted here. **§5b's `EXTERNAL` clause is narrowed
   to `REINFORCE`:** a `USER_ASSERTED`→`EXTERNAL` `REINFORCE` still raises, while the
   same `SUPERSEDE` is now permitted and asserted to write a new-id correction
   (ADR-0045 §5). The remaining `MemoryWriter` obligations, and §8's other exclusions,

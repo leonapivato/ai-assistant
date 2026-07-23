@@ -199,3 +199,46 @@ async def test_supersede_never_extends_a_targets_existing_window() -> None:
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     retired = next(record for record in await store.export() if record.id == "existing")
     assert retired.validity.valid_until == already_closes  # not extended to the writer clock
+
+
+async def test_supersede_hiding_is_read_time_relative() -> None:
+    """The fake's retirement is hidden read-time-relatively, as ``MemoryIngestor``'s is.
+
+    Mirrors ``test_ingest.py``: ``valid_until`` is the writer's close instant, so the
+    retired target is hidden from ``get``/``search`` only once the store's read clock
+    reaches it. A store clock behind the close transiently still returns it
+    (documented, not a bug); ``export`` keeps it at either clock. Pins the property on
+    the canonical fake so a duplicate stamping the wrong close instant is caught.
+    """
+    read_at = [datetime(2026, 1, 1, tzinfo=UTC)]  # store read clock, mutable; starts BEHIND close
+    store = FakeMemoryStore(now=lambda: read_at[0])
+    await store.add(
+        PreferenceMemory(
+            id="existing",
+            content="prefers concise emails",  # matches `_proposal`, so it is a conflict
+            preference="prefers concise emails",
+            provenance=Provenance(
+                source=MemorySource.INFERRED, confidence=0.6, last_updated=_fixed_now()
+            ),
+        )
+    )
+    writer = FakeMemoryWriter(
+        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_fixed_now
+    )
+
+    result = await writer.ingest(_proposal("correction"))
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    new_id = result.record_id
+    assert new_id is not None
+
+    # Read behind the close (2026-01-01 < the writer's 2026-06-01 close): still visible.
+    assert await store.get("existing") is not None
+    assert any(r.id == "existing" for r in await store.search("prefers concise emails"))
+
+    # Advance the store's read clock to the close instant: now hidden.
+    read_at[0] = datetime(2026, 6, 1, tzinfo=UTC)
+    assert await store.get("existing") is None
+    assert all(r.id != "existing" for r in await store.search("prefers concise emails"))
+
+    # export keeps the retired target unconditionally.
+    assert {r.id for r in await store.export()} == {"existing", new_id}

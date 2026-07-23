@@ -478,12 +478,15 @@ class MemoryIngestor:
 
         The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), so
         the retired target leaves the read path once the *store's* read clock
-        reaches it — the same read-time semantics ``expires_at`` has. Under the
-        composition's real monotonic wall clock (ADR-0028 §4: the writer and its
-        reader share one store, and here both read UTC ``now``), a ``get`` after
-        ``ingest`` returns always reads at or after the close, so the target is
-        hidden; only a store clock injected *behind* the writer's — a test-only
-        skew — keeps it briefly visible, exactly as a future ``expires_at`` would.
+        reaches it — the same read-time semantics ``expires_at`` has. In production
+        the store and this ingestor each *independently sample* the real wall clock
+        (neither is given a ``now`` in ``build_engine``), and a ``get`` after
+        ``ingest`` returns samples at or after the close — provided the wall clock
+        advances forward between the two — so the target is hidden. A store read that
+        samples *behind* the close (an injected test clock, or the wall clock
+        stepping backward between the two samples) keeps it briefly visible, exactly
+        as a backward step un-expires an ``expires_at`` record — a read-time-filtering
+        property, not a supersession bug (issue #306 tracks an absolute guarantee).
 
         Returns:
             The **live** record's id — the correction's freshly-minted id, not the
