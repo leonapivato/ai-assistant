@@ -707,7 +707,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
 
 
 async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
-    """The ceiling must be positive — zero would make every park evict itself."""
+    """The ceiling must be positive — zero would refuse to drive any step at all."""
     harness = Harness()
     with pytest.raises(ValueError, match="must be positive"):
         Engine(
@@ -715,6 +715,19 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             runner=harness.engine._runner,
             plans=harness.plans,
             max_outstanding_confirmations=0,
+        )
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "2"])
+async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> None:
+    """A bool, float or string ceiling is a TypeError, not a surprising limit."""
+    harness = Harness()
+    with pytest.raises(TypeError, match="must be an integer"):
+        Engine(
+            loop=harness.engine._loop,
+            runner=harness.engine._runner,
+            plans=harness.plans,
+            max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
         )
 
 
