@@ -10,6 +10,7 @@ plan reproducible byte-for-byte.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -231,9 +232,45 @@ async def test_repair_prompt_echoes_the_reason_and_carries_the_bad_reply() -> No
     assert "only the JSON object" in second_call[-1].content
 
 
+async def test_max_attempts_above_two_allows_multiple_repair_rounds() -> None:
+    """Two malformed replies then a valid one succeeds at max_attempts=3."""
+    model = FakeModelProvider.scripted("bad one", "bad two", _VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter(), max_attempts=3)
+
+    plan = await planner.plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+    assert model.call_count == 3
+
+
+async def test_max_attempts_three_exhausts_after_three_calls() -> None:
+    model = FakeModelProvider.scripted("bad one", "bad two", "bad three")
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter(), max_attempts=3)
+
+    with pytest.raises(PlanningError):
+        await planner.plan(_goal(), context=_context())
+    assert model.call_count == 3
+
+
 async def test_max_attempts_below_one_is_rejected() -> None:
     with pytest.raises(ValueError, match="max_attempts"):
         ModelBackedPlanner(FakeModelProvider(_VALID_REPLY), max_attempts=0)
+
+
+@pytest.mark.parametrize("bad", [1.5, True, "2", None])
+async def test_non_int_max_attempts_is_rejected(bad: object) -> None:
+    """A non-int (bool included) is a TypeError at construction, not a later crash."""
+    with pytest.raises(TypeError, match="max_attempts"):
+        ModelBackedPlanner(FakeModelProvider(_VALID_REPLY), max_attempts=bad)  # type: ignore[arg-type]
+
+
+async def test_deeply_nested_json_becomes_planning_error() -> None:
+    """A pathologically nested payload enters the repair path, not a RecursionError."""
+    depth = sys.getrecursionlimit() + 100
+    reply = '{"steps":' + "[" * depth + "]" * depth + "}"
+
+    with pytest.raises(PlanningError):
+        await _planner(reply).plan(_goal(), context=_context())
 
 
 async def test_model_error_propagates_unwrapped() -> None:

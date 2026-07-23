@@ -115,11 +115,16 @@ class ModelBackedPlanner:
             id_factory: Mints the plan id and every step id; injectable so tests
                 assert exact ids (ADR-0047 §2). Defaults to random UUIDs.
             max_attempts: Total ``complete`` calls one ``plan`` may make — one
-                request plus bounded repairs (ADR-0047 §6). Must be at least 1.
+                request plus up to ``max_attempts - 1`` bounded repair rounds
+                (ADR-0047 §6). Must be an ``int`` of at least 1.
 
         Raises:
+            TypeError: If ``max_attempts`` is not an ``int`` (``bool`` included).
             ValueError: If ``max_attempts`` is less than 1.
         """
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+            msg = f"max_attempts must be an integer, got {max_attempts!r}"
+            raise TypeError(msg)
         if max_attempts < 1:
             msg = f"max_attempts must be at least 1, got {max_attempts}"
             raise ValueError(msg)
@@ -316,7 +321,9 @@ def _extract_object(content: str) -> dict[str, object]:
 
     Raises:
         _ExtractionError: If there is no ``{`` … ``}`` span, it is not valid JSON,
-            or it is not a JSON object.
+            or it is not a JSON object. A ``RecursionError`` from a pathologically
+            nested payload is translated too, so an oversized reply enters the
+            repair path rather than escaping as an unhandled error (ADR-0047 §4).
     """
     start = content.find("{")
     end = content.rfind("}")
@@ -328,6 +335,9 @@ def _extract_object(content: str) -> dict[str, object]:
         parsed: object = json.loads(content[start : end + 1])
     except json.JSONDecodeError as exc:
         msg = f"the model reply was not valid JSON: {exc}"
+        raise _ExtractionError(msg) from exc
+    except RecursionError as exc:
+        msg = "the model reply nested JSON beyond the decoder's limit"
         raise _ExtractionError(msg) from exc
 
     if not isinstance(parsed, dict):

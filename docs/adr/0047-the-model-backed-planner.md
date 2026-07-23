@@ -154,14 +154,18 @@ not a broken plan.
 
 ### 6. Malformed output: bounded repair, then `PlanningError`
 
-Extraction failure (steps 1–4 above) triggers **one bounded repair round**, not
-an unbounded loop. The planner appends the model's bad reply and a user message
-quoting the specific failure and re-requesting *only* the JSON envelope, then
-calls `complete` once more. `max_attempts` (default **2** — one initial call plus
-one repair) bounds the total number of model calls; the constructor rejects
-`max_attempts < 1`. If the last attempt still fails to yield a valid plan, `plan`
-raises **`PlanningError`** naming the last extraction failure — the Protocol's
-documented "no plan could be produced".
+Extraction failure (steps 1–4 above) triggers a **bounded repair round**, never
+an unbounded loop. On each failed attempt the planner appends the model's bad
+reply and a user message quoting the specific failure and re-requesting *only*
+the JSON envelope, then calls `complete` again. `max_attempts` bounds the total
+number of model calls — one initial request plus up to `max_attempts - 1` repair
+rounds — and defaults to **2** (one repair). The constructor rejects a
+non-`int` (`bool` included) with `TypeError` and `max_attempts < 1` with
+`ValueError`, matching how `orchestration` validates its own bounds. Raising
+`max_attempts` is the knob for a provider that proves noisier; whatever its
+value, the loop is finite. If the final attempt still fails to yield a valid
+plan, `plan` raises **`PlanningError`** naming the last extraction failure — the
+Protocol's documented "no plan could be produced".
 
 A **`ModelError` raised by the provider itself** (transport, auth, rate limit,
 content filter) **propagates unwrapped**. It is already a typed, actionable
@@ -188,9 +192,10 @@ a plan.
   audit demands it**: first-`{`-to-last-`}` slicing absorbs prose and fences, but
   the constructed `PlanStep`/`ActionPlan` must pass every `core` invariant, so a
   malformed decision can never masquerade as a valid audit record.
-- **Repair is bounded**: at most one retry, so a stubbornly malformed model
-  cannot spin. Tuning `max_attempts` upward is a constructor argument if a
-  provider proves noisier.
+- **Repair is bounded**: at most `max_attempts - 1` retries (one by default), so
+  a stubbornly malformed model cannot spin. Tuning `max_attempts` upward is a
+  constructor argument if a provider proves noisier; the loop stays finite at any
+  value.
 - **Harder / revisit when**: the capability vocabulary is settled by Lane B (does
   the planner gain access to advertised capabilities to prompt against?); a
   provider offering typed/structured output lands (the text-envelope extraction
