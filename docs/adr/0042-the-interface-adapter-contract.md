@@ -173,8 +173,13 @@ opened if a later one fails to construct, returning no half-built façade with a
 orphaned connection, and (b) hand the successfully-built façade a close/shutdown
 path (an async context manager, or an `aclose()`), so a long-lived process — an
 API front end above all — has a defined owner that releases every connection on
-shutdown rather than leaking it. Closing the façade when a session ends is the
-adapter's own lifecycle I/O, which §6 permits.
+shutdown rather than leaking it. The shutdown path is **ordered, not abrupt**: it
+stops accepting new calls, then drains (or cancels) in-flight ones before closing
+the owned resources, so a store operation cannot run against a connection closed
+out from under it — the stores' own locks serialise their synchronous `close()`
+against their *own* operations, not against a façade-level request mid-`await`, so
+that ordering has to be the façade's. Closing the façade when a session ends is
+the adapter's own lifecycle I/O, which §6 permits.
 
 The builder can only wire a subsystem that *has* a production implementation.
 Where one does not yet exist — today the `Planner` has only
