@@ -369,6 +369,20 @@ guarantees the positional correspondence with the plan that everything else
 assumes. A caller handing in an `ExecutionState` could open one already marked
 `RUNNING`, or with steps that do not match the plan it names.
 
+> **Amended by ADR-0044 §1 (2026-07-23).** `start_execution`'s contract is
+> strengthened: the id it derives is now guaranteed **unique for the life of
+> the audit trail** — never reused, even after the execution is deleted or the
+> store is cleared, and across a restart. ADR-0044 §3 recovers a parked
+> confirmation by its `(execution_id, step_id)` binding, so a reused id would let
+> a stale `CONFIRM` from a prior incarnation resolve the fresh execution's
+> action. Because the store mints the id and takes none from the caller, only
+> the store can keep this, not the composition root (#280). A store satisfies it
+> with minted entropy in the id — a uuid, or (as `InMemoryPlanStore` does) a
+> per-incarnation nonce plus a never-reset sequence; a bare process-local
+> counter is not enough, since a non-persistent store rewinds it on every
+> restart and would re-mint an id a persistent audit trail still binds. The live
+> contract in `core/protocols.py` governs.
+
 This is what makes §4's transition graph *authoritative* rather than merely
 conventional. Had the store taken a whole `ExecutionState`, any consumer of the
 Protocol could commit `PENDING → SUCCEEDED` directly and the claim that

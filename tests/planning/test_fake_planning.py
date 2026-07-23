@@ -50,6 +50,27 @@ class TestFakePlannerContract(PlannerContract):
         return FakePlanner(now=_fixed_now)
 
 
+async def test_a_fresh_fake_does_not_reuse_a_prior_instances_execution_id() -> None:
+    """The fake matches ``InMemoryPlanStore``'s cross-restart non-reuse (#280).
+
+    A new instance rewinds the sequence to 0, so without the per-instance
+    incarnation nonce it would re-mint a prior instance's id. The fake must keep
+    this or it would certify a store that reuses ids across restarts — the exact
+    hazard ADR-0044 §1 forbids. Impl-level, like the real store's twin, because
+    "restart" for an in-memory double is a new instance.
+    """
+    from plan_store_contract import _goal, _plan  # noqa: PLC0415
+
+    async def start(store: FakePlanStore) -> str:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        return (await store.start_execution("p1")).id
+
+    first_id = await start(FakePlanStore(now=_fixed_now))
+    second_id = await start(FakePlanStore(now=_fixed_now))
+    assert first_id != second_id
+
+
 async def test_fake_planner_records_what_it_was_asked() -> None:
     """Beyond the contract: the fake exists to let callers assert on the call."""
     planner = FakePlanner(now=_fixed_now)
