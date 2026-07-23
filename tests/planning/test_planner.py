@@ -273,6 +273,18 @@ async def test_deeply_nested_json_becomes_planning_error() -> None:
         await _planner(reply).plan(_goal(), context=_context())
 
 
+async def test_oversized_integer_becomes_planning_error() -> None:
+    """An over-limit integer literal raises a plain ValueError; it is still bounded."""
+    big = "1" * (sys.get_int_max_str_digits() + 100)
+    reply = '{"steps":[{"intent":"x","capability":"do_x","parameters":{"n":' + big + "}}]}"
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    with pytest.raises(PlanningError):
+        await planner.plan(_goal(), context=_context())
+    assert model.call_count == 2
+
+
 async def test_model_error_propagates_unwrapped() -> None:
     """A provider transport failure stays a ModelError, not a PlanningError."""
 

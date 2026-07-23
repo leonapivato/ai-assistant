@@ -320,10 +320,14 @@ def _extract_object(content: str) -> dict[str, object]:
     Markdown code fence (ADR-0047 §4).
 
     Raises:
-        _ExtractionError: If there is no ``{`` … ``}`` span, it is not valid JSON,
-            or it is not a JSON object. A ``RecursionError`` from a pathologically
-            nested payload is translated too, so an oversized reply enters the
-            repair path rather than escaping as an unhandled error (ADR-0047 §4).
+        _ExtractionError: If there is no ``{`` … ``}`` span, or ``json.loads``
+            fails, or the result is not a JSON object. **Every** ``json.loads``
+            failure is translated (ADR-0047 §4): a ``JSONDecodeError`` for bad
+            syntax, but also the plain ``ValueError`` an over-limit integer raises
+            and the ``RecursionError`` a pathologically nested payload raises — so
+            an oversized reply enters the bounded repair path rather than escaping
+            as an unhandled error. The ``try`` wraps only the parse, so nothing
+            but a parse failure is caught here.
     """
     start = content.find("{")
     end = content.rfind("}")
@@ -333,11 +337,10 @@ def _extract_object(content: str) -> dict[str, object]:
 
     try:
         parsed: object = json.loads(content[start : end + 1])
-    except json.JSONDecodeError as exc:
-        msg = f"the model reply was not valid JSON: {exc}"
-        raise _ExtractionError(msg) from exc
-    except RecursionError as exc:
-        msg = "the model reply nested JSON beyond the decoder's limit"
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers JSONDecodeError (a subclass) *and* the digit-limit
+        # ValueError CPython raises for an oversized integer literal.
+        msg = f"the model reply could not be parsed as JSON: {exc}"
         raise _ExtractionError(msg) from exc
 
     if not isinstance(parsed, dict):
