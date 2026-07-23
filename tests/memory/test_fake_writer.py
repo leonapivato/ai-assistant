@@ -240,5 +240,6 @@ async def test_supersede_hiding_is_read_time_relative() -> None:
     assert await store.get("existing") is None
     assert all(r.id != "existing" for r in await store.search("prefers concise emails"))
 
-    # export keeps the retired target unconditionally.
+    # export keeps the retired target regardless of its validity window (both
+    # records here are non-expired, so both appear).
     assert {r.id for r in await store.export()} == {"existing", new_id}

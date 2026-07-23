@@ -244,7 +244,8 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
         assert await store.get("stale") is None
         assert all(r.id != "stale" for r in await store.search("user prefers morning meetings"))
 
-        # `export` keeps the retired target unconditionally, at either read clock.
+        # `export` keeps the retired target regardless of its validity window (at
+        # either read clock); both records here are non-expired, so both appear.
         assert {r.id for r in await store.export()} == {"stale", new_id}
     finally:
         if isinstance(store, SqliteMemoryStore):

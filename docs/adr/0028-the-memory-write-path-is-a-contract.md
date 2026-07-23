@@ -23,9 +23,13 @@
   test clock, or the wall clock stepping backward (NTP) between the two samples —
   transiently still returns it, the same way a backward step un-expires an
   `expires_at` record; it is a read-time-filtering property, not a supersession bug.
-  `export` keeps the target **unconditionally**. An *absolute*,
-  clock-coherence-independent guarantee — a store-authoritative retirement instant —
-  is a `MemoryStore` contract change deferred to issue #306, not asserted here. **§5b's `EXTERNAL` clause is narrowed
+  `export` keeps the target **regardless of its validity window** — open or
+  closed — but still only while it is **non-expired**: a record past its
+  `expires_at` retention deadline is excluded from `export` as from everything
+  (ADR-0007 §3, ADR-0045 §6), because retention wins over history. An *absolute*,
+  clock-coherence-independent hide guarantee — a store-authoritative retirement
+  instant — is a `MemoryStore` contract change deferred to issue #306, not asserted
+  here. **§5b's `EXTERNAL` clause is narrowed
   to `REINFORCE`:** a `USER_ASSERTED`→`EXTERNAL` `REINFORCE` still raises, while the
   same `SUPERSEDE` is now permitted and asserted to write a new-id correction
   (ADR-0045 §5). The remaining `MemoryWriter` obligations, and §8's other exclusions,
