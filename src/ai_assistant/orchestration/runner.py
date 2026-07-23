@@ -347,15 +347,17 @@ class StepRunner:
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(state, step, request, decision, timeout=timeout)
 
-        # Both remaining outcomes pass through `AWAITING_APPROVAL`. For a
-        # `CONFIRM` that is the state's own meaning; for a `DENY` it is the only
-        # path ADR-0014 §4 leaves to `APPROVAL_DENIED`, which it refuses from
-        # `PENDING` because "a step that was never queued for approval cannot
-        # have been denied one" (ADR-0037 §5).
-        queued = await self._queue_for_approval(state, step, tool.id)
         if decision.ruling.outcome is PermissionOutcome.CONFIRM:
+            # A `CONFIRM` is the one outcome that parks the step: it is committed
+            # `PENDING → AWAITING_APPROVAL` with `bound_tool`, durably, and
+            # `resume` takes the human's answer when it arrives (ADR-0037 §4).
+            queued = await self._queue_for_approval(state, step, tool.id)
             return StepDisposition(Disposition.AWAITING_CONFIRMATION, queued, decision.id, tool.id)
-        return await self._deny(queued, step, decision, tool)
+        # A `DENY` is recorded in one commit, straight from `PENDING`
+        # (ADR-0037 §5, ADR-0041). The policy refused on its own authority with
+        # nobody asked, so the step never queued for an approval — it goes
+        # `PENDING → SKIPPED`/`APPROVAL_DENIED`, naming the recorded `DENY`.
+        return await self._deny(state, step, decision, tool)
 
     async def resume(
         self,
@@ -796,9 +798,15 @@ class StepRunner:
     ) -> StepDisposition:
         """Skip the step as denied, naming the decision that refused it.
 
-        ``approval_ref`` is required here by ``PlanExecution``, which refuses to
-        record a denial without one — the same insistence ADR-0014 §4 places on
-        the claim, from the other side.
+        Reached from both entry points, over the one edge ADR-0041 made legal
+        for either: :meth:`run` skips straight from ``PENDING`` when the policy
+        refused outright, and :meth:`resume` from ``AWAITING_APPROVAL`` when a
+        human said no. ``approval_ref`` is required on both by ``PlanExecution``,
+        which refuses to record a denial without one whichever status it comes
+        from — the same insistence ADR-0014 §4 places on the claim, from the
+        other side. A ``PENDING`` denial therefore carries no ``bound_tool``:
+        nothing was queued for an approval, and the ``approval_ref`` names the
+        decision that identifies the tool.
         """
         skipped = await self._skip(
             state, step, SkipReason.APPROVAL_DENIED, approval_ref=decision.id
