@@ -15,6 +15,7 @@ v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -32,7 +33,6 @@ from ai_assistant.orchestration import Disposition
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.config import Settings
     from ai_assistant.orchestration import Confirmation, Engine, TurnOutcome
 
 app = typer.Typer(
@@ -52,11 +52,12 @@ _EXIT_ERROR = 1
 def main() -> None:
     """Root command group. Keeps subcommands addressable by name.
 
-    Configures logging before any subcommand runs, so the ADR-0004 §5 redaction
-    processor is installed for the whole process rather than depending on
-    whichever module happens to log first.
+    Deliberately does no configuration work: loading settings can fail, and a
+    failure here would escape as an uncaught traceback with no controlled exit
+    code. Each command that needs settings loads them inside its own error
+    boundary instead (ADR-0042 §7), so a bad ``ASSISTANT_*`` value is rendered,
+    not dumped.
     """
-    configure_logging(load_settings())
 
 
 @app.command()
@@ -65,11 +66,27 @@ def version() -> None:
     console.print(f"ai-assistant [bold cyan]{__version__}[/]")
 
 
+def _positive_finite_seconds(value: float) -> float:
+    """Reject a ``--timeout`` that is not a positive, finite number of seconds.
+
+    Runs during Typer's parameter parsing, so an invalid value is a normal usage
+    error (exit code 2) rather than an ``OverflowError`` from ``timedelta`` or a
+    non-positive budget the executor would later refuse mid-run.
+    """
+    if not math.isfinite(value) or value <= 0:
+        msg = "must be a positive, finite number of seconds"
+        raise typer.BadParameter(msg)
+    return value
+
+
 @app.command()
 def ask(
     utterance: str = typer.Argument(..., help="What you want the assistant to do."),
     timeout_seconds: float = typer.Option(
-        60.0, "--timeout", help="Per-attempt deadline for the engine's work, in seconds."
+        60.0,
+        "--timeout",
+        callback=_positive_finite_seconds,
+        help="Per-attempt deadline for the engine's work, in seconds (positive).",
     ),
     *,
     yes: bool = typer.Option(
@@ -81,34 +98,43 @@ def ask(
     If the engine parks a step for confirmation, the prompt shows the action and
     the policy's reason; answering relays the opaque token back to the engine.
     """
-    settings = load_settings()
-    code = asyncio.run(
-        _ask(settings, utterance, timeout=timedelta(seconds=timeout_seconds), assume_yes=yes)
-    )
+    code = asyncio.run(_ask(utterance, timeout_seconds=timeout_seconds, assume_yes=yes))
     raise typer.Exit(code)
 
 
-async def _ask(
-    settings: Settings,
-    utterance: str,
-    *,
-    timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
-    assume_yes: bool,
-) -> int:
-    """Build the engine, drive one turn, and always close the engine (ADR-0042 §2).
+async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> int:
+    """Load settings, build the engine, drive one turn, and close it (ADR-0042 §2, §7).
 
-    Returns the process exit code. The composition root owns constructing the
-    façade; this adapter owns its session lifecycle — closing it on exit
-    (releasing the resources §2 gives the façade to own).
+    One error boundary spans **every** stage that can fail — loading settings,
+    configuring logging, constructing the engine, driving the turn, and shutting
+    down — so any :class:`AssistantError` is rendered and mapped to a non-zero exit
+    code rather than escaping as a traceback (§7). Returns the process exit code.
+    The composition root owns constructing the façade; this adapter owns closing it.
     """
+    timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
     approver: Callable[[Confirmation], bool] = (
         (lambda _confirmation: True) if assume_yes else _prompt_for_approval
     )
-    engine = build_engine(settings)
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        engine = build_engine(settings)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
     try:
         return await _drive_turn(engine, utterance, timeout=timeout, approver=approver)
     finally:
+        await _close(engine)
+
+
+async def _close(engine: Engine) -> None:
+    """Close the façade on exit, surfacing a shutdown failure rather than crashing."""
+    try:
         await engine.aclose()
+    except AssistantError as exc:
+        _render_error(exc)
 
 
 async def _drive_turn(
