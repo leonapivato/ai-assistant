@@ -52,7 +52,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import CurrentContext, Goal, MemoryKind, MemoryRecord
 
@@ -143,7 +143,7 @@ class RaisingMemoryStore(FakeMemoryStore):
 class Harness:
     """A wired :class:`Engine` and the fakes behind it, for assertions."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one knob per fake; that is what a harness is
         self,
         *,
         planner: object | None = None,
@@ -151,6 +151,7 @@ class Harness:
         policy: FakeActionPolicy | None = None,
         memory: FakeMemoryStore | None = None,
         closers: Sequence[object] = (),
+        loop_id_factory: Callable[[], str] | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -169,7 +170,7 @@ class Harness:
             planner=planner if planner is not None else OneStepPlanner(),  # type: ignore[arg-type]
             feedback=FakeFeedbackProcessor(),
             now=lambda: AT,
-            id_factory=lambda: "g-1",
+            id_factory=loop_id_factory if loop_id_factory is not None else lambda: "g-1",
         )
         runner = StepRunner(
             plans=self.plans,
@@ -625,7 +626,8 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
 
 async def test_outstanding_confirmations_apply_backpressure_without_stranding() -> None:
     """At the ceiling the engine refuses new work rather than dropping a live token (§4)."""
-    harness = Harness(tools=(confirmable(),))
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     engine = Engine(
         loop=harness.engine._loop,
         runner=harness.engine._runner,
@@ -638,10 +640,14 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     second = await engine.converse("send it", timeout=PATIENT)
     assert len(engine._parked) == 2  # at the ceiling
 
-    # A third action is refused — backpressure — and nothing new is parked.
+    # A third action is refused — backpressure — and nothing new is parked, and no
+    # durable goal/plan is written for the refused turn (round 8: admission precedes
+    # persistence). The refused turn's goal would have been "g-3".
     with pytest.raises(RuntimeError, match="awaiting an answer"):
         await engine.converse("send it", timeout=PATIENT)
     assert len(engine._parked) == 2
+    assert await harness.plans.get_goal("g-3") is None
+    assert await harness.plans.get_plan("g-3-plan") is None
 
     # Both outstanding confirmations are still answerable — nothing was stranded.
     a = await engine.resume(first.step.confirmation.token, approved=True, timeout=PATIENT)  # type: ignore[union-attr]
@@ -652,6 +658,52 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     assert third.step.disposition is Disposition.AWAITING_CONFIRMATION
     b = await engine.resume(second.step.confirmation.token, approved=True, timeout=PATIENT)  # type: ignore[union-attr]
     assert b.step is not None
+
+
+async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> None:
+    """Concurrent admissions cannot exceed the ceiling: reserved slots count (§4)."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen = 0
+
+    class GatedConfirmPlanner:
+        async def plan(
+            self,
+            goal: Goal,
+            *,
+            context: CurrentContext,
+            memories: Sequence[MemoryRecord] = (),
+        ) -> ActionPlan:
+            nonlocal seen
+            seen += 1
+            if seen == 3:  # all three turns are in flight together
+                entered.set()
+            await release.wait()
+            step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
+            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(
+        tools=(confirmable(),), planner=GatedConfirmPlanner(), loop_id_factory=lambda: next(goals)
+    )
+    engine = Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        id_factory=lambda: next(harness.handles),
+        max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
+    )
+
+    calls = [asyncio.ensure_future(engine.converse("send it", timeout=PATIENT)) for _ in range(3)]
+    await entered.wait()
+    release.set()
+    results = await asyncio.gather(*calls, return_exceptions=True)
+
+    parked = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, RuntimeError)]
+    assert len(parked) == 2  # exactly the ceiling parked
+    assert len(refused) == 1  # the third was refused, not admitted
+    assert len(engine._parked) == 2  # never exceeded the hard bound
 
 
 async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
