@@ -175,11 +175,25 @@ async def test_supersede_never_extends_a_bounded_targets_window() -> None:
     assert retired.validity.valid_until == already_closes  # not extended to the writer clock
 
 
-async def test_supersede_refuses_a_close_before_the_targets_valid_from() -> None:
-    """The fake refuses an inverted close and leaves the target live, as the real one does."""
-    starts_later = datetime(2026, 9, 1, tzinfo=UTC)  # after the writer clock
+@pytest.mark.parametrize(
+    "valid_from",
+    [
+        datetime(2026, 9, 1, tzinfo=UTC),  # strictly after the writer clock: inverted
+        datetime(2026, 6, 1, tzinfo=UTC),  # exactly the writer clock: empty-interval boundary
+    ],
+    ids=["valid_from-after-now", "valid_from-equals-now"],
+)
+async def test_supersede_refuses_a_close_at_or_before_the_targets_valid_from(
+    valid_from: datetime,
+) -> None:
+    """The fake refuses a close at or before ``valid_from`` and leaves the target live.
+
+    The equality boundary matters as much as the strictly-future case: an end equal
+    to ``valid_from`` is an empty window ``Validity`` rejects on the durable store's
+    decode, so the fake must refuse it exactly as the production writer does.
+    """
     store = FakeMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
-    await store.add(_inferred_target(validity=Validity(valid_from=starts_later)))
+    await store.add(_inferred_target(validity=Validity(valid_from=valid_from)))
     before = await store.export()
     writer = FakeMemoryWriter(
         store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_fixed_now

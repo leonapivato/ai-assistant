@@ -210,18 +210,25 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     - **Never extend.** If the target already self-closes at or before ``now``,
       keep that earlier end (``min``): retirement only ever takes a belief *off*
       the read path, never puts one back on or prolongs it.
-    - **Refuse an inverted close.** If the chosen end is not after ``valid_from``
-      (reachable only when a producer set a future ``valid_from`` and the writer's
-      and store's clocks skew, since a conflict search returns only records live at
-      store-now), there is no valid closed window at ``now``; raise so the target
-      is left live rather than persist an interval ``Validity`` would reject.
+    - **Refuse a close at or before ``valid_from``.** If the chosen end is **not
+      strictly after** ``valid_from`` (the target starts at or after the close
+      instant — reachable when a producer set a ``valid_from`` equal to ``now``, or
+      a future one that a store/writer clock skew still surfaces as a live
+      conflict), there is no *representable* closed window: an end equal to
+      ``valid_from`` is an empty ``[from, from)`` interval and an earlier end is
+      inverted, and **both are rejected by ``Validity``'s validator** — which
+      ``SqliteMemoryStore`` re-runs when it decodes the row, so persisting one would
+      make the retired record un-loadable. There being no honest way to retire such
+      a target, this raises and leaves it live rather than write a window that
+      cannot round-trip.
 
     ``now`` must already be a guarded, aware-UTC reading (the ingestor's
     :meth:`MemoryIngestor._now_utc`).
 
     Raises:
-        MemoryStoreError: If no valid closed window exists at ``now`` (the
-            inverted-close case above); nothing is written and the target stays live.
+        MemoryStoreError: If no representable closed window exists at ``now`` (the
+            at-or-before-``valid_from`` case above); nothing is written and the
+            target stays live.
     """
     window = target.validity
     end = now if window.valid_until is None else min(now, window.valid_until)
@@ -454,6 +461,15 @@ class MemoryIngestor:
         re-mints and retries, bounded by :data:`_MAX_SUPERSEDE_ATTEMPTS`. Any other
         ``MemoryStoreError`` aborts with the target left **live and unchanged**,
         because the atomic batch rolls the window-close back with it.
+
+        The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), so
+        the retired target leaves the read path once the *store's* read clock
+        reaches it — the same read-time semantics ``expires_at`` has. Under the
+        composition's real monotonic wall clock (ADR-0028 §4: the writer and its
+        reader share one store, and here both read UTC ``now``), a ``get`` after
+        ``ingest`` returns always reads at or after the close, so the target is
+        hidden; only a store clock injected *behind* the writer's — a test-only
+        skew — keeps it briefly visible, exactly as a future ``expires_at`` would.
 
         Returns:
             The **live** record's id — the correction's freshly-minted id, not the
