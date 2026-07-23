@@ -573,6 +573,93 @@ async def test_a_raising_handle_factory_fails_before_any_step_is_parked() -> Non
     )
 
 
+async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory() -> None:
+    """Two turns parking at once never share a handle (atomic reservation, §4).
+
+    Same utterance both turns, so the fixed-id goal/plan re-save idempotently, but
+    each ``start_execution`` opens a *distinct* execution — so the two parks are
+    genuinely different steps that must not collide onto one token.
+    """
+
+    class CollidingFactory:
+        def __call__(self) -> str:
+            return "same"
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen = 0
+
+    class GatedConfirmPlanner:
+        async def plan(
+            self,
+            goal: Goal,
+            *,
+            context: CurrentContext,
+            memories: Sequence[MemoryRecord] = (),
+        ) -> ActionPlan:
+            nonlocal seen
+            seen += 1
+            if seen == 2:  # both turns are now in flight together
+                entered.set()
+            await release.wait()
+            step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
+            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+
+    harness = Harness(tools=(confirmable(),), planner=GatedConfirmPlanner())
+    harness.engine._id_factory = CollidingFactory()
+
+    first = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
+    second = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
+    await entered.wait()
+    release.set()
+    out_one, out_two = await first, await second
+
+    token_one = out_one.step.confirmation.token  # type: ignore[union-attr]
+    token_two = out_two.step.confirmation.token  # type: ignore[union-attr]
+    assert token_one != token_two  # atomic reservation kept them apart
+    # Each token still resolves its own execution, not the other's.
+    r1 = await harness.engine.resume(token_one, approved=True, timeout=PATIENT)
+    r2 = await harness.engine.resume(token_two, approved=True, timeout=PATIENT)
+    assert r1.step.state.id != r2.step.state.id  # type: ignore[union-attr]
+
+
+async def test_outstanding_confirmations_are_bounded() -> None:
+    """An abandoning client cannot grow the parked table without limit (§4)."""
+    harness = Harness(tools=(confirmable(),))
+    engine = Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        id_factory=lambda: next(harness.handles),
+        max_outstanding_confirmations=2,  # tighten for the test
+    )
+
+    tokens = [
+        (await engine.converse("send it", timeout=PATIENT)).step.confirmation.token  # type: ignore[union-attr]
+        for _ in range(4)  # four parks, ceiling of two
+    ]
+
+    assert len(engine._parked) == 2  # bounded despite four parks
+    # The oldest tokens were evicted: they resolve to a clean refusal, not a wrong step.
+    with pytest.raises(PlanningError, match="no step awaiting confirmation"):
+        await engine.resume(tokens[0], approved=True, timeout=PATIENT)
+    # The newest is still answerable.
+    resumed = await engine.resume(tokens[-1], approved=True, timeout=PATIENT)
+    assert resumed.step is not None
+
+
+async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
+    """The ceiling must be positive — zero would make every park evict itself."""
+    harness = Harness()
+    with pytest.raises(ValueError, match="must be positive"):
+        Engine(
+            loop=harness.engine._loop,
+            runner=harness.engine._runner,
+            plans=harness.plans,
+            max_outstanding_confirmations=0,
+        )
+
+
 async def test_aclose_attempts_every_closer_even_when_one_fails() -> None:
     """A raising closer must not skip the resources after it (§2 releases every one)."""
     closed: list[str] = []
