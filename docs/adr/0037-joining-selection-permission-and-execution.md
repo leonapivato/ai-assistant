@@ -5,9 +5,11 @@
 - **Not a contract change.** No Protocol is added or altered, no `core` type
   moves, and `core/config.py` is untouched. Every contract this needs —
   `ToolRegistry`, `ActionPolicy`, `AuditTrail`, `PlanStore`, `ToolInvoker` — was
-  ratified by ADR-0016, ADR-0021, ADR-0014 and ADR-0029. Golden rule 5's
-  separate-PR requirement therefore does not apply and this ADR merges with the
-  implementation it authorises.
+  ratified by ADR-0016, ADR-0021, ADR-0014 and ADR-0029, and the one transition
+  the denial path leans on (`PENDING → SKIPPED`/`APPROVAL_DENIED`) was widened
+  into `PlanStore`'s graph by ADR-0041, which merged ahead of this. Golden
+  rule 5's separate-PR requirement therefore does not apply and this ADR merges
+  with the implementation it authorises.
 - **No ratified text changes here.** Everything below chooses among options the
   contracts left open, or records that an option is *not* being chosen.
 
@@ -400,67 +402,70 @@ the id from its caller. Closing it means either widening that transition to carr
 `approval_ref` (a `planning` change) or a by-step query on `AuditTrail` (a
 contract change); both were outside this change's fence. Issue #242.
 
-### 5. A denial passes through `AWAITING_APPROVAL`, because that is the only truthful path
+### 5. A denial is recorded in one commit, straight from `PENDING`
 
-ADR-0014 §4 permits `SkipReason.APPROVAL_DENIED` **only** from
-`AWAITING_APPROVAL` — `_LEGAL_SKIP_REASONS` refuses it from `PENDING`, on the
-reasoning that "a step that was never queued for approval cannot have been denied
-one". A `DENY` from `decide` arrives while the step is still `PENDING`.
+A `DENY` from `decide` arrives while the step is still `PENDING`: the policy
+refused on its own authority, with nobody asked and nothing shown. `StepRunner`
+commits that in a single transition — `PENDING → SKIPPED` with `skip_reason=
+APPROVAL_DENIED` and `approval_ref` naming the recorded `DENY`. One version, one
+disposition, no intermediate state. The step never passes through
+`AWAITING_APPROVAL`, because it was never a question.
 
-So a denied step is committed twice: `PENDING → AWAITING_APPROVAL` with
-`bound_tool`, then `AWAITING_APPROVAL → SKIPPED` with `skip_reason=
-APPROVAL_DENIED` and `approval_ref` naming the recorded `DENY`. Two versions,
-one disposition.
+That edge is ADR-0041's. ADR-0014 §4's original table permitted
+`APPROVAL_DENIED` **only** from `AWAITING_APPROVAL`, on the reasoning that "a
+step that was never queued for approval cannot have been denied one". ADR-0041
+took that rule apart: it conflates *whether a human was asked* with *whether a
+decision exists to point at*, and only the second is load-bearing. What makes a
+denial record truthful is not the step having passed through `AWAITING_APPROVAL`
+— that proves only a `bound_tool` was known — but the `approval_ref`, a foreign
+key into the audit trail that either resolves to a stored `PermissionDecision`
+or does not. So ADR-0041 widened the table by one row: `PENDING → SKIPPED` with
+`APPROVAL_DENIED` is legal **when, and only when, an `approval_ref` is
+supplied**. `StepRunner` takes that edge and supplies the id of the `DENY` it
+just recorded (§2).
 
-That reads oddly — the step "awaited" an approval nobody was asked for — and
-ADR-0014 §4's trigger column says `PENDING → AWAITING_APPROVAL` fires when
-"permission check requires confirmation", which is not what happened here. The
-objection is real and this section is the answer to it rather than an oversight.
+This is the same rule ADR-0014 §4 already applies in the mirror-image case, and
+seeing it stated there is what settles the design. Every transition into
+`RUNNING` carries an `approval_ref` — *including* the common automatic clearance
+where no prompt was shown — because otherwise "precisely the silent, automatic
+actions ... would be the ones that could not be correlated with their
+authorisation". An automatic *refusal* is that event with the sign flipped, and
+`SkipReason.APPROVAL_DENIED` is the member that records it. The one-commit edge
+lets that member be reached without a fiction: the durable state now says
+exactly what happened — a step refused, naming the decision that refused it —
+rather than claiming it "awaited" an approval nobody was asked for.
 
-**The graph's own design says an automatic ruling still gets a record.** ADR-0014
-§4 is emphatic that *every* transition into `RUNNING` carries an `approval_ref`
-"including the common case where the permission layer cleared the step
-automatically, without prompting", because otherwise "precisely the silent,
-automatic actions — the ones a user is least able to recall consenting to — would
-be the ones that could not be correlated with their authorisation". The
-symmetrical case is an automatic *refusal*, and `SkipReason.APPROVAL_DENIED`
-exists for it. Reading the trigger column strictly would make that member
-unreachable for every flow in which no human was asked — which cannot be the
-intent of a table that spends a paragraph insisting the automatic path be
-recorded too. So the intermediate state is read as *queued for the permission
-gate with a specific tool bound*, which is exactly what happened; the gate then
-answered without needing a human.
+**The guarantee boundary is narrow and worth being exact about.** `planning`
+enforces that the denial *carries* an `approval_ref` — present and non-blank,
+which `Identifier` already validates (ADR-0041 §1, §2). That the id *resolves*
+to a stored decision is `permissions/`'s to guarantee and remains issue #107's
+open gap, which neither this ADR nor ADR-0041 closes. The claim here is the
+narrower one: a denial is never recorded without something to look up.
 
-The alternatives are worse in the way that matters. Skipping from `PENDING` as
-`SUPERSEDED` records a false reason and loses the `approval_ref` entirely.
-Committing nothing and leaving the step `PENDING` throws away the durable fact
-that it was refused, and makes a denied step indistinguishable from an
-unattempted one. And widening `_LEGAL_SKIP_REASONS` to admit `APPROVAL_DENIED`
-from `PENDING` edits ADR-0014's graph, in a subsystem this change's fence
-excludes.
+The alternatives ADR-0041 also weighed and rejected, on the same grounds this
+section would: skipping from `PENDING` as `SUPERSEDED` records a false reason and
+carries no `approval_ref` at all; committing nothing and leaving the step
+`PENDING` throws away the durable fact that it was refused, making a denied step
+indistinguishable from an unattempted one, which ADR-0004 §7 likes least of all;
+and a distinct `SkipReason` for a policy refusal would be a `core` type change
+putting the ruling's *content* into execution state, a second authority that can
+drift from the trail (ADR-0014 §3). One reason for one disposition — the step
+will not run, and here is the decision that says so — is what execution state
+needs; the join to the trail answers *who* refused.
 
-**That last one is the reviewable disagreement, and it is recorded rather than
-settled here.** Architecture review of the implementing PR argued the reverse
-priority: that repurposing a ratified state is the greater cost, and the right
-fix is to ratify a planning-contract change letting an approval denial go
-`PENDING → SKIPPED` directly with an `approval_ref`. That is a better end state —
-it removes the odd intermediate commit *and* one of #257's three stranding
-windows — and it is a change to ADR-0014's transition table, which belongs to the
-planning lane and needs its own ADR. Issue #260 carries it. Until it lands, the
-two-commit path is the only one the ratified graph offers that records the
-denial at all, and this ADR takes recording it as the more important property.
+**This section records a settled design, not a waiver.** The join originally
+shipped a two-commit workaround — `PENDING → AWAITING_APPROVAL` purely to reach a
+status from which `APPROVAL_DENIED` was legal, then `AWAITING_APPROVAL → SKIPPED`
+— because the direct edge did not yet exist, and architecture review of that
+draft argued the reverse priority: that repurposing a ratified state was the
+greater cost and the planning-contract change was the right fix. That review was
+correct, the planning change is ADR-0041, and it has merged. The workaround is
+gone with it: `StepRunner` no longer queues a denied step for an approval, and
+the odd intermediate commit — along with the stranding window it opened (#257,
+under Consequences) — no longer exists.
 
-Review pressed the point a second time, asking that #260 land *before* this
-change rather than after. That is a sequencing judgement rather than a defect,
-and it is the dispatcher's: CONTRIBUTING puts ratification with the author and
-review in an advisory role, and the alternative on offer — shipping the join with
-no durable record of a refusal at all — trades a documented state-meaning
-stretch for a silently unrecorded denial, which ADR-0004 §7 likes less. The
-disagreement is on the record here, in #260, and in the PR, so whoever merges can
-hold this behind the planning change if they weigh it the other way.
-
-The denial therefore satisfies ADR-0014 §4's own rule for the automatic case: a
-decision was recorded and can be pointed at.
+The denial therefore satisfies ADR-0014 §4's own rule for the automatic case,
+now made reachable by ADR-0041: a decision was recorded and can be pointed at.
 
 ### 6. `run` enters only at `PENDING`, and `FAILED` is not a second entry
 
@@ -517,11 +522,13 @@ whole `ActionPlan`. This object disposes of one step, once.
   transition (§2), `PlanStore` offers no multi-step transaction, and
   `AuditTrail.record` makes a resolution single-use — so a failure or
   cancellation between the two leaves the step `AWAITING_APPROVAL` with its
-  ruling durable and unapplied, in three places: a resolved `ALLOW` whose claim
-  failed, a resolved `DENY` whose skip failed, and an initial `DENY` whose skip
-  failed after the queue transition landed. `resume` cannot retry any of them —
-  the first two because the confirmation is already resolved, the third because
-  a `DENY` was never a question.
+  ruling durable and unapplied, in two places, both on the `resume` path: a
+  resolved `ALLOW` whose claim failed, and a resolved `DENY` whose skip failed.
+  `resume` cannot retry either, because the confirmation is already resolved.
+  The third window #257 named — an initial `DENY` whose skip failed after a
+  synthetic queue transition landed — is gone: §5's denial is now a single
+  commit over ADR-0041's direct edge, so there is no gap on that path to strand
+  in.
 
   **Nothing has acted in any of those windows**, which is what makes this a
   recoverable gap rather than the one ADR-0014 §4 reserves `INDETERMINATE` for:
@@ -536,7 +543,7 @@ whole `ActionPlan`. This object disposes of one step, once.
   and the loop over `ActionPlan.steps` are the next slice, and keeping them out
   is what let this one be about the join.
 - **Revisit when** the selection rule lands (#241), when a confirmation acquires
-  durable identity (#242) or a lifetime (#243), when an automatic denial gets a
-  direct transition (#260), when execution authority becomes unforgeable (#259),
-  or when standing grants (ADR-0021 §6) make `decide` answer from a stored
-  authorisation.
+  durable identity (#242) or a lifetime (#243), when execution authority becomes
+  unforgeable (#259), or when standing grants (ADR-0021 §6) make `decide` answer
+  from a stored authorisation. The direct denial transition #260 asked for has
+  landed as ADR-0041 and is taken here (§5).
