@@ -71,8 +71,21 @@ class FakeMemoryStore:
         except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
 
-    def _is_expired(self, record: MemoryRecord) -> bool:
-        return record.expires_at is not None and record.expires_at <= self._now_utc()
+    @staticmethod
+    def _is_expired(record: MemoryRecord, now: datetime) -> bool:
+        return record.expires_at is not None and record.expires_at <= now
+
+    def _is_readable(self, record: MemoryRecord, now: datetime) -> bool:
+        """Whether a record may be returned by ``get``/``search`` at ``now``.
+
+        Both read-time filters: not expired (ADR-0007) and live at now — the
+        validity window's ``live_at`` predicate, both ends (ADR-0045 §6). ``now``
+        is captured **once per read operation** and passed in, so every record in
+        one ``search`` is judged against a single instant, matching the persistent
+        store. ``export`` deliberately does not use this: it keeps window-closed
+        records.
+        """
+        return not self._is_expired(record, now) and record.validity.live_at(now)
 
     async def add(self, record: MemoryRecord) -> str:
         """Persist ``record`` (overwriting any existing same id) and return its id.
@@ -85,12 +98,16 @@ class FakeMemoryStore:
         return record.id
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent or expired."""
+        """Return the record with ``record_id``, or ``None`` if not readable.
+
+        ``None`` when the record is absent, expired, or not live at now — a closed
+        or not-yet-open validity window, both ends (ADR-0045 §6).
+        """
         record = self._records.get(record_id)
-        if record is None or self._is_expired(record):
+        if record is None or not self._is_readable(record, self._now_utc()):
             return None
         # Deep copy so callers cannot mutate stored state — including nested fields
-        # like provenance — matching the persistent store (ADR-0007).
+        # like provenance and validity — matching the persistent store (ADR-0007).
         return record.model_copy(deep=True)
 
     async def search(
@@ -103,16 +120,20 @@ class FakeMemoryStore:
         """Return live records matching ``query`` by lexical overlap, best first.
 
         Relevance is the fraction of query terms that appear as substrings of a
-        record's content. Expired records, non-matching records, an empty query,
-        and a non-positive ``limit`` all yield nothing.
+        record's content. Non-matching records, expired records, records not live
+        at now (a closed or not-yet-open validity window, both ends — ADR-0045
+        §6), an empty query, and a non-positive ``limit`` all yield nothing.
         """
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
             return []
+        now = self._now_utc()  # one reading for the whole search, not one per record
         wanted = {str(kind) for kind in kinds} if kinds is not None else None
         scored: list[MemoryRecord] = []
         for record in self._records.values():
-            if self._is_expired(record) or (wanted is not None and record.kind not in wanted):
+            if not self._is_readable(record, now) or (
+                wanted is not None and record.kind not in wanted
+            ):
                 continue
             content = record.content.lower()
             hits = sum(1 for term in query_terms if term in content)
@@ -134,12 +155,22 @@ class FakeMemoryStore:
         return count
 
     async def export(self) -> list[MemoryRecord]:
-        """Return an independent snapshot of all live (non-expired) records."""
-        return [r.model_copy(deep=True) for r in self._records.values() if not self._is_expired(r)]
+        """Return an independent snapshot of every retained (non-expired) record.
+
+        Includes window-closed records: unlike ``get``/``search`` this does not
+        filter on the validity window — a superseded belief is retained data a
+        data-rights export must keep; only expired records are excluded (ADR-0045
+        §6, amending ADR-0007 §3).
+        """
+        now = self._now_utc()
+        return [
+            r.model_copy(deep=True) for r in self._records.values() if not self._is_expired(r, now)
+        ]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
-        expired = [rid for rid, record in self._records.items() if self._is_expired(record)]
+        now = self._now_utc()
+        expired = [rid for rid, record in self._records.items() if self._is_expired(record, now)]
         for rid in expired:
             del self._records[rid]
         return len(expired)

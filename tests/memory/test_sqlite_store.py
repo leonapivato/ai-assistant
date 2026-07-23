@@ -23,6 +23,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
+    Validity,
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
@@ -48,13 +49,20 @@ def _provenance() -> Provenance:
     return Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN)
 
 
-def _semantic(record_id: str, content: str, *, expires_at: datetime | None = None) -> MemoryRecord:
+def _semantic(
+    record_id: str,
+    content: str,
+    *,
+    expires_at: datetime | None = None,
+    validity: Validity | None = None,
+) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
         content=content,
         fact=content,
         provenance=_provenance(),
         expires_at=expires_at,
+        validity=validity or Validity(),
     )
 
 
@@ -380,24 +388,46 @@ async def test_purge_expired_removes_only_expired_and_returns_count(
     assert await store.purge_expired() == 0
 
 
-def _write_legacy_db(path: Path, records: list[MemoryRecord]) -> None:
-    """Create a pre-ADR-0007 database (records table without expires_at)."""
+def _write_legacy_db(
+    path: Path, records: list[MemoryRecord], *, with_expires_at: bool = False
+) -> None:
+    """Create a legacy database whose ``records`` table predates a column.
+
+    ``with_expires_at=False`` is the pre-ADR-0007 shape (neither ``expires_at``
+    nor ``valid_until``). ``with_expires_at=True`` is the intermediate
+    post-ADR-0007, pre-ADR-0045 shape: ``expires_at`` present, ``valid_until``
+    absent — the table variant whose ``valid_until`` migration must run on its own.
+    """
     legacy = sqlite3.connect(path)
     legacy.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     legacy.executemany(
         "INSERT INTO meta(key, value) VALUES (?, ?)",
         [("embedding_model", "hashing-8"), ("dimensions", "8")],
     )
-    legacy.execute(
-        "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
-        "kind TEXT NOT NULL, data TEXT NOT NULL)"
-    )
-    legacy.executemany(
-        "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
-        [(r.id, r.kind, r.model_dump_json()) for r in records],
-    )
+    if with_expires_at:
+        legacy.execute(
+            "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL, expires_at REAL)"
+        )
+        legacy.executemany(
+            "INSERT INTO records(id, kind, data, expires_at) VALUES (?, ?, ?, ?)",
+            [(r.id, r.kind, r.model_dump_json(), _epoch_or_none(r.expires_at)) for r in records],
+        )
+    else:
+        legacy.execute(
+            "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+        legacy.executemany(
+            "INSERT INTO records(id, kind, data) VALUES (?, ?, ?)",
+            [(r.id, r.kind, r.model_dump_json()) for r in records],
+        )
     legacy.commit()
     legacy.close()
+
+
+def _epoch_or_none(instant: datetime | None) -> float | None:
+    return instant.timestamp() if instant is not None else None
 
 
 async def test_migration_adds_expires_at_column_and_accepts_writes(tmp_path: Path) -> None:
@@ -434,6 +464,86 @@ async def test_migration_backfills_expiry_so_legacy_expired_stays_forgotten(
         assert await store.get("live") is not None
         assert [r.id for r in await store.export()] == ["live"]
         assert await store.purge_expired() == 1
+    finally:
+        store.close()
+
+
+def _valid_until_column(store: SqliteMemoryStore, record_id: str) -> float | None:
+    """Read the raw ``records.valid_until`` column for a record, bypassing decode.
+
+    The migration's whole job is to *populate this column* from the JSON blob, so
+    a test of the backfill must assert the column itself — ``get``/``search``
+    decode ``valid_from`` from JSON and could pass with the column empty, and
+    ``search`` over an unpopulated ``vec_records`` yields nothing regardless.
+    """
+    row = store._conn.execute(
+        "SELECT valid_until FROM records WHERE id = ?", (record_id,)
+    ).fetchone()
+    assert row is not None
+    return cast("float | None", row[0])
+
+
+async def test_migration_backfills_valid_until_column_from_json(tmp_path: Path) -> None:
+    # A pre-ADR-0045 database carries a record's closed window only in its JSON
+    # blob; search filters valid_until from the column, so migration must backfill
+    # it or a retired legacy belief would resurface in search (ADR-0045 §9). Assert
+    # the column itself, not a read path that reads the window back out of JSON.
+    retired_deadline = datetime(2026, 1, 2, tzinfo=UTC)
+    db = tmp_path / "legacy.db"
+    _write_legacy_db(
+        db,
+        [
+            _semantic(
+                "retired", "legacy coffee retired", validity=Validity(valid_until=retired_deadline)
+            ),
+            _semantic("live", "legacy coffee live"),
+        ],
+    )
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert "valid_until" in columns
+        # The backfill populated the column for the retired record and left the
+        # live one NULL (= open) — the property search's column pre-filter relies on.
+        assert _valid_until_column(store, "retired") == retired_deadline.timestamp()
+        assert _valid_until_column(store, "live") is None
+        # And the read paths honour it: retired is hidden from get, retained by export.
+        assert await store.get("retired") is None
+        assert await store.get("live") is not None
+        assert {r.id for r in await store.export()} == {"retired", "live"}
+    finally:
+        store.close()
+
+
+async def test_migration_adds_valid_until_to_a_post_expires_at_table(
+    tmp_path: Path,
+) -> None:
+    # The intermediate shape: expires_at already present, valid_until absent. Only
+    # the valid_until migration block should run, and it must backfill the closed
+    # window from JSON just the same.
+    retired_deadline = datetime(2026, 1, 2, tzinfo=UTC)
+    db = tmp_path / "intermediate.db"
+    _write_legacy_db(
+        db,
+        [
+            _semantic(
+                "retired", "legacy coffee retired", validity=Validity(valid_until=retired_deadline)
+            ),
+            _semantic("live", "legacy coffee live"),
+        ],
+        with_expires_at=True,
+    )
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert {"expires_at", "valid_until"} <= columns
+        # The valid_until block ran on its own and backfilled the column.
+        assert _valid_until_column(store, "retired") == retired_deadline.timestamp()
+        assert _valid_until_column(store, "live") is None
+        assert await store.get("retired") is None
+        assert {r.id for r in await store.export()} == {"retired", "live"}
     finally:
         store.close()
 
@@ -490,3 +600,9 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store(self, make_store: Callable[..., SqliteMemoryStore]) -> MemoryStore:
         return make_store()
+
+    @pytest.fixture
+    def store_factory(
+        self, make_store: Callable[..., SqliteMemoryStore]
+    ) -> Callable[[Callable[[], datetime]], MemoryStore]:
+        return lambda now: make_store(now=now)

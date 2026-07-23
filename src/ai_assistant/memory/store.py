@@ -81,8 +81,21 @@ class InMemoryMemoryStore:
         except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
 
-    def _is_expired(self, record: MemoryRecord) -> bool:
-        return record.expires_at is not None and record.expires_at <= self._now_utc()
+    @staticmethod
+    def _is_expired(record: MemoryRecord, now: datetime) -> bool:
+        return record.expires_at is not None and record.expires_at <= now
+
+    def _is_readable(self, record: MemoryRecord, now: datetime) -> bool:
+        """Whether a record may be returned by ``get``/``search`` at ``now``.
+
+        Both read-time filters at once: not expired (ADR-0007) and live at now —
+        the validity window's ``live_at`` predicate, both ends (ADR-0045 §6).
+        ``now`` is captured **once per read operation** and passed in, so every
+        record in one ``search`` is judged against a single instant (matching the
+        persistent store, which reads its clock once). ``export`` deliberately
+        does not use this: it keeps window-closed records.
+        """
+        return not self._is_expired(record, now) and record.validity.live_at(now)
 
     async def add(self, record: MemoryRecord) -> str:
         """Persist a record and return its id.
@@ -94,16 +107,24 @@ class InMemoryMemoryStore:
         Returns:
             The stored record's id.
         """
-        self._records[record.id] = record
+        # Deep copy so a caller mutating the record (including nested fields like
+        # validity, which drives read filtering) after add cannot reach stored
+        # state — matching FakeMemoryStore and the serialised persistent store.
+        self._records[record.id] = record.model_copy(deep=True)
         return record.id
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent or expired."""
+        """Return the record with ``record_id``, or ``None`` if not readable.
+
+        ``None`` when the record is absent, expired, or not live at now — a closed
+        or not-yet-open validity window, both ends (ADR-0045 §6).
+        """
         record = self._records.get(record_id)
-        if record is None or self._is_expired(record):
+        if record is None or not self._is_readable(record, self._now_utc()):
             return None
-        # Copy so callers cannot mutate stored state, matching the persistent store.
-        return record.model_copy()
+        # Deep copy so callers cannot mutate stored state — including nested fields
+        # like validity — matching the persistent store.
+        return record.model_copy(deep=True)
 
     async def search(
         self,
@@ -116,8 +137,9 @@ class InMemoryMemoryStore:
 
         Relevance is naive lexical overlap: the fraction of query terms that
         appear as substrings of a record's content. Records that match no query
-        term, and expired records, are omitted. An empty or whitespace-only
-        query matches nothing.
+        term, expired records, and records not live at now (a closed or
+        not-yet-open validity window, both ends — ADR-0045 §6) are omitted. An
+        empty or whitespace-only query matches nothing.
 
         Args:
             query: The search text.
@@ -132,11 +154,12 @@ class InMemoryMemoryStore:
         if limit <= 0 or not query_terms:
             return []
 
+        now = self._now_utc()  # one reading for the whole search, not one per record
         wanted = {str(kind) for kind in kinds} if kinds is not None else None
         scored = [
-            record.model_copy(update={"score": score})
+            record.model_copy(update={"score": score}, deep=True)
             for record in self._records.values()
-            if not self._is_expired(record)
+            if self._is_readable(record, now)
             and (wanted is None or record.kind in wanted)
             and (score := _relevance(query_terms, record.content)) > 0.0
         ]
@@ -154,14 +177,24 @@ class InMemoryMemoryStore:
         return count
 
     async def export(self) -> list[MemoryRecord]:
-        """Return an independent snapshot of all live (non-expired) records."""
+        """Return an independent snapshot of every retained (non-expired) record.
+
+        Includes window-closed records: unlike ``get``/``search`` this does not
+        filter on the validity window — a superseded belief is retained data a
+        data-rights export must keep; only expired records are excluded (ADR-0045
+        §6, amending ADR-0007 §3).
+        """
+        now = self._now_utc()
         return [
-            record.model_copy() for record in self._records.values() if not self._is_expired(record)
+            record.model_copy(deep=True)
+            for record in self._records.values()
+            if not self._is_expired(record, now)
         ]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
-        expired = [rid for rid, record in self._records.items() if self._is_expired(record)]
+        now = self._now_utc()
+        expired = [rid for rid, record in self._records.items() if self._is_expired(record, now)]
         for rid in expired:
             del self._records[rid]
         return len(expired)

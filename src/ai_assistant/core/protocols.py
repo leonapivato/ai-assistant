@@ -117,6 +117,16 @@ class MemoryStore(Protocol):
     Records carry an optional ``expires_at`` retention deadline. A record past
     that deadline is treated as already forgotten: ``get`` and ``search`` never
     return it, whether or not ``purge_expired`` has reclaimed it yet (ADR-0007).
+
+    Records also carry a ``validity`` window — the valid-time axis of ADR-0045.
+    ``get`` and ``search`` return only records *live at now* (both ends of the
+    window enforced: past ``valid_until`` or before ``valid_from`` are hidden),
+    the same read-time treatment ``expires_at`` gets. The two axes are
+    independent and both are honoured: ``expires_at`` is retention (an expired
+    record is gone from *everything*, including ``export``), the window is truth
+    (a window-closed record is off the read path but **retained** and still
+    returned by ``export``). A record can be retired-but-retained or
+    still-live-but-expired; each axis is judged on its own terms.
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -129,7 +139,13 @@ class MemoryStore(Protocol):
         ...
 
     async def get(self, record_id: str) -> MemoryRecord | None:
-        """Return the record with ``record_id``, or ``None`` if absent or expired."""
+        """Return the record with ``record_id``, or ``None`` if it is not readable.
+
+        Returns ``None`` when the record is absent, expired, **or not live at
+        now** — a closed ``valid_until`` (``valid_until <= now``) or a not-yet-open
+        ``valid_from`` (``valid_from > now``); both ends of the window are enforced
+        (ADR-0045 §6).
+        """
         ...
 
     async def search(
@@ -141,7 +157,9 @@ class MemoryStore(Protocol):
     ) -> list[MemoryRecord]:
         """Return the records most relevant to ``query``, best first.
 
-        Expired records are never returned.
+        Expired records are never returned, nor are records not live at now — a
+        record whose window is closed or not yet open is omitted, both ends
+        enforced, exactly as an expired one is (ADR-0045 §6).
 
         Args:
             query: The search text.
@@ -170,10 +188,15 @@ class MemoryStore(Protocol):
         ...
 
     async def export(self) -> list[MemoryRecord]:
-        """Return a portable snapshot of all live (non-expired) records.
+        """Return a portable snapshot of every retained (non-expired) record.
 
         The caller serialises the records to JSON (e.g. ``model_dump(mode="json")``);
-        the snapshot excludes expired records and carries no embeddings (ADR-0007 §3).
+        the snapshot carries no embeddings (ADR-0007 §3). Unlike ``get``/``search``,
+        ``export`` returns records **whether their validity window is open or
+        closed** — a superseded belief is data the store holds, so a data-rights
+        export must include it (ADR-0045 §6, amending ADR-0007 §3). Only *expired*
+        records (past ``expires_at``) are excluded: retention still wins over
+        history, so a record the system promised to forget cannot resurface here.
         """
         ...
 
