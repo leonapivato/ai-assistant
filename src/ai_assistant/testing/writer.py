@@ -326,14 +326,16 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     to ``now``; every other field, ``valid_from`` included, is preserved. Mirrors
     ``MemoryIngestor._close_window``, including its two robustness rules for a
     producer-set bounded window: **never extend** an earlier ``valid_until``
-    (``min``), and **refuse an inverted close** (raise, target left live) — both so
-    the fake cannot persist a ``Validity`` the production writer would reject, since
-    ``model_copy(update=...)`` skips the ``valid_until > valid_from`` validator.
+    (``min``), and **refuse a close at or before ``valid_from``** (raise, target
+    left live) — the latter because an end equal to ``valid_from`` is an empty
+    interval and an earlier one is inverted, both of which ``Validity``'s validator
+    rejects on the durable store's decode, so the fake must refuse them too rather
+    than let a consumer's test pass on a window the production path cannot persist.
     ``now`` must be a guarded, aware-UTC reading.
 
     Raises:
-        MemoryStoreError: If no valid closed window exists at ``now``; nothing is
-            written and the target stays live.
+        MemoryStoreError: If no representable closed window exists at ``now``;
+            nothing is written and the target stays live.
     """
     window = target.validity
     end = now if window.valid_until is None else min(now, window.valid_until)

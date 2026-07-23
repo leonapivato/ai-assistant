@@ -216,25 +216,38 @@ async def test_superseding_a_target_never_extends_its_existing_window() -> None:
     assert retired.validity.valid_until == already_closes
 
 
-async def test_superseding_a_target_that_starts_after_now_is_refused() -> None:
-    # The only window a `valid_until = now` close could invert: a producer-set
-    # future `valid_from`, reachable as a live conflict only under a store/writer
-    # clock skew (a search returns records live at store-now). `_close_window`
-    # refuses rather than persist an interval `Validity` would reject, leaving the
-    # target live and unchanged (ADR-0045 §4/§6).
-    starts_later = datetime(2026, 9, 1, tzinfo=UTC)
+@pytest.mark.parametrize(
+    "valid_from",
+    [
+        # Strictly after the ingestor's 2026-06-01 clock: an inverted close.
+        datetime(2026, 9, 1, tzinfo=UTC),
+        # Exactly the ingestor's clock: the boundary — an empty `[from, from)` close.
+        datetime(2026, 6, 1, tzinfo=UTC),
+    ],
+    ids=["valid_from-after-now", "valid_from-equals-now"],
+)
+async def test_superseding_a_target_that_starts_at_or_after_now_is_refused(
+    valid_from: datetime,
+) -> None:
+    # A `valid_until = now` close of a target whose window starts at or after `now`
+    # has no representable form: an end equal to `valid_from` is an empty interval
+    # and an earlier one is inverted, and `Validity`'s validator (which
+    # `SqliteMemoryStore` re-runs on decode) rejects both — so persisting one would
+    # make the retired record un-loadable. `_close_window` refuses instead, leaving
+    # the target live and unchanged (ADR-0045 §4/§6). Reachable as a live conflict
+    # only via a producer-set `valid_from` (no in-scope writer sets one) at the
+    # store's read clock.
     store = InMemoryMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
     await store.add(
         PreferenceMemory(
             id="future",
             content="user prefers morning meetings",
             preference="morning",
-            validity=Validity(valid_from=starts_later),
+            validity=Validity(valid_from=valid_from),
             provenance=_prov(0.6, source=MemorySource.INFERRED),
         )
     )
 
-    # The ingestor's clock (2026-06-01) precedes the target's own start.
     with pytest.raises(MemoryStoreError, match="not after its valid_from"):
         await _ingestor(store).ingest(
             _proposal(_asserted("correction", "user prefers afternoon meetings"))
@@ -243,7 +256,7 @@ async def test_superseding_a_target_that_starts_after_now_is_refused() -> None:
     # Fail-closed: the target is untouched and no correction was written.
     survivor = await store.get("future")
     assert survivor is not None
-    assert survivor.validity.valid_from == starts_later
+    assert survivor.validity.valid_from == valid_from
     assert survivor.validity.valid_until is None
 
 
