@@ -207,12 +207,18 @@ Applying `SUPERSEDE(target_id=T)` for a proposed record `P`:
    is caller-supplied and `MemoryStore.add` is a caller-id upsert (a record whose
    id already exists is overwritten), so writing at `P.id` could silently clobber
    an unrelated live record that happens to share it. The applier therefore mints
-   a fresh id **distinct from every existing record's id** — `MemoryIngestor` uses
-   a `uuid4`, collision-free by construction — and discards `P.id`, exactly as
-   today's supersession discards it when it rehomes `P` onto `T`'s id. Which
-   allocator mints the id is `memory`'s own semantics (like the fold rule,
-   ADR-0028 §8); the *obligation* the contract pins is only that the id is fresh
-   and returned (§5).
+   a fresh id from an **injected id factory** (mirroring the injected clock and
+   ADR-0022 §5's goal-id factory — deterministic in tests) and discards `P.id`,
+   exactly as today's supersession discards it when it rehomes `P` onto `T`'s id.
+   **Distinctness is enforced, not assumed.** A minted id must be **distinct from
+   every existing record's id**, and a probabilistic generator (`uuid4`) makes a
+   collision unlikely, not impossible — so the new record is written with
+   **insert-if-absent** semantics under the atomic primitive (§8), *not* a blind
+   upsert: a minted id that already exists is rejected and the applier mints
+   again, rather than overwriting the colliding record. Which factory mints the id
+   is `memory`'s own semantics (like the fold rule, ADR-0028 §8); the *obligation*
+   the contract pins is only that the id is fresh, non-colliding, and returned
+   (§5).
 3. **Return the new record's id.** `MemoryIngestResult.record_id` is the id of the
    **live** record, which is now `P`'s new id, not `T`'s — "MemoryIngestResult
    carries a different id than it does today" (ADR-0040 §6).
@@ -244,10 +250,13 @@ becomes:
 > target's. The target remains fetchable by `export` and, being window-closed, is
 > absent from `get`/`search`.
 
-The conformance suite adds a case where the proposal's own `id` already names a
-**live, non-target** record: the `SUPERSEDE` must not overwrite that record — the
-fresh-id obligation is precisely what forbids the upsert collision — and the live
-record it returns is neither the target nor the collided-with record.
+The conformance suite adds two collision cases, both asserting the `SUPERSEDE`
+overwrites **neither** and returns an id that is neither the target nor the
+collided-with record: one where the proposal's own `id` already names a **live,
+non-target** record, and one where the **minted** id collides with an existing
+record — exercised by driving the injected id factory to return a colliding value
+first and asserting the applier mints again (insert-if-absent, not upsert) rather
+than clobbering it. The fresh-id obligation is what forbids both collisions.
 
 The differential ADR-0040 §5a ratified — **`SUPERSEDE` carries nothing of the
 target onto the surviving record** — is unchanged and still complete; only "at
@@ -401,10 +410,16 @@ We rule, rather than assume: **the window-closing `SUPERSEDE` applier requires
   `add`s would ship the regression above under the cover of a feature.
 
 So the implementation sequence is: #104 gives `MemoryStore` an atomic batch/
-transaction; then #112's applier uses it. This ADR does **not** design that
-primitive — it belongs to #104's lane and Protocol change — it only fixes that
-#112's applier consumes it and must not precede it. Stated so a later lane cannot
-silently implement the applier over a non-atomic pair of writes.
+transaction; then #112's applier uses it. Two properties the applier needs from
+that primitive, stated as consumer requirements rather than as its design: it must
+apply the window-close and the new-record write **atomically** (a failure between
+them must not commit the retirement), and it must support an **insert-if-absent**
+write for the new record (§4) — a blind upsert cannot honour the fresh-id
+obligation, since a minted id that collided would silently clobber the colliding
+record. This ADR does **not** design the primitive — it belongs to #104's lane and
+Protocol change — it only fixes what #112's applier consumes and that it must not
+precede it. Stated so a later lane cannot silently implement the applier over a
+non-atomic pair of blind upserts.
 
 ### 9. Schema migration is needed and is mechanical (OQ4)
 
@@ -474,9 +489,11 @@ existing `expires_at` pattern covers it with no new machinery.
   - `memory/store.py`, `memory/sqlite_store.py` — read-time window filtering;
     `export` returns closed-window records; the SQLite `valid_until` migration (§9).
   - `memory/ingest.py` — `_supersede`/`_apply` rewritten to close the target's
-    window and write a new-id record (§4); `_SUPERSEDABLE` widened to include
-    `EXTERNAL`; the `EXTERNAL` arm of `_refuse_unsafe_fold` removed; **clause 1
-    kept** (§5). Requires #104 (§8).
+    window and write a new-id record via an **injected id factory**, using the
+    insert-if-absent primitive (§4); `_SUPERSEDABLE` widened to include `EXTERNAL`;
+    the `EXTERNAL` arm of `_refuse_unsafe_fold` removed; **clause 1 kept** (§5).
+    `MemoryIngestor` gains the id factory alongside its existing injected clock.
+    Requires #104 (§8).
   - `memory/policy.py` — `_SUPERSEDABLE` widened to include `EXTERNAL`; the rule 3
     docstring updated. No new ruling.
   - `testing/writer.py`, `testing/store.py` — `FakeMemoryWriter` grows the new
@@ -543,6 +560,13 @@ existing `expires_at` pattern covers it with no new machinery.
   supersession — a retired belief with no live replacement — under the cover of a
   feature. Atomicity has to come from the store (ADR-0028 §7); #104 is the
   prerequisite, not an optimisation.
+- **Mint the new supersession id with a bare `uuid4` and a blind `add` upsert.**
+  Rejected in §4: `uuid4` makes a collision unlikely, not impossible, and `add` is
+  an unconditional upsert, so the fresh-id obligation — distinct from *every*
+  existing id — would be probabilistic rather than enforced, and a collision would
+  silently clobber an unrelated record. An injected id factory plus insert-if-absent
+  under the atomic primitive makes the obligation exact and testable, at no extra
+  Protocol surface beyond the atomicity #104 already owes (§8).
 - **Redefine `expires_at` to double as the validity window.** Rejected in §6 and
   per issue #112 explicitly: `expires_at` is a retention/privacy deadline (an
   expired record is gone from *everything*, including `export`), the window is a
