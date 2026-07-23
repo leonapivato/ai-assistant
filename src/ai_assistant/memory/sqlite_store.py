@@ -343,21 +343,18 @@ class SqliteMemoryStore:
                 self._persist_record(record, vector)
             conn.commit()
         except MemoryStoreError:
-            # Includes the MemoryStoreConflictError raised by the presence check
-            # above: roll the whole batch back and propagate it unchanged — it is
-            # already the seam's error (ADR-0028 §5).
+            # The in-scope collision is *this*: the presence check above raises
+            # MemoryStoreConflictError deterministically for a single writer (§4).
+            # Roll the whole batch back and propagate it unchanged — it is already
+            # the seam's error (ADR-0028 §5). A raced cross-process INSERT that hit
+            # the records.id UNIQUE constraint instead is §5's out-of-scope
+            # concurrency, which ADR-0046 §4 does *not* require reclassifying as a
+            # conflict; it falls through below as MemoryStoreError, so only a
+            # verified stored-id collision — never another integrity failure (a
+            # NOT NULL or vec constraint) — is reported as recoverable.
             with contextlib.suppress(sqlite3.Error):
                 conn.rollback()
             raise
-        except sqlite3.IntegrityError as exc:
-            # A UNIQUE collision on records.id despite the presence check means a
-            # concurrent writer inserted the id between our SELECT and our INSERT —
-            # a collision, not a fatal fault, so it surfaces as a conflict rather
-            # than a generic error (ADR-0046 §4).
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
-            msg = f"an atomic batch conflicted on an existing id: {exc}"
-            raise MemoryStoreConflictError(msg) from exc
         except Exception as exc:
             # Any *other* mid-transaction failure — a backend error, or a
             # malformed vector that makes serialization raise after an earlier
