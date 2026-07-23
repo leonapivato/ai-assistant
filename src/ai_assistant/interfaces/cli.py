@@ -124,17 +124,30 @@ async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> i
         return _EXIT_ERROR
 
     try:
-        return await _drive_turn(engine, utterance, timeout=timeout, approver=approver)
+        code = await _drive_turn(engine, utterance, timeout=timeout, approver=approver)
     finally:
-        await _close(engine)
+        shutdown_code = await _close(engine)
+    # A failure closing an owned resource is itself a failure to report (§7): the
+    # turn may have succeeded, but the process did not shut down cleanly.
+    return max(code, shutdown_code)
 
 
-async def _close(engine: Engine) -> None:
-    """Close the façade on exit, surfacing a shutdown failure rather than crashing."""
+async def _close(engine: Engine) -> int:
+    """Close the façade on exit, reporting a shutdown failure rather than crashing.
+
+    Returns a non-zero code if closing fails, so the caller can fold it into the
+    exit status (ADR-0042 §7). Catches ``Exception`` — not just ``AssistantError``
+    — because :meth:`Engine.aclose` raises an ``ExceptionGroup`` when an owned
+    resource's ``close`` fails; a shutdown fault must be surfaced, not propagated
+    as a traceback, and must not be mistaken for success. ``BaseException`` (a
+    cancellation, a keyboard interrupt) is left to propagate.
+    """
     try:
         await engine.aclose()
-    except AssistantError as exc:
+    except Exception as exc:  # shutdown must surface any fault, not crash
         _render_error(exc)
+        return _EXIT_ERROR
+    return _EXIT_OK
 
 
 async def _drive_turn(
@@ -235,8 +248,13 @@ def _prompt_for_approval(confirmation: Confirmation) -> bool:
     return typer.confirm("Proceed?", default=False)
 
 
-def _render_error(exc: AssistantError) -> None:
-    """Render an engine error for the terminal, without leaking a traceback."""
+def _render_error(exc: Exception) -> None:
+    """Render an error for the terminal, without leaking a traceback.
+
+    Accepts any ``Exception`` — an :class:`AssistantError` from a stage, or the
+    ``ExceptionGroup`` :meth:`Engine.aclose` raises when an owned resource fails to
+    close — and shows its message rather than a stack trace.
+    """
     console.print(f"[red]Error:[/] {_safe(str(exc))}")
 
 

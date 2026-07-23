@@ -52,7 +52,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
@@ -120,7 +120,12 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
 
 
-def _engine(*, tools: tuple[ToolDefinition, ...], policy: FakeActionPolicy | None = None) -> Engine:
+def _engine(
+    *,
+    tools: tuple[ToolDefinition, ...] = (),
+    policy: FakeActionPolicy | None = None,
+    closers: Sequence[Callable[[], Awaitable[None]]] = (),
+) -> Engine:
     """A real ``Engine`` over canonical fakes, driving a one-step plan."""
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
@@ -146,7 +151,7 @@ def _engine(*, tools: tuple[ToolDefinition, ...], policy: FakeActionPolicy | Non
         now=lambda: AT,
         id_factory=lambda: next(ids),
     )
-    return Engine(loop=loop, runner=runner, plans=plans)
+    return Engine(loop=loop, runner=runner, plans=plans, closers=closers)
 
 
 # --- rendering: escaping is the adapter's, per target (ADR-0042 §4) ------
@@ -285,3 +290,36 @@ def test_ask_rejects_a_non_positive_or_non_finite_timeout(bad: str) -> None:
     """An invalid --timeout is a usage error (exit 2), not a crash (§7, finding 2)."""
     result = CliRunner().invoke(cli.app, ["ask", "hello", "--timeout", bad])
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
+
+
+# --- shutdown-failure boundary (ADR-0042 §2, §7) ------------------------
+
+
+async def _failing_closer() -> None:
+    """A closer that fails, as a broken owned resource would."""
+    msg = "the store would not close"
+    raise RuntimeError(msg)
+
+
+async def test_close_reports_a_failing_closer_as_nonzero(output: StringIO) -> None:
+    """``aclose`` raises an ExceptionGroup on a closer failure; it is surfaced, exit 1."""
+    engine = _engine(closers=(_failing_closer,))
+    code = await cli._close(engine)
+    assert code == cli._EXIT_ERROR
+    assert "Error" in output.getvalue()
+
+
+async def test_a_shutdown_failure_after_a_good_turn_still_exits_nonzero(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn can succeed yet the process fail to shut down cleanly — that is exit 1 (§7)."""
+    engine = _engine(tools=(tool(),), closers=(_failing_closer,))
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
+    monkeypatch.setattr(cli, "build_engine", lambda _settings: engine)
+
+    code = await cli._ask("send it", timeout_seconds=1.0, assume_yes=True)
+    assert code == 1  # the step ran, but the failed close downgrades the exit code
+    rendered = output.getvalue()
+    assert "Done" in rendered  # the turn's success was still reported
+    assert "Error" in rendered  # and so was the shutdown failure
