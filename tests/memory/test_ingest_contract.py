@@ -18,6 +18,8 @@ from memory_writer_contract import MemoryWriterContract, WriterFactory
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
 
 
@@ -30,8 +32,15 @@ class TestMemoryIngestorContract(MemoryWriterContract):
 
     @pytest.fixture
     def make_writer(self) -> WriterFactory:
-        def build(store: MemoryStore, policy: MemoryPolicy) -> MemoryWriter:
-            return MemoryIngestor(store=store, policy=policy, now=_fixed_now)
+        def build(
+            store: MemoryStore,
+            policy: MemoryPolicy,
+            *,
+            id_factory: Callable[[], str] | None = None,
+        ) -> MemoryWriter:
+            if id_factory is None:
+                return MemoryIngestor(store=store, policy=policy, now=_fixed_now)
+            return MemoryIngestor(store=store, policy=policy, now=_fixed_now, id_factory=id_factory)
 
         return build
 

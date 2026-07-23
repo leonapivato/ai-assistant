@@ -13,23 +13,35 @@ Every ``MemoryWriter`` implementation must pass this suite (CONTRIBUTING,
 * ``writer`` — one ready-made writer, for the structural check (and the
   evidence the triad check reads).
 
-The obligations are the ones ADR-0028 §8 lists (as amended by ADR-0040 §5a and §5b),
-and no more: conflicts are resolved *before* the policy is asked and their ids
-are carried on the proposal it sees; ``ACCEPT`` stores the record and returns its
-id; ``STORE_TEMPORARY`` stores it with an expiry; ``REJECT`` and ``ASK_USER``
-write nothing and return a ``None`` record id; a ``REINFORCE`` or ``SUPERSEDE``
-naming a target absent from the conflicts raises ``MemoryStoreError`` rather than
-storing the proposal as new.
+The obligations are the ones ADR-0028 §8 lists (as amended by ADR-0040 §5a/§5b and
+ADR-0045 §5), and no more: conflicts are resolved *before* the policy is asked and
+their ids are carried on the proposal it sees; ``ACCEPT`` stores the record and
+returns its id; ``STORE_TEMPORARY`` stores it with an expiry; ``REJECT`` and
+``ASK_USER`` write nothing and return a ``None`` record id; a ``REINFORCE`` or
+``SUPERSEDE`` naming a target absent from the conflicts raises ``MemoryStoreError``
+rather than storing the proposal as new.
 
-``REINFORCE`` and ``SUPERSEDE`` both land on the target's id and return it — the
-one mechanism clause here, marked as what issue #112 rewrites — and are pinned
-*differentially* (ADR-0040 §5a): ``REINFORCE`` retains **both** records'
-``evidence``, and ``SUPERSEDE`` carries **nothing** of the target across, so the
-live record equals the proposed record but for its id. Both must also refuse the
-two unsafe folds (§5b): any fold onto a ``USER_ASSERTED`` target, and a
-``USER_ASSERTED`` proposal onto an ``EXTERNAL`` one, each raising
-``MemoryStoreError`` and writing nothing. Every other pairing is permitted, which
-the suite exercises as well as the two it refuses.
+``REINFORCE`` and ``SUPERSEDE`` are pinned *differentially* (ADR-0040 §5a, as the
+mechanism half is rewritten by ADR-0045 §5):
+
+* ``REINFORCE`` folds at the target's id, mints no second record, and retains
+  **both** records' ``evidence``, returning the target's id.
+* ``SUPERSEDE`` (ADR-0045 §4/§5a) leaves the target **retained with a closed
+  validity window** (``get``/``search`` hide it, ``export`` keeps it) and writes
+  the proposed record — carrying nothing of the target — at an id **absent from the
+  store**, so it overwrites no existing record. ``record_id`` is the **live
+  record's** id, neither the target's nor any collided-with record's. The id is
+  minted by an **injected id factory** and written insert-if-absent: a collision is
+  re-minted (bounded), an always-colliding factory raises ``MemoryStoreError`` with
+  the target left live, and a raising or non-``str``/empty factory raises
+  ``MemoryStoreError`` before any write — the four id cases below.
+
+Both must also refuse the unsafe folds (§5b as narrowed by ADR-0045 §5): **clause
+1** — any fold onto a ``USER_ASSERTED`` target — stays record-keyed for **both**
+rulings; the **``EXTERNAL``** clause is **narrowed to ``REINFORCE``** — a
+``USER_ASSERTED`` proposal *reinforcing* an ``EXTERNAL`` target still raises, while
+the same *supersession* is now permitted and writes a new-id correction. Every
+other pairing is permitted, which the suite exercises as well as those it refuses.
 
 It deliberately does **not** pin the conflict threshold, the conflict limit, the
 constructor's tuning check, or — for ``REINFORCE`` — which content wins and how
@@ -46,7 +58,7 @@ abstract base directly; it is collected via a ``Test``-prefixed subclass.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import pytest
 
@@ -54,6 +66,7 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.protocols import MemoryWriter
 from ai_assistant.core.types import (
     DataTier,
+    EpisodicMemory,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
@@ -69,8 +82,29 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
 
-#: Builds the writer under test over the store and policy the suite supplies.
-type WriterFactory = Callable[[MemoryStore, MemoryPolicy], MemoryWriter]
+    #: Mints the id a ``SUPERSEDE`` writes its correction at (ADR-0045 §4).
+    type IdFactory = Callable[[], str]
+
+
+class WriterFactory(Protocol):
+    """Builds the writer under test over the store, policy, and (optional) id factory.
+
+    A callable rather than a ready-made writer because a writer hides its own
+    store and policy (see the class docstring). The ``id_factory`` is keyword-only
+    and optional: most obligations do not care which id a ``SUPERSEDE`` mints, but
+    the four id-factory cases (ADR-0045 §5) drive it deterministically, so the
+    factory must reach the writer's constructor. ``None`` leaves the writer's own
+    default (random UUIDs).
+    """
+
+    def __call__(
+        self,
+        store: MemoryStore,
+        policy: MemoryPolicy,
+        *,
+        id_factory: IdFactory | None = None,
+    ) -> MemoryWriter: ...
+
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -80,11 +114,72 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: behind ADR-0007's read-time retention and fail a conforming writer.
 _LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
 
+#: A store clock fixed far enough *forward* that any window a writer closes from
+#: any clock is already closed by the time the store reads. The mirror of
+#: ``_LONG_AGO``: supersession stamps ``valid_until = writer_now`` on the retired
+#: target, and ``get``/``search`` hide it only when read at or after that instant.
+#: The contract fixes no writer clock, so the window tests read from a store
+#: whose "now" is after every plausible writer now, and pin their records'
+#: ``expires_at`` to ``None`` or beyond it so retention does not confound the
+#: window assertion.
+_AFTER_CLOSE = datetime(2100, 1, 1, tzinfo=UTC)
+
 _CONTENT = "prefers concise emails"
 
 
 def _long_ago() -> datetime:
     return _LONG_AGO
+
+
+def _after_close() -> datetime:
+    return _AFTER_CLOSE
+
+
+def _episodic(record_id: str, content: str) -> MemoryRecord:
+    """A live record of a *different kind* from the preference under test.
+
+    Used as the innocent bystander in the id cases: because conflict detection is
+    kind-scoped, an episodic record never enters the preference proposal's
+    conflicts, so it can occupy an id (the proposal's own, or one the factory
+    mints) purely to prove a ``SUPERSEDE`` does not clobber it.
+    """
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        occurred_at=_WHEN,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN),
+    )
+
+
+def _scripted(*ids: str) -> Callable[[], str]:
+    """An id factory that yields ``ids`` in order — deterministic minting."""
+    minted = iter(ids)
+
+    def _next() -> str:
+        return next(minted)
+
+    return _next
+
+
+def _always(record_id: str) -> Callable[[], str]:
+    """An id factory that always mints the same (colliding) id."""
+    return lambda: record_id
+
+
+def _raises_id() -> str:
+    """An id factory that raises rather than returning an id."""
+    msg = "id factory is broken"
+    raise RuntimeError(msg)
+
+
+def _empty_id() -> str:
+    """An id factory that returns an empty id."""
+    return ""
+
+
+def _non_str_id() -> str:
+    """An id factory that returns a non-``str`` id (a wiring bug the guard catches)."""
+    return 123  # type: ignore[return-value]  # deliberately wrong, to drive the output guard
 
 
 def _preference(
@@ -120,12 +215,23 @@ def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
 _FOLD_KINDS = [MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE]
 
 
-def _fold_is_refused(incoming: MemorySource, target: MemorySource) -> bool:
-    """Exactly ADR-0040 §5b's two prohibited predicates — every other pairing is
-    permitted: a fold onto a ``USER_ASSERTED`` target, or a ``USER_ASSERTED``
-    proposal onto an ``EXTERNAL`` one."""
-    return target is MemorySource.USER_ASSERTED or (
-        incoming is MemorySource.USER_ASSERTED and target is MemorySource.EXTERNAL
+def _fold_is_refused(
+    kind: MemoryDecisionKind, incoming: MemorySource, target: MemorySource
+) -> bool:
+    """ADR-0040 §5b's predicate as narrowed by ADR-0045 §5 — now ruling-aware.
+
+    Clause 1 (any fold onto a ``USER_ASSERTED`` target) refuses under **both**
+    rulings. The ``EXTERNAL`` clause (a ``USER_ASSERTED`` proposal onto an
+    ``EXTERNAL`` target) is refused only for ``REINFORCE``: the same ``SUPERSEDE``
+    is now permitted, because it mints a fresh id rather than inheriting the
+    external one (ADR-0045 §4). Every other pairing is permitted.
+    """
+    if target is MemorySource.USER_ASSERTED:
+        return True
+    return (
+        kind is MemoryDecisionKind.REINFORCE
+        and incoming is MemorySource.USER_ASSERTED
+        and target is MemorySource.EXTERNAL
     )
 
 
@@ -266,29 +372,30 @@ class MemoryWriterContract:
         assert stored is not None
         assert set(stored.provenance.evidence) == {"t-ev", "p-ev"}
 
-    async def test_supersede_overwrites_the_target_keeping_only_its_id(
+    async def test_supersede_retires_the_target_and_writes_a_new_id_correction(
         self, make_writer: WriterFactory
     ) -> None:
-        """``SUPERSEDE`` carries nothing of the target across (ADR-0040 §5a).
+        """``SUPERSEDE`` retires the target and writes the proposal at a fresh id.
 
-        The live record is the proposed record — content, provenance, evidence,
-        confidence, and every other field — borrowing from the target only the id
-        it is written at. A *complete* specification, unlike ``REINFORCE``'s fold:
-        "take nothing across" leaves nothing open, so the stored record must equal
-        the proposed record with only its id replaced. Target and proposal differ
-        in every settable field, so a writer that kept any one of the target's —
-        not merely its evidence — is caught.
+        ADR-0045 §5a's rewrite: the target is **retained with a closed window**
+        (hidden from ``get``, kept in ``export``) and the live record is the
+        proposed record — carrying nothing of the target — written at an id
+        **absent from the store**, returned as ``record_id`` (neither the target's
+        nor the proposal's own). Target and proposal differ in every settable
+        field, and "take nothing across" is complete, so the stored correction must
+        equal the proposed record with only its id replaced.
         """
-        store = FakeMemoryStore(now=_long_ago)
-        # Target INFERRED (supersedable, so neither §5b refusal fires); its
-        # content is a superset of the proposal's terms, so the conflict is found.
+        store = FakeMemoryStore(now=_after_close)
+        # Target INFERRED (supersedable, so neither refusal fires); content a
+        # superset of the proposal's terms, so the conflict is found; no expiry, so
+        # the far-forward store clock does not retire it before the window does.
         target = PreferenceMemory(
             id="existing",
             content="prefers concise emails, an older note",
             preference="older preference",
             context="stale-context",
             strength=0.1,
-            expires_at=datetime(2029, 1, 1, tzinfo=UTC),
+            expires_at=None,
             provenance=Provenance(
                 source=MemorySource.INFERRED,
                 confidence=0.9,
@@ -303,7 +410,7 @@ class MemoryWriterContract:
             preference="fresh preference",
             context="fresh-context",
             strength=0.9,
-            expires_at=datetime(2030, 6, 1, tzinfo=UTC),
+            expires_at=datetime(2200, 6, 1, tzinfo=UTC),
             provenance=Provenance(
                 source=MemorySource.OBSERVED,
                 confidence=0.6,
@@ -311,16 +418,143 @@ class MemoryWriterContract:
                 last_updated=datetime(2026, 2, 1, tzinfo=UTC),
             ),
         )
-        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE))
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
+        )
 
         result = await writer.ingest(_proposal(proposed))
 
         assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
-        assert result.record_id == "existing"
-        assert [record.id for record in await store.export()] == ["existing"]
-        stored = await store.get("existing")
-        # Complete: the live record is the proposed record, only its id changed.
-        assert stored == proposed.model_copy(update={"id": "existing"})
+        # The live record's id is the minted one — not the target's, not "new".
+        assert result.record_id == "corrected"
+        # Target retained with a closed window: hidden from get, present in export.
+        assert await store.get("existing") is None
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", "corrected"}
+        assert retained["existing"].validity.valid_until is not None
+        assert retained["existing"].validity.live_at(_AFTER_CLOSE) is False
+        # The rest of the target is otherwise untouched (only its window moved).
+        assert retained["existing"].content == target.content
+        assert set(retained["existing"].provenance.evidence) == {"t-ev"}
+        # The correction is the proposed record, only its id changed, at an id that
+        # named no record before — so it overwrote nothing.
+        stored = await store.get("corrected")
+        assert stored == proposed.model_copy(update={"id": "corrected"})
+        # The proposal's own id is discarded, never written at.
+        assert await store.get("new") is None
+
+    async def test_supersede_discards_the_proposal_id_and_clobbers_no_record_there(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Case (a): the proposal's own id already names a live, non-target record.
+
+        The applier mints its own id and discards ``proposed.id``, so the unrelated
+        record living at that id is left intact — writing at ``proposed.id`` would
+        silently clobber it (ADR-0045 §4).
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
+        occupant = _episodic("new", "an unrelated memory that happens to share the id")
+        await store.add(occupant)
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+
+        assert result.record_id == "corrected"
+        # The record at the proposal's id is untouched — not clobbered.
+        assert await store.get("new") == occupant
+        # Target retired, correction live at the minted id.
+        assert await store.get("existing") is None
+        live = await store.get("corrected")
+        assert live is not None
+        assert "p-ev" in live.provenance.evidence
+
+    async def test_supersede_re_mints_a_colliding_id_then_succeeds(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Case (b): the first minted id collides; the applier mints again.
+
+        Insert-if-absent, not a blind upsert (ADR-0045 §4): the colliding record is
+        rejected — never overwritten — and the correction lands at the next free id.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        await store.add(_episodic("taken", "occupies the id the factory mints first"))
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            id_factory=_scripted("taken", "free"),
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+
+        assert result.record_id == "free"  # the first mint collided, re-minted
+        collided = await store.get("taken")
+        assert collided is not None
+        assert collided.content == "occupies the id the factory mints first"  # not clobbered
+        assert await store.get("existing") is None  # target retired
+        live = await store.get("free")
+        assert live is not None
+        assert "p-ev" in live.provenance.evidence
+
+    async def test_supersede_with_an_always_colliding_factory_leaves_the_target_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Case (c): the factory always collides; the applier gives up, target live.
+
+        After a bounded number of re-mints the applier raises ``MemoryStoreError``,
+        and — because the whole ``SUPERSEDE`` is one atomic batch — the window-close
+        rolls back with it, so the target is left **live and unchanged** (ADR-0045
+        §4/§8).
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
+        await store.add(_episodic("wall", "always in the way"))
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_always("wall")
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new")))
+
+        target = await store.get("existing")
+        assert target is not None  # still live: window never closed
+        assert target.validity.valid_until is None
+        assert set(target.provenance.evidence) == {"t-ev"}
+        collided = await store.get("wall")
+        assert collided is not None  # the collided record is intact
+
+    @pytest.mark.parametrize(
+        "factory",
+        [_raises_id, _empty_id, _non_str_id],
+        ids=["raises", "empty", "non-str"],
+    )
+    async def test_supersede_with_a_malformed_id_factory_writes_nothing(
+        self, make_writer: WriterFactory, factory: Callable[[], str]
+    ) -> None:
+        """Case (d): a raising or non-``str``/empty factory raises before any write.
+
+        The output guard turns the factory's own failure into ``MemoryStoreError``
+        *before* the atomic write, so the two writers cannot diverge on a malformed
+        factory and the store is left byte-for-byte unchanged, the target live
+        (ADR-0045 §4).
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
+        before = await store.export()
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=factory
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new")))
+
+        assert await store.export() == before  # nothing written
+        target = await store.get("existing")
+        assert target is not None
+        assert target.validity.valid_until is None  # target left live
 
     @pytest.mark.parametrize("kind", _FOLD_KINDS, ids=str)
     async def test_a_fold_naming_an_absent_target_is_refused(
@@ -349,23 +583,27 @@ class MemoryWriterContract:
         incoming: MemorySource,
         target: MemorySource,
     ) -> None:
-        """The whole ADR-0040 §5b predicate, over the complete source matrix.
+        """The whole §5b predicate as narrowed by ADR-0045 §5, over the source matrix.
 
-        For *every* ``(ruling, incoming source, target source)`` triple: a fold
-        onto a ``USER_ASSERTED`` target and a ``USER_ASSERTED`` proposal onto an
-        ``EXTERNAL`` one raise and leave the store byte-for-byte unchanged; every
-        other pairing is *applied* — and applied means it reached the store, so a
-        writer that returned the target's id without writing (leaving the stale
-        record live) is caught. The proposal carries evidence the target lacks,
-        so the stored record's evidence proves the fold actually ran.
+        For *every* ``(ruling, incoming source, target source)`` triple: clause 1
+        (a fold onto a ``USER_ASSERTED`` target) and a ``USER_ASSERTED``
+        *reinforcement* of an ``EXTERNAL`` target raise and leave the store
+        byte-for-byte unchanged; every other pairing — the same *supersession* of an
+        ``EXTERNAL`` target now included — is *applied*. "Applied" means it reached
+        the store, so a writer that returned an id without writing is caught; the
+        proposal carries evidence the target lacks, which the stored record proves.
+        The two rulings apply *differently* (ADR-0045 §4): ``REINFORCE`` folds at the
+        target's id; ``SUPERSEDE`` retires the target and writes a new-id correction.
         """
-        store = FakeMemoryStore(now=_long_ago)
+        # A far-forward store clock so a SUPERSEDE's window-close is observable
+        # through get (the target's records carry no expiry to confound it).
+        store = FakeMemoryStore(now=_after_close)
         await store.add(_preference("existing", source=target))
         writer = make_writer(store, FakeMemoryPolicy(kind))
         before = await store.export()
         proposal = _proposal(_preference("new", source=incoming, evidence=("p-ev",)))
 
-        if _fold_is_refused(incoming, target):
+        if _fold_is_refused(kind, incoming, target):
             with pytest.raises(MemoryStoreError):
                 await writer.ingest(proposal)
             # Write nothing: the whole store is unchanged, so a writer that
@@ -377,11 +615,24 @@ class MemoryWriterContract:
         result = await writer.ingest(proposal)
 
         assert result.decision.kind is kind
-        assert result.record_id == "existing"
-        assert await store.get("new") is None  # folded in place, no duplicate
-        stored = await store.get("existing")
-        assert stored is not None
-        # The fold reached the store: both REINFORCE (union) and SUPERSEDE (the
-        # proposed record) leave the proposal's evidence on the live record, which
-        # the pre-fold target did not carry.
-        assert "p-ev" in stored.provenance.evidence
+        assert await store.get("new") is None  # no duplicate at the proposal's id
+
+        if kind is MemoryDecisionKind.REINFORCE:
+            # Folded in place at the target's id, which is returned.
+            assert result.record_id == "existing"
+            stored = await store.get("existing")
+            assert stored is not None
+            assert "p-ev" in stored.provenance.evidence
+            return
+
+        # SUPERSEDE: the target is retired (window closed, hidden from get, kept in
+        # export) and the correction lands at a fresh id, returned as record_id.
+        assert result.record_id is not None
+        assert result.record_id not in {"existing", "new"}
+        assert await store.get("existing") is None
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", result.record_id}
+        assert retained["existing"].validity.valid_until is not None  # window closed
+        live = await store.get(result.record_id)
+        assert live is not None
+        assert "p-ev" in live.provenance.evidence
