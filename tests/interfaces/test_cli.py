@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 from rich.console import Console
+from typer.testing import CliRunner
 
-from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.config import Settings
+from ai_assistant.core.errors import ConfigurationError, MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     ActionPlan,
     CostBasis,
@@ -240,3 +242,46 @@ async def test_ask_surfaces_an_error_with_a_nonzero_exit(output: StringIO) -> No
     assert code == 1
     assert "Error" in output.getvalue()
     await engine.aclose()
+
+
+# --- startup and input error boundaries (ADR-0042 §7) -------------------
+
+
+async def test_ask_renders_a_config_failure_and_exits_nonzero(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settings failure at startup is rendered, not dumped as a traceback (§7)."""
+
+    def _bad_settings() -> object:
+        msg = "invalid configuration: unknown timezone"
+        raise ConfigurationError(msg)
+
+    monkeypatch.setattr(cli, "load_settings", _bad_settings)
+    code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
+    assert code == 1
+    assert "Error" in output.getvalue()
+    assert "unknown timezone" in output.getvalue()
+
+
+async def test_ask_renders_a_build_failure_and_exits_nonzero(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A composition-root failure is caught by the same boundary (§7)."""
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
+
+    def _bad_build(_settings: object) -> object:
+        msg = "could not open the store"
+        raise MemoryStoreError(msg)
+
+    monkeypatch.setattr(cli, "build_engine", _bad_build)
+    code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
+    assert code == 1
+    assert "could not open the store" in output.getvalue()
+
+
+@pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1"])
+def test_ask_rejects_a_non_positive_or_non_finite_timeout(bad: str) -> None:
+    """An invalid --timeout is a usage error (exit 2), not a crash (§7, finding 2)."""
+    result = CliRunner().invoke(cli.app, ["ask", "hello", "--timeout", bad])
+    assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
