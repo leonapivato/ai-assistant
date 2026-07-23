@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import ActiveExecutionError, PlanningError
@@ -63,6 +64,14 @@ class InMemoryPlanStore:
         self._clock = checked_clock(now, owner="InMemoryPlanStore")
         self._tracker = tracker or PlanExecution(now=now)
         self._sequence = 0
+        # A fresh random nonce per store instance. The plan-prefixed sequence
+        # alone is process-local — a restarted store (this is non-persistent, so
+        # every process start is one) rewinds it to 0 and would re-mint a prior
+        # incarnation's id, colliding with a *persistent* audit trail that still
+        # binds a CONFIRM to it (ADR-0044 §1, #280). The incarnation nonce is the
+        # minted entropy that makes the id unique for the audit trail's life
+        # regardless of restarts — the "minted uuids already satisfy it" path.
+        self._incarnation = uuid4().hex
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as `planning`'s own error (ADR-0026 §4).
@@ -142,14 +151,27 @@ class InMemoryPlanStore:
         return None if stored is None else stored.model_copy(deep=True)
 
     async def start_execution(self, plan_id: str) -> ExecutionState:
-        """Open and store a fresh execution for ``plan_id``."""
+        """Open and store a fresh execution for ``plan_id``.
+
+        The id is ``{plan_id}-exec-{incarnation}-{sequence}``. ``_sequence`` is
+        monotonic and **never** reset within a store's life — not by
+        :meth:`delete_goal`, not by :meth:`clear` — so ids never collide *within*
+        one incarnation. ``_incarnation`` is a per-store random nonce, so ids
+        never collide *across* restarts either (this store is non-persistent, so
+        a restart rewinds the sequence to 0). Together they give the non-reuse
+        guarantee ADR-0044 §1 makes normative — an id unique for the life of the
+        audit trail (#280) — so a deleted or prior-incarnation execution's id can
+        never be minted again and let a stale parked ``CONFIRM`` recover onto a
+        new execution.
+        """
         plan = self._plans.get(plan_id)
         if plan is None:
             msg = f"cannot start an execution for unknown plan {plan_id}"
             raise PlanningError(msg)
 
         self._sequence += 1
-        state = self._tracker.start(plan, execution_id=f"{plan_id}-exec-{self._sequence}")
+        execution_id = f"{plan_id}-exec-{self._incarnation}-{self._sequence}"
+        state = self._tracker.start(plan, execution_id=execution_id)
         self._executions[state.id] = state
         return state.model_copy(deep=True)
 

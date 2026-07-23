@@ -606,6 +606,56 @@ class PlanStoreContract:
         state = await self._started(store)
         assert [found.id for found in await store.active_executions()] == [state.id]
 
+    # --- execution-id non-reuse (ADR-0044 §1, #280) -----------------------
+
+    async def test_two_executions_of_one_plan_get_distinct_ids(self, store: PlanStore) -> None:
+        """A plan may have several live executions, and each is its own instance.
+
+        ADR-0014 §5's ``active_executions`` exists precisely to resume several,
+        and ADR-0044 §1 binds a parked confirmation to ``(execution_id,
+        step_id)``. So two executions of one plan must never share an id, or
+        one's answer would resolve the other's identical parked step.
+        """
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        first = await store.start_execution("p1")
+        second = await store.start_execution("p1")
+        assert first.id != second.id
+
+    async def test_a_deleted_executions_id_is_never_reused(self, store: PlanStore) -> None:
+        """Deleting execution ``E`` must not free its id for a later one (#280).
+
+        This is the exact hazard ADR-0044 §1 makes non-reuse normative against:
+        a conforming store that deleted ``E`` and later minted another named
+        ``E`` would let ``pending_confirmation(E, step)`` (ADR-0044 §3) return a
+        stale ``CONFIRM`` from the prior incarnation for the fresh one. The id is
+        asserted *unequal*, never a format — the contract fixes uniqueness, not
+        how a store keys its ids.
+        """
+        first = await self._started(store)
+        await store.delete_goal("g1")
+        assert await store.get_execution(first.id) is None
+
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        second = await store.start_execution("p1")
+        assert second.id != first.id
+
+    async def test_an_execution_id_is_not_reused_after_clear(self, store: PlanStore) -> None:
+        """``clear`` erases the records but must not rewind the id space.
+
+        The same non-reuse guarantee as deletion, taken through the bulk-erase
+        path: a store that reset an id counter on ``clear`` would collide a new
+        execution with one a still-retained audit trail already names.
+        """
+        first = await self._started(store)
+        await store.clear()
+
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        second = await store.start_execution("p1")
+        assert second.id != first.id
+
     async def test_a_finished_execution_is_not_active(self, store: PlanStore) -> None:
         state = await self._started(store)
         state = await store.commit_transition(

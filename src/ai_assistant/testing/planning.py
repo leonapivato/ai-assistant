@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -160,6 +161,12 @@ class FakePlanStore:
         self._executions: dict[str, ExecutionState] = {}
         self._clock = checked_clock(now, owner="FakePlanStore")
         self._sequence = 0
+        # A per-instance random nonce, matching ``InMemoryPlanStore``: the
+        # sequence alone is process-local, so a restart would re-mint a prior
+        # id. The nonce makes the id unique across restarts too, satisfying the
+        # ADR-0044 §1 non-reuse guarantee (#280). The fake must not certify a
+        # weaker contract than the real store keeps.
+        self._incarnation = uuid4().hex
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as the error the real store raises.
@@ -229,7 +236,15 @@ class FakePlanStore:
         return None if stored is None else stored.model_copy(deep=True)
 
     async def start_execution(self, plan_id: str) -> ExecutionState:
-        """Open and store a fresh execution, derived from the plan's steps."""
+        """Open and store a fresh execution, derived from the plan's steps.
+
+        The id is ``{plan_id}-exec-{incarnation}-{sequence}``, matching
+        ``InMemoryPlanStore``: the monotonic, never-reset ``_sequence`` makes ids
+        unique within one incarnation and the per-instance ``_incarnation`` nonce
+        makes them unique across restarts, the non-reuse guarantee ADR-0044 §1
+        makes normative (#280). The fake must not diverge here or it would
+        certify a weaker contract than the real store keeps.
+        """
         plan = self._plans.get(plan_id)
         if plan is None:
             msg = f"cannot start an execution for unknown plan {plan_id}"
@@ -237,7 +252,7 @@ class FakePlanStore:
 
         self._sequence += 1
         state = ExecutionState(
-            id=f"{plan_id}-exec-{self._sequence}",
+            id=f"{plan_id}-exec-{self._incarnation}-{self._sequence}",
             plan_id=plan.id,
             steps=tuple(StepExecution(step_id=step.id) for step in plan.steps),
             version=0,

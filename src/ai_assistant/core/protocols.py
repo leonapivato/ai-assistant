@@ -415,6 +415,33 @@ class PlanStore(Protocol):
         order, at version 0 — rather than supplied, which is what guarantees the
         positional correspondence with the plan that everything else assumes.
 
+        **The returned execution's ``id`` is unique for the life of the audit
+        trail** (ADR-0044 §1): an id handed to one execution is never handed to
+        another, even after the first is deleted (:meth:`delete_goal`,
+        :meth:`clear`) and even across a restart of a persistent store. This is
+        normative, not incidental. ADR-0044 §3 recovers a parked confirmation by
+        its ``(execution_id, step_id)`` binding, so were an id reused, a stale
+        ``CONFIRM`` from a prior incarnation of that id — matching tool and
+        parameters — could resolve and run the freshly created execution's
+        action. The store owns this guarantee because it mints the id and
+        accepts none from the caller, so the composition root cannot enforce it
+        (ADR-0044 §1, #280). A store satisfies it with minted entropy in the id:
+        a uuid, or — as the in-memory stores do — a per-incarnation random nonce
+        combined with a monotonic, never-reset sequence, so that neither a reuse
+        *within* one incarnation (the sequence never rewinds) nor one *across* a
+        restart (a fresh incarnation never repeats a prior id) can occur. A
+        non-persistent store restarts on every process start, so a bare
+        process-local counter is **not** enough — it would rewind and re-mint a
+        prior id that a persistent audit trail still binds a ``CONFIRM`` to.
+
+        Uniqueness is met to the strength of the minted entropy — a uuid or a
+        random nonce — which is the mechanism ADR-0044 §1 designates ("minted
+        uuids already satisfy it"). A nonce collision is a cryptographically
+        negligible event (~2^-122, not an interleaving a caller can provoke), not
+        a reachable state a store must defend against with durable id-history
+        checks; a store that instead keys on durable state it reopens (a future
+        persistent store) meets the same bar without a nonce.
+
         Raises:
             PlanningError: If ``plan_id`` names no stored plan.
         """
