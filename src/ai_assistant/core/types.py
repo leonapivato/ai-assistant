@@ -496,7 +496,17 @@ class MemoryWrite(BaseModel):
     handled. Crosses subsystem boundaries — the applier in `memory` constructs
     it, the store consumes it, the contract in `core` names it — so it is a
     `core` type.
+
+    **Frozen**, so ``mode`` cannot be reassigned after construction. The store
+    selects collision behaviour by enum identity (``is
+    MemoryWriteMode.INSERT_IF_ABSENT``); without this, ``write.mode = "insert_if_absent"``
+    would store a raw string that no backend recognises as the enum, silently
+    downgrading an insert-if-absent to an upsert that clobbers a colliding record
+    — the exact loss ADR-0046 §3 and §4 exist to prevent. Freezing keeps ``mode`` an
+    enum member (pydantic coerces a valid string at construction, then locks it).
     """
+
+    model_config = ConfigDict(frozen=True)
 
     record: MemoryRecord
     mode: MemoryWriteMode = MemoryWriteMode.UPSERT

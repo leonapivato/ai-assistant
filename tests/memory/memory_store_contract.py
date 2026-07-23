@@ -438,14 +438,19 @@ class MemoryStoreContract:
         # expired row still blocks an insert on its id.
         await store.add(_semantic("gone", "coffee", expires_at=_LONG_AGO))
 
-        with pytest.raises(MemoryStoreConflictError):
-            await store.write_atomic(
-                [
-                    MemoryWrite(
-                        record=_semantic("gone", "new"), mode=MemoryWriteMode.INSERT_IF_ABSENT
-                    )
-                ]
-            )
+        for _ in range(2):
+            # Twice: a rejected batch must *retain* the colliding row, not delete
+            # it. Both get and export hide an expired row, so one collision cannot
+            # tell "rejected and kept" from "deleted then raised"; a second
+            # collision on the same id proves the row survived the first.
+            with pytest.raises(MemoryStoreConflictError):
+                await store.write_atomic(
+                    [
+                        MemoryWrite(
+                            record=_semantic("gone", "new"), mode=MemoryWriteMode.INSERT_IF_ABSENT
+                        )
+                    ]
+                )
 
     async def test_write_atomic_supersede_shape_commits_both_atomically(
         self, store: MemoryStore, now: datetime
