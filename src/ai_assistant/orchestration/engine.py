@@ -350,11 +350,27 @@ class Engine:
         can leave it half-done (:meth:`aclose`). Draining is *awaiting*, never
         cancelling (ADR-0042 §2): a tracked task orphaned by a cancelled call is
         still using a connection ``close()`` would shut, so it is waited out first.
+
+        **Every closer is attempted, even after one fails.** ADR-0042 §2 requires
+        the façade to release *every* owned connection on shutdown, so a raising
+        closer must not skip the ones after it — a leaked connection is the exact
+        failure the ordered close exists to prevent. Failures are collected and
+        re-raised together once every resource has had its close attempted.
+
+        Raises:
+            ExceptionGroup: If one or more closers raised. Every closer was still
+                attempted; the group carries what went wrong with each.
         """
         if self._inflight:
             await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
+        errors: list[Exception] = []
         for close in self._closers:
-            await close()
+            try:
+                await close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("one or more resources failed to close on shutdown", errors)
 
     async def _tracked(self, coro: Awaitable[TurnOutcome]) -> TurnOutcome:
         """Run ``coro`` as a tracked, shielded task, so shutdown can drain it.
@@ -381,6 +397,22 @@ class Engine:
         if self._closing:
             msg = "the engine is shutting down and is not accepting new work"
             raise RuntimeError(msg)
+
+    def _mint_handle(self) -> str:
+        """Return a continuation handle not already naming a parked step.
+
+        The injected factory supplies the opacity; the engine supplies the
+        *uniqueness* (:meth:`_confirmation`). A factory that repeats a handle is
+        disambiguated with a suffix rather than trusted or refused, so two parked
+        steps never share a handle and neither is stranded — the loop is bounded by
+        the number of parked steps.
+        """
+        handle = self._id_factory()
+        suffix = 0
+        while handle in self._parked:
+            suffix += 1
+            handle = f"{self._id_factory()}#{suffix}"
+        return handle
 
     async def _converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         """Plan the turn, then drive its first step if it has one."""
@@ -458,13 +490,12 @@ class Engine:
         are the driven step's own, carried as data for the adapter to escape per
         target (ADR-0042 §4).
 
-        Raises:
-            RuntimeError: If the injected id factory mints a continuation handle
-                already in use. A handle names exactly one parked step (ADR-0042
-                §4), so a silent overwrite would rebind one prompt's token to a
-                *different* step — releasing consent for the wrong action. Failing
-                closed refuses that rather than papering over a broken factory (the
-                default UUID factory never collides).
+        Handle uniqueness is the **engine's** invariant, not the injected factory's:
+        a handle names exactly one parked step (ADR-0042 §4), so a silent overwrite
+        would rebind one prompt's token to a *different* step, releasing consent for
+        the wrong action. The default UUID factory never collides, but rather than
+        trust that — or fail a durably-parked step closed, which would strand it —
+        a colliding handle is disambiguated to a fresh unique one (:meth:`_mint_handle`).
         """
         decision_id = disposition.decision_id
         if decision_id is None:  # pragma: no cover — StepRunner sets it on this branch
@@ -474,14 +505,7 @@ class Engine:
         if recorded is None:
             msg = f"the trail does not hold the confirmation {decision_id!r} just recorded"
             raise PlanningError(msg)
-        handle = self._id_factory()
-        if handle in self._parked:
-            msg = (
-                f"continuation handle {handle!r} is already in use; handles must be unique so a "
-                "token names exactly one parked step, and rebinding one would release consent for "
-                "another action"
-            )
-            raise RuntimeError(msg)
+        handle = self._mint_handle()
         self._parked[handle] = _Parked(
             turn=turn,
             execution_id=disposition.state.id,
