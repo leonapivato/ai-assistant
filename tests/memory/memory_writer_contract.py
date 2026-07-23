@@ -28,7 +28,8 @@ mechanism half is rewritten by ADR-0045 §5):
   **both** records' ``evidence``, returning the target's id.
 * ``SUPERSEDE`` (ADR-0045 §4/§5a) leaves the target **retained with a closed
   validity window** and writes the proposed record — carrying nothing of the
-  target — at an id **absent from the store**, so it overwrites no existing record.
+  target, with a **fresh open window** so the correction is live — at an id
+  **absent from the store**, so it overwrites no existing record.
   ``record_id`` is the **live record's** id, neither the target's nor any
   collided-with record's. The id is minted by an **injected id factory** and written
   insert-if-absent: a collision is re-minted (bounded), an always-colliding factory
@@ -84,6 +85,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
 
@@ -499,12 +501,53 @@ class MemoryWriterContract:
         # The rest of the target is otherwise untouched (only its window moved).
         assert retained["existing"].content == target.content
         assert set(retained["existing"].provenance.evidence) == {"t-ev"}
-        # The correction is the proposed record, only its id changed, at an id that
-        # named no record before — so it overwrote nothing.
+        # The correction is the proposed record, only its id changed (and its window
+        # reset to open, which the proposal already had), at an id that named no
+        # record before — so it overwrote nothing.
         stored = await store.get("corrected")
         assert stored == proposed.model_copy(update={"id": "corrected"})
         # The proposal's own id is discarded, never written at.
         assert await store.get("new") is None
+
+    @pytest.mark.parametrize(
+        "proposal_window",
+        [
+            Validity(valid_until=datetime(2000, 1, 1, tzinfo=UTC)),  # producer-set, already closed
+            Validity(valid_from=datetime(2200, 1, 1, tzinfo=UTC)),  # producer-set, not yet open
+        ],
+        ids=["proposal-already-closed", "proposal-not-yet-open"],
+    )
+    async def test_supersede_gives_the_correction_a_fresh_open_window(
+        self, make_writer: WriterFactory, proposal_window: Validity
+    ) -> None:
+        """The correction is written with a fresh open window (ADR-0045 §4).
+
+        The whole point of a supersession is to install a *live* belief. A proposal
+        may carry a producer-set ``validity`` (the public type permits a closed or
+        future-dated window); if that survived onto the correction, the target would
+        be retired and the correction already hidden or not yet live — no live belief
+        at all. The applier overrides it with an open window, so the correction is
+        live at the store's read clock regardless of what the proposal supplied.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        proposed = _preference("new", evidence=("p-ev",)).model_copy(
+            update={"validity": proposal_window}
+        )
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
+        )
+
+        result = await writer.ingest(_proposal(proposed))
+
+        assert result.record_id == "corrected"
+        live = await store.get("corrected")
+        # Live at the store's read clock: would be None if the proposal's closed or
+        # future window had survived onto the correction.
+        assert live is not None
+        assert live.validity.valid_from is None
+        assert live.validity.valid_until is None
+        assert "p-ev" in live.provenance.evidence
 
     async def test_supersede_discards_the_proposal_id_and_clobbers_no_record_there(
         self, make_writer: WriterFactory

@@ -31,6 +31,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    Validity,
 )
 
 if TYPE_CHECKING:
@@ -273,8 +274,16 @@ def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
     record. The id is also not ``incoming.id`` — that is caller-supplied and could
     name an unrelated live record — but the minted id, which is written
     insert-if-absent so a collision is rejected, not clobbered.
+
+    The correction is given a **fresh open window** (ADR-0045 §4), overriding any
+    ``validity`` the proposal happened to carry: the whole point of a supersession
+    is to install a *live* belief, so a proposal with a producer-set closed or
+    future-dated window must not leave the store with the target retired and the
+    correction already hidden or not yet live — which would be no live belief at
+    all. Every other field of ``incoming`` is kept (§5a: the live record is the
+    proposed record but for its id and window).
     """
-    return incoming.model_copy(update={"id": new_id})
+    return incoming.model_copy(update={"id": new_id, "validity": Validity()})
 
 
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:

@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Provenance,
+    Validity,
 )
 
 if TYPE_CHECKING:
@@ -365,10 +366,14 @@ def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
     §4 stopped rehoming the correction onto the target's id: the target is retained
     with a closed window (:func:`_close_window`) and the correction becomes a *new*
     record at the minted id, written insert-if-absent so a collision is rejected.
-    "Carries nothing across, at an id absent from the store" is a complete
-    specification, unlike ``_merge``'s fold rule.
+    The correction is also given a **fresh open window** (ADR-0045 §4), overriding
+    any ``validity`` the proposal carried, so a supersession always leaves a *live*
+    belief — a proposal with a producer-set closed or future window must not retire
+    the target and leave the correction hidden. "Carries nothing of the target, at a
+    fresh id with a fresh open window" is a complete specification, unlike
+    ``_merge``'s fold rule.
     """
-    return incoming.model_copy(update={"id": new_id})
+    return incoming.model_copy(update={"id": new_id, "validity": Validity()})
 
 
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
