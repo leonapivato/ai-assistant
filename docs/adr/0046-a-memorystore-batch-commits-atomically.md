@@ -1,6 +1,6 @@
 # 46. A `MemoryStore` batch commits atomically, or not at all
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-23
 - **Contract change.** This adds one method — `write_atomic` — to the
   `MemoryStore` Protocol in `core/protocols.py`, plus a `MemoryWrite` value
