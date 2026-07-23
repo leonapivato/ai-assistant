@@ -59,6 +59,11 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+#: Default ceiling on unanswered parked confirmations held in memory (see
+#: :class:`Engine`). Generous enough that a real interactive session never reaches
+#: it, low enough that an abandoning client cannot exhaust memory.
+_DEFAULT_MAX_OUTSTANDING = 1024
+
 
 def _uuid() -> str:
     return str(uuid.uuid4())
@@ -182,7 +187,7 @@ class Engine:
     construct concretes (ADR-0042 §2).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus two knobs
         self,
         *,
         loop: LearningLoop,
@@ -190,6 +195,7 @@ class Engine:
         plans: PlanStore,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
+        max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -219,13 +225,34 @@ class Engine:
                 nothing (its collaborators are all in-memory).
             id_factory: Supplies opaque continuation-token handles; injectable so
                 a test can assert a stable handle.
+            max_outstanding_confirmations: The ceiling on **unanswered** parked
+                confirmations held in memory at once. Each holds the turn's
+                ``TurnResult``, and entries are removed only on resolution, so a
+                client that requests confirmable actions and abandons every token
+                would grow the table without bound — a memory-exhaustion vector in
+                a long-lived front end (a short-lived CLI barely touches it). Past
+                the ceiling the **oldest** outstanding confirmation is evicted; its
+                token then resolves to nothing (a clean refusal, never the wrong
+                step), and the step stays durably parked for the durable-resume
+                lane to recover (#287). Must be positive.
+
+        Raises:
+            ValueError: If ``max_outstanding_confirmations`` is not positive.
         """
+        if max_outstanding_confirmations < 1:
+            msg = (
+                "max_outstanding_confirmations must be positive, got "
+                f"{max_outstanding_confirmations}"
+            )
+            raise ValueError(msg)
         self._loop = loop
         self._runner = runner
         self._plans = plans
         self._closers = tuple(closers)
         self._id_factory = id_factory
+        self._max_outstanding = max_outstanding_confirmations
         self._parked: dict[str, _Parked] = {}
+        self._reserved: set[str] = set()
         self._inflight: set[asyncio.Task[TurnOutcome]] = set()
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
@@ -411,20 +438,28 @@ class Engine:
             raise RuntimeError(msg)
 
     def _mint_handle(self) -> str:
-        """Return a continuation handle not already naming a parked step.
+        """Reserve and return a handle no other outstanding continuation is using.
 
         The injected factory supplies the opacity; the engine supplies the
-        *uniqueness*. A factory that repeats a handle is disambiguated with a
-        suffix rather than trusted or refused, so two parked steps never share a
-        handle and neither is stranded — the loop is bounded by the number of
-        parked steps. Called from :meth:`_converse` *before* the runner can park,
-        so a raising factory fails with no durable state yet committed.
+        *uniqueness*, against both the parked table and the set of handles reserved
+        by turns still in flight. A factory that repeats a handle is disambiguated
+        with a suffix rather than trusted or refused, so two parked steps never
+        share a handle and neither is stranded.
+
+        **Reservation is atomic against concurrency.** This method runs to
+        completion with no ``await`` between checking uniqueness and recording the
+        reservation, so two concurrent turns cannot both mint the same handle even
+        with a repeating factory: the first fully reserves before the second reads.
+        The reservation is released by :meth:`_converse` once the turn is known to
+        park (moved into the parked table) or not. Called *before* the runner can
+        park, so a raising factory fails with no durable state yet committed.
         """
         handle = self._id_factory()
         suffix = 0
-        while handle in self._parked:
+        while handle in self._parked or handle in self._reserved:
             suffix += 1
             handle = f"{self._id_factory()}#{suffix}"
+        self._reserved.add(handle)
         return handle
 
     async def _converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
@@ -446,9 +481,16 @@ class Engine:
         # strand a parked step with no token ever offered (ADR-0042 §4; #287). The
         # handle is a cheap string; if the step is not parked it is simply unused.
         handle = self._mint_handle()
-        disposition = await self._runner.run(state, first.id, timeout=timeout)
-        step = self._step_outcome(turn, disposition, handle=handle)
-        return TurnOutcome(turn=turn, step=step)
+        try:
+            disposition = await self._runner.run(state, first.id, timeout=timeout)
+            step = self._step_outcome(turn, disposition, handle=handle)
+            return TurnOutcome(turn=turn, step=step)
+        finally:
+            # The reservation held the handle across `run`'s await. It is now either
+            # in the parked table (the step parked) or unused (it did not); either
+            # way the in-flight reservation is done with. Uniqueness is thereafter
+            # kept by the parked table itself.
+            self._reserved.discard(handle)
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
         """Refuse a plan that was not built for this turn's goal (ADR-0037 §2 in spirit).
@@ -555,6 +597,7 @@ class Engine:
             # carry its decision so the step is resumable without a fallible re-read.
             msg = "a parked confirmation carries no recorded decision, so it cannot be rendered"
             raise PlanningError(msg)
+        self._evict_oldest_if_full()
         self._parked[handle] = _Parked(
             turn=turn,
             execution_id=disposition.state.id,
@@ -568,6 +611,28 @@ class Engine:
             reason=recorded.ruling.reason,
             token=ContinuationToken(handle),
         )
+
+    def _evict_oldest_if_full(self) -> None:
+        """Keep the outstanding-confirmation table under its ceiling (ADR-0042 §4).
+
+        Unanswered confirmations are removed only on resolution, so without a bound
+        a client that abandons every token grows the table until memory is
+        exhausted. At the ceiling the **oldest** outstanding confirmation is
+        dropped (``dict`` preserves insertion order), which fails **closed**: its
+        token then resolves to nothing — a clean "unknown token", never the wrong
+        step — while the step stays durably parked for the durable-resume lane to
+        recover (#287). Evicting the oldest, not the newest, means a flood cannot
+        knock out the confirmation a user is actively answering ahead of it.
+        """
+        while len(self._parked) >= self._max_outstanding:
+            oldest = next(iter(self._parked))
+            evicted = self._parked.pop(oldest)
+            _log.warning(
+                "outstanding_confirmation_evicted",
+                execution_id=evicted.execution_id,
+                step_id=evicted.step_id,
+                ceiling=self._max_outstanding,
+            )
 
 
 __all__ = [
