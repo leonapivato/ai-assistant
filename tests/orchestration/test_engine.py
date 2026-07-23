@@ -186,7 +186,6 @@ class Harness:
             loop=loop,
             runner=runner,
             plans=self.plans,
-            trail=self.trail,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
         )
@@ -538,3 +537,20 @@ async def test_aclose_attempts_every_closer_even_when_one_fails() -> None:
     with pytest.raises(ExceptionGroup):
         await harness.engine.aclose()
     assert closed == ["a", "b"]  # b was closed despite a failing first
+
+
+async def test_aclose_sweeps_remaining_closers_when_one_is_cancelled() -> None:
+    """A cancelled closer still lets the rest release, then propagates (§2)."""
+    closed: list[str] = []
+
+    async def close_a() -> None:
+        closed.append("a")
+        raise asyncio.CancelledError
+
+    async def close_b() -> None:
+        closed.append("b")
+
+    harness = Harness(closers=(close_a, close_b))
+    with pytest.raises(asyncio.CancelledError):
+        await harness.engine.aclose()
+    assert closed == ["a", "b"]  # b released despite a's cancellation

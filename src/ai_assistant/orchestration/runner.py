@@ -247,12 +247,21 @@ class StepDisposition:
             id :meth:`StepRunner.resume` needs, and until #242 lands it is the
             only place that id exists outside the trail.
         tool_id: The tool selected, or ``None`` where none was.
+        decision: The trail's own copy of the recorded ``CONFIRM``, carried on
+            ``AWAITING_CONFIRMATION`` so a driver can render the parked action —
+            the tool declaration and the ruling's ``reason`` — **without** a second
+            trail read after the step is durably parked (which would be fallible
+            work between parking and offering the continuation). It is already in
+            hand here: :meth:`StepRunner._record` reads it back before
+            :meth:`StepRunner._queue_for_approval` parks. ``None`` on every other
+            disposition.
     """
 
     disposition: Disposition
     state: ExecutionState
     decision_id: str | None = None
     tool_id: str | None = None
+    decision: PermissionDecision | None = None
 
 
 class StepRunner:
@@ -399,7 +408,9 @@ class StepRunner:
             # `PENDING → AWAITING_APPROVAL` with `bound_tool`, durably, and
             # `resume` takes the human's answer when it arrives (ADR-0037 §4).
             queued = await self._queue_for_approval(state, step, tool.id)
-            return StepDisposition(Disposition.AWAITING_CONFIRMATION, queued, decision.id, tool.id)
+            return StepDisposition(
+                Disposition.AWAITING_CONFIRMATION, queued, decision.id, tool.id, decision=decision
+            )
         # A `DENY` is recorded in one commit, straight from `PENDING`
         # (ADR-0037 §5, ADR-0041). The policy refused on its own authority with
         # nobody asked, so the step never queued for an approval — it goes
