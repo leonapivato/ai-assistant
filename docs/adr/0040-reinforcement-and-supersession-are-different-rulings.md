@@ -1,7 +1,29 @@
 # 40. Reinforcement and supersession are different rulings
 
-- Status: Accepted
+- Status: Accepted, §5a/§5b/§3 amended by ADR-0045 (window-closing `SUPERSEDE`; the
+  `EXTERNAL` refusal narrowed to `REINFORCE`)
 - Date: 2026-07-22
+- Amended: 2026-07-23 by ADR-0045 — the `MemoryWriter` mechanism clauses this ADR
+  set as issue #112's frontier (§6) are now taken up. **§5a's id clause is
+  rewritten:** a `SUPERSEDE` no longer writes the correction "at the target's id,
+  which is returned"; instead the target is **retained with a closed validity
+  window** and the correction is written as a *new* record at a **freshly-minted id
+  absent from the store**, which is what `MemoryIngestResult.record_id` returns
+  (ADR-0045 §4/§5a). §5a's *differential* — `SUPERSEDE` carries nothing of the
+  target across, `REINFORCE` retains both records' evidence — stands unchanged.
+  **§5b's `EXTERNAL` clause is narrowed to `REINFORCE`:** a `USER_ASSERTED`
+  proposal *reinforcing* an `EXTERNAL` target still refuses (it still inherits the
+  external idempotency key and the next sync overwrites it), but the same
+  *supersession* is now **permitted** and writes a new-id correction, because §4's
+  fresh id removes the hazard (ADR-0045 §5b). **§3 is narrowed on two points:**
+  "its refusals do not move" now holds for **clause 1 only** (no fold of any kind
+  onto a `USER_ASSERTED` target — still record-keyed, both rulings), and "keyed on
+  the records, not the relation" gains an exception for the `EXTERNAL` arm, now
+  `REINFORCE`-only — sound because §4 makes the two folds do different things to the
+  target's id, which was not true when §3 was written. The §3/§5a/§5b text below is
+  unchanged (ADR-0001 append-only); **`DefaultMemoryPolicy`, the members,
+  `MemoryDecision` and the `MemoryPolicy` suite all stand untouched — §6 holds
+  verbatim** — only the writer/ingestor floor moved.
 - **Contract change.** `MemoryDecisionKind` and `MemoryDecision` are `core` types
   that cross subsystem boundaries, so this ADR ships as its own PR and is
   ratified before anything implements against it (golden rule 5, ADR-0015 §5,

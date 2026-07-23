@@ -1,7 +1,23 @@
 # 38. A user assertion supersedes a conflicting inference
 
-- Status: Accepted, §1b discharged by ADR-0040
+- Status: Accepted, §1b discharged by ADR-0040; §2a's `EXTERNAL` refusal narrowed to
+  `REINFORCE` by ADR-0045
 - Date: 2026-07-22
+- Amended: 2026-07-23 by ADR-0045 — §2a's **ingestor-enforced** `EXTERNAL` refusal
+  is **lifted for `SUPERSEDE` only**. §2a refused a `USER_ASSERTED` proposal folded
+  onto an `EXTERNAL` target because supersession inherited the target's id — the
+  integrating system's idempotency key — so the next routine sync overwrote the
+  correction (the sole ground §2a gave, and the one §6 foresaw a validity window
+  removing). ADR-0045 §4 makes a `SUPERSEDE` write its correction at a
+  **freshly-minted id**, so that hazard is gone: `_refuse_unsafe_fold`'s `EXTERNAL`
+  arm now receives the ruling and **permits an `EXTERNAL` `SUPERSEDE` while still
+  refusing an `EXTERNAL` `REINFORCE`** (which still inherits the external id).
+  §2a's `USER_ASSERTED`-*target* refusal (clause 1 — nothing may fold onto an
+  assertion, either ruling) is **untouched**, as is `DefaultMemoryPolicy`'s own
+  `_SUPERSEDABLE` set (`{OBSERVED, INFERRED}`, ADR-0040 §6), so §2a's *policy-side*
+  exclusion of `EXTERNAL` persists until a policy lane adopts it — this ADR moved
+  only the writer floor. The §2a text below is unchanged (ADR-0001 append-only);
+  §§1a, 2, 3, 4, 5 stand.
 - Amended: 2026-07-22 by ADR-0040 — §1b's precondition retires. ``REINFORCE`` and
   ``SUPERSEDE`` are now distinct ``MemoryDecisionKind`` members, so the policy
   names the relation and ``MemoryIngestor`` no longer infers it from provenance.
