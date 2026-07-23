@@ -1,6 +1,6 @@
 # 42. The interface adapter contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-22
 
 ## Context
