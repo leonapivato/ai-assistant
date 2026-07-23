@@ -331,31 +331,31 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
 def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
 
-    The target is retained off the read path with ``valid_until = now``; every
-    other field, ``valid_from`` included, is preserved. Mirrors
-    ``MemoryIngestor._close_window`` — exactly ADR-0045 §4's "``valid_until = now``",
-    with retiring a producer-set bounded window left to a follow-up ADR (no in-scope
-    producer creates one; envelope validity is operational-only, ADR-0045 §2). It
-    carries the same **data-integrity floor**: a producer-set ``valid_from`` at or
-    after ``now`` would form an empty/inverted interval the durable store's decode
-    rejects, so this refuses before the write rather than let the fake persist a
-    window the production path could not (issue #306). ``now`` must be a guarded,
-    aware-UTC reading.
+    The target is retained off the read path with its window's open end brought in
+    to ``now``; ``valid_from`` and every other field are preserved. Mirrors
+    ``MemoryIngestor._close_window``, carrying its two correctness floors for a
+    producer-set bounded window: **never extend** an earlier ``valid_until``
+    (``valid_until = min(now, existing)``, so retirement cannot resurrect a
+    self-closed belief) and **never write an unrepresentable window** (refuse when
+    the end is at or before ``valid_from``, which the durable store's decode
+    rejects). Both so the fake cannot pass a consumer's test on state the production
+    writer would refuse; the richer question of producer-settable windows is
+    deferred to issue #306. ``now`` must be a guarded, aware-UTC reading.
 
     Raises:
-        MemoryStoreError: If closing at ``now`` would form an interval ending at or
-            before ``valid_from``; nothing is written and the target stays live.
+        MemoryStoreError: If the chosen end is at or before ``valid_from``; nothing
+            is written and the target stays live.
     """
-    valid_from = target.validity.valid_from
-    if valid_from is not None and now <= valid_from:
+    window = target.validity
+    end = now if window.valid_until is None else min(now, window.valid_until)
+    if window.valid_from is not None and end <= window.valid_from:
         msg = (
-            f"cannot retire {target.id!r}: closing at {now.isoformat()} would form a window "
-            f"ending at or before its valid_from {valid_from.isoformat()} — an unrepresentable "
-            f"interval the store would reject (issue #306)"
+            f"cannot retire {target.id!r}: a close at {end.isoformat()} is at or before its "
+            f"valid_from {window.valid_from.isoformat()} — an unrepresentable window the store "
+            f"would reject (issue #306)"
         )
         raise MemoryStoreError(msg)
-    closed = target.validity.model_copy(update={"valid_until": now})
-    return target.model_copy(update={"validity": closed})
+    return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
 
 
 def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:

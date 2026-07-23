@@ -168,3 +168,34 @@ async def test_supersede_refuses_a_future_dated_target_without_writing() -> None
         await writer.ingest(_proposal("correction"))
 
     assert await store.export() == before  # fail-closed: nothing written, target untouched
+
+
+async def test_supersede_never_extends_a_targets_existing_window() -> None:
+    """The fake keeps a target's earlier ``valid_until`` — retirement never resurrects.
+
+    Mirrors ``MemoryIngestor``: a target self-closing before the writer clock keeps
+    that earlier end (``min``), so a fake regressing to a bare ``valid_until = now``
+    that pushed the end out is caught.
+    """
+    already_closes = datetime(2026, 3, 1, tzinfo=UTC)  # before the writer's 2026-06-01 clock
+    store = FakeMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    await store.add(
+        PreferenceMemory(
+            id="existing",
+            content="prefers concise emails",
+            preference="prefers concise emails",
+            validity=Validity(valid_until=already_closes),
+            provenance=Provenance(
+                source=MemorySource.INFERRED, confidence=0.6, last_updated=_fixed_now()
+            ),
+        )
+    )
+    writer = FakeMemoryWriter(
+        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_fixed_now
+    )
+
+    result = await writer.ingest(_proposal("correction"))
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    retired = next(record for record in await store.export() if record.id == "existing")
+    assert retired.validity.valid_until == already_closes  # not extended to the writer clock
