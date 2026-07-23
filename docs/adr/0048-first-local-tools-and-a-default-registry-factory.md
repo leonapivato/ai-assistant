@@ -170,8 +170,8 @@ territory, a planning-contract change ADR-0016 §5 left open), a capability
 alias/normalisation layer, or a naming convention both sides share — none of
 which belongs in a first-tools slice. What this slice proves is that a plan
 **naming a tool's advertised capability drives selection→execute** to a real
-result; the alignment of the *model's* names with the *registry's* is a
-**follow-up issue** filed alongside this ADR.
+result; the alignment of the *model's* names with the *registry's* is
+**issue #296**, filed alongside this ADR.
 
 ## Consequences
 
@@ -193,7 +193,7 @@ result; the alignment of the *model's* names with the *registry's* is a
   composition root, importing no concrete. The next tool that needs memory,
   calendar or notes follows the same seam.
 - **Follow-ups, filed as issues rather than TODOs:** model↔tool capability
-  alignment (above); and a `remember` write tool, deferred with the
+  alignment (issue #296); and a `remember` write tool, deferred with the
   side-effecting-idempotency question it carries.
 - **Revisit when** the first *egress* tool is proposed — that needs ADR-0017 §3's
   conditions discharged and the seam designated, which this ADR explicitly does
