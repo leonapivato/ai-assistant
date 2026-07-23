@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import DefaultMemoryPolicy, MemoryIngestor, SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder, PydanticAIProvider, RetryingProvider
@@ -69,9 +70,19 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     Returns:
         A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
         it with ``aclose`` when the session ends.
+
+    Raises:
+        ConfigurationError: If the data directory cannot be prepared — blocked by
+            permissions, or a file occupies its path. Converted from the raw
+            ``OSError`` so an adapter's ``AssistantError`` boundary surfaces it
+            rather than letting it escape as a traceback.
     """
     directory = data_dir if data_dir is not None else _default_data_dir()
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        msg = f"could not prepare the data directory {directory}: {exc}"
+        raise ConfigurationError(msg) from exc
 
     opened: list[Callable[[], None]] = []
     try:
