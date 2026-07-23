@@ -5,17 +5,26 @@
 - Amended: 2026-07-23 by ADR-0045 — §8's conformance list is touched a second time,
   for the two `MemoryWriter` fold clauses ADR-0040 §5a/§5b added. **§5a's id clause
   is rewritten:** a `SUPERSEDE` leaves the target **retained with a closed validity
-  window** (hidden from `get`/`search`, kept in `export`) and writes the correction
-  at a **new id absent from the store**, returned as `MemoryIngestResult.record_id`
-  — with four id-factory cases the suite now drives (the proposal's own id names a
-  live non-target record; a minted id collides once then succeeds; an
-  always-colliding factory raises `MemoryStoreError` with the target left live; a
-  raising/non-`str`/empty factory raises before any write). **§5b's `EXTERNAL`
-  clause is narrowed to `REINFORCE`:** a `USER_ASSERTED`→`EXTERNAL` `REINFORCE`
-  still raises, while the same `SUPERSEDE` is now permitted and asserted to write a
-  new-id correction (ADR-0045 §5). The remaining `MemoryWriter` obligations, and
-  §8's other exclusions, stand. The §8 text below is unchanged (ADR-0001
-  append-only).
+  window** and writes the correction at a **new id absent from the store**, returned
+  as `MemoryIngestResult.record_id` — with four id-factory cases the suite now drives
+  (the proposal's own id names a live non-target record; a minted id collides once
+  then succeeds; an always-colliding factory raises `MemoryStoreError` with the
+  target left live; a raising/non-`str`/empty factory raises before any write).
+  **The retained target is hidden from `get`/`search` *read-time-relatively*, not
+  absolutely:** the applier stamps `valid_until` from the *ingestor's* clock
+  (ADR-0045 §4), and `get`/`search` hide the target once the *store's* read clock is
+  at or after that instant — exactly the read-time filter `expires_at` (ADR-0007) and
+  ADR-0045 §6 already use, evaluated against the reader's own `now`. With coherent
+  clocks (production injects one real wall clock to both store and ingestor, so a
+  read after the write reads at or after the close) it is hidden; a store clock
+  injected *behind* the close transiently still returns it. `export` keeps it
+  **unconditionally**. An *absolute*, clock-coherence-independent guarantee — a
+  store-authoritative retirement instant — is a `MemoryStore` contract change
+  deferred to issue #306, not asserted here. **§5b's `EXTERNAL` clause is narrowed
+  to `REINFORCE`:** a `USER_ASSERTED`→`EXTERNAL` `REINFORCE` still raises, while the
+  same `SUPERSEDE` is now permitted and asserted to write a new-id correction
+  (ADR-0045 §5). The remaining `MemoryWriter` obligations, and §8's other exclusions,
+  stand. The §8 text below is unchanged (ADR-0001 append-only).
 - Amended: 2026-07-22 by ADR-0040 — §8's exclusion of "the fold's own rule" from
   the conformance suite now carries an exception (ADR-0040 §5a): once
   ``REINFORCE`` and ``SUPERSEDE`` are distinct `core` members, the *difference*
