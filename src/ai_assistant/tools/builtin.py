@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ai_assistant.core.clock import checked_clock
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
@@ -38,7 +39,7 @@ from ai_assistant.core.types import (
 from ai_assistant.tools.registry import InMemoryToolRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryStore
@@ -51,6 +52,31 @@ _DEFAULT_RECALL_LIMIT = 5
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _reject_unknown(
+    parameters: Mapping[str, FrozenJson], allowed: Collection[str], tool_id: str
+) -> None:
+    """Refuse a parameter key the tool's schema does not declare.
+
+    Each tool advertises ``additionalProperties: false``, and ``parameters_schema``
+    is carried but not enforced at selection (ADR-0016 §7), so the callable makes
+    its own behaviour match its own declaration: an unexpected argument is a bad
+    argument, refused loudly (the seam classifies it ``INTERNAL``, ADR-0029 §3)
+    rather than silently ignored, which would surface a planner↔tool mismatch
+    (#296) instead of hiding it.
+
+    **The message names the offending *keys*, never their values** — a value is
+    untrusted input that could carry Tier 1 data, and only the key set (which the
+    author declared) is safe to render.
+
+    Raises:
+        ValueError: If any key is outside ``allowed``.
+    """
+    unexpected = sorted(set(parameters) - set(allowed))
+    if unexpected:
+        msg = f"{tool_id} was given unexpected argument(s): {', '.join(unexpected)}"
+        raise ValueError(msg)
 
 
 # --- current_time: a pure-compute tool, zero injected subsystems --------
@@ -87,16 +113,32 @@ class CurrentTime:
     """
 
     def __init__(self, *, now: Clock = _utcnow) -> None:
-        """Bind the clock this tool reads."""
-        self._now = now
+        """Bind the clock this tool reads, guarded like every injected-clock seam.
+
+        Wrapped in :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §2),
+        so a reading is converted to canonical UTC and a non-conforming one — a
+        naive datetime, a non-``datetime`` — raises ``ClockReadingError`` rather
+        than letting a tool advertised as returning UTC emit a naive or
+        wrong-zone timestamp. The guard is per-reading, so it holds for a clock
+        that drifts, not only at construction.
+        """
+        self._now = checked_clock(now, owner="CurrentTime")
 
     async def __call__(
         self,
-        parameters: Mapping[str, FrozenJson],  # noqa: ARG002 — a clock reader ignores its arguments
+        parameters: Mapping[str, FrozenJson],
         *,
         idempotency_key: str | None,  # noqa: ARG002 — NATURAL, so the key is always None
     ) -> FrozenJson:
-        """Return the current UTC time as an ISO-8601 string under ``utc``."""
+        """Return the current UTC time as an ISO-8601 string under ``utc``.
+
+        Raises:
+            ValueError: If any argument is given — the tool takes none, and its
+                schema declares ``additionalProperties: false`` (ADR-0048 §2).
+            ClockReadingError: If the injected clock's reading is not a conforming
+                UTC instant; the seam classifies it ``INTERNAL`` (ADR-0029 §3).
+        """
+        _reject_unknown(parameters, (), CURRENT_TIME.id)
         return {"utc": self._now().isoformat()}
 
 
@@ -159,9 +201,11 @@ class RecallMemory:
         value, so nothing untrusted reaches the failure text (ADR-0029 §3).
 
         Raises:
-            ValueError: If ``query`` is absent or not a string, or ``limit`` is
-                present and not a positive integer.
+            ValueError: If an unexpected argument is given, ``query`` is absent
+                or not a string, or ``limit`` is present and not a positive
+                integer.
         """
+        _reject_unknown(parameters, ("query", "limit"), RECALL_MEMORY.id)
         query = parameters.get("query")
         if not isinstance(query, str):
             msg = "recall_memory requires a string 'query' argument"

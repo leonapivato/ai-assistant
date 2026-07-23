@@ -125,11 +125,22 @@ declarations:
 
 Each definition carries a `parameters_schema` (JSON Schema): an empty object for
 `current_time`, and `{query: string (required), limit: positive integer}` for
-`recall_memory`. The schema is **carried, not yet enforced** — ADR-0016 §7 defers
-selection-time validation against it — so each callable validates its own inputs
-defensively and raises on a bad argument, which the seam classifies `INTERNAL`
-(ADR-0029 §3). No message a callable raises interpolates a parameter value, so
-nothing untrusted reaches the Tier 2 failure text or a log.
+`recall_memory`, both with `additionalProperties: false`. The schema is
+**carried, not enforced at selection** — ADR-0016 §7 defers that — so each
+callable validates its own inputs and **makes its behaviour match its own
+declaration**: it rejects an argument key outside its declared set (the
+`additionalProperties: false` it advertises), a missing or ill-typed known
+argument, and raises `ValueError`, which the seam classifies `INTERNAL` (ADR-0029
+§3). Rejecting an unexpected argument loudly, rather than ignoring it, surfaces a
+planner↔tool mismatch (the #296 alignment question) instead of hiding it. No
+message a callable raises interpolates a parameter *value* — only the offending
+key set, which the author declared — so nothing untrusted reaches the Tier 2
+failure text or a log.
+
+`current_time`'s injected clock is wrapped in `checked_clock` (ADR-0026 §2), the
+guard every injected-clock seam uses: a tool advertised as returning UTC must not
+emit a naive or wrong-zone instant, so a non-conforming reading raises rather than
+producing a misleading timestamp.
 
 ### 3. `build_default_registry` — a factory that keeps registration internal
 
