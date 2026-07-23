@@ -205,6 +205,30 @@ def _hostile_subclass_id() -> str:
     return _HostileId("looks-like-a-str")
 
 
+class _HostileMeta(type):
+    """A metaclass whose ``__name__`` access raises.
+
+    A guard that tried to name the offending type in its error message —
+    ``type(minted).__name__`` — would trip this and leak a raw exception instead of
+    ``MemoryStoreError``. The guard must introspect *nothing* about the returned
+    object on the error path.
+    """
+
+    @property
+    def __name__(cls) -> str:  # type: ignore[override]
+        msg = "hostile type refuses to be named"
+        raise RuntimeError(msg)
+
+
+class _HostileTyped(metaclass=_HostileMeta):
+    """Not a ``str`` at all, and whose type resists being introspected."""
+
+
+def _hostile_typed_id() -> str:
+    """An id factory returning a non-str whose *type* raises when named."""
+    return _HostileTyped()  # type: ignore[return-value]  # deliberately not a str
+
+
 def _preference(
     record_id: str,
     content: str = _CONTENT,
@@ -610,8 +634,8 @@ class MemoryWriterContract:
 
     @pytest.mark.parametrize(
         "factory",
-        [_raises_id, _empty_id, _non_str_id, _hostile_subclass_id],
-        ids=["raises", "empty", "non-str", "hostile-str-subclass"],
+        [_raises_id, _empty_id, _non_str_id, _hostile_subclass_id, _hostile_typed_id],
+        ids=["raises", "empty", "non-str", "hostile-str-subclass", "hostile-metaclass"],
     )
     async def test_supersede_with_a_malformed_id_factory_writes_nothing(
         self, make_writer: WriterFactory, factory: Callable[[], str]
