@@ -19,6 +19,7 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
+    Validity,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 
@@ -181,6 +182,69 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert set(exported) == {"stale", new_id}
     # The retired target carries a closed window (present in export, hidden from get).
     assert exported["stale"].validity.valid_until is not None
+
+
+async def test_superseding_a_target_never_extends_its_existing_window() -> None:
+    # Retirement only ever takes a belief *off* the read path — never prolongs one.
+    # A target that already self-closes earlier than the ingestor's clock keeps that
+    # earlier end; `_close_window` takes the min, so a correction cannot resurrect
+    # the stale belief by pushing its `valid_until` out to "now" (ADR-0045 §4). The
+    # store reads before the earlier end so the target is a live conflict. Asserted
+    # on `MemoryIngestor` (and mirrored on the fake in test_fake_writer.py) rather
+    # than the shared suite, which deliberately pins no clock (ADR-0028 §4b).
+    already_closes = datetime(2026, 3, 1, tzinfo=UTC)
+    store = InMemoryMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    await store.add(
+        PreferenceMemory(
+            id="stale",
+            content="user prefers morning meetings",
+            preference="morning",
+            validity=Validity(valid_until=already_closes),
+            provenance=_prov(0.6, source=MemorySource.INFERRED),
+        )
+    )
+
+    # The ingestor's own clock is 2026-06-01 (`_fixed_now`), later than the target's
+    # existing end, so a naive `valid_until = now` would push the window out.
+    result = await _ingestor(store).ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    retired = next(record for record in await store.export() if record.id == "stale")
+    # Kept at the earlier self-close, not extended to the ingestor's 2026-06-01 clock.
+    assert retired.validity.valid_until == already_closes
+
+
+async def test_superseding_a_target_that_starts_after_now_is_refused() -> None:
+    # The only window a `valid_until = now` close could invert: a producer-set
+    # future `valid_from`, reachable as a live conflict only under a store/writer
+    # clock skew (a search returns records live at store-now). `_close_window`
+    # refuses rather than persist an interval `Validity` would reject, leaving the
+    # target live and unchanged (ADR-0045 §4/§6).
+    starts_later = datetime(2026, 9, 1, tzinfo=UTC)
+    store = InMemoryMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
+    await store.add(
+        PreferenceMemory(
+            id="future",
+            content="user prefers morning meetings",
+            preference="morning",
+            validity=Validity(valid_from=starts_later),
+            provenance=_prov(0.6, source=MemorySource.INFERRED),
+        )
+    )
+
+    # The ingestor's clock (2026-06-01) precedes the target's own start.
+    with pytest.raises(MemoryStoreError, match="not after its valid_from"):
+        await _ingestor(store).ingest(
+            _proposal(_asserted("correction", "user prefers afternoon meetings"))
+        )
+
+    # Fail-closed: the target is untouched and no correction was written.
+    survivor = await store.get("future")
+    assert survivor is not None
+    assert survivor.validity.valid_from == starts_later
+    assert survivor.validity.valid_until is None
 
 
 async def test_a_correction_survives_the_next_external_re_sync() -> None:
