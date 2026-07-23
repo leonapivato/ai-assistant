@@ -197,14 +197,41 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
 def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
 
-    The target stays on disk — retained, off the read path — with
-    ``valid_until = now``. Its ``valid_from`` and every other field are preserved:
-    only the window's open end is set. Written with ``model_copy(update=...)``,
-    which skips validators, so ``now`` must already be a guarded, aware-UTC
-    reading (the ingestor's :meth:`MemoryIngestor._now_utc`).
+    The target stays on disk — retained, off the read path — with its window's
+    open end brought in to ``now``. ``valid_from`` and every other field are
+    preserved; only ``valid_until`` moves. Written with ``model_copy(update=...)``,
+    which **skips** ``Validity``'s ``valid_until > valid_from`` validator, so this
+    function does that validation itself before handing the value on — the same
+    reason the injected clock and id are guarded at the producer.
+
+    Two robustness rules, because a producer *may* set a bounded window (ADR-0045
+    §6) that the common open-window case never exercises:
+
+    - **Never extend.** If the target already self-closes at or before ``now``,
+      keep that earlier end (``min``): retirement only ever takes a belief *off*
+      the read path, never puts one back on or prolongs it.
+    - **Refuse an inverted close.** If the chosen end is not after ``valid_from``
+      (reachable only when a producer set a future ``valid_from`` and the writer's
+      and store's clocks skew, since a conflict search returns only records live at
+      store-now), there is no valid closed window at ``now``; raise so the target
+      is left live rather than persist an interval ``Validity`` would reject.
+
+    ``now`` must already be a guarded, aware-UTC reading (the ingestor's
+    :meth:`MemoryIngestor._now_utc`).
+
+    Raises:
+        MemoryStoreError: If no valid closed window exists at ``now`` (the
+            inverted-close case above); nothing is written and the target stays live.
     """
-    closed = target.validity.model_copy(update={"valid_until": now})
-    return target.model_copy(update={"validity": closed})
+    window = target.validity
+    end = now if window.valid_until is None else min(now, window.valid_until)
+    if window.valid_from is not None and end <= window.valid_from:
+        msg = (
+            f"cannot retire {target.id!r}: the close instant {end.isoformat()} is not after "
+            f"its valid_from {window.valid_from.isoformat()}"
+        )
+        raise MemoryStoreError(msg)
+    return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
 
 
 def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
@@ -441,6 +468,17 @@ class MemoryIngestor:
         last_conflict: MemoryStoreConflictError | None = None
         for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
             new_id = _checked_id(self._id_factory, owner="MemoryIngestor")
+            if new_id == target.id:
+                # The minted id names the retained target itself — a *stored* id, so
+                # it must be re-minted (ADR-0045 §4: the absent-id obligation covers
+                # "the retained target T included"). Writing it would make the batch
+                # two writes to one id, which `write_atomic` rejects as a hard
+                # `MemoryStoreError` (repeated id, ADR-0046 §3) rather than the
+                # retryable conflict this is, aborting a re-mint the ADR requires.
+                last_conflict = MemoryStoreConflictError(
+                    f"minted id {new_id!r} names the superseded target; re-minting"
+                )
+                continue
             batch = [
                 MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT),
                 MemoryWrite(
