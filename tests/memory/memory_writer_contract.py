@@ -130,9 +130,10 @@ _LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
 
 #: A store read clock fixed far enough *forward* that any window a writer closes
 #: from any clock is already closed by the time the store reads — i.e. the store
-#: reads **at or after the close instant**, the coherent case production's one
-#: shared wall clock gives (a ``get`` after ``ingest`` reads at/after the write).
-#: The mirror of ``_LONG_AGO``: supersession stamps ``valid_until = writer_now`` on
+#: reads **at or after the close instant**, the coherent case production gives when
+#: the store and ingestor each independently sample a forward-advancing wall clock
+#: (a ``get`` after ``ingest`` reads at/after the write). The mirror of
+#: ``_LONG_AGO``: supersession stamps ``valid_until = writer_now`` on
 #: the retired target, and ``get``/``search`` hide it *read-time-relatively*, only
 #: when read at or after that instant. This is deliberately the coherent direction —
 #: it does not "mask" the skew, it fixes the reader at/after the close so the
