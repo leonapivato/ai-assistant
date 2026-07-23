@@ -12,6 +12,7 @@ and needs no ``integration`` mark. The tests that open a real file say so.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -140,6 +141,163 @@ async def test_the_single_resolution_rule_is_also_a_database_constraint(
             "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
             ("d-answer-2", 0, "d-confirm", answer.model_dump_json()),
         )
+
+
+async def test_the_per_binding_resolution_rule_is_also_a_database_constraint(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """ADR-0044 §2b's partial unique index holds even if the checked read were bypassed.
+
+    Asserted by inserting a second resolution of the same concrete binding —
+    naming a *different* CONFIRM, so the ``decisions_resolves`` index does not
+    catch it — straight into the table, past the store's own validation. Only the
+    ``decisions_binding_resolution`` index constrains this, which is the whole
+    point of having it beneath the check.
+    """
+    bind: dict[str, object] = {"execution_id": "exec-a"}  # step_id defaults to "step-1"
+    await ephemeral.record(decision("c-1", request=action(**bind)))
+    await ephemeral.record(decision("c-2", request=action(**bind)))
+    answer = decision(
+        "r-1",
+        request=action(**bind),
+        ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+        resolves="c-1",
+    )
+    await ephemeral.record(answer)
+    sibling = decision(
+        "r-2", request=action(**bind), ruled=ruling(PermissionOutcome.DENY), resolves="c-2"
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        ephemeral._conn.execute(
+            "INSERT INTO decisions("
+            "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("r-2", 0, "c-2", "exec-a", "step-1", "deny", sibling.model_dump_json()),
+        )
+
+
+@pytest.mark.integration
+async def test_a_pre_binding_database_is_migrated_and_stays_usable(tmp_path: Path) -> None:
+    """A trail written before ADR-0044 grows the binding columns on reopen (§1).
+
+    ``step_id`` and ``outcome`` are backfilled from each row's JSON so the
+    per-binding index and the recovery query see them; ``execution_id`` stays
+    ``NULL``, since a pre-ADR-0044 decision belongs to no execution — a
+    non-concrete binding §2b never constrains. The legacy record stays readable,
+    and the reopened trail records and recovers a new concrete binding, proving
+    the migrated schema is fully functional.
+    """
+    path = tmp_path / "audit.db"
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, data TEXT NOT NULL)"
+        )
+        old = decision("c-old", request=action(step_id="step-old"))
+        raw = json.loads(old.model_dump_json())
+        del raw["execution_id"]  # a genuinely pre-ADR-0044 record had no such key
+        legacy.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+            ("c-old", 0, None, json.dumps(raw)),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.get("c-old") == old  # readable, execution_id defaults to None
+        row = reopened._conn.execute(
+            "SELECT execution_id, step_id, outcome FROM decisions WHERE id = ?", ("c-old",)
+        ).fetchone()
+        assert row == (None, "step-old", "confirm")  # step_id/outcome backfilled, execution_id NULL
+
+        # The migrated schema supports the new binding features end to end.
+        await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
+        found = await reopened.pending_confirmation(execution_id="exec-a", step_id="step-1")
+        assert found is not None
+        assert found.id == "c-new"
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+async def test_a_corrupt_legacy_row_is_reported_as_an_audit_error_not_a_raw_json_error(
+    tmp_path: Path,
+) -> None:
+    """A malformed blob in a pre-ADR-0044 table is reported, not left to escape.
+
+    Migration reads each legacy row's JSON to backfill the binding columns. A
+    blob that is not JSON must surface as this layer's ``AuditError`` — the same
+    "reported, not returned" rule ``_decode`` applies at read time — rather than a
+    bare ``JSONDecodeError`` leaking past ``_setup``'s ``sqlite3``/``OSError``
+    boundary and aborting construction with a foreign exception.
+    """
+    path = tmp_path / "audit.db"
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, data TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+            ("c-bad", 0, None, "{not valid json"),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    with pytest.raises(AuditError):
+        SqliteAuditTrail(path=path)
+
+
+@pytest.mark.integration
+async def test_a_second_trail_opens_a_migrated_legacy_database_without_failing(
+    tmp_path: Path,
+) -> None:
+    """Concurrent upgrade is serialised, so a second opener does not double-ALTER.
+
+    ``_setup`` takes the write lock (``BEGIN IMMEDIATE``) before it inspects the
+    schema, so two processes upgrading one pre-ADR-0044 file cannot both run
+    ``ALTER TABLE ... ADD COLUMN`` — the loser waits and re-reads the migrated
+    columns, its ``missing`` set coming back empty. Exercised sequentially here
+    (the observable outcome of that serialisation): a second trail opens the
+    already-migrated file cleanly, and both read the legacy record and drive the
+    new binding features.
+    """
+    path = tmp_path / "audit.db"
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, data TEXT NOT NULL)"
+        )
+        old = decision("c-old", request=action(step_id="step-1"))
+        raw = json.loads(old.model_dump_json())
+        del raw["execution_id"]
+        legacy.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+            ("c-old", 0, None, json.dumps(raw)),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    first = SqliteAuditTrail(path=path)
+    second = SqliteAuditTrail(path=path)  # the already-migrated file opens cleanly
+    try:
+        assert await first.get("c-old") == old
+        assert await second.get("c-old") == old
+        await first.record(decision("c-a", request=action(execution_id="exec-a")))
+        found = await second.pending_confirmation(execution_id="exec-a", step_id="step-1")
+        assert found is not None
+        assert found.id == "c-a"
+    finally:
+        first.close()
+        second.close()
 
 
 async def test_a_row_the_model_no_longer_accepts_is_reported_not_returned(

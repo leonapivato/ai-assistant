@@ -850,15 +850,35 @@ class AuditTrail(Protocol):
         both records are in hand. A decision whose ``resolves`` is set is
         refused unless the referenced id is present, its ruling was ``CONFIRM``,
         no other recorded decision already resolves it, its ``tool``,
-        ``parameters_digest`` and ``step_id`` match the incoming decision's
-        exactly, and it was not decided *after* the resolution answering it
-        (equal timestamps are fine — a fast confirmation at a coarse clock
-        resolution is real). The authorisation pointer is checked here too: a
-        resolving ``ALLOW`` must carry ``authorised_by`` equal to its
-        ``resolves``, and a resolving ``DENY`` must leave it unset. Without that
-        pair, a resolving ``ALLOW`` could name any confirmation it liked — or a
-        string naming nothing — while satisfying every other check, and the
-        disclosure floor would be satisfiable by fabrication.
+        ``parameters_digest``, ``step_id`` **and ``execution_id``** match the
+        incoming decision's exactly (the ``execution_id`` conjunct is ADR-0044
+        §2a: two executions of one plan parked on the same step produce two
+        ``CONFIRM``s identical but for their execution, and without it B's answer
+        could name A's confirmation), and it was not decided *after* the
+        resolution answering it (equal timestamps are fine — a fast confirmation
+        at a coarse clock resolution is real). The authorisation pointer is
+        checked here too: a resolving ``ALLOW`` must carry ``authorised_by``
+        equal to its ``resolves``, and a resolving ``DENY`` must leave it unset.
+        Without that pair, a resolving ``ALLOW`` could name any confirmation it
+        liked — or a string naming nothing — while satisfying every other check,
+        and the disclosure floor would be satisfiable by fabrication.
+
+        **A concrete binding resolves once** (ADR-0044 §2b). *On top of* the
+        per-*confirmation* rule above — which stops the *same* ``CONFIRM`` being
+        resolved twice and is unchanged (ADR-0036 §2) — a further rule fires
+        **only when the confirmation's ``execution_id`` and ``step_id`` are both
+        present**: once *any* ``CONFIRM`` for that ``(execution_id, step_id)``
+        binding is resolved, the binding is decided, and no second resolution —
+        of that confirmation *or a sibling* under the same binding — may be
+        recorded. ADR-0037 §2 accepts several unresolved ``CONFIRM``s under one
+        binding (a ``run`` that lost the ``PENDING → AWAITING_APPROVAL`` compare-
+        and-swap still leaves its ``CONFIRM`` recorded), and those are the *same
+        action* — one step of one execution — so they must share one *fate*:
+        without this, a step whose ``CONFIRM`` was answered ``DENY`` could still
+        have a sibling orphan answered ``ALLOW`` and execute the very action the
+        user refused (the #257 window). When the binding is not concrete, only
+        the per-confirmation rule applies, so two independent *direct*
+        confirmations (each ``(None, None)``) never become mutually exclusive.
 
         This bounds **resolutions, not executions**, and the difference is worth
         being precise about: ``authorises()`` is a pure comparison, so the same
@@ -872,6 +892,45 @@ class AuditTrail(Protocol):
                 recorded.
             InvalidResolutionError: If ``resolves`` is set and the invariant
                 above does not hold.
+        """
+        ...
+
+    async def pending_confirmation(
+        self, *, execution_id: str, step_id: str
+    ) -> PermissionDecision | None:
+        """The confirmation this binding still awaits, or ``None`` (ADR-0044 §3).
+
+        The recovery query. A restarted process reads a reloaded
+        ``AWAITING_APPROVAL`` step, sees it is awaiting an answer, and asks the
+        trail — *the store that already holds the confirmation* — for it by the
+        ``(execution_id, step_id)`` binding ADR-0044 §1 and §2 established, rather
+        than by a decision id it no longer has after the restart. ``resume`` then
+        proceeds exactly as it does in-process, including its existing check that
+        the returned confirmation's ``tool`` equals the reloaded step's
+        ``bound_tool``.
+
+        Keys on whether the *binding* carries a resolution, not on any single
+        confirmation's state, and works in two steps **in this order**:
+
+        1. **If any ``CONFIRM`` for ``(execution_id, step_id)`` is already
+           resolved, return ``None``.** By §2b the binding is decided and no
+           further resolution may be recorded, so the pipeline must not present
+           it as answerable — and returning a still-unresolved sibling orphan
+           here would hand back exactly the #257 hazard §2b closes.
+        2. **Otherwise return the newest unresolved ``CONFIRM``** by the trail's
+           own order (``decided_at`` descending, ``id`` ascending), or ``None``
+           if the binding carries none. A binding may hold more than one
+           unresolved ``CONFIRM`` (ADR-0037 §2's compare-and-swap loser), but
+           they are the same action — selection is deterministic and
+           single-candidate (ADR-0037 §1) — so any is a correct question to
+           re-present and the newest is returned deterministically. This does
+           **not** raise on multiple unresolved ``CONFIRM``s: that is a reachable,
+           accepted state, not a corrupt one.
+
+        **Query-only and returns a detached snapshot**, like every other
+        ``AuditTrail`` read (ADR-0018 §3): it adds no write path and no way to
+        mutate the trail, so the append-only and single-resolution guarantees are
+        untouched.
         """
         ...
 

@@ -204,13 +204,14 @@ class FakeAuditTrail:
         return snapshot.id
 
     def _check_resolution(self, decision: PermissionDecision) -> None:
-        """Enforce ADR-0021 §1's invariant on a resolving decision.
+        """Enforce ADR-0021 §1 and ADR-0044 §2's invariant on a resolving decision.
 
         Raises:
             InvalidResolutionError: If the referenced decision is absent, was not
-                a ``CONFIRM``, is already resolved, describes a different
-                subject, postdates the answer, or if the authorisation pointer
-                does not match.
+                a ``CONFIRM``, is already resolved, describes a different subject
+                (including a different ``execution_id``, ADR-0044 §2a), postdates
+                the answer, resolves a concrete binding a sibling already settled
+                (ADR-0044 §2b), or if the authorisation pointer does not match.
         """
         confirmed = self._decisions.get(str(decision.resolves))
         if confirmed is None:
@@ -232,12 +233,14 @@ class FakeAuditTrail:
             confirmed.tool != decision.tool
             or confirmed.parameters_digest != decision.parameters_digest
             or confirmed.step_id != decision.step_id
+            or confirmed.execution_id != decision.execution_id
         ):
             msg = (
                 f"decision {decision.id!r} resolves {confirmed.id!r} but rules on a "
                 f"different action; a confirmation must answer the question that was asked"
             )
             raise InvalidResolutionError(msg)
+        self._check_binding_undecided(decision)
         if decision.decided_at < confirmed.decided_at:
             msg = (
                 f"decision {decision.id!r} is timestamped before the confirmation "
@@ -245,6 +248,47 @@ class FakeAuditTrail:
             )
             raise InvalidResolutionError(msg)
         self._check_authorisation(decision)
+
+    def _check_binding_undecided(self, decision: PermissionDecision) -> None:
+        """Refuse a resolution of a concrete binding a sibling already settled (§2b).
+
+        Fires **only** when the resolving decision's ``execution_id`` and
+        ``step_id`` are both present — a concrete ``(execution_id, step_id)``
+        binding. ADR-0037 §2 accepts several unresolved ``CONFIRM``s under one
+        binding (a compare-and-swap loser's ``CONFIRM`` stays recorded), and they
+        are the same action, so they must share one fate: once *any* of them is
+        resolved the binding is decided, and no second resolution — of that
+        confirmation *or a sibling* — may be recorded. Layered *on top of* the
+        per-confirmation ``resolves`` rule above, which alone would let a
+        ``DENY``'d step keep an ``ALLOW``'d sibling orphan (the #257 window).
+
+        A resolution's own ``(execution_id, step_id)`` equals its confirmation's
+        (§2a and the ``step_id`` check enforce it at record time), so a recorded
+        resolution sharing this binding *is* a prior resolution of it.
+
+        Raises:
+            InvalidResolutionError: If a resolution for this concrete binding is
+                already recorded.
+        """
+        if decision.execution_id is None or decision.step_id is None:
+            return
+        prior = next(
+            (
+                other
+                for other in self._decisions.values()
+                if other.resolves is not None
+                and other.execution_id == decision.execution_id
+                and other.step_id == decision.step_id
+            ),
+            None,
+        )
+        if prior is not None:
+            msg = (
+                f"decision {decision.id!r} resolves the binding "
+                f"({decision.execution_id!r}, {decision.step_id!r}), which decision "
+                f"{prior.id!r} already settled; one step of one execution has one answer"
+            )
+            raise InvalidResolutionError(msg)
 
     @staticmethod
     def _check_authorisation(decision: PermissionDecision) -> None:
@@ -273,6 +317,33 @@ class FakeAuditTrail:
             # hold a safety rule of its own.
             msg = f"a resolving {decision.ruling.outcome} rests on no authorisation"
             raise InvalidResolutionError(msg)
+
+    async def pending_confirmation(
+        self, *, execution_id: str, step_id: str
+    ) -> PermissionDecision | None:
+        """The confirmation this binding still awaits, or ``None`` (ADR-0044 §3).
+
+        Two steps in order: if any ``CONFIRM`` for the binding is already
+        resolved the binding is decided, so return ``None`` (never a still-
+        unresolved sibling orphan — the #257 hazard §2b closes); otherwise return
+        the newest unresolved ``CONFIRM`` by ``decided_at`` descending, ``id``
+        ascending, or ``None`` if the binding carries none.
+        """
+        confirms = [
+            held
+            for held in self._decisions.values()
+            if held.ruling.outcome is PermissionOutcome.CONFIRM
+            and held.execution_id == execution_id
+            and held.step_id == step_id
+        ]
+        resolved = {other.resolves for other in self._decisions.values() if other.resolves}
+        if any(confirm.id in resolved for confirm in confirms):
+            return None
+        if not confirms:
+            return None
+        by_id = sorted(confirms, key=lambda held: held.id)
+        newest = sorted(by_id, key=lambda held: held.decided_at, reverse=True)[0]
+        return newest.model_copy(deep=True)
 
     async def get(self, decision_id: str) -> PermissionDecision | None:
         """Return the decision with ``decision_id`` as a detached snapshot, or ``None``."""

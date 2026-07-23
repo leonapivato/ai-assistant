@@ -2241,6 +2241,9 @@ class ActionRequest(BaseModel):
     step_id: DurableIdentifier | None = Field(
         default=None, description="The plan step this action belongs to, if any."
     )
+    execution_id: DurableIdentifier | None = Field(
+        default=None, description="The execution this action belongs to, if any."
+    )
 
     @property
     def parameters_digest(self) -> str:
@@ -2376,6 +2379,16 @@ class PermissionDecision(BaseModel):
         )
     )
     step_id: DurableIdentifier | None = None
+    execution_id: DurableIdentifier | None = Field(
+        default=None,
+        description=(
+            "The execution this decision belongs to, if any (ADR-0044 §1). "
+            "Transcribed from the request by :meth:`from_request`, never asserted "
+            "by a caller, so a decision cannot name an execution the policy did "
+            "not see. ``None`` for a direct ruling outside a plan execution, "
+            "exactly as ``step_id`` is."
+        ),
+    )
     resolves: DurableIdentifier | None = Field(
         default=None, description="The CONFIRM decision this one answers, if any."
     )
@@ -2394,10 +2407,10 @@ class PermissionDecision(BaseModel):
 
         **The only construction path a caller should use**, and it exists so the
         binding is *transcribed* rather than asserted. Every field describing
-        what was ruled on — ``tool``, ``parameters_digest``, ``step_id`` — is
-        copied from the request by ``core``, so a decision naming a different
-        tool than the one the policy saw cannot be produced by following the
-        contract.
+        what was ruled on — ``tool``, ``parameters_digest``, ``step_id`` and
+        ``execution_id`` (ADR-0044 §1) — is copied from the request by ``core``,
+        so a decision naming a different tool, or a different execution, than the
+        one the policy saw cannot be produced by following the contract.
 
         A factory rather than a validator because the request is not a field of
         the decision: embedding it whole would store the parameters this design
@@ -2434,6 +2447,7 @@ class PermissionDecision(BaseModel):
             parameters_digest=request.parameters_digest,
             decided_at=decided_at,
             step_id=request.step_id,
+            execution_id=request.execution_id,
             resolves=resolves,
         )
 
@@ -2466,12 +2480,26 @@ class PermissionDecision(BaseModel):
         validated once, by ``AuditTrail.record``, at the boundary where the
         referenced record is in hand, rather than at every later read where it
         is not.
+
+        **``execution_id`` is the fourth conjunct, and it is load-bearing rather
+        than symmetry** (ADR-0044 §1). This is the check the executor runs before
+        it claims a step, so it is where a decision is bound to *what it may run*.
+        Without it, a decision resolved (or auto-granted) for execution A — same
+        tool, same digest, same step id as B's — would answer ``True`` for a
+        request naming execution B, and an executor handed B's state and that
+        decision would run B under A's approval, never resolving B's own parked
+        question. That is the cross-execution substitutability #253 closes, at the
+        seam that runs the tool rather than the one that records a resolution. It
+        still meets ADR-0016 §2's test for living on the type — computable from
+        the two values alone, independent of policy, config, context and clock —
+        because an execution id is a value on both records, not a decision.
         """
         return (
             self.ruling.outcome is PermissionOutcome.ALLOW
             and request.tool == self.tool
             and request.parameters_digest == self.parameters_digest
             and request.step_id == self.step_id
+            and request.execution_id == self.execution_id
         )
 
     @model_validator(mode="after")

@@ -198,6 +198,17 @@ requires that one `CONFIRM` be answered once, and `record` checks it. The index
 is the same rule stated where a bug in the check cannot reach it; SQLite treats
 NULLs as distinct, so it constrains resolving rows only.
 
+> **Amended by ADR-0044 §2b (2026-07-23).** This per-*confirmation* index is
+> unchanged and still stops the *same* `CONFIRM` being resolved twice. ADR-0044
+> adds a second, per-*binding* rule *on top of* it: a partial unique index on
+> `(execution_id, step_id)` over resolving rows with a concrete binding, so one
+> step of one execution carries at most one resolution even across sibling
+> `CONFIRM`s (an ADR-0037 §2 compare-and-swap loser). The two coexist — the
+> `resolves` index keeps unrelated *direct* confirmations independent, since they
+> share no concrete binding to collide on. `SqliteAuditTrail` gains
+> `execution_id`, `step_id` and `outcome` columns (migrated and backfilled on an
+> existing database) to carry both indexes and the recovery query.
+
 **Atomicity is the `asyncio.Lock`, and the transaction is `BEGIN IMMEDIATE`.**
 The lock serialises `record` within the process, and the duplicate check, the
 resolution validation and the insert run in one `to_thread` call, so there is no

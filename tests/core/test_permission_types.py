@@ -264,7 +264,9 @@ def test_a_ruling_has_no_field_naming_a_subject() -> None:
 
 def test_from_request_transcribes_the_subject() -> None:
     """The caller supplies the id, the clock and the ruling; ``core`` copies the rest."""
-    request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    request = ActionRequest(
+        tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-1"
+    )
     ruling = PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine")
 
     made = PermissionDecision.from_request(request, ruling, id="d-1", decided_at=AT)
@@ -272,6 +274,7 @@ def test_from_request_transcribes_the_subject() -> None:
     assert made.tool == request.tool
     assert made.parameters_digest == request.parameters_digest
     assert made.step_id == request.step_id
+    assert made.execution_id == request.execution_id  # ADR-0044 §1
     assert made.id == "d-1"
     assert made.decided_at == AT
     assert made.resolves is None
@@ -367,7 +370,9 @@ def test_a_substituted_definition_stops_a_decision_authorising_the_request() -> 
 
 
 def test_a_decision_authorises_the_request_it_was_made_about() -> None:
-    request = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
+    request = ActionRequest(
+        tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-1"
+    )
     made = PermissionDecision.from_request(
         request,
         PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="fine"),
@@ -391,6 +396,7 @@ def test_a_decision_authorises_the_request_it_was_made_about() -> None:
         ActionRequest(tool=tool(), parameters={"to": "b"}, step_id="step-1"),
         ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-2"),
         ActionRequest(tool=tool(), parameters={"to": "a"}),
+        ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1", execution_id="exec-2"),
     ],
     ids=[
         "a rebound id",
@@ -399,15 +405,18 @@ def test_a_decision_authorises_the_request_it_was_made_about() -> None:
         "different arguments",
         "another step",
         "no step at all",
+        "another execution",
     ],
 )
 def test_a_decision_does_not_authorise_a_substituted_request(substituted: ActionRequest) -> None:
-    """Three substitutions closed by the shape of the types rather than by prose.
+    """Substitutions closed by the shape of the types rather than by prose.
 
     Taking the *request* is what makes this discharge ADR-0017 §3: a signature
     taking only a definition would have checked the tool and silently ignored
     the arguments — authorising an email to one recipient and executing it to
-    another, with every record still reading as consistent.
+    another, with every record still reading as consistent. The execution binding
+    (ADR-0044 §1) is the fourth conjunct: a decision made for execution A does not
+    authorise B's identical request.
     """
     approved = ActionRequest(tool=tool(), parameters={"to": "a"}, step_id="step-1")
     made = PermissionDecision.from_request(

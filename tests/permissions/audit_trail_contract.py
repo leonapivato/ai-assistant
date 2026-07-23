@@ -287,6 +287,170 @@ class AuditTrailContract:
 
         await _refuses(trail, unbacked)
 
+    # --- the execution binding (ADR-0044 §2) -----------------------------
+
+    async def test_a_resolution_must_share_the_confirmations_execution(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0044 §2a: B's answer may not resolve A's confirmation.
+
+        Two executions of one plan, both parked on the same step, produce two
+        CONFIRMs identical in tool, digest and step but differing in
+        ``execution_id``. Without the added conjunct a resolution built for B
+        could name A's confirmation and pass every earlier check — the
+        cross-execution substitutability #253 closes at the resolution seam.
+        """
+        await trail.record(decision("c-a", request=action(execution_id="exec-a")))
+        answer_for_b = decision(
+            "r-b",
+            request=action(execution_id="exec-b"),
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-a"),
+            resolves="c-a",
+        )
+
+        await _refuses(trail, answer_for_b)
+
+    async def test_a_concrete_binding_carries_at_most_one_resolution(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0044 §2b: one step of one execution has one answer, across siblings.
+
+        ADR-0037 §2 leaves a second unresolved CONFIRM under one binding (a
+        compare-and-swap loser), and the two are the same action. The
+        per-*confirmation* rule alone would let the sibling be answered the other
+        way while the first stood — the #257 window. This is the per-*binding*
+        rule layered on top: once the binding is decided, no sibling may be
+        resolved. The refused answer names a *different* CONFIRM, so only the
+        binding rule — not the ``resolves`` index — can catch it.
+        """
+        bind = {"execution_id": "exec-a"}  # step_id defaults to "step-1": a concrete binding
+        await trail.record(decision("c-1", request=action(**bind)))
+        await trail.record(decision("c-2", request=action(**bind)))
+        await trail.record(
+            decision(
+                "r-1",
+                request=action(**bind),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+                resolves="c-1",
+            )
+        )
+
+        sibling_answer = decision(
+            "r-2",
+            request=action(**bind),
+            ruled=ruling(PermissionOutcome.DENY),
+            resolves="c-2",
+        )
+        await _refuses(trail, sibling_answer)
+
+    async def test_direct_confirmations_are_not_coupled_by_a_binding(
+        self, trail: AuditTrail
+    ) -> None:
+        """§2b fires only for a *concrete* binding (ADR-0044 §2b).
+
+        Two direct confirmations — no execution, no step — share the ``(None,
+        None)`` non-binding, so resolving one must not decide the other. Only the
+        per-confirmation rule applies, and it keeps them independent.
+        """
+        direct: dict[str, object] = {"step_id": None, "execution_id": None}
+        await trail.record(decision("c-1", request=action(**direct)))
+        await trail.record(decision("c-2", request=action(**direct)))
+        await trail.record(
+            decision(
+                "r-1",
+                request=action(**direct),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+                resolves="c-1",
+            )
+        )
+
+        answer_for_the_other = decision(
+            "r-2",
+            request=action(**direct),
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-2"),
+            resolves="c-2",
+        )
+        assert await trail.record(answer_for_the_other) == "r-2"
+
+    # --- recovering a parked confirmation (ADR-0044 §3) ------------------
+
+    async def test_pending_confirmation_returns_the_unresolved_confirm(
+        self, trail: AuditTrail
+    ) -> None:
+        """The recovery query: a restart finds the parked question by its binding."""
+        confirmed = decision("c-1", request=action(execution_id="exec-a"))
+        await trail.record(confirmed)
+
+        found = await trail.pending_confirmation(execution_id="exec-a", step_id="step-1")
+
+        assert found == confirmed
+
+    async def test_pending_confirmation_is_none_for_an_unparked_binding(
+        self, trail: AuditTrail
+    ) -> None:
+        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
+
+    async def test_pending_confirmation_is_none_once_the_binding_is_resolved(
+        self, trail: AuditTrail
+    ) -> None:
+        """A resolved binding is decided, so nothing is awaiting an answer."""
+        bind = {"execution_id": "exec-a"}
+        await trail.record(decision("c-1", request=action(**bind)))
+        await trail.record(
+            decision(
+                "r-1",
+                request=action(**bind),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+                resolves="c-1",
+            )
+        )
+
+        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
+
+    async def test_pending_confirmation_returns_the_newest_of_several_unresolved(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0037 §2's CAS loser leaves a second unresolved CONFIRM under the binding.
+
+        They are the same action (selection is deterministic and single-candidate,
+        ADR-0037 §1), so any is a correct question to re-present and the newest is
+        returned deterministically — ``decided_at`` descending, ``id`` ascending.
+        The query does not raise on the several.
+        """
+        bind = {"execution_id": "exec-a"}
+        await trail.record(decision("c-old", request=action(**bind), decided_at=AT))
+        await trail.record(
+            decision("c-new", request=action(**bind), decided_at=AT + timedelta(hours=1))
+        )
+
+        found = await trail.pending_confirmation(execution_id="exec-a", step_id="step-1")
+
+        assert found is not None
+        assert found.id == "c-new"
+
+    async def test_pending_confirmation_is_none_when_a_sibling_is_resolved(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0044 §3 step 1 — the #257 safety, the blocker an earlier draft failed.
+
+        Once *any* CONFIRM for the binding is resolved the binding is decided, so
+        the query returns ``None`` rather than handing back a still-unresolved
+        sibling orphan for the pipeline to re-answer the other way.
+        """
+        bind = {"execution_id": "exec-a"}
+        await trail.record(decision("c-1", request=action(**bind)))
+        await trail.record(decision("c-2", request=action(**bind)))  # the unresolved sibling
+        await trail.record(
+            decision(
+                "r-1",
+                request=action(**bind),
+                ruled=ruling(PermissionOutcome.DENY),
+                resolves="c-1",
+            )
+        )
+
+        assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
+
     # --- ordering and bounds ---------------------------------------------
 
     async def test_recent_is_newest_first_with_an_id_tie_break(self, trail: AuditTrail) -> None:
