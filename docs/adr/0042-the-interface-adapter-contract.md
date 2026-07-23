@@ -206,19 +206,29 @@ result it returns must carry two things — and because the adapter is forbidden
 from reading the registry, the audit trail, or a `PermissionDecision` (§6), the
 *engine* is what assembles them into the result:
 
-- **Display-safe confirmation content** — enough for a person to judge the action:
-  the selected tool's human-readable name/description, the parameters it would run
-  with, **and the recorded `CONFIRM` ruling's own `reason`** — all rendered safe by
-  the engine. The reason is not optional: `PermissionRuling.reason` is defined as
-  "text shown to the user at the moment they decide" (`core/types.py`), so a prompt
-  that omitted it would drop the policy's own explanation of *why* confirmation is
-  required — an off-device disclosure, an unknown cost — which is exactly what the
-  user needs to decide. The stage-level `StepDisposition` carries only `tool_id`,
-  and the adapter may not read the `PermissionDecision` to recover the rest (§6);
-  so the façade's confirmation outcome is a **richer `orchestration`-level DTO**
-  (§1) that the implementation lane defines to hold the tool content *and* the
-  ruling reason. This is the concrete reason §3's result type is the façade's own,
-  not a raw stage DTO.
+- **Confirmation content as structured semantic data** — enough for a person to
+  judge the action: the selected tool's human-readable name and description, the
+  parameters it would run with (as structured data, not a pre-formatted string),
+  **and the recorded `CONFIRM` ruling's own `reason`**. The reason is not optional:
+  `PermissionRuling.reason` is defined as "text shown to the user at the moment
+  they decide" (`core/types.py`), so a prompt that omitted it would drop the
+  policy's own explanation of *why* confirmation is required — an off-device
+  disclosure, an unknown cost — which is exactly what the user needs to decide. The
+  stage-level `StepDisposition` carries only `tool_id`, and the adapter may not read
+  the `PermissionDecision` to recover the rest (§6); so the façade's confirmation
+  outcome is a **richer `orchestration`-level DTO** (§1) that the implementation
+  lane defines to hold the tool content *and* the ruling reason. This is the
+  concrete reason §3's result type is the façade's own, not a raw stage DTO.
+
+  **The engine carries semantic data; escaping is the adapter's, per target.**
+  "Safe" is target-specific — a parameter value like `"\x1b[2J"` or Rich markup is
+  valid data that a terminal would interpret as a control sequence, but an HTTP or
+  TUI front end must encode differently — so the engine cannot pre-escape it
+  without corrupting it for some adapter. The DTO therefore carries the values
+  as-is (as data), and each adapter neutralises them for its own output on render:
+  the terminal adapter strips or escapes control sequences and markup before
+  writing; an HTTP adapter encodes for its response. Escaping-for-a-target is
+  rendering, which §6 assigns to the adapter.
 
 - **An opaque continuation token** — everything the engine needs to resume the
   exact parked step and no more. Today that is the recorded `CONFIRM`'s
