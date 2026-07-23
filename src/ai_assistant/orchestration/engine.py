@@ -231,15 +231,37 @@ class Engine:
                 client that requests confirmable actions and abandons every token
                 would grow the table without bound — a memory-exhaustion vector in
                 a long-lived front end (a short-lived CLI barely touches it). At the
-                ceiling the engine applies **backpressure**: it refuses to drive
-                another step (:meth:`_reject_if_confirmations_full`) rather than
-                parking one and dropping a live continuation, which would strand a
-                durably-parked step (#287). A soft limit — see that method. Must be
-                positive.
+                ceiling the engine applies **backpressure** (:meth:`_admit_and_reserve`).
+
+                **This is a global step-execution throttle at saturation, not a
+                selective one.** The engine cannot know before running a step
+                whether it will park (that is the policy's ruling, reached inside
+                ``run``), and letting it run and *then* dropping the park would
+                strand a durably-parked step (#287, round 7). So at the ceiling it
+                refuses to drive **any** further step — including one that would be
+                auto-allowed or find no capable tool — until an outstanding
+                confirmation is resolved. Selective admission (throttling only
+                would-be confirmations) awaits the durable-resume lane that can
+                recover a dropped continuation (#287, #242). The default is high
+                enough that this bites only a genuinely saturated system; a caller
+                that wants a different policy sets it here. Must be a positive
+                integer.
 
         Raises:
-            ValueError: If ``max_outstanding_confirmations`` is not positive.
+            TypeError: If ``max_outstanding_confirmations`` is not an integer. A
+                ``bool`` is excluded (it is an ``int`` subclass and a flag is not a
+                count), and a ``float`` like ``1.5`` is refused rather than compared
+                — the same guard shape ``LearningLoop`` uses for its own count.
+            ValueError: If it is not positive.
         """
+        if isinstance(max_outstanding_confirmations, bool) or not isinstance(
+            max_outstanding_confirmations, int
+        ):
+            msg = (
+                "max_outstanding_confirmations must be an integer, got "
+                f"{max_outstanding_confirmations!r}"
+            )
+            raise TypeError(msg)
         if max_outstanding_confirmations < 1:
             msg = (
                 "max_outstanding_confirmations must be positive, got "
