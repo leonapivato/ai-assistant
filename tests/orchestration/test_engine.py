@@ -206,6 +206,35 @@ async def test_converse_with_no_step_ends_at_the_plan() -> None:
     assert outcome.step is None
     assert outcome.turn.plan.steps == ()
     assert outcome.turn.memory_degraded is False
+    # A no-action decision is still a decision: its goal and plan are persisted as
+    # an auditable record even though there is nothing to drive.
+    assert await harness.plans.get_goal(outcome.turn.goal.id) is not None
+    assert await harness.plans.get_plan(outcome.turn.plan.id) is not None
+
+
+async def test_converse_refuses_a_plan_built_for_another_goal() -> None:
+    """A plan whose goal_id is not the turn's goal is refused before it is driven."""
+
+    class MismatchPlanner:
+        """Returns a plan pointing at a different goal than the one it was given."""
+
+        async def plan(
+            self,
+            goal: Goal,
+            *,
+            context: CurrentContext,
+            memories: Sequence[MemoryRecord] = (),
+        ) -> ActionPlan:
+            step = PlanStep(id="step-1", intent="x", capability=CAPABILITY, parameters=PARAMETERS)
+            return ActionPlan(
+                id="rogue-plan", goal_id="some-other-goal", steps=(step,), created_at=AT
+            )
+
+    harness = Harness(planner=MismatchPlanner(), tools=(tool(),))
+    with pytest.raises(PlanningError, match="different objective"):
+        await harness.engine.converse("send it", timeout=PATIENT)
+    # Nothing was persisted or driven for the mismatched plan.
+    assert await harness.plans.get_plan("rogue-plan") is None
 
 
 async def test_converse_drives_the_first_step_and_executes_it() -> None:

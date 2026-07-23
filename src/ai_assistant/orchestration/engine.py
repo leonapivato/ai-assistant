@@ -428,12 +428,18 @@ class Engine:
         return handle
 
     async def _converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-        """Plan the turn, then drive its first step if it has one."""
+        """Plan the turn, persist it, then drive its first step if it has one."""
         turn = await self._loop.respond(utterance)
+        self._check_plan_is_for_goal(turn)
+        # Persist the goal and plan for *every* turn, before branching on whether
+        # there is a step to drive: the plan is an auditable record of what the
+        # system decided (ADR-0014 §2), and a no-action decision is a decision.
+        await self._plans.save_goal(turn.goal)
+        await self._plans.save_plan(turn.plan)
         if not turn.plan.steps:
             return TurnOutcome(turn=turn)
         first = turn.plan.steps[0]
-        state = await self._start_execution(turn)
+        state = await self._plans.start_execution(turn.plan.id)
         # Mint the continuation handle *before* the runner can park the step, so a
         # raising or malformed id factory fails here — with no durable state yet —
         # rather than after `run` has committed AWAITING_APPROVAL, which would
@@ -443,6 +449,29 @@ class Engine:
         disposition = await self._runner.run(state, first.id, timeout=timeout)
         step = self._step_outcome(turn, disposition, handle=handle)
         return TurnOutcome(turn=turn, step=step)
+
+    def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
+        """Refuse a plan that was not built for this turn's goal (ADR-0037 §2 in spirit).
+
+        The pipeline reads its subjects from the store, not the caller's word, so a
+        substituted subject is refused rather than checked for. Here the façade is
+        the caller of the store, so it makes the one check no lower stage can: a
+        conforming ``Planner`` returns a plan for the goal it was handed
+        (``plan.goal_id == goal.id``), but a faulty or stale one could return an
+        *already persisted* plan for a **previous** goal — which ``save_plan``
+        would accept (its goal exists) and ``start_execution`` would then drive,
+        executing actions planned for a different objective than the utterance.
+
+        Raises:
+            PlanningError: If the plan's ``goal_id`` is not this turn's goal.
+        """
+        if turn.plan.goal_id != turn.goal.id:
+            msg = (
+                f"the planner returned a plan for goal {turn.plan.goal_id!r}, not this turn's "
+                f"goal {turn.goal.id!r}; driving it would execute actions planned for a "
+                "different objective"
+            )
+            raise PlanningError(msg)
 
     async def _resume(
         self,
@@ -478,17 +507,6 @@ class Engine:
         # turns a replay into a clean "unknown token" (ADR-0042 §4).
         self._parked.pop(token.handle, None)
         return TurnOutcome(turn=parked.turn, step=step)
-
-    async def _start_execution(self, turn: TurnResult) -> ExecutionState:
-        """Persist the turn's goal and plan and open the execution to drive.
-
-        ``respond`` ends at the plan without persisting it, and ``StepRunner``
-        reads its subjects from the store, never the caller (ADR-0037 §2), so the
-        goal and plan are saved and an execution started before a step is driven.
-        """
-        await self._plans.save_goal(turn.goal)
-        await self._plans.save_plan(turn.plan)
-        return await self._plans.start_execution(turn.plan.id)
 
     def _step_outcome(
         self, turn: TurnResult, disposition: StepDisposition, *, handle: str | None
