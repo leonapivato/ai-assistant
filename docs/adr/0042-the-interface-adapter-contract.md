@@ -174,12 +174,19 @@ orphaned connection, and (b) hand the successfully-built façade a close/shutdow
 path (an async context manager, or an `aclose()`), so a long-lived process — an
 API front end above all — has a defined owner that releases every connection on
 shutdown rather than leaking it. The shutdown path is **ordered, not abrupt**: it
-stops accepting new calls, then drains (or cancels) in-flight ones before closing
-the owned resources, so a store operation cannot run against a connection closed
-out from under it — each store's `close()` closes its connection directly and
-takes no lock, so nothing at the store level serialises it against an in-flight
-operation, and that ordering has to be the façade's. Closing the façade when a
-session ends is the adapter's own lifecycle I/O, which §6 permits.
+stops accepting new calls, then **awaits the completion of** in-flight ones before
+closing the owned resources, so a store operation cannot run against a connection
+closed out from under it. Draining, not cancelling: a store runs its SQLite work in
+an `asyncio.to_thread` worker, and cancelling the awaiting task abandons the
+coroutine but **not** the worker thread — which would keep using the connection
+`close()` then shuts, the very race this exists to prevent — so the façade must let
+each in-flight operation *finish* before closing, and stopping request delivery is
+not enough on its own. Nothing below the façade enforces this: each store's
+`close()` closes its connection directly and takes no lock (its `asyncio.Lock`
+guards its own operations, not `close`), so nothing at the store level serialises
+`close()` against an in-flight operation, and that ordering has to be the façade's.
+Closing the façade when a session ends is the adapter's own lifecycle I/O, which §6
+permits.
 
 The builder can only wire a subsystem that *has* a production implementation.
 Where one does not yet exist — today the `Planner` has only
@@ -193,16 +200,23 @@ The façade's human-facing surface is **request/response**: the adapter hands th
 engine one unit of input and receives one result describing what happened. Two
 call shapes, mirroring the two the engine already has:
 
-- **A turn.** `converse(utterance: str) -> <TurnOutcome>` (names illustrative):
-  the adapter passes the user's raw utterance — unrewritten; intent is the
-  engine's, not the adapter's — and receives an `orchestration`-level result (§1)
-  carrying the answer/plan, whether retrieval degraded
+- **A turn.** `converse(utterance: str, *, timeout: timedelta) -> <TurnOutcome>`
+  (names illustrative): the adapter passes the user's raw utterance — unrewritten;
+  intent is the engine's, not the adapter's — and receives an `orchestration`-level
+  result (§1) carrying the answer/plan, whether retrieval degraded
   (`TurnResult.memory_degraded`, which the adapter is obliged to surface, not
   swallow), and the disposition of any step the engine drove — including a parked
   confirmation (§4).
 
 - **A resumption.** When a step parks, the adapter later calls
-  `resume(<token>, approved: bool) -> <TurnOutcome>` to release or refuse it (§4).
+  `resume(<token>, *, approved: bool, timeout: timedelta) -> <TurnOutcome>` to
+  release or refuse it (§4).
+
+Both operations carry the **`timeout` budget** §6 assigns to the adapter: it is
+the caller's budget, not the tool's (ADR-0029 §4), which the façade threads to the
+executor for the one authorised call a driven step makes. It is keyword-only and
+required, mirroring `ToolInvoker.invoke` — the contract has no spelling for
+"forever," so the adapter must state a deadline rather than inherit a default.
 
 ### 4. A confirmation is a prompt the adapter transports, not a decision it makes
 
