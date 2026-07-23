@@ -290,6 +290,47 @@ async def test_write_atomic_rolls_back_a_mid_batch_backend_failure(
     assert store._conn.execute("SELECT COUNT(*) FROM vec_records").fetchone()[0] == 0
 
 
+async def test_write_atomic_rolls_back_a_non_sqlite_mid_batch_error(
+    make_store: Callable[..., SqliteMemoryStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A mid-transaction failure that is *not* a sqlite3.Error — serializing a
+    # malformed vector raises ValueError after the first element is already
+    # written — must still roll the whole batch back and surface as
+    # MemoryStoreError, never escape with the transaction left open (which would
+    # leave the first element a committable partial batch, breaking §4).
+    store = make_store()
+    real = sqlite_vec.serialize_float32
+    calls = {"n": 0}
+
+    def raises_on_second(vector: object) -> bytes:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            msg = "not a float32 vector"
+            raise ValueError(msg)
+        return cast("bytes", real(vector))
+
+    monkeypatch.setattr(
+        "ai_assistant.memory.sqlite_store.sqlite_vec.serialize_float32", raises_on_second
+    )
+    with pytest.raises(MemoryStoreError) as exc_info:
+        await store.write_atomic(
+            [
+                MemoryWrite(record=_semantic("a", "first element")),
+                MemoryWrite(record=_semantic("b", "second element")),
+            ]
+        )
+    monkeypatch.undo()
+
+    assert isinstance(exc_info.value.__cause__, ValueError)  # the raw fault retained, wrapped
+    assert await store.get("a") is None  # first element rolled back, not committable
+    assert store._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+    # The transaction was closed by the rollback, so the store is still usable —
+    # proof no half-open transaction lingers to commit the partial batch later.
+    await store.add(_semantic("c", "still works"))
+    assert await store.get("c") is not None
+
+
 async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Path) -> None:
     # ADR-0046 §4's durability obligation, which the in-process fault test above
     # cannot reach: a process killed mid-batch (after the first transactional write,

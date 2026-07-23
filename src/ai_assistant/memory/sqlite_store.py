@@ -346,7 +346,10 @@ class SqliteMemoryStore:
                         raise MemoryStoreConflictError(msg)
                 self._persist_record(record, vector)
             conn.commit()
-        except MemoryStoreConflictError:
+        except MemoryStoreError:
+            # Includes the MemoryStoreConflictError raised by the presence check
+            # above: roll the whole batch back and propagate it unchanged — it is
+            # already the seam's error (ADR-0028 §5).
             with contextlib.suppress(sqlite3.Error):
                 conn.rollback()
             raise
@@ -359,7 +362,13 @@ class SqliteMemoryStore:
                 conn.rollback()
             msg = f"an atomic batch conflicted on an existing id: {exc}"
             raise MemoryStoreConflictError(msg) from exc
-        except sqlite3.Error as exc:
+        except Exception as exc:
+            # Any *other* mid-transaction failure — a backend error, or a
+            # malformed vector that makes serialization raise after an earlier
+            # element was already written — must still roll the whole batch back,
+            # and only MemoryStoreError may cross the seam (ADR-0028 §5). Catching
+            # sqlite3.Error alone would let a non-SQLite exception escape with the
+            # transaction still open, leaving a committable partial batch.
             with contextlib.suppress(sqlite3.Error):
                 conn.rollback()
             msg = f"failed to commit an atomic memory batch: {exc}"
