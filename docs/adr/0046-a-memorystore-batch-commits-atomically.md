@@ -24,8 +24,7 @@
   this ADR does not decide" list, predicts that "#104 closes [#248] alongside the
   atomicity primitive." §5 of this ADR — designing that primitive as the #104 lane
   ADR-0045 §8 and §10 delegated it to — decides the atomicity primitive does **not**
-  subsume #248's cross-process lost update, and re-scopes #248 rather than closing
-  it. That narrows ADR-0045 §10's #248 conclusion, so ADR-0001 requires it be
+  subsume #248's lost update, and re-scopes #248 rather than closing it. That narrows ADR-0045 §10's #248 conclusion, so ADR-0001 requires it be
   recorded as an amendment that updates ADR-0045's status. It is recorded here, to
   apply **on ratification**, in the append-only form ADR-0028 §6 and ADR-0045's own
   header use — the edit is **not** made now, because this ADR is Proposed; its exact
@@ -258,7 +257,7 @@ hand the in-memory fake a contract it cannot meet:
   atomicity is therefore a property of the *durable* backend, not of the Protocol
   method uniformly.
 
-### 5. Ruling on #248: this primitive does **not** close the cross-process lost update
+### 5. Ruling on #248: this primitive does **not** close the lost update
 
 ADR-0045 §10 lists, among what it does not decide, "the lost-update window in
 `MemoryIngestor.ingest` (issue #248)," adding "#104 closes it alongside the
@@ -290,22 +289,36 @@ conflict `search` itself.
   too: ADR-0045 §3 keeps it "renaming nothing and changing no value."
 
 The decisive point is that **#248 has no in-scope consumer to justify that
-surface.** The system composes on one event loop (`CLAUDE.md`), and #248's
-in-process race is **already closed** — PR #262 serialised `MemoryIngestor.ingest`
-on an `asyncio.Lock`, which is the composition-model guarantee. The only residual
-is two *processes* sharing one SQLite file, which the issue itself flags as out of
-that lock's reach. Building a compare-and-swap with its record-level token for a
-cross-process consumer that does not yet exist is precisely the "surface without a
-consumer" ADR-0028 §7 and ADR-0040 §4 each declined — and, pointedly, the reason
-ADR-0028 §7 rejected `ingest_all` in the first place.
+surface.** What #262 actually closed is narrower than "the in-process race": it
+serialised `MemoryIngestor.ingest` on an `asyncio.Lock` **held by that one
+ingestor**, so the read-modify-write is atomic for a **single ingestor instance**.
+Its own docstring is explicit that this leaves two residuals uncovered
+(`ingest.py`): **two `MemoryIngestor` instances over one store hold different
+locks and race exactly as before** — an *in-process* lost update — and two
+*processes* sharing a store file race too. So the residual #104 could close is
+**any two writers not sharing that lock**, in-process or cross-, not the
+cross-process case alone; closing any of it needs the write conditional on `T`
+unchanged (the compare-and-swap). No such consumer exists today: ADR-0028 §4's
+composition-root obligation pins that a writer and its reader share **one store**,
+but nothing runs two writers on one store — the only composers are tests, and no
+in-scope wiring constructs a second ingestor or a second process against a shared
+store. Building a compare-and-swap with its record-level token for a multi-writer
+consumer that does not yet exist is precisely the "surface without a consumer"
+ADR-0028 §7 and ADR-0040 §4 each declined — and, pointedly, the reason ADR-0028 §7
+rejected `ingest_all` in the first place. If a composition ever does run two
+writers on one store, closing #248 is that lane's trigger — either a store CAS
+(the extension below) or a tested single-writer invariant — not a claim this ADR
+can make for it now.
 
 So this ADR delivers the atomic write-set ADR-0045 §8 depends on, and rules that
-**#248's cross-process lost update is not subsumed by it.** #248 stays open,
-re-scoped from "closed by #104" to "a compare-and-swap extension of `write_atomic`
-(a `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode), gated on a real
-cross-process consumer." The in-process lock (#262) remains the answer under the
-one-event-loop composition model. This refines ADR-0045 §10's loose "closes it
-alongside" from the very lane §10 delegated it to. It does not reopen ADR-0045's
+**#248's lost update is not subsumed by it** — neither the multi-ingestor
+in-process form nor the cross-process one. #248 stays open, re-scoped from "closed
+by #104" to "a compare-and-swap extension of `write_atomic` (a `MemoryRecord`
+concurrency token plus an `IF_UNCHANGED` mode), gated on a consumer that runs two
+writers on one store." #262's per-ingestor lock remains the answer for the
+single-ingestor case, which is all any in-scope wiring exercises today. This
+refines ADR-0045 §10's loose "closes it alongside" from the very lane §10
+delegated it to. It does not reopen ADR-0045's
 in-scope rulings — §8's two consumer requirements and the #104-first sequencing
 stand and are delivered here — but it does **narrow §10's #248 conclusion**, which
 is recorded as an amendment to apply on ratification (header and §Consequences),
@@ -314,8 +327,9 @@ in the append-only form ADR-0001 requires; no ADR body is edited now.
 ### 6. What this ADR does not decide
 
 - **A compare-and-swap / conditional-on-unchanged write** (§5). Deferred with
-  #248 until a cross-process consumer exists; it needs a `MemoryRecord`
-  concurrency token this ADR does not add.
+  #248 until a consumer runs two writers on one store (a second in-process
+  ingestor or another process); it needs a `MemoryRecord` concurrency token this
+  ADR does not add.
 - **A `DELETE` element in a batch.** The one in-scope consumer (ADR-0045 §4)
   never deletes inside its atomic unit — it upserts a window-close and inserts a
   new record. A batched atomic delete has no consumer; `delete` stays the single
@@ -411,33 +425,36 @@ in the append-only form ADR-0001 requires; no ADR body is edited now.
   test yet leave `T` retired on reopen.
 - **Issue #104 is answered**, not merely referenced: `MemoryStore` gets the atomic
   multi-write ADR-0022 §4 and ADR-0028 §7 filed. **Issue #248 is re-scoped**, not
-  closed (§5): the cross-process lost update needs a compare-and-swap extension,
-  gated on a cross-process consumer; the in-process lock (#262) stands.
+  closed (§5): the lost update — multi-ingestor in-process and cross-process alike —
+  needs a compare-and-swap extension, gated on a consumer that runs two writers on
+  one store; #262's per-ingestor lock covers the single-ingestor case, which is all
+  in-scope wiring exercises.
 - **ADR-0045 §10 amendment — the #248 conclusion only.** On ratification, ADR-0045's
   `Status` line gains `§10's #248 conclusion narrowed by ADR-0046`, and a dated note
   is appended to ADR-0045's header: *"§10's statement that '#104 closes [#248]
   alongside the atomicity primitive' is narrowed by ADR-0046: #104 delivers the
   atomic write-set §8 requires, but that primitive does not subsume #248's
-  cross-process read-modify-write race, which needs a compare-and-swap ADR-0046 §5
-  defers for want of a cross-process consumer. #248 is therefore re-scoped, not
-  closed; the in-process lock (#262) remains its answer under the one-event-loop
-  model. ADR-0045 §8 (its two consumer requirements and #104-as-hard-prerequisite)
-  and every other ADR-0045 ruling stand unchanged."* No other ADR-0045 text is
-  edited; ADR-0001 keeps it append-only, so the note travels with the ratifying
-  change, not this one.
-- **Revisit if** a cross-process consumer needs the compare-and-swap (§5), if a
-  caller needs a batched atomic `delete` (§6), or if a second-store atomic write
-  is ever required (§6).
+  read-modify-write race — in-process across two `MemoryIngestor` instances or
+  across processes — which needs a compare-and-swap ADR-0046 §5 defers for want of
+  a consumer that runs two writers on one store. #248 is therefore re-scoped, not
+  closed; #262's per-ingestor lock covers the single-ingestor case. ADR-0045 §8
+  (its two consumer requirements and #104-as-hard-prerequisite) and every other
+  ADR-0045 ruling stand unchanged."* No other ADR-0045 text is edited; ADR-0001
+  keeps it append-only, so the note travels with the ratifying change, not this one.
+- **Revisit if** a consumer runs two writers on one store and needs the
+  compare-and-swap (§5), if a caller needs a batched atomic `delete` (§6), or if a
+  second-store atomic write is ever required (§6).
 
 ## Alternatives considered
 
 - **A compare-and-swap primitive now (`expected_version` / `IF_UNCHANGED`),
   closing #248 in one move.** Rejected in §5. It is the `PlanStore.commit_transition`
-  shape and would close #248's cross-process residual, but it needs a concurrency
-  token on `MemoryRecord` — the envelope-field blast radius ADR-0045 deliberately
-  avoided — for a consumer that does not exist (the system composes on one event
-  loop; #262's lock already closes the in-process race). It is the "surface without
-  a consumer" ADR-0028 §7 rejects. The atomic write-set is the strictly smaller
+  shape and would close #248's residual — the multi-ingestor in-process race and
+  the cross-process one alike — but it needs a concurrency token on `MemoryRecord`
+  — the envelope-field blast radius ADR-0045 deliberately avoided — for a consumer
+  that does not exist: no in-scope wiring runs two writers on one store (#262's
+  per-ingestor lock covers the single-ingestor case the tests do exercise). It is
+  the "surface without a consumer" ADR-0028 §7 rejects. The atomic write-set is the strictly smaller
   capability ADR-0045 §8 actually requires, and the compare-and-swap remains a
   clean later extension of it.
 - **A transaction *handle* spanning reads and writes**
