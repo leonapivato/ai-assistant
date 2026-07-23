@@ -203,22 +203,32 @@ Applying `SUPERSEDE(target_id=T)` for a proposed record `P`:
 2. **Write `P` as a *new* record, at a freshly-minted unique id**, with a fresh
    open window. `P` carries nothing of `T` (ADR-0038 §1a is unchanged — a
    correction does not inherit the overturned belief's evidence), and it no
-   longer borrows `T`'s id. The new id is **not** `P.id` either: `MemoryRecord.id`
-   is caller-supplied and `MemoryStore.add` is a caller-id upsert (a record whose
-   id already exists is overwritten), so writing at `P.id` could silently clobber
-   an unrelated live record that happens to share it. The applier therefore mints
-   a fresh id from an **injected id factory** (mirroring the injected clock and
-   ADR-0022 §5's goal-id factory — deterministic in tests) and discards `P.id`,
-   exactly as today's supersession discards it when it rehomes `P` onto `T`'s id.
-   **Distinctness is enforced, not assumed.** A minted id must be **distinct from
-   every existing record's id**, and a probabilistic generator (`uuid4`) makes a
-   collision unlikely, not impossible — so the new record is written with
-   **insert-if-absent** semantics under the atomic primitive (§8), *not* a blind
-   upsert: a minted id that already exists is rejected and the applier mints
-   again, rather than overwriting the colliding record. Which factory mints the id
-   is `memory`'s own semantics (like the fold rule, ADR-0028 §8); the *obligation*
-   the contract pins is only that the id is fresh, non-colliding, and returned
-   (§5).
+   longer borrows `T`'s id. The id is also **not sourced from** `P.id`:
+   `MemoryRecord.id` is caller-supplied and `MemoryStore.add` is a caller-id upsert
+   (a record whose id already exists is overwritten), so writing at `P.id` could
+   silently clobber an unrelated live record that happens to share it. The applier
+   therefore mints its own id from an **injected id factory** (mirroring the
+   injected clock and ADR-0022 §5's goal-id factory — deterministic in tests) and
+   discards `P.id`, exactly as today's supersession discards it when it rehomes
+   `P` onto `T`'s id.
+   **The one id requirement is "names no existing record," enforced not assumed.**
+   The record that must not be clobbered is any *stored* one — the retained target
+   `T` included, and any unrelated `U` — so the sole obligation is that the minted
+   id is **absent from the store**. (Whether it happens to equal the discarded,
+   *unstored* `P.id` is immaterial: no record lives there to overwrite. There is
+   no separate "must differ from `P.id`" rule — the earlier hazard was `P.id`
+   naming an *existing* record, which the absence check already covers.) A
+   probabilistic generator (`uuid4`) makes a collision unlikely, not impossible,
+   so the new record is written with **insert-if-absent** semantics under the
+   atomic primitive (§8), *not* a blind upsert: a minted id that already exists is
+   rejected and the applier mints again, rather than overwriting the colliding
+   record. **Retry is bounded.** After a small fixed number of attempts the
+   applier raises `MemoryStoreError`; because the whole `SUPERSEDE` is atomic
+   (§8), that abort rolls back the window-close too, so a pathological id factory
+   fails loudly with the **target left live and unchanged** rather than hanging or
+   half-applying. Which factory mints the id is `memory`'s own semantics (like the
+   fold rule, ADR-0028 §8); the *obligation* the contract pins is only that the id
+   is absent-and-fresh, or the write fails (§5).
 3. **Return the new record's id.** `MemoryIngestResult.record_id` is the id of the
    **live** record, which is now `P`'s new id, not `T`'s — "MemoryIngestResult
    carries a different id than it does today" (ADR-0040 §6).
@@ -244,19 +254,22 @@ becomes:
 
 > After a `SUPERSEDE`, the target is **retained with a closed validity window**
 > (`valid_until` set, live-at-now false) and the live record is the proposed
-> record written **at a fresh id distinct from every existing record's id**
-> (including the target's *and* the proposal's own `id`), carrying nothing of the
-> target. `MemoryIngestResult.record_id` is the **live record's** id, not the
-> target's. The target remains fetchable by `export` and, being window-closed, is
-> absent from `get`/`search`.
+> record written **at an id absent from the store** (so it overwrites no existing
+> record — the retained target included), carrying nothing of the target.
+> `MemoryIngestResult.record_id` is the **live record's** id, not the target's.
+> The target remains fetchable by `export` and, being window-closed, is absent
+> from `get`/`search`.
 
-The conformance suite adds two collision cases, both asserting the `SUPERSEDE`
-overwrites **neither** and returns an id that is neither the target nor the
-collided-with record: one where the proposal's own `id` already names a **live,
-non-target** record, and one where the **minted** id collides with an existing
-record — exercised by driving the injected id factory to return a colliding value
-first and asserting the applier mints again (insert-if-absent, not upsert) rather
-than clobbering it. The fresh-id obligation is what forbids both collisions.
+The conformance suite adds three cases, all driving the injected id factory
+deterministically and asserting the `SUPERSEDE` overwrites **no** existing record
+and returns a live-record id equal to neither the target nor any collided-with
+record: (a) the proposal's own `id` already names a **live, non-target** record;
+(b) the **minted** id collides with an existing record on the first attempt —
+the applier mints again (insert-if-absent, not upsert) and succeeds; (c) an
+**always-colliding** factory — the applier raises `MemoryStoreError` after its
+bounded retries, and by §8's atomicity the target is left **live and unchanged**.
+The absent-id obligation is what forbids the collisions; the bound is what forbids
+the hang.
 
 The differential ADR-0040 §5a ratified — **`SUPERSEDE` carries nothing of the
 target onto the surviving record** — is unchanged and still complete; only "at
