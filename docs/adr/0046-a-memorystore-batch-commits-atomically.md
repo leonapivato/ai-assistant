@@ -20,11 +20,18 @@
   batch method that is "a loop with a better name"; and to
   [ADR-0014](0014-planning-model.md)'s `PlanStore.commit_transition`, the
   in-repo prior art for a conditional store write.
-- **Does not amend any prior ADR's body.** ADR-0045 §10 anticipated #104 closing
-  issue #248 "alongside" this primitive; §5 of this ADR **declines** that,
-  grounded in the design, and re-scopes #248 rather than editing ADR-0045 (which
-  delegated the decision to this lane). No ratified text is rewritten; ADR-0001
-  keeps ADRs append-only.
+- **Amends ADR-0045 §10 on ratification.** ADR-0045 §10 (ratified), in its "what
+  this ADR does not decide" list, predicts that "#104 closes [#248] alongside the
+  atomicity primitive." §5 of this ADR — designing that primitive as the #104 lane
+  ADR-0045 §8 and §10 delegated it to — decides the atomicity primitive does **not**
+  subsume #248's cross-process lost update, and re-scopes #248 rather than closing
+  it. That narrows ADR-0045 §10's #248 conclusion, so ADR-0001 requires it be
+  recorded as an amendment that updates ADR-0045's status. It is recorded here, to
+  apply **on ratification**, in the append-only form ADR-0028 §6 and ADR-0045's own
+  header use — the edit is **not** made now, because this ADR is Proposed; its exact
+  form is in §Consequences. **Nothing else in ADR-0045 is touched:** §8's ruling
+  that #104 is a hard prerequisite of the `SUPERSEDE` applier, and its two consumer
+  requirements, stand exactly and are what this ADR delivers.
 
 ## Context
 
@@ -82,8 +89,10 @@ async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
 
     The batch is ordered and all-or-nothing. On any element's failure — an
     ``INSERT_IF_ABSENT`` whose id already names a stored record, or any backend
-    error — nothing in the batch is committed and the store is left exactly as it
-    was. On success every record is persisted.
+    error — nothing in the batch is committed: no record it named is added,
+    overwritten, or removed, and every read (``get``, ``search``, ``export``)
+    returns exactly what it would have before the call. On success every record is
+    persisted.
 
     Returns the ids written, in the order of ``writes``. An empty batch is a
     no-op and returns an empty sequence.
@@ -222,8 +231,12 @@ hand the in-memory fake a contract it cannot meet:
 
 - **In-call all-or-nothing — every backend, the fake included.** On **any**
   element's failure — a conflict, a repeated id (§3), or a backend error
-  part-way through the batch — the store commits **nothing** and is left
-  byte-for-byte as it was before the call. This is a purely in-process guarantee
+  part-way through the batch — the store commits **nothing**: no observable
+  change to any record or vector, and every read returns what it would have before
+  the call. The guarantee is over *observable logical state*, not the physical
+  backing store — a SQLite rollback may still touch its WAL/journal, which is
+  invisible through the read contract and is not a violation. This is a purely
+  in-process guarantee
   (the failure is observed and the partial work discarded before `write_atomic`
   returns), so `InMemoryMemoryStore` and `FakeMemoryStore` satisfy it by staging
   and only-then-applying (§Consequences), no persistence required.
@@ -287,9 +300,11 @@ re-scoped from "closed by #104" to "a compare-and-swap extension of `write_atomi
 (a `MemoryRecord` concurrency token plus an `IF_UNCHANGED` mode), gated on a real
 cross-process consumer." The in-process lock (#262) remains the answer under the
 one-event-loop composition model. This refines ADR-0045 §10's loose "closes it
-alongside" from the very lane §10 delegated it to; it does not relitigate
-ADR-0045's decision, and it edits no ADR body (§Consequences records the
-re-scoping as issue-tracker work, not an ADR amendment).
+alongside" from the very lane §10 delegated it to. It does not reopen ADR-0045's
+in-scope rulings — §8's two consumer requirements and the #104-first sequencing
+stand and are delivered here — but it does **narrow §10's #248 conclusion**, which
+is recorded as an amendment to apply on ratification (header and §Consequences),
+in the append-only form ADR-0001 requires; no ADR body is edited now.
 
 ### 6. What this ADR does not decide
 
@@ -393,6 +408,18 @@ re-scoping as issue-tracker work, not an ADR amendment).
   multi-write ADR-0022 §4 and ADR-0028 §7 filed. **Issue #248 is re-scoped**, not
   closed (§5): the cross-process lost update needs a compare-and-swap extension,
   gated on a cross-process consumer; the in-process lock (#262) stands.
+- **ADR-0045 §10 amendment — the #248 conclusion only.** On ratification, ADR-0045's
+  `Status` line gains `§10's #248 conclusion narrowed by ADR-0046`, and a dated note
+  is appended to ADR-0045's header: *"§10's statement that '#104 closes [#248]
+  alongside the atomicity primitive' is narrowed by ADR-0046: #104 delivers the
+  atomic write-set §8 requires, but that primitive does not subsume #248's
+  cross-process read-modify-write race, which needs a compare-and-swap ADR-0046 §5
+  defers for want of a cross-process consumer. #248 is therefore re-scoped, not
+  closed; the in-process lock (#262) remains its answer under the one-event-loop
+  model. ADR-0045 §8 (its two consumer requirements and #104-as-hard-prerequisite)
+  and every other ADR-0045 ruling stand unchanged."* No other ADR-0045 text is
+  edited; ADR-0001 keeps it append-only, so the note travels with the ratifying
+  change, not this one.
 - **Revisit if** a cross-process consumer needs the compare-and-swap (§5), if a
   caller needs a batched atomic `delete` (§6), or if a second-store atomic write
   is ever required (§6).
