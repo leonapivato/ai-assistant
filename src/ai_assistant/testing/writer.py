@@ -318,12 +318,11 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
         msg = f"the id factory injected into {owner} raised while minting a supersession id"
         raise MemoryStoreError(msg) from exc
     if type(minted) is not str or not minted:
-        # Report the type name (a plain str), never ``repr(minted)``: a hostile
-        # object could raise from ``__repr__`` too.
-        msg = (
-            f"the id factory injected into {owner} returned something other than a "
-            f"non-empty built-in str (got type {type(minted).__name__!r})"
-        )
+        # Introspect nothing about the returned object (not ``repr``, not
+        # ``type(minted).__name__``): a hostile ``__repr__`` or metaclass
+        # ``__getattribute__`` could raise and leak past the guard. Only ``owner``
+        # appears. ``type(minted) is not str`` invokes no user code.
+        msg = f"the id factory injected into {owner} did not return a non-empty built-in str"
         raise MemoryStoreError(msg)
     return minted
 
