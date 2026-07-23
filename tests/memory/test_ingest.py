@@ -192,43 +192,63 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert exported["stale"].validity.valid_until is not None
 
 
-async def test_a_superseded_targets_hiding_is_read_time_relative() -> None:
+@pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
+async def test_a_superseded_targets_hiding_is_read_time_relative(
+    backend: str, tmp_path: Path
+) -> None:
     # The retirement guarantee is *read-time-relative*, not absolute — exactly like
     # `expires_at` (ADR-0007) and ADR-0045 §6's own read filter. `_close_window`
     # stamps `valid_until` from the *ingestor's* clock (ADR-0045 §4); `get`/`search`
-    # hide the target once the *store's* read clock reaches that instant. With
-    # coherent clocks (production injects one real wall clock to both, so a read
-    # after the write reads at/after the close) it is hidden; a store clock injected
-    # *behind* the close transiently still returns it. That transient visibility is a
-    # property of read-time filtering, not a bug — documented here, not "fixed". An
-    # absolute, clock-coherence-independent guarantee (a store-authoritative
-    # retirement instant) is a MemoryStore contract change deferred to issue #306.
+    # hide the target once the *store's* read clock reaches that instant. In
+    # production the store and ingestor each independently sample the real wall clock
+    # (neither is given a `now`), so a read after the write samples at/after the close
+    # — provided the wall clock advances forward — and it is hidden; a store clock
+    # that samples *behind* the close (a test clock, or the wall clock stepping back)
+    # transiently still returns it. That transient visibility is a property of
+    # read-time filtering, not a bug — documented here, not "fixed". An absolute,
+    # clock-coherence-independent guarantee (a store-authoritative retirement instant)
+    # is a MemoryStore contract change deferred to issue #306. Run over SQLite too,
+    # where the hide rides the `valid_until` pre-filter column the batch UPSERT must
+    # write alongside the JSON blob (ADR-0045 §9), not only the in-memory dict.
     read_at = [datetime(2026, 1, 1, tzinfo=UTC)]  # store read clock, mutable; starts BEHIND close
-    store = InMemoryMemoryStore(now=lambda: read_at[0])
-    # Open-window target, so it is a live conflict at any read clock.
-    await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
+    store: MemoryStore
+    if backend == "in-memory":
+        store = InMemoryMemoryStore(now=lambda: read_at[0])
+    else:
+        store = SqliteMemoryStore(
+            path=tmp_path / "memory.db",
+            embedder=HashingEmbedder(dimensions=32),
+            now=lambda: read_at[0],
+        )
+    try:
+        # Open-window target, so it is a live conflict at any read clock. Identical
+        # content to the correction so both the lexical and vector detectors find it.
+        await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
 
-    # The ingestor's clock (`_fixed_now`, 2026-06-01) is the close instant.
-    result = await _ingestor(store).ingest(
-        _proposal(_asserted("correction", "user prefers morning meetings"))
-    )
-    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
-    new_id = result.record_id
-    assert new_id is not None
+        # The ingestor's clock (`_fixed_now`, 2026-06-01) is the close instant.
+        result = await _ingestor(store).ingest(
+            _proposal(_asserted("correction", "user prefers morning meetings"))
+        )
+        assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+        new_id = result.record_id
+        assert new_id is not None
 
-    # Read BEHIND the close (store clock 2026-01-01 < valid_until 2026-06-01): the
-    # retired target is transiently still visible — the read-time-relative property.
-    assert await store.get("stale") is not None
-    assert any(r.id == "stale" for r in await store.search("user prefers morning meetings"))
+        # Read BEHIND the close (store clock 2026-01-01 < valid_until 2026-06-01): the
+        # retired target is transiently still visible — the read-time-relative property.
+        assert await store.get("stale") is not None
+        assert any(r.id == "stale" for r in await store.search("user prefers morning meetings"))
 
-    # Advance the store's read clock to the close instant: now hidden from get/search
-    # (the half-open window makes `valid_until` itself exclusive).
-    read_at[0] = datetime(2026, 6, 1, tzinfo=UTC)
-    assert await store.get("stale") is None
-    assert all(r.id != "stale" for r in await store.search("user prefers morning meetings"))
+        # Advance the store's read clock to the close instant: now hidden from
+        # get/search (the half-open window makes `valid_until` itself exclusive).
+        read_at[0] = datetime(2026, 6, 1, tzinfo=UTC)
+        assert await store.get("stale") is None
+        assert all(r.id != "stale" for r in await store.search("user prefers morning meetings"))
 
-    # `export` keeps the retired target unconditionally, at either read clock.
-    assert {r.id for r in await store.export()} == {"stale", new_id}
+        # `export` keeps the retired target unconditionally, at either read clock.
+        assert {r.id for r in await store.export()} == {"stale", new_id}
+    finally:
+        if isinstance(store, SqliteMemoryStore):
+            store.close()
 
 
 async def test_superseding_a_target_never_extends_its_existing_window() -> None:

@@ -39,9 +39,10 @@ mechanism half is rewritten by ADR-0045 §5):
   instant, and ``get``/``search`` hide it once the *store's* read clock is at or
   after it — the same read-time filter ``expires_at`` uses (ADR-0007, ADR-0045 §6).
   The suite therefore reads from a store clock at or after the close (``_after_close``,
-  the coherent case production's shared wall clock gives); the read-time-relative
-  behaviour itself, including that a store clock *behind* the close transiently still
-  returns the target, is pinned per-writer (``test_ingest.py``). ``export`` keeps the
+  the coherent case production's forward-advancing wall clock gives); the
+  read-time-relative behaviour itself, including that a store clock *behind* the
+  close transiently still returns the target, is pinned per-writer (``test_ingest.py``
+  and ``test_fake_writer.py``). ``export`` keeps the
   target unconditionally. An absolute, clock-coherence-independent guarantee is
   deferred to issue #306.
 
@@ -134,7 +135,8 @@ _LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
 #: when read at or after that instant. This is deliberately the coherent direction —
 #: it does not "mask" the skew, it fixes the reader at/after the close so the
 #: read-time-relative hide is observable; the *behind*-the-close direction (target
-#: transiently still returned) is pinned per-writer in ``test_ingest.py``. The
+#: transiently still returned) is pinned per-writer in ``test_ingest.py`` and
+#: ``test_fake_writer.py``. The
 #: contract fixes no writer clock, so the window tests read from a store whose "now"
 #: is after every plausible writer now, and pin their records' ``expires_at`` to
 #: ``None`` or beyond it so retention does not confound the window assertion.
