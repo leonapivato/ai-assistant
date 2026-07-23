@@ -623,8 +623,8 @@ async def test_concurrent_parks_get_distinct_tokens_despite_a_colliding_factory(
     assert r1.step.state.id != r2.step.state.id  # type: ignore[union-attr]
 
 
-async def test_outstanding_confirmations_are_bounded() -> None:
-    """An abandoning client cannot grow the parked table without limit (§4)."""
+async def test_outstanding_confirmations_apply_backpressure_without_stranding() -> None:
+    """At the ceiling the engine refuses new work rather than dropping a live token (§4)."""
     harness = Harness(tools=(confirmable(),))
     engine = Engine(
         loop=harness.engine._loop,
@@ -634,18 +634,24 @@ async def test_outstanding_confirmations_are_bounded() -> None:
         max_outstanding_confirmations=2,  # tighten for the test
     )
 
-    tokens = [
-        (await engine.converse("send it", timeout=PATIENT)).step.confirmation.token  # type: ignore[union-attr]
-        for _ in range(4)  # four parks, ceiling of two
-    ]
+    first = await engine.converse("send it", timeout=PATIENT)
+    second = await engine.converse("send it", timeout=PATIENT)
+    assert len(engine._parked) == 2  # at the ceiling
 
-    assert len(engine._parked) == 2  # bounded despite four parks
-    # The oldest tokens were evicted: they resolve to a clean refusal, not a wrong step.
-    with pytest.raises(PlanningError, match="no step awaiting confirmation"):
-        await engine.resume(tokens[0], approved=True, timeout=PATIENT)
-    # The newest is still answerable.
-    resumed = await engine.resume(tokens[-1], approved=True, timeout=PATIENT)
-    assert resumed.step is not None
+    # A third action is refused — backpressure — and nothing new is parked.
+    with pytest.raises(RuntimeError, match="awaiting an answer"):
+        await engine.converse("send it", timeout=PATIENT)
+    assert len(engine._parked) == 2
+
+    # Both outstanding confirmations are still answerable — nothing was stranded.
+    a = await engine.resume(first.step.confirmation.token, approved=True, timeout=PATIENT)  # type: ignore[union-attr]
+    assert a.step is not None
+    # With one resolved, there is room to start another action again.
+    third = await engine.converse("send it", timeout=PATIENT)
+    assert third.step is not None
+    assert third.step.disposition is Disposition.AWAITING_CONFIRMATION
+    b = await engine.resume(second.step.confirmation.token, approved=True, timeout=PATIENT)  # type: ignore[union-attr]
+    assert b.step is not None
 
 
 async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
