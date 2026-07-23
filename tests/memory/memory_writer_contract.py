@@ -27,14 +27,23 @@ mechanism half is rewritten by ADR-0045 §5):
 * ``REINFORCE`` folds at the target's id, mints no second record, and retains
   **both** records' ``evidence``, returning the target's id.
 * ``SUPERSEDE`` (ADR-0045 §4/§5a) leaves the target **retained with a closed
-  validity window** (``get``/``search`` hide it, ``export`` keeps it) and writes
-  the proposed record — carrying nothing of the target — at an id **absent from the
-  store**, so it overwrites no existing record. ``record_id`` is the **live
-  record's** id, neither the target's nor any collided-with record's. The id is
-  minted by an **injected id factory** and written insert-if-absent: a collision is
-  re-minted (bounded), an always-colliding factory raises ``MemoryStoreError`` with
-  the target left live, and a raising or non-``str``/empty factory raises
-  ``MemoryStoreError`` before any write — the four id cases below.
+  validity window** and writes the proposed record — carrying nothing of the
+  target — at an id **absent from the store**, so it overwrites no existing record.
+  ``record_id`` is the **live record's** id, neither the target's nor any
+  collided-with record's. The id is minted by an **injected id factory** and written
+  insert-if-absent: a collision is re-minted (bounded), an always-colliding factory
+  raises ``MemoryStoreError`` with the target left live, and a raising or
+  non-``str``/empty factory raises ``MemoryStoreError`` before any write — the four
+  id cases below. The retained target's closed window hides it from ``get``/``search``
+  **read-time-relatively**, not absolutely: ``valid_until`` is the *writer's* close
+  instant, and ``get``/``search`` hide it once the *store's* read clock is at or
+  after it — the same read-time filter ``expires_at`` uses (ADR-0007, ADR-0045 §6).
+  The suite therefore reads from a store clock at or after the close (``_after_close``,
+  the coherent case production's shared wall clock gives); the read-time-relative
+  behaviour itself, including that a store clock *behind* the close transiently still
+  returns the target, is pinned per-writer (``test_ingest.py``). ``export`` keeps the
+  target unconditionally. An absolute, clock-coherence-independent guarantee is
+  deferred to issue #306.
 
 Both must also refuse the unsafe folds (§5b as narrowed by ADR-0045 §5): **clause
 1** — any fold onto a ``USER_ASSERTED`` target — stays record-keyed for **both**
@@ -116,14 +125,19 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 #: behind ADR-0007's read-time retention and fail a conforming writer.
 _LONG_AGO = datetime(2000, 1, 1, tzinfo=UTC)
 
-#: A store clock fixed far enough *forward* that any window a writer closes from
-#: any clock is already closed by the time the store reads. The mirror of
-#: ``_LONG_AGO``: supersession stamps ``valid_until = writer_now`` on the retired
-#: target, and ``get``/``search`` hide it only when read at or after that instant.
-#: The contract fixes no writer clock, so the window tests read from a store
-#: whose "now" is after every plausible writer now, and pin their records'
-#: ``expires_at`` to ``None`` or beyond it so retention does not confound the
-#: window assertion.
+#: A store read clock fixed far enough *forward* that any window a writer closes
+#: from any clock is already closed by the time the store reads — i.e. the store
+#: reads **at or after the close instant**, the coherent case production's one
+#: shared wall clock gives (a ``get`` after ``ingest`` reads at/after the write).
+#: The mirror of ``_LONG_AGO``: supersession stamps ``valid_until = writer_now`` on
+#: the retired target, and ``get``/``search`` hide it *read-time-relatively*, only
+#: when read at or after that instant. This is deliberately the coherent direction —
+#: it does not "mask" the skew, it fixes the reader at/after the close so the
+#: read-time-relative hide is observable; the *behind*-the-close direction (target
+#: transiently still returned) is pinned per-writer in ``test_ingest.py``. The
+#: contract fixes no writer clock, so the window tests read from a store whose "now"
+#: is after every plausible writer now, and pin their records' ``expires_at`` to
+#: ``None`` or beyond it so retention does not confound the window assertion.
 _AFTER_CLOSE = datetime(2100, 1, 1, tzinfo=UTC)
 
 _CONTENT = "prefers concise emails"
