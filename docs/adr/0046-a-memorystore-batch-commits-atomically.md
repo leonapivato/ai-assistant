@@ -198,6 +198,24 @@ mint again" from "the store is broken, abort." This mirrors
 `StaleExecutionError <: PlanningError` (ADR-0014 §5): a distinct, catchable,
 recoverable-and-retryable failure under the general store error.
 
+**A present id must surface as `MemoryStoreConflictError`, deterministically,
+within the single-writer scope §5 fixes.** The contract pins the *observable* — a
+stored id ⇒ `MemoryStoreConflictError` — not the mechanism; the durable backend is
+obliged to reach it reliably rather than by luck. `SqliteMemoryStore` therefore
+enforces `INSERT_IF_ABSENT` with a **uniqueness constraint / presence check inside
+the batch's transaction** and maps a duplicate-key integrity error to
+`MemoryStoreConflictError`, so a collision is never misreported as a generic
+fatal `MemoryStoreError` (which would wrongly abort the applier's re-mint instead
+of triggering it, ADR-0045 §4). The *cross-process* insert race — two
+`SqliteMemoryStore` handles on one file both finding the id absent, the loser
+getting `SQLITE_BUSY` or a stale-snapshot error rather than a clean uniqueness
+error — is **§5's out-of-scope concurrency**, not this error-mapping obligation:
+under the one-event-loop composition model a single writer observes an
+unambiguous collision, and the cross-process case is the deferred compare-and-swap
+lane (§5), which is where a busy/raced insert is linearised. A retry loop that
+also caught a raced duplicate is a robustness the SQLite lane may add, but this
+ADR does not require it, because it belongs to the cross-process story §5 defers.
+
 The atomicity guarantee has **two obligations, scoped by durability**, because a
 non-durable store has no post-crash state to protect and conflating the two would
 hand the in-memory fake a contract it cannot meet:
@@ -350,7 +368,14 @@ records the re-scoping as issue-tracker work, not an ADR amendment).
   element's physical write (a stubbed cursor error mid-transaction), asserting the
   first element's row **and its vector row** did not persist. Without it, an
   implementation that accidentally commits per element passes every logical case
-  above while violating §4's all-or-nothing guarantee.
+  above while violating §4's all-or-nothing guarantee. That fault-injection test
+  proves rollback on an *observed* error but not recovery after **process death**,
+  which §4's durability obligation is separately about; the durable backend
+  therefore also owes a **crash-recovery integration test** — a subprocess killed
+  after the first transactional write, the database reopened, asserting **neither**
+  batch mutation is visible (`T` not left window-closed, `P` not present) — since a
+  per-element-commit or premature-`COMMIT` bug can survive the cursor-exception
+  test yet leave `T` retired on reopen.
 - **Issue #104 is answered**, not merely referenced: `MemoryStore` gets the atomic
   multi-write ADR-0022 §4 and ADR-0028 §7 filed. **Issue #248 is re-scoped**, not
   closed (§5): the cross-process lost update needs a compare-and-swap extension,
