@@ -1,7 +1,16 @@
 # 45. Memory records carry a validity window: invalidate, don't delete
 
-- Status: Accepted
+- Status: Accepted, §10's #248 conclusion narrowed by ADR-0046
 - Date: 2026-07-22
+- Amended: 2026-07-23 by ADR-0046 — §10's statement that '#104 closes [#248]
+  alongside the atomicity primitive' is narrowed by ADR-0046: #104 delivers the
+  atomic write-set §8 requires, but that primitive does not subsume #248's
+  read-modify-write race — in-process across two `MemoryIngestor` instances or
+  across processes — which needs a compare-and-swap ADR-0046 §5 defers for want of
+  a consumer that runs two writers on one store. #248 is therefore re-scoped, not
+  closed; #262's per-ingestor lock covers the single-ingestor case. ADR-0045 §8
+  (its two consumer requirements and #104-as-hard-prerequisite) and every other
+  ADR-0045 ruling stand unchanged.
 - **Contract change.** This adds a `Validity` value object and a `validity` field
   to `MemoryBase` in `core/types.py` (both cross subsystem boundaries), changes
   the read-time contract of three `MemoryStore` methods (`get`, `search`,
