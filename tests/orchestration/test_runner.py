@@ -113,6 +113,20 @@ def clock(*, at: datetime = AT) -> Iterator[datetime]:
         yield at
 
 
+def advancing_clock(*, first: datetime, then: datetime) -> Iterator[datetime]:
+    """Reads ``first`` once — the parking decision's ``decided_at`` — then ``then``.
+
+    ``run`` reads the clock exactly once while parking a ``CONFIRM`` (minting the
+    decision), so the first reading stamps the confirmation and every later
+    reading — the freshness check in ``resume``, and any resolving decision — sees
+    ``then``. That is what lets a test park at one instant and answer at another
+    over the single clock a ``StepRunner`` holds.
+    """
+    yield first
+    while True:
+        yield then
+
+
 async def an_execution(store: FakePlanStore, step: PlanStep) -> ExecutionState:
     """Store a goal, a one-step plan, and open an execution for it."""
     goal = Goal(
@@ -370,7 +384,7 @@ class RewritingPolicy(FakeActionPolicy):
 class Harness:
     """A wired ``StepRunner`` and the fakes behind it, for assertions."""
 
-    def __init__(  # one knob per fake; that is what a harness is
+    def __init__(  # noqa: PLR0913  # one knob per fake; that is what a harness is
         self,
         *,
         tools: tuple[ToolDefinition, ...] = (),
@@ -378,6 +392,7 @@ class Harness:
         policy: FakeActionPolicy | None = None,
         trail: FakeAuditTrail | None = None,
         now: Clock | None = None,
+        confirmation_ttl: timedelta | None = None,
     ) -> None:
         """Wire the stage over canonical fakes."""
         self.plans = plans if plans is not None else FakePlanStore(now=lambda: AT)
@@ -398,6 +413,7 @@ class Harness:
             ),
             now=(lambda: next(ticks)) if now is None else now,
             id_factory=lambda: next(self.ids),
+            confirmation_ttl=confirmation_ttl,
         )
 
 
@@ -1023,6 +1039,112 @@ async def test_a_state_repointed_mid_ruling_claims_the_execution_it_authenticate
     assert ran_step.status is StepStatus.SUCCEEDED
     assert other_step.status is StepStatus.PENDING
     assert len(harness.invoker.invocations) == 1
+
+
+# --- confirmation lifetime (#243, ADR-0036 §1) --------------------------
+
+
+async def test_a_confirmation_answered_past_its_lifetime_is_refused() -> None:
+    """A stale question is no longer answerable (ADR-0036 §1, #243)."""
+    hour = timedelta(hours=1)
+    ticks = advancing_clock(first=AT, then=AT + timedelta(hours=2))
+    harness = Harness(tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=hour)
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    with pytest.raises(PermissionDeniedError, match="the question has expired"):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    # Refused before anything was authored or run: no resolution, no side effect,
+    # and the step is left exactly as it was parked.
+    assert harness.policy.resolutions == []
+    assert harness.invoker.invocations == []
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.AWAITING_APPROVAL
+
+
+async def test_a_stale_confirmation_is_unanswerable_even_when_declined() -> None:
+    """Past its lifetime a question is refused whichever way it is answered.
+
+    A late "no" is not quietly honoured as a decline: the question has expired,
+    so the answer — either answer — resolves nothing (:meth:`_check_fresh`).
+    """
+    ticks = advancing_clock(first=AT, then=AT + timedelta(hours=2))
+    harness = Harness(
+        tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=timedelta(hours=1)
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    with pytest.raises(PermissionDeniedError, match="the question has expired"):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            confirmation_id=str(parked.decision_id),
+            approved=False,
+            timeout=PATIENT,
+        )
+
+    assert harness.policy.resolutions == []
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.AWAITING_APPROVAL
+
+
+async def test_a_confirmation_answered_within_its_lifetime_runs() -> None:
+    """Inside the lifetime a configured deadline changes nothing (#243)."""
+    ticks = advancing_clock(first=AT, then=AT + timedelta(minutes=30))
+    harness = Harness(
+        tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=timedelta(hours=1)
+    )
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    result = await harness.runner.resume(
+        parked.state,
+        STEP,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.SUCCEEDED
+
+
+async def test_no_lifetime_means_a_confirmation_never_expires() -> None:
+    """The default is no expiry — the behaviour before #243 is preserved."""
+    ticks = advancing_clock(first=AT, then=AT + timedelta(days=365))
+    harness = Harness(tools=(confirmable(),), now=lambda: next(ticks))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    result = await harness.runner.resume(
+        parked.state,
+        STEP,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+
+
+def test_a_non_positive_confirmation_ttl_is_refused_at_construction() -> None:
+    """A zero or negative lifetime would expire every confirmation at once."""
+    for bad in (timedelta(0), timedelta(seconds=-1)):
+        with pytest.raises(ValueError, match="confirmation_ttl must be strictly positive"):
+            Harness(confirmation_ttl=bad)
 
 
 # --- the step comes from the plan (ADR-0037 §2) --------------------------
