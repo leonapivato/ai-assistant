@@ -192,6 +192,36 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert exported["stale"].validity.valid_until is not None
 
 
+async def test_superseding_a_target_never_extends_its_existing_window() -> None:
+    # Retirement takes a belief *off* the read path — it never resurrects one.
+    # A target that already self-closes *before* the ingestor's clock keeps that
+    # earlier end (`_close_window` takes the min), so a supersession cannot push a
+    # self-closed belief back onto the read path for [existing-end, now). No invalid
+    # interval or clock skew is needed — just a producer-set `valid_until` earlier
+    # than the writer clock, with the store reading before it so it is a live
+    # conflict. The full question of producer-settable windows is deferred to #306.
+    already_closes = datetime(2026, 3, 1, tzinfo=UTC)  # before the ingestor's 2026-06-01 clock
+    store = InMemoryMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+    await store.add(
+        PreferenceMemory(
+            id="stale",
+            content="user prefers morning meetings",
+            preference="morning",
+            validity=Validity(valid_until=already_closes),
+            provenance=_prov(0.6, source=MemorySource.INFERRED),
+        )
+    )
+
+    result = await _ingestor(store).ingest(
+        _proposal(_asserted("correction", "user prefers morning meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    retired = next(record for record in await store.export() if record.id == "stale")
+    # Kept at its earlier self-close, not extended out to the writer's 2026-06-01 clock.
+    assert retired.validity.valid_until == already_closes
+
+
 @pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
 async def test_superseding_a_future_dated_target_refuses_without_corrupting(
     backend: str, tmp_path: Path

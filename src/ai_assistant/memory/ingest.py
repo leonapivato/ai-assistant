@@ -219,33 +219,39 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     constructs a bounded-window record and a supersession only fires on a record its
     own conflict search returned as *live*.
 
-    **One data-integrity floor, not a retirement policy.** ``model_copy(update=...)``
-    skips ``Validity``'s ``valid_until > valid_from`` validator, so a producer-set
-    ``valid_from`` at or after ``now`` (reachable only under a store/writer clock
-    skew, since a search returns records live at store-now) would let this write an
-    empty or inverted interval — which ``SqliteMemoryStore``'s decode re-validation
-    then *rejects*, corrupting reads. This refuses that write outright, before the
-    batch, so no corrupt state is ever persisted. It is deliberately **only** a
-    "never write an unrepresentable window" guard: what a supersession *should* do
-    with a producer-set bounded window (clamp, refuse, or an empty "never-lived"
-    marker) is a semantics decision ADR-0045 §4 does not make and is deferred to a
-    follow-up ADR (issue #306), not decided here.
+    **Two correctness floors, not a retirement policy.** ``model_copy(update=...)``
+    skips ``Validity``'s validator, so both are enforced here:
+
+    - **Never extend (never resurrect).** If the target already self-closes *before*
+      ``now``, keep that earlier end — ``valid_until = min(now, existing)``.
+      Overwriting an earlier end with a later ``now`` would push a self-closed
+      belief back onto the read path for ``[existing, now)``; retirement only ever
+      takes a belief *off* the read path.
+    - **Never write an unrepresentable window.** If the chosen end is at or before
+      ``valid_from`` (empty or inverted), refuse before the batch: such an interval
+      is what ``SqliteMemoryStore``'s decode re-validation *rejects*, so persisting
+      it would corrupt reads. Fail closed with the target left live instead.
+
+    Both are unambiguous — ``min`` is the only non-resurrecting end, and an
+    unrepresentable window has no honest form — so they belong in the applier. What
+    remains genuinely undecided (whether the envelope window should be
+    producer-settable at all, and any richer retirement of a bounded window) stays
+    deferred to a follow-up ADR (issue #306).
 
     Raises:
-        MemoryStoreError: If closing at ``now`` would form an interval ending at or
-            before ``valid_from`` (empty or inverted); nothing is written and the
-            target stays live.
+        MemoryStoreError: If the chosen end is at or before ``valid_from`` (empty or
+            inverted); nothing is written and the target stays live.
     """
-    valid_from = target.validity.valid_from
-    if valid_from is not None and now <= valid_from:
+    window = target.validity
+    end = now if window.valid_until is None else min(now, window.valid_until)
+    if window.valid_from is not None and end <= window.valid_from:
         msg = (
-            f"cannot retire {target.id!r}: closing at {now.isoformat()} would form a window "
-            f"ending at or before its valid_from {valid_from.isoformat()} — an unrepresentable "
-            f"interval the store would reject (issue #306)"
+            f"cannot retire {target.id!r}: a close at {end.isoformat()} is at or before its "
+            f"valid_from {window.valid_from.isoformat()} — an unrepresentable window the store "
+            f"would reject (issue #306)"
         )
         raise MemoryStoreError(msg)
-    closed = target.validity.model_copy(update={"valid_until": now})
-    return target.model_copy(update={"validity": closed})
+    return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
 
 
 def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
