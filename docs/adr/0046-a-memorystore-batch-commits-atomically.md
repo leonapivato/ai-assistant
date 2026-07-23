@@ -198,16 +198,29 @@ mint again" from "the store is broken, abort." This mirrors
 `StaleExecutionError <: PlanningError` (ADR-0014 §5): a distinct, catchable,
 recoverable-and-retryable failure under the general store error.
 
-The atomicity guarantee is stated as a store obligation, not a hope:
+The atomicity guarantee has **two obligations, scoped by durability**, because a
+non-durable store has no post-crash state to protect and conflating the two would
+hand the in-memory fake a contract it cannot meet:
 
-- On **any** element's failure — a conflict, a repeated id (§3), or a backend
-  error part-way — the store commits **nothing** and is left byte-for-byte as it
-  was before the call.
-- The guarantee holds across a **crash** between the notional two writes, which
-  is the ADR-0045 §8 regression this whole primitive exists to prevent: a
-  window-close that commits while its paired insert never does would retire a
-  belief with no replacement. A store that cannot make the pair crash-atomic does
-  not satisfy this contract.
+- **In-call all-or-nothing — every backend, the fake included.** On **any**
+  element's failure — a conflict, a repeated id (§3), or a backend error
+  part-way through the batch — the store commits **nothing** and is left
+  byte-for-byte as it was before the call. This is a purely in-process guarantee
+  (the failure is observed and the partial work discarded before `write_atomic`
+  returns), so `InMemoryMemoryStore` and `FakeMemoryStore` satisfy it by staging
+  and only-then-applying (§Consequences), no persistence required.
+- **Crash / durability atomicity — durable backends only.** Across a process
+  **crash** between the notional two writes, a durable store must recover to
+  *neither* write committed, never to the window-close alone — the ADR-0045 §8
+  regression this primitive exists to prevent (a window-close that survives while
+  its paired insert is lost would retire a belief with no replacement).
+  `SqliteMemoryStore` meets this by wrapping the batch in one transaction, so a
+  crash before `COMMIT` leaves nothing on disk. The obligation is **vacuous for a
+  non-durable store**: a crash wipes an `InMemoryMemoryStore` in its entirety, so
+  there is no half-applied on-disk state for it to guard, and requiring crash
+  atomicity of it would be a contract term nothing can satisfy or test. Crash
+  atomicity is therefore a property of the *durable* backend, not of the Protocol
+  method uniformly.
 
 ### 5. Ruling on #248: this primitive does **not** close the cross-process lost update
 
@@ -327,9 +340,17 @@ records the re-scoping as issue-tracker work, not an ADR amendment).
   `INSERT_IF_ABSENT` on a present id — including a window-closed or expired row
   (§3) — raises `MemoryStoreConflictError` and leaves the store unchanged (nothing
   from the batch committed); a batch that fails part-way (a valid element followed
-  by a colliding one, in either order) commits nothing; a batch with a repeated id
-  raises `MemoryStoreError` and writes nothing; an empty batch is a no-op returning
-  an empty sequence.
+  by a colliding one, in either order) commits nothing — the shared suite's in-call
+  all-or-nothing case, driving a rollback after the first element is otherwise
+  applicable; a batch with a repeated id raises `MemoryStoreError` and writes
+  nothing; an empty batch is a no-op returning an empty sequence. Those logical
+  failures are all the *shared* suite can drive uniformly across the fake and both
+  backends. The **durable backend additionally owes a fault-injection test**,
+  outside the shared suite: `SqliteMemoryStore` made to fail on the *second*
+  element's physical write (a stubbed cursor error mid-transaction), asserting the
+  first element's row **and its vector row** did not persist. Without it, an
+  implementation that accidentally commits per element passes every logical case
+  above while violating §4's all-or-nothing guarantee.
 - **Issue #104 is answered**, not merely referenced: `MemoryStore` gets the atomic
   multi-write ADR-0022 §4 and ADR-0028 §7 filed. **Issue #248 is re-scoped**, not
   closed (§5): the cross-process lost update needs a compare-and-swap extension,
