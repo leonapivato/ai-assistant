@@ -438,27 +438,39 @@ class Engine:
             msg = "the engine is shutting down and is not accepting new work"
             raise RuntimeError(msg)
 
-    def _reject_if_confirmations_full(self) -> None:
-        """Refuse to drive a new step while the confirmation table is at capacity.
+    def _admit_and_reserve(self) -> str:
+        """Admit one step for driving under the confirmation ceiling, reserving its slot.
 
         The backpressure that keeps the outstanding-confirmation table bounded
-        **without** ever dropping a live continuation (ADR-0042 §4; #287). Checked
-        before a step is driven, so a refusal parks nothing and strands nothing —
-        the caller resolves an outstanding confirmation and retries. A soft limit:
-        under concurrency several in-flight turns may each pass this check before
-        any parks, so the table can briefly exceed the ceiling by the number of
-        concurrent turns — bounded, and never at the cost of a stranded step.
+        **without** ever dropping a live continuation (ADR-0042 §4; #287): at the
+        ceiling the engine refuses to drive another step rather than parking one
+        and having to strand it. A refusal parks nothing and strands nothing — the
+        caller resolves an outstanding confirmation and retries.
+
+        **Admission and reservation are one atomic step.** This runs to completion
+        with no ``await``, so concurrency cannot bypass the ceiling: capacity counts
+        the parked table *and* the slots reserved by turns still in flight
+        (``_reserved``), and the reserving write happens before this returns, so the
+        Nth concurrent turn sees the N-1 already-reserved slots and is refused once
+        they fill the ceiling. This is why the limit is **hard**, not merely a
+        post-hoc check that several turns could pass together. The slot is released
+        by :meth:`_converse` once the turn parks (moving into ``_parked``, which
+        then counts it) or does not.
+
+        Called *before* the runner can park and before the turn is persisted, so a
+        refusal leaves neither durable execution state nor a durable goal/plan.
 
         Raises:
             RuntimeError: If ``max_outstanding_confirmations`` confirmations are
-                already awaiting an answer.
+                already outstanding or reserved.
         """
-        if len(self._parked) >= self._max_outstanding:
+        if len(self._parked) + len(self._reserved) >= self._max_outstanding:
             msg = (
                 f"{self._max_outstanding} confirmations are already awaiting an answer; resolve "
                 "some before starting another action"
             )
             raise RuntimeError(msg)
+        return self._mint_handle()
 
     def _mint_handle(self) -> str:
         """Reserve and return a handle no other outstanding continuation is using.
@@ -486,40 +498,36 @@ class Engine:
         return handle
 
     async def _converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-        """Plan the turn, persist it, then drive its first step if it has one."""
+        """Plan the turn, then persist and drive its first step if it has one."""
         turn = await self._loop.respond(utterance)
         self._check_plan_is_for_goal(turn)
-        # Persist the goal and plan for *every* turn, before branching on whether
-        # there is a step to drive: the plan is an auditable record of what the
-        # system decided (ADR-0014 §2), and a no-action decision is a decision.
-        await self._plans.save_goal(turn.goal)
-        await self._plans.save_plan(turn.plan)
         if not turn.plan.steps:
+            # A no-action decision is still a decision, and drives nothing that
+            # could park — so it needs no capacity slot, and its goal and plan are
+            # persisted as an auditable record (ADR-0014 §2).
+            await self._plans.save_goal(turn.goal)
+            await self._plans.save_plan(turn.plan)
             return TurnOutcome(turn=turn)
-        # Backpressure, applied *before* a step is driven (and so before it could
-        # park): at the outstanding-confirmation ceiling the engine refuses to
-        # start another action rather than driving one and then having to drop a
-        # live continuation — which would strand a durably-parked step (round 7;
-        # #287). Nothing is parked here, so nothing is stranded; the step is simply
-        # not driven yet.
-        self._reject_if_confirmations_full()
         first = turn.plan.steps[0]
-        state = await self._plans.start_execution(turn.plan.id)
-        # Mint the continuation handle *before* the runner can park the step, so a
-        # raising or malformed id factory fails here — with no durable state yet —
-        # rather than after `run` has committed AWAITING_APPROVAL, which would
-        # strand a parked step with no token ever offered (ADR-0042 §4; #287). The
-        # handle is a cheap string; if the step is not parked it is simply unused.
-        handle = self._mint_handle()
+        # Admit-and-reserve *before* anything is persisted or driven, atomically
+        # (no await), so a backpressure refusal at the ceiling writes no durable
+        # goal/plan and no execution — a flood of refused turns leaves no
+        # inaccessible plan state behind (round 8) — and the ceiling is a hard bound
+        # even under concurrency (:meth:`_admit_and_reserve`). The reserved handle
+        # is also the continuation token, minted here before the runner can park so
+        # a raising id factory fails with no durable state committed (#287).
+        handle = self._admit_and_reserve()
         try:
+            await self._plans.save_goal(turn.goal)
+            await self._plans.save_plan(turn.plan)
+            state = await self._plans.start_execution(turn.plan.id)
             disposition = await self._runner.run(state, first.id, timeout=timeout)
             step = self._step_outcome(turn, disposition, handle=handle)
             return TurnOutcome(turn=turn, step=step)
         finally:
-            # The reservation held the handle across `run`'s await. It is now either
-            # in the parked table (the step parked) or unused (it did not); either
-            # way the in-flight reservation is done with. Uniqueness is thereafter
-            # kept by the parked table itself.
+            # The reservation held the slot across the awaits. It is now either in
+            # the parked table (the step parked, which counts it) or unused (it did
+            # not); either way the in-flight reservation is released.
             self._reserved.discard(handle)
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
