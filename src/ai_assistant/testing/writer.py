@@ -322,30 +322,15 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
 def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
 
-    The target is retained off the read path with its window's open end brought in
-    to ``now``; every other field, ``valid_from`` included, is preserved. Mirrors
-    ``MemoryIngestor._close_window``, including its two robustness rules for a
-    producer-set bounded window: **never extend** an earlier ``valid_until``
-    (``min``), and **refuse a close at or before ``valid_from``** (raise, target
-    left live) — the latter because an end equal to ``valid_from`` is an empty
-    interval and an earlier one is inverted, both of which ``Validity``'s validator
-    rejects on the durable store's decode, so the fake must refuse them too rather
-    than let a consumer's test pass on a window the production path cannot persist.
+    The target is retained off the read path with ``valid_until = now``; every
+    other field, ``valid_from`` included, is preserved. Mirrors
+    ``MemoryIngestor._close_window`` — exactly ADR-0045 §4's "``valid_until = now``",
+    with retiring a producer-set bounded window left to a follow-up ADR (no in-scope
+    producer creates one; envelope validity is operational-only, ADR-0045 §2).
     ``now`` must be a guarded, aware-UTC reading.
-
-    Raises:
-        MemoryStoreError: If no representable closed window exists at ``now``;
-            nothing is written and the target stays live.
     """
-    window = target.validity
-    end = now if window.valid_until is None else min(now, window.valid_until)
-    if window.valid_from is not None and end <= window.valid_from:
-        msg = (
-            f"cannot retire {target.id!r}: the close instant {end.isoformat()} is not after "
-            f"its valid_from {window.valid_from.isoformat()}"
-        )
-        raise MemoryStoreError(msg)
-    return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
+    closed = target.validity.model_copy(update={"valid_until": now})
+    return target.model_copy(update={"validity": closed})
 
 
 def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:

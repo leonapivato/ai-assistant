@@ -19,7 +19,6 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
-    Validity,
 )
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 
@@ -182,82 +181,6 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert set(exported) == {"stale", new_id}
     # The retired target carries a closed window (present in export, hidden from get).
     assert exported["stale"].validity.valid_until is not None
-
-
-async def test_superseding_a_target_never_extends_its_existing_window() -> None:
-    # Retirement only ever takes a belief *off* the read path — never prolongs one.
-    # A target that already self-closes earlier than the ingestor's clock keeps that
-    # earlier end; `_close_window` takes the min, so a correction cannot resurrect
-    # the stale belief by pushing its `valid_until` out to "now" (ADR-0045 §4). The
-    # store reads before the earlier end so the target is a live conflict. Asserted
-    # on `MemoryIngestor` (and mirrored on the fake in test_fake_writer.py) rather
-    # than the shared suite, which deliberately pins no clock (ADR-0028 §4b).
-    already_closes = datetime(2026, 3, 1, tzinfo=UTC)
-    store = InMemoryMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
-    await store.add(
-        PreferenceMemory(
-            id="stale",
-            content="user prefers morning meetings",
-            preference="morning",
-            validity=Validity(valid_until=already_closes),
-            provenance=_prov(0.6, source=MemorySource.INFERRED),
-        )
-    )
-
-    # The ingestor's own clock is 2026-06-01 (`_fixed_now`), later than the target's
-    # existing end, so a naive `valid_until = now` would push the window out.
-    result = await _ingestor(store).ingest(
-        _proposal(_asserted("correction", "user prefers afternoon meetings"))
-    )
-
-    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
-    retired = next(record for record in await store.export() if record.id == "stale")
-    # Kept at the earlier self-close, not extended to the ingestor's 2026-06-01 clock.
-    assert retired.validity.valid_until == already_closes
-
-
-@pytest.mark.parametrize(
-    "valid_from",
-    [
-        # Strictly after the ingestor's 2026-06-01 clock: an inverted close.
-        datetime(2026, 9, 1, tzinfo=UTC),
-        # Exactly the ingestor's clock: the boundary — an empty `[from, from)` close.
-        datetime(2026, 6, 1, tzinfo=UTC),
-    ],
-    ids=["valid_from-after-now", "valid_from-equals-now"],
-)
-async def test_superseding_a_target_that_starts_at_or_after_now_is_refused(
-    valid_from: datetime,
-) -> None:
-    # A `valid_until = now` close of a target whose window starts at or after `now`
-    # has no representable form: an end equal to `valid_from` is an empty interval
-    # and an earlier one is inverted, and `Validity`'s validator (which
-    # `SqliteMemoryStore` re-runs on decode) rejects both — so persisting one would
-    # make the retired record un-loadable. `_close_window` refuses instead, leaving
-    # the target live and unchanged (ADR-0045 §4/§6). Reachable as a live conflict
-    # only via a producer-set `valid_from` (no in-scope writer sets one) at the
-    # store's read clock.
-    store = InMemoryMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
-    await store.add(
-        PreferenceMemory(
-            id="future",
-            content="user prefers morning meetings",
-            preference="morning",
-            validity=Validity(valid_from=valid_from),
-            provenance=_prov(0.6, source=MemorySource.INFERRED),
-        )
-    )
-
-    with pytest.raises(MemoryStoreError, match="not after its valid_from"):
-        await _ingestor(store).ingest(
-            _proposal(_asserted("correction", "user prefers afternoon meetings"))
-        )
-
-    # Fail-closed: the target is untouched and no correction was written.
-    survivor = await store.get("future")
-    assert survivor is not None
-    assert survivor.validity.valid_from == valid_from
-    assert survivor.validity.valid_until is None
 
 
 async def test_a_correction_survives_the_next_external_re_sync() -> None:
