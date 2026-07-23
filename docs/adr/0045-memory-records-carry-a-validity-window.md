@@ -26,16 +26,21 @@
   `_refuse_unsafe_fold` `EXTERNAL` arm it pinned — its removal is the ingestor-side
   half of the §5b change, which §5b itself named as "the second clause a validity
   window revisits"); and [ADR-0038](0038-a-user-assertion-supersedes-a-conflicting-inference.md)
-  §2a (the policy-side `EXTERNAL` exclusion, which ADR-0038 §6 anticipated a
-  window would lift — "would let §2a supersede an `EXTERNAL` record without
+  §2a's **ingestor-enforced** `EXTERNAL` refusal (the `_refuse_unsafe_fold` arm, the
+  half §2a §"enforced at the ingestor" installs — which ADR-0038 §6 anticipated a
+  window would lift, "would let §2a supersede an `EXTERNAL` record without
   inheriting its key"). [ADR-0028](0028-the-memory-write-path-is-a-contract.md)
   §8's conformance list is touched a second time, for the two `MemoryWriter`
-  clauses. ADR-0040 §4 (`DefaultMemoryPolicy` migrated with no behavioural change)
-  is **not** amended — it describes ADR-0040's own no-op migration and stands as
-  history; the policy's `EXTERNAL` behaviour change is the ADR-0038 §2a amendment,
-  not a §4 one. None of these edits is made by this change — ADR-0001 keeps ADRs
-  append-only, so each travels with the implementation PR it describes; their
-  exact form is in §Consequences.
+  clauses. **`DefaultMemoryPolicy` is not amended, and ADR-0040 §6 and §4 stand
+  verbatim:** this ADR lifts only the *writer/ingestor* floor that refused an
+  `EXTERNAL` supersession, leaving the shipped policy's `_SUPERSEDABLE` set
+  (`{OBSERVED, INFERRED}`) untouched — so the members, `MemoryDecision`,
+  `DefaultMemoryPolicy` and the `MemoryPolicy` suite all survive untouched, exactly
+  as ADR-0040 §6 promised. Whether the default policy *opts in* to superseding
+  `EXTERNAL` is a policy-lane choice this ADR only makes *safe*, not one it makes
+  (§7). None of these edits is made by this change — ADR-0001 keeps ADRs
+  append-only, so each travels with the implementation PR it describes; their exact
+  form is in §Consequences.
 
 ## Context
 
@@ -303,15 +308,26 @@ the target's id" becomes "at a new id, target retained". `REINFORCE`'s
 *entirely* on supersession inheriting the target's id (ADR-0038 §2a, ADR-0040
 §5b: "it rests entirely on the target's id being inherited, which is what a
 validity window stops doing"). Once §4 gives the correction a **new** id, the
-idempotency-key hazard is gone, so the refusal is dropped and `EXTERNAL` joins
-the supersedable sources (§7 details the resolution). Concretely, the
-`_SUPERSEDABLE` allow-list — held in both `memory/policy.py` and `memory/ingest.py` —
-widens from `{OBSERVED, INFERRED}` to `{OBSERVED, INFERRED, EXTERNAL}`, and the
-`EXTERNAL` arm of `_refuse_unsafe_fold` and the suite obligation for it are
-removed together. These touch two further ratified decisions — ADR-0040 §3 (the
-ingestor refusal it pinned) and ADR-0038 §2a (the policy exclusion) — both of
-which their own authors named a validity window as revisiting; their append-only
-amendment forms are in the header and §Consequences.
+idempotency-key hazard is gone, so the refusal is dropped: an `EXTERNAL`
+supersession becomes *permitted at the writer boundary* (§7 details the
+resolution). Concretely, the `EXTERNAL` arm of `_refuse_unsafe_fold` in
+`memory/ingest.py` and the `EXTERNAL` obligation in the `MemoryWriter` conformance
+suite are removed together — a **writer/ingestor** change, keyed on the records
+and applied to every writer (ADR-0040 §3, §5b).
+
+**The shipped policy's `_SUPERSEDABLE` set is deliberately *not* widened here.**
+`DefaultMemoryPolicy` keeps `{OBSERVED, INFERRED}` in `memory/policy.py`, so it
+continues to `ACCEPT` a correction *beside* an `EXTERNAL` conflict rather than rule
+`SUPERSEDE` over it — `DefaultMemoryPolicy` is untouched, and ADR-0040 §6's "the
+policy survives untouched" holds verbatim. What this ADR changes is only the
+*floor*: the writer boundary no longer forbids an `EXTERNAL` supersession, so a
+policy that chooses to rule one is now safe (the correction gets a new id, §4).
+Adopting that in the default policy is a policy-lane decision, filed with #244 and
+#245 as the third "unblocked, not taken here" (§7). These lift two ratified
+decisions — ADR-0040 §3 and §5b (the ingestor refusal and its conformance clause)
+and ADR-0038 §2a's ingestor-enforced half — each of which its own author named a
+validity window as revisiting; their append-only amendment forms are in the header
+and §Consequences.
 
 **Clause 1 stays.** `_refuse_unsafe_fold`'s *first* refusal — **no fold of any
 kind onto a `USER_ASSERTED` target** — is **not** rewritten by this ADR, and this
@@ -372,33 +388,36 @@ verb, and as-of retrieval is deferred (§1).
 
 ### 7. How #254, #244, #245 resolve under the window
 
-- **#254 (correction vs `EXTERNAL`) — its destructive core resolved here; a
-  residual scoped, not overclaimed.** #254's actual bug is that a background
-  re-sync **silently destroys** the user's correction, because supersession
-  inherits the target's idempotency key and the re-sync upserts over it. With §4
-  the correction is written at a **fresh id**, so the re-sync's upsert of the
-  external id can no longer touch it: **the correction survives unconditionally**,
-  which is the ADR-0038 §2 error-direction #254 is about, and which
+- **#254 (correction vs `EXTERNAL`) — its blocker dissolved here; adoption
+  deferred, like #244/#245.** #254 was not "the default policy should supersede
+  `EXTERNAL`"; it was "it *cannot*, because superseding inherits the target's
+  idempotency key and the next re-sync overwrites the correction — so `EXTERNAL`
+  had to be excluded." §4 removes the ground: a superseding correction is written
+  at a **fresh id**, so the re-sync's upsert of the external id can no longer touch
+  it, and §5 lifts the writer-boundary refusal that held the exclusion shut. An
+  `EXTERNAL` supersession is therefore now **safe and permitted**, and a policy
+  that rules one leaves the correction surviving unconditionally — which
   `tests/memory/test_ingest.py::test_a_correction_survives_the_next_external_re_sync`
   is retargeted to assert (from "the exclusion holds" to "the new id survives the
-  re-sync"). `EXTERNAL` therefore becomes supersedable and §5b's refusal is
-  removed (§5).
+  re-sync").
 
-  What the window does **not** by itself guarantee is that the re-synced external
-  record stays *retired*. If the re-sync's conflict search finds the live
-  correction, `DefaultMemoryPolicy` rule 2 defers it (`ASK_USER`) and the external
-  record stays closed — the good case. But conflict detection is similarity, not
-  identity (ADR-0038 §2), and the score is asymmetric: a correction whose content
-  is shorter than the record it corrected can be *found* when superseding yet
-  *missed* on the reverse query, in which case the re-sync sees no conflict,
-  `ACCEPT`s, and the stale external belief becomes live again **alongside** the
-  surviving correction. That is the two-live-records shape of #38/#245, not #254's
-  silent-destruction — no user data is lost — and closing it needs an
-  identity-aware or tombstone-aware re-sync rule (an external id whose prior record
-  was superseded must not silently resurrect) that is a property of conflict
-  detection, not of the validity window. This ADR fixes the destruction and
-  **files the resurrection residual** (§10) rather than claiming the window closes
-  it.
+  Two honest limits keep this from being "#254 closed". First, **the shipped
+  default policy does not yet adopt it** (§5): with `_SUPERSEDABLE` unchanged it
+  still `ACCEPT`s the correction *beside* the `EXTERNAL` record, so both stay live —
+  the #38 "stale belief stays live" shape, not the silent-destruction #254 is
+  about. Whether the default policy should now rule `SUPERSEDE` over an `EXTERNAL`
+  conflict is a policy-lane choice this ADR makes safe, filed alongside #244 and
+  #245. Second, even for a policy that adopts it, **the re-synced external record
+  is not guaranteed to stay retired**: conflict detection is similarity, not
+  identity (ADR-0038 §2), and the score is asymmetric — a correction shorter than
+  the record it corrected can be *found* when superseding yet *missed* on the
+  reverse query, so the re-sync may see no conflict, `ACCEPT`, and make the stale
+  external belief live again **alongside** the surviving correction. That is again
+  the two-live-records shape, not destruction — no user data is lost — and closing
+  it needs an identity-/tombstone-aware re-sync rule (a superseded external id must
+  not silently resurrect), a property of conflict detection, not of the window.
+  This ADR removes the destruction hazard and **files both residuals** (§10)
+  rather than claiming #254 closed.
 
 - **#244 (only the best-ranked inference superseded) — unblocked, downgraded out
   of `core`.** ADR-0038 §4 limited supersession to one target because a
@@ -494,6 +513,9 @@ existing `expires_at` pattern covers it with no new machinery.
   signal, not here.
 - **#244's multi-target supersession** (§7). Unblocked, a policy-lane choice, no
   `core` growth.
+- **Whether `DefaultMemoryPolicy` adopts `EXTERNAL` supersession** (§5, §7). The
+  writer floor is lifted so it is safe; the shipped policy's `_SUPERSEDABLE` is
+  untouched (ADR-0040 §6), and opting in is a policy-lane choice filed with #254.
 - **Identity-aware re-sync so a superseded `EXTERNAL` record does not resurrect**
   (§7, #254 residual). The window stops the correction being destroyed but does
   not, on its own, keep a re-synced external record retired when similarity misses
@@ -528,12 +550,13 @@ existing `expires_at` pattern covers it with no new machinery.
     `export` returns closed-window records; the SQLite `valid_until` migration (§9).
   - `memory/ingest.py` — `_supersede`/`_apply` rewritten to close the target's
     window and write a new-id record via an **injected id factory**, using the
-    insert-if-absent primitive (§4); `_SUPERSEDABLE` widened to include `EXTERNAL`;
-    the `EXTERNAL` arm of `_refuse_unsafe_fold` removed; **clause 1 kept** (§5).
-    `MemoryIngestor` gains the id factory alongside its existing injected clock.
-    Requires #104 (§8).
-  - `memory/policy.py` — `_SUPERSEDABLE` widened to include `EXTERNAL`; the rule 3
-    docstring updated. No new ruling.
+    insert-if-absent primitive (§4); the **ingestor's** `_SUPERSEDABLE` widened to
+    include `EXTERNAL` so the `EXTERNAL` arm of `_refuse_unsafe_fold` no longer
+    refuses; **clause 1 kept** (§5). `MemoryIngestor` gains the id factory alongside
+    its existing injected clock. Requires #104 (§8).
+  - `memory/policy.py` — **unchanged.** `DefaultMemoryPolicy`'s `_SUPERSEDABLE`
+    stays `{OBSERVED, INFERRED}` (ADR-0040 §6); adopting `EXTERNAL` supersession is
+    a policy-lane follow-up (§5, §7), not this ADR's change.
   - `testing/writer.py`, `testing/store.py` — `FakeMemoryWriter` grows the new
     supersession shape; the fake store grows window filtering.
   - conformance suites — `MemoryStoreContract` gains the window read obligations
@@ -549,23 +572,26 @@ existing `expires_at` pattern covers it with no new machinery.
   ADR-0028 §8's conformance list records both. ADR-0040's members, `MemoryDecision`
   and the `MemoryPolicy` suite are confirmed untouched — if any of them had to
   move, ADR-0040 §1's naming rule was wrong; it was not.
-- **`EXTERNAL`-refusal amendment (ADR-0040 §3; ADR-0038 §2a).** On ratification,
-  ADR-0040 §3's "refusals do not move" is annotated to narrow to **clause 1** (no
-  fold onto a `USER_ASSERTED` target, which stays put): the `EXTERNAL` arm of
-  `_refuse_unsafe_fold` is removed, which §5b already named as the clause a
-  validity window revisits, so §3 and §5b move together and consistently. ADR-0038
-  §2a's exclusion of `EXTERNAL` from the supersedable sources is annotated lifted —
-  `_SUPERSEDABLE` widens to `{OBSERVED, INFERRED, EXTERNAL}` in both `policy.py`
-  and `ingest.py` — because supersession no longer inherits the target's id (§4),
-  which is the *sole* ground ADR-0038 §2a gave for the exclusion and which ADR-0038
-  §6 foresaw a window removing. ADR-0038 §2a's `USER_ASSERTED`-target refusal
-  (clause 1) and every other ADR-0038 ruling stand unchanged.
+- **`EXTERNAL`-refusal amendment (ADR-0040 §3; ADR-0038 §2a) — the writer floor
+  only.** On ratification, ADR-0040 §3's "refusals do not move" is annotated to
+  narrow to **clause 1** (no fold onto a `USER_ASSERTED` target, which stays put):
+  the `EXTERNAL` arm of `_refuse_unsafe_fold` is removed, which §5b already named
+  as the clause a validity window revisits, so §3 and §5b move together and
+  consistently. ADR-0038 §2a's **ingestor-enforced** `EXTERNAL` refusal is
+  annotated lifted — the ingestor's `_SUPERSEDABLE` widens to
+  `{OBSERVED, INFERRED, EXTERNAL}` in `ingest.py` only — because supersession no
+  longer inherits the target's id (§4), the *sole* ground ADR-0038 §2a gave for it
+  and the one ADR-0038 §6 foresaw a window removing. **`DefaultMemoryPolicy`'s own
+  `_SUPERSEDABLE` is not touched** (ADR-0040 §6 stands), so §2a's *policy-side*
+  exclusion persists until a policy lane adopts it; §2a's `USER_ASSERTED`-target
+  refusal (clause 1) and every other ADR-0038 and ADR-0040 ruling stand unchanged.
 - **Issue #112's open questions close**: OQ2 was already ADR-0040's; OQ3 (export)
   §6; OQ4 (migration) §9; OQ5 (placement) §2. OQ1 (as-of) is deferred (§10).
-- **#254's destruction bug closes** with the implementation (the correction is no
-  longer overwritable); its resurrection residual is re-filed as a
-  conflict-detection question (§7, §10). **#244 and #245** are retargeted to the
-  policy lane (§7); **#104** becomes a hard predecessor of the applier lane (§8).
+- **#254's blocker dissolves** with the implementation (the writer floor is lifted
+  and a superseding correction is no longer overwritable, §4–§5); its default-policy
+  *adoption* and its resurrection residual are re-filed to the policy and
+  conflict-detection lanes (§7, §10). **#244 and #245** are likewise retargeted to
+  the policy lane (§7); **#104** becomes a hard predecessor of the applier lane (§8).
 - **Two `valid_until` notions coexist** until the reconciliation (§10) — a known,
   filed overlap, the cost of not conflating a content-declared expiry with an
   operational window in one change.
@@ -609,6 +635,18 @@ existing `expires_at` pattern covers it with no new machinery.
   supersession — a retired belief with no live replacement — under the cover of a
   feature. Atomicity has to come from the store (ADR-0028 §7); #104 is the
   prerequisite, not an optimisation.
+- **Widen `DefaultMemoryPolicy`'s `_SUPERSEDABLE` to include `EXTERNAL` here,
+  amending ADR-0040 §6.** Rejected in §5, §7. It would resolve #254 in the shipped
+  policy in one move, but it changes `DefaultMemoryPolicy`'s *behaviour* — a
+  policy-lane decision — inside a temporal-model contract ADR, and it would force
+  an amendment to ADR-0040 §6's "the policy survives untouched", which this ADR
+  otherwise honours verbatim. Lifting only the *writer floor* (the ingestor refusal
+  and its conformance clause, which ADR-0040 §5b/§3 and ADR-0038 §2a's ingestor
+  half all named a window as revisiting) makes an `EXTERNAL` supersession *safe*
+  without deciding that the default policy *takes* it — the same "unblock the
+  mechanism, defer the policy" treatment #244 and #245 get. The default policy's
+  adoption is then one uniform policy-lane question, not a behavioural change
+  smuggled in here.
 - **Mint the new supersession id with a bare `uuid4` and a blind `add` upsert.**
   Rejected in §4: `uuid4` makes a collision unlikely, not impossible, and `add` is
   an unconditional upsert, so the fresh-id obligation — distinct from *every*
