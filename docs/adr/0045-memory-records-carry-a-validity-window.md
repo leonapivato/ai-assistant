@@ -200,9 +200,19 @@ Applying `SUPERSEDE(target_id=T)` for a proposed record `P`:
 1. **Close `T`'s window.** Write `T` back with `validity.valid_until = now`,
    where `now` is the ingestor's injected clock (ADR-0026). `T` stays on disk with
    a closed window — retained, off the read path.
-2. **Write `P` as a *new* record, with a *new* id** and a fresh open window. `P`
-   carries nothing of `T` (ADR-0038 §1a is unchanged — a correction does not
-   inherit the overturned belief's evidence), and it no longer borrows `T`'s id.
+2. **Write `P` as a *new* record, at a freshly-minted unique id**, with a fresh
+   open window. `P` carries nothing of `T` (ADR-0038 §1a is unchanged — a
+   correction does not inherit the overturned belief's evidence), and it no
+   longer borrows `T`'s id. The new id is **not** `P.id` either: `MemoryRecord.id`
+   is caller-supplied and `MemoryStore.add` is a caller-id upsert (a record whose
+   id already exists is overwritten), so writing at `P.id` could silently clobber
+   an unrelated live record that happens to share it. The applier therefore mints
+   a fresh id **distinct from every existing record's id** — `MemoryIngestor` uses
+   a `uuid4`, collision-free by construction — and discards `P.id`, exactly as
+   today's supersession discards it when it rehomes `P` onto `T`'s id. Which
+   allocator mints the id is `memory`'s own semantics (like the fold rule,
+   ADR-0028 §8); the *obligation* the contract pins is only that the id is fresh
+   and returned (§5).
 3. **Return the new record's id.** `MemoryIngestResult.record_id` is the id of the
    **live** record, which is now `P`'s new id, not `T`'s — "MemoryIngestResult
    carries a different id than it does today" (ADR-0040 §6).
@@ -228,9 +238,16 @@ becomes:
 
 > After a `SUPERSEDE`, the target is **retained with a closed validity window**
 > (`valid_until` set, live-at-now false) and the live record is the proposed
-> record written **at a new id**, carrying nothing of the target. `MemoryIngestResult.record_id`
-> is the **live record's** id, not the target's. The target remains fetchable by
-> `export` and, being window-closed, is absent from `get`/`search`.
+> record written **at a fresh id distinct from every existing record's id**
+> (including the target's *and* the proposal's own `id`), carrying nothing of the
+> target. `MemoryIngestResult.record_id` is the **live record's** id, not the
+> target's. The target remains fetchable by `export` and, being window-closed, is
+> absent from `get`/`search`.
+
+The conformance suite adds a case where the proposal's own `id` already names a
+**live, non-target** record: the `SUPERSEDE` must not overwrite that record — the
+fresh-id obligation is precisely what forbids the upsert collision — and the live
+record it returns is neither the target nor the collided-with record.
 
 The differential ADR-0040 §5a ratified — **`SUPERSEDE` carries nothing of the
 target onto the surviving record** — is unchanged and still complete; only "at
@@ -273,10 +290,19 @@ window unblocks for assertions is filed as policy-lane work, not taken here (§7
 The `MemoryStore` Protocol contract and its conformance suite change as follows.
 
 - **`get`** returns `None` for a record that is absent, expired, **or not live at
-  now** (window closed). One more disjunct on the existing predicate.
+  now** — where "not live" is the *full* §2 predicate, **both** ends: a closed
+  `valid_until` (`valid_until <= now`) **and** a not-yet-open `valid_from`
+  (`valid_from > now`).
 - **`search`** never returns a non-live record, exactly as it never returns an
-  expired one. The over-fetch-and-post-filter caveat ADR-0007 §Consequences
-  records for expiry applies identically to the window.
+  expired one, again on both ends of the window. The over-fetch-and-post-filter
+  caveat ADR-0007 §Consequences records for expiry applies identically.
+- **The `valid_from` end is enforced, not assumed away.** This ADR's own
+  mechanisms never set `valid_from` to the future (retirement sets `valid_until`;
+  new records get an open window), but a producer *may*, and the store must honour
+  the contract regardless. `valid_from` is therefore filtered like `kinds` already
+  are — in the post-filter step, not the SQL pre-filter (§9) — and the conformance
+  suite carries before/at/after-boundary cases for **each** end of the window, not
+  only "closed" and "fully open".
 - **`export`** returns **every retained (non-expired) record, whether its window
   is open or closed.** This is the amendment to ADR-0007 §3 (issue #112 OQ3): a
   superseded belief is data the store holds, so a data-rights export must include
@@ -299,18 +325,33 @@ verb, and as-of retrieval is deferred (§1).
 
 ### 7. How #254, #244, #245 resolve under the window
 
-- **#254 (correction vs `EXTERNAL`) — resolved here.** With §4, a correction that
-  supersedes an `EXTERNAL` record closes that record's window and writes a **new**
-  user-asserted record at a new id; it never inherits the calendar/idempotency
-  key. The next routine sync re-proposes the external id, finds the (retained,
-  window-closed) external record self-excluded from its own conflict set, and
-  finds the *new live user-asserted correction* as a conflict — so
-  `DefaultMemoryPolicy` rule 2 defers it (`ASK_USER`: a non-asserted proposal
-  conflicts with a `USER_ASSERTED` live record) instead of overwriting. The
-  correction survives, which is what
+- **#254 (correction vs `EXTERNAL`) — its destructive core resolved here; a
+  residual scoped, not overclaimed.** #254's actual bug is that a background
+  re-sync **silently destroys** the user's correction, because supersession
+  inherits the target's idempotency key and the re-sync upserts over it. With §4
+  the correction is written at a **fresh id**, so the re-sync's upsert of the
+  external id can no longer touch it: **the correction survives unconditionally**,
+  which is the ADR-0038 §2 error-direction #254 is about, and which
   `tests/memory/test_ingest.py::test_a_correction_survives_the_next_external_re_sync`
-  asserts — retargeted from "the exclusion holds" to "the new id survives the
-  re-sync". `EXTERNAL` becomes supersedable (§5).
+  is retargeted to assert (from "the exclusion holds" to "the new id survives the
+  re-sync"). `EXTERNAL` therefore becomes supersedable and §5b's refusal is
+  removed (§5).
+
+  What the window does **not** by itself guarantee is that the re-synced external
+  record stays *retired*. If the re-sync's conflict search finds the live
+  correction, `DefaultMemoryPolicy` rule 2 defers it (`ASK_USER`) and the external
+  record stays closed — the good case. But conflict detection is similarity, not
+  identity (ADR-0038 §2), and the score is asymmetric: a correction whose content
+  is shorter than the record it corrected can be *found* when superseding yet
+  *missed* on the reverse query, in which case the re-sync sees no conflict,
+  `ACCEPT`s, and the stale external belief becomes live again **alongside** the
+  surviving correction. That is the two-live-records shape of #38/#245, not #254's
+  silent-destruction — no user data is lost — and closing it needs an
+  identity-aware or tombstone-aware re-sync rule (an external id whose prior record
+  was superseded must not silently resurrect) that is a property of conflict
+  detection, not of the validity window. This ADR fixes the destruction and
+  **files the resurrection residual** (§10) rather than claiming the window closes
+  it.
 
 - **#244 (only the best-ranked inference superseded) — unblocked, downgraded out
   of `core`.** ADR-0038 §4 limited supersession to one target because a
@@ -371,12 +412,17 @@ silently implement the applier over a non-atomic pair of writes.
 REAL` column, and already carries a `_migrate_records` that `ALTER TABLE ADD
 COLUMN`s and backfills within the setup commit (the `expires_at` migration is the
 template). The window migration mirrors it: add a `valid_until REAL` column,
-default `NULL` (= open = live), which correctly leaves every existing row live;
-`valid_from` rides in the JSON blob, since the hot read filter only needs
-`valid_until` (records default to open at the start). The read predicate becomes
+default `NULL` (= open = live), which correctly leaves every existing row live.
+`valid_until` is the **hot** end — retirement is the common operation, so it earns
+a column and a SQL pre-filter: the predicate becomes
 `(expires_at IS NULL OR expires_at > now) AND (valid_until IS NULL OR valid_until > now)`.
-Issue #112 OQ4 is answered: yes, a migration is required, and the existing pattern
-covers it with no new machinery.
+`valid_from` rides in the JSON blob and is applied in the **post-filter**, in the
+same pass that already drops kind- and expiry-filtered rows (`_search_sync`), and
+in the `get` decode path — because future-dated `valid_from` is rare (no in-scope
+writer produces it) and does not justify a second indexed column. What is **not**
+optional is that both ends are enforced somewhere on every read (§6); the split is
+only *where*. Issue #112 OQ4 is answered: yes, a migration is required, and the
+existing `expires_at` pattern covers it with no new machinery.
 
 ### 10. What this ADR does not decide
 
@@ -395,6 +441,11 @@ covers it with no new machinery.
   signal, not here.
 - **#244's multi-target supersession** (§7). Unblocked, a policy-lane choice, no
   `core` growth.
+- **Identity-aware re-sync so a superseded `EXTERNAL` record does not resurrect**
+  (§7, #254 residual). The window stops the correction being destroyed but does
+  not, on its own, keep a re-synced external record retired when similarity misses
+  the correction. Filed as a conflict-detection / tombstone question, distinct
+  from the destruction bug this ADR closes.
 - **`MemoryStore`'s atomic primitive** (§8). Issue #104's lane designs it.
 - **The lost-update window** in `MemoryIngestor.ingest` (issue #248). Orthogonal;
   #104 closes it alongside the atomicity primitive this ADR depends on.
@@ -445,7 +496,9 @@ covers it with no new machinery.
   any of them had to move, ADR-0040 §1's naming rule was wrong; it was not.
 - **Issue #112's open questions close**: OQ2 was already ADR-0040's; OQ3 (export)
   §6; OQ4 (migration) §9; OQ5 (placement) §2. OQ1 (as-of) is deferred (§10).
-- **#254 closes** with the implementation; **#244 and #245** are retargeted to the
+- **#254's destruction bug closes** with the implementation (the correction is no
+  longer overwritable); its resurrection residual is re-filed as a
+  conflict-detection question (§7, §10). **#244 and #245** are retargeted to the
   policy lane (§7); **#104** becomes a hard predecessor of the applier lane (§8).
 - **Two `valid_until` notions coexist** until the reconciliation (§10) — a known,
   filed overlap, the cost of not conflating a content-declared expiry with an
