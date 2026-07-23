@@ -531,6 +531,35 @@ class MemoryWriterContract:
         assert live is not None
         assert "p-ev" in live.provenance.evidence
 
+    async def test_supersede_may_mint_the_proposal_id_when_it_is_absent(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """A minted id equal to the *unstored* proposal id is permitted (ADR-0045 §4).
+
+        The obligation is "absent from the store," not "differs from the proposal's
+        id." When the proposal's own id names no stored record, nothing lives there
+        to clobber, so a factory that mints exactly it succeeds — the id is
+        immaterial as long as it is absent. The counterpart is
+        ``test_supersede_discards_the_proposal_id_and_clobbers_no_record_there``,
+        where the proposal id *does* name a live record and so must be avoided.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        # "new" (the proposal's id) names no stored record; the factory mints it.
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("new")
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+
+        assert result.record_id == "new"  # permitted: nothing was stored at "new"
+        assert await store.get("existing") is None  # target retired
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", "new"}
+        live = await store.get("new")
+        assert live is not None
+        assert "p-ev" in live.provenance.evidence
+
     async def test_supersede_with_an_always_colliding_factory_leaves_the_target_live(
         self, make_writer: WriterFactory
     ) -> None:
@@ -647,20 +676,26 @@ class MemoryWriterContract:
         result = await writer.ingest(proposal)
 
         assert result.decision.kind is kind
-        assert await store.get("new") is None  # no duplicate at the proposal's id
 
         if kind is MemoryDecisionKind.REINFORCE:
-            # Folded in place at the target's id, which is returned.
+            # Folded in place at the target's id, which is returned; no second record
+            # at the proposal's id.
             assert result.record_id == "existing"
+            assert await store.get("new") is None
             stored = await store.get("existing")
             assert stored is not None
             assert "p-ev" in stored.provenance.evidence
             return
 
         # SUPERSEDE: the target is retired (window closed, hidden from get, kept in
-        # export) and the correction lands at a fresh id, returned as record_id.
+        # export) and the correction lands at a fresh id, returned as record_id. The
+        # id differs from the target's (the retained target is a separate record),
+        # but the ADR pins only "absent from the store"; whether it happens to equal
+        # the *unstored* proposal id "new" is immaterial (ADR-0045 §4), so the suite
+        # asserts the store's *shape* — exactly {target, correction} — not that the
+        # id avoids "new". The default uuid factory makes it a fresh id here anyway.
         assert result.record_id is not None
-        assert result.record_id not in {"existing", "new"}
+        assert result.record_id != "existing"
         assert await store.get("existing") is None
         retained = {record.id: record for record in await store.export()}
         assert set(retained) == {"existing", result.record_id}

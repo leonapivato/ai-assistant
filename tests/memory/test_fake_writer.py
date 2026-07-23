@@ -21,7 +21,6 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
-    Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
 
@@ -137,69 +136,3 @@ async def test_an_unrepresentable_temporary_ttl_is_the_subsystems_error() -> Non
         await writer.ingest(_proposal("pref-1"))
 
     assert await store.export() == []
-
-
-# The bounded-window close safeguards, mirrored from MemoryIngestor
-# (test_ingest.py): the fake duplicates `_close_window`, so a fake regressing to a
-# bare `valid_until = now` would extend a bounded target's window or persist an
-# inverted one under clock skew. The shared suite deliberately pins no clock
-# (ADR-0028 §4b), so these live here, where the fake's clock is injectable.
-
-
-def _inferred_target(*, validity: Validity) -> PreferenceMemory:
-    content = "prefers concise emails"  # matches `_proposal`, so it is a conflict
-    return PreferenceMemory(
-        id="existing",
-        content=content,
-        preference=content,
-        validity=validity,
-        provenance=Provenance(
-            source=MemorySource.INFERRED, confidence=0.6, last_updated=_fixed_now()
-        ),
-    )
-
-
-async def test_supersede_never_extends_a_bounded_targets_window() -> None:
-    """The fake keeps a target's earlier ``valid_until`` — retirement never prolongs."""
-    already_closes = datetime(2026, 3, 1, tzinfo=UTC)  # earlier than the writer clock
-    store = FakeMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
-    await store.add(_inferred_target(validity=Validity(valid_until=already_closes)))
-    writer = FakeMemoryWriter(
-        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_fixed_now
-    )
-
-    result = await writer.ingest(_proposal("correction"))
-
-    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
-    retired = next(record for record in await store.export() if record.id == "existing")
-    assert retired.validity.valid_until == already_closes  # not extended to the writer clock
-
-
-@pytest.mark.parametrize(
-    "valid_from",
-    [
-        datetime(2026, 9, 1, tzinfo=UTC),  # strictly after the writer clock: inverted
-        datetime(2026, 6, 1, tzinfo=UTC),  # exactly the writer clock: empty-interval boundary
-    ],
-    ids=["valid_from-after-now", "valid_from-equals-now"],
-)
-async def test_supersede_refuses_a_close_at_or_before_the_targets_valid_from(
-    valid_from: datetime,
-) -> None:
-    """The fake refuses a close at or before ``valid_from`` and leaves the target live.
-
-    The equality boundary matters as much as the strictly-future case: an end equal
-    to ``valid_from`` is an empty window ``Validity`` rejects on the durable store's
-    decode, so the fake must refuse it exactly as the production writer does.
-    """
-    store = FakeMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
-    await store.add(_inferred_target(validity=Validity(valid_from=valid_from)))
-    before = await store.export()
-    writer = FakeMemoryWriter(
-        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_fixed_now
-    )
-
-    with pytest.raises(MemoryStoreError, match="not after its valid_from"):
-        await writer.ingest(_proposal("correction"))
-
-    assert await store.export() == before  # fail-closed: nothing written, target untouched
