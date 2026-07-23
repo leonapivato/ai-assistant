@@ -24,15 +24,15 @@ import sqlite_vec
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreError
-from ai_assistant.core.types import MemoryRecord
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.types import MemoryRecord, MemoryWriteMode
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
-    from ai_assistant.core.types import Embedding, MemoryKind
+    from ai_assistant.core.types import Embedding, MemoryKind, MemoryWrite
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # ``search`` applies the kind and expiry filters *after* the vector KNN (sqlite-vec
@@ -236,32 +236,8 @@ class SqliteMemoryStore:
 
     def _add_sync(self, record: MemoryRecord, vector: Embedding) -> None:
         conn = self._conn
-        blob = sqlite_vec.serialize_float32(list(vector))
-        data = record.model_dump_json()
-        expires = record.expires_at.timestamp() if record.expires_at is not None else None
-        valid_until = (
-            record.validity.valid_until.timestamp()
-            if record.validity.valid_until is not None
-            else None
-        )
         try:
-            row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
-            if row is None:
-                cursor = conn.execute(
-                    "INSERT INTO records(id, kind, data, expires_at, valid_until) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (record.id, record.kind, data, expires, valid_until),
-                )
-                rowid = cursor.lastrowid
-            else:
-                rowid = row[0]
-                conn.execute(
-                    "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ? "
-                    "WHERE rowid = ?",
-                    (record.kind, data, expires, valid_until, rowid),
-                )
-                conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
-            conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
+            self._persist_record(record, vector)
             conn.commit()
         except sqlite3.Error as exc:
             # Roll back the partial multi-table write so a later commit cannot
@@ -270,6 +246,123 @@ class SqliteMemoryStore:
             with contextlib.suppress(sqlite3.Error):
                 conn.rollback()
             msg = f"failed to store memory {record.id!r}: {exc}"
+            raise MemoryStoreError(msg) from exc
+
+    def _persist_record(self, record: MemoryRecord, vector: Embedding) -> None:
+        """Write one record and its vector into the *open* transaction, no commit.
+
+        Shared by :meth:`add` and :meth:`write_atomic`: an overwrite rewrites every
+        column and replaces the vector row; a new id inserts both. The caller owns
+        the surrounding transaction — the commit and any rollback — so this is
+        equally one standalone write or one element of an atomic batch (ADR-0046
+        §4). Raises the underlying :class:`sqlite3.Error` unwrapped, for the caller
+        to translate.
+        """
+        conn = self._conn
+        blob = sqlite_vec.serialize_float32(list(vector))
+        data = record.model_dump_json()
+        expires = record.expires_at.timestamp() if record.expires_at is not None else None
+        valid_until = (
+            record.validity.valid_until.timestamp()
+            if record.validity.valid_until is not None
+            else None
+        )
+        row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record.id,)).fetchone()
+        if row is None:
+            cursor = conn.execute(
+                "INSERT INTO records(id, kind, data, expires_at, valid_until) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (record.id, record.kind, data, expires, valid_until),
+            )
+            rowid = cursor.lastrowid
+        else:
+            rowid = row[0]
+            conn.execute(
+                "UPDATE records SET kind = ?, data = ?, expires_at = ?, valid_until = ? "
+                "WHERE rowid = ?",
+                (record.kind, data, expires, valid_until, rowid),
+            )
+            conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
+        conn.execute("INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)", (rowid, blob))
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Apply every write in one SQLite transaction — all commit, or none do.
+
+        The whole batch runs inside one transaction: a failure part-way (a
+        conflict, or a backend error) rolls the transaction back, so nothing is
+        committed — and a crash before ``COMMIT`` leaves nothing on disk, which is
+        the durability guarantee (ADR-0046 §4) supersession needs so a window-close
+        can never survive without its paired insert (ADR-0045 §8).
+
+        Embedding happens before the lock (like :meth:`add`); the transaction is
+        held only for the writes themselves.
+
+        Raises:
+            MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
+                stored record — physical presence, so an expired or window-closed
+                row still collides (ADR-0046 §3). Nothing is written.
+            MemoryStoreError: the batch names the same id twice (ADR-0046 §3), or
+                any backend failure (with the ``sqlite3`` cause retained). Nothing
+                is written.
+        """
+        self._reject_repeated_ids(writes)
+        if not writes:
+            return []
+        prepared: list[tuple[MemoryRecord, MemoryWriteMode, Embedding]] = []
+        for write in writes:
+            vector = await self._embed_one(write.record.content)
+            prepared.append((write.record, write.mode, vector))
+        async with self._lock:
+            await asyncio.to_thread(self._write_atomic_sync, prepared)
+        return [write.record.id for write in writes]
+
+    @staticmethod
+    def _reject_repeated_ids(writes: Sequence[MemoryWrite]) -> None:
+        """Refuse a batch that writes the same id twice (ADR-0046 §3).
+
+        Checked before the transaction opens: two writes to one id is the case a
+        sequential SQLite apply resolves differently from a stage-then-swap fake,
+        so it is forbidden rather than defined.
+        """
+        ids = [write.record.id for write in writes]
+        if len(set(ids)) != len(ids):
+            msg = "an atomic batch may not write the same id twice"
+            raise MemoryStoreError(msg)
+
+    def _write_atomic_sync(
+        self, prepared: Sequence[tuple[MemoryRecord, MemoryWriteMode, Embedding]]
+    ) -> None:
+        conn = self._conn
+        try:
+            for record, mode, vector in prepared:
+                if mode is MemoryWriteMode.INSERT_IF_ABSENT:
+                    row = conn.execute(
+                        "SELECT rowid FROM records WHERE id = ?", (record.id,)
+                    ).fetchone()
+                    if row is not None:
+                        msg = (
+                            f"cannot insert {record.id!r}: a record with that id is already stored"
+                        )
+                        raise MemoryStoreConflictError(msg)
+                self._persist_record(record, vector)
+            conn.commit()
+        except MemoryStoreConflictError:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            raise
+        except sqlite3.IntegrityError as exc:
+            # A UNIQUE collision on records.id despite the presence check means a
+            # concurrent writer inserted the id between our SELECT and our INSERT —
+            # a collision, not a fatal fault, so it surfaces as a conflict rather
+            # than a generic error (ADR-0046 §4).
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            msg = f"an atomic batch conflicted on an existing id: {exc}"
+            raise MemoryStoreConflictError(msg) from exc
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            msg = f"failed to commit an atomic memory batch: {exc}"
             raise MemoryStoreError(msg) from exc
 
     def _now(self) -> datetime:

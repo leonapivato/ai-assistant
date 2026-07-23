@@ -125,6 +125,21 @@ class MemoryStoreError(AssistantError):
     """
 
 
+class MemoryStoreConflictError(MemoryStoreError):
+    """An ``INSERT_IF_ABSENT`` write's id already named a stored record (ADR-0046 §4).
+
+    The batch was rolled back — nothing was written. The caller minted a
+    colliding id and should re-mint and retry (ADR-0045 §4).
+
+    Subclasses :class:`MemoryStoreError` so every existing ``except
+    MemoryStoreError`` still catches it (the writer boundary documents
+    ``MemoryStoreError`` as the only error that crosses the seam, ADR-0028 §5),
+    while the applier catches the narrower conflict to distinguish "id collided,
+    mint again" from "the store is broken, abort" — mirroring
+    :class:`StaleExecutionError` under :class:`PlanningError`.
+    """
+
+
 class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 

@@ -18,13 +18,14 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.types import MemoryWriteMode
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import MemoryKind, MemoryRecord
+    from ai_assistant.core.types import MemoryKind, MemoryRecord, MemoryWrite
 
 
 def _utcnow() -> datetime:
@@ -112,6 +113,52 @@ class InMemoryMemoryStore:
         # state — matching FakeMemoryStore and the serialised persistent store.
         self._records[record.id] = record.model_copy(deep=True)
         return record.id
+
+    async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+        """Apply every write in one atomic unit — all commit, or none do.
+
+        A ``dict`` has no transaction, so atomicity is *emulated*: the whole batch
+        is validated up front (no repeated id, no ``INSERT_IF_ABSENT`` collision)
+        and every mutation is staged, then applied only once every check has
+        passed — so a mid-batch failure mutates nothing (ADR-0046 §4, in-call
+        all-or-nothing). This is the whole guarantee a non-durable store owes;
+        crash atomicity is vacuous for it.
+
+        Raises:
+            MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
+                stored record — physical presence, so an expired or window-closed
+                row still collides (ADR-0046 §3). Nothing is written.
+            MemoryStoreError: the batch names the same id twice (ADR-0046 §3).
+                Nothing is written.
+        """
+        self._reject_repeated_ids(writes)
+        # Stage first: validate every element against the *pre-batch* state, then
+        # apply. No element's check may observe an earlier element's staged write
+        # (the repeated-id rejection above makes that case unreachable anyway).
+        staged: list[MemoryRecord] = []
+        for write in writes:
+            if write.mode is MemoryWriteMode.INSERT_IF_ABSENT and write.record.id in self._records:
+                msg = f"cannot insert {write.record.id!r}: a record with that id is already stored"
+                raise MemoryStoreConflictError(msg)
+            # Deep copy so a caller mutating the record after the call cannot reach
+            # stored state, matching ``add``.
+            staged.append(write.record.model_copy(deep=True))
+        for record in staged:
+            self._records[record.id] = record
+        return [record.id for record in staged]
+
+    @staticmethod
+    def _reject_repeated_ids(writes: Sequence[MemoryWrite]) -> None:
+        """Refuse a batch that writes the same id twice (ADR-0046 §3).
+
+        A property of the batch, checked before anything is written: two writes to
+        one id is the case a sequential SQLite apply and a stage-then-swap fake
+        would resolve differently, so it is forbidden rather than defined.
+        """
+        ids = [write.record.id for write in writes]
+        if len(set(ids)) != len(ids):
+            msg = "an atomic batch may not write the same id twice"
+            raise MemoryStoreError(msg)
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if not readable.

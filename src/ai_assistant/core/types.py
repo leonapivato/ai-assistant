@@ -462,6 +462,46 @@ MemoryRecord = Annotated[
 """A unit of long-term memory: one of the four typed kinds, tagged by ``kind``."""
 
 
+class MemoryWriteMode(StrEnum):
+    """How one write in an atomic batch treats a colliding id (ADR-0046 §2).
+
+    The two modes are exactly the two the supersession applier needs and no more:
+    an ``UPSERT`` window-close of the retained target, and an
+    ``INSERT_IF_ABSENT`` of the freshly-minted correction whose probabilistic id
+    must not clobber an existing record (ADR-0045 §4).
+    """
+
+    UPSERT = "upsert"
+    """Overwrite the record if its id is present, insert it if absent.
+
+    Reproduces :meth:`~ai_assistant.core.protocols.MemoryStore.add`'s upsert
+    semantics — what a window-close is, since the target already exists and is
+    overwritten with its retired form.
+    """
+
+    INSERT_IF_ABSENT = "insert_if_absent"
+    """Insert the record only if its id names no stored record.
+
+    Otherwise the **whole batch** fails with
+    :class:`~ai_assistant.core.errors.MemoryStoreConflictError` and nothing is
+    committed. "Absent" is *physical presence*, not read-visibility: a stored row
+    blocks the insert even when expired or window-closed (ADR-0046 §3).
+    """
+
+
+class MemoryWrite(BaseModel):
+    """One write within an atomic ``MemoryStore`` batch (ADR-0046 §2).
+
+    A record paired with the mode that governs how a collision on its id is
+    handled. Crosses subsystem boundaries — the applier in `memory` constructs
+    it, the store consumes it, the contract in `core` names it — so it is a
+    `core` type.
+    """
+
+    record: MemoryRecord
+    mode: MemoryWriteMode = MemoryWriteMode.UPSERT
+
+
 class DataTier(StrEnum):
     """Sensitivity classification of stored data (see ADR-0004)."""
 

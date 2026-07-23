@@ -609,7 +609,9 @@ class _ARealMemoryStore:
     exactly the "is this a second subject?" question ``_binds_fake`` asks.
     """
 
-    add = clear = delete = export = get = purge_expired = search = staticmethod(lambda *a: None)
+    add = clear = delete = export = get = purge_expired = search = write_atomic = staticmethod(
+        lambda *a: None
+    )
 
 
 class _DecoyFixture:
