@@ -27,6 +27,7 @@ from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWr
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
 
 
@@ -60,12 +61,12 @@ class TestFakeMemoryWriterContract(MemoryWriterContract):
             policy: MemoryPolicy,
             *,
             id_factory: Callable[[], str] | None = None,
+            now: Clock | None = None,
         ) -> MemoryWriter:
+            clock = now if now is not None else _fixed_now
             if id_factory is None:
-                return FakeMemoryWriter(store=store, policy=policy, now=_fixed_now)
-            return FakeMemoryWriter(
-                store=store, policy=policy, now=_fixed_now, id_factory=id_factory
-            )
+                return FakeMemoryWriter(store=store, policy=policy, now=clock)
+            return FakeMemoryWriter(store=store, policy=policy, now=clock, id_factory=id_factory)
 
         return build
 
