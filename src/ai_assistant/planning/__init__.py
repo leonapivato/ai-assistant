@@ -12,6 +12,13 @@ holds the durable goals, plans and execution state (ADR-0014).
 from __future__ import annotations
 
 from ai_assistant.planning.execution import DEFAULT_MAX_ATTEMPTS, PlanExecution
+from ai_assistant.planning.planner import DEFAULT_PLAN_ATTEMPTS, ModelBackedPlanner
 from ai_assistant.planning.store import InMemoryPlanStore
 
-__all__ = ["DEFAULT_MAX_ATTEMPTS", "InMemoryPlanStore", "PlanExecution"]
+__all__ = [
+    "DEFAULT_MAX_ATTEMPTS",
+    "DEFAULT_PLAN_ATTEMPTS",
+    "InMemoryPlanStore",
+    "ModelBackedPlanner",
+    "PlanExecution",
+]
