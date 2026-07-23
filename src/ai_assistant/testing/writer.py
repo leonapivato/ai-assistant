@@ -21,26 +21,40 @@ a test can assert what its subject actually delegated.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
     MemorySource,
+    MemoryWrite,
+    MemoryWriteMode,
     Provenance,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 _DEFAULT_CONFLICT_LIMIT = 5
+
+#: Bound on the supersession re-mint loop, matching ``MemoryIngestor`` (ADR-0045
+#: §4). Duplicated rather than imported: the fake must not reach into `memory`.
+_MAX_SUPERSEDE_ATTEMPTS = 5
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
 
 # The only targets a user assertion may be folded onto (ADR-0038 §2a). Held here
 # rather than imported from `memory`, so the fake stays free of the subsystem's
@@ -63,7 +77,7 @@ class FakeMemoryWriter:
     failure ADR-0028 §Consequences names as the standing cost of this seam.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus two knobs
         self,
         *,
         store: MemoryStore,
@@ -71,6 +85,7 @@ class FakeMemoryWriter:
         conflict_threshold: float = _DEFAULT_CONFLICT_THRESHOLD,
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
         now: Clock = _utcnow,
+        id_factory: Callable[[], str] = _uuid,
     ) -> None:
         """Create the fake writer.
 
@@ -82,19 +97,26 @@ class FakeMemoryWriter:
             conflict_threshold: Minimum retrieval score for an existing record
                 to count as conflicting.
             conflict_limit: Maximum number of conflict candidates considered.
-            now: Clock used to stamp expiry on temporary stores; injectable so
-                a consumer's turn is deterministic. The loop's own clock does
-                *not* reach this one (ADR-0028 §4b). Guarded by
+            now: Clock used to stamp expiry on temporary stores and to close a
+                superseded target's window; injectable so a consumer's turn is
+                deterministic. The loop's own clock does *not* reach this one
+                (ADR-0028 §4b). Guarded by
                 :func:`~ai_assistant.core.clock.checked_clock`, the same guard
                 ``MemoryIngestor`` carries — which is what closes #186, where
                 this fake accepted a clock whose ``utcoffset()`` is indeterminate
                 and the production writer refused it.
+            id_factory: Mints the fresh id a ``SUPERSEDE`` writes its correction at
+                (ADR-0045 §4); injectable so a consumer's test asserts exact ids.
+                Guarded at its output by :func:`_checked_id`, the same guard
+                ``MemoryIngestor`` carries, so this fake refuses a malformed factory
+                exactly as the production writer does. Defaults to random UUIDs.
         """
         self._store = store
         self._policy = policy
         self._conflict_threshold = conflict_threshold
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="FakeMemoryWriter")
+        self._id_factory = id_factory
         self.calls: list[MemoryUpdateProposal] = []
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
@@ -137,12 +159,61 @@ class FakeMemoryWriter:
                 if target is None:
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
-                _refuse_unsafe_fold(target, proposed)
+                _refuse_unsafe_fold(target, proposed, decision.kind)
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    return await self._store.add(_supersede(target, proposed))
+                    return await self._apply_supersede(target, proposed)
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
+
+    async def _apply_supersede(self, target: MemoryRecord, proposed: MemoryRecord) -> str:
+        """Close ``target``'s window and write ``proposed`` at a fresh id (ADR-0045 §4).
+
+        Contract behaviour, mirroring ``MemoryIngestor``: the window-close of the
+        retained target and the insert-if-absent of the correction are one atomic
+        ``write_atomic`` batch (ADR-0046), the correction's id comes from the
+        guarded factory and is re-minted on a bounded number of collisions, and any
+        other store failure leaves the target live. A fake that rehomed the
+        correction onto the target's id, or blind-upserted a colliding id, would let
+        a consumer's test pass on state the production writer refuses.
+
+        Returns:
+            The correction's freshly-minted id — the id now holding the live belief.
+        """
+        closed_target = _close_window(target, self._now_utc())
+        last_conflict: MemoryStoreConflictError | None = None
+        for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
+            new_id = _checked_id(self._id_factory, owner="FakeMemoryWriter")
+            batch = [
+                MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT),
+                MemoryWrite(
+                    record=_supersede(proposed, new_id),
+                    mode=MemoryWriteMode.INSERT_IF_ABSENT,
+                ),
+            ]
+            try:
+                await self._store.write_atomic(batch)
+            except MemoryStoreConflictError as exc:
+                last_conflict = exc
+                continue
+            return new_id
+        msg = (
+            f"supersession could not mint a free id for a correction to {target.id!r} "
+            f"after {_MAX_SUPERSEDE_ATTEMPTS} attempts; the target is left live and unchanged"
+        )
+        raise MemoryStoreError(msg) from last_conflict
+
+    def _now_utc(self) -> datetime:
+        """The guarded clock's reading, as a ``MemoryStoreError`` on a bad reading.
+
+        Load-bearing for :meth:`_apply_supersede`'s window-close, which installs
+        ``valid_until`` via ``model_copy(update=...)`` — a path pydantic never
+        validates — exactly as :meth:`_expiry` is for the expiry write.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            raise MemoryStoreError(str(exc)) from exc
 
     def _expiry(self, ttl: timedelta | None) -> datetime | None:
         """Stamp an expiry ``ttl`` from now, in UTC, failing the way a store does.
@@ -166,27 +237,33 @@ class FakeMemoryWriter:
         if ttl is None:
             return None
         try:
-            now = self._clock()
-        except ClockReadingError as exc:
-            raise MemoryStoreError(str(exc)) from exc
-        try:
-            return now + ttl
+            return self._now_utc() + ttl
         except OverflowError as exc:
             msg = f"temporary-store ttl {ttl!r} overflows the representable date range"
             raise MemoryStoreError(msg) from exc
 
 
-def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
+def _refuse_unsafe_fold(
+    target: MemoryRecord, incoming: MemoryRecord, kind: MemoryDecisionKind
+) -> None:
     """Refuse a fold that would destroy data, as ``MemoryIngestor`` does.
 
-    Contract, not tuning (ADR-0040 §5b): every fold writes at the *target's* id,
-    so a ``REINFORCE`` or ``SUPERSEDE`` must raise and write nothing when the
-    target is ``USER_ASSERTED``, or when the incoming record is ``USER_ASSERTED``
-    and the target is ``EXTERNAL``. Keyed on the records, before either arm is
-    chosen. Duplicated from ``MemoryIngestor`` deliberately: the fake owes the
-    same refusals but must not reach into the ``memory`` subsystem to get them
-    (golden rule 1), so a consumer's test cannot pass on state the production
-    writer would have refused.
+    Contract, not tuning (ADR-0040 §5b, as narrowed by ADR-0045 §5). Two refusals,
+    differing in whether the ruling matters because ADR-0045 §4 made only
+    ``SUPERSEDE`` mint a new id:
+
+    - **Clause 1 — any fold onto a ``USER_ASSERTED`` target**, under either ruling.
+      Kept record-keyed: the conflict signal is too weak to retire a record the
+      user gave us, which the window does not change (ADR-0045 §5).
+    - **Clause 2 — a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target,
+      ``REINFORCE`` only.** A ``REINFORCE`` still inherits the external id and is
+      overwritten by the next sync (ADR-0038 §2a); a ``SUPERSEDE`` now gets a fresh
+      id and is permitted (ADR-0045 §5b), so the arm is narrowed to ``REINFORCE``.
+
+    Duplicated from ``MemoryIngestor`` deliberately: the fake owes the same
+    refusals but must not reach into the ``memory`` subsystem to get them (golden
+    rule 1), so a consumer's test cannot pass on state the production writer would
+    have refused.
 
     Raises:
         MemoryStoreError: If the fold is one of the two above.
@@ -194,30 +271,68 @@ def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
     if target.provenance.source is MemorySource.USER_ASSERTED:
         msg = (
             f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
-            f"be folded onto a user-asserted one (ADR-0038 §3)"
+            f"be folded onto a user-asserted one (ADR-0038 §3, ADR-0045 §5)"
         )
         raise MemoryStoreError(msg)
     if (
-        incoming.provenance.source is MemorySource.USER_ASSERTED
+        kind is MemoryDecisionKind.REINFORCE
+        and incoming.provenance.source is MemorySource.USER_ASSERTED
         and target.provenance.source not in _SUPERSEDABLE
     ):
         msg = (
-            f"refusing to fold onto {target.id!r}: a user assertion may not be folded onto a "
-            f"{target.provenance.source} record — only OBSERVED and INFERRED beliefs may be "
-            f"superseded (ADR-0038 §2a)"
+            f"refusing to reinforce onto {target.id!r}: a user assertion may not be reinforced "
+            f"onto a {target.provenance.source} record whose id it would inherit — only OBSERVED "
+            f"and INFERRED beliefs (ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
         )
         raise MemoryStoreError(msg)
 
 
-def _supersede(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
-    """Overturn ``target`` with ``incoming``, keeping only the target's id.
+def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
+    """Read the injected id factory, guarding its output like ``MemoryIngestor``.
+
+    The minted id is installed with ``model_copy(update=...)``, which skips
+    validators, so a raising, non-``str`` or empty reading must become a
+    ``MemoryStoreError`` *before* the write (ADR-0045 §4). Duplicated from the
+    production writer so the fake refuses a malformed factory identically.
+
+    Raises:
+        MemoryStoreError: If the factory raises, or returns a non-``str`` or empty
+            id.
+    """
+    try:
+        minted = id_factory()
+    except Exception as exc:  # any factory failure is the store's error, not the caller's
+        msg = f"the id factory injected into {owner} raised while minting a supersession id"
+        raise MemoryStoreError(msg) from exc
+    if not isinstance(minted, str) or not minted:
+        msg = f"the id factory injected into {owner} returned a non-str or empty id: {minted!r}"
+        raise MemoryStoreError(msg)
+    return minted
+
+
+def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
+    """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
+
+    The target is retained off the read path with ``valid_until = now``; every
+    other field, ``valid_from`` included, is preserved. ``now`` must be a guarded,
+    aware-UTC reading, since ``model_copy(update=...)`` skips validators.
+    """
+    closed = target.validity.model_copy(update={"valid_until": now})
+    return target.model_copy(update={"validity": closed})
+
+
+def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:
+    """The superseding record: ``incoming`` at a fresh, target-free id (ADR-0045 §4).
 
     Nothing of the overturned belief is carried across — not its content, its
-    provenance, its ``evidence``, nor its ``confidence`` — only the id the
-    surviving record is written at (ADR-0040 §5a). Contract, unlike ``_merge``'s
-    fold rule: "carries nothing across" is a complete specification.
+    provenance, its ``evidence``, nor its ``confidence`` (ADR-0038 §1a). ADR-0045
+    §4 stopped rehoming the correction onto the target's id: the target is retained
+    with a closed window (:func:`_close_window`) and the correction becomes a *new*
+    record at the minted id, written insert-if-absent so a collision is rejected.
+    "Carries nothing across, at an id absent from the store" is a complete
+    specification, unlike ``_merge``'s fold rule.
     """
-    return incoming.model_copy(update={"id": target.id})
+    return incoming.model_copy(update={"id": new_id})
 
 
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
