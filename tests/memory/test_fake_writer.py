@@ -21,6 +21,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
 
@@ -136,3 +137,34 @@ async def test_an_unrepresentable_temporary_ttl_is_the_subsystems_error() -> Non
         await writer.ingest(_proposal("pref-1"))
 
     assert await store.export() == []
+
+
+async def test_supersede_refuses_a_future_dated_target_without_writing() -> None:
+    """The fake carries the same data-integrity floor as ``MemoryIngestor``.
+
+    A producer-set ``valid_from`` at or after the writer's clock would close to an
+    empty/inverted window the durable store rejects on decode, so the fake refuses
+    before the write rather than let a consumer's test pass on state the production
+    writer could not persist (issue #306).
+    """
+    store = FakeMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
+    await store.add(
+        PreferenceMemory(
+            id="existing",
+            content="prefers concise emails",  # matches `_proposal`, so it is a conflict
+            preference="prefers concise emails",
+            validity=Validity(valid_from=datetime(2026, 9, 1, tzinfo=UTC)),  # after _fixed_now
+            provenance=Provenance(
+                source=MemorySource.INFERRED, confidence=0.6, last_updated=_fixed_now()
+            ),
+        )
+    )
+    before = await store.export()
+    writer = FakeMemoryWriter(
+        store=store, policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_fixed_now
+    )
+
+    with pytest.raises(MemoryStoreError, match="valid_from"):
+        await writer.ingest(_proposal("correction"))
+
+    assert await store.export() == before  # fail-closed: nothing written, target untouched
