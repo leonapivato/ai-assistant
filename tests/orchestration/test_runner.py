@@ -302,6 +302,26 @@ class TurncoatTrail(FakeAuditTrail):
         return recorded
 
 
+class RedirectingTrail(FakeAuditTrail):
+    """A trail that lets a caller repoint its own ``state`` while a write is in flight.
+
+    The interleaving that defeats a stage which authenticates the stored
+    execution and then reads ``state.id``/``state.version`` again after an await:
+    the ``record`` this stage does before any transition is that await.
+    """
+
+    def __init__(self, redirect: Callable[[], None]) -> None:
+        """Run ``redirect`` mid-``record``, as a concurrent mutation would."""
+        super().__init__()
+        self._redirect = redirect
+
+    async def record(self, decision: PermissionDecision) -> str:
+        """Append, giving the caller the await it needs to move its state."""
+        recorded = await super().record(decision)
+        self._redirect()
+        return recorded
+
+
 class ForgetfulPlanStore(FakePlanStore):
     """A store whose execution outlives the plan it names.
 
@@ -414,7 +434,9 @@ async def test_several_candidates_commit_nothing_and_leave_the_step_pending() ->
     result = await harness.runner.run(state, STEP, timeout=PATIENT)
 
     assert result.disposition is Disposition.AMBIGUOUS_CAPABILITY
-    assert result.state is state
+    # Value-equal to the input: nothing was committed. It is the private snapshot
+    # `run` detaches on entry, not the caller's object by identity.
+    assert result.state == state
     stored = await stored_step(harness.plans, state)
     assert stored.status is StepStatus.PENDING
     assert stored.skip_reason is None
@@ -907,6 +929,47 @@ async def test_a_step_rewritten_mid_ruling_does_not_move_its_neighbour() -> None
     assert ruled_on.skip_reason is SkipReason.APPROVAL_DENIED
     assert untouched.status is StepStatus.PENDING
     assert untouched.approval_ref is None
+
+
+async def test_a_state_repointed_mid_ruling_claims_the_execution_it_authenticated() -> None:
+    """`run` claims the execution it read history from, not one `state` is moved to.
+
+    `run` authenticates the stored execution through `_opened`, then — after the
+    registry, the policy and the trail have awaited — commits and hands the
+    executor a claim. `ExecutionState` is mutable (`frozen=True` is not set), so a
+    caller sharing the object could repoint `state.id`/`state.version` to a
+    *second* execution of the same plan, whose matching step is still `PENDING`
+    and claimable at its own version, while a write is suspended. The private
+    snapshot `run` takes on entry (`_detached_state`) is what keeps the claim on
+    the authenticated execution.
+    """
+    plans = FakePlanStore(now=lambda: AT)
+    step = plan_step()
+    first = await an_execution(plans, step)  # execution A, authenticated below
+    second = await plans.start_execution("p-1")  # execution B, same plan
+    a_id = first.id
+
+    def repoint() -> None:
+        first.id = second.id
+        first.version = second.version
+
+    harness = Harness(tools=(tool(),), plans=plans, trail=RedirectingTrail(repoint))
+
+    result = await harness.runner.run(first, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    ran = await plans.get_execution(a_id)
+    other = await plans.get_execution(second.id)
+    assert ran is not None
+    assert other is not None
+    ran_step = ran.step(STEP)
+    other_step = other.step(STEP)
+    assert ran_step is not None
+    assert other_step is not None
+    # A ran under the authority that authenticated it; B was never claimed.
+    assert ran_step.status is StepStatus.SUCCEEDED
+    assert other_step.status is StepStatus.PENDING
+    assert len(harness.invoker.invocations) == 1
 
 
 # --- the step comes from the plan (ADR-0037 §2) --------------------------

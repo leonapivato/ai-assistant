@@ -53,6 +53,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import AuditError, PermissionDeniedError, PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
+    ExecutionState,
     PermissionDecision,
     PermissionOutcome,
     PlanStep,
@@ -74,7 +75,6 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from ai_assistant.core.types import (
-        ExecutionState,
         PermissionRuling,
         ToolDefinition,
     )
@@ -154,6 +154,49 @@ def _detached_step(step: PlanStep) -> PlanStep:
         return PlanStep.model_validate(step.model_dump())
     except ValidationError as exc:
         msg = "the plan step did not survive revalidation, so it is not the step that was planned"
+        raise PlanningError(msg) from exc
+
+
+def _detached_state(state: ExecutionState) -> ExecutionState:
+    """A private copy of the caller's execution state, taken before the first await.
+
+    **Both guards this stage runs on the caller's ``state`` — :meth:`StepRunner._opened`
+    reading history from the store, :meth:`StepRunner._check_parked` proving the step
+    is genuinely parked — are defeated if the two fields the transitions and the
+    executor read from ``state`` can change after those guards pass.** ADR-0037
+    §§2 and 4 make the store, not the argument, the authority on what has
+    happened, and leave the caller only its CAS token, its ``version``. But
+    ``ExecutionState`` is a plain pydantic model (``frozen=True`` is not set), so
+    ``state.id`` and ``state.version`` are ordinary mutable attributes, and every
+    durable effect — ``_skip``, ``_queue_for_approval`` and the executor's own
+    claim — reads them *after* the registry lookup, the policy ruling and the
+    trail writes have awaited.
+
+    A caller sharing this object with another task can therefore authenticate
+    execution A through both guards and, while an await is suspended, rewrite
+    ``state.id`` and ``state.version`` to execution B — a *second* run of the same
+    plan, whose matching step is still claimable at its own version. The claim,
+    the invocation and the durable record then land on B, driven by a request and
+    a decision derived from A: the exact cross-execution substitution
+    ``_check_parked`` refuses one branch of, reintroduced through the fields it
+    does not own. Reading ``state.id``/``state.version`` off a private snapshot
+    the caller has no handle on removes the move rather than checking for it — the
+    same reasoning :func:`_detached_step` and
+    :func:`~ai_assistant.orchestration.executor._detached` apply to the plan step
+    and the tool call, for the two fields left.
+
+    The copy is taken before any await, so the snapshot is the state as the caller
+    named it on entry; ``version`` is unchanged by the copy and remains the CAS
+    token the store adjudicates.
+
+    Raises:
+        PlanningError: If the state does not survive revalidation. Raised before
+            any await, so an unusable state touches no durable state.
+    """
+    try:
+        return ExecutionState.model_validate(state.model_dump())
+    except ValidationError as exc:
+        msg = "the execution state did not survive revalidation, so it is not the one named"
         raise PlanningError(msg) from exc
 
 
@@ -313,6 +356,10 @@ class StepRunner:
             ToolBindingError: From the executor, if the authorised call does not
                 survive its own revalidation.
         """
+        # Every field a later transition or the executor reads from `state` is
+        # taken from this private copy, so a caller sharing the object cannot
+        # rewrite the execution out from under the guards (`_detached_state`).
+        state = _detached_state(state)
         opened = await self._opened(state)
         step = await self._planned(opened, step_id)
         self._check_pending(opened, step_id)
@@ -418,6 +465,10 @@ class StepRunner:
                 a mismatched answer cannot become a recorded decision.
             PlanningError: As :meth:`run`.
         """
+        # A private copy for `run`'s reason: `_check_parked` authenticates the
+        # stored execution, and the claim must land on the same one, not on a
+        # `state` a caller can rewrite mid-await (`_detached_state`).
+        state = _detached_state(state)
         opened = await self._opened(state)
         step = await self._planned(opened, step_id)
         confirmed = await self._recorded(confirmation_id)
@@ -679,6 +730,12 @@ class StepRunner:
         past are checkable against the store and are checked, and the one field
         that is a claim about *concurrency* is left to the mechanism designed to
         settle it.
+
+        ``state`` here is already the private snapshot :meth:`run` and
+        :meth:`resume` take on entry (:func:`_detached_state`), so the ``id`` this
+        loads by and the ``version`` the transitions carry are the ones the caller
+        named *before* the first await — not values a shared object could change
+        once a guard has passed.
 
         Raises:
             PlanningError: If the store holds no execution with that id.
