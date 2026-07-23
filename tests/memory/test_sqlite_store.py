@@ -331,6 +331,49 @@ async def test_write_atomic_rolls_back_a_non_sqlite_mid_batch_error(
     assert await store.get("c") is not None
 
 
+async def test_write_atomic_snapshots_records_against_mid_call_mutation(tmp_path: Path) -> None:
+    # write_atomic reads record fields across the embedding awaits. A caller
+    # aliasing a submitted record and mutating it mid-call must not be able to
+    # subvert the batch: it is snapshotted before the first await. Here an embedder
+    # rewrites the *second* record's id to collide with the first and changes its
+    # content, mid-embed — the corruption ADR-0046 §3 forbids. The snapshot makes
+    # the mutation a no-op: both original ids persist with their original content.
+    rec_a = _semantic("a", "alpha")
+    rec_b = _semantic("b", "beta")
+
+    class _MutatingEmbedder:
+        """Mutates a caller-held record from inside embed(), simulating aliasing."""
+
+        def __init__(self) -> None:
+            self._inner = HashingEmbedder(dimensions=8)
+
+        @property
+        def model_id(self) -> str:
+            return "mutating-8"
+
+        @property
+        def dimensions(self) -> int:
+            return 8
+
+        async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+            rec_b.id = "a"  # would collide with rec_a if the batch read the live record
+            rec_b.content = "mutated"
+            return await self._inner.embed(texts)
+
+    store = SqliteMemoryStore(path=tmp_path / "snap.db", embedder=_MutatingEmbedder())
+    try:
+        await store.write_atomic([MemoryWrite(record=rec_a), MemoryWrite(record=rec_b)])
+
+        got_a = await store.get("a")
+        got_b = await store.get("b")
+        assert got_a is not None
+        assert got_a.content == "alpha"  # not overwritten by a second write to "a"
+        assert got_b is not None  # b survived under its original id...
+        assert got_b.content == "beta"  # ...with content matching its embedding
+    finally:
+        store.close()
+
+
 async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Path) -> None:
     # ADR-0046 §4's durability obligation, which the in-process fault test above
     # cannot reach: a process killed mid-batch (after the first transactional write,

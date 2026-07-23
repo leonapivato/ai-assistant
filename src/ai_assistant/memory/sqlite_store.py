@@ -305,29 +305,25 @@ class SqliteMemoryStore:
                 any backend failure (with the ``sqlite3`` cause retained). Nothing
                 is written.
         """
-        self._reject_repeated_ids(writes)
-        if not writes:
-            return []
-        prepared: list[tuple[MemoryRecord, MemoryWriteMode, Embedding]] = []
-        for write in writes:
-            vector = await self._embed_one(write.record.content)
-            prepared.append((write.record, write.mode, vector))
-        async with self._lock:
-            await asyncio.to_thread(self._write_atomic_sync, prepared)
-        return [write.record.id for write in writes]
-
-    @staticmethod
-    def _reject_repeated_ids(writes: Sequence[MemoryWrite]) -> None:
-        """Refuse a batch that writes the same id twice (ADR-0046 §3).
-
-        Checked before the transaction opens: two writes to one id is the case a
-        sequential SQLite apply resolves differently from a stage-then-swap fake,
-        so it is forbidden rather than defined.
-        """
-        ids = [write.record.id for write in writes]
+        # Snapshot every record *before the first await*, so a caller aliasing a
+        # submitted record and mutating it across the embedding awaits cannot
+        # change the id the duplicate-id check validated, desync content from the
+        # embedding computed for it, or otherwise alter the committed write-set
+        # (ADR-0046 §3). Everything downstream reads only the immutable snapshot.
+        snapshot = [(write.record.model_copy(deep=True), write.mode) for write in writes]
+        ids = [record.id for record, _ in snapshot]
         if len(set(ids)) != len(ids):
             msg = "an atomic batch may not write the same id twice"
             raise MemoryStoreError(msg)
+        if not snapshot:
+            return []
+        prepared: list[tuple[MemoryRecord, MemoryWriteMode, Embedding]] = []
+        for record, mode in snapshot:
+            vector = await self._embed_one(record.content)
+            prepared.append((record, mode, vector))
+        async with self._lock:
+            await asyncio.to_thread(self._write_atomic_sync, prepared)
+        return ids
 
     def _write_atomic_sync(
         self, prepared: Sequence[tuple[MemoryRecord, MemoryWriteMode, Embedding]]
