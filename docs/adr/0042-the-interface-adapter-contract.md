@@ -142,6 +142,17 @@ builder and does no construction or injection itself (§6). Sharing the builder 
 what keeps those security-critical invariants in a single audited place rather
 than re-implemented per front end, and keeps each adapter thin.
 
+**The composition root owns the resources it opens, and the façade carries that
+ownership out.** The concrete stores are connection-owning —
+`SqliteMemoryStore.close()` and `SqliteAuditTrail.close()` each hold an open
+SQLite connection — so the builder must (a) close any resource it has already
+opened if a later one fails to construct, returning no half-built façade with an
+orphaned connection, and (b) hand the successfully-built façade a close/shutdown
+path (an async context manager, or an `aclose()`), so a long-lived process — an
+API front end above all — has a defined owner that releases every connection on
+shutdown rather than leaking it. Closing the façade when a session ends is the
+adapter's own lifecycle I/O, which §6 permits.
+
 The builder can only wire a subsystem that *has* a production implementation.
 Where one does not yet exist — today the `Planner` has only
 `ai_assistant.testing.FakePlanner`, which production code may not import — that
@@ -173,12 +184,18 @@ from reading the registry, the audit trail, or a `PermissionDecision` (§6), the
 *engine* is what assembles them into the result:
 
 - **Display-safe confirmation content** — enough for a person to judge the action:
-  the selected tool's human-readable name/description and the parameters it would
-  run with, rendered safe by the engine. The stage-level `StepDisposition` carries
-  only `tool_id`, which is not enough for a human to confirm "send email to X"; so
-  the façade's confirmation outcome is a **richer `orchestration`-level DTO** (§1)
-  that the implementation lane defines to hold this content. This is the concrete
-  reason §3's result type is the façade's own, not a raw stage DTO.
+  the selected tool's human-readable name/description, the parameters it would run
+  with, **and the recorded `CONFIRM` ruling's own `reason`** — all rendered safe by
+  the engine. The reason is not optional: `PermissionRuling.reason` is defined as
+  "text shown to the user at the moment they decide" (`core/types.py`), so a prompt
+  that omitted it would drop the policy's own explanation of *why* confirmation is
+  required — an off-device disclosure, an unknown cost — which is exactly what the
+  user needs to decide. The stage-level `StepDisposition` carries only `tool_id`,
+  and the adapter may not read the `PermissionDecision` to recover the rest (§6);
+  so the façade's confirmation outcome is a **richer `orchestration`-level DTO**
+  (§1) that the implementation lane defines to hold the tool content *and* the
+  ruling reason. This is the concrete reason §3's result type is the façade's own,
+  not a raw stage DTO.
 
 - **An opaque continuation token** — everything the engine needs to resume the
   exact parked step and no more. Today that is the recorded `CONFIRM`'s
@@ -223,9 +240,10 @@ adapter.
 
 An adapter (golden rule 3) **may**:
 
-- **I/O**: read argv/stdin/keypresses, write to stdout/stderr, manage the TTY,
-  set process exit codes, install logging via `configure_logging`, load
-  `Settings`.
+- **I/O and lifecycle**: read argv/stdin/keypresses, write to stdout/stderr,
+  manage the TTY, set process exit codes, install logging via
+  `configure_logging`, load `Settings`, and close the façade when the session
+  ends (releasing the resources §2 gives the façade to own).
 - **Adaptation**: parse input into an utterance string; map a yes/no answer to
   `approved: bool`; supply a per-call timeout budget (the *caller's* budget, which
   ADR-0029 §4 explicitly assigns to the caller, not the tool).
@@ -263,8 +281,10 @@ script). It is responsible for:
 - an entry command (e.g. a one-shot `ask` and/or an interactive session) that
   obtains the façade from the composition root, drives one or more turns, and
   renders each outcome;
-- prompting for confirmations and relaying the yes/no via `resume`;
-- surfacing degraded memory and errors, and setting a meaningful exit code.
+- prompting for confirmations — rendering the tool content *and* the ruling
+  reason (§4) — and relaying the yes/no via `resume`;
+- surfacing degraded memory and errors, setting a meaningful exit code, and
+  closing the façade on exit (§2).
 
 It is **not** responsible for planning, tool selection, permission decisions,
 persistence, subsystem construction, or any engine stage — all of which it
