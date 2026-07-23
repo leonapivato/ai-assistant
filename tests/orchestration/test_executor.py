@@ -548,7 +548,8 @@ async def test_a_failure_is_committed_with_its_message() -> None:
     # kind *and* its message, unedited (ADR-0039 §6). A raising tool is INTERNAL
     # and the fake authors "<ExcType> escaped tool <id>".
     assert step.failure.kind is ToolFailureKind.INTERNAL
-    assert "escaped tool" in step.failure.message
+    # Exact equality: the tool's authored message crosses unedited (ADR-0039 §6).
+    assert step.failure.message == f"RuntimeError escaped tool {tool().id!r}"
     assert step.finished_at is not None
     assert implementation.calls == 1
 
@@ -578,7 +579,9 @@ async def test_a_live_deadline_expiry_reaches_indeterminate() -> None:
     # wrote `StepFailure(kind=None, message=_UNEXPLAINED)` here.
     assert step.failure is not None
     assert step.failure.kind is ToolFailureKind.TIMED_OUT
-    assert "did not finish within" in step.failure.message
+    # Exact equality, not a substring: the message crosses *unedited* (ADR-0039
+    # §6, ADR-0032 §5), so an executor that prefixed or truncated it must fail.
+    assert step.failure.message == f"tool {tool().id!r} did not finish within {BRIEF}"
 
 
 async def test_a_read_only_deadline_expiry_reaches_failed() -> None:
