@@ -485,24 +485,56 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
     assert closed.is_set()
 
 
-async def test_a_duplicate_continuation_handle_is_refused() -> None:
-    """A reused handle would rebind consent to another step, so it fails closed (§4)."""
+async def test_a_colliding_handle_factory_still_yields_distinct_tokens() -> None:
+    """Handle uniqueness is the engine's invariant, so consent never rebinds (§4).
+
+    A factory that repeats a handle must not overwrite one parked step with
+    another (which would resume the wrong action), nor strand the second step by
+    refusing it — the engine disambiguates to a unique handle instead.
+    """
 
     class CollidingFactory:
-        """Mints the same handle twice."""
-
-        def __init__(self) -> None:
-            self._minted = 0
+        """Always mints the same handle."""
 
         def __call__(self) -> str:
-            self._minted += 1
             return "same"
 
     harness = Harness(tools=(confirmable(),))
     harness.engine._id_factory = CollidingFactory()
 
     # Same utterance both turns, so the fixed-id goal/plan re-save idempotently and
-    # each turn parks its own execution — the second reuses the handle.
+    # each turn parks its own execution.
+    first = await harness.engine.converse("send it", timeout=PATIENT)
+    second = await harness.engine.converse("send it", timeout=PATIENT)
+    token_one = first.step.confirmation.token  # type: ignore[union-attr]
+    token_two = second.step.confirmation.token  # type: ignore[union-attr]
+    assert token_one != token_two  # distinct despite the colliding factory
+
+    # The first token resolves the first execution, not the second — no rebind.
+    first_execution = first.step.state.id  # type: ignore[union-attr]
+    resumed = await harness.engine.resume(token_one, approved=True, timeout=PATIENT)
+    assert resumed.step is not None
+    assert resumed.step.state.id == first_execution
+    # The second token is still answerable on its own execution.
+    resumed_two = await harness.engine.resume(token_two, approved=True, timeout=PATIENT)
+    assert resumed_two.step is not None
+    assert resumed_two.step.state.id == second.step.state.id  # type: ignore[union-attr]
+
+
+async def test_aclose_attempts_every_closer_even_when_one_fails() -> None:
+    """A raising closer must not skip the resources after it (§2 releases every one)."""
+    closed: list[str] = []
+
+    async def close_a() -> None:
+        closed.append("a")
+        msg = "resource a would not close"
+        raise RuntimeError(msg)
+
+    async def close_b() -> None:
+        closed.append("b")
+
+    harness = Harness(tools=(tool(),), closers=(close_a, close_b))
     await harness.engine.converse("send it", timeout=PATIENT)
-    with pytest.raises(RuntimeError, match="already in use"):
-        await harness.engine.converse("send it", timeout=PATIENT)
+    with pytest.raises(ExceptionGroup):
+        await harness.engine.aclose()
+    assert closed == ["a", "b"]  # b was closed despite a failing first
