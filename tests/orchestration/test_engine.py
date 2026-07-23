@@ -436,3 +436,73 @@ async def test_a_cancelled_call_does_not_abandon_its_underlying_work() -> None:
     release.set()
     await closing
     assert finished.is_set()  # the drain waited for the orphaned work to quiesce
+
+
+async def test_cancelling_aclose_still_closes_the_resources() -> None:
+    """A cancelled aclose does not leave connections open (§2 ownership).
+
+    The drain-and-close is one memoised task every caller awaits shielded, so
+    cancelling *this* caller cannot abandon the closures: the task runs on, and a
+    later aclose awaits the same task rather than returning over unclosed
+    resources.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    class GatedPlanner:
+        async def plan(
+            self,
+            goal: Goal,
+            *,
+            context: CurrentContext,
+            memories: Sequence[MemoryRecord] = (),
+        ) -> ActionPlan:
+            entered.set()
+            await release.wait()
+            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+
+    async def close() -> None:
+        closed.set()
+
+    harness = Harness(planner=GatedPlanner(), closers=(close,))
+    call = asyncio.ensure_future(harness.engine.converse("send it", timeout=PATIENT))
+    await entered.wait()
+
+    # First aclose blocks on the drain; cancel it while it waits.
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert not closed.is_set()  # nothing closed yet — the drain is still waiting
+
+    # The shutdown task survives the cancellation; letting work finish and awaiting
+    # aclose again completes the closures exactly once.
+    release.set()
+    await call
+    await harness.engine.aclose()
+    assert closed.is_set()
+
+
+async def test_a_duplicate_continuation_handle_is_refused() -> None:
+    """A reused handle would rebind consent to another step, so it fails closed (§4)."""
+
+    class CollidingFactory:
+        """Mints the same handle twice."""
+
+        def __init__(self) -> None:
+            self._minted = 0
+
+        def __call__(self) -> str:
+            self._minted += 1
+            return "same"
+
+    harness = Harness(tools=(confirmable(),))
+    harness.engine._id_factory = CollidingFactory()
+
+    # Same utterance both turns, so the fixed-id goal/plan re-save idempotently and
+    # each turn parks its own execution — the second reuses the handle.
+    await harness.engine.converse("send it", timeout=PATIENT)
+    with pytest.raises(RuntimeError, match="already in use"):
+        await harness.engine.converse("send it", timeout=PATIENT)
