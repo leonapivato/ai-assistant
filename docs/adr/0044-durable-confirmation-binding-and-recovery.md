@@ -1,6 +1,6 @@
 # 44. Durable confirmation: binding a parked CONFIRM to its execution, recoverable after restart
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-22
 - **This is a contract change, and a cross-subsystem one.** It adds a field to
   `ActionRequest` and `PermissionDecision` in `core/types.py` (read by
