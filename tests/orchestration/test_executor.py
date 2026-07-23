@@ -544,8 +544,11 @@ async def test_a_failure_is_committed_with_its_message() -> None:
     step = await stored_step(store, state)
     assert step.status is StepStatus.FAILED
     assert step.failure is not None
-    assert step.failure.kind is ToolFailureKind.INTERNAL, "the tool's own kind crosses verbatim"
-    assert step.failure.message
+    # The seam's failure crosses by value onto the FAILED step: the tool's own
+    # kind *and* its message, unedited (ADR-0039 §6). A raising tool is INTERNAL
+    # and the fake authors "<ExcType> escaped tool <id>".
+    assert step.failure.kind is ToolFailureKind.INTERNAL
+    assert "escaped tool" in step.failure.message
     assert step.finished_at is not None
     assert implementation.calls == 1
 
@@ -569,6 +572,13 @@ async def test_a_live_deadline_expiry_reaches_indeterminate() -> None:
     assert step.status is StepStatus.INDETERMINATE
     assert step.finished_at is not None
     assert step.attempts == 1, "an INDETERMINATE outcome is never auto-retried"
+    # #208's live half: the seam's TIMED_OUT failure crosses by value onto the
+    # INDETERMINATE step, not dropped and not replaced with an authored stand-in
+    # (ADR-0039 §6). Asserting only the status would pass an implementation that
+    # wrote `StepFailure(kind=None, message=_UNEXPLAINED)` here.
+    assert step.failure is not None
+    assert step.failure.kind is ToolFailureKind.TIMED_OUT
+    assert "did not finish within" in step.failure.message
 
 
 async def test_a_read_only_deadline_expiry_reaches_failed() -> None:
