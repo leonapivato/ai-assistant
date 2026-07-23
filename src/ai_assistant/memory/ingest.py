@@ -92,10 +92,12 @@ def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
 
 
 def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
-    """Refuse a ``MERGE`` that would destroy data, whichever direction it runs.
+    """Refuse a fold that would destroy data, whichever ruling asks for it.
 
-    **Every** fold — reinforcing or superseding — writes at the *target's* id, so
-    the target is always overwritten. Two folds are therefore refused outright:
+    Runs before either a ``REINFORCE`` or a ``SUPERSEDE`` arm is selected and is
+    keyed on the *records*, not on the relation the ruling names (ADR-0040 §3):
+    **every** fold writes at the *target's* id, so the target is always
+    overwritten. Two folds are therefore refused outright:
 
     - **Any fold onto a ``USER_ASSERTED`` target.** Whatever the proposal's
       source, the write replaces what the user told us, and for a non-asserted
@@ -121,9 +123,9 @@ def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
     thoroughly.
 
     Fail-closed rather than silently downgrading, for the reason that already
-    makes an absent ``MERGE`` target raise instead of falling back to storing
-    the proposal as new: a write that loses data while reporting success is
-    worse than one that stops.
+    makes an absent fold target raise instead of falling back to storing the
+    proposal as new: a write that loses data while reporting success is worse
+    than one that stops.
 
     Raises:
         MemoryStoreError: If the fold is one of the two above.
@@ -173,9 +175,9 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     so a merge strengthens rather than weakens what is known.
 
     **Reinforcement only.** Both halves of that — the union and the maximum —
-    assume the two records *agree*, so this must not be used where ``incoming``
-    contradicts ``target``: see :func:`_overturns`, which routes that case to
-    :func:`_supersede` instead.
+    assume the two records *agree*. Only a ``REINFORCE`` ruling reaches this
+    function (ADR-0040 §3): a contradiction is a ``SUPERSEDE``, which
+    :meth:`MemoryIngestor._apply` routes to :func:`_supersede` instead.
     """
     provenance = Provenance(
         source=incoming.provenance.source,
@@ -252,13 +254,14 @@ class MemoryIngestor:
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
         """Detect conflicts, apply the policy, and persist the outcome.
 
-        The three steps are one **read-modify-write**: a ``MERGE`` folds the
-        proposal into a conflict snapshot taken by the search above it, and
-        writes the result back at that record's id. Interleaved, two ingests
-        both snapshot the same target before either writes, and the second
-        ``add`` silently discards the first — with both callers handed a healthy
-        result. Since ADR-0038 the discarded write may be a user correction, so
-        the whole sequence is serialised on a lock held by this ingestor.
+        The three steps are one **read-modify-write**: a fold (``REINFORCE`` or
+        ``SUPERSEDE``) folds the proposal into a conflict snapshot taken by the
+        search above it, and writes the result back at that record's id.
+        Interleaved, two ingests both snapshot the same target before either
+        writes, and the second ``add`` silently discards the first — with both
+        callers handed a healthy result. Since ADR-0038 the discarded write may
+        be a user correction, so the whole sequence is serialised on a lock held
+        by this ingestor.
 
         What that does **not** cover, stated plainly because the guarantee is
         narrower than "ingestion is safe":
@@ -321,26 +324,20 @@ class MemoryIngestor:
             case MemoryDecisionKind.STORE_TEMPORARY:
                 expires_at = self._expiry(decision.ttl)
                 return await self._store.add(proposed.model_copy(update={"expires_at": expires_at}))
-            case MemoryDecisionKind.MERGE:
-                target = next((c for c in conflicts if c.id == decision.merge_into), None)
+            case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
+                target = next((c for c in conflicts if c.id == decision.target_id), None)
                 if target is None:
-                    # A MERGE naming an absent target must fail loudly: silently
+                    # A fold naming an absent target must fail loudly: silently
                     # storing the proposal as new would create the duplicate the
-                    # merge was meant to prevent, while reporting success.
-                    msg = f"MERGE target {decision.merge_into!r} is not among the conflicts"
+                    # fold was meant to prevent, while reporting success.
+                    msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
                 _refuse_unsafe_fold(target, proposed)
                 # Past the refusal, only a recoverable belief can be overwritten.
-                # Which relation a MERGE expresses — reinforcement or
-                # supersession — is then read off the proposal's provenance,
-                # because `MemoryDecisionKind` has one MERGE for both and
-                # distinguishing them in `core` would be a contract change. That
-                # reading is a *precondition*, not a derivation (ADR-0038 §1b):
-                # only the policy knows, and the contract gives it no channel to
-                # say so. It holds for every policy that ships, and issue #256
-                # removes the need for it. Nothing unrecoverable rests on it —
-                # the refusal above runs first, for every policy.
-                if proposed.provenance.source is MemorySource.USER_ASSERTED:
+                # The ruling names the relation, so the ingestor no longer reads
+                # provenance to recover it (ADR-0040 §3): SUPERSEDE overturns the
+                # target and carries nothing across, REINFORCE folds the two.
+                if decision.kind is MemoryDecisionKind.SUPERSEDE:
                     return await self._store.add(_supersede(target, proposed))
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.

@@ -1,7 +1,15 @@
 # 38. A user assertion supersedes a conflicting inference
 
-- Status: Accepted
+- Status: Accepted, §1b discharged by ADR-0040
 - Date: 2026-07-22
+- Amended: 2026-07-22 by ADR-0040 — §1b's precondition retires. ``REINFORCE`` and
+  ``SUPERSEDE`` are now distinct ``MemoryDecisionKind`` members, so the policy
+  names the relation and ``MemoryIngestor`` no longer infers it from provenance.
+  §1b is annotated as discharged, and the three §Consequences entries it governs
+  — "``MERGE`` now means two different things at the ingestor", "Writing a new
+  ``MemoryPolicy`` now carries a constraint that is not on the Protocol", and the
+  issue #256 clause of "Revisit when" — are marked closed below. §§1a, 2, 2a, 3,
+  4 and 5 are unchanged; only the inference machinery in §1b goes.
 - **Not a contract change.** `MemoryPolicy` is ratified by
   [ADR-0005](0005-memory-model.md) §3 and unchanged here; no Protocol moves, no
   `MemoryDecisionKind` is added, and no `core` type is touched. This ADR changes
@@ -53,6 +61,15 @@ The forces:
 ## Decision
 
 ### 1. Supersession means `MERGE` over the stale record, at its id
+
+> **Amended by ADR-0040 (2026-07-22).** `MemoryDecisionKind.MERGE` was replaced
+> by two rulings — `REINFORCE` and `SUPERSEDE` — and `MemoryDecision.merge_into`
+> renamed `target_id`. Supersession is now expressed by the `SUPERSEDE` ruling
+> naming a `target_id`; the `MERGE`/`merge_into` naming throughout this section is
+> historical. The *mechanism* §1 describes — write at the target's id, carry
+> nothing of the overturned record across (§1a) — is unchanged; only the ruling's
+> name is. A policy implementing this decision today returns `SUPERSEDE`, not
+> `MERGE`.
 
 We will make a user-asserted proposal that conflicts with a *derived* record
 (§2a fixes which sources those are) return `MERGE` into that record, rather than
@@ -120,6 +137,14 @@ is what issue #112 proposes. Until that exists the honest choice is to drop the
 evidence rather than to relabel it as support for a claim it never supported.
 
 ### 1b. This decision rests on a precondition the contract cannot express
+
+> **Discharged by ADR-0040 (2026-07-22).** The precondition below is gone.
+> ``MemoryDecisionKind`` now has ``REINFORCE`` and ``SUPERSEDE`` as separate
+> members, so the policy states the relation on the decision and
+> ``MemoryIngestor`` no longer reads provenance to recover it. The guard in
+> `tests/memory/test_ingest.py` this section describes is removed, and issue #256
+> closes with ADR-0040's implementation. The section is kept as history; it is
+> no longer in force.
 
 §1a has the ingestor decide *which relation a `MERGE` expresses* by reading the
 two records' provenance. That is not where the answer belongs. The only party
@@ -335,20 +360,25 @@ unchanged by that.
   #248 rather than left implicit, because §3's guarantee is about the *ruling*
   and does not survive a lost update.
 - **`MERGE` now means two different things at the ingestor, told apart by
-  provenance.** Reinforcement keeps `_merge`; contradiction takes `_supersede`
-  (§1a). The cost is a second fold path and a precondition on `_merge` that a
-  reader must respect; the benefit is that neither path silently does the
-  other's job. If `MemoryDecisionKind` ever gains an invalidation ruling
-  (issue #112), that discrimination moves back onto the decision where it
-  belongs and this inference disappears.
+  provenance.** *(Closed by ADR-0040, 2026-07-22 — `MERGE` split into
+  ``REINFORCE`` and ``SUPERSEDE``, so the ruling names the relation and the
+  ingestor stops reading provenance to recover it.)* Reinforcement keeps
+  `_merge`; contradiction takes `_supersede` (§1a). The cost is a second fold
+  path and a precondition on `_merge` that a reader must respect; the benefit is
+  that neither path silently does the other's job. If `MemoryDecisionKind` ever
+  gains an invalidation ruling (issue #112), that discrimination moves back onto
+  the decision where it belongs and this inference disappears.
 - **A correction loses the overturned belief's evidence outright**, because
   there is nowhere honest to keep it (§1a). This is a real loss of audit trail,
   chosen over a false one, and it is the first thing #112 should give back.
 - **Writing a new `MemoryPolicy` now carries a constraint that is not on the
   Protocol** (§1b): its `MERGE` rulings for user-asserted proposals must mean
-  supersession. The gate enforces this for policies in the `memory` subsystem,
-  so the constraint is discovered at author time; it is still a seam that
-  should not exist, and issue #256 is what removes it.
+  supersession. *(Closed by ADR-0040, 2026-07-22 — the constraint is now on the
+  contract: a policy states ``REINFORCE`` or ``SUPERSEDE`` outright, so there is
+  no unwritten precondition to meet. Issue #256 closed with the implementation.)*
+  The gate enforces this for policies in the `memory` subsystem, so the
+  constraint is discovered at author time; it is still a seam that should not
+  exist, and issue #256 is what removes it.
 - **`conflict_threshold` gets sharper teeth.** It already gated a merge; it now
   gates a merge triggered by the highest-trust source in the system. Lowering it
   is no longer only a precision/recall trade on advisory conflicts.
@@ -356,8 +386,10 @@ unchanged by that.
   asserts no particular ruling — it names issue #38 as the reason — so this
   change lands entirely in `DefaultMemoryPolicy` and its own tests. Any other
   implementation is free to rule differently.
-- **Revisit when** issue #256 puts the reinforce/supersede distinction on the
-  decision contract (§1b's precondition and its guard both retire), when issue
-  #112 ratifies a validity window (§1, §1a, §2a and §5 all change shape), when conflict detection becomes contradiction detection rather than
-  similarity (§2's error choice is then re-argued from a better signal), or if
-  §4's single-target limit proves to strand stale records in practice.
+- **Revisit when** ~~issue #256 puts the reinforce/supersede distinction on the
+  decision contract (§1b's precondition and its guard both retire)~~ *(done —
+  ADR-0040, 2026-07-22)*, when issue #112 ratifies a validity window (§1, §1a,
+  §2a and §5 all change shape), when conflict detection becomes contradiction
+  detection rather than similarity (§2's error choice is then re-argued from a
+  better signal), or if §4's single-target limit proves to strand stale records
+  in practice.

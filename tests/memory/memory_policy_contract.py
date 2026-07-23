@@ -15,7 +15,7 @@ separation working. ``DefaultMemoryPolicy``'s specific rules are tested in
 
 Every obligation here traces to something already ratified — determinism to the
 ``MemoryPolicy`` docstring, the secret-tier rule to ADR-0004 §3, the coherence of
-``merge_into`` to what ``decide`` says its ``conflicts`` argument is. A
+``target_id`` to what ``decide`` says its ``conflicts`` argument is. A
 conformance suite **is** contract: an obligation the Protocol does not state
 widens that contract without an ADR (golden rule 5) and would fail an
 implementation that actually conforms. Two reasonable-sounding expectations were
@@ -23,11 +23,17 @@ cut for exactly that reason — that ``decide`` leaves its inputs alone, and tha
 ``reason`` is non-blank. Both are tested per-implementation instead, and
 Issue #40 tracks ratifying them properly.
 
+It also does **not** assert *which* relation a target-carrying ruling picks —
+``REINFORCE`` versus ``SUPERSEDE`` — for a given proposal (ADR-0040 §5): that is
+the policy's reasoning, and pinning it here would refuse a policy that genuinely
+conforms. Only the coherence common to both is asserted.
+
 Two things are intentionally left unasserted because ``MemoryDecision``'s own
-validator already makes them unrepresentable: that ``MERGE`` carries a
-``merge_into`` and that ``STORE_TEMPORARY`` carries a positive ``ttl``. Asserting
-them here would test pydantic. What the validator *cannot* know — that
-``merge_into`` names one of the records actually supplied — is asserted below.
+validator already makes them unrepresentable: that ``REINFORCE`` and
+``SUPERSEDE`` carry a ``target_id`` and that ``STORE_TEMPORARY`` carries a
+positive ``ttl``. Asserting them here would test pydantic. What the validator
+*cannot* know — that ``target_id`` names one of the records actually supplied —
+is asserted below.
 
 This module is intentionally not named ``test_*`` so pytest does not collect the
 abstract base directly; it is collected via a ``Test``-prefixed subclass.
@@ -67,10 +73,15 @@ _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _COMMITTING = frozenset(
     {
         MemoryDecisionKind.ACCEPT,
-        MemoryDecisionKind.MERGE,
+        MemoryDecisionKind.REINFORCE,
+        MemoryDecisionKind.SUPERSEDE,
         MemoryDecisionKind.STORE_TEMPORARY,
     }
 )
+
+# The rulings that name a target drawn from `conflicts`; the coherence of that
+# target is asserted for either, but never which of the two a policy picks.
+_TARGET_CARRYING = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE})
 
 
 # Every concrete `MemoryRecord` variant. A policy is handed the union, so a
@@ -224,29 +235,29 @@ class MemoryPolicyContract:
         # Deterministic (the `MemoryPolicy` docstring). The whole decision, not
         # just its kind: an alternating ttl changes when the record expires.
         assert decision == again
-        # The merge target, which the model's validator cannot check.
-        if decision.kind is MemoryDecisionKind.MERGE:
-            assert decision.merge_into in {c.id for c in conflicts}
+        # The fold target, which the model's validator cannot check.
+        if decision.kind in _TARGET_CARRYING:
+            assert decision.target_id in {c.id for c in conflicts}
         # ADR-0004 §3: Tier 0 data belongs in the OS keyring, never the memory
         # store — whatever the policy's other rules, however trusted the source,
         # and on the retry as much as the first call.
         if case.sensitivity is DataTier.SECRET:
             assert decision.kind not in _COMMITTING
 
-    async def test_merge_targets_one_of_the_supplied_conflicts(self, policy: MemoryPolicy) -> None:
+    async def test_fold_targets_one_of_the_supplied_conflicts(self, policy: MemoryPolicy) -> None:
         # The sweep above only ever supplies one conflict. This is the case it
-        # cannot cover: with several to choose from, `merge_into` must still name
+        # cannot cover: with several to choose from, `target_id` must still name
         # one the caller actually offered, not an id of the policy's own making.
         conflicts = [_record("first"), _record("second")]
 
         decision = await policy.decide(_proposal(conflicts=conflicts), conflicts=conflicts)
 
-        if decision.kind is MemoryDecisionKind.MERGE:
-            assert decision.merge_into in {c.id for c in conflicts}
+        if decision.kind in _TARGET_CARRYING:
+            assert decision.target_id in {c.id for c in conflicts}
 
-    async def test_does_not_merge_when_there_is_no_conflict(self, policy: MemoryPolicy) -> None:
-        # The degenerate case of the rule above: with nothing to merge into,
-        # MERGE cannot name a valid target.
+    async def test_does_not_fold_when_there_is_no_conflict(self, policy: MemoryPolicy) -> None:
+        # The degenerate case of the rule above: with nothing to fold into,
+        # neither REINFORCE nor SUPERSEDE can name a valid target.
         decision = await policy.decide(_proposal(), conflicts=[])
 
-        assert decision.kind is not MemoryDecisionKind.MERGE
+        assert decision.kind not in _TARGET_CARRYING

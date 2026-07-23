@@ -7,10 +7,13 @@ all — can exercise it *without importing the memory subsystem's internals*
 
 It is a minimal, contract-correct writer over an injected store and policy: it
 resolves conflicts, asks the policy to rule, and applies the ruling. Only the
-behaviour pinned by the shared ``MemoryWriter`` conformance suite is contract.
-Its conflict heuristic and its merge rule are deliberately *not* — those are
-``MemoryIngestor``'s tuning and `memory`'s semantics, and a fake that promised
-them would be a second copy of one implementation.
+behaviour pinned by the shared ``MemoryWriter`` conformance suite is contract —
+which, since ADR-0040 §5a, includes ``SUPERSEDE`` carrying nothing of the target
+across, ``REINFORCE`` retaining both records' evidence, and the two fold refusals
+(§5b). Its conflict heuristic and how a ``REINFORCE`` combines content and
+confidence are deliberately *not* — those are ``MemoryIngestor``'s tuning and
+`memory`'s semantics, and a fake that promised them would be a second copy of one
+implementation.
 
 Beyond the contract it records every proposal it was handed on :attr:`calls`, so
 a test can assert what its subject actually delegated.
@@ -23,7 +26,13 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError
-from ai_assistant.core.types import MemoryDecisionKind, MemoryIngestResult, MemoryKind, Provenance
+from ai_assistant.core.types import (
+    MemoryDecisionKind,
+    MemoryIngestResult,
+    MemoryKind,
+    MemorySource,
+    Provenance,
+)
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -32,6 +41,12 @@ if TYPE_CHECKING:
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 _DEFAULT_CONFLICT_LIMIT = 5
+
+# The only targets a user assertion may be folded onto (ADR-0038 §2a). Held here
+# rather than imported from `memory`, so the fake stays free of the subsystem's
+# internals (golden rule 1) while honouring the same refusals the production
+# writer does (ADR-0040 §5b).
+_SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
 
 
 def _utcnow() -> datetime:
@@ -117,11 +132,14 @@ class FakeMemoryWriter:
                 return await self._store.add(
                     proposed.model_copy(update={"expires_at": self._expiry(decision.ttl)})
                 )
-            case MemoryDecisionKind.MERGE:
-                target = next((c for c in conflicts if c.id == decision.merge_into), None)
+            case MemoryDecisionKind.REINFORCE | MemoryDecisionKind.SUPERSEDE:
+                target = next((c for c in conflicts if c.id == decision.target_id), None)
                 if target is None:
-                    msg = f"MERGE target {decision.merge_into!r} is not among the conflicts"
+                    msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
+                _refuse_unsafe_fold(target, proposed)
+                if decision.kind is MemoryDecisionKind.SUPERSEDE:
+                    return await self._store.add(_supersede(target, proposed))
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
@@ -158,12 +176,57 @@ class FakeMemoryWriter:
             raise MemoryStoreError(msg) from exc
 
 
+def _refuse_unsafe_fold(target: MemoryRecord, incoming: MemoryRecord) -> None:
+    """Refuse a fold that would destroy data, as ``MemoryIngestor`` does.
+
+    Contract, not tuning (ADR-0040 §5b): every fold writes at the *target's* id,
+    so a ``REINFORCE`` or ``SUPERSEDE`` must raise and write nothing when the
+    target is ``USER_ASSERTED``, or when the incoming record is ``USER_ASSERTED``
+    and the target is ``EXTERNAL``. Keyed on the records, before either arm is
+    chosen. Duplicated from ``MemoryIngestor`` deliberately: the fake owes the
+    same refusals but must not reach into the ``memory`` subsystem to get them
+    (golden rule 1), so a consumer's test cannot pass on state the production
+    writer would have refused.
+
+    Raises:
+        MemoryStoreError: If the fold is one of the two above.
+    """
+    if target.provenance.source is MemorySource.USER_ASSERTED:
+        msg = (
+            f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
+            f"be folded onto a user-asserted one (ADR-0038 §3)"
+        )
+        raise MemoryStoreError(msg)
+    if (
+        incoming.provenance.source is MemorySource.USER_ASSERTED
+        and target.provenance.source not in _SUPERSEDABLE
+    ):
+        msg = (
+            f"refusing to fold onto {target.id!r}: a user assertion may not be folded onto a "
+            f"{target.provenance.source} record — only OBSERVED and INFERRED beliefs may be "
+            f"superseded (ADR-0038 §2a)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _supersede(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+    """Overturn ``target`` with ``incoming``, keeping only the target's id.
+
+    Nothing of the overturned belief is carried across — not its content, its
+    provenance, its ``evidence``, nor its ``confidence`` — only the id the
+    surviving record is written at (ADR-0040 §5a). Contract, unlike ``_merge``'s
+    fold rule: "carries nothing across" is a complete specification.
+    """
+    return incoming.model_copy(update={"id": target.id})
+
+
 def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     """Fold ``incoming`` into ``target``, keeping the target's id.
 
-    A minimal fold — newer content wins, evidence is unioned, confidence taken
-    as the maximum. Not part of the contract: the fold's rule is `memory`'s own,
-    and the conformance suite deliberately does not pin it.
+    A minimal fold — newer content wins, confidence taken as the maximum. Only
+    the evidence half is contract (ADR-0040 §5a): a ``REINFORCE`` retains
+    **both** records' ``evidence``. How content and confidence combine is
+    `memory`'s own rule, which the conformance suite deliberately does not pin.
     """
     provenance = Provenance(
         source=incoming.provenance.source,

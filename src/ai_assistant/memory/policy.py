@@ -62,8 +62,8 @@ def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
     if superseded is None:
         return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="user-asserted")
     return MemoryDecision(
-        kind=MemoryDecisionKind.MERGE,
-        merge_into=superseded.id,
+        kind=MemoryDecisionKind.SUPERSEDE,
+        target_id=superseded.id,
         reason="user assertion supersedes a conflicting inference",
     )
 
@@ -76,14 +76,14 @@ class DefaultMemoryPolicy:
 
     1. Secret-tier proposals always defer to the user.
     2. An inference never silently overrides a user-asserted memory — defer.
-    3. A user-asserted proposal *supersedes* a conflicting inference: it merges
-       over the best-ranked ``OBSERVED``/``INFERRED`` conflict rather than
-       landing beside it, so a correction takes the stale belief off the read
-       path (ADR-0038).
+    3. A user-asserted proposal *supersedes* a conflicting inference: it rules
+       ``SUPERSEDE`` over the best-ranked ``OBSERVED``/``INFERRED`` conflict
+       rather than landing beside it, so a correction takes the stale belief off
+       the read path (ADR-0038, ADR-0040).
     4. A user-asserted proposal with nothing to supersede is trusted and
        accepted.
-    5. A proposal that conflicts with an existing (non-asserted) record merges
-       into it.
+    5. A proposal that conflicts with an existing (non-asserted) record rules
+       ``REINFORCE`` over it, folding into it (ADR-0040 §4).
     6. Weak evidence (below ``min_confidence``) is stored temporarily, with an
        expiry, rather than committed.
     7. Otherwise the proposal is accepted.
@@ -150,8 +150,8 @@ class DefaultMemoryPolicy:
 
         if conflicts:
             return MemoryDecision(
-                kind=MemoryDecisionKind.MERGE,
-                merge_into=conflicts[0].id,
+                kind=MemoryDecisionKind.REINFORCE,
+                target_id=conflicts[0].id,
                 reason="updates an existing memory",
             )
 

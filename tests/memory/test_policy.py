@@ -93,8 +93,8 @@ async def test_user_assertion_supersedes_a_conflicting_inference() -> None:
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[stale])
 
-    assert decision.kind is MemoryDecisionKind.MERGE
-    assert decision.merge_into == "stale"
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "stale"
 
 
 async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assertion() -> None:
@@ -110,8 +110,8 @@ async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assert
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
 
-    assert decision.kind is MemoryDecisionKind.MERGE
-    assert decision.merge_into == "our-guess"
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "our-guess"
 
 
 async def test_user_assertion_does_not_supersede_an_external_record() -> None:
@@ -141,8 +141,8 @@ async def test_user_assertion_skips_an_external_conflict_to_supersede_an_inferen
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
 
-    assert decision.kind is MemoryDecisionKind.MERGE
-    assert decision.merge_into == "our-guess"
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "our-guess"
 
 
 async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
@@ -188,8 +188,8 @@ async def test_conflict_with_non_asserted_merges() -> None:
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[existing])
 
-    assert decision.kind is MemoryDecisionKind.MERGE
-    assert decision.merge_into == "existing"
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "existing"
 
 
 async def test_low_confidence_is_stored_temporarily() -> None:

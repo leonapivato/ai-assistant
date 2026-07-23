@@ -77,13 +77,16 @@ async def test_returns_the_configured_kind() -> None:
     assert decision.kind is MemoryDecisionKind.REJECT
 
 
-async def test_merge_without_conflicts_falls_back_to_accept() -> None:
-    policy = FakeMemoryPolicy(MemoryDecisionKind.MERGE)
+@pytest.mark.parametrize(
+    "kind", [MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE], ids=str
+)
+async def test_fold_without_conflicts_falls_back_to_accept(kind: MemoryDecisionKind) -> None:
+    policy = FakeMemoryPolicy(kind)
 
     decision = await policy.decide(_proposal(), conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ACCEPT
-    assert "merge" in decision.reason
+    assert "fold" in decision.reason
 
 
 async def test_secret_tier_overrides_the_configured_kind() -> None:

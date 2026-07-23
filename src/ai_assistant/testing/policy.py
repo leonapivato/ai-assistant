@@ -7,9 +7,9 @@ memory subsystem's internals* (CLAUDE.md golden rule 1) and without depending on
 ``DefaultMemoryPolicy``'s particular rules — which are an implementation choice
 and expected to change (see issue #38).
 
-That independence is the point. A test that wants "the policy said MERGE" should
-say so directly, rather than reverse-engineering a proposal that happens to make
-the production policy merge today and something else tomorrow.
+That independence is the point. A test that wants "the policy said REINFORCE"
+should say so directly, rather than reverse-engineering a proposal that happens
+to make the production policy fold today and something else tomorrow.
 
 Beyond the contract it records every call to :attr:`calls`, so a test can assert
 what its subject actually proposed. Only the behaviour pinned by the shared
@@ -34,6 +34,9 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import MemoryRecord, MemoryUpdateProposal
 
 _DEFAULT_TTL = timedelta(days=1)
+
+#: The two rulings that name a target record to fold the proposal against.
+_FOLD_KINDS = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE})
 
 
 @dataclass(frozen=True)
@@ -65,8 +68,9 @@ class FakeMemoryPolicy:
 
     * **Secret-tier proposals are never committed** (ADR-0004 §3) — they return
       ``ASK_USER`` whatever ``kind`` says.
-    * **``MERGE`` needs a target.** With no conflicts to merge into there is no
-      representable merge decision, so it falls back to ``ACCEPT``.
+    * **A fold needs a target.** ``REINFORCE`` and ``SUPERSEDE`` both name a
+      target record; with no conflicts to fold into there is no representable
+      fold decision, so either falls back to ``ACCEPT``.
 
     Both are visible in the returned :attr:`~MemoryDecision.reason`, so a
     surprised test can see what happened rather than silently passing.
@@ -124,16 +128,16 @@ class FakeMemoryPolicy:
             )
 
         kind = self.kind
-        if kind is MemoryDecisionKind.MERGE and not conflicts:
+        if kind in _FOLD_KINDS and not conflicts:
             return MemoryDecision(
                 kind=MemoryDecisionKind.ACCEPT,
-                reason="fake: no conflict to merge into, accepted instead",
+                reason="fake: no conflict to fold into, accepted instead",
             )
 
-        if kind is MemoryDecisionKind.MERGE:
+        if kind in _FOLD_KINDS:
             return MemoryDecision(
                 kind=kind,
-                merge_into=conflicts[0].id,
+                target_id=conflicts[0].id,
                 reason="fake: configured decision",
             )
 
