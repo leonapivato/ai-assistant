@@ -43,9 +43,10 @@ mechanism half is rewritten by ADR-0045 §5):
   the coherent case production's forward-advancing wall clock gives); the
   read-time-relative behaviour itself, including that a store clock *behind* the
   close transiently still returns the target, is pinned per-writer (``test_ingest.py``
-  and ``test_fake_writer.py``). ``export`` keeps the
-  target unconditionally. An absolute, clock-coherence-independent guarantee is
-  deferred to issue #306.
+  and ``test_fake_writer.py``). ``export`` keeps the target **regardless of its
+  validity window**, but still only while non-expired (a record past ``expires_at``
+  is excluded there too, ADR-0007 §3/ADR-0045 §6). An absolute,
+  clock-coherence-independent hide guarantee is deferred to issue #306.
 
 Both must also refuse the unsafe folds (§5b as narrowed by ADR-0045 §5): **clause
 1** — any fold onto a ``USER_ASSERTED`` target — stays record-keyed for **both**
