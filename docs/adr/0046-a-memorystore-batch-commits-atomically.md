@@ -90,9 +90,11 @@ async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
     The batch is ordered and all-or-nothing. On any element's failure — an
     ``INSERT_IF_ABSENT`` whose id already names a stored record, or any backend
     error — nothing in the batch is committed: no record it named is added,
-    overwritten, or removed, and every read (``get``, ``search``, ``export``)
-    returns exactly what it would have before the call. On success every record is
-    persisted.
+    overwritten, or removed, so no read reflects the batch. ``get``, ``search``
+    and ``export`` return what they would have had ``write_atomic`` not run, under
+    their normal time-based filtering (a record that expires or whose window closes
+    mid-call is hidden by that filter, ADR-0007/ADR-0045 §6, not by any batch
+    effect). On success every record is persisted.
 
     Returns the ids written, in the order of ``writes``. An empty batch is a
     no-op and returns an empty sequence.
@@ -231,9 +233,12 @@ hand the in-memory fake a contract it cannot meet:
 
 - **In-call all-or-nothing — every backend, the fake included.** On **any**
   element's failure — a conflict, a repeated id (§3), or a backend error
-  part-way through the batch — the store commits **nothing**: no observable
-  change to any record or vector, and every read returns what it would have before
-  the call. The guarantee is over *observable logical state*, not the physical
+  part-way through the batch — the store commits **nothing**: no change to any
+  record or vector *attributable to the batch*, so no read reflects it — each of
+  `get`/`search`/`export` returns what it would have had the batch not run, still
+  under its normal time-based filtering (a record that expires or whose window
+  closes mid-call differs by that filter, not by any batch effect). The guarantee
+  is over *observable logical state attributable to the call*, not the physical
   backing store — a SQLite rollback may still touch its WAL/journal, which is
   invisible through the read contract and is not a violation. This is a purely
   in-process guarantee
