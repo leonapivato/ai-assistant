@@ -218,6 +218,19 @@ executor for the one authorised call a driven step makes. It is keyword-only and
 required, mirroring `ToolInvoker.invoke` — the contract has no spelling for
 "forever," so the adapter must state a deadline rather than inherit a default.
 
+This `timeout` is the **per-attempt** budget of ADR-0029 §4 — it bounds each
+authorised call the engine makes, exactly as `ToolInvoker.invoke` and
+`StepExecutor` interpret it — **not** an overall wall-clock deadline for the whole
+request. The distinction is dormant today: `respond` ends at the plan and a turn
+drives at most one call, so per-attempt and per-request coincide. Once the
+plan-driving stage across a plan's steps lands (still "the next slice"), a single
+`converse` could run several per-attempt budgets in series, and a 10-second budget
+would not bound a two-step turn to 10 seconds. Bounding a whole multi-step request
+— an overall deadline the façade decrements and passes on as each step's
+*remaining* budget — is a decision that belongs with that plan-driving stage, and
+is named here as a follow-on rather than pretended to be solved by threading one
+figure through unchanged.
+
 ### 4. A confirmation is a prompt the adapter transports, not a decision it makes
 
 When the engine parks a step (`Disposition.AWAITING_CONFIRMATION`), the façade
@@ -392,8 +405,9 @@ deferred extension to a decided one.
 **Follow-on.** Open issues for: the production subsystem implementations the
 builder needs (starting with a production `Planner`); the composition-root
 package + façade + CLI implementation lane; the `interfaces`-may-not-import-
-subsystems `lint-imports` contract (§6); and the deferred streaming façade method
-(§5), to be picked up only when a progress-emitting stage exists.
+subsystems `lint-imports` contract (§6); an overall per-request deadline across a
+plan's steps, decided with the plan-driving stage (§3); and the deferred streaming
+façade method (§5), to be picked up only when a progress-emitting stage exists.
 
 ## Alternatives considered
 
