@@ -230,11 +230,12 @@ class Engine:
                 ``TurnResult``, and entries are removed only on resolution, so a
                 client that requests confirmable actions and abandons every token
                 would grow the table without bound — a memory-exhaustion vector in
-                a long-lived front end (a short-lived CLI barely touches it). Past
-                the ceiling the **oldest** outstanding confirmation is evicted; its
-                token then resolves to nothing (a clean refusal, never the wrong
-                step), and the step stays durably parked for the durable-resume
-                lane to recover (#287). Must be positive.
+                a long-lived front end (a short-lived CLI barely touches it). At the
+                ceiling the engine applies **backpressure**: it refuses to drive
+                another step (:meth:`_reject_if_confirmations_full`) rather than
+                parking one and dropping a live continuation, which would strand a
+                durably-parked step (#287). A soft limit — see that method. Must be
+                positive.
 
         Raises:
             ValueError: If ``max_outstanding_confirmations`` is not positive.
@@ -437,6 +438,28 @@ class Engine:
             msg = "the engine is shutting down and is not accepting new work"
             raise RuntimeError(msg)
 
+    def _reject_if_confirmations_full(self) -> None:
+        """Refuse to drive a new step while the confirmation table is at capacity.
+
+        The backpressure that keeps the outstanding-confirmation table bounded
+        **without** ever dropping a live continuation (ADR-0042 §4; #287). Checked
+        before a step is driven, so a refusal parks nothing and strands nothing —
+        the caller resolves an outstanding confirmation and retries. A soft limit:
+        under concurrency several in-flight turns may each pass this check before
+        any parks, so the table can briefly exceed the ceiling by the number of
+        concurrent turns — bounded, and never at the cost of a stranded step.
+
+        Raises:
+            RuntimeError: If ``max_outstanding_confirmations`` confirmations are
+                already awaiting an answer.
+        """
+        if len(self._parked) >= self._max_outstanding:
+            msg = (
+                f"{self._max_outstanding} confirmations are already awaiting an answer; resolve "
+                "some before starting another action"
+            )
+            raise RuntimeError(msg)
+
     def _mint_handle(self) -> str:
         """Reserve and return a handle no other outstanding continuation is using.
 
@@ -473,6 +496,13 @@ class Engine:
         await self._plans.save_plan(turn.plan)
         if not turn.plan.steps:
             return TurnOutcome(turn=turn)
+        # Backpressure, applied *before* a step is driven (and so before it could
+        # park): at the outstanding-confirmation ceiling the engine refuses to
+        # start another action rather than driving one and then having to drop a
+        # live continuation — which would strand a durably-parked step (round 7;
+        # #287). Nothing is parked here, so nothing is stranded; the step is simply
+        # not driven yet.
+        self._reject_if_confirmations_full()
         first = turn.plan.steps[0]
         state = await self._plans.start_execution(turn.plan.id)
         # Mint the continuation handle *before* the runner can park the step, so a
@@ -597,7 +627,6 @@ class Engine:
             # carry its decision so the step is resumable without a fallible re-read.
             msg = "a parked confirmation carries no recorded decision, so it cannot be rendered"
             raise PlanningError(msg)
-        self._evict_oldest_if_full()
         self._parked[handle] = _Parked(
             turn=turn,
             execution_id=disposition.state.id,
@@ -611,28 +640,6 @@ class Engine:
             reason=recorded.ruling.reason,
             token=ContinuationToken(handle),
         )
-
-    def _evict_oldest_if_full(self) -> None:
-        """Keep the outstanding-confirmation table under its ceiling (ADR-0042 §4).
-
-        Unanswered confirmations are removed only on resolution, so without a bound
-        a client that abandons every token grows the table until memory is
-        exhausted. At the ceiling the **oldest** outstanding confirmation is
-        dropped (``dict`` preserves insertion order), which fails **closed**: its
-        token then resolves to nothing — a clean "unknown token", never the wrong
-        step — while the step stays durably parked for the durable-resume lane to
-        recover (#287). Evicting the oldest, not the newest, means a flood cannot
-        knock out the confirmation a user is actively answering ahead of it.
-        """
-        while len(self._parked) >= self._max_outstanding:
-            oldest = next(iter(self._parked))
-            evicted = self._parked.pop(oldest)
-            _log.warning(
-                "outstanding_confirmation_evicted",
-                execution_id=evicted.execution_id,
-                step_id=evicted.step_id,
-                ceiling=self._max_outstanding,
-            )
 
 
 __all__ = [
