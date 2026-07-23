@@ -74,12 +74,14 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
 
     #: Mints the id a ``SUPERSEDE`` writes its correction at (ADR-0045 §4).
@@ -87,14 +89,18 @@ if TYPE_CHECKING:
 
 
 class WriterFactory(Protocol):
-    """Builds the writer under test over the store, policy, and (optional) id factory.
+    """Builds the writer under test over the store, policy, and two optional seams.
 
     A callable rather than a ready-made writer because a writer hides its own
-    store and policy (see the class docstring). The ``id_factory`` is keyword-only
-    and optional: most obligations do not care which id a ``SUPERSEDE`` mints, but
-    the four id-factory cases (ADR-0045 §5) drive it deterministically, so the
-    factory must reach the writer's constructor. ``None`` leaves the writer's own
-    default (random UUIDs).
+    store and policy (see the class docstring). Two keyword-only seams reach its
+    constructor because a handful of obligations need them deterministic:
+
+    * ``id_factory`` — the four id-factory cases (ADR-0045 §5) drive which id a
+      ``SUPERSEDE`` mints; ``None`` leaves the writer's default (random UUIDs).
+    * ``now`` — the writer's clock, which stamps a superseded target's
+      ``valid_until``. The bounded-window cases need it at a *known* instant
+      relative to a target's producer-set window; ``None`` leaves the binding's
+      own fixed clock.
     """
 
     def __call__(
@@ -103,6 +109,7 @@ class WriterFactory(Protocol):
         policy: MemoryPolicy,
         *,
         id_factory: IdFactory | None = None,
+        now: Clock | None = None,
     ) -> MemoryWriter: ...
 
 
@@ -133,6 +140,17 @@ def _long_ago() -> datetime:
 
 def _after_close() -> datetime:
     return _AFTER_CLOSE
+
+
+#: A known writer clock for the bounded-window cases, injected via ``make_writer``'s
+#: ``now`` seam so both the production writer and the fake close a target's window at
+#: the *same* instant — the one the store's clock and the target's producer-set
+#: window are positioned around.
+_WRITER_NOW = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+def _writer_now() -> datetime:
+    return _WRITER_NOW
 
 
 def _episodic(record_id: str, content: str) -> MemoryRecord:
@@ -585,6 +603,74 @@ class MemoryWriterContract:
         target = await store.get("existing")
         assert target is not None
         assert target.validity.valid_until is None  # target left live
+
+    async def test_supersede_never_extends_a_bounded_targets_window(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Retirement only takes a belief off the read path — it never prolongs one.
+
+        A target that already self-closes *earlier* than the writer's clock keeps
+        that earlier ``valid_until``: closing takes the min, so a correction cannot
+        resurrect the stale belief by pushing its window out to "now" (ADR-0045 §4).
+        Driven with an injected writer clock so both writers close at the same known
+        instant, later than the target's existing end; the store reads *before* that
+        end, so the target is a live conflict.
+        """
+        already_closes = datetime(2026, 3, 1, tzinfo=UTC)  # earlier than _WRITER_NOW
+        store = FakeMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
+        await store.add(
+            PreferenceMemory(
+                id="existing",
+                content=_CONTENT,
+                preference=_CONTENT,
+                validity=Validity(valid_until=already_closes),
+                provenance=Provenance(
+                    source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN
+                ),
+            )
+        )
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_writer_now)
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+
+        assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+        retired = next(record for record in await store.export() if record.id == "existing")
+        # Kept at the earlier self-close, not extended out to the writer's clock.
+        assert retired.validity.valid_until == already_closes
+
+    async def test_supersede_refuses_a_close_before_the_targets_valid_from(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """A close instant before the target's ``valid_from`` is refused, target live.
+
+        The one window a ``valid_until = now`` close could invert: a producer-set
+        future ``valid_from``, reachable as a live conflict only under a store/writer
+        clock skew (a search returns records live at store-now). The writer refuses
+        rather than persist an interval ``Validity`` would reject, and leaves the
+        target live and unchanged (ADR-0045 §4/§6) — a safeguard the shared suite
+        must pin on *both* writers, since each closes the window in duplicated code.
+        """
+        starts_later = datetime(2026, 9, 1, tzinfo=UTC)  # after _WRITER_NOW
+        store = FakeMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
+        await store.add(
+            PreferenceMemory(
+                id="existing",
+                content=_CONTENT,
+                preference=_CONTENT,
+                validity=Validity(valid_from=starts_later),
+                provenance=Provenance(
+                    source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN
+                ),
+            )
+        )
+        before = await store.export()
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), now=_writer_now)
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new")))
+
+        # Fail-closed: nothing written, the target untouched and still live.
+        assert await store.export() == before
 
     @pytest.mark.parametrize("kind", _FOLD_KINDS, ids=str)
     async def test_a_fold_naming_an_absent_target_is_refused(
