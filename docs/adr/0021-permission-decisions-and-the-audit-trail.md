@@ -274,6 +274,21 @@ test ADR-0018 §1 applies to a tool's description and for the same reason: it is
 shown to the user at the moment they are deciding, and a reason that renders as
 nothing leaves the prompt with nothing to say.
 
+> **Amended by ADR-0044 §§1-3 (2026-07-23).** The binding gains an
+> `execution_id`, so `ActionRequest` and `PermissionDecision` carry the
+> execution an action belongs to (transcribed by `from_request`, never
+> asserted), and `authorises` gains it as a **fourth conjunct** beside `tool`,
+> `parameters_digest` and `step_id` — a decision made for execution A no longer
+> authorises B's identical request (#253). The resolution invariant above is
+> extended twice: the resolution's `execution_id` must equal the confirmation's
+> (§2a), and a *concrete* `(execution_id, step_id)` binding carries at most **one
+> resolution** — of that confirmation *or a sibling* — layered on top of, not in
+> place of, ADR-0036 §2's per-confirmation `resolves` index (§2b). `AuditTrail`
+> also gains a query, `pending_confirmation(execution_id, step_id)`, so a
+> restarted process recovers a parked confirmation by its binding rather than by
+> a decision id it no longer holds (§3). The live contract in `core/protocols.py`
+> and `core/types.py` governs.
+
 ### 2. `PermissionOutcome` is an ordered scale, reusing `_SeverityScale`
 
 ```python

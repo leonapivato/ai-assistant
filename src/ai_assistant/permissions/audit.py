@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,18 +46,59 @@ _MAX_SQLITE_INT = 2**63 - 1
 #: conventional.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
-_SCHEMA = (
+# The columns beside the ``data`` blob exist only so SQLite can order and
+# constrain; the blob is the record. ``execution_id``, ``step_id`` and
+# ``outcome`` (ADR-0044) are what the per-binding rule and the recovery query
+# read — kept nullable so an existing pre-ADR-0044 table can grow them by
+# ``ALTER`` and be backfilled (:meth:`_migrate`), identical to a table created
+# fresh here.
+_CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS decisions("
     "id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
-    "resolves TEXT, data TEXT NOT NULL)",
-    # A *unique* index, so the single-resolution rule survives even a bug in the
-    # check below. SQLite treats NULLs as distinct, so it constrains resolving
-    # rows only and leaves ordinary decisions unaffected.
+    "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, "
+    "data TEXT NOT NULL)"
+)
+
+_INDEXES = (
+    # A *unique* index, so the per-*confirmation* single-resolution rule (ADR-0036
+    # §2) survives even a bug in the check below. SQLite treats NULLs as distinct,
+    # so it constrains resolving rows only and leaves ordinary decisions
+    # unaffected.
     "CREATE UNIQUE INDEX IF NOT EXISTS decisions_resolves ON decisions(resolves)",
     "CREATE INDEX IF NOT EXISTS decisions_order ON decisions(decided_at_us DESC, id ASC)",
+    # ADR-0044 §2b: a *concrete* ``(execution_id, step_id)`` binding carries at
+    # most one resolution — the per-*binding* rule layered on top of the
+    # per-confirmation one. Partial, over resolving rows with a concrete binding
+    # only; NULLs being distinct leaves non-concrete (direct) bindings
+    # unconstrained. This is the safety net beneath the checked read in
+    # :meth:`_check_binding_undecided`.
+    "CREATE UNIQUE INDEX IF NOT EXISTS decisions_binding_resolution "
+    "ON decisions(execution_id, step_id) "
+    "WHERE resolves IS NOT NULL AND execution_id IS NOT NULL AND step_id IS NOT NULL",
+    # ADR-0044 §3: ``pending_confirmation`` finds a binding's CONFIRMs by this.
+    "CREATE INDEX IF NOT EXISTS decisions_binding ON decisions(execution_id, step_id, outcome)",
 )
 
 _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
+
+#: A binding's CONFIRMs, newest first — the candidates ``pending_confirmation``
+#: chooses from once it knows the binding is undecided.
+_BINDING_CONFIRMS = (
+    "SELECT data FROM decisions "
+    "WHERE outcome = ? AND execution_id = ? AND step_id = ? "
+    "ORDER BY decided_at_us DESC, id ASC"
+)
+
+#: Whether a concrete binding already carries a resolution. A resolution's own
+#: ``(execution_id, step_id)`` equals its confirmation's (ADR-0044 §2a and the
+#: ``step_id`` check enforce it at record time), so a resolving row with this
+#: binding *is* a resolution of one of its CONFIRMs. Answers both step 1 of
+#: ``pending_confirmation`` and §2b's checked refusal, and matches exactly what
+#: the ``decisions_binding_resolution`` partial unique index constrains.
+_BINDING_HAS_RESOLUTION = (
+    "SELECT 1 FROM decisions "
+    "WHERE resolves IS NOT NULL AND execution_id = ? AND step_id = ? LIMIT 1"
+)
 
 
 def _sort_key(instant: datetime) -> int:
@@ -128,16 +170,79 @@ class SqliteAuditTrail:
             msg = f"failed to open the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         try:
-            for statement in _SCHEMA:
-                conn.execute(statement)
-            conn.commit()
+            # `BEGIN IMMEDIATE` takes the write lock before the schema is
+            # inspected, so the whole of create/migrate/index is **serialised
+            # against another process opening the same file** — the same guard
+            # `_record_sync` uses, applied to setup. Without it, two processes
+            # upgrading a pre-ADR-0044 database could both read the old columns,
+            # and the second's `ALTER TABLE ... ADD COLUMN` would then fail with a
+            # duplicate-column error; the lock makes the loser wait and re-read
+            # the migrated schema instead (its `missing` set comes back empty).
+            with conn:  # commits on success, rolls back on any exception
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(_CREATE_TABLE)
+                self._migrate(conn)
+                for statement in _INDEXES:
+                    conn.execute(statement)
             if self._path != ":memory:":
                 Path(self._path).chmod(_OWNER_ONLY)
+        except AuditError:
+            # A migration reporting a corrupt legacy row is already this layer's
+            # error; it still leaves a connection to close before it propagates.
+            conn.close()
+            raise
         except (sqlite3.Error, OSError) as exc:
             conn.close()
             msg = f"failed to initialise the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         return conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add and backfill the ADR-0044 binding columns on a pre-existing table.
+
+        Rows written before ADR-0044 carry their ``step_id`` and ``outcome`` only
+        inside the JSON blob and no ``execution_id`` at all — that field did not
+        exist, so a pre-ADR-0044 decision belongs to no execution and its column
+        is correctly left ``NULL`` (a non-concrete binding, which §2b never
+        constrains). ``step_id`` and ``outcome`` are backfilled from each row's
+        stored value so the recovery query and the per-binding index see them.
+        Read straight from the JSON rather than through a full model validation
+        (the MemoryStore precedent, ADR-0045 §9): a migration must not fail on a
+        record an unrelated future field made momentarily unvalidatable. Runs
+        inside the setup transaction, before the indexes that depend on the
+        columns are created; the partial unique index is safe to build over old
+        data because every legacy resolution has ``execution_id`` ``NULL`` and is
+        excluded by its ``WHERE``.
+        """
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(decisions)")}
+        missing = {"execution_id", "step_id", "outcome"} - columns
+        if not missing:
+            return
+        if "execution_id" in missing:
+            conn.execute("ALTER TABLE decisions ADD COLUMN execution_id TEXT")
+        if "step_id" in missing:
+            conn.execute("ALTER TABLE decisions ADD COLUMN step_id TEXT")
+        if "outcome" in missing:
+            conn.execute("ALTER TABLE decisions ADD COLUMN outcome TEXT")
+        for decision_id, data in conn.execute("SELECT id, data FROM decisions").fetchall():
+            try:
+                payload = json.loads(data)
+                execution_id = payload.get("execution_id")
+                step_id = payload.get("step_id")
+                outcome = (payload.get("ruling") or {}).get("outcome")
+            except (ValueError, TypeError, AttributeError) as exc:
+                # A blob that is not JSON, or not the object shape a decision
+                # serialises to, is a corrupt row. Reported as this layer's error
+                # rather than left to escape as a bare ``JSONDecodeError`` past
+                # ``_setup``'s ``sqlite3``/``OSError`` boundary — the same
+                # "reported, not returned" rule ``_decode`` applies at read time.
+                msg = f"a legacy audit record {decision_id!r} could not be migrated: {exc}"
+                raise AuditError(msg) from exc
+            conn.execute(
+                "UPDATE decisions SET execution_id = ?, step_id = ?, outcome = ? WHERE id = ?",
+                (execution_id, step_id, outcome, decision_id),
+            )
 
     # --- the write path ---------------------------------------------------
 
@@ -181,11 +286,16 @@ class SqliteAuditTrail:
                 if snapshot.resolves is not None:
                     self._check_resolution(snapshot)
                 conn.execute(
-                    "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO decisions("
+                    "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         snapshot.id,
                         _sort_key(snapshot.decided_at),
                         snapshot.resolves,
+                        snapshot.execution_id,
+                        snapshot.step_id,
+                        snapshot.ruling.outcome.value,
                         snapshot.model_dump_json(),
                     ),
                 )
@@ -194,13 +304,14 @@ class SqliteAuditTrail:
             raise AuditError(msg) from exc
 
     def _check_resolution(self, decision: PermissionDecision) -> None:
-        """Enforce ADR-0021 §1's invariant on a resolving decision.
+        """Enforce ADR-0021 §1 and ADR-0044 §2's invariant on a resolving decision.
 
         Raises:
             InvalidResolutionError: If the referenced decision is absent, was not
-                a ``CONFIRM``, is already resolved, describes a different
-                subject, postdates the answer, or if the authorisation pointer
-                does not match.
+                a ``CONFIRM``, is already resolved, describes a different subject
+                (including a different ``execution_id``, ADR-0044 §2a), postdates
+                the answer, resolves a concrete binding a sibling already settled
+                (ADR-0044 §2b), or if the authorisation pointer does not match.
         """
         row = self._conn.execute(
             "SELECT data FROM decisions WHERE id = ?", (str(decision.resolves),)
@@ -227,12 +338,14 @@ class SqliteAuditTrail:
             confirmed.tool != decision.tool
             or confirmed.parameters_digest != decision.parameters_digest
             or confirmed.step_id != decision.step_id
+            or confirmed.execution_id != decision.execution_id
         ):
             msg = (
                 f"decision {decision.id!r} resolves {confirmed.id!r} but rules on a "
                 f"different action; a confirmation must answer the question that was asked"
             )
             raise InvalidResolutionError(msg)
+        self._check_binding_undecided(decision)
         if decision.decided_at < confirmed.decided_at:
             msg = (
                 f"decision {decision.id!r} is timestamped before the confirmation "
@@ -240,6 +353,38 @@ class SqliteAuditTrail:
             )
             raise InvalidResolutionError(msg)
         _check_authorisation(decision)
+
+    def _check_binding_undecided(self, decision: PermissionDecision) -> None:
+        """Refuse a resolution of a concrete binding a sibling already settled (§2b).
+
+        Fires **only** when the resolving decision's ``execution_id`` and
+        ``step_id`` are both present — a concrete ``(execution_id, step_id)``
+        binding. ADR-0037 §2 accepts several unresolved ``CONFIRM``s under one
+        binding (a compare-and-swap loser's ``CONFIRM`` stays recorded), and they
+        are the same action, so they must share one fate: once *any* of them is
+        resolved the binding is decided, and no second resolution — of that
+        confirmation *or a sibling* — may be recorded. Layered on top of the
+        per-confirmation ``resolves`` rule above, which alone would let a
+        ``DENY``'d step keep an ``ALLOW``'d sibling orphan (the #257 window). The
+        ``decisions_binding_resolution`` partial unique index is the durable
+        safety net beneath this read; the read exists to give the friendlier
+        error before the index raises a bare ``IntegrityError``.
+
+        Raises:
+            InvalidResolutionError: If a resolution for this concrete binding is
+                already recorded.
+        """
+        if decision.execution_id is None or decision.step_id is None:
+            return
+        if self._conn.execute(
+            _BINDING_HAS_RESOLUTION, (decision.execution_id, decision.step_id)
+        ).fetchone():
+            msg = (
+                f"decision {decision.id!r} resolves the binding "
+                f"({decision.execution_id!r}, {decision.step_id!r}), which is already "
+                f"settled; one step of one execution has one answer"
+            )
+            raise InvalidResolutionError(msg)
 
     # --- the read path ----------------------------------------------------
 
@@ -261,6 +406,40 @@ class SqliteAuditTrail:
             ).fetchone()
         except sqlite3.Error as exc:
             msg = f"failed to read decision {decision_id!r}: {exc}"
+            raise AuditError(msg) from exc
+        return None if row is None else str(row[0])
+
+    async def pending_confirmation(
+        self, *, execution_id: str, step_id: str
+    ) -> PermissionDecision | None:
+        """The confirmation this binding still awaits, or ``None`` (ADR-0044 §3).
+
+        Two steps in order: if the binding already carries a resolution it is
+        decided, so return ``None`` (never a still-unresolved sibling orphan — the
+        #257 hazard §2b closes); otherwise return the newest unresolved ``CONFIRM``
+        by ``decided_at`` descending, ``id`` ascending, or ``None`` if the binding
+        carries none. Query-only, returning a detached snapshot rebuilt from JSON.
+
+        Raises:
+            AuditError: If the trail cannot be read.
+        """
+        async with self._lock:
+            data = await asyncio.to_thread(self._pending_confirmation_sync, execution_id, step_id)
+        return None if data is None else _decode(data)
+
+    def _pending_confirmation_sync(self, execution_id: str, step_id: str) -> str | None:
+        conn = self._conn
+        try:
+            if conn.execute(_BINDING_HAS_RESOLUTION, (execution_id, step_id)).fetchone():
+                return None
+            row = conn.execute(
+                _BINDING_CONFIRMS, (PermissionOutcome.CONFIRM.value, execution_id, step_id)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            msg = (
+                f"failed to read the pending confirmation for "
+                f"({execution_id!r}, {step_id!r}): {exc}"
+            )
             raise AuditError(msg) from exc
         return None if row is None else str(row[0])
 

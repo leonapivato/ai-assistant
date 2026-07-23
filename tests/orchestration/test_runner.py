@@ -677,6 +677,59 @@ async def test_an_approved_confirmation_runs_the_step_it_was_about() -> None:
     assert resolution.ruling.authorised_by == parked.decision_id
 
 
+async def test_a_reloaded_step_recovers_its_confirmation_without_a_carried_id() -> None:
+    """ADR-0044 §3: after a restart the confirmation id is gone, so ``resume``
+    finds the parked question by its ``(execution_id, step_id)`` binding.
+
+    The caller passes no ``confirmation_id`` — the state it hands in is what the
+    store reloaded, exactly what a restarted process holds — and the runner
+    recovers the ``CONFIRM`` from the trail, then resolves it as it would
+    in-process. This is #242's closure at the runner/AuditTrail layer.
+    """
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    reloaded = await harness.plans.get_execution(state.id)
+    assert reloaded is not None
+    result = await harness.runner.resume(reloaded, STEP, approved=True, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.SUCCEEDED
+    resolution = await harness.trail.get(str(result.decision_id))
+    assert resolution is not None
+    assert resolution.resolves == parked.decision_id  # it recovered the right CONFIRM
+
+
+async def test_recovery_refuses_once_the_binding_is_already_resolved() -> None:
+    """A resolved binding has no pending confirmation, so a restart-path resume
+    is refused rather than answering a decided binding again (ADR-0044 §2b/§3)."""
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    await harness.runner.resume(
+        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+    )
+
+    reloaded = await harness.plans.get_execution(state.id)
+    assert reloaded is not None
+    with pytest.raises(PermissionDeniedError, match="already be resolved"):
+        await harness.runner.resume(reloaded, STEP, approved=True, timeout=PATIENT)
+
+
+async def test_recovery_refuses_when_nothing_is_parked() -> None:
+    """No CONFIRM for the binding means no question to answer (ADR-0044 §3)."""
+    harness = Harness(tools=(confirmable(),))
+    step = plan_step()
+    state = await an_execution(harness.plans, step)  # PENDING, never parked
+
+    with pytest.raises(PermissionDeniedError, match="never parked"):
+        await harness.runner.resume(state, STEP, approved=True, timeout=PATIENT)
+
+
 async def test_a_declined_confirmation_skips_the_step_as_denied() -> None:
     """Only ``True`` is consent, and a refusal is honoured (ADR-0021 §3)."""
     harness = Harness(tools=(confirmable(),))

@@ -253,8 +253,9 @@ class StepExecutor:
                 the injected clock's reading is not a conforming one — a wiring
                 bug rather than a pessimistic measurement (:meth:`_reading`).
             ToolBindingError: If the call does not survive revalidation
-                (:func:`_detached`), or is authorised for a different plan step
-                than ``step_id``. Both are raised before the claim, so they
+                (:func:`_detached`), is authorised for a different plan step than
+                ``step_id``, or is authorised for a different execution than
+                ``state`` (ADR-0044 §1). All are raised before the claim, so they
                 leave no durable state — unlike the seam's own refusal, which
                 arrives after it and is committed ``FAILED``.
             ValueError: If ``timeout`` is not a strictly positive ``timedelta``.
@@ -286,6 +287,22 @@ class StepExecutor:
             msg = (
                 "the call is authorised for a different plan step, so claiming this one "
                 "would name a decision that approved something else"
+            )
+            raise ToolBindingError(msg)
+        if authorised.request.execution_id != state.id:
+            # ADR-0044 §1's third seam. `authorises` binds the decision to the
+            # *request*, and a `ToolCall` whose request and decision both name
+            # execution A is internally consistent — but nothing there stops that
+            # call being handed to `execute(state=B, …)`. The executor already
+            # checks `step_id` against the step it was asked to run; this checks
+            # `execution_id` against the *execution* it was asked to claim, so a
+            # call bound to A cannot claim B's identically-shaped step (two
+            # executions of one plan parked on the same step, #253). Refused
+            # before the claim, so nothing durable names it (`_detached`), exactly
+            # like the `step_id` mismatch above.
+            msg = (
+                "the call is authorised for a different execution, so claiming this step "
+                "would run it under an approval made for another execution of the plan"
             )
             raise ToolBindingError(msg)
         trusted = await self._registry.get(authorised.request.tool.id)

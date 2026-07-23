@@ -117,11 +117,23 @@ def keyed(tool_id: str = "smtp", window: timedelta = timedelta(hours=1)) -> Tool
 
 
 def call_for(
-    definition: ToolDefinition, *, decision_id: str = "d-1", step_id: str = STEP
+    definition: ToolDefinition,
+    *,
+    decision_id: str = "d-1",
+    step_id: str = STEP,
+    execution_id: str | None = None,
 ) -> ToolCall:
-    """Build an authorised call, through the path the contract asks callers to use."""
+    """Build an authorised call, through the path the contract asks callers to use.
+
+    ``execution_id`` binds the call to an execution (ADR-0044 §1); the executor
+    refuses a call whose ``execution_id`` does not match the ``state`` it is asked
+    to claim, so a test running against a real ``state`` passes ``state.id`` here.
+    """
     request = ActionRequest(
-        tool=definition, parameters={"to": "someone@example.com"}, step_id=step_id
+        tool=definition,
+        parameters={"to": "someone@example.com"},
+        step_id=step_id,
+        execution_id=execution_id,
     )
     decision = PermissionDecision.from_request(
         request,
@@ -439,7 +451,7 @@ async def test_the_claim_names_the_tool_and_the_decision_that_authorised_it() ->
     state = await a_claimed_execution(store)
     implementation = Blocking()
     seam = FakeToolInvoker([(tool(), implementation)])
-    call = call_for(tool(), decision_id="d-99")
+    call = call_for(tool(), decision_id="d-99", execution_id=state.id)
     task = asyncio.create_task(
         executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
     )
@@ -479,7 +491,7 @@ async def test_a_binding_refusal_is_committed_failed_and_not_re_driven() -> None
     seam = FakeToolInvoker([(tool("other"), implementation)])
 
     final = await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
     )
 
     step = await stored_step(store, state)
@@ -499,7 +511,7 @@ async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -
     seam = FakeToolInvoker([(tool("other"), Spy())])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
     )
 
     step = await stored_step(store, state)
@@ -517,7 +529,7 @@ async def test_a_success_is_committed_with_its_output() -> None:
     seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
     )
 
     step = await stored_step(store, state)
@@ -538,7 +550,7 @@ async def test_a_failure_is_committed_with_its_message() -> None:
     seam = FakeToolInvoker([(tool(), implementation)])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
     )
 
     step = await stored_step(store, state)
@@ -566,7 +578,7 @@ async def test_a_live_deadline_expiry_reaches_indeterminate() -> None:
     seam = FakeToolInvoker([(tool(), Blocking())])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=BRIEF
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=BRIEF
     )
 
     step = await stored_step(store, state)
@@ -591,7 +603,7 @@ async def test_a_read_only_deadline_expiry_reaches_failed() -> None:
     seam = FakeToolInvoker([(read_only(), Blocking())])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(read_only()), timeout=BRIEF
+        state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=BRIEF
     )
 
     step = await stored_step(store, state)
@@ -626,7 +638,7 @@ async def test_a_cancelled_call_is_committed_and_the_cancellation_re_raised(
     seam = FakeToolInvoker([(definition, implementation)])
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(definition), timeout=PATIENT
+            state, step_id=STEP, call=call_for(definition, execution_id=state.id), timeout=PATIENT
         )
     )
 
@@ -666,7 +678,7 @@ async def test_the_transition_lands_before_a_repeat_cancellation_escapes() -> No
     seam = FakeToolInvoker([(tool(), implementation)])
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
     )
 
@@ -702,7 +714,7 @@ async def test_a_known_outcome_is_committed_even_when_the_commit_is_cancelled() 
     seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
     )
 
@@ -740,7 +752,7 @@ async def test_a_call_that_does_not_survive_revalidation_claims_nothing() -> Non
     state = await a_claimed_execution(store, capability="read_email")
     implementation = Spy()
     seam = FakeToolInvoker([(read_only(), implementation)])
-    call = call_for(read_only())
+    call = call_for(read_only(), execution_id=state.id)
     call.__dict__["request"] = None
 
     with pytest.raises(ToolBindingError) as caught:
@@ -773,7 +785,7 @@ async def test_a_claim_that_lands_as_the_cancellation_arrives_is_still_closed() 
 
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(read_only()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=PATIENT
         )
     )
     store.target = task
@@ -818,6 +830,37 @@ async def test_a_call_authorised_for_another_step_claims_nothing() -> None:
     assert step.approval_ref is None
 
 
+async def test_a_call_authorised_for_another_execution_claims_nothing() -> None:
+    """ADR-0044 §1's executor seam: a call bound to A cannot claim B's step.
+
+    ``authorises`` binds the decision to the *request*, and a call whose request
+    and decision both name execution A is internally consistent — but nothing
+    there stops it being handed to ``execute(state=B, …)``. Two executions of one
+    plan can be parked on the same step (#253), so without this the second's
+    identical step would run under the first's approval. Refused before the claim,
+    so the step stays ``PENDING`` and nothing durable names the call.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store, capability="read_email")
+    implementation = Spy()
+    seam = FakeToolInvoker([(read_only(), implementation)])
+
+    with pytest.raises(ToolBindingError, match="different execution"):
+        await executor_over(store, seam).execute(
+            state,
+            step_id=STEP,
+            call=call_for(read_only(), execution_id="some-other-execution"),
+            timeout=PATIENT,
+        )
+
+    assert implementation.calls == []
+    assert seam.invocations == []
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.PENDING
+    assert step.attempts == 0
+    assert step.approval_ref is None
+
+
 async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() -> None:
     """The claim and the invocation read one snapshot, taken before either.
 
@@ -838,8 +881,8 @@ async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() ->
     state = await a_claimed_execution(store, capability="read_email")
     innocuous, dangerous = Spy(), Spy()
     seam = FakeToolInvoker([(read_only(), innocuous), (tool(), dangerous)])
-    call = call_for(read_only())
-    substitute = call_for(tool(), decision_id="d-2")
+    call = call_for(read_only(), execution_id=state.id)
+    substitute = call_for(tool(), decision_id="d-2", execution_id=state.id)
 
     task = asyncio.create_task(
         executor_over(store, seam).execute(state, step_id=STEP, call=call, timeout=PATIENT)
@@ -872,7 +915,7 @@ async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() ->
     seam = FakeToolInvoker([(tool(), implementation)])
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
     )
 
@@ -928,7 +971,7 @@ async def test_a_cancellation_requested_after_the_claim_still_reaches_the_tool()
         return AT
 
     await executor_over(store, seam, now=cancelling_clock).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
     )
 
     assert implementation.calls == 1, "the callable was entered before the error landed"
@@ -959,7 +1002,7 @@ async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> Non
 
     with pytest.raises(PlanningError):
         await executor_over(store, seam, now=unreadable).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
 
     assert implementation.calls == [], "the tool was never reached"
@@ -988,7 +1031,7 @@ async def test_a_cancellation_absorbed_while_closing_unstarted_outranks_the_caus
 
     task = asyncio.create_task(
         executor_over(store, seam, now=unreadable).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
     )
 
@@ -1025,7 +1068,7 @@ async def test_a_rejected_unstarted_close_is_raised_not_logged_away() -> None:
 
     with pytest.raises(PlanningError, match="rejected") as caught:
         await executor_over(store, seam, now=unreadable).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
 
     assert isinstance(caught.value.__context__, PlanningError), "the reason for closing is kept"
@@ -1056,7 +1099,7 @@ async def test_a_cancelled_reason_survives_a_rejected_unstarted_close() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await executor_over(store, seam, now=cancelled_clock).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
 
     assert implementation.calls == []
@@ -1080,7 +1123,7 @@ async def test_a_clock_callables_own_exception_propagates_unwrapped() -> None:
 
     with pytest.raises(OSError, match="unreachable"):
         await executor_over(store, seam, now=exploding).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
 
     assert implementation.calls == []
@@ -1101,7 +1144,7 @@ async def test_an_absorbed_cancellation_outranks_the_commits_own_failure() -> No
     seam = FakeToolInvoker([(tool(), Spy({"message_id": "m-1"}))])
     task = asyncio.create_task(
         executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
     )
 
@@ -1124,7 +1167,7 @@ async def test_a_commit_failure_with_nothing_absorbed_is_still_a_planning_error(
 
     with pytest.raises(PlanningError, match="rejected"):
         await executor_over(store, seam).execute(
-            state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+            state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
         )
 
 
@@ -1138,7 +1181,7 @@ async def test_classification_reads_the_trusted_binding_not_the_callers_object()
     """
     store = FakePlanStore()
     state = await a_claimed_execution(store)
-    call = call_for(tool())
+    call = call_for(tool(), execution_id=state.id)
     implementation = Mutating(call)
     seam = FakeToolInvoker([(tool(), implementation)])
     task = asyncio.create_task(
@@ -1179,7 +1222,7 @@ async def test_a_timeout_the_seam_would_refuse_leaves_no_claim(bad: object) -> N
         await executor_over(store, seam).execute(
             state,
             step_id=STEP,
-            call=call_for(tool()),
+            call=call_for(tool(), execution_id=state.id),
             timeout=bad,  # type: ignore[arg-type]  # the annotation is not the enforcement
         )
 
@@ -1208,7 +1251,7 @@ async def test_the_window_is_measured_from_the_first_attempt_not_the_claim() -> 
     await executor_over(store, seam, now=clock).execute(
         state,
         step_id=STEP,
-        call=call_for(keyed(window=timedelta(hours=1))),
+        call=call_for(keyed(window=timedelta(hours=1)), execution_id=state.id),
         timeout=PATIENT,
     )
 
@@ -1225,7 +1268,7 @@ async def test_a_keyed_tool_is_retried_inside_its_window() -> None:
     clock = stepping_clock([AT, AT + timedelta(minutes=1)])
 
     await executor_over(store, seam, now=clock).execute(
-        state, step_id=STEP, call=call_for(keyed()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(keyed(), execution_id=state.id), timeout=PATIENT
     )
 
     step = await stored_step(store, state)
@@ -1249,7 +1292,10 @@ async def test_a_keyed_tool_is_not_retried_at_the_exact_window_boundary() -> Non
     clock = stepping_clock([AT, AT + window])
 
     await executor_over(store, seam, now=clock).execute(
-        state, step_id=STEP, call=call_for(keyed(window=window)), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(keyed(window=window), execution_id=state.id),
+        timeout=PATIENT,
     )
 
     assert seam.calls == 1, "the window is closed at the instant it elapses"
@@ -1272,7 +1318,7 @@ async def test_a_natural_tool_is_retried_without_a_window() -> None:
     seam = ScriptedInvoker(natural(), [unavailable(), succeeded()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(natural()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(natural(), execution_id=state.id), timeout=PATIENT
     )
 
     assert seam.calls == 2
@@ -1293,7 +1339,10 @@ async def test_retrying_stops_once_the_window_has_elapsed() -> None:
     clock = stepping_clock([AT, AT + timedelta(hours=2)])
 
     await executor_over(store, seam, now=clock).execute(
-        state, step_id=STEP, call=call_for(keyed(window=timedelta(hours=1))), timeout=PATIENT
+        state,
+        step_id=STEP,
+        call=call_for(keyed(window=timedelta(hours=1)), execution_id=state.id),
+        timeout=PATIENT,
     )
 
     step = await stored_step(store, state)
@@ -1324,7 +1373,7 @@ async def test_a_reading_that_is_not_a_positive_elapsed_duration_is_lapsed(
     clock = stepping_clock([AT, second])
 
     await executor_over(store, seam, now=clock).execute(
-        state, step_id=STEP, call=call_for(keyed()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(keyed(), execution_id=state.id), timeout=PATIENT
     )
 
     assert seam.calls == 1, "an unusable measurement declines the retry"
@@ -1339,7 +1388,7 @@ async def test_a_side_effecting_tool_with_no_guarantee_is_never_auto_retried() -
     seam = ScriptedInvoker(tool(), [unavailable(), succeeded()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
     )
 
     assert seam.calls == 1
@@ -1359,7 +1408,7 @@ async def test_a_read_only_tool_is_retried_without_consulting_any_clock() -> Non
     seam = ScriptedInvoker(read_only(), [unavailable(), succeeded()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(read_only()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=PATIENT
     )
 
     assert seam.calls == 2
@@ -1378,7 +1427,7 @@ async def test_retrying_stops_at_the_trackers_ceiling() -> None:
     seam = ScriptedInvoker(read_only(), [unavailable()])
 
     await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(read_only()), timeout=PATIENT
+        state, step_id=STEP, call=call_for(read_only(), execution_id=state.id), timeout=PATIENT
     )
 
     step = await stored_step(store, state)

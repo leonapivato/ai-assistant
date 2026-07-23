@@ -388,7 +388,9 @@ class StepRunner:
             return StepDisposition(Disposition.AMBIGUOUS_CAPABILITY, state)
 
         tool = candidates[0]
-        request = ActionRequest(tool=tool, parameters=step.parameters, step_id=step.id)
+        request = ActionRequest(
+            tool=tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
+        )
         # The policy rules on its *own* copy, and never on the object that is
         # then bound and executed (`_detached_request`).
         ruling = await self._policy.decide(_detached_request(request))
@@ -422,7 +424,7 @@ class StepRunner:
         state: ExecutionState,
         step_id: str,
         *,
-        confirmation_id: str,
+        confirmation_id: str | None = None,
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
     ) -> StepDisposition:
@@ -450,9 +452,12 @@ class StepRunner:
             step_id: The step the confirmation was about, read from the
                 execution's plan for :meth:`run`'s reason.
             confirmation_id: The recorded ``CONFIRM``'s id, as returned in the
-                :class:`StepDisposition` that parked it. It is carried by the
-                caller because the ``→ AWAITING_APPROVAL`` transition does not
-                store it (#242).
+                :class:`StepDisposition` that parked it — the **in-process** path,
+                where the caller still holds it. ``None`` on the **restart** path:
+                the ``→ AWAITING_APPROVAL`` transition never stored the id (#242),
+                so a reloaded step has none, and the confirmation is recovered
+                from the trail by its ``(execution_id, step_id)`` binding instead
+                (:meth:`_confirmation_for`, ADR-0044 §3).
             approved: The human's answer. Only ``True`` is consent, and the
                 policy — not this object — is what turns it into a ruling
                 (ADR-0021 §3, ADR-0036 §1).
@@ -469,11 +474,13 @@ class StepRunner:
                 record ``confirmation_id`` names (:meth:`_recorded`), if the
                 trail refuses the resolving decision, or if it does not hand back
                 the record of it.
-            PermissionDeniedError: If ``confirmation_id`` names something that
-                was not a ``CONFIRM``, or a ``CONFIRM`` about a different step,
-                or one this execution is not parked on
-                (:meth:`_check_parked`). Refused before anything is authored, so
-                a mismatched answer cannot become a recorded decision.
+            PermissionDeniedError: If the named confirmation was not a ``CONFIRM``,
+                or is a ``CONFIRM`` about a different step, or one this execution
+                is not parked on (:meth:`_check_parked`); or, on the restart path,
+                if the trail holds no pending confirmation for the binding — it is
+                already resolved, or the step was never parked
+                (:meth:`_confirmation_for`). Refused before anything is authored,
+                so a mismatched answer cannot become a recorded decision.
             PlanningError: As :meth:`run`.
         """
         # A private copy for `run`'s reason: `_check_parked` authenticates the
@@ -482,10 +489,10 @@ class StepRunner:
         state = _detached_state(state)
         opened = await self._opened(state)
         step = await self._planned(opened, step_id)
-        confirmed = await self._recorded(confirmation_id)
+        confirmed = await self._confirmation_for(state, step.id, confirmation_id)
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             msg = (
-                f"decision {confirmation_id!r} is a {confirmed.ruling.outcome} and was never "
+                f"decision {confirmed.id!r} is a {confirmed.ruling.outcome} and was never "
                 "shown as a question, so an answer to it authorises nothing"
             )
             raise PermissionDeniedError(msg)
@@ -495,13 +502,15 @@ class StepRunner:
             # prompt release a different step's action — the shape the executor
             # refuses at its own boundary, one stage earlier.
             msg = (
-                f"decision {confirmation_id!r} confirms a different plan step, so resolving it "
+                f"decision {confirmed.id!r} confirms a different plan step, so resolving it "
                 f"here would release step {step.id!r} on somebody else's answer"
             )
             raise PermissionDeniedError(msg)
-        self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmation_id)
+        self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmed.id)
 
-        request = ActionRequest(tool=confirmed.tool, parameters=step.parameters, step_id=step.id)
+        request = ActionRequest(
+            tool=confirmed.tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
+        )
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
@@ -509,6 +518,44 @@ class StepRunner:
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(state, step, request, decision, timeout=timeout)
         return await self._deny(state, step, decision, confirmed.tool)
+
+    async def _confirmation_for(
+        self, state: ExecutionState, step_id: str, confirmation_id: str | None
+    ) -> PermissionDecision:
+        """The ``CONFIRM`` to resolve — named by the caller, or recovered on restart.
+
+        In-process the caller carries the id the parking :class:`StepDisposition`
+        returned, and it is loaded and authenticated (:meth:`_recorded`). On the
+        restart path there is none — the ``→ AWAITING_APPROVAL`` transition never
+        stored it (#242) — so the confirmation is recovered from the trail by its
+        ``(execution_id, step_id)`` binding, the query ADR-0044 §3 adds for
+        exactly this. The recovery keys on the reloaded execution, so it needs no
+        caller-carried id and no ``core`` change. Either way :meth:`resume`'s own
+        checks and :meth:`_check_parked` (including that the confirmation's tool
+        equals the reloaded step's ``bound_tool``) then run over the result, so
+        the restart path is held to the same guarantees as the in-process one.
+
+        Returns ``pending_confirmation``'s result unchanged: ``None`` there means
+        the binding is decided or empty, which this turns into the refusal below —
+        the trail is never asked to hand back a resolved or absent question.
+
+        Raises:
+            AuditError: If an id is given but names no record, or not that record
+                (:meth:`_recorded`).
+            PermissionDeniedError: On the restart path, if the trail holds no
+                pending confirmation for the binding: it is already resolved
+                (ADR-0044 §2b/§3), or the step was never parked.
+        """
+        if confirmation_id is not None:
+            return await self._recorded(confirmation_id)
+        recovered = await self._trail.pending_confirmation(execution_id=state.id, step_id=step_id)
+        if recovered is None:
+            msg = (
+                f"no confirmation is awaiting an answer for step {step_id!r} of execution "
+                f"{state.id!r}: it may already be resolved, or the step was never parked"
+            )
+            raise PermissionDeniedError(msg)
+        return recovered
 
     # --- the permission stage -------------------------------------------
 
