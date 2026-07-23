@@ -1,6 +1,6 @@
 # 45. Memory records carry a validity window: invalidate, don't delete
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-22
 - **Contract change.** This adds a `Validity` value object and a `validity` field
   to `MemoryBase` in `core/types.py` (both cross subsystem boundaries), changes
