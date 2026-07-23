@@ -25,6 +25,8 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
 
 
@@ -53,8 +55,17 @@ class TestFakeMemoryWriterContract(MemoryWriterContract):
 
     @pytest.fixture
     def make_writer(self) -> WriterFactory:
-        def build(store: MemoryStore, policy: MemoryPolicy) -> MemoryWriter:
-            return FakeMemoryWriter(store=store, policy=policy, now=_fixed_now)
+        def build(
+            store: MemoryStore,
+            policy: MemoryPolicy,
+            *,
+            id_factory: Callable[[], str] | None = None,
+        ) -> MemoryWriter:
+            if id_factory is None:
+                return FakeMemoryWriter(store=store, policy=policy, now=_fixed_now)
+            return FakeMemoryWriter(
+                store=store, policy=policy, now=_fixed_now, id_factory=id_factory
+            )
 
         return build
 

@@ -142,10 +142,11 @@ async def test_conflicting_proposal_merges_into_existing() -> None:
 
 
 async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
-    # The unlearning path (issue #38, ADR-0038): a correction must take the
-    # stale belief off the read path, not sit beside it. Asserted end to end
-    # rather than on the policy alone, because "the wrong memory is still
-    # retrievable" is a property of the store after ingestion.
+    # The unlearning path (issue #38, ADR-0038), now non-destructive (ADR-0045
+    # §4): a correction takes the stale belief off the read path by closing its
+    # window and lands as a *new* record at a freshly-minted id — the stale
+    # inference is retained on disk, not overwritten. Asserted end to end because
+    # "the wrong memory is still retrievable" is a property of the store.
     store = InMemoryMemoryStore()
     await store.add(
         _preference("stale", "user prefers morning meetings", confidence=0.6, evidence=("ev1",))
@@ -156,31 +157,41 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     )
 
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
-    assert result.record_id == "stale"
-    superseded = await store.get("stale")
-    assert superseded is not None
-    assert superseded.content == "user prefers afternoon meetings"
-    assert superseded.provenance.source is MemorySource.USER_ASSERTED
-    assert superseded.provenance.confidence == 1.0
+    # The live belief is a NEW record at a minted id — neither the target's id nor
+    # the proposal's own (ADR-0045 §4).
+    new_id = result.record_id
+    assert new_id is not None
+    assert new_id not in {"stale", "correction"}
+    # The stale inference is retired: off the read path (get), still on disk.
+    assert await store.get("stale") is None
+    correction = await store.get(new_id)
+    assert correction is not None
+    assert correction.content == "user prefers afternoon meetings"
+    assert correction.provenance.source is MemorySource.USER_ASSERTED
+    assert correction.provenance.confidence == 1.0
     # ADR-0038 §1a: the overturned belief's evidence must NOT follow it across.
     # `ev1` is what made us think "morning"; presenting it as support for
     # "afternoon" would be a fabricated warrant in the field ADR-0005 §2 defines
-    # as references *supporting* the record. A user's assertion is its own
-    # warrant.
-    assert set(superseded.provenance.evidence) == {"ev2"}
-    assert await store.get("correction") is None  # not stored beside the stale belief
-    assert [record.id for record in await store.export()] == ["stale"]
+    # as references *supporting* the record. A user's assertion is its own warrant.
+    assert set(correction.provenance.evidence) == {"ev2"}
+    # The proposal's own id is discarded, not written at.
+    assert await store.get("correction") is None
+    # Both records are retained: the retired inference and the live correction.
+    exported = {record.id: record for record in await store.export()}
+    assert set(exported) == {"stale", new_id}
+    # The retired target carries a closed window (present in export, hidden from get).
+    assert exported["stale"].validity.valid_until is not None
 
 
 async def test_a_correction_survives_the_next_external_re_sync() -> None:
     # The regression ADR-0038 §2a exists to prevent, asserted end to end because
-    # the hole is in the interaction, not in either half. Superseding an
-    # EXTERNAL record would write the correction at that record's id, which is
-    # the integrating system's idempotency key. `_detect_conflicts` drops an
-    # existing record whose id equals the proposal's, so the next sync — same id
-    # — would see no conflict, be ACCEPTed, and upsert the stale imported value
-    # back over the user's words. Excluding EXTERNAL from supersession is what
-    # keeps the correction out of that key.
+    # the hole is in the interaction, not in either half. ADR-0045 §7 lifts the
+    # *writer-floor* refusal of an EXTERNAL supersession, but the shipped
+    # `DefaultMemoryPolicy` still does not rule SUPERSEDE over an EXTERNAL conflict
+    # (`_SUPERSEDABLE` stays {OBSERVED, INFERRED}, ADR-0040 §6): it ACCEPTs the
+    # correction *beside* the imported record, at the correction's own id. The
+    # next sync re-adds `calendar:1` (its idempotency key), which cannot touch the
+    # correction stored under a different id — so the user's words survive.
     store = InMemoryMemoryStore()
     ingestor = _ingestor(store)
     await store.add(
@@ -284,7 +295,7 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_an_external_record
     )
     ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
 
-    with pytest.raises(MemoryStoreError, match="refusing to supersede"):
+    with pytest.raises(MemoryStoreError, match="refusing to reinforce"):
         await ingestor.ingest(_proposal(_asserted("new", "user works from the berlin office")))
 
     # Fail-closed: the imported record is untouched and nothing was written.
@@ -306,7 +317,7 @@ async def test_the_ingestor_refuses_to_fold_an_assertion_onto_another_assertion(
     await store.add(_asserted("said-before", "user prefers morning meetings"))
     ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
 
-    with pytest.raises(MemoryStoreError, match="refusing to supersede"):
+    with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
         await ingestor.ingest(_proposal(_asserted("says-now", "user prefers afternoon meetings")))
 
     earlier = await store.get("said-before")
@@ -330,7 +341,7 @@ async def test_the_ingestor_refuses_to_fold_a_non_assertion_onto_an_assertion(
     await store.add(_asserted("their-words", "user prefers morning meetings"))
     ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
 
-    with pytest.raises(MemoryStoreError, match="refusing to supersede"):
+    with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
         await ingestor.ingest(
             _proposal(_preference("guess", "user prefers afternoon meetings", source=source))
         )
