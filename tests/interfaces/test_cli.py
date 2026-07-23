@@ -285,9 +285,9 @@ async def test_ask_renders_a_build_failure_and_exits_nonzero(
     assert "could not open the store" in output.getvalue()
 
 
-@pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1"])
-def test_ask_rejects_a_non_positive_or_non_finite_timeout(bad: str) -> None:
-    """An invalid --timeout is a usage error (exit 2), not a crash (§7, finding 2)."""
+@pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "1e100"])
+def test_ask_rejects_an_unusable_timeout(bad: str) -> None:
+    """A non-finite, non-positive, or overflowing --timeout is a usage error (exit 2)."""
     result = CliRunner().invoke(cli.app, ["ask", "hello", "--timeout", bad])
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
 

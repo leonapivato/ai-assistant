@@ -67,15 +67,23 @@ def version() -> None:
 
 
 def _positive_finite_seconds(value: float) -> float:
-    """Reject a ``--timeout`` that is not a positive, finite number of seconds.
+    """Reject a ``--timeout`` that is not a usable number of seconds.
 
     Runs during Typer's parameter parsing, so an invalid value is a normal usage
     error (exit code 2) rather than an ``OverflowError`` from ``timedelta`` or a
-    non-positive budget the executor would later refuse mid-run.
+    non-positive budget the executor would later refuse mid-run. Rejected: a
+    non-finite value (``inf``/``nan``), a non-positive one, and a finite value too
+    large to be a ``timedelta`` (e.g. ``1e100``) — the last checked by constructing
+    it here, so ``_ask`` can build the same duration without overflowing.
     """
     if not math.isfinite(value) or value <= 0:
         msg = "must be a positive, finite number of seconds"
         raise typer.BadParameter(msg)
+    try:
+        timedelta(seconds=value)
+    except OverflowError as exc:
+        msg = "is too large to be a duration"
+        raise typer.BadParameter(msg) from exc
     return value
 
 
