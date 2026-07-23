@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from datetime import timedelta
 
-    from ai_assistant.core.protocols import AuditTrail, PlanStore
+    from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import ExecutionState, FrozenJsonMapping
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
@@ -177,44 +177,41 @@ class Engine:
     """The concrete façade an interface adapter drives (ADR-0042 §1).
 
     Composes the engine's stage objects behind two calls and one shutdown path.
-    It is handed the stage objects and two subsystem contracts — the same
-    ``PlanStore`` and ``AuditTrail`` instances its ``runner`` was wired with — by
-    the composition root, which is the one layer licensed to construct concretes
-    (ADR-0042 §2).
+    It is handed the stage objects and the ``PlanStore`` — the same instance its
+    ``runner`` was wired with — by the composition root, the one layer licensed to
+    construct concretes (ADR-0042 §2).
     """
 
-    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator; that is the design
+    def __init__(
         self,
         *,
         loop: LearningLoop,
         runner: StepRunner,
         plans: PlanStore,
-        trail: AuditTrail,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
     ) -> None:
         """Wire the façade from injected collaborators.
 
-        **``plans`` and ``trail`` must be the very instances ``runner`` holds.**
-        No type can say so, so it is a composition-root obligation (ADR-0042 §2,
-        the same shape as ADR-0028 §4's writer/store rule): the façade reads the
-        execution back through ``plans`` to resume it and reads the recorded
-        ``CONFIRM`` back through ``trail`` to render it, so a façade wired to a
-        *second* store or trail would resume nothing and confirm nothing while
-        reporting success.
+        **``plans`` must be the very instance ``runner`` holds.** No type can say
+        so, so it is a composition-root obligation (ADR-0042 §2, the same shape as
+        ADR-0028 §4's writer/store rule): the façade persists the turn's plan and
+        starts the execution it drives through ``plans``, and reloads it through
+        ``plans`` to resume, so a façade wired to a *second* store would drive and
+        resume nothing while reporting success. The parked step's confirmation
+        content rides back on the runner's own disposition
+        (:attr:`~ai_assistant.orchestration.runner.StepDisposition.decision`), so
+        the façade needs no audit-trail handle of its own.
 
         Args:
             loop: The turn stage. :meth:`converse` calls its ``respond``.
             runner: The single-step stage (selection, permission, execution). Its
                 ``registry``, ``policy``, ``plans`` and ``trail`` are already
-                wired; the façade adds only ``plans`` and ``trail`` for the reads
-                a driver needs around it.
+                wired; the façade adds only ``plans`` for the reads a driver needs
+                around it.
             plans: Durable planning state — the same instance ``runner`` holds.
                 The façade persists the turn's goal and plan and starts the
                 execution it drives, and reloads it to resume.
-            trail: The audit trail — the same instance ``runner`` holds. Read to
-                assemble a parked step's confirmation content (ADR-0042 §4); the
-                façade only *reads* it, never records.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -226,7 +223,6 @@ class Engine:
         self._loop = loop
         self._runner = runner
         self._plans = plans
-        self._trail = trail
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._parked: dict[str, _Parked] = {}
@@ -351,24 +347,40 @@ class Engine:
         cancelling (ADR-0042 §2): a tracked task orphaned by a cancelled call is
         still using a connection ``close()`` would shut, so it is waited out first.
 
-        **Every closer is attempted, even after one fails.** ADR-0042 §2 requires
-        the façade to release *every* owned connection on shutdown, so a raising
-        closer must not skip the ones after it — a leaked connection is the exact
-        failure the ordered close exists to prevent. Failures are collected and
-        re-raised together once every resource has had its close attempted.
+        **Every closer is attempted, even after one fails — including on
+        cancellation.** ADR-0042 §2 requires the façade to release *every* owned
+        connection on shutdown, so a closer that raises, or is cancelled (a
+        ``CancelledError``, which is a ``BaseException`` and not an ``Exception``),
+        must not skip the ones after it — a leaked connection is the exact failure
+        the ordered close exists to prevent. Ordinary failures are collected and
+        re-raised together once every resource has had its close attempted; a
+        cancellation is re-raised after the same best-effort sweep, so it still
+        propagates but not before the remaining resources are released.
 
         Raises:
-            ExceptionGroup: If one or more closers raised. Every closer was still
-                attempted; the group carries what went wrong with each.
+            CancelledError: If closing a resource was cancelled. Re-raised after
+                every remaining closer has been attempted.
+            ExceptionGroup: If one or more closers raised (and none was cancelled).
+                Every closer was still attempted; the group carries each failure.
         """
         if self._inflight:
             await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
         errors: list[Exception] = []
+        cancelled: asyncio.CancelledError | None = None
         for close in self._closers:
             try:
                 await close()
-            except Exception as exc:
+            except asyncio.CancelledError as exc:  # sweep the rest, then propagate
+                cancelled = exc
+            except Exception as exc:  # every resource must still get its close attempt
                 errors.append(exc)
+        if cancelled is not None:
+            if errors:
+                _log.error(
+                    "resource_close_failed_during_shutdown_cancellation",
+                    failures=[str(exc) for exc in errors],
+                )
+            raise cancelled
         if errors:
             raise ExceptionGroup("one or more resources failed to close on shutdown", errors)
 
@@ -422,7 +434,7 @@ class Engine:
         first = turn.plan.steps[0]
         state = await self._start_execution(turn)
         disposition = await self._runner.run(state, first.id, timeout=timeout)
-        step = await self._step_outcome(turn, disposition)
+        step = self._step_outcome(turn, disposition)
         return TurnOutcome(turn=turn, step=step)
 
     async def _resume(
@@ -451,7 +463,7 @@ class Engine:
             approved=approved,
             timeout=timeout,
         )
-        step = await self._step_outcome(parked.turn, disposition)
+        step = self._step_outcome(parked.turn, disposition)
         # Resolved once: a second answer would be refused by the trail's
         # single-resolution index anyway; evicting keeps the table bounded and
         # turns a replay into a clean "unknown token" (ADR-0042 §4).
@@ -469,11 +481,11 @@ class Engine:
         await self._plans.save_plan(turn.plan)
         return await self._plans.start_execution(turn.plan.id)
 
-    async def _step_outcome(self, turn: TurnResult, disposition: StepDisposition) -> StepOutcome:
+    def _step_outcome(self, turn: TurnResult, disposition: StepDisposition) -> StepOutcome:
         """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4)."""
         confirmation: Confirmation | None = None
         if disposition.disposition is Disposition.AWAITING_CONFIRMATION:
-            confirmation = await self._confirmation(turn, disposition)
+            confirmation = self._confirmation(turn, disposition)
         return StepOutcome(
             disposition=disposition.disposition,
             state=disposition.state,
@@ -481,14 +493,19 @@ class Engine:
             confirmation=confirmation,
         )
 
-    async def _confirmation(self, turn: TurnResult, disposition: StepDisposition) -> Confirmation:
+    def _confirmation(self, turn: TurnResult, disposition: StepDisposition) -> Confirmation:
         """Assemble the confirmation content and mint its continuation token.
 
         The tool declaration and the ruling ``reason`` come from the **recorded**
-        ``CONFIRM`` — the decision the user is being shown — read back through the
-        trail, which the adapter may not do itself (ADR-0042 §6). The parameters
-        are the driven step's own, carried as data for the adapter to escape per
-        target (ADR-0042 §4).
+        ``CONFIRM`` the runner already read back and carried on its disposition
+        (:attr:`~ai_assistant.orchestration.runner.StepDisposition.decision`) — the
+        decision the user is being shown, which the adapter may not read itself
+        (ADR-0042 §6). Taking it from the disposition rather than re-reading the
+        trail is deliberate: the step is *already durably parked* by the time this
+        runs, so a fallible read here could raise and strand a parked step with no
+        continuation ever offered (#287). There is now **no fallible work between
+        parking and offering the token.** The parameters are the driven step's own,
+        carried as data for the adapter to escape per target (ADR-0042 §4).
 
         Handle uniqueness is the **engine's** invariant, not the injected factory's:
         a handle names exactly one parked step (ADR-0042 §4), so a silent overwrite
@@ -497,20 +514,18 @@ class Engine:
         trust that — or fail a durably-parked step closed, which would strand it —
         a colliding handle is disambiguated to a fresh unique one (:meth:`_mint_handle`).
         """
-        decision_id = disposition.decision_id
-        if decision_id is None:  # pragma: no cover — StepRunner sets it on this branch
-            msg = "a parked confirmation carries no decision id, so it cannot be resumed"
-            raise PlanningError(msg)
-        recorded = await self._trail.get(decision_id)
-        if recorded is None:
-            msg = f"the trail does not hold the confirmation {decision_id!r} just recorded"
+        recorded = disposition.decision
+        if recorded is None:  # pragma: no cover — StepRunner always sets it on this branch
+            # A runner-contract violation, not caller input: a parked CONFIRM must
+            # carry its decision so the step is resumable without a fallible re-read.
+            msg = "a parked confirmation carries no recorded decision, so it cannot be rendered"
             raise PlanningError(msg)
         handle = self._mint_handle()
         self._parked[handle] = _Parked(
             turn=turn,
             execution_id=disposition.state.id,
             step_id=turn.plan.steps[0].id,
-            confirmation_id=decision_id,
+            confirmation_id=recorded.id,
         )
         return Confirmation(
             tool_id=recorded.tool.id,
