@@ -374,7 +374,12 @@ records the re-scoping as issue-tracker work, not an ADR amendment).
   backends. The **durable backend additionally owes a fault-injection test**,
   outside the shared suite: `SqliteMemoryStore` made to fail on the *second*
   element's physical write (a stubbed cursor error mid-transaction), asserting the
-  first element's row **and its vector row** did not persist. Without it, an
+  first element's row **and its vector row** did not persist **and** that the raised
+  error is `MemoryStoreError` (the stubbed `sqlite3` exception retained as its
+  `__cause__`), never a leaked provider exception — ADR-0028 §5's
+  only-`MemoryStoreError`-crosses-the-seam rule governs this path too, so a store
+  that rolls back correctly but leaks `sqlite3.OperationalError` still fails the
+  contract. Without it, an
   implementation that accidentally commits per element passes every logical case
   above while violating §4's all-or-nothing guarantee. That fault-injection test
   proves rollback on an *observed* error but not recovery after **process death**,
