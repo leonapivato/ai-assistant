@@ -1,6 +1,6 @@
 # 40. Reinforcement and supersession are different rulings
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-22
 - **Contract change.** `MemoryDecisionKind` and `MemoryDecision` are `core` types
   that cross subsystem boundaries, so this ADR ships as its own PR and is
