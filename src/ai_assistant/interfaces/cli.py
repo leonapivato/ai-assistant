@@ -80,10 +80,16 @@ def _positive_finite_seconds(value: float) -> float:
         msg = "must be a positive, finite number of seconds"
         raise typer.BadParameter(msg)
     try:
-        timedelta(seconds=value)
+        duration = timedelta(seconds=value)
     except OverflowError as exc:
         msg = "is too large to be a duration"
         raise typer.BadParameter(msg) from exc
+    # A positive value below timedelta's microsecond resolution (e.g. 1e-7) rounds
+    # to zero — a deadline the executor refuses. Reject it as invalid input, not a
+    # mid-run ValueError.
+    if duration <= timedelta(0):
+        msg = "is too small to be a usable deadline"
+        raise typer.BadParameter(msg)
     return value
 
 
