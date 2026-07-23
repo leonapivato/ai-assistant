@@ -20,7 +20,6 @@ from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, Memory
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
 
 
@@ -38,12 +37,10 @@ class TestMemoryIngestorContract(MemoryWriterContract):
             policy: MemoryPolicy,
             *,
             id_factory: Callable[[], str] | None = None,
-            now: Clock | None = None,
         ) -> MemoryWriter:
-            clock = now if now is not None else _fixed_now
             if id_factory is None:
-                return MemoryIngestor(store=store, policy=policy, now=clock)
-            return MemoryIngestor(store=store, policy=policy, now=clock, id_factory=id_factory)
+                return MemoryIngestor(store=store, policy=policy, now=_fixed_now)
+            return MemoryIngestor(store=store, policy=policy, now=_fixed_now, id_factory=id_factory)
 
         return build
 
