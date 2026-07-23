@@ -30,6 +30,15 @@
   auto-retried, but that is ADR-0029 §8's mechanism rather than a new property
   of this state: retry is scheduled only from a ToolResult, and no exit through
   that window produces one.
+- Note (2026-07-22): §3's `StepExecution.error: str | None` and
+  `StepTransition.error: str | None` become `failure: StepFailure | None` by
+  ADR-0039, and §3's "error is only valid for a FAILED step" is redrawn as
+  "required when FAILED or INDETERMINATE, forbidden on every other status" — the
+  same rule over `to_status` on `StepTransition`. §4's transition table gains
+  `failure` in the *Also sets* column for RUNNING → FAILED and
+  RUNNING → INDETERMINATE. The transition graph itself, the retry ceiling, and
+  INDETERMINATE's never-auto-retried, resolved-explicitly treatment all stand as
+  ratified; `SkipReason` stays the record for a SKIPPED step.
 - Partially superseded: 2026-07-22 by ADR-0041 — **§4's transition table, one
   row.** The `PENDING → SKIPPED` row below enumerates its legal skip reasons as
   {UNMET_DEPENDENCY, NO_CAPABLE_TOOL, SUPERSEDED}, on the reasoning that "a step

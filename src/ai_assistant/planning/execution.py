@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     ExecutionState,
     SkipReason,
     StepExecution,
+    StepFailure,
     StepStatus,
     StepTransition,
 )
@@ -72,6 +73,14 @@ _LEGAL_SKIP_REASONS: dict[StepStatus, frozenset[SkipReason]] = {
 
 #: How many times a step may be claimed before its retry budget is spent.
 DEFAULT_MAX_ATTEMPTS = 3
+
+#: What :meth:`PlanExecution.abandon_running` records on a step it found
+#: ``RUNNING`` with nothing executing it (ADR-0039 §7). ``planning`` authors it
+#: because recovery has no ``ToolResult`` and never had one — which is also why
+#: the paired ``kind`` is ``None`` rather than a fabricated classification.
+_ABANDONED = (
+    "the step was found running with nothing executing it, so whether the tool acted is unknown"
+)
 
 
 def _utcnow() -> datetime:
@@ -248,11 +257,24 @@ class PlanExecution:
         caused its side effect — planning cannot tell. Rather than guess, it
         becomes `INDETERMINATE`, which is never auto-retried and must be
         resolved explicitly (ADR-0014 §4).
+
+        It now carries a :class:`StepFailure` too (ADR-0039 §7): the state
+        ADR-0014 §4 made durable *because* it must be resolved explicitly is no
+        longer the one finished status with no durable diagnostic. ``kind`` is
+        ``None`` — recovery has no ``ToolResult`` to classify from and never had
+        one — which is correct and not a shortfall.
         """
         stopped = self._now()
+        abandoned = StepFailure(kind=None, message=_ABANDONED)
         steps = tuple(
             _revalidated(
-                step.model_copy(update={"status": StepStatus.INDETERMINATE, "finished_at": stopped})
+                step.model_copy(
+                    update={
+                        "status": StepStatus.INDETERMINATE,
+                        "finished_at": stopped,
+                        "failure": abandoned,
+                    }
+                )
             )
             if step.status is StepStatus.RUNNING
             else step
@@ -380,7 +402,7 @@ class PlanExecution:
                 "started_at": self._now(),
                 # A retry re-opens the step, so last attempt's outcome is cleared.
                 "finished_at": None,
-                "error": None,
+                "failure": None,
                 "output": None,
             }
         )
@@ -391,7 +413,7 @@ class PlanExecution:
             update={
                 "status": transition.to_status,
                 "output": transition.output,
-                "error": transition.error,
+                "failure": transition.failure,
                 "finished_at": self._now(),
             }
         )

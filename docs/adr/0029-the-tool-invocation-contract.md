@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032; §8 amended by ADR-0034
+- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032; §8 amended by ADR-0034 and ADR-0039
 - Date: 2026-07-21
 - Amended: 2026-07-21 by ADR-0031 — the corrections first use found
   (PR #188). §4's interrupted-call rule gains a core home and is
@@ -134,6 +134,21 @@
   when it was written rather than falsified by ADR-0034, since §4 of this same
   document already mandates a second such outcome for a cancelled invocation.
   ADR-0034 §3 replaces it with an enumeration.
+- Amended: 2026-07-22 by ADR-0039 — §8's bullet "Failure kind does not survive a
+  restart, and this ADR does not widen `StepExecution` to fix it" is discharged
+  in its first half and **explicitly not in its second**. `StepExecution` now
+  carries `failure: StepFailure | None` whose `kind` is the tool's own
+  `ToolFailureKind`, so ADR-0029 §5's first conjunct, `result.failure.kind.retryable`,
+  has a durable home for the first time. The interim behaviour stands unchanged:
+  a FAILED step recovered after a restart is still not auto-retried, because §5's
+  second conjunct measures from a first-attempt instant that remains non-durable
+  and that ADR-0014 §4's FAILED → RUNNING retry resets (ADR-0039 §7). §8's
+  "Result mapping is total" gains INDETERMINATE → failure and finished_at, where
+  it previously mapped that outcome to a transition carrying neither. §5's retry
+  conjunction, §3's producer-side message rule, and §8's "retry is scheduled only
+  from a ToolResult, never from an exception" are unchanged — the last is now
+  *readable off the record* (a FAILED step with `kind is None` had no result to
+  read from) without becoming enforced by the tracker, which §8 already rejected.
 - Decides: what ADR-0016 §7 defers — invocation, its result type and error
   taxonomy, timeouts and cancellation, and idempotency-key plumbing. It honours
   the three constraints ADR-0016 §7 sets on this ADR (§1, §2, §6 below).

@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
     ActiveExecutionError,
@@ -36,8 +37,10 @@ from ai_assistant.core.types import (
     PlanStep,
     Provenance,
     SkipReason,
+    StepFailure,
     StepStatus,
     StepTransition,
+    ToolFailureKind,
 )
 
 if TYPE_CHECKING:
@@ -393,7 +396,7 @@ class PlanStoreContract:
                 step_id="s1",
                 to_status=StepStatus.FAILED,
                 expected_version=state.version,
-                error="boom",
+                failure=StepFailure(message="boom"),
             )
         )
         with pytest.raises(IllegalTransitionError):
@@ -473,7 +476,7 @@ class PlanStoreContract:
                 step_id="s1",
                 to_status=StepStatus.FAILED,
                 expected_version=state.version,
-                error="boom",
+                failure=StepFailure(message="boom"),
             )
         )
         state = await store.commit_transition(_claim(state))
@@ -481,7 +484,7 @@ class PlanStoreContract:
         assert step is not None
         assert step.status is StepStatus.RUNNING
         assert step.attempts == 2
-        assert step.error is None
+        assert step.failure is None, "a retry re-opens the step, clearing the last failure"
 
     async def test_retries_are_bounded(self, store: PlanStore) -> None:
         """The ceiling is deterministic code's to enforce (VISION §7)."""
@@ -494,10 +497,107 @@ class PlanStoreContract:
                     step_id="s1",
                     to_status=StepStatus.FAILED,
                     expected_version=state.version,
-                    error="boom",
+                    failure=StepFailure(message="boom"),
                 )
             )
         with pytest.raises(RetriesExhaustedError):
+            await store.commit_transition(_claim(state))
+
+    # --- failure records survive the store (ADR-0039) ---------------------
+
+    @pytest.mark.parametrize("to_status", [StepStatus.FAILED, StepStatus.INDETERMINATE])
+    async def test_a_failure_status_transition_requires_a_failure(
+        self, store: PlanStore, to_status: StepStatus
+    ) -> None:
+        """Required on both FAILED and INDETERMINATE (ADR-0039 §2), not just FAILED.
+
+        A suite that pinned only ``FAILED`` would certify a store fed by a
+        command shape that left ``INDETERMINATE`` — the #208 half — with no
+        durable account of itself.
+        """
+        with pytest.raises(ValidationError, match="requires a failure"):
+            StepTransition(
+                execution_id="e1",
+                step_id="s1",
+                to_status=to_status,
+                expected_version=0,
+            )
+
+    @pytest.mark.parametrize(
+        "to_status",
+        [StepStatus.RUNNING, StepStatus.AWAITING_APPROVAL, StepStatus.SUCCEEDED],
+    )
+    async def test_a_non_failure_transition_forbids_a_failure(
+        self, store: PlanStore, to_status: StepStatus
+    ) -> None:
+        with pytest.raises(ValidationError, match="only valid for a transition to FAILED"):
+            StepTransition(
+                execution_id="e1",
+                step_id="s1",
+                to_status=to_status,
+                expected_version=0,
+                failure=StepFailure(message="boom"),
+            )
+
+    @pytest.mark.parametrize("to_status", [StepStatus.FAILED, StepStatus.INDETERMINATE])
+    async def test_a_tool_failure_round_trips_verbatim(
+        self, store: PlanStore, to_status: StepStatus
+    ) -> None:
+        """Kind and message are unchanged after ``commit_transition`` (ADR-0039 §6).
+
+        On ``FAILED`` *and* ``INDETERMINATE`` — the latter is the regression test
+        for #208 and for ADR-0032 §5's by-value rule surviving one frame past the
+        seam. Read back from the store, not the return value, so a store that
+        only echoed the command would not pass.
+        """
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        failure = StepFailure(
+            kind=ToolFailureKind.RATE_LIMITED, message="the upstream throttled us"
+        )
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=to_status,
+                expected_version=state.version,
+                failure=failure,
+            )
+        )
+
+        stored = await store.get_execution(state.id)
+        assert stored is not None
+        step = stored.step("s1")
+        assert step is not None
+        assert step.status is to_status
+        assert step.failure == failure
+        assert step.failure is not None
+        assert step.failure.kind is ToolFailureKind.RATE_LIMITED
+        assert step.failure.message == "the upstream throttled us"
+
+    async def test_an_indeterminate_step_with_a_retryable_kind_is_not_run_again(
+        self, store: PlanStore
+    ) -> None:
+        """A durable kind on an INDETERMINATE step is diagnostic, never permission.
+
+        The graph has no ``INDETERMINATE → RUNNING`` edge (ADR-0014 §4), so a
+        ``TIMED_OUT`` whose ``retryable`` is ``True`` still cannot be re-claimed
+        (ADR-0039 §4). This is the case a reader of the new field is most likely
+        to get wrong.
+        """
+        state = await self._started(store)
+        state = await store.commit_transition(_claim(state))
+        state = await store.commit_transition(
+            StepTransition(
+                execution_id=state.id,
+                step_id="s1",
+                to_status=StepStatus.INDETERMINATE,
+                expected_version=state.version,
+                failure=StepFailure(kind=ToolFailureKind.TIMED_OUT, message="deadline passed"),
+            )
+        )
+        assert ToolFailureKind.TIMED_OUT.retryable  # the field says "retryable"...
+        with pytest.raises(IllegalTransitionError):  # ...and the graph still refuses it
             await store.commit_transition(_claim(state))
 
     # --- resumption -------------------------------------------------------
@@ -656,6 +756,7 @@ class PlanStoreContract:
                 step_id="s1",
                 to_status=StepStatus.INDETERMINATE,
                 expected_version=state.version,
+                failure=StepFailure(message="whether the tool acted is unknown"),
             )
         )
         result = await store.delete_goal("g1")
@@ -671,6 +772,7 @@ class PlanStoreContract:
                 step_id="s1",
                 to_status=StepStatus.INDETERMINATE,
                 expected_version=state.version,
+                failure=StepFailure(message="whether the tool acted is unknown"),
             )
         )
         result = await store.delete_goal("g1")
@@ -688,7 +790,7 @@ class PlanStoreContract:
                 step_id="s1",
                 to_status=StepStatus.FAILED,
                 expected_version=state.version,
-                error="boom",
+                failure=StepFailure(message="boom"),
             )
         )
         assert state.is_active

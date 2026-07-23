@@ -1,7 +1,16 @@
 # 32. The failure transport at the tool seam
 
-- Status: Accepted
+- Status: Accepted, §5 amended by ADR-0039
 - Date: 2026-07-21
+- Amended: 2026-07-22 by ADR-0039 — §5's "it does not reach `StepExecution.error`
+  when the outcome is INDETERMINATE, an asymmetry inherited rather than chosen"
+  is resolved. ADR-0039 redraws the required/forbidden rule over
+  {FAILED, INDETERMINATE} and renames the field to `failure: StepFailure | None`,
+  so a tool-reported failure now lands durably on an INDETERMINATE step too, by
+  value — kind and message unedited, one frame past the seam. Everything else in
+  §5 is untouched and still binding: the seam's enumeration, the by-value rule,
+  and the no-safety-net candour that the producer-side rule (§3) is the only
+  defence against a Tier 1 leak.
 - Decides what ADR-0031 §3 named and declined — issue #192. ADR-0029 §3
   ratified a vocabulary of eight `ToolFailureKind`s; six of them have no
   carrier, so an integration cannot report any of them. This gives them one.

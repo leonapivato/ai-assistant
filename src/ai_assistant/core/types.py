@@ -845,6 +845,128 @@ _LIVE_STATUSES = frozenset({StepStatus.RUNNING})
 #: Statuses whose record must say when the step stopped.
 _FINISHED_STATUSES = frozenset({StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE})
 
+#: Statuses whose record must carry an account of why the step did not succeed
+#: (ADR-0039 §2). Redrawn over ``INDETERMINATE`` as well as ``FAILED``: both are
+#: finished, non-successful outcomes, and ``INDETERMINATE`` — the state ADR-0014
+#: §4 makes durable *because* it must be resolved explicitly — was the one
+#: finished status left with no durable diagnostic.
+_FAILURE_STATUSES = frozenset({StepStatus.FAILED, StepStatus.INDETERMINATE})
+
+
+class ToolFailureKind(StrEnum):
+    """Why an invocation did not succeed (ADR-0029 §3).
+
+    Defined here, above the planning types, because :class:`StepFailure` and
+    :class:`StepExecution` record it: a finished step keeps the tool's own
+    classification of how its call failed, not a planning-owned mirror of it
+    (ADR-0039 §3, ADR-0031 §1). Shared with :class:`ToolFailure` below, which is
+    the seam-facing form the executor reads it from.
+    """
+
+    INVALID_REQUEST = "invalid_request"
+    """The arguments were unacceptable to the tool."""
+
+    NOT_AUTHORISED = "not_authorised"
+    """The tool's own upstream refused its credential."""
+
+    UNAVAILABLE = "unavailable"
+    """The upstream is unreachable or failing."""
+
+    RATE_LIMITED = "rate_limited"
+    """The upstream throttled us."""
+
+    TIMED_OUT = "timed_out"
+    """The seam's own deadline passed (ADR-0029 §4)."""
+
+    CANCELLED = "cancelled"
+    """Cancelled before completing (ADR-0029 §4)."""
+
+    REFUSED = "refused"
+    """Attempted, and the upstream declined it."""
+
+    INTERNAL = "internal"
+    """The tool implementation is broken."""
+
+    @property
+    def retryable(self) -> bool:
+        """Whether a repeat of this same call could plausibly succeed.
+
+        Not whether repeating is *safe* — that is
+        :attr:`ToolDefinition.idempotency`'s answer, and ADR-0029 §5 requires
+        both. An executor that read this alone would double a charge on the
+        first ``TIMED_OUT`` send it saw.
+
+        Declared once here rather than per consumer, copying the shape
+        ``core/errors.py`` already ratified for ``ModelError.retryable``: it is
+        computable from the enum's own declaration and is the same answer for
+        every consumer, which is ADR-0016 §2's test for a semantic intrinsic to
+        a type.
+
+        Raises:
+            KeyError: If a member was added without a value in
+                ``_RETRYABLE_BY_KIND``. Loud by construction — a default would
+                let a new kind acquire a retry policy nobody chose.
+        """
+        return _RETRYABLE_BY_KIND[self]
+
+
+#: Exhaustive over :class:`ToolFailureKind`; a missing member raises rather than
+#: defaulting, which is what makes ``retryable`` a declaration rather than a guess.
+_RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
+    ToolFailureKind.INVALID_REQUEST: False,
+    ToolFailureKind.NOT_AUTHORISED: False,
+    ToolFailureKind.UNAVAILABLE: True,
+    ToolFailureKind.RATE_LIMITED: True,
+    ToolFailureKind.TIMED_OUT: True,
+    # True because the cancellation was ours: nothing about the call itself
+    # failed, so the same call could be issued again.
+    ToolFailureKind.CANCELLED: True,
+    ToolFailureKind.REFUSED: False,
+    ToolFailureKind.INTERNAL: False,
+}
+
+
+class StepFailure(BaseModel):
+    """Why a step finished without succeeding (see ADR-0039).
+
+    The durable account a finished-unsuccessfully step keeps: an operator-facing
+    ``message`` that is always present, and the tool's own ``kind`` when a tool
+    produced one. That asymmetry is the whole design — every such step has
+    something to say, not every one has a tool's classification to say it with.
+
+    ``frozen=True`` because it is a record of something that already happened:
+    what an operator reads while resolving an ``INDETERMINATE`` step must not be
+    editable after the fact, the same argument ADR-0014 makes for freezing the
+    plan. (:class:`StepExecution` itself stays mutable — a different change.)
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message: str = Field(
+        description="Operator-facing Tier 2 explanation; visible characters required."
+    )
+    kind: ToolFailureKind | None = Field(
+        default=None,
+        description="The tool's own classification, when a tool produced one; None otherwise.",
+    )
+
+    @field_validator("message")
+    @classmethod
+    def _message_is_present(cls, value: str) -> str:
+        """Reject a message with nothing visible in it, returning it stripped.
+
+        The ``_has_visible_text`` test ADR-0018 §1 applies to a tool's
+        description, ADR-0021 §1 to a ruling's reason and ADR-0029 §3 to a
+        ``ToolFailure``'s message, for the same reason one layer up: a failure
+        that renders as nothing leaves the operator resolving the step with
+        nothing to read.
+        """
+        stripped = value.strip()
+        if not _has_visible_text(stripped):
+            msg = "step failure message must contain visible text"
+            raise ValueError(msg)
+        return stripped
+
 
 class StepExecution(BaseModel):
     """What actually happened to one :class:`PlanStep` (see ADR-0014 §3).
@@ -876,7 +998,10 @@ class StepExecution(BaseModel):
     )
     started_at: UtcInstant | None = None
     finished_at: UtcInstant | None = None
-    error: str | None = Field(default=None, description="Failure detail; required when FAILED.")
+    failure: StepFailure | None = Field(
+        default=None,
+        description="Why the step finished unsuccessfully; required when FAILED or INDETERMINATE.",
+    )
 
     @model_validator(mode="after")
     def _claimed_step_is_authorised(self) -> StepExecution:
@@ -947,8 +1072,14 @@ class StepExecution(BaseModel):
         """Ensure the outcome fields are consistent with the status.
 
         Makes the contradictory combinations unrepresentable rather than merely
-        undocumented — a SKIPPED step carrying an error, say, or an output on a
+        undocumented — a SKIPPED step carrying a failure, say, or an output on a
         step that never ran.
+
+        The ``failure`` rule is drawn over ``{FAILED, INDETERMINATE}`` rather
+        than ``FAILED`` alone (ADR-0039 §2): both are finished, non-successful
+        outcomes, so both must carry an account of why, and every other status
+        forbids one — a step that carries a diagnostic is a step that did not
+        succeed, still readable off the type.
         """
         if self.status is StepStatus.SKIPPED:
             if self.skip_reason is None:
@@ -958,12 +1089,12 @@ class StepExecution(BaseModel):
             msg = "skip_reason is only valid for a SKIPPED step"
             raise ValueError(msg)
 
-        if self.status is StepStatus.FAILED:
-            if self.error is None:
-                msg = "a FAILED step requires an error"
+        if self.status in _FAILURE_STATUSES:
+            if self.failure is None:
+                msg = f"a {self.status} step requires a failure"
                 raise ValueError(msg)
-        elif self.error is not None:
-            msg = "error is only valid for a FAILED step"
+        elif self.failure is not None:
+            msg = "failure is only valid for a FAILED or INDETERMINATE step"
             raise ValueError(msg)
 
         if self.output is not None and self.status is not StepStatus.SUCCEEDED:
@@ -1073,7 +1204,7 @@ class StepTransition(BaseModel):
     approval_ref: Identifier | None = None
     output: FrozenJsonValue = None
     skip_reason: SkipReason | None = None
-    error: str | None = None
+    failure: StepFailure | None = None
 
     @model_validator(mode="after")
     def _fields_match_target_status(self) -> StepTransition:
@@ -1091,12 +1222,12 @@ class StepTransition(BaseModel):
             msg = "skip_reason is only valid for a transition to SKIPPED"
             raise ValueError(msg)
 
-        if self.to_status is StepStatus.FAILED:
-            if self.error is None:
-                msg = "a transition to FAILED requires an error"
+        if self.to_status in _FAILURE_STATUSES:
+            if self.failure is None:
+                msg = f"a transition to {self.to_status} requires a failure"
                 raise ValueError(msg)
-        elif self.error is not None:
-            msg = "error is only valid for a transition to FAILED"
+        elif self.failure is not None:
+            msg = "failure is only valid for a transition to FAILED or INDETERMINATE"
             raise ValueError(msg)
 
         if self.output is not None and self.to_status is not StepStatus.SUCCEEDED:
@@ -1152,10 +1283,15 @@ class PlanExport(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = Field(
-        default=1,
-        ge=1,
-        description="Shape of this export; explicit because an export outlives the code.",
+    schema_version: Literal[2] = Field(
+        default=2,
+        description=(
+            "Shape of this export, pinned to exactly 2 (ADR-0039 §10): an export "
+            "outlives the code that wrote it, so the label must be a fact about the "
+            "document rather than a producer's unchecked claim. ``Literal[2]`` refuses "
+            "every other value — a v1 document does not validate against this contract "
+            "at all — so the advertised version cannot be mislabelled."
+        ),
     )
     exported_at: UtcInstant
     goals: tuple[Goal, ...] = ()
@@ -2237,78 +2373,13 @@ class ToolOutcome(StrEnum):
     """The call may or may not have taken effect; ADR-0014 §4's durable ignorance."""
 
 
-class ToolFailureKind(StrEnum):
-    """Why an invocation did not succeed (ADR-0029 §3)."""
-
-    INVALID_REQUEST = "invalid_request"
-    """The arguments were unacceptable to the tool."""
-
-    NOT_AUTHORISED = "not_authorised"
-    """The tool's own upstream refused its credential."""
-
-    UNAVAILABLE = "unavailable"
-    """The upstream is unreachable or failing."""
-
-    RATE_LIMITED = "rate_limited"
-    """The upstream throttled us."""
-
-    TIMED_OUT = "timed_out"
-    """The seam's own deadline passed (ADR-0029 §4)."""
-
-    CANCELLED = "cancelled"
-    """Cancelled before completing (ADR-0029 §4)."""
-
-    REFUSED = "refused"
-    """Attempted, and the upstream declined it."""
-
-    INTERNAL = "internal"
-    """The tool implementation is broken."""
-
-    @property
-    def retryable(self) -> bool:
-        """Whether a repeat of this same call could plausibly succeed.
-
-        Not whether repeating is *safe* — that is
-        :attr:`ToolDefinition.idempotency`'s answer, and ADR-0029 §5 requires
-        both. An executor that read this alone would double a charge on the
-        first ``TIMED_OUT`` send it saw.
-
-        Declared once here rather than per consumer, copying the shape
-        ``core/errors.py`` already ratified for ``ModelError.retryable``: it is
-        computable from the enum's own declaration and is the same answer for
-        every consumer, which is ADR-0016 §2's test for a semantic intrinsic to
-        a type.
-
-        Raises:
-            KeyError: If a member was added without a value in
-                ``_RETRYABLE_BY_KIND``. Loud by construction — a default would
-                let a new kind acquire a retry policy nobody chose.
-        """
-        return _RETRYABLE_BY_KIND[self]
-
-
-#: Exhaustive over :class:`ToolFailureKind`; a missing member raises rather than
-#: defaulting, which is what makes ``retryable`` a declaration rather than a guess.
-_RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
-    ToolFailureKind.INVALID_REQUEST: False,
-    ToolFailureKind.NOT_AUTHORISED: False,
-    ToolFailureKind.UNAVAILABLE: True,
-    ToolFailureKind.RATE_LIMITED: True,
-    ToolFailureKind.TIMED_OUT: True,
-    # True because the cancellation was ours: nothing about the call itself
-    # failed, so the same call could be issued again.
-    ToolFailureKind.CANCELLED: True,
-    ToolFailureKind.REFUSED: False,
-    ToolFailureKind.INTERNAL: False,
-}
-
-
 class ToolFailure(BaseModel):
     """Why an invocation failed, in a form an executor can record (ADR-0029 §3).
 
     :attr:`message` is **operator-facing Tier 2 text and must not carry Tier 0 or
-    Tier 1 data**. It is bound for a log and for ``StepExecution.error``, and
-    ADR-0004 §5 forbids Tier 1 data in both. There is no safety net under it:
+    Tier 1 data**. It is bound for a log and for ``StepFailure.message`` on a
+    finished step (ADR-0039), and ADR-0004 §5 forbids Tier 1 data in both. There
+    is no safety net under it:
     ``core/logging.py`` redacts by *key*, and its own docstring names
     ``error=str(exc)`` — "where the provider quoted the user's prompt" — as the
     leak it cannot see. So the rule holds at the producer: an integration
@@ -2363,8 +2434,8 @@ class ToolResult(BaseModel):
 
         Every combination refused here has a wrong state that reads as
         plausible. A ``FAILED`` result with no failure leaves the executor
-        writing ``StepExecution.error`` — required when ``FAILED`` (ADR-0014 §3)
-        — with nothing to write. A ``SUCCEEDED`` result carrying one is a
+        writing ``StepExecution.failure`` — required when ``FAILED`` (ADR-0014
+        §3, ADR-0039) — with nothing to write. A ``SUCCEEDED`` result carrying one is a
         contradiction a caller reads whichever half it looks at first. And a
         non-``SUCCEEDED`` result carrying an output is a *partial* result an
         executor could record as a whole one, which is worse than an absent one.

@@ -20,6 +20,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     PlanStep,
     SkipReason,
+    StepFailure,
     StepStatus,
     StepTransition,
 )
@@ -261,6 +262,26 @@ def test_abandon_running_marks_indeterminate_not_failed() -> None:
     assert recovered.is_active  # still needs resolving
 
 
+def test_abandon_running_records_a_failure_with_no_kind() -> None:
+    """The transition #208 is really about now writes a diagnostic (ADR-0039 §7).
+
+    Every recovered ``RUNNING`` step carries a ``StepFailure`` with visible text
+    and ``kind=None`` — recovery has no ``ToolResult`` and never had one, so a
+    fabricated kind would be wrong, not merely absent.
+    """
+    tracker = _tracker()
+    state = tracker.start(_plan(1), execution_id="e1")
+    state = tracker.apply(state, _claim("e1", "s1", state.version))
+
+    recovered = tracker.abandon_running(state)
+
+    step = recovered.step("s1")
+    assert step is not None
+    assert step.failure is not None
+    assert step.failure.kind is None
+    assert step.failure.message.strip()
+
+
 def test_an_indeterminate_step_cannot_be_retried() -> None:
     """It is never auto-retried — that is the whole point of the state."""
     tracker = _tracker()
@@ -283,7 +304,7 @@ def test_the_retry_ceiling_is_configurable() -> None:
             step_id="s1",
             to_status=StepStatus.FAILED,
             expected_version=state.version,
-            error="boom",
+            failure=StepFailure(message="boom"),
         ),
     )
 
@@ -307,14 +328,14 @@ def test_a_retry_clears_the_previous_attempts_outcome() -> None:
             step_id="s1",
             to_status=StepStatus.FAILED,
             expected_version=state.version,
-            error="boom",
+            failure=StepFailure(message="boom"),
         ),
     )
     state = tracker.apply(state, _claim("e1", "s1", state.version))
 
     step = state.step("s1")
     assert step is not None
-    assert step.error is None
+    assert step.failure is None
     assert step.finished_at is None
     assert step.attempts == 2
 
@@ -331,7 +352,7 @@ def test_a_retry_inherits_the_original_authorisation() -> None:
             step_id="s1",
             to_status=StepStatus.FAILED,
             expected_version=state.version,
-            error="boom",
+            failure=StepFailure(message="boom"),
         ),
     )
     state = tracker.apply(
