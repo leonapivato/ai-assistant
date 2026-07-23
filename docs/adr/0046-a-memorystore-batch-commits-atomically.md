@@ -354,7 +354,12 @@ records the re-scoping as issue-tracker work, not an ADR amendment).
   `MemoryStoreContract` and the canonical fake and both backends together — one
   unit of work — so the new obligation is enforced, not assumed. The obligations
   the suite gains: an all-`UPSERT` batch commits every record and returns their
-  ids in order; an `INSERT_IF_ABSENT` on an absent id succeeds; an
+  ids in order; an `UPSERT` on a **present** id **overwrites** it — the
+  window-close semantic the `SUPERSEDE` batch's first element depends on — so a
+  batch that upserts a full replacement at an existing id (`T`'s window-closed
+  form) yields the replacement, not the prior record, on a subsequent
+  `get`/`export`, exactly as a bare `add` upsert does; an `INSERT_IF_ABSENT` on an
+  absent id succeeds; an
   `INSERT_IF_ABSENT` on a present id — including a window-closed or expired row
   (§3) — raises `MemoryStoreConflictError` and leaves the store unchanged (nothing
   from the batch committed); a batch that fails part-way (a valid element followed
