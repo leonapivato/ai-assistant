@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
     ActionPlan,
     ExecutionState,
@@ -27,6 +28,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     StepStatus,
     ToolDefinition,
+    ToolFailureKind,
 )
 from ai_assistant.orchestration import Disposition, StepExecutor, StepRunner
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakeMemoryStore, FakePlanStore
@@ -80,6 +82,19 @@ async def test_current_time_reports_the_injected_clock() -> None:
     assert output == {"utc": AT.isoformat()}
 
 
+async def test_current_time_rejects_any_argument() -> None:
+    """It takes none; its schema declares additionalProperties: false (ADR-0048 §2)."""
+    with pytest.raises(ValueError, match="unexpected argument"):
+        await CurrentTime(now=_at)({"timezone": "UTC"}, idempotency_key=None)
+
+
+async def test_current_time_rejects_a_non_conforming_clock() -> None:
+    """A naive reading raises rather than emitting a misleading timestamp (ADR-0026 §2)."""
+    naive = CurrentTime(now=lambda: datetime(2026, 7, 23, 12, 0))  # noqa: DTZ001 — the bug under test
+    with pytest.raises(ClockReadingError):
+        await naive({}, idempotency_key=None)
+
+
 # --- recall_memory ------------------------------------------------------
 
 
@@ -127,6 +142,13 @@ async def test_recall_memory_rejects_a_non_positive_limit() -> None:
         await tool({"query": "x", "limit": 0}, idempotency_key=None)
     with pytest.raises(ValueError, match="limit"):
         await tool({"query": "x", "limit": True}, idempotency_key=None)
+
+
+async def test_recall_memory_rejects_an_unexpected_argument() -> None:
+    """A key outside {query, limit} is refused (additionalProperties: false)."""
+    tool = RecallMemory(FakeMemoryStore(now=_at))
+    with pytest.raises(ValueError, match="unexpected argument"):
+        await tool({"query": "x", "surprise": 1}, idempotency_key=None)
 
 
 # --- end to end: a plan drives selection -> permission -> execute --------
@@ -184,6 +206,29 @@ async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     assert stored is not None
     assert stored.status is StepStatus.SUCCEEDED
     assert stored.output == {"utc": AT.isoformat()}
+
+
+async def test_an_unexpected_argument_fails_the_step_internally_end_to_end() -> None:
+    """A bad argument reaches the seam as INTERNAL, not a silently-ignored success."""
+    registry = build_default_registry(memory=FakeMemoryStore(now=_at), now=_at)
+    runner, plans = _runner(registry)
+    step = PlanStep(
+        id="step-1",
+        intent="what time is it",
+        capability="report_current_time",
+        parameters={"timezone": "UTC"},  # the tool takes no arguments
+    )
+    state = await _execution_for(plans, step)
+
+    disposition = await runner.run(state, "step-1", timeout=PATIENT)
+
+    # The runner did execute; the tool's own outcome is a FAILED/INTERNAL step.
+    assert disposition.disposition is Disposition.EXECUTED
+    stored = (await plans.get_execution(state.id)).step("step-1")  # type: ignore[union-attr]
+    assert stored is not None
+    assert stored.status is StepStatus.FAILED
+    assert stored.failure is not None
+    assert stored.failure.kind is ToolFailureKind.INTERNAL
 
 
 async def test_a_plan_naming_recall_memory_executes_end_to_end() -> None:
