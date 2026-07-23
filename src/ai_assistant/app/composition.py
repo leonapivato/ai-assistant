@@ -20,7 +20,7 @@ from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import Engine, LearningLoop, StepExecutor, StepRunner
 from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
 from ai_assistant.planning import InMemoryPlanStore, ModelBackedPlanner
-from ai_assistant.tools import InMemoryToolRegistry
+from ai_assistant.tools import build_default_registry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -55,10 +55,13 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     its ordered shutdown path — the façade's ``aclose`` drains in-flight work, then
     closes them (ADR-0042 §2); the caller (an adapter) owns calling ``aclose``.
 
-    The tool registry starts **empty**: no tool implementation ships yet, so a
-    planned step finds no capable tool and is skipped (``NO_CAPABLE_TOOL``). This
-    is the transitional reach ADR-0042 §Consequences names — "the adapter reaches
-    only as far as the real subsystems allow"; registering tools is a later lane.
+    The tool registry is populated with the first **local, no-egress** tools
+    (ADR-0048): ``current_time`` and ``recall_memory``. So a planned step naming
+    one of their capabilities selects, gates and executes; a step naming any other
+    capability still finds no capable tool and is skipped (``NO_CAPABLE_TOOL``).
+    Whether the planner names a tool's exact capability string is not guaranteed
+    (ADR-0014 §2 keeps planning blind to the tool set), which is the model↔tool
+    alignment follow-up ADR-0048 records rather than solves.
 
     Args:
         settings: Loaded application settings — the model spec and its resilience
@@ -98,8 +101,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         )
         plans = InMemoryPlanStore()
         # One object as both the selecting registry and the acting invoker
-        # (ADR-0029 §8). Empty until a tool lane registers implementations.
-        tools = InMemoryToolRegistry()
+        # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
+        # memory-backed `recall_memory` reads the *same* store the loop retrieves
+        # from, so a recall sees what the user's memory holds.
+        tools = build_default_registry(memory=memory)
 
         context = AssemblingContextProvider(
             [
