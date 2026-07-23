@@ -232,6 +232,7 @@ class Engine:
         self._parked: dict[str, _Parked] = {}
         self._inflight: set[asyncio.Task[TurnOutcome]] = set()
         self._closing = False
+        self._shutdown: asyncio.Task[None] | None = None
 
     async def converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — the caller's budget, threaded to the seam which owns the deadline (ADR-0029 §4)
         """Run one turn and drive the step it produces (ADR-0042 §3).
@@ -326,19 +327,32 @@ class Engine:
         started, which keeps using the connection a subsequent ``close()`` would
         shut. Each public call therefore runs as a **shielded** task this engine
         holds a reference to, so cancelling the caller leaves the underlying task
-        running and tracked, and this drain still awaits it. The drain is itself
-        shielded from ``aclose``'s own cancellation (ADR-0042 §2). Only then are
-        the owned resources closed, in the order the composition root handed them.
+        running and tracked, and this drain still awaits it. Only then are the
+        owned resources closed, in the order the composition root handed them.
 
-        Idempotent: a second call drains nothing and closes nothing again.
+        **The drain-and-close is one memoised task, and every caller awaits it
+        shielded.** So cancelling *this* ``aclose`` — not only a ``converse`` —
+        cannot abandon the closures half-done: the shutdown task keeps running to
+        completion, and a subsequent ``aclose`` awaits the same task rather than
+        returning early over resources that were never closed (ADR-0042 §2). This
+        is what makes ``aclose`` idempotent *and* cancellation-safe; the closers
+        run exactly once.
         """
-        if self._closing:
-            return
-        self._closing = True
+        self._closing = True  # stop accepting new work at once (§2)
+        if self._shutdown is None:
+            self._shutdown = asyncio.ensure_future(self._drain_and_close())
+        await asyncio.shield(self._shutdown)
+
+    async def _drain_and_close(self) -> None:
+        """Await every tracked operation, then close owned resources in order.
+
+        The body of shutdown, run as one retained task so no caller's cancellation
+        can leave it half-done (:meth:`aclose`). Draining is *awaiting*, never
+        cancelling (ADR-0042 §2): a tracked task orphaned by a cancelled call is
+        still using a connection ``close()`` would shut, so it is waited out first.
+        """
         if self._inflight:
-            # Drain, do not cancel (ADR-0042 §2). Shielded so `aclose` being
-            # cancelled cannot abandon a store operation mid-connection-use.
-            await asyncio.shield(asyncio.gather(*tuple(self._inflight), return_exceptions=True))
+            await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
         for close in self._closers:
             await close()
 
@@ -443,6 +457,14 @@ class Engine:
         trail, which the adapter may not do itself (ADR-0042 §6). The parameters
         are the driven step's own, carried as data for the adapter to escape per
         target (ADR-0042 §4).
+
+        Raises:
+            RuntimeError: If the injected id factory mints a continuation handle
+                already in use. A handle names exactly one parked step (ADR-0042
+                §4), so a silent overwrite would rebind one prompt's token to a
+                *different* step — releasing consent for the wrong action. Failing
+                closed refuses that rather than papering over a broken factory (the
+                default UUID factory never collides).
         """
         decision_id = disposition.decision_id
         if decision_id is None:  # pragma: no cover — StepRunner sets it on this branch
@@ -453,6 +475,13 @@ class Engine:
             msg = f"the trail does not hold the confirmation {decision_id!r} just recorded"
             raise PlanningError(msg)
         handle = self._id_factory()
+        if handle in self._parked:
+            msg = (
+                f"continuation handle {handle!r} is already in use; handles must be unique so a "
+                "token names exactly one parked step, and rebinding one would release consent for "
+                "another action"
+            )
+            raise RuntimeError(msg)
         self._parked[handle] = _Parked(
             turn=turn,
             execution_id=disposition.state.id,
