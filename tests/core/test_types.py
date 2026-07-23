@@ -148,9 +148,12 @@ def test_discriminated_union_resolves_by_kind(
     assert isinstance(record, expected)
 
 
-def test_merge_decision_requires_target() -> None:
-    with pytest.raises(ValidationError, match="requires merge_into"):
-        MemoryDecision(kind=MemoryDecisionKind.MERGE, reason="x")
+@pytest.mark.parametrize(
+    "kind", [MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE], ids=str
+)
+def test_fold_decision_requires_target(kind: MemoryDecisionKind) -> None:
+    with pytest.raises(ValidationError, match="requires target_id"):
+        MemoryDecision(kind=kind, reason="x")
 
 
 def test_store_temporary_decision_requires_ttl() -> None:
@@ -160,7 +163,7 @@ def test_store_temporary_decision_requires_ttl() -> None:
 
 def test_accept_decision_needs_no_extra_fields() -> None:
     decision = MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="ok")
-    assert decision.merge_into is None
+    assert decision.target_id is None
 
 
 def test_store_temporary_decision_rejects_non_positive_ttl() -> None:
@@ -171,8 +174,8 @@ def test_store_temporary_decision_rejects_non_positive_ttl() -> None:
 
 
 def test_decision_rejects_fields_foreign_to_its_kind() -> None:
-    with pytest.raises(ValidationError, match="merge_into is only valid"):
-        MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", merge_into="other")
+    with pytest.raises(ValidationError, match="target_id is only valid"):
+        MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", target_id="other")
     with pytest.raises(ValidationError, match="ttl is only valid"):
         MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="x", ttl=timedelta(days=1))
 

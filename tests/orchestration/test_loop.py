@@ -354,10 +354,10 @@ async def test_learn_stamps_expiry_on_a_temporary_store() -> None:
     assert stored.expires_at == _NOW + ttl
 
 
-async def test_learn_applies_a_merge_through_the_writer() -> None:
+async def test_learn_applies_a_reinforce_through_the_writer() -> None:
     """ADR-0028 §4: the ruling that consolidates is now *applied*, not reported.
 
-    The loop still knows nothing about what a merge is — the writer's fold
+    The loop still knows nothing about what a fold is — the writer's fold
     lands it on the target's id and the loop reports what it was told. This test
     replaces ADR-0022 §4's ``test_learn_reports_a_merge_without_applying_it``,
     which described the gap issue #103 tracked.
@@ -368,17 +368,15 @@ async def test_learn_applies_a_merge_through_the_writer() -> None:
             id="pref-existing",
             content="prefers concise replies always",
             preference="prefers concise replies always",
-            provenance=Provenance(
-                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_NOW
-            ),
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_NOW),
         )
     )
-    loop = _loop(memory=memory, policy=FakeMemoryPolicy(MemoryDecisionKind.MERGE))
+    loop = _loop(memory=memory, policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
 
     [outcome] = await loop.learn(_preference_feedback())
 
-    assert outcome.decision.kind is MemoryDecisionKind.MERGE
-    assert outcome.decision.merge_into == "pref-existing"
+    assert outcome.decision.kind is MemoryDecisionKind.REINFORCE
+    assert outcome.decision.target_id == "pref-existing"
     assert outcome.record_id == "pref-existing"  # the target's id, not a new one
     assert [record.id for record in await memory.export()] == ["pref-existing"]
     merged = await memory.get("pref-existing")

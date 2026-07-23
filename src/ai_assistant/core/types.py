@@ -407,13 +407,33 @@ class MemoryUpdateProposal(BaseModel):
 
 
 class MemoryDecisionKind(StrEnum):
-    """The possible rulings a memory policy can make on a proposal."""
+    """The possible rulings a memory policy can make on a proposal.
+
+    ``REINFORCE`` and ``SUPERSEDE`` each name the *relation* between the incoming
+    record and the target it names, never the write that relation causes
+    (ADR-0040 §1):
+
+    - ``REINFORCE`` — the incoming record agrees with the target and strengthens
+      it. The applier folds the two, and the surviving record carries **both**
+      records' ``evidence``.
+    - ``SUPERSEDE`` — the incoming record overturns the belief the target holds.
+      The applier retires what the target held and carries **nothing** of it
+      across.
+
+    Both carry a target id and both commit. How content and confidence combine
+    is the applier's semantics, not this ruling's (ADR-0028 §8, ADR-0040 §5a).
+    """
 
     ACCEPT = "accept"
     REJECT = "reject"
-    MERGE = "merge"
+    REINFORCE = "reinforce"
+    SUPERSEDE = "supersede"
     ASK_USER = "ask_user"
     STORE_TEMPORARY = "store_temporary"
+
+
+#: Rulings that name an existing target record and fold the proposal against it.
+_TARGET_CARRYING_KINDS = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE})
 
 
 class MemoryDecision(BaseModel):
@@ -421,9 +441,9 @@ class MemoryDecision(BaseModel):
 
     kind: MemoryDecisionKind
     reason: str = Field(description="Human-readable justification, for transparency.")
-    merge_into: str | None = Field(
+    target_id: str | None = Field(
         default=None,
-        description="Target record id; required when ``kind`` is MERGE.",
+        description="Target record id; required when ``kind`` is REINFORCE or SUPERSEDE.",
     )
     ttl: timedelta | None = Field(
         default=None,
@@ -439,12 +459,12 @@ class MemoryDecision(BaseModel):
         temporary store's ``ttl`` must be positive, since a non-positive window
         would produce an already-expired record.
         """
-        if self.kind is MemoryDecisionKind.MERGE:
-            if self.merge_into is None:
-                msg = "MERGE decision requires merge_into"
+        if self.kind in _TARGET_CARRYING_KINDS:
+            if self.target_id is None:
+                msg = f"a {self.kind} decision requires target_id"
                 raise ValueError(msg)
-        elif self.merge_into is not None:
-            msg = "merge_into is only valid for a MERGE decision"
+        elif self.target_id is not None:
+            msg = "target_id is only valid for a REINFORCE or SUPERSEDE decision"
             raise ValueError(msg)
 
         if self.kind is MemoryDecisionKind.STORE_TEMPORARY:

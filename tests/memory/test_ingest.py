@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import pkgutil
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
-from importlib import import_module
-from itertools import product
 from typing import TYPE_CHECKING
 
 import pytest
 
-import ai_assistant.memory
 from ai_assistant.core.errors import MemoryStoreError
-from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
     DataTier,
     MemoryDecision,
@@ -137,7 +132,7 @@ async def test_conflicting_proposal_merges_into_existing() -> None:
         _proposal(_preference("new", "prefers concise emails", confidence=0.7, evidence=("ev2",)))
     )
 
-    assert result.decision.kind is MemoryDecisionKind.MERGE
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
     assert result.record_id == "e"
     merged = await store.get("e")
     assert merged is not None
@@ -160,7 +155,7 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
         _proposal(_asserted("correction", "user prefers afternoon meetings", evidence=("ev2",)))
     )
 
-    assert result.decision.kind is MemoryDecisionKind.MERGE
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     assert result.record_id == "stale"
     superseded = await store.get("stale")
     assert superseded is not None
@@ -223,117 +218,35 @@ async def test_a_correction_survives_the_next_external_re_sync() -> None:
     assert imported.provenance.source is MemorySource.EXTERNAL
 
 
-# --- ADR-0038 §1b: the precondition supersession rests on -------------------
+# --- The default policy supersedes ------------------------------------------
 #
-# `MemoryIngestor` routes a `MERGE` to `_supersede` (discard the target's
-# evidence) or `_merge` (union it) by reading the pair's provenance, because
-# `MemoryDecisionKind` has one `MERGE` for both relations. That inference is
-# only sound while every policy that can reach the ingestor in production
-# returns `MERGE` for a `USER_ASSERTED` proposal *only* to mean supersession.
-# The checks below are what stop that precondition from being merely asserted.
+# ADR-0040 removed ADR-0038 §1b's precondition: the ruling now names the
+# relation, so `MemoryIngestor` no longer infers it from provenance and the
+# scan-based guard that enumerated the shipped policies has nothing left to
+# guard. What survives is the behavioural pin below — the default policy really
+# does rule SUPERSEDE for an assertion over a derived conflict (ADR-0038 §1).
 
 
-def _production_memory_policies() -> list[type[MemoryPolicy]]:
-    """Every ``MemoryPolicy`` implementation in the ``memory`` subsystem.
-
-    ``ai_assistant.testing.FakeMemoryPolicy`` is deliberately out of scope, and
-    not because it is inconvenient: it returns a *configured* ruling rather than
-    reasoning about the proposal, so its ``MERGE`` expresses no relation between
-    the records at all — there is nothing for this precondition to bind. It also
-    cannot reach the ingestor in production, which ``lint-imports`` enforces by
-    forbidding production code to import ``ai_assistant.testing``.
-    """
-    found: dict[str, type[MemoryPolicy]] = {}
-    package = ai_assistant.memory
-    for info in pkgutil.walk_packages(package.__path__, f"{package.__name__}."):
-        module = import_module(info.name)
-        for value in vars(module).values():
-            if (
-                isinstance(value, type)
-                and value.__module__.startswith(f"{package.__name__}.")
-                and issubclass(value, MemoryPolicy)
-            ):
-                found[f"{value.__module__}.{value.__qualname__}"] = value
-    return list(found.values())
-
-
-def test_the_policy_scan_actually_finds_the_shipped_policies() -> None:
-    # A discovery check that silently found nothing would pass forever, taking
-    # the precondition check below with it.
-    assert DefaultMemoryPolicy in _production_memory_policies()
-
-
-@pytest.mark.parametrize("policy_cls", _production_memory_policies(), ids=lambda cls: cls.__name__)
-async def test_a_shipped_policy_merges_an_assertion_only_into_a_derived_record(
-    policy_cls: type[MemoryPolicy],
-) -> None:
-    """No production policy may return ``MERGE`` for an assertion onto a non-derived record.
-
-    This is the guard on ADR-0038 §1b. ``_overturns`` reads a ``MERGE`` from a
-    ``USER_ASSERTED`` proposal as *supersession* and discards the target's
-    evidence, so a policy that used the same ruling to mean reinforcement — or
-    that named an ``EXTERNAL`` target, whose id is an integrating system's
-    idempotency key (§2a) — would have this ingestor silently destroy data.
-
-    Written over the shipped policies rather than added to
-    ``memory_policy_contract.py`` on purpose: a conformance suite *is* the
-    contract, and the ``MemoryPolicy`` Protocol states no such obligation, so
-    asserting it there would widen the contract without an ADR and would refuse
-    a policy that genuinely conforms (issue #40). Issue #256 is what moves this
-    onto the contract properly, at which point this check is redundant.
-
-    Deliberately conditional — "*if* it merges, the target is derived". A policy
-    that never merges an assertion at all (accepting or deferring instead)
-    conforms and satisfies the precondition vacuously; requiring it to merge
-    would be this check inventing an obligation, which is the same mistake as
-    putting it in the conformance suite. The separate test below keeps that
-    leniency from hiding a `DefaultMemoryPolicy` that quietly stopped
-    superseding.
-    """
-    policy = policy_cls()
-    sources = list(MemorySource)
-
-    for proposal_source, *conflict_sources in product(sources, sources, sources):
-        if proposal_source is not MemorySource.USER_ASSERTED:
-            continue
-        proposed = _semantic_from(proposal_source, "new", "user prefers afternoon meetings")
-        conflicts = [
-            _semantic_from(source, f"c{index}", "user prefers morning meetings")
-            for index, source in enumerate(conflict_sources)
-        ]
-
-        decision = await policy.decide(_proposal(proposed), conflicts=conflicts)
-
-        if decision.kind is not MemoryDecisionKind.MERGE:
-            continue
-        target = next(c for c in conflicts if c.id == decision.merge_into)
-        assert target.provenance.source in {MemorySource.OBSERVED, MemorySource.INFERRED}, (
-            f"{policy_cls.__name__} merged a USER_ASSERTED proposal into a "
-            f"{target.provenance.source} record; MemoryIngestor would read that as "
-            f"supersession and discard the target's evidence (ADR-0038 §1b, issue #256)"
-        )
-
-
-async def test_the_default_policy_actually_supersedes_so_the_guard_is_not_vacuous() -> None:
-    # The guard above is conditional on a MERGE happening, which is right for an
-    # arbitrary conforming policy but would let the *default* policy pass by
-    # quietly abandoning supersession. ADR-0038 §1 requires it to supersede, so
-    # pin that separately rather than by constraining every discovered policy.
+async def test_the_default_policy_actually_supersedes() -> None:
+    # ADR-0038 §1 requires the default policy to supersede a conflicting
+    # inference under an assertion; ADR-0040 §4 makes it say so with the
+    # SUPERSEDE ruling rather than a MERGE the ingestor had to interpret.
     decision = await DefaultMemoryPolicy().decide(
         _proposal(_semantic_from(MemorySource.USER_ASSERTED, "new", "afternoon")),
         conflicts=[_semantic_from(MemorySource.INFERRED, "stale", "morning")],
     )
 
-    assert decision.kind is MemoryDecisionKind.MERGE
-    assert decision.merge_into == "stale"
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "stale"
 
 
 class _MergeEverythingPolicy:
-    """A conforming ``MemoryPolicy`` that merges every proposal into the first conflict.
+    """A conforming ``MemoryPolicy`` that folds every proposal into the first conflict.
 
-    Defined outside ``ai_assistant.memory`` on purpose: the scan above cannot see
-    it, which is exactly the case ADR-0038 §1b names as out of the guard's reach.
-    It violates nothing in the ``MemoryPolicy`` Protocol.
+    Returns ``REINFORCE`` regardless of the records' relation — a conforming
+    ruling (the ``MemoryPolicy`` contract does not constrain which relation a
+    policy picks), and the case ADR-0040 §3 keeps ``_refuse_unsafe_fold`` keyed
+    on the records for: the refusal must fire whatever the policy claims.
     """
 
     async def decide(
@@ -342,13 +255,13 @@ class _MergeEverythingPolicy:
         *,
         conflicts: Sequence[MemoryRecord],
     ) -> MemoryDecision:
-        """Merge into the first conflict, or accept when there is none."""
+        """Fold into the first conflict, or accept when there is none."""
         if not conflicts:
-            return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="nothing to merge into")
+            return MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="nothing to fold into")
         return MemoryDecision(
-            kind=MemoryDecisionKind.MERGE,
-            merge_into=conflicts[0].id,
-            reason="merges everything",
+            kind=MemoryDecisionKind.REINFORCE,
+            target_id=conflicts[0].id,
+            reason="folds everything",
         )
 
 
@@ -429,6 +342,40 @@ async def test_the_ingestor_refuses_to_fold_a_non_assertion_onto_an_assertion(
     assert await store.get("guess") is None
 
 
+async def test_a_reinforce_of_an_assertion_onto_a_derived_record_keeps_its_evidence() -> None:
+    # The recoverable case ADR-0040 exists for. Before it, `MemoryIngestor` read
+    # any assertion folded onto a derived record as *supersession* and discarded
+    # the target's evidence — a precondition (ADR-0038 §1b) the ingestor could
+    # not verify. Now the ruling names the relation: a policy that means
+    # reinforcement says REINFORCE, and the target's evidence survives the fold.
+    store = InMemoryMemoryStore()
+    await store.add(
+        _preference(
+            "derived",
+            "user prefers morning meetings",
+            confidence=0.6,
+            evidence=("obs1",),
+            source=MemorySource.INFERRED,
+        )
+    )
+    # `_MergeEverythingPolicy` rules REINFORCE for the assertion; INFERRED is
+    # supersedable, so `_refuse_unsafe_fold` permits the fold.
+    ingestor = MemoryIngestor(store=store, policy=_MergeEverythingPolicy(), now=_fixed_now)
+
+    result = await ingestor.ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings", evidence=("ev2",)))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.record_id == "derived"
+    reinforced = await store.get("derived")
+    assert reinforced is not None
+    # Both records' evidence is retained (ADR-0040 §5a) — the derived record's
+    # audit trail is no longer thrown away.
+    assert set(reinforced.provenance.evidence) == {"obs1", "ev2"}
+    assert await store.get("correction") is None
+
+
 class _RecordingPolicy:
     """A policy that records the conflicts it was offered and rejects everything."""
 
@@ -479,7 +426,7 @@ async def test_conflicts_offered_never_exceed_the_limit() -> None:
 
 
 class _MergeToAbsentTargetPolicy:
-    """A policy that always asks to merge into a record that isn't a conflict."""
+    """A policy that always asks to fold into a record that isn't a conflict."""
 
     async def decide(
         self,
@@ -488,7 +435,7 @@ class _MergeToAbsentTargetPolicy:
         conflicts: Sequence[MemoryRecord],
     ) -> MemoryDecision:
         return MemoryDecision(
-            kind=MemoryDecisionKind.MERGE, merge_into="ghost", reason="test misdirection"
+            kind=MemoryDecisionKind.REINFORCE, target_id="ghost", reason="test misdirection"
         )
 
 
@@ -874,8 +821,8 @@ async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
 
     result_a, result_b = await asyncio.gather(first(), second())
 
-    assert result_a.decision.kind is MemoryDecisionKind.MERGE
-    assert result_b.decision.kind is MemoryDecisionKind.MERGE
+    assert result_a.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result_b.decision.kind is MemoryDecisionKind.REINFORCE
     assert result_a.record_id == result_b.record_id == "e"
     merged = await store.get("e")
     assert merged is not None

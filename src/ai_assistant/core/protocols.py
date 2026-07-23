@@ -210,8 +210,8 @@ class MemoryPolicy(Protocol):
                 resolved from the store (the proposal carries their ids).
 
         Returns:
-            The decision to accept, reject, merge, defer to the user, or store
-            the proposal temporarily.
+            The decision to accept, reject, reinforce or supersede a named
+            target record, defer to the user, or store the proposal temporarily.
         """
         ...
 
@@ -244,7 +244,8 @@ class MemoryWriter(Protocol):
 
         Raises:
             MemoryStoreError: If reading conflicts or writing a record failed,
-                or a ``MERGE`` named a target that is not among the conflicts.
+                or a ``REINFORCE`` or ``SUPERSEDE`` named a ``target_id`` that is
+                not among the conflicts.
         """
         ...
 

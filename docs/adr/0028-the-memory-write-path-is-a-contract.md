@@ -1,7 +1,16 @@
 # 28. The memory write path is a contract: `MemoryWriter`
 
-- Status: Accepted
+- Status: Accepted, §8 amended by ADR-0040
 - Date: 2026-07-21
+- Amended: 2026-07-22 by ADR-0040 — §8's exclusion of "the fold's own rule" from
+  the conformance suite now carries an exception (ADR-0040 §5a): once
+  ``REINFORCE`` and ``SUPERSEDE`` are distinct `core` members, the *difference*
+  between the two folds is what the members mean, so the suite pins that
+  ``SUPERSEDE`` carries nothing of the target across and ``REINFORCE`` retains
+  both records' evidence — while content precedence, confidence combination and
+  ``last_updated`` stay excluded. ADR-0040 §5b likewise adds the two unsafe-fold
+  refusals to the writer's obligations. §8's other exclusions and every other
+  ruling here stand unchanged.
 - Closes the gap ADR-0022 §Consequences item 1 filed as issue #103, and the one
   ADR-0009 §Context named before it. Neither is reopened here: this ADR promotes
   an existing shape to a contract and changes no memory semantics.
@@ -87,6 +96,14 @@ class MemoryWriter(Protocol):
         """
         ...
 ```
+
+**Amended by ADR-0040 (2026-07-22).** The snippet above reproduces the Protocol
+as it stood at ADR-0028 and is kept as history; the live contract in
+`core/protocols.py` is what governs. ADR-0040 removed `MemoryDecisionKind.MERGE`
+in favour of `REINFORCE` and `SUPERSEDE` and renamed `MemoryDecision.merge_into`
+to `target_id`, so the `Raises:` clause now reads "a ``REINFORCE`` or
+``SUPERSEDE`` named a ``target_id`` that is not among the conflicts." The
+signature is otherwise unchanged.
 
 `MemoryIngestResult` joins the `TYPE_CHECKING` import block at the top of
 `core/protocols.py`, which today imports `MemoryUpdateProposal` but not the
@@ -401,6 +418,14 @@ limit, the relocated tuning check (§4a), or the fold's own rule. Those are `Mem
 `memory`'s semantics, and a suite that pinned them would stop being a contract
 and start being a second copy of one implementation — the mistake this ADR exists
 to undo.
+
+**Amended by ADR-0040 §§5a–5b (2026-07-22).** "The fold's own rule" stops being a
+single exclusion once `MERGE` splits into ``REINFORCE`` and ``SUPERSEDE``, whose
+*difference* is what the members mean rather than an implementation choice. The
+suite therefore now pins the differential — ``SUPERSEDE`` carries nothing of the
+target across (a complete specification), ``REINFORCE`` retains both records'
+``evidence`` — and the two unsafe-fold refusals (§5b), while still excluding
+content precedence, confidence combination and ``last_updated``.
 
 `tests/core/test_protocol_triad.py` enforces all three mechanically, and its
 `_LEGACY_DEBT` is a closed, empty set: a new Protocol cannot be exempted. Adding
