@@ -176,10 +176,10 @@ API front end above all — has a defined owner that releases every connection o
 shutdown rather than leaking it. The shutdown path is **ordered, not abrupt**: it
 stops accepting new calls, then drains (or cancels) in-flight ones before closing
 the owned resources, so a store operation cannot run against a connection closed
-out from under it — the stores' own locks serialise their synchronous `close()`
-against their *own* operations, not against a façade-level request mid-`await`, so
-that ordering has to be the façade's. Closing the façade when a session ends is
-the adapter's own lifecycle I/O, which §6 permits.
+out from under it — each store's `close()` closes its connection directly and
+takes no lock, so nothing at the store level serialises it against an in-flight
+operation, and that ordering has to be the façade's. Closing the façade when a
+session ends is the adapter's own lifecycle I/O, which §6 permits.
 
 The builder can only wire a subsystem that *has* a production implementation.
 Where one does not yet exist — today the `Planner` has only
