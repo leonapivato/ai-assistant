@@ -184,6 +184,27 @@ def _non_str_id() -> str:
     return 123  # type: ignore[return-value]  # deliberately wrong, to drive the output guard
 
 
+class _HostileId(str):
+    """A ``str`` *subclass* whose ``__hash__`` raises when used as a store key.
+
+    It passes a naive ``isinstance(x, str)`` check, so an output guard that only
+    tests ``isinstance`` would install it and let the store hash it — leaking a raw
+    ``RuntimeError`` across the writer seam. The guard must reject a non-exact
+    ``str`` (``type(x) is str``) to catch it before any write.
+    """
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        msg = "hostile id refuses to be hashed"
+        raise RuntimeError(msg)
+
+
+def _hostile_subclass_id() -> str:
+    """An id factory returning a hostile ``str`` subclass (ADR-0045 §4's output guard)."""
+    return _HostileId("looks-like-a-str")
+
+
 def _preference(
     record_id: str,
     content: str = _CONTENT,
@@ -589,8 +610,8 @@ class MemoryWriterContract:
 
     @pytest.mark.parametrize(
         "factory",
-        [_raises_id, _empty_id, _non_str_id],
-        ids=["raises", "empty", "non-str"],
+        [_raises_id, _empty_id, _non_str_id, _hostile_subclass_id],
+        ids=["raises", "empty", "non-str", "hostile-str-subclass"],
     )
     async def test_supersede_with_a_malformed_id_factory_writes_nothing(
         self, make_writer: WriterFactory, factory: Callable[[], str]

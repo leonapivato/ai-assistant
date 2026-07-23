@@ -179,17 +179,28 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
     malformed factory fails the write loudly rather than propagating an arbitrary
     exception across the writer seam (ADR-0028 §5).
 
+    An **exact** ``str`` is required, not merely an ``isinstance`` one: a hostile
+    ``str`` *subclass* (say one whose ``__hash__`` raises) passes ``isinstance`` and
+    is then hashed as a dict/set key inside ``write_atomic``, leaking an arbitrary
+    exception across the seam and defeating this guard. ``type(minted) is str``
+    invokes no subclass code, so the check itself cannot be subverted.
+
     Raises:
-        MemoryStoreError: If the factory raises, or returns a non-``str`` or empty
-            id — before any write is attempted.
+        MemoryStoreError: If the factory raises, or returns anything that is not a
+            non-empty built-in ``str`` — before any write is attempted.
     """
     try:
         minted = id_factory()
     except Exception as exc:  # any factory failure is the store's error, not the caller's
         msg = f"the id factory injected into {owner} raised while minting a supersession id"
         raise MemoryStoreError(msg) from exc
-    if not isinstance(minted, str) or not minted:
-        msg = f"the id factory injected into {owner} returned a non-str or empty id: {minted!r}"
+    if type(minted) is not str or not minted:
+        # Report the *type name* (a plain str), never ``repr(minted)``: a hostile
+        # object could raise from ``__repr__`` too, which would defeat the guard.
+        msg = (
+            f"the id factory injected into {owner} returned something other than a "
+            f"non-empty built-in str (got type {type(minted).__name__!r})"
+        )
         raise MemoryStoreError(msg)
     return minted
 
@@ -202,18 +213,37 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     Written with ``model_copy(update=...)``, so ``now`` must already be a guarded,
     aware-UTC reading (the ingestor's :meth:`MemoryIngestor._now_utc`).
 
-    Exactly ADR-0045 §4's "``valid_until = now``", no more. Every target the applier
-    retires has an **open** window: the envelope validity is set *operationally* by
-    supersession alone (ADR-0045 §2), so no in-scope producer constructs a
-    bounded-window record, and a supersession only fires on a record its own
-    conflict search returned as *live*. Retiring a *producer-set* bounded window (a
-    future ``valid_from``, or an already-bounded ``valid_until``) is deliberately
-    **not** special-cased here: closing such a window at ``now`` can form an empty
-    or inverted interval that ``Validity`` and ``SqliteMemoryStore``'s decode
-    reject, and choosing between clamping, refusing, or an empty "never-lived"
-    marker is a design decision ADR-0045 §4 does not make — so it belongs in a
-    follow-up ADR, not smuggled into the applier (tracked as a follow-up issue).
+    Exactly ADR-0045 §4's "``valid_until = now``" for the only targets the applier
+    ever retires — records with an **open** window, since the envelope validity is
+    set *operationally* by supersession alone (ADR-0045 §2), so no in-scope producer
+    constructs a bounded-window record and a supersession only fires on a record its
+    own conflict search returned as *live*.
+
+    **One data-integrity floor, not a retirement policy.** ``model_copy(update=...)``
+    skips ``Validity``'s ``valid_until > valid_from`` validator, so a producer-set
+    ``valid_from`` at or after ``now`` (reachable only under a store/writer clock
+    skew, since a search returns records live at store-now) would let this write an
+    empty or inverted interval — which ``SqliteMemoryStore``'s decode re-validation
+    then *rejects*, corrupting reads. This refuses that write outright, before the
+    batch, so no corrupt state is ever persisted. It is deliberately **only** a
+    "never write an unrepresentable window" guard: what a supersession *should* do
+    with a producer-set bounded window (clamp, refuse, or an empty "never-lived"
+    marker) is a semantics decision ADR-0045 §4 does not make and is deferred to a
+    follow-up ADR (issue #306), not decided here.
+
+    Raises:
+        MemoryStoreError: If closing at ``now`` would form an interval ending at or
+            before ``valid_from`` (empty or inverted); nothing is written and the
+            target stays live.
     """
+    valid_from = target.validity.valid_from
+    if valid_from is not None and now <= valid_from:
+        msg = (
+            f"cannot retire {target.id!r}: closing at {now.isoformat()} would form a window "
+            f"ending at or before its valid_from {valid_from.isoformat()} — an unrepresentable "
+            f"interval the store would reject (issue #306)"
+        )
+        raise MemoryStoreError(msg)
     closed = target.validity.model_copy(update={"valid_until": now})
     return target.model_copy(update={"validity": closed})
 

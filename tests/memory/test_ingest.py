@@ -19,12 +19,21 @@ from ai_assistant.core.types import (
     PreferenceMemory,
     Provenance,
     SemanticMemory,
+    Validity,
 )
-from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.memory import (
+    DefaultMemoryPolicy,
+    InMemoryMemoryStore,
+    MemoryIngestor,
+    SqliteMemoryStore,
+)
+from ai_assistant.models import HashingEmbedder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
+    from ai_assistant.core.protocols import MemoryStore
     from ai_assistant.core.types import MemoryIngestResult, MemoryKind
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -96,7 +105,7 @@ def _proposal(
     return MemoryUpdateProposal(proposed=record, rationale="because", sensitivity=sensitivity)
 
 
-def _ingestor(store: InMemoryMemoryStore) -> MemoryIngestor:
+def _ingestor(store: MemoryStore) -> MemoryIngestor:
     return MemoryIngestor(store=store, policy=DefaultMemoryPolicy(), now=_fixed_now)
 
 
@@ -181,6 +190,55 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert set(exported) == {"stale", new_id}
     # The retired target carries a closed window (present in export, hidden from get).
     assert exported["stale"].validity.valid_until is not None
+
+
+@pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
+async def test_superseding_a_future_dated_target_refuses_without_corrupting(
+    backend: str, tmp_path: Path
+) -> None:
+    # The data-integrity floor in `_close_window`: a producer-set `valid_from` at or
+    # after the ingestor's clock would, closed at `now`, form an empty/inverted
+    # window that `SqliteMemoryStore`'s decode re-validation rejects — corrupting
+    # reads. The applier refuses before `write_atomic`, so *neither* backend
+    # persists it. Run over both because the corruption is backend-specific; the
+    # full retirement semantics for such a target is deferred to issue #306. The
+    # target is a live conflict at the store's 2026-10-01 clock but its window would
+    # invert against the ingestor's 2026-06-01 clock. Identical content makes it a
+    # conflict under both the lexical (in-memory) and vector (SQLite) detectors.
+    store: MemoryStore
+    if backend == "in-memory":
+        store = InMemoryMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
+    else:
+        store = SqliteMemoryStore(
+            path=tmp_path / "memory.db",
+            embedder=HashingEmbedder(dimensions=32),
+            now=lambda: datetime(2026, 10, 1, tzinfo=UTC),
+        )
+    try:
+        await store.add(
+            PreferenceMemory(
+                id="future",
+                content="user prefers morning meetings",
+                preference="morning",
+                validity=Validity(valid_from=datetime(2026, 9, 1, tzinfo=UTC)),
+                provenance=_prov(0.6, source=MemorySource.INFERRED),
+            )
+        )
+
+        with pytest.raises(MemoryStoreError, match="valid_from"):
+            await _ingestor(store).ingest(
+                _proposal(_asserted("correction", "user prefers morning meetings"))
+            )
+
+        # No corrupt state: the store still reads cleanly (a corrupt SQLite row would
+        # make `export`/`get` raise a decode error) and the target is intact.
+        survivor = await store.get("future")
+        assert survivor is not None
+        assert survivor.validity.valid_until is None
+        assert [record.id for record in await store.export()] == ["future"]
+    finally:
+        if isinstance(store, SqliteMemoryStore):
+            store.close()
 
 
 async def test_a_correction_survives_the_next_external_re_sync() -> None:

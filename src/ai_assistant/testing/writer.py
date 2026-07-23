@@ -301,20 +301,29 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
 
     The minted id is installed with ``model_copy(update=...)``, which skips
     validators, so a raising, non-``str`` or empty reading must become a
-    ``MemoryStoreError`` *before* the write (ADR-0045 §4). Duplicated from the
-    production writer so the fake refuses a malformed factory identically.
+    ``MemoryStoreError`` *before* the write (ADR-0045 §4). An **exact** ``str`` is
+    required (``type(minted) is str``), not merely an ``isinstance`` one: a hostile
+    ``str`` subclass — say one whose ``__hash__`` raises — passes ``isinstance`` and
+    is then hashed as a store key, leaking an arbitrary exception across the seam.
+    Duplicated from the production writer so the fake refuses a malformed factory
+    identically.
 
     Raises:
-        MemoryStoreError: If the factory raises, or returns a non-``str`` or empty
-            id.
+        MemoryStoreError: If the factory raises, or returns anything that is not a
+            non-empty built-in ``str``.
     """
     try:
         minted = id_factory()
     except Exception as exc:  # any factory failure is the store's error, not the caller's
         msg = f"the id factory injected into {owner} raised while minting a supersession id"
         raise MemoryStoreError(msg) from exc
-    if not isinstance(minted, str) or not minted:
-        msg = f"the id factory injected into {owner} returned a non-str or empty id: {minted!r}"
+    if type(minted) is not str or not minted:
+        # Report the type name (a plain str), never ``repr(minted)``: a hostile
+        # object could raise from ``__repr__`` too.
+        msg = (
+            f"the id factory injected into {owner} returned something other than a "
+            f"non-empty built-in str (got type {type(minted).__name__!r})"
+        )
         raise MemoryStoreError(msg)
     return minted
 
@@ -326,9 +335,25 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     other field, ``valid_from`` included, is preserved. Mirrors
     ``MemoryIngestor._close_window`` — exactly ADR-0045 §4's "``valid_until = now``",
     with retiring a producer-set bounded window left to a follow-up ADR (no in-scope
-    producer creates one; envelope validity is operational-only, ADR-0045 §2).
-    ``now`` must be a guarded, aware-UTC reading.
+    producer creates one; envelope validity is operational-only, ADR-0045 §2). It
+    carries the same **data-integrity floor**: a producer-set ``valid_from`` at or
+    after ``now`` would form an empty/inverted interval the durable store's decode
+    rejects, so this refuses before the write rather than let the fake persist a
+    window the production path could not (issue #306). ``now`` must be a guarded,
+    aware-UTC reading.
+
+    Raises:
+        MemoryStoreError: If closing at ``now`` would form an interval ending at or
+            before ``valid_from``; nothing is written and the target stays live.
     """
+    valid_from = target.validity.valid_from
+    if valid_from is not None and now <= valid_from:
+        msg = (
+            f"cannot retire {target.id!r}: closing at {now.isoformat()} would form a window "
+            f"ending at or before its valid_from {valid_from.isoformat()} — an unrepresentable "
+            f"interval the store would reject (issue #306)"
+        )
+        raise MemoryStoreError(msg)
     closed = target.validity.model_copy(update={"valid_until": now})
     return target.model_copy(update={"validity": closed})
 
