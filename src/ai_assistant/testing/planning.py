@@ -300,7 +300,7 @@ class FakePlanStore:
                 update={
                     "status": transition.to_status,
                     "output": transition.output,
-                    "error": transition.error,
+                    "failure": transition.failure,
                     "finished_at": self._now(),
                 }
             )
@@ -369,7 +369,7 @@ class FakePlanStore:
                 "approval_ref": approval_ref,
                 "started_at": self._now(),
                 "finished_at": None,
-                "error": None,
+                "failure": None,
                 "output": None,
             }
         )

@@ -17,10 +17,12 @@ Three rules shape the whole module and are worth stating before the code:
   therefore goes wrong against a step that is already durably ``RUNNING``, which
   is why every exit path here commits something.
 - **Retry is scheduled only from a ``ToolResult``, never from an exception**
-  (ADR-0029 §8). Nothing durable distinguishes the ``FAILED`` a
-  ``ToolBindingError`` produces from a retryable one — ``StepExecution.error`` is
-  an unstructured string — so "never retried" is a property of this loop's
-  shape rather than something the transition graph enforces.
+  (ADR-0029 §8). The three exception paths write ``StepFailure(kind=None)``, so a
+  ``FAILED`` step whose ``failure.kind`` is ``None`` provably had no
+  ``ToolResult`` to read a retry decision from (ADR-0039 §3) — the rule is
+  readable off the record now, not only inferable from this loop's shape.
+  "Never retried" is still a property of that shape and not enforced by the
+  transition graph; what changed is that the record shows it.
 - **Classification reads the registry's declaration, captured before the call**
   (ADR-0029 §4). Never ``call.request.tool``, which a ``__dict__`` write could
   flip to read-only mid-flight and turn a possible side effect into
@@ -40,6 +42,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError, RetriesExhaustedError, ToolBindingError
 from ai_assistant.core.types import (
     Idempotency,
+    StepFailure,
     StepStatus,
     StepTransition,
     ToolCall,
@@ -70,16 +73,18 @@ _STATUS_BY_OUTCOME: Mapping[ToolOutcome, StepStatus] = {
 }
 
 #: What a seam rejection records. Authored here rather than taken from the
-#: exception: ``StepExecution.error`` is Tier 2 operator text bound for a log,
+#: exception: ``StepFailure.message`` is Tier 2 operator text bound for a log,
 #: and a ``ToolBindingError``'s own message interpolates identifiers off an
-#: untrusted call (ADR-0029 §3, ADR-0004 §5).
+#: untrusted call (ADR-0029 §3, ADR-0004 §5). No tool classified this, so the
+#: paired ``kind`` is ``None`` (ADR-0039 §3).
 _REFUSED = (
     "the invoker refused the call before the tool ran: it is not the call that was authorised"
 )
 
-#: What a cancelled call records on the ``FAILED`` branch. ``INDETERMINATE``
-#: records nothing, because ``StepTransition`` accepts ``error`` only for
-#: ``FAILED``; that a cancelled step carries no durable diagnostic is #208.
+#: What a cancelled call records, on both the ``FAILED`` and the
+#: ``INDETERMINATE`` branch. ``StepFailure`` is now accepted on both (ADR-0039
+#: §2), so the ``INDETERMINATE`` branch records this text rather than discarding
+#: it — the change that closes #208. ``kind`` is ``None``: no tool classified it.
 _CANCELLED = "the invocation was cancelled before it completed"
 
 #: What a claim closed before the tool could be reached records. ``FAILED``
@@ -429,7 +434,12 @@ class StepExecutor:
                 failed — :meth:`_commit_shielded`'s own precedence.
         """
         _, cancelled = await self._commit_shielded(
-            self._closing(state, step_id, StepStatus.FAILED, error=_UNSTARTED)
+            self._closing(
+                state,
+                step_id,
+                StepStatus.FAILED,
+                failure=StepFailure(kind=None, message=_UNSTARTED),
+            )
         )
         return cancelled
 
@@ -447,26 +457,27 @@ class StepExecutor:
         whole mechanism for "never retried": ADR-0029 §5's conjuncts read
         ``result.failure.kind``, and an exception produces no result to read.
         """
-        return await self._finish(state, step_id, StepStatus.FAILED, error=_REFUSED)
+        return await self._finish(
+            state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_REFUSED)
+        )
 
     async def _record(
         self, state: ExecutionState, step_id: str, result: ToolResult
     ) -> ExecutionState:
         """Commit what the seam returned — a total mapping over ``ToolOutcome``.
 
-        ``SUCCEEDED`` carries the output, ``FAILED`` the failure's message, and
-        ``INDETERMINATE`` neither: ADR-0014 §4's transition reserved for recovery
-        is now reachable from a live deadline expiry too, and it takes no payload
-        (#208).
+        ``SUCCEEDED`` carries the output; ``FAILED`` and ``INDETERMINATE`` carry
+        the tool's failure by value — kind and message unedited (ADR-0032 §5,
+        ADR-0039 §6). ADR-0014 §4's ``INDETERMINATE`` transition, once reserved
+        for a crash found at recovery, now records a diagnostic from a live
+        deadline expiry too, where it used to drop it (#208); ADR-0029 §3
+        requires ``failure`` present on a non-``SUCCEEDED`` result, so nothing is
+        fabricated.
         """
         status = _STATUS_BY_OUTCOME[result.outcome]
         if status is StepStatus.SUCCEEDED:
             return await self._finish(state, step_id, status, output=result.output)
-        if status is StepStatus.FAILED:
-            failure = result.failure
-            message = _UNEXPLAINED if failure is None else failure.message
-            return await self._finish(state, step_id, status, error=message)
-        return await self._finish(state, step_id, status)
+        return await self._finish(state, step_id, status, failure=_failure_of(result))
 
     async def _finish(
         self,
@@ -475,7 +486,7 @@ class StepExecutor:
         status: StepStatus,
         *,
         output: FrozenJsonValue = None,
-        error: str | None = None,
+        failure: StepFailure | None = None,
     ) -> ExecutionState:
         """Commit a terminal transition for the claimed step, through the shield.
 
@@ -496,7 +507,7 @@ class StepExecutor:
             PlanningError: If the store rejected the transition.
         """
         committed, cancelled = await self._commit_shielded(
-            self._closing(state, step_id, status, output=output, error=error)
+            self._closing(state, step_id, status, output=output, failure=failure)
         )
         if cancelled:
             msg = f"step {step_id!r} was committed {status}; its executing task was cancelled"
@@ -510,7 +521,7 @@ class StepExecutor:
         status: StepStatus,
         *,
         output: FrozenJsonValue = None,
-        error: str | None = None,
+        failure: StepFailure | None = None,
     ) -> StepTransition:
         """Build the terminal transition without committing it."""
         return StepTransition(
@@ -519,7 +530,7 @@ class StepExecutor:
             to_status=status,
             expected_version=state.version,
             output=output,
-            error=error,
+            failure=failure,
         )
 
     # --- cancellation ---------------------------------------------------
@@ -600,11 +611,16 @@ class StepExecutor:
         cancellation is what the caller must see: replacing it with a
         ``PlanningError`` would strand a shutdown mid-teardown. The absorbed-flag
         is ignored for the same reason — the caller re-raises unconditionally.
+
+        Both branches record now (ADR-0039 §2): ``outcome`` is ``FAILED`` or
+        ``INDETERMINATE`` — never ``SUCCEEDED`` — and both require a failure, so
+        the ``INDETERMINATE`` branch keeps its text instead of discarding it
+        (#208). ``kind`` is ``None``: no tool classified this cancellation (§3).
         """
         status = _STATUS_BY_OUTCOME[outcome]
-        error = _CANCELLED if status is StepStatus.FAILED else None
+        failure = StepFailure(kind=None, message=_CANCELLED)
         try:
-            await self._commit_shielded(self._closing(state, step_id, status, error=error))
+            await self._commit_shielded(self._closing(state, step_id, status, failure=failure))
         except PlanningError:
             _log.warning("executor_cancellation_commit_failed", step_id=step_id, exc_info=True)
 
@@ -708,6 +724,23 @@ class StepExecutor:
             return self._clock()
         except ClockReadingError as exc:
             raise PlanningError(str(exc)) from exc
+
+
+def _failure_of(result: ToolResult) -> StepFailure:
+    """The ``StepFailure`` a non-``SUCCEEDED`` result records, by value (ADR-0039 §6).
+
+    Kind and message cross **unedited** — ADR-0032 §5 governs the message up to
+    the seam, and the executor adds no rule of its own past that point: it does
+    not prefix, wrap or annotate. ``_UNEXPLAINED`` stands in only for the
+    result-with-no-failure that :class:`~ai_assistant.core.types.ToolResult`'s
+    own validator makes unconstructable, keeping the mapping total against a
+    value tampered past ``frozen=True``; it takes ``kind=None`` because — like an
+    executor-authored failure — no tool classified it (§3).
+    """
+    failure = result.failure
+    if failure is None:
+        return StepFailure(kind=None, message=_UNEXPLAINED)
+    return StepFailure(kind=failure.kind, message=failure.message)
 
 
 def _interrupted(trusted: ToolDefinition | None) -> ToolOutcome:

@@ -485,14 +485,15 @@ async def test_a_binding_refusal_is_committed_failed_and_not_re_driven() -> None
     step = await stored_step(store, state)
     assert step.status is StepStatus.FAILED
     assert step.attempts == 1, "a rejected call is not re-claimed"
-    assert step.error is not None
+    assert step.failure is not None
+    assert step.failure.kind is None, "no tool classified a seam rejection (ADR-0039 §3)"
     assert step.finished_at is not None
     assert implementation.calls == [], "the callable was never reached"
     assert final.step(STEP) == step
 
 
 async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -> None:
-    """``StepExecution.error`` is Tier 2 text bound for a log (ADR-0004 §5)."""
+    """``StepFailure.message`` is Tier 2 text bound for a log (ADR-0004 §5)."""
     store = FakePlanStore()
     state = await a_claimed_execution(store)
     seam = FakeToolInvoker([(tool("other"), Spy())])
@@ -502,7 +503,8 @@ async def test_a_binding_refusal_records_nothing_the_executor_did_not_author() -
     )
 
     step = await stored_step(store, state)
-    assert "someone@example.com" not in str(step.error)
+    assert step.failure is not None
+    assert "someone@example.com" not in step.failure.message
 
 
 # --- §8: the result mapping is total ------------------------------------
@@ -541,7 +543,9 @@ async def test_a_failure_is_committed_with_its_message() -> None:
 
     step = await stored_step(store, state)
     assert step.status is StepStatus.FAILED
-    assert step.error is not None
+    assert step.failure is not None
+    assert step.failure.kind is ToolFailureKind.INTERNAL, "the tool's own kind crosses verbatim"
+    assert step.failure.message
     assert step.finished_at is not None
     assert implementation.calls == 1
 
@@ -622,6 +626,11 @@ async def test_a_cancelled_call_is_committed_and_the_cancellation_re_raised(
     step = await stored_step(store, state)
     assert step.status is expected
     assert step.finished_at is not None
+    # Both branches record now (ADR-0039 §2) — the INDETERMINATE one is #208's
+    # regression — and neither fabricates a kind (§3).
+    assert step.failure is not None
+    assert step.failure.kind is None
+    assert step.failure.message
 
 
 async def test_the_transition_lands_before_a_repeat_cancellation_escapes() -> None:
@@ -944,6 +953,9 @@ async def test_a_clock_that_raises_is_a_wiring_bug_and_is_not_swallowed() -> Non
     step = await stored_step(store, state)
     assert step.status is StepStatus.FAILED, "not left RUNNING for recovery to misread"
     assert step.finished_at is not None
+    # The unstarted close authors its own text and fabricates no kind (ADR-0039 §3).
+    assert step.failure is not None
+    assert step.failure.kind is None
 
 
 async def test_a_cancellation_absorbed_while_closing_unstarted_outranks_the_cause() -> None:

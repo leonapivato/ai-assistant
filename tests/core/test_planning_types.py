@@ -26,8 +26,10 @@ from ai_assistant.core.types import (
     Provenance,
     SkipReason,
     StepExecution,
+    StepFailure,
     StepStatus,
     StepTransition,
+    ToolFailureKind,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -50,14 +52,16 @@ def _step(**overrides: object) -> StepExecution:
 
 
 _FINISHED = (StepStatus.SUCCEEDED, StepStatus.FAILED, StepStatus.INDETERMINATE)
+_FAILURE = (StepStatus.FAILED, StepStatus.INDETERMINATE)
 
 
 def _claimed(status: StepStatus, **overrides: object) -> StepExecution:
     """A step carrying the full set of marks a claimed step requires.
 
-    Supplies ``finished_at`` for the statuses that require one, so a test that
-    is about something else does not have to. Pass ``finished_at=None`` to opt
-    out and exercise the invariant itself.
+    Supplies ``finished_at`` for the statuses that require one, and a
+    ``failure`` for ``FAILED``/``INDETERMINATE`` (ADR-0039 §2), so a test that
+    is about something else does not have to. Pass ``finished_at=None`` or
+    ``failure=None`` to opt out and exercise the invariant itself.
     """
     fields: dict[str, object] = {
         "step_id": "s1",
@@ -69,6 +73,8 @@ def _claimed(status: StepStatus, **overrides: object) -> StepExecution:
     }
     if status in _FINISHED:
         fields["finished_at"] = _WHEN
+    if status in _FAILURE:
+        fields["failure"] = StepFailure(message="boom")
     return StepExecution(**(fields | overrides))  # type: ignore[arg-type]
 
 
@@ -258,11 +264,8 @@ def test_plan_rejects_duplicate_step_ids() -> None:
 )
 def test_claimed_step_requires_an_approval_ref(status: StepStatus) -> None:
     """ADR-0004 §7: a step that may have acted must name the decision that let it."""
-    extra: dict[str, object] = {"approval_ref": None}
-    if status is StepStatus.FAILED:
-        extra["error"] = "boom"
     with pytest.raises(ValidationError, match="approval_ref"):
-        _claimed(status, **extra)
+        _claimed(status, approval_ref=None)
 
 
 def test_claimed_step_requires_a_bound_tool() -> None:
@@ -344,14 +347,54 @@ def test_skip_reason_is_rejected_on_a_step_that_was_not_skipped() -> None:
         _step(skip_reason=SkipReason.SUPERSEDED)
 
 
-def test_failed_step_requires_an_error() -> None:
-    with pytest.raises(ValidationError, match="requires an error"):
-        _claimed(StepStatus.FAILED)
+@pytest.mark.parametrize("status", _FAILURE)
+def test_a_failure_status_requires_a_failure(status: StepStatus) -> None:
+    """Required on FAILED *and* INDETERMINATE (ADR-0039 §2), both asserted.
+
+    INDETERMINATE is the half #208 is about: the state ADR-0014 §4 makes durable
+    because it must be resolved explicitly was the one finished status with no
+    durable account of itself.
+    """
+    with pytest.raises(ValidationError, match="requires a failure"):
+        _claimed(status, failure=None)
 
 
-def test_error_is_rejected_on_a_step_that_did_not_fail() -> None:
-    with pytest.raises(ValidationError, match="only valid for a FAILED"):
-        _claimed(StepStatus.RUNNING, error="boom")
+def _with_failure(status: StepStatus) -> StepExecution:
+    """A step of ``status`` that is valid except for carrying a failure.
+
+    Each non-failure status has its own other requirements, so the scaffolding
+    differs; the failure is the single thing every one of them must reject.
+    """
+    failure = StepFailure(message="boom")
+    if status is StepStatus.PENDING:
+        return _step(failure=failure)
+    if status is StepStatus.AWAITING_APPROVAL:
+        return _step(status=status, bound_tool="smtp", failure=failure)
+    if status is StepStatus.SKIPPED:
+        return _step(status=status, skip_reason=SkipReason.SUPERSEDED, failure=failure)
+    return _claimed(status, failure=failure)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        StepStatus.PENDING,
+        StepStatus.AWAITING_APPROVAL,
+        StepStatus.RUNNING,
+        StepStatus.SUCCEEDED,
+        StepStatus.SKIPPED,
+    ],
+)
+def test_failure_is_forbidden_off_the_failure_statuses(status: StepStatus) -> None:
+    """Forbidden on each of the other five (ADR-0039 §2).
+
+    The redrawn rule is too-coarse-made-right, not lifted: a step carrying a
+    diagnostic stays readable as a step that did not succeed. A suite that
+    checked only the required half would certify one widened to "anything
+    finished".
+    """
+    with pytest.raises(ValidationError, match="only valid for a FAILED or INDETERMINATE"):
+        _with_failure(status)
 
 
 def test_output_is_rejected_on_a_step_that_did_not_succeed() -> None:
@@ -364,6 +407,43 @@ def test_succeeded_step_carries_a_frozen_output() -> None:
     assert step.output is not None
     with pytest.raises(TypeError):
         step.output["ref"] = "XYZ"  # type: ignore[index]
+
+
+# --- StepFailure --------------------------------------------------------
+
+
+def test_step_failure_defaults_to_no_kind() -> None:
+    """``message`` required, ``kind`` optional — the whole asymmetry (ADR-0039 §1)."""
+    failure = StepFailure(message="the upstream is down")
+    assert failure.message == "the upstream is down"
+    assert failure.kind is None
+
+
+def test_step_failure_carries_a_tool_kind_when_one_produced_it() -> None:
+    failure = StepFailure(kind=ToolFailureKind.UNAVAILABLE, message="the upstream is down")
+    assert failure.kind is ToolFailureKind.UNAVAILABLE
+
+
+def test_step_failure_refuses_a_blank_message() -> None:
+    """ADR-0029 §3's ``_has_visible_text`` case, one layer up (ADR-0039 §1)."""
+    with pytest.raises(ValidationError, match="must contain visible text"):
+        StepFailure(message="   ")
+
+
+def test_step_failure_strips_its_message() -> None:
+    assert StepFailure(message="  boom  ").message == "boom"
+
+
+def test_step_failure_is_frozen() -> None:
+    """An account of what already happened must not be editable after the fact."""
+    failure = StepFailure(message="boom")
+    with pytest.raises(ValidationError):
+        failure.message = "rewritten"
+
+
+def test_step_failure_round_trips_through_json() -> None:
+    failure = StepFailure(kind=ToolFailureKind.RATE_LIMITED, message="throttled")
+    assert TypeAdapter(StepFailure).validate_json(failure.model_dump_json()) == failure
 
 
 # --- ExecutionState -----------------------------------------------------
@@ -387,7 +467,7 @@ def test_execution_is_inactive_once_every_step_is_terminal() -> None:
 
 def test_failed_step_leaves_the_execution_active() -> None:
     """FAILED is terminal only if nobody retries, so it must not read as done."""
-    assert _execution(_claimed(StepStatus.FAILED, error="boom")).is_active
+    assert _execution(_claimed(StepStatus.FAILED)).is_active
 
 
 def test_indeterminate_step_leaves_the_execution_active() -> None:
@@ -402,7 +482,7 @@ def test_only_a_running_step_counts_as_live() -> None:
 @pytest.mark.parametrize(
     ("status", "extra"),
     [
-        (StepStatus.FAILED, {"error": "boom"}),
+        (StepStatus.FAILED, {}),
         (StepStatus.INDETERMINATE, {}),
     ],
 )
@@ -427,7 +507,7 @@ def test_unfinished_but_not_running_steps_are_not_live(
     ("status", "extra"),
     [
         (StepStatus.SUCCEEDED, {}),
-        (StepStatus.FAILED, {"error": "boom"}),
+        (StepStatus.FAILED, {}),
         (StepStatus.INDETERMINATE, {}),
     ],
 )
@@ -507,9 +587,27 @@ def test_transition_to_skipped_requires_a_reason() -> None:
         _transition(StepStatus.SKIPPED)
 
 
-def test_transition_to_failed_requires_an_error() -> None:
-    with pytest.raises(ValidationError, match="requires an error"):
-        _transition(StepStatus.FAILED)
+@pytest.mark.parametrize("to_status", _FAILURE)
+def test_transition_to_a_failure_status_requires_a_failure(to_status: StepStatus) -> None:
+    """The same rule as ``StepExecution``, over ``to_status`` (ADR-0039 §2).
+
+    Both directions on both statuses: ``StepTransition`` and ``StepExecution``
+    are two validators expressing one rule, and are exactly the pair that can
+    drift.
+    """
+    with pytest.raises(ValidationError, match="requires a failure"):
+        _transition(to_status)
+
+
+@pytest.mark.parametrize(
+    "to_status",
+    [StepStatus.RUNNING, StepStatus.AWAITING_APPROVAL, StepStatus.SUCCEEDED],
+)
+def test_transition_forbids_a_failure_off_the_failure_statuses(to_status: StepStatus) -> None:
+    with pytest.raises(
+        ValidationError, match="only valid for a transition to FAILED or INDETERMINATE"
+    ):
+        _transition(to_status, failure=StepFailure(message="boom"))
 
 
 def test_transition_rejects_an_output_unless_succeeding() -> None:
@@ -555,8 +653,23 @@ def test_deletion_reports_erased_indeterminate_steps() -> None:
 
 def test_export_is_versioned_and_defaults_to_empty() -> None:
     export = PlanExport(exported_at=_WHEN)
-    assert export.schema_version == 1
+    assert export.schema_version == 2
     assert export.goals == ()
+
+
+def test_export_pins_the_schema_version_to_exactly_two() -> None:
+    """The label is a fact about the document, not a producer's claim (ADR-0039 §10).
+
+    ``Literal[2]`` refuses an explicit ``1`` — a v1 document does not validate
+    against this contract at all — and any other value, so the advertised
+    version cannot be mislabelled. The positive default is what a producer gets
+    for free; only the rejections pin it.
+    """
+    assert PlanExport(exported_at=_WHEN, schema_version=2).schema_version == 2
+    with pytest.raises(ValidationError):
+        PlanExport(exported_at=_WHEN, schema_version=1)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        PlanExport(exported_at=_WHEN, schema_version=3)  # type: ignore[arg-type]
 
 
 def test_export_rejects_a_plan_whose_goal_is_missing() -> None:
@@ -603,18 +716,39 @@ def test_a_step_cannot_finish_before_it_started() -> None:
     with pytest.raises(ValidationError, match="cannot finish before it started"):
         _claimed(
             StepStatus.FAILED,
-            error="boom",
             started_at=datetime(2026, 2, 1, tzinfo=UTC),
             finished_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
 
 def test_export_round_trips_through_json() -> None:
+    """A v2 export with a failed step's failure survives a JSON round-trip.
+
+    Carrying the failure is the point: ``StepFailure`` is new to the exported
+    shape, which is exactly what ``schema_version`` moving to 2 announces.
+    """
     plan = ActionPlan(
         id="p1",
         goal_id="g1",
         steps=(PlanStep(id="s1", intent="mail", capability="send_email"),),
         created_at=_WHEN,
     )
-    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,))
-    assert TypeAdapter(PlanExport).validate_json(export.model_dump_json()) == export
+    execution = ExecutionState(
+        id="e1",
+        plan_id="p1",
+        steps=(
+            _claimed(
+                StepStatus.FAILED,
+                failure=StepFailure(kind=ToolFailureKind.UNAVAILABLE, message="down"),
+            ),
+        ),
+        updated_at=_WHEN,
+    )
+    export = PlanExport(exported_at=_WHEN, goals=(_goal(),), plans=(plan,), executions=(execution,))
+    restored = TypeAdapter(PlanExport).validate_json(export.model_dump_json())
+    assert restored == export
+    assert restored.schema_version == 2
+    step = restored.executions[0].steps[0]
+    assert step.failure is not None
+    assert step.failure.kind is ToolFailureKind.UNAVAILABLE
+    assert step.failure.message == "down"
