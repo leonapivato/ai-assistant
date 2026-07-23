@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -65,7 +65,6 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from datetime import timedelta
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -307,8 +306,31 @@ class StepRunner:
         executor: StepExecutor,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
+        confirmation_ttl: timedelta | None = None,
     ) -> None:
-        """Wire the stage from injected contracts."""
+        """Wire the stage from injected contracts.
+
+        ``confirmation_ttl`` is the one setting here that is the deployment's
+        rather than the contract's, in the shape ``ThresholdActionPolicy``'s
+        thresholds are (ADR-0036 §1): the mechanism lives here because staleness
+        enforcement is `orchestration`'s (ADR-0036 §1 declined to give the policy
+        a clock), and how long a question stands is a value a deployment sets, not
+        one this stage invents. It defaults to ``None`` — no lifetime, the
+        behaviour before #243 — so a deployment that has not chosen a duration
+        refuses no legitimate answer, which is the failure ADR-0037 §4 named when
+        it declined to invent one.
+
+        Raises:
+            ValueError: If ``confirmation_ttl`` is set and not strictly positive.
+                A zero or negative lifetime would expire every confirmation the
+                instant it was recorded, which is a way to make the whole
+                confirmation flow unanswerable by misconfiguration rather than a
+                lifetime; refused at construction rather than surfacing per
+                answer.
+        """
+        if confirmation_ttl is not None and confirmation_ttl <= timedelta(0):
+            msg = f"confirmation_ttl must be strictly positive, got {confirmation_ttl}"
+            raise ValueError(msg)
         self._plans = plans
         self._registry = registry
         self._policy = policy
@@ -316,6 +338,7 @@ class StepRunner:
         self._executor = executor
         self._clock = checked_clock(now, owner="StepRunner")
         self._id_factory = id_factory
+        self._confirmation_ttl = confirmation_ttl
 
     async def run(
         self,
@@ -443,6 +466,11 @@ class StepRunner:
         and the answer is refused with ``InvalidResolutionError`` rather than
         executed against arguments nobody approved.
 
+        **A stale confirmation is refused before anything is authored** when a
+        ``confirmation_ttl`` was configured (:meth:`_check_fresh`, #243): past its
+        lifetime a question is no longer answerable, whichever way the human
+        replied. With no lifetime set — the default — no confirmation expires.
+
         Args:
             state: The execution as currently stored. The step must be parked in
                 *it*, awaiting the confirmation's own tool — checked here rather
@@ -476,11 +504,12 @@ class StepRunner:
                 the record of it.
             PermissionDeniedError: If the named confirmation was not a ``CONFIRM``,
                 or is a ``CONFIRM`` about a different step, or one this execution
-                is not parked on (:meth:`_check_parked`); or, on the restart path,
-                if the trail holds no pending confirmation for the binding — it is
-                already resolved, or the step was never parked
+                is not parked on (:meth:`_check_parked`), or one answered past its
+                configured lifetime (:meth:`_check_fresh`); or, on the restart
+                path, if the trail holds no pending confirmation for the binding —
+                it is already resolved, or the step was never parked
                 (:meth:`_confirmation_for`). Refused before anything is authored,
-                so a mismatched answer cannot become a recorded decision.
+                so a mismatched or stale answer cannot become a recorded decision.
             PlanningError: As :meth:`run`.
         """
         # A private copy for `run`'s reason: `_check_parked` authenticates the
@@ -507,6 +536,7 @@ class StepRunner:
             )
             raise PermissionDeniedError(msg)
         self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmed.id)
+        self._check_fresh(confirmed)
 
         request = ActionRequest(
             tool=confirmed.tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
@@ -621,6 +651,55 @@ class StepRunner:
             msg = (
                 f"step {step.id!r} awaits approval for {parked.bound_tool!r}, but decision "
                 f"{confirmation_id!r} confirms {tool_id!r}"
+            )
+            raise PermissionDeniedError(msg)
+
+    def _check_fresh(self, confirmed: PermissionDecision) -> None:
+        """Refuse an answer that arrives past the confirmation's lifetime (#243).
+
+        ADR-0036 §1 declined to put a staleness check in the policy — it needs a
+        clock, and ADR-0021 §3 removed the clock from the policy deliberately —
+        and concluded a confirmation gone stale "should not be answerable; that
+        is `orchestration`'s to enforce". This is that enforcement, and it lives
+        here because this stage is the one that both holds a clock and takes the
+        answer.
+
+        **Opt-in, and that is the whole of the design's caution.** With no
+        ``confirmation_ttl`` configured nothing expires, so a deployment that has
+        not decided how long a question stands refuses no legitimate reply — the
+        exact hazard ADR-0037 §4 named when it declined to invent a duration at
+        the moment an answer arrives. When a lifetime *is* set, the duration is
+        the deployment's, read from a construction parameter rather than a rule
+        this stage authors, the same division ``ThresholdActionPolicy`` draws
+        between its contract-fixed floors and its user-set thresholds.
+
+        **Refused whichever way the human answered.** A stale question is not
+        answerable at all, so this runs before ``policy.resolve`` and before any
+        record is authored — a late "no" is refused for the same reason a late
+        "yes" is, rather than being quietly honoured as a decline. Nothing is
+        committed, so the step stays ``AWAITING_APPROVAL``; reclaiming a
+        permanently unanswerable park is a separate concern (a plan-level sweep),
+        not this stage's to invent here.
+
+        ``decided_at`` is a ``UtcInstant`` and :meth:`_now` returns a guarded
+        UTC-aware reading, so the difference is over instants — the comparison is
+        well-defined across a DST boundary, which a wall-clock subtraction would
+        not be.
+
+        Raises:
+            PermissionDeniedError: If a lifetime is configured and this answer
+                arrives more than that long after the confirmation was recorded.
+            PlanningError: If the injected clock's reading is not conforming
+                (:meth:`_now`).
+        """
+        if self._confirmation_ttl is None:
+            return
+        age = self._now() - confirmed.decided_at
+        if age > self._confirmation_ttl:
+            msg = (
+                f"decision {confirmed.id!r} was confirmed at {confirmed.decided_at.isoformat()} "
+                f"and this answer arrives {age} later, past the {self._confirmation_ttl} a "
+                f"confirmation stands, so the question has expired and answers nothing"
             )
             raise PermissionDeniedError(msg)
 
