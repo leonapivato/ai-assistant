@@ -184,6 +184,15 @@ class FakeMemoryWriter:
         last_conflict: MemoryStoreConflictError | None = None
         for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
             new_id = _checked_id(self._id_factory, owner="FakeMemoryWriter")
+            if new_id == target.id:
+                # The minted id names the retained target itself — a stored id that
+                # must be re-minted (ADR-0045 §4). Writing it would make the batch
+                # two writes to one id, a hard `MemoryStoreError` (ADR-0046 §3), not
+                # the retryable conflict this is. Mirrors ``MemoryIngestor``.
+                last_conflict = MemoryStoreConflictError(
+                    f"minted id {new_id!r} names the superseded target; re-minting"
+                )
+                continue
             batch = [
                 MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT),
                 MemoryWrite(
@@ -313,12 +322,28 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
 def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
 
-    The target is retained off the read path with ``valid_until = now``; every
-    other field, ``valid_from`` included, is preserved. ``now`` must be a guarded,
-    aware-UTC reading, since ``model_copy(update=...)`` skips validators.
+    The target is retained off the read path with its window's open end brought in
+    to ``now``; every other field, ``valid_from`` included, is preserved. Mirrors
+    ``MemoryIngestor._close_window``, including its two robustness rules for a
+    producer-set bounded window: **never extend** an earlier ``valid_until``
+    (``min``), and **refuse an inverted close** (raise, target left live) — both so
+    the fake cannot persist a ``Validity`` the production writer would reject, since
+    ``model_copy(update=...)`` skips the ``valid_until > valid_from`` validator.
+    ``now`` must be a guarded, aware-UTC reading.
+
+    Raises:
+        MemoryStoreError: If no valid closed window exists at ``now``; nothing is
+            written and the target stays live.
     """
-    closed = target.validity.model_copy(update={"valid_until": now})
-    return target.model_copy(update={"validity": closed})
+    window = target.validity
+    end = now if window.valid_until is None else min(now, window.valid_until)
+    if window.valid_from is not None and end <= window.valid_from:
+        msg = (
+            f"cannot retire {target.id!r}: the close instant {end.isoformat()} is not after "
+            f"its valid_from {window.valid_from.isoformat()}"
+        )
+        raise MemoryStoreError(msg)
+    return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
 
 
 def _supersede(incoming: MemoryRecord, new_id: str) -> MemoryRecord:

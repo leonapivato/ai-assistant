@@ -499,6 +499,36 @@ class MemoryWriterContract:
         assert live is not None
         assert "p-ev" in live.provenance.evidence
 
+    async def test_supersede_re_mints_when_the_minted_id_is_the_target_itself(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Case (b-bis): the minted id equals the retained target's own id.
+
+        The target is a *stored* record, so its id is one the correction must not be
+        written at (ADR-0045 §4, "the retained target T included"). This is the one
+        collision a naive applier misses: the two-element batch would name the
+        target's id twice, which ``write_atomic`` rejects as a hard
+        ``MemoryStoreError`` (a repeated id, ADR-0046 §3), not the retryable conflict
+        it is — so the applier detects it up front and re-mints instead of aborting.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            id_factory=_scripted("existing", "corrected"),
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+
+        assert result.record_id == "corrected"  # re-minted past the target's own id
+        assert await store.get("existing") is None  # target retired, not clobbered
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", "corrected"}
+        live = await store.get("corrected")
+        assert live is not None
+        assert "p-ev" in live.provenance.evidence
+
     async def test_supersede_with_an_always_colliding_factory_leaves_the_target_live(
         self, make_writer: WriterFactory
     ) -> None:
