@@ -673,18 +673,27 @@ class StepRunner:
         this stage authors, the same division ``ThresholdActionPolicy`` draws
         between its contract-fixed floors and its user-set thresholds.
 
-        **Refused whichever way the human answered.** A stale question is not
-        answerable at all, so this runs before ``policy.resolve`` and before any
-        record is authored — a late "no" is refused for the same reason a late
-        "yes" is, rather than being quietly honoured as a decline. Nothing is
-        committed, so the step stays ``AWAITING_APPROVAL``; reclaiming a
-        permanently unanswerable park is a separate concern (a plan-level sweep),
-        not this stage's to invent here.
+        **Refused whichever way the human answered.** Once past the lifetime a
+        question is treated as no longer answerable, so this runs before
+        ``policy.resolve`` and before any record is authored — a late "no" is
+        refused for the same reason a late "yes" is, rather than being quietly
+        honoured as a decline. Nothing is committed, so the step stays
+        ``AWAITING_APPROVAL``; reclaiming a permanently unanswerable park is a
+        separate concern (a plan-level sweep), not this stage's to invent here.
 
-        ``decided_at`` is a ``UtcInstant`` and :meth:`_now` returns a guarded
-        UTC-aware reading, so the difference is over instants — the comparison is
-        well-defined across a DST boundary, which a wall-clock subtraction would
-        not be.
+        **This is a wall-clock bound, and best-effort by construction.** The age
+        is ``_now() - decided_at`` over two ``UtcInstant`` readings of the ADR-0026
+        clock — well-defined across a DST boundary, where a naive subtraction
+        would not be, but *not* an elapsed-time measurement resilient to the clock
+        being corrected. A backward correction can carry ``_now()`` behind
+        ``decided_at``, making ``age`` negative and the question answerable again;
+        the failure direction is safe — an approval the user genuinely gave is
+        honoured late, never an action performed without one, and the trail's
+        single-resolution index still binds one approval to one resolution. A
+        lifetime robust to clock corrections and to a restart needs the deadline
+        on the durable record and a monotonic component — the deadline-on-the-
+        record shape ADR-0037 §4 and ADR-0044 defer to the contract change, not
+        this within-contract bound (issue filed).
 
         Raises:
             PermissionDeniedError: If a lifetime is configured and this answer
