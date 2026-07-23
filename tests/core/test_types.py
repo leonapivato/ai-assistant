@@ -20,6 +20,8 @@ from ai_assistant.core.types import (
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
+    MemoryWrite,
+    MemoryWriteMode,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -189,6 +191,37 @@ def test_discriminated_union_resolves_by_kind(
         }
     )
     assert isinstance(record, expected)
+
+
+def _semantic(record_id: str) -> SemanticMemory:
+    return SemanticMemory(
+        id=record_id,
+        content="c",
+        fact="f",
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.4, last_updated=_WHEN),
+    )
+
+
+def test_memory_write_defaults_to_upsert() -> None:
+    write = MemoryWrite(record=_semantic("1"))
+    assert write.mode is MemoryWriteMode.UPSERT
+
+
+def test_memory_write_coerces_a_valid_mode_string_to_the_enum() -> None:
+    # A raw string at construction is validated to the enum member, so the store's
+    # identity check (`is MemoryWriteMode.INSERT_IF_ABSENT`) still holds.
+    write = MemoryWrite(record=_semantic("1"), mode="insert_if_absent")  # type: ignore[arg-type]
+    assert write.mode is MemoryWriteMode.INSERT_IF_ABSENT
+
+
+def test_memory_write_is_frozen_so_mode_cannot_be_reassigned() -> None:
+    # Frozen blocks *any* post-construction reassignment of mode. This is what
+    # stops a raw-string overwrite (`write.mode = "insert_if_absent"`) from
+    # bypassing the enum and silently downgrading an insert-if-absent to an upsert
+    # that clobbers a colliding record (ADR-0046 §3-4).
+    write = MemoryWrite(record=_semantic("1"), mode=MemoryWriteMode.INSERT_IF_ABSENT)
+    with pytest.raises(ValidationError):
+        write.mode = MemoryWriteMode.UPSERT
 
 
 @pytest.mark.parametrize(
