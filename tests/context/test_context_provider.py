@@ -1013,6 +1013,88 @@ async def test_a_sibling_that_fails_during_a_caller_initiated_drain_is_still_obs
     assert not any("never retrieved" in str(ctx.get("message", "")) for ctx in unhandled)
 
 
+class _RaisesAfterReleaseInCleanupSource:
+    """A required source that, once cancelled, waits for a release then raises.
+
+    The release lets a test hold the source in cleanup and then make it fail at a
+    chosen moment — used to drive a *second* cancellation into ``_drain`` after
+    the source has failed but before the drain would otherwise read it.
+    """
+
+    required = True
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cleanup_entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @property
+    def name(self) -> str:
+        return "double-boom"
+
+    async def contribute(self) -> Mapping[str, object]:
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            self.cleanup_entered.set()
+            await self.release.wait()
+            msg = "failed during cleanup, interrupted by a second cancellation"
+            raise RuntimeError(msg) from None
+        return {}
+
+
+async def test_a_second_cancellation_mid_drain_still_accounts_for_a_failed_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second cancellation must not strand a sibling that failed during the drain.
+
+    The caller cancels ``assemble()`` once (starting the drain), the sibling is
+    released so it fails inside its cleanup, then the caller cancels again before
+    the drain resumes — cutting ``_drain``'s ``await`` short. Consumption lives in
+    ``_drain``'s ``finally`` alongside straggler-abandonment, so every task is
+    accounted for on that cancellation-safe path: a sibling already done is read,
+    one still running is abandoned. Either way nothing is left for asyncio to
+    report as "never retrieved".
+    """
+    monkeypatch.setattr(
+        provider_module, "_DRAIN_SECONDS", 5.0
+    )  # long, so the 2nd cancel cuts it short
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+    try:
+        source = _RaisesAfterReleaseInCleanupSource()
+        provider = AssemblingContextProvider([_clock(), source], source_timeout=None)
+        assembling = asyncio.ensure_future(provider.assemble())
+        async with asyncio.timeout(2):
+            await source.started.wait()
+        assembling.cancel()  # 1st cancel: the caller-cancellation drain begins
+        async with asyncio.timeout(2):
+            await source.cleanup_entered.wait()  # source is in cleanup, drain awaiting
+        source.release.set()  # the source will raise on its next turn
+        assembling.cancel()  # 2nd cancel: cut the drain short before it observes the failure
+        with pytest.raises(asyncio.CancelledError):
+            await assembling
+
+        # If the source was abandoned (still pending at the drain's finally) it
+        # finishes off `release`; await any straggler so its done-callback drops
+        # the reference and the assertion sees a clean slate either way.
+        outstanding = tuple(provider_module._abandoned)
+        async with asyncio.timeout(2):
+            await asyncio.gather(*outstanding, return_exceptions=True)
+        await asyncio.sleep(0)  # one turn, for the done-callbacks
+        del provider, assembling
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert not any("never retrieved" in str(ctx.get("message", "")) for ctx in unhandled)
+
+
 async def test_each_assembly_abandons_its_own_straggler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
