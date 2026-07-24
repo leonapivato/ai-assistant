@@ -8,6 +8,7 @@ or API key is needed.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -56,6 +57,29 @@ async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
         assert engine._runner._executor._plans is plans
         # The façade and the runner read the very same audit trail.
         assert engine._trail is engine._runner._trail
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_passes_the_configured_confirmation_ttl_to_the_runner(
+    tmp_path: Path,
+) -> None:
+    """A configured lifetime reaches the runner that enforces it end to end (#310)."""
+    ttl = timedelta(hours=1)
+    engine = build_engine(Settings(confirmation_ttl=ttl), data_dir=tmp_path)
+    try:
+        assert engine._runner._confirmation_ttl == ttl
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_defaults_the_runner_to_no_confirmation_lifetime(
+    tmp_path: Path,
+) -> None:
+    """With no ``confirmation_ttl`` set, the runner keeps the pre-#243 default of None (#310)."""
+    engine = build_engine(Settings(), data_dir=tmp_path)
+    try:
+        assert engine._runner._confirmation_ttl is None
     finally:
         await engine.aclose()
 

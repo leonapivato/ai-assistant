@@ -8,6 +8,7 @@ configuration knob is discoverable, typed, and validated in one place.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, ValidationError, field_validator, model_validator
@@ -100,6 +101,23 @@ class Settings(BaseSettings):
         ge=1,
         le=24,
         description="End hour of the working-hours window (local, exclusive).",
+    )
+
+    # --- Orchestration ---------------------------------------------------
+    # How long a parked confirmation stands before an answer to it is refused as
+    # stale (StepRunner._check_fresh, ADR-0036 §1, #243). A deployment value, not
+    # a contract one. ``None`` (the default) means no lifetime — the pre-#243
+    # behaviour, refusing no legitimate answer — which is why StepRunner declines
+    # to invent one (ADR-0037 §4). ``gt=timedelta(0)`` mirrors the runner's own
+    # non-positive guard: a zero or negative lifetime would expire every
+    # confirmation the instant it was recorded, making the flow unanswerable by
+    # misconfiguration, so it is refused at load rather than per answer. Parsed
+    # from an ISO-8601 duration or ``HH:MM:SS`` string in the environment
+    # (e.g. ``ASSISTANT_CONFIRMATION_TTL=PT1H`` or ``01:00:00``).
+    confirmation_ttl: timedelta | None = Field(
+        default=None,
+        gt=timedelta(0),
+        description="Lifetime of a parked confirmation before its answer is refused as stale.",
     )
 
     @field_validator("timezone")
