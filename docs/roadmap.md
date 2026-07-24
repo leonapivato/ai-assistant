@@ -125,8 +125,9 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       of a JSON Schema validator, so `parameters_schema` is declarative and the
       invoker forwards parameters to the callable unchecked; the local tools
       validate their own arguments, which is not the same guarantee. Also
-      **ranking** — the registry returns capable candidates unordered and there
-      is no rule for choosing among several
+      **ranking** — the registry returns capable candidates ordered by tool id
+      (ADR-0016 §5), which is determinism, not preference, and there is no rule
+      for choosing among several
       (#241); ADR-0053's selection-time alias layer resolves a *synonym* onto an
       advertised capability, which is not ranking. Also deferred: registry
       persistence (only `InMemoryToolRegistry` exists) and per-call data reach.
