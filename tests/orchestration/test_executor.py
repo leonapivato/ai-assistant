@@ -970,29 +970,21 @@ class ForgedDump(ToolResult):
         return {"outcome": "succeeded", "output": "ok", "failure": None}
 
 
-class RaisingField:
-    """An object injected into a genuine result's field to make serialization fail.
+def _dump_raises(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make the base ``ToolResult.model_dump`` raise ``error`` directly.
 
-    Placed past ``frozen=True`` via ``__dict__``, it lets a test exercise the
-    revalidation's ``except`` on a genuine ``ToolResult`` (which clears the exact-
-    type gate) rather than on a subclass (which does not). Its ``__repr__`` raises
-    the configured exception when the real serializer reaches it.
+    The revalidation calls ``result.model_dump`` on a genuine instance (past the
+    exact-type gate), so patching the base method is what puts an exception in
+    front of the ``except`` clause *itself* — rather than in a field, where
+    ``model_validate`` reshapes it into a ``ValidationError`` and the explicit
+    ``CancelledError`` arm is never reached. Only ``_detached_result`` calls
+    ``ToolResult.model_dump`` on this path, so nothing else is disturbed.
     """
 
-    def __init__(self, error: BaseException) -> None:
-        """Raise ``error`` from ``__repr__``, where pydantic's serializer hits it."""
-        self._error = error
+    def _raise(_self: ToolResult, **_kwargs: object) -> dict[str, object]:
+        raise error
 
-    def __repr__(self) -> str:
-        """Raise instead of rendering."""
-        raise self._error
-
-
-def _field_raises(error: BaseException) -> ToolResult:
-    """A genuine ``ToolResult`` whose ``output`` field serialization raises ``error``."""
-    result = ToolResult(outcome=ToolOutcome.SUCCEEDED, output="ok")
-    result.__dict__["output"] = RaisingField(error)
-    return result
+    monkeypatch.setattr(ToolResult, "model_dump", _raise)
 
 
 async def _assert_unusable_indeterminate(definition: ToolDefinition, seam: ScriptedInvoker) -> None:
@@ -1096,34 +1088,36 @@ async def test_a_subclass_that_forges_a_valid_dump_is_rejected_not_trusted() -> 
     await _assert_unusable_indeterminate(tool(), ReturningInvoker(tool(), forged))
 
 
-async def test_a_genuine_result_whose_field_serialization_raises_is_closed() -> None:
-    """The revalidation's catch covers a serializer that raises, past ``ValidationError``.
+async def test_a_result_whose_model_dump_raises_is_closed_not_stranded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The revalidation's catch covers the serializer itself raising, past ``ValidationError``.
 
-    A *genuine* ``ToolResult`` (so it clears the type gate) with a
-    ``__dict__``-injected ``output`` whose serialization raises ``RuntimeError``
-    throws inside the real ``model_dump`` — the case a narrow ``except
-    ValidationError`` would let escape past the claim. It closes ``INDETERMINATE``
-    instead (ADR-0051 §1).
+    If ``model_dump`` raises an ordinary exception — a broken serializer — a narrow
+    ``except ValidationError`` would let it escape past the claim. Driven by making
+    the base ``model_dump`` raise directly (a ``__dict__``-injected field, by
+    contrast, is reshaped into a ``ValidationError`` by ``model_validate`` and
+    never reaches the clause). It closes ``INDETERMINATE`` instead (ADR-0051 §1).
     """
-    await _assert_unusable_indeterminate(
-        tool(), ScriptedInvoker(tool(), [_field_raises(RuntimeError("serialization is broken"))])
-    )
+    _dump_raises(monkeypatch, RuntimeError("serializer is broken"))
+    await _assert_unusable_indeterminate(tool(), ScriptedInvoker(tool(), [succeeded()]))
 
 
-async def test_a_forged_cancellederror_from_field_serialization_does_not_strand() -> None:
-    """A ``CancelledError`` the executing task never requested must not escape.
+async def test_a_forged_cancellederror_from_model_dump_does_not_strand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``CancelledError`` from serialization must not escape as a teardown.
 
-    A genuine ``ToolResult`` with a ``__dict__``-injected field whose
-    serialization raises ``asyncio.CancelledError`` is not a teardown: the guard's
-    body is synchronous, so no genuine cancellation can originate there. Letting it
-    propagate would strand the durably ``RUNNING`` step exactly as an uncaught
-    ``KeyError`` would. ``_detached_result`` absorbs it and the step closes
-    ``INDETERMINATE`` — and crucially ``execute`` returns normally rather than
-    raising ``CancelledError`` (ADR-0051 §1).
+    ``_detached_result``'s body is synchronous, so a ``CancelledError`` out of
+    ``model_dump`` is forged, not a real task cancellation. It is absorbed to the
+    ``INDETERMINATE`` close and ``execute`` returns normally rather than raising.
+    This is the assertion that **fails if ``asyncio.CancelledError`` is dropped
+    from the ``except`` clause** — the behaviour ADR-0051 §6 pins — because
+    ``model_dump`` raising it directly reaches the clause rather than being
+    reshaped into a ``ValidationError``.
     """
-    await _assert_unusable_indeterminate(
-        tool(), ScriptedInvoker(tool(), [_field_raises(asyncio.CancelledError())])
-    )
+    _dump_raises(monkeypatch, asyncio.CancelledError())
+    await _assert_unusable_indeterminate(tool(), ScriptedInvoker(tool(), [succeeded()]))
 
 
 async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() -> None:
