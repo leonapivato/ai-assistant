@@ -559,6 +559,74 @@ async def test_pending_confirmations_is_drained_before_shutdown_closes_resources
     await closing  # shutdown completes only after the drain
 
 
+async def test_concurrent_recovery_does_not_prune_another_calls_returned_token() -> None:
+    """Overlapping recoveries are serialized, so one's prune cannot strand another's token.
+
+    Without serialization, a recovery that enumerated a stale snapshot could prune a
+    binding a concurrent recovery had just registered and returned, making that token
+    unresumable (round 2 review). One engine, two overlapping ``pending_confirmations``
+    calls, with a second execution parked in between: both returned tokens must remain
+    resumable (ADR-0052 §2).
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
+    await harness.engine.converse("send it", timeout=PATIENT)  # park execution 1 (g-1)
+
+    # Façade A's plan store gates its first get_plan so call A suspends mid-enumeration,
+    # after it has snapshotted active_executions but before it reconciles.
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateFirstGetPlan:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+            self._gated = False
+
+        async def get_plan(self, plan_id: str) -> object:
+            if not self._gated:
+                self._gated = True
+                entered.set()
+                await release.wait()
+            return await self._inner.get_plan(plan_id)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    facade = Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        id_factory=lambda: next(harness.handles),
+    )
+    facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
+
+    call_a = asyncio.ensure_future(facade.pending_confirmations())
+    await entered.wait()  # A holds the recovery lock, suspended in get_plan
+
+    # A second execution is parked durably while A is suspended (another façade, same stores).
+    parker = _fresh_facade(harness)
+    await parker.converse("send it", timeout=PATIENT)  # park execution 2 (g-2)
+
+    # Call B on the *same* façade. It must wait for A's critical section, not interleave.
+    call_b = asyncio.ensure_future(facade.pending_confirmations())
+    await asyncio.sleep(0)
+    assert not call_b.done()  # serialized behind A's held recovery lock
+
+    release.set()
+    a_result = await call_a
+    b_result = await call_b
+    # B ran after A and saw both parked executions; A saw only the first.
+    assert len(a_result) == 1
+    assert len(b_result) == 2
+
+    # Every token B returned is still resumable — none was pruned by A's older snapshot.
+    for confirmation in b_result:
+        resumed = await facade.resume(confirmation.token, approved=True, timeout=PATIENT)
+        assert resumed.step is not None
+        assert resumed.step.disposition is Disposition.EXECUTED
+
+
 async def test_aclose_closes_owned_resources_in_order() -> None:
     """The façade releases every resource, in the order it was handed them."""
     order: list[str] = []
