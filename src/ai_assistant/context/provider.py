@@ -310,21 +310,17 @@ class AssemblingContextProvider:
                 # is tearing down. Cancel and drain the siblings on the way out —
                 # bounded, so a suppressing source cannot hold the caller's
                 # cancellation the way a bare `gather` let it hold a required
-                # failure (issue #231) — read any co-failed sibling's exception so
-                # it is not reported unread, then re-raise whatever we caught.
+                # failure (issue #231) — then re-raise whatever we caught. `_drain`
+                # reads any co-failed sibling's exception from its own `finally`,
+                # so a second cancellation cannot leave one unread.
                 await self._drain(tasks)
-                _consume_pending_exceptions(tasks)
                 raise
             failure = _first_failure(tasks)
             if failure is not None:
-                # A source failed or was cancelled. Drain the siblings, read every
-                # other completed source's exception so none is later reported
-                # "never retrieved" (a sibling can fail *during* the drain —
-                # catching its cancellation and raising anew — as well as before
-                # it; `gather` read them via per-child callbacks, `asyncio.wait`
-                # does not), then re-raise the selected outcome.
+                # A source failed or was cancelled. Drain the siblings (which also
+                # reads every other completed source's exception, so none is later
+                # reported "never retrieved"), then re-raise the selected outcome.
                 await self._drain(tasks)
-                _consume_pending_exceptions(tasks)
                 raise failure
         return [task.result() for task in tasks]
 
@@ -351,7 +347,13 @@ class AssemblingContextProvider:
         the caller can cancel *this* method mid-drain: the ``await`` then raises
         and every promise ``_abandon`` makes — the strong reference, the
         warning, the retrieved outcome — would be skipped for tasks that outlive
-        the method anyway.
+        the method anyway. Reading each already-*done* sibling's exception is in
+        that same ``finally`` and for the same reason: a sibling can fail
+        *during* the drain (catching its cancellation and raising anew), and a
+        second cancellation can cut the ``await`` short before the caller would
+        otherwise read it — leaving its exception for asyncio to report as "never
+        retrieved". Doing it here makes the accounting cancellation-safe: every
+        task is either abandoned (still running) or read (already done).
         """
         for task in tasks:
             task.cancel()
@@ -367,6 +369,7 @@ class AssemblingContextProvider:
             ]
             if stragglers:
                 self._abandon(stragglers, interrupted=interrupted)
+            _consume_pending_exceptions(tasks)
 
     def _abandon(
         self,
