@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from ai_assistant.planning.execution import DEFAULT_MAX_ATTEMPTS, PlanExecution
 from ai_assistant.planning.planner import DEFAULT_PLAN_ATTEMPTS, ModelBackedPlanner
+from ai_assistant.planning.sqlite_store import SqlitePlanStore
 from ai_assistant.planning.store import InMemoryPlanStore
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "InMemoryPlanStore",
     "ModelBackedPlanner",
     "PlanExecution",
+    "SqlitePlanStore",
 ]
