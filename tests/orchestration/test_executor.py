@@ -970,21 +970,32 @@ class ForgedDump(ToolResult):
         return {"outcome": "succeeded", "output": "ok", "failure": None}
 
 
-def _dump_raises(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
-    """Make the base ``ToolResult.model_dump`` raise ``error`` directly.
+class _RaisingSerializer:
+    """A stand-in for ``ToolResult.__pydantic_serializer__`` whose ``to_python`` raises.
 
-    The revalidation calls ``result.model_dump`` on a genuine instance (past the
-    exact-type gate), so patching the base method is what puts an exception in
-    front of the ``except`` clause *itself* — rather than in a field, where
-    ``model_validate`` reshapes it into a ``ValidationError`` and the explicit
-    ``CancelledError`` arm is never reached. Only ``_detached_result`` calls
-    ``ToolResult.model_dump`` on this path, so nothing else is disturbed.
+    ``_detached_result`` serializes through the class serializer, so patching it
+    is what puts an exception in front of the ``except`` clause *itself* — rather
+    than in a field, where ``model_validate`` reshapes it into a
+    ``ValidationError`` and the explicit ``CancelledError`` arm is never reached.
     """
 
-    def _raise(_self: ToolResult, **_kwargs: object) -> dict[str, object]:
-        raise error
+    def __init__(self, error: BaseException) -> None:
+        """Raise ``error`` from every ``to_python``."""
+        self._error = error
 
-    monkeypatch.setattr(ToolResult, "model_dump", _raise)
+    def to_python(self, *args: object, **kwargs: object) -> object:
+        """Raise instead of serializing."""
+        del args, kwargs
+        raise self._error
+
+
+def _serializer_raises(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Make the class serializer ``_detached_result`` calls raise ``error`` directly.
+
+    Only ``_detached_result`` serializes a ``ToolResult`` on the execute path, so
+    nothing else is disturbed.
+    """
+    monkeypatch.setattr(ToolResult, "__pydantic_serializer__", _RaisingSerializer(error))
 
 
 async def _assert_unusable_indeterminate(definition: ToolDefinition, seam: ScriptedInvoker) -> None:
@@ -1088,35 +1099,72 @@ async def test_a_subclass_that_forges_a_valid_dump_is_rejected_not_trusted() -> 
     await _assert_unusable_indeterminate(tool(), ReturningInvoker(tool(), forged))
 
 
-async def test_a_result_whose_model_dump_raises_is_closed_not_stranded(
+async def test_an_exact_result_cannot_forge_success_by_shadowing_model_dump() -> None:
+    """A ``__dict__``-shadowed ``model_dump`` on an *exact* ``ToolResult`` forges nothing.
+
+    ``result.__dict__["model_dump"]`` shadows the class method — a plain method
+    loses to the instance dict — so ``result.model_dump()`` would return a valid
+    ``SUCCEEDED`` dict for a genuinely ``INDETERMINATE`` result, and
+    ``type(result) is ToolResult`` stays true so the exact-type gate does not
+    catch it. ``_detached_result`` serializes through the *class* serializer, which
+    reads the actual fields and ignores the shadow, so the executor records the
+    true ``INDETERMINATE`` result with the tool's own failure — never the forged
+    ``SUCCEEDED`` (ADR-0051 §1).
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+    forged = ToolResult(
+        outcome=ToolOutcome.INDETERMINATE,
+        failure=ToolFailure(kind=ToolFailureKind.TIMED_OUT, message="the tool timed out"),
+    )
+    forged.__dict__["model_dump"] = lambda **_kwargs: {
+        "outcome": "succeeded",
+        "output": "ok",
+        "failure": None,
+    }
+
+    await executor_over(store, ScriptedInvoker(tool(), [forged])).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.INDETERMINATE, "the shadowed dump did not forge SUCCEEDED"
+    assert step.failure is not None
+    assert step.failure.kind is ToolFailureKind.TIMED_OUT, (
+        "the true failure crossed, not the forgery"
+    )
+    assert step.failure.message == "the tool timed out"
+
+
+async def test_a_result_whose_serializer_raises_is_closed_not_stranded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The revalidation's catch covers the serializer itself raising, past ``ValidationError``.
 
-    If ``model_dump`` raises an ordinary exception — a broken serializer — a narrow
-    ``except ValidationError`` would let it escape past the claim. Driven by making
-    the base ``model_dump`` raise directly (a ``__dict__``-injected field, by
-    contrast, is reshaped into a ``ValidationError`` by ``model_validate`` and
-    never reaches the clause). It closes ``INDETERMINATE`` instead (ADR-0051 §1).
+    If the class serializer raises an ordinary exception — a broken serializer — a
+    narrow ``except ValidationError`` would let it escape past the claim. Driven by
+    making it raise directly (a ``__dict__``-injected field, by contrast, is
+    reshaped into a ``ValidationError`` by ``model_validate`` and never reaches the
+    clause). It closes ``INDETERMINATE`` instead (ADR-0051 §1).
     """
-    _dump_raises(monkeypatch, RuntimeError("serializer is broken"))
+    _serializer_raises(monkeypatch, RuntimeError("serializer is broken"))
     await _assert_unusable_indeterminate(tool(), ScriptedInvoker(tool(), [succeeded()]))
 
 
-async def test_a_forged_cancellederror_from_model_dump_does_not_strand(
+async def test_a_forged_cancellederror_from_serialization_does_not_strand(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``CancelledError`` from serialization must not escape as a teardown.
 
     ``_detached_result``'s body is synchronous, so a ``CancelledError`` out of
-    ``model_dump`` is forged, not a real task cancellation. It is absorbed to the
+    serialization is forged, not a real task cancellation. It is absorbed to the
     ``INDETERMINATE`` close and ``execute`` returns normally rather than raising.
     This is the assertion that **fails if ``asyncio.CancelledError`` is dropped
-    from the ``except`` clause** — the behaviour ADR-0051 §6 pins — because
-    ``model_dump`` raising it directly reaches the clause rather than being
-    reshaped into a ``ValidationError``.
+    from the ``except`` clause** — the behaviour ADR-0051 §6 pins — because the
+    serializer raising it directly reaches the clause rather than being reshaped
+    into a ``ValidationError``.
     """
-    _dump_raises(monkeypatch, asyncio.CancelledError())
+    _serializer_raises(monkeypatch, asyncio.CancelledError())
     await _assert_unusable_indeterminate(tool(), ScriptedInvoker(tool(), [succeeded()]))
 
 
