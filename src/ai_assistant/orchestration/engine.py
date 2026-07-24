@@ -305,6 +305,7 @@ class Engine:
         self._max_outstanding = max_outstanding_confirmations
         self._parked: dict[str, _Parked] = {}
         self._reserved: set[str] = set()
+        self._recovery_lock = asyncio.Lock()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
@@ -436,34 +437,45 @@ class Engine:
         return await self._tracked(self._pending_confirmations())
 
     async def _pending_confirmations(self) -> list[Confirmation]:
-        """Enumerate the durably-parked confirmations and reconcile the table."""
-        recovered: list[Confirmation] = []
-        live: set[tuple[str, str]] = set()
-        for state in await self._plans.active_executions():
-            plan = await self._plans.get_plan(state.plan_id)
-            if plan is None:  # pragma: no cover — an execution without its plan is a corrupt store
-                continue
-            for step in state.steps:
-                if step.status is not StepStatus.AWAITING_APPROVAL:
+        """Enumerate the durably-parked confirmations and reconcile the table.
+
+        **Serialized against itself** (``_recovery_lock``): enumeration spans several
+        ``await``s and ends in :meth:`_prune_recovered`, and the two are not atomic.
+        Without the lock, one call could enumerate a stale snapshot and then prune a
+        binding a concurrently-running call had just registered and returned, leaving
+        that returned token unresumable. The lock makes enumerate-and-reconcile one
+        critical section per engine, so a call's prune only ever runs against the
+        bindings it itself observed. Recovery is not on the latency-critical path, so
+        serializing it costs nothing that matters (round 2 review).
+        """
+        async with self._recovery_lock:
+            recovered: list[Confirmation] = []
+            live: set[tuple[str, str]] = set()
+            for state in await self._plans.active_executions():
+                plan = await self._plans.get_plan(state.plan_id)
+                if plan is None:  # pragma: no cover — an execution without its plan is corrupt
                     continue
-                confirmed = await self._trail.pending_confirmation(
-                    execution_id=state.id, step_id=step.step_id
-                )
-                if confirmed is None:
-                    # The binding is already resolved (ADR-0044 §3 step 1), or holds
-                    # no CONFIRM; either way there is nothing to present.
-                    continue
-                planned = next((s for s in plan.steps if s.id == step.step_id), None)
-                if planned is None:  # pragma: no cover — a step not in its plan is a corrupt store
-                    continue
-                live.add((state.id, step.step_id))
-                recovered.append(
-                    self._recovered_confirmation(
-                        state.id, step.step_id, planned.parameters, confirmed
+                for step in state.steps:
+                    if step.status is not StepStatus.AWAITING_APPROVAL:
+                        continue
+                    confirmed = await self._trail.pending_confirmation(
+                        execution_id=state.id, step_id=step.step_id
                     )
-                )
-        self._prune_recovered(live)
-        return recovered
+                    if confirmed is None:
+                        # The binding is already resolved (ADR-0044 §3 step 1), or holds
+                        # no CONFIRM; either way there is nothing to present.
+                        continue
+                    planned = next((s for s in plan.steps if s.id == step.step_id), None)
+                    if planned is None:  # pragma: no cover — a step not in its plan is corrupt
+                        continue
+                    live.add((state.id, step.step_id))
+                    recovered.append(
+                        self._recovered_confirmation(
+                            state.id, step.step_id, planned.parameters, confirmed
+                        )
+                    )
+            self._prune_recovered(live)
+            return recovered
 
     def _prune_recovered(self, live: set[tuple[str, str]]) -> None:
         """Drop recovered entries whose binding is no longer pending (ADR-0052 §2).
