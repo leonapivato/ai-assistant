@@ -104,23 +104,28 @@ def _log_safe_name(source: ContextSource) -> str:
 def _first_failure(
     tasks: Sequence[asyncio.Task[Mapping[str, object]]],
 ) -> BaseException | None:
-    """The exception of the first task (in source order) that failed, or ``None``.
+    """The exception to propagate for the first failed or cancelled task, or ``None``.
 
-    ``asyncio.wait(return_when=FIRST_EXCEPTION)`` returns as soon as any task
-    raises but neither says which nor retrieves the exception. Reading it here
-    reconstructs the first-exception propagation ``asyncio.gather`` used to give
-    the success path, and — by calling ``task.exception()`` — marks the failure
-    retrieved so it leaves no unread exception behind. Source order rather than
-    completion order is chosen because it is deterministic and matches the merge
-    loop; the two coincide for the only wiring that fails today, a single
-    required source beside optional ones.
+    Scans in source order and returns the outcome of the first done task that
+    failed or was cancelled, or ``None`` if every done task succeeded.
+    ``asyncio.wait`` neither says which task ended a batch nor retrieves its
+    outcome. Reading it here reconstructs the first-exception *and* first-
+    cancellation propagation ``asyncio.gather`` gave the success path. Source
+    order rather than completion order is chosen because it is deterministic and
+    matches the merge loop.
 
-    A cancelled task is skipped: ``task.exception()`` raises ``CancelledError`` on
-    one, and a task cancelled at this point can only be one the drain will handle.
+    A cancelled task is reported as a fresh ``CancelledError``, exactly as
+    ``gather`` propagated a cancelled child. This matters because
+    ``asyncio.wait(return_when=FIRST_EXCEPTION)`` does **not** treat a cancelled
+    task as a raised exception — it would keep waiting on the suppressing sibling
+    forever — so the caller loops on ``FIRST_COMPLETED`` and scans for the
+    cancelled task explicitly (issue #231's regression, caught in review).
     """
     for task in tasks:
-        if not task.done() or task.cancelled():
+        if not task.done():
             continue
+        if task.cancelled():
+            return asyncio.CancelledError()
         exc = task.exception()
         if exc is not None:
             return exc
@@ -219,17 +224,22 @@ class AssemblingContextProvider:
         *awaited* by ``asyncio.gather``, and that choice is load-bearing on two
         paths, not one:
 
-        - **A required source fails.** ``wait(return_when=FIRST_EXCEPTION)``
-          returns the moment the first task raises — exactly as ``gather``
-          propagated the first exception (:func:`_first_failure` recovers which,
-          in source order). The siblings are then cancelled and drained before
-          that exception is re-raised, unchanged. This only became reachable with
-          ADR-0026 §4's required sources: before them ``_safe_contribute``
-          degraded everything and nothing raised. A required source failing fast
-          beside an optional one blocked in I/O would otherwise return to the
-          caller while that source ran on — to its own timeout, or forever when
-          ``source_timeout`` is ``None`` — still able to perform a late side
-          effect for a request that is over.
+        - **A required source fails, or a source task is cancelled.** The caller
+          loops on ``wait(return_when=FIRST_COMPLETED)``: every completion is
+          inspected, and the first task that failed or was cancelled
+          (:func:`_first_failure`, in source order) is terminal — the siblings
+          are cancelled and drained, then it is re-raised unchanged.
+          ``FIRST_COMPLETED`` rather than
+          ``FIRST_EXCEPTION`` because the latter does not treat a *cancelled*
+          child as a raised exception, so a required source that raises
+          ``CancelledError`` beside a suppressing sibling would leave it waiting
+          forever. This whole path only became reachable with ADR-0026 §4's
+          required sources: before them ``_safe_contribute`` degraded everything
+          and nothing raised. A required source failing fast beside an optional
+          one blocked in I/O would otherwise return to the caller while that
+          source ran on — to its own timeout, or forever when ``source_timeout``
+          is ``None`` — still able to perform a late side effect for a request
+          that is over.
         - **The caller cancels ``assemble()``.** Because ``asyncio.wait``
           observes its tasks instead of awaiting them, a caller's
           ``CancelledError`` — its own ``asyncio.timeout``, a shutdown, a
@@ -259,20 +269,31 @@ class AssemblingContextProvider:
             # `asyncio.wait` rejects an empty set, and there is nothing to gather,
             # drain, or fail over when there are no sources.
             return []
-        try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-        except BaseException:
-            # The caller cancelled us (its deadline, a shutdown), or the loop is
-            # tearing down. Cancel and drain the siblings on the way out —
-            # bounded, so a suppressing source cannot hold the caller's
-            # cancellation the way a bare `gather` let it hold a required failure
-            # (issue #231) — then re-raise whatever we caught.
-            await self._drain(tasks)
-            raise
-        failure = _first_failure(tasks)
-        if failure is not None:
-            await self._drain(tasks)
-            raise failure
+        pending: set[asyncio.Task[Mapping[str, object]]] = set(tasks)
+        while pending:
+            try:
+                _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            except BaseException:
+                # The caller cancelled us (its deadline, a shutdown), or the loop
+                # is tearing down. Cancel and drain the siblings on the way out —
+                # bounded, so a suppressing source cannot hold the caller's
+                # cancellation the way a bare `gather` let it hold a required
+                # failure (issue #231) — then re-raise whatever we caught.
+                await self._drain(tasks)
+                raise
+            failure = _first_failure(tasks)
+            if failure is not None:
+                # A source failed or was cancelled. Drain the siblings, then
+                # re-raise. No separate step is needed to retrieve the exceptions
+                # of *other* sources that failed in the same turn: `_drain`
+                # cancels every task first, and `asyncio.Task.cancel()` marks an
+                # already-done task's exception retrieved (it clears
+                # `_log_traceback` before its done-check), so a batch of
+                # simultaneous failures leaves nothing for asyncio to report as
+                # "never retrieved". The property is pinned by
+                # `test_concurrent_required_failures_leave_no_unretrieved_exception`.
+                await self._drain(tasks)
+                raise failure
         return [task.result() for task in tasks]
 
     async def _drain(self, tasks: Sequence[asyncio.Task[Mapping[str, object]]]) -> None:

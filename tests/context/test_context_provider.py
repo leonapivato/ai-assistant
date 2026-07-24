@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
@@ -811,6 +812,103 @@ async def test_cancelling_the_assembling_task_propagates_past_a_suppressing_sour
     assert len(provider_module._abandoned) == 1
     await _retire(stubborn)
     assert not provider_module._abandoned
+
+
+class _RequiredCancellingSource:
+    """A required source whose ``contribute()`` raises ``CancelledError`` itself.
+
+    Its task ends *cancelled*, which ``asyncio.wait(FIRST_EXCEPTION)`` does not
+    treat as a raised exception — so the assembler must scan for a cancelled task
+    explicitly or a suppressing sibling holds it forever (a regression caught in
+    review of the issue #231 fix).
+    """
+
+    required = True
+
+    @property
+    def name(self) -> str:
+        return "cancels"
+
+    async def contribute(self) -> Mapping[str, object]:
+        raise asyncio.CancelledError
+
+
+class _OtherRequiredFailingSource:
+    """A second required source that fails, with a distinct message."""
+
+    required = True
+
+    @property
+    def name(self) -> str:
+        return "other-boom"
+
+    async def contribute(self) -> Mapping[str, object]:
+        msg = "second source down"
+        raise RuntimeError(msg)
+
+
+async def test_a_required_source_ending_in_cancellation_still_drains_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A *cancelled* source task is terminal too, not only a raised exception.
+
+    ``asyncio.wait(FIRST_EXCEPTION)`` would not return for a cancelled child, so a
+    required source raising ``CancelledError`` beside a source that suppresses
+    cancellation would hang the assembler. Looping on ``FIRST_COMPLETED`` and
+    treating the cancelled task as terminal drains the sibling within the budget
+    and propagates the cancellation.
+    """
+    budget = 0.05
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider(
+        [_RequiredCancellingSource(), stubborn], source_timeout=None
+    )
+
+    started = time.monotonic()
+    with pytest.raises(asyncio.CancelledError):
+        await provider.assemble()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < budget + 0.5  # bounded by the drain, not hung on the sibling
+    assert stubborn.cancels >= 1
+    assert len(provider_module._abandoned) == 1
+    await _retire(stubborn)
+    assert not provider_module._abandoned
+
+
+async def test_concurrent_required_failures_leave_no_unretrieved_exception() -> None:
+    """Simultaneous required failures must every one be retrieved.
+
+    ``_first_failure`` selects one exception in source order; a sibling that
+    failed in the same turn must not be left for asyncio to report as "Task
+    exception was never retrieved" when it is garbage-collected. It is not,
+    because ``_drain`` cancels every task before the failure is re-raised and
+    ``asyncio.Task.cancel()`` marks an already-done task's exception retrieved
+    (it clears ``_log_traceback`` ahead of its done-check). This pins that
+    property — an implementation that stopped cancelling done siblings would
+    resurrect the warning. Verified through the loop's exception handler, since
+    the report only fires when the unretrieved task is collected.
+    """
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+    try:
+        provider = AssemblingContextProvider(
+            [_RequiredFailingSource(), _OtherRequiredFailingSource()]
+        )
+        with pytest.raises(RuntimeError, match="source down"):
+            await provider.assemble()
+
+        assert not provider_module._abandoned  # both failed synchronously; nothing abandoned
+        del provider
+        gc.collect()  # force the tasks' __del__, which is what would report an unread exception
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert not any("never retrieved" in str(ctx.get("message", "")) for ctx in unhandled)
 
 
 async def test_each_assembly_abandons_its_own_straggler(
