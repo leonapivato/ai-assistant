@@ -87,6 +87,28 @@ standing reason:
   supersedes. An `EXTERNAL` target a custom policy *names explicitly* is still
   retired — it is the `target` — but sibling `EXTERNAL` conflicts are left live.
 
+**"Full" is bounded by conflict detection; the over-limit surplus is a filed
+residual.** The set is the full *detected* conflict set, which `_detect_conflicts`
+caps at the configured `conflict_limit` (default 5) — the same pre-existing bound that
+governs how many conflicts the policy considers at all. So when more than
+`conflict_limit` inferences match one correction, this supersession retires exactly
+`conflict_limit` of them and the surplus stays live. This is deliberately *not* an
+unbounded re-search: `conflict_limit` is a safety knob (`_check_tuning` refuses to
+disable it), and an unbounded supersession sweep would be a denial-of-service surface
+on a single ingest. The honesty claim is therefore the precise one — a `SUPERSEDE`
+retires *every conflict it is shown*, not "every conflict that exists on the topic" —
+the same read-time-relative, bounded honesty the rest of the memory model states
+(ADR-0045 §6). This is still a strict improvement over the pre-ADR behaviour (which
+retired *one* of N); the residual leak shrinks from N−1 to N−`conflict_limit`.
+
+**The surplus does not self-heal by re-proposal**, and this ADR does not claim it
+does: once the correction lands as a `USER_ASSERTED` record, a re-proposal of the same
+correction sees *it* as an asserted conflict and defers (`ASK_USER`, §2), so the
+surviving inferences are not swept on a second pass. Retiring them needs either a
+larger `conflict_limit` (widening what one ingest sees) or the confirmation-driven
+flow §2 defers. The over-limit boundary and this residual are pinned by a regression
+test and **filed** as issue #313; they are not resolved here.
+
 This lives in the applier because the policy cannot express it: `target_id` is
 singular and this ADR deliberately does not grow it (below). The `target` remains the
 **primary** the policy names and `MemoryDecision` audits; `MemoryIngestResult.record_id`
@@ -162,8 +184,8 @@ interrogation §5 feared.
 - **Growing `MemoryDecision.target_id` to a list.** Rejected in §1; closing N windows
   needs no contract growth. Filed against a possible future `MemoryWriter` promotion.
 - **Promoting the full-set retirement to a universal `MemoryWriter` obligation** (the
-  conformance suite + `FakeMemoryWriter`). Filed; it is a contract-surface change in
-  its own lane. Here it is `MemoryIngestor`'s behaviour within the contract's
+  conformance suite + `FakeMemoryWriter`). Filed as issue #314; it is a contract-surface
+  change in its own lane. Here it is `MemoryIngestor`'s behaviour within the contract's
   existing latitude (§1).
 - **A real contradiction signal** to distinguish a genuine assertion contradiction
   from a benign restatement or a coexisting preference. ADR-0045's finding stands:
@@ -178,9 +200,11 @@ interrogation §5 feared.
 ## Consequences
 
 - **The memory stops holding beliefs it was just corrected about.** A correction
-  retires *every* stale inference on its topic in one atomic supersession, not only
-  the best-ranked (#244). The store gains no record it did not before — the extra
-  retirements are window-closes, all retained in `export`.
+  retires every stale inference it is *shown* — the full detected conflict set, up to
+  `conflict_limit` — in one atomic supersession, not only the best-ranked (#244); a
+  surplus beyond the cap stays live as a bounded, filed residual (§1). The store gains
+  no record it did not before — the extra retirements are window-closes, all retained
+  in `export`.
 - **The profile never silently holds two contradictory assertions.** An assertion
   that contradicts a prior assertion defers to the user rather than landing beside it
   (#245). No assertion is destroyed on a weak signal; clause 1 stands.
@@ -193,7 +217,10 @@ interrogation §5 feared.
   (secret-tier, rule 1), so no new decision kind is used.
 - **Filed follow-ups:** promoting the full-set retirement to a universal writer
   obligation (with fake parity); a real contradiction signal for #245; the
-  confirmation-driven recency supersession.
+  confirmation-driven recency supersession; the **over-`conflict_limit` surplus**
+  (issue #313) — a correction contradicting more inferences than the detection cap
+  leaves the surplus live (§1), a bounded residual not self-healed by re-proposal. The
+  universal-obligation promotion is issue #314.
 - **Revisit if** a contradiction signal lands (§2's gate could tighten from "any
   asserted conflict" to "a *contradicting* asserted conflict", sparing benign
   restatements the prompt), or if a consumer needs finer per-record supersession
