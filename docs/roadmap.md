@@ -119,8 +119,12 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       query-only `ToolRegistry` that returns candidates without ranking them
       (ADR-0016). Settles ADR-0014's capability vocabulary as an open,
       registry-authoritative set. Since landed: invocation — the `ToolInvoker`
-      seam, carrying ADR-0004 §2's egress rule (ADR-0029) — and the first local
-      tools behind a default-registry factory (ADR-0048). Still deferred:
+      seam (ADR-0029), which inherits the egress rule unchanged from ADR-0017
+      (that ADR, not ADR-0004 §2, governs egress since it superseded §2's
+      clause) and does **not** designate the `tools/` egress seam: ADR-0017 §3's
+      conditions are unmet, so a networked tool is not yet permitted — and the
+      first local tools behind a default-registry factory (ADR-0048). Still
+      deferred:
       **parameter-schema enforcement** — ADR-0029 §7 carries it forward for want
       of a JSON Schema validator, so `parameters_schema` is declarative and the
       invoker forwards parameters to the callable unchecked; the local tools
