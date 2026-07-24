@@ -185,48 +185,56 @@ latter:
   committed) is made *safe* by ADR-0044 §2(b)/§3 in the trail, not *recovered*
   here; this store persisting execution state does not change that boundary.
 
-### 3. Execution-id non-reuse by a durable, atomically-allocated ordinal (#280, #305)
+### 3. Execution-id non-reuse: a per-incarnation nonce *and* a durable ordinal (#280, #305)
 
 ADR-0044 §1 makes it normative that an execution id is never handed to a second
 execution for the life of the audit trail — otherwise a stale parked `CONFIRM`
 from a prior incarnation could recover onto a freshly-created execution with the
-same id. `InMemoryPlanStore` meets this with a per-incarnation random nonce plus
-a monotonic sequence, because it is non-persistent and every process start
-rewinds its counter. A durable store must not rely on entropy for this: it
-**persists the counter**.
+same id. The `PlanStore.start_execution` docstring names two acceptable
+mechanisms: minted entropy (a nonce or uuid), or keying on durable state the
+store reopens. This store uses **both**, and each earns its place because neither
+alone covers every mode this store can be constructed in. The id is
+`{plan_id}-exec-{incarnation}-{ordinal}`, matching `InMemoryPlanStore`'s format:
 
-`start_execution` allocates the id from a durable monotonic ordinal stored in
-`meta("exec_counter")`, incremented inside the *same* `BEGIN IMMEDIATE`
-transaction that inserts the new execution row. The id is
-`{plan_id}-exec-{ordinal}`. Because the counter lives in the database and is
-read-incremented under the SQLite write lock:
+- **`incarnation` is a per-construction random nonce** (`uuid4().hex`), minted
+  once when the store object is built, exactly as `InMemoryPlanStore` does. It is
+  what makes non-reuse hold when the backing store is **not** durable — a
+  `SqlitePlanStore(path=":memory:")`, whose database is fresh per connection and
+  whose counter therefore rewinds to zero on every new instance just as the
+  in-memory store's does. Two such instances get two different nonces, so
+  `p-exec-<nonce-a>-1` and `p-exec-<nonce-b>-1` never collide. **This is the
+  reason `:memory:` remains a safe construction** rather than a hole: the ordinal
+  is worthless there, and the nonce carries non-reuse alone.
+- **`ordinal` is a durable monotonic counter** in `meta("exec_counter")`,
+  read-incremented inside the *same* `BEGIN IMMEDIATE` transaction that inserts
+  the execution row. It carries the two guarantees the nonce cannot:
+  - **Monotonic within one incarnation, never reset.** `delete_goal` and `clear`
+    delete rows from `goals`/`plans`/`executions` but never touch
+    `meta("exec_counter")`, so a deleted or bulk-erased execution's id is never
+    re-minted — which the conformance suite already pins
+    (`test_a_deleted_executions_id_is_never_reused`,
+    `test_an_execution_id_is_not_reused_after_clear`). The nonce is constant
+    within an incarnation, so intra-incarnation uniqueness is the ordinal's job.
+  - **Fork- and multi-process-safe (the #305 hazard).** #305's fork case is two
+    children inheriting one parent's in-memory nonce (copied by `fork`) and each
+    starting a private counter at zero, so a nonce copied across the fork does
+    *not* save them. A durable ordinal does: it is allocated by a read-increment
+    under SQLite's write lock, so two processes — or two forked children — opening
+    the same file are serialised and receive distinct ordinals, even sharing a
+    copied nonce. So on a **file-backed** store the ordinal closes #305's fork
+    hazard by construction rather than parking it, and additionally never rewinds
+    across a restart (a reopened file resumes the counter, so a pre-restart id
+    cannot recur even before the fresh nonce is considered — belt and braces).
 
-- **It never rewinds across a restart.** Reopening the file reads the counter
-  where it was left, so an id minted before the restart can never be minted
-  again — the exact hole #303 closed for the in-memory store with a nonce, closed
-  here by durability instead.
-- **It is never reset by `delete_goal` or `clear`.** Those delete rows from
-  `goals`/`plans`/`executions`; they do not touch `meta("exec_counter")`. So a
-  deleted or bulk-erased execution's id is never re-minted, which the conformance
-  suite already pins (`test_a_deleted_executions_id_is_never_reused`,
-  `test_an_execution_id_is_not_reused_after_clear`).
-- **It is safe under multiple processes and the fork hazard #305 named.** #305's
-  fork case — two children inheriting one process's `_incarnation` and
-  `_sequence == 0` and both minting `-exec-…-1` — is a property of the in-memory
-  nonce being *in memory*. A durable counter has no such case: the ordinal is
-  allocated by a read-increment under SQLite's write lock, so two processes (or
-  two forked children) opening the same file are serialised and receive distinct
-  ordinals by construction. The durable store therefore does not inherit #305's
-  hazard rather than merely parking it; #305 stays open only for the in-memory
-  and fake stores, which are out of this lane's fence and, per that issue,
-  unreachable in the current single-process model anyway. #305's second item —
-  injecting the nonce for deterministic restart tests — also does not arise here:
-  the durable ordinal is already deterministic, so the restart tests (§5) assert
-  non-reuse by reopening the same file, needing no injected entropy.
-
-Uniqueness is thus met "by keying on durable state it reopens", the mechanism the
-`PlanStore.start_execution` docstring already designates for a persistent store —
-not by minted entropy, and not by any durable id-history scan.
+So the two mechanisms are not redundant: on a file the ordinal gives fork-safety
+and cross-restart monotonicity while the nonce is spare entropy; on `:memory:` the
+nonce gives cross-instance non-reuse while the ordinal is spare. Every
+construction mode is covered by at least one, and the sharp `:memory:` case — a
+fresh in-memory instance paired with a persistent audit trail — is covered by the
+nonce, not left open. #305's second item (injecting the nonce for deterministic
+tests) is a follow-up on the in-memory/fake stores, out of this fence; the
+file-backed restart test here asserts non-reuse by reopening the same file, where
+the durable ordinal alone already proves it without depending on nonce entropy.
 
 ### 4. #308 is deferred, and this store neither closes nor widens it
 
@@ -264,6 +272,12 @@ connections):
   (and, separately, `clear`), reopen the file, start another execution, and
   assert the new id differs from the first: the durable `exec_counter` did not
   rewind.
+- **Execution-id non-reuse across two fresh `:memory:` instances** — the mode
+  where the durable counter is *worthless* (a `:memory:` database is fresh per
+  instance), so this is what proves the per-incarnation nonce (§3) actually
+  carries non-reuse there. Two independently-constructed
+  `SqlitePlanStore(path=":memory:")` stores each start `p1`; assert the two ids
+  differ. Mirrors `InMemoryPlanStore`'s own fresh-instance test.
 - **Atomic rollback of an interrupted write** — a `commit_transition` whose
   transaction does not complete leaves the store reloading the prior version, never
   a half-applied one (no version without its blob, no blob without its version).
