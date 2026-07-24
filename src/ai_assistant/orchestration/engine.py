@@ -409,17 +409,17 @@ class Engine:
         recovery (ADR-0044 §3) rather than a cached id.
 
         **Idempotent and bounded.** A binding already named by a ``_parked`` entry
-        reuses that entry's token rather than minting a second, and every recovered
-        entry whose binding is *no longer* pending — resolved since a previous call,
-        here or by another engine over the same durable stores — is pruned
-        (:meth:`_prune_recovered`). So repeated calls return stable tokens, the table
-        stays bounded by the number of distinct durably-parked bindings, and a
-        resolved recovery leaves no stranded entry. Recovered entries are also
-        **excluded from the confirmation ceiling** (:meth:`_admit_and_reserve`):
-        they are bounded by durable state, not by client behaviour, so a lingering
-        one applies no backpressure. Recovery presents parks that already happened
-        and are already durable — refusing to surface one would strand it (ADR-0052
-        §2).
+        reuses that entry's token rather than minting a second, and every entry whose
+        binding is *no longer* pending — recovered or in-process, resolved since a
+        previous call, here or by another engine over the same durable stores — is
+        evicted (:meth:`_reconcile`). So repeated calls return stable tokens, the
+        table stays bounded by the number of distinct durably-parked bindings, and a
+        resolution out of this engine's sight strands nothing (it neither leaks an
+        entry nor pins the confirmation ceiling with a dead in-process park).
+        Recovered entries are additionally **excluded from the confirmation ceiling**
+        (:meth:`_admit_and_reserve`): they are bounded by durable state, not by client
+        behaviour. Recovery presents parks that already happened and are already
+        durable — refusing to surface one would strand it (ADR-0052 §2).
 
         Returns:
             One :class:`Confirmation` per durably-parked, still-unresolved step,
@@ -440,7 +440,7 @@ class Engine:
         """Enumerate the durably-parked confirmations and reconcile the table.
 
         **Serialized against recovery *and* resolution** (``_recovery_lock``):
-        enumeration spans several ``await``s and ends in :meth:`_prune_recovered`,
+        enumeration spans several ``await``s and ends in :meth:`_reconcile`,
         reading both the trail (``pending_confirmation``) and ``_parked`` and then
         minting into ``_parked`` — all state :meth:`_resume` also mutates when it
         resolves a binding (it records the resolving decision through the runner and
@@ -483,28 +483,48 @@ class Engine:
                             state.id, step.step_id, planned.parameters, confirmed
                         )
                     )
-            self._prune_recovered(live)
+            await self._reconcile(live)
             return recovered
 
-    def _prune_recovered(self, live: set[tuple[str, str]]) -> None:
-        """Drop recovered entries whose binding is no longer pending (ADR-0052 §2).
+    async def _reconcile(self, live: set[tuple[str, str]]) -> None:
+        """Evict every ``_parked`` entry whose durable binding is no longer pending (ADR-0052 §2).
 
-        A recovered ``_parked`` entry (``turn is None``) is registered from durable
-        state; once its ``(execution_id, step_id)`` binding is resolved — here or by
-        another engine over the same stores — it is dead, and leaving it would leak
-        an entry the table can never remove on its own. Pruning against the freshly
-        enumerated set of still-pending bindings keeps recovery bounded and
-        self-healing. Only recovered entries are touched: an in-process converse
-        park (``turn is not None``) is the driving turn's to resolve or evict, not
-        recovery's.
+        A ``_parked`` entry — recovered (``turn is None``) *or* an in-process converse
+        park (``turn is not None``) — becomes dead once its ``(execution_id,
+        step_id)`` binding is resolved, and that resolution can happen out of this
+        engine's sight: another engine over the same durable stores answers it (the
+        durable-resume topology this whole feature exists for). A dead entry the
+        table never removes would leak — and, for a converse park, keep counting
+        toward the confirmation ceiling forever, refusing every later turn (#287,
+        round 5). So both kinds are reconciled here.
+
+        **The check is authoritative per binding, not a snapshot difference.** An
+        entry whose binding is in ``live`` was just observed pending, so it is kept
+        without a re-query. Any *other* entry is re-checked directly against the
+        trail: a binding that returns ``None`` has been resolved (or holds no
+        ``CONFIRM``) and its entry is evicted; one that still returns a ``CONFIRM`` is
+        kept. Re-checking rather than trusting "absent from the enumeration snapshot"
+        is what makes pruning a converse park **safe against a concurrent
+        ``converse``** that parked *after* this call read ``active_executions``: that
+        fresh park is not in ``live``, but its binding is genuinely pending, so the
+        re-query keeps it. ``converse`` does not take ``_recovery_lock``, so without
+        this authoritative re-check a snapshot-difference prune would strand it.
+
+        Runs under ``_recovery_lock`` (its caller holds it), and a same-engine
+        ``resume`` — the only path that also evicts — takes the same lock, so no
+        eviction races this reconciliation.
         """
-        stale = [
-            handle
+        candidates = [
+            (handle, parked)
             for handle, parked in self._parked.items()
-            if parked.turn is None and (parked.execution_id, parked.step_id) not in live
+            if (parked.execution_id, parked.step_id) not in live
         ]
-        for handle in stale:
-            del self._parked[handle]
+        for handle, parked in candidates:
+            pending = await self._trail.pending_confirmation(
+                execution_id=parked.execution_id, step_id=parked.step_id
+            )
+            if pending is None:
+                self._parked.pop(handle, None)
 
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.

@@ -515,6 +515,112 @@ async def test_a_recovered_entry_resolved_elsewhere_is_pruned() -> None:
     assert facade_a._parked == {}
 
 
+async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the_ceiling() -> None:
+    """A converse park resolved by another engine is reconciled, not pinned forever (round 5).
+
+    In-process (turn-carrying) parks count toward the confirmation ceiling. If one is
+    resolved by another engine over the same durable stores, its ``_parked`` entry
+    would otherwise linger and refuse every later turn as "awaiting an answer". The
+    next recovery reconciles it against the trail and evicts it, freeing the ceiling.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
+    facade_a = Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        id_factory=lambda: next(harness.handles),
+        max_outstanding_confirmations=1,
+    )
+    parked = await facade_a.converse("send it", timeout=PATIENT)  # A parks in-process (g-1)
+    assert parked.step is not None
+    assert parked.step.disposition is Disposition.AWAITING_CONFIRMATION
+    assert len(facade_a._parked) == 1  # a turn-carrying entry, counting toward the ceiling
+
+    # Another engine over the same durable stores resolves A's binding.
+    facade_b = _fresh_facade(harness)
+    b_pending = await facade_b.pending_confirmations()
+    await facade_b.resume(b_pending[0].token, approved=True, timeout=PATIENT)
+
+    # A is now at its ceiling of one with a *stale* in-process entry, so a new turn is
+    # refused even though nothing is truly outstanding.
+    with pytest.raises(RuntimeError, match="awaiting an answer"):
+        await facade_a.converse("send another", timeout=PATIENT)  # consumes g-2
+
+    # Recovery reconciles the stale entry away — it is no longer pending in the trail.
+    assert await facade_a.pending_confirmations() == []
+    assert facade_a._parked == {}
+
+    # The ceiling is freed: A drives a fresh turn again.
+    outcome = await facade_a.converse("send a third", timeout=PATIENT)  # g-3
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
+
+
+async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
+    """Reconciliation re-checks the trail per binding, so it never strands a fresh park.
+
+    A same-engine ``converse`` that parks *after* recovery read ``active_executions``
+    lands in ``_parked`` but is absent from recovery's enumeration snapshot. Evicting
+    on that snapshot difference would strand it; the authoritative per-binding
+    re-check keeps it, because its binding is genuinely pending (round 5).
+    """
+    goals = iter(f"g-{n}" for n in range(1, 100))
+    harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
+    facade = Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        id_factory=lambda: next(harness.handles),
+    )
+    first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
+    assert first.step is not None
+    assert len(facade._parked) == 1
+
+    # Gate active_executions so recovery snapshots the store (just g-1), then suspends.
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateActiveExecutions:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+            self._gated = False
+
+        async def active_executions(self) -> object:
+            snapshot = await self._inner.active_executions()  # type: ignore[attr-defined]
+            if not self._gated:
+                self._gated = True
+                entered.set()
+                await release.wait()
+            return snapshot
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    facade._plans = _GateActiveExecutions(harness.plans)  # type: ignore[assignment]  # test double
+
+    recovering = asyncio.ensure_future(facade.pending_confirmations())
+    await entered.wait()  # recovery holds the lock, its snapshot is [g-1]
+
+    # A concurrent same-engine converse parks g-2 into facade._parked while recovery is
+    # suspended — after its snapshot, so recovery never enumerates it. (converse does
+    # not take the recovery lock, so it completes.)
+    second = await facade.converse("send another", timeout=PATIENT)  # g-2
+    assert second.step is not None
+    assert second.step.confirmation is not None
+    assert len(facade._parked) == 2  # g-1 and the fresh g-2
+
+    release.set()
+    await recovering
+    # Reconcile re-checked g-2's binding, found it still pending, and kept it.
+    assert len(facade._parked) == 2
+    resumed = await facade.resume(second.step.confirmation.token, approved=True, timeout=PATIENT)
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+
+
 async def test_pending_confirmations_is_drained_before_shutdown_closes_resources() -> None:
     """Recovery is a tracked operation, so ``aclose`` awaits it before closing (§2).
 
