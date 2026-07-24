@@ -101,6 +101,37 @@ def _log_safe_name(source: ContextSource) -> str:
         return "<unknown>"
 
 
+def _first_failure(
+    tasks: Sequence[asyncio.Task[Mapping[str, object]]],
+) -> BaseException | None:
+    """The exception to propagate for the first failed or cancelled task, or ``None``.
+
+    Scans in source order and returns the outcome of the first done task that
+    failed or was cancelled, or ``None`` if every done task succeeded.
+    ``asyncio.wait`` neither says which task ended a batch nor retrieves its
+    outcome. Reading it here reconstructs the first-exception *and* first-
+    cancellation propagation ``asyncio.gather`` gave the success path. Source
+    order rather than completion order is chosen because it is deterministic and
+    matches the merge loop.
+
+    A cancelled task is reported as a fresh ``CancelledError``, exactly as
+    ``gather`` propagated a cancelled child. This matters because
+    ``asyncio.wait(return_when=FIRST_EXCEPTION)`` does **not** treat a cancelled
+    task as a raised exception — it would keep waiting on the suppressing sibling
+    forever — so the caller loops on ``FIRST_COMPLETED`` and scans for the
+    cancelled task explicitly (issue #231's regression, caught in review).
+    """
+    for task in tasks:
+        if not task.done():
+            continue
+        if task.cancelled():
+            return asyncio.CancelledError()
+        exc = task.exception()
+        if exc is not None:
+            return exc
+    return None
+
+
 def _is_required(source: ContextSource) -> bool:
     """Whether ``source``'s failure aborts assembly rather than degrading it.
 
@@ -142,17 +173,18 @@ class AssemblingContextProvider:
                 cannot stall assembly. ``None`` disables it, and with it any
                 bound on how long :meth:`assemble` may take — the caller then
                 owns that deadline and is expected to impose one (ADR-0033 §4).
-                A caller's deadline is not effective against a source that
-                suppresses cancellation, though: on the success path
-                ``asyncio.gather`` does not yield a cancellation until every
-                source has finished, so an ``asyncio.timeout`` around
-                :meth:`assemble` is swallowed alongside everything else
-                (issue #231).
-                It is *not* a bound on a source that suppresses cancellation
-                either way: ``asyncio.timeout`` fires exactly once, so a
-                suppressing source defeats a numeric deadline as readily as it
-                defeats ``None``. The bound that survives that case is the
-                post-failure drain, which no caller can disable.
+                A caller's deadline *is* effective even against a source that
+                suppresses cancellation: :meth:`assemble` observes its sources
+                with ``asyncio.wait`` rather than awaiting a bare
+                ``asyncio.gather``, so a caller's cancellation of :meth:`assemble`
+                surfaces promptly and is routed through the bounded drain instead
+                of being swallowed by a source that ignores it (issue #231).
+                ``source_timeout`` itself is *not* that bound: ``asyncio.timeout``
+                fires exactly once, so a suppressing source defeats a numeric
+                per-source deadline as readily as it defeats ``None``. The bounds
+                that survive that case are the caller's own deadline and the
+                post-failure drain, neither of which a ``source_timeout`` value
+                turns off.
         """
         self._sources = tuple(sources)
         self._source_timeout = source_timeout
@@ -186,38 +218,83 @@ class AssemblingContextProvider:
             raise ContextError(msg) from exc
 
     async def _gather_contributions(self) -> list[Mapping[str, object]]:
-        """Run every source concurrently, bounding what a failure leaves behind.
+        """Run every source concurrently, bounding what a failure or a cancel leaves.
 
-        ``asyncio.gather`` propagates the first exception but does **not** cancel
-        its siblings, and that only became reachable with ADR-0026 §4's required
-        sources: before them ``_safe_contribute`` degraded everything and gather
-        never raised. A required source failing fast beside an optional one
-        blocked in I/O would otherwise return to the caller while that source ran
-        on — to its own timeout, or forever when ``source_timeout`` is ``None`` —
-        still able to perform a late side effect for a request that is over.
+        The sources run as tasks *observed* by ``asyncio.wait`` rather than
+        *awaited* by ``asyncio.gather``, and that choice is load-bearing on two
+        paths, not one:
 
-        Siblings are therefore cancelled and joined before the failure is
-        re-raised. **A source that unwinds within ``_DRAIN_SECONDS`` is finished
-        when this method returns or raises**; anything still running past that
-        budget is abandoned, still running, and logged (ADR-0033 §§1-3) —
-        whether it is ignoring cancellation or merely slow to unwind, a
-        distinction the assembler cannot draw. The weaker claim is the true one:
-        nothing the assembler can do stops a task that suppresses
-        ``CancelledError``, so awaiting it without a bound would not contain it —
-        it would only add the caller to what it blocks.
+        - **A required source fails, or a source task is cancelled.** The caller
+          loops on ``wait(return_when=FIRST_COMPLETED)``: every completion is
+          inspected, and the first task that failed or was cancelled
+          (:func:`_first_failure`, in source order) is terminal — the siblings
+          are cancelled and drained, then it is re-raised unchanged.
+          ``FIRST_COMPLETED`` rather than
+          ``FIRST_EXCEPTION`` because the latter does not treat a *cancelled*
+          child as a raised exception, so a required source that raises
+          ``CancelledError`` beside a suppressing sibling would leave it waiting
+          forever. This whole path only became reachable with ADR-0026 §4's
+          required sources: before them ``_safe_contribute`` degraded everything
+          and nothing raised. A required source failing fast beside an optional
+          one blocked in I/O would otherwise return to the caller while that
+          source ran on — to its own timeout, or forever when ``source_timeout``
+          is ``None`` — still able to perform a late side effect for a request
+          that is over.
+        - **The caller cancels ``assemble()``.** Because ``asyncio.wait``
+          observes its tasks instead of awaiting them, a caller's
+          ``CancelledError`` — its own ``asyncio.timeout``, a shutdown, a
+          cancelled request — surfaces here promptly and is routed through the
+          same bounded drain. A bare ``await gather(*tasks)`` did not: ``gather``
+          does not yield a cancellation until every child has finished, so a
+          source that suppresses ``CancelledError`` swallowed the caller's
+          deadline whole and this method never returned (issue #231). ADR-0033
+          §4's "with ``source_timeout=None`` the caller owns the deadline" is only
+          a real offer once the caller's cancellation is actually observed.
+
+        **A source that unwinds within ``_DRAIN_SECONDS`` is finished when this
+        method returns or raises**; anything still running past that budget is
+        abandoned, still running, and logged (ADR-0033 §§1-3) — whether it is
+        ignoring cancellation or merely slow to unwind, a distinction the
+        assembler cannot draw. The weaker claim is the true one: nothing the
+        assembler can do stops a task that suppresses ``CancelledError``, so
+        awaiting it without a bound would not contain it — it would only add the
+        caller to what it blocks.
 
         Raises:
-            BaseException: Whatever a ``required`` source raised, unchanged.
+            BaseException: Whatever a ``required`` source raised, unchanged; or
+                the caller's own cancellation, re-raised after the drain.
         """
         tasks = [asyncio.ensure_future(self._safe_contribute(source)) for source in self._sources]
-        try:
-            return await asyncio.gather(*tasks)
-        except BaseException:
-            # `asyncio.wait` rejects an empty set, and `gather()` over no sources
-            # completes without yielding, so there is nothing to drain here.
-            if tasks:
+        if not tasks:
+            # `asyncio.wait` rejects an empty set, and there is nothing to gather,
+            # drain, or fail over when there are no sources.
+            return []
+        pending: set[asyncio.Task[Mapping[str, object]]] = set(tasks)
+        while pending:
+            try:
+                _, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            except BaseException:
+                # The caller cancelled us (its deadline, a shutdown), or the loop
+                # is tearing down. Cancel and drain the siblings on the way out —
+                # bounded, so a suppressing source cannot hold the caller's
+                # cancellation the way a bare `gather` let it hold a required
+                # failure (issue #231) — then re-raise whatever we caught.
                 await self._drain(tasks)
-            raise
+                raise
+            failure = _first_failure(tasks)
+            if failure is not None:
+                # A source failed or was cancelled. Drain the siblings, then
+                # re-raise. No separate step is needed to retrieve the exceptions
+                # of *other* sources that failed in the same turn: `_drain`
+                # cancels every task first, and `asyncio.Task.cancel()` marks an
+                # already-done task's exception retrieved (it clears
+                # `_log_traceback` before its done-check), so a batch of
+                # simultaneous failures leaves nothing for asyncio to report as
+                # "never retrieved". The property is pinned by
+                # `test_concurrent_required_failures_leave_no_unretrieved_exception`.
+                await self._drain(tasks)
+                raise failure
+        return [task.result() for task in tasks]
 
     async def _drain(self, tasks: Sequence[asyncio.Task[Mapping[str, object]]]) -> None:
         """Cancel every task, then join it for at most ``_DRAIN_SECONDS``.
