@@ -34,27 +34,44 @@ _SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
 
 
 def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
-    """Rule on a user-asserted proposal: supersede a stale inference, or accept.
+    """Rule on a user-asserted proposal: defer, supersede stale inferences, or accept.
 
-    Supersession targets the best-ranked conflict whose source is in
-    :data:`_SUPERSEDABLE` — an allow-list of the two *derived* sources, not
-    "anything that is not an assertion". Two exclusions, for different reasons:
+    Three arms, in order:
 
-    - ``USER_ASSERTED``, because an assertion may displace a belief we derived
-      but may never displace one we were told (ADR-0038 §3). Scanning past it
-      rather than taking ``conflicts[0]`` matters because the sequence is
-      ordered by retrieval score, so the top entry may itself be asserted and
-      merging over it would destroy the user's own words on the strength of a
-      lexical or embedding near-match.
-    - ``EXTERNAL``, because supersession keeps the *target's* id, and an
-      external record's id is that system's idempotency key. A correction
-      merged into it would inherit that key and be silently overwritten by the
-      next routine sync — the user's correction lost, not the stale value
-      (ADR-0038 §2a).
+    1. **A contradictory prior assertion → ``ASK_USER`` (ADR-0050 §2, #245).** If
+       *any* conflict is itself ``USER_ASSERTED``, the user is contradicting
+       something they earlier told us. Committing the new assertion — even by
+       superseding an inference alongside it — would leave two live, contradictory
+       profile records, the honesty gap issue #245 reports. We may not silently
+       destroy either (topical similarity is not a contradiction signal, ADR-0045 §5
+       / clause 1), and we may not silently keep both, so we defer to the one
+       authority that can resolve it: the user. This is the "explicit user
+       confirmation" gate ADR-0045 §7 named as the acceptable way to resolve
+       assertion-versus-assertion, and it supersedes ADR-0038 §5's "accept beside"
+       — the validity window now makes the *outcome* of that confirmation
+       non-destructive (the earlier assertion is retained in ``export``), which flips
+       the cost/benefit ADR-0038 §5 weighed. The check comes first because it must
+       win even when an inference is also in the set: superseding the inference would
+       still commit the contradicting assertion.
 
-    With nothing supersedable the assertion is accepted and lands beside the
-    conflict, which is the pre-ADR-0038 behaviour (ADR-0038 §5).
+    2. **A supersedable inference → ``SUPERSEDE`` (ADR-0038, #244).** With no asserted
+       conflict, supersession targets the best-ranked conflict whose source is in
+       :data:`_SUPERSEDABLE` — an allow-list of the two *derived* sources, not
+       "anything that is not an assertion". ``EXTERNAL`` is excluded because adopting
+       its supersession is a separate deferred choice (ADR-0045 §5/§7); scanning past
+       it (rather than taking ``conflicts[0]``) reaches the first inference instead of
+       abandoning supersession. The named target is the **primary**; the applier
+       retires the *full* supersedable set it leads (:func:`_retirement_set`, #244),
+       so a second and third stale inference on the same topic do not survive.
+
+    3. **Nothing supersedable → ``ACCEPT``.** With only ``EXTERNAL`` conflicts (or
+       none), the assertion lands beside them (ADR-0045 §7's #254 shape).
     """
+    if any(c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts):
+        return MemoryDecision(
+            kind=MemoryDecisionKind.ASK_USER,
+            reason="contradicts a prior user assertion; defer to the user (ADR-0050)",
+        )
     superseded = next(
         (c for c in conflicts if c.provenance.source in _SUPERSEDABLE),
         None,
@@ -64,7 +81,7 @@ def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
     return MemoryDecision(
         kind=MemoryDecisionKind.SUPERSEDE,
         target_id=superseded.id,
-        reason="user assertion supersedes a conflicting inference",
+        reason="user assertion supersedes the conflicting inferences",
     )
 
 
@@ -76,19 +93,24 @@ class DefaultMemoryPolicy:
 
     1. Secret-tier proposals always defer to the user.
     2. An inference never silently overrides a user-asserted memory — defer.
-    3. A user-asserted proposal *supersedes* a conflicting inference: it rules
-       ``SUPERSEDE`` over the best-ranked ``OBSERVED``/``INFERRED`` conflict
-       rather than landing beside it, so a correction takes the stale belief off
-       the read path (ADR-0038, ADR-0040).
-    4. A user-asserted proposal with nothing to supersede is trusted and
+    3. A user-asserted proposal that contradicts a *prior assertion* defers to
+       the user (``ASK_USER``): two things the user said cannot both stay live,
+       yet neither may be destroyed on a topical-similarity signal, so the user
+       resolves it (ADR-0050 §2, #245).
+    4. A user-asserted proposal *supersedes* the conflicting inferences: it rules
+       ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED`` conflict,
+       and the applier retires the *whole* supersedable conflict set it leads, so
+       no stale belief on the topic stays on the read path (ADR-0038, ADR-0040,
+       ADR-0050 §1, #244).
+    5. A user-asserted proposal with nothing to supersede is trusted and
        accepted.
-    5. A proposal that conflicts with an existing (non-asserted) record rules
+    6. A proposal that conflicts with an existing (non-asserted) record rules
        ``REINFORCE`` over it, folding into it (ADR-0040 §4).
-    6. Weak evidence (below ``min_confidence``) is stored temporarily, with an
+    7. Weak evidence (below ``min_confidence``) is stored temporarily, with an
        expiry, rather than committed.
-    7. Otherwise the proposal is accepted.
+    8. Otherwise the proposal is accepted.
 
-    Rules 2 and 3 are the same asymmetry read in both directions: an assertion
+    Rules 2 and 4 are the same asymmetry read in both directions: an assertion
     outranks an inference, and never the reverse.
     """
 

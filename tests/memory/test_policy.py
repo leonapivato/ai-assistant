@@ -97,11 +97,13 @@ async def test_user_assertion_supersedes_a_conflicting_inference() -> None:
     assert decision.target_id == "stale"
 
 
-async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assertion() -> None:
-    # `conflicts` is score-ordered, so the highest-ranked conflict can be a
-    # user-asserted record. Superseding it would destroy something the user
-    # said on the strength of a lexical match; the rule skips to the first
-    # non-asserted candidate instead (ADR-0038 §3).
+async def test_user_assertion_contradicting_an_assertion_defers_even_with_an_inference() -> None:
+    # ADR-0050 §2 (#245): when the conflict set contains a prior *assertion*, the
+    # proposal is contradicting something the user themselves said. Superseding the
+    # inference alongside it (the old ADR-0038 §3 behaviour) would still commit the
+    # new assertion beside "their-words", leaving two live contradictory profile
+    # records. The assertion-conflict check wins over the inference, so the policy
+    # defers the whole thing to the user rather than half-resolving it.
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
     conflicts = [
         _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
@@ -110,8 +112,7 @@ async def test_user_assertion_supersedes_the_best_ranked_inference_not_an_assert
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
 
-    assert decision.kind is MemoryDecisionKind.SUPERSEDE
-    assert decision.target_id == "our-guess"
+    assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
 async def test_user_assertion_does_not_supersede_an_external_record() -> None:
@@ -156,16 +157,18 @@ async def test_external_proposal_conflicting_with_an_assertion_defers() -> None:
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
-async def test_user_assertion_conflicting_only_with_assertions_is_accepted() -> None:
-    # Two things the user said, both at confidence 1.0: nothing ranks them, and
-    # the conflict signal is not strong enough to destroy either. Accept beside
-    # (ADR-0038 §5) — deliberately unchanged from the pre-ADR behaviour.
+async def test_user_assertion_contradicting_only_an_assertion_defers_to_the_user() -> None:
+    # ADR-0050 §2 (#245): two things the user said, both at confidence 1.0. Nothing
+    # ranks them and topical similarity is not a contradiction signal, so neither may
+    # be destroyed (ADR-0045 §5 / clause 1); but leaving both live is the honesty gap
+    # #245 reports. The policy defers to the user — the acceptable gate ADR-0045 §7
+    # named — superseding ADR-0038 §5's "accept beside".
     proposal = _proposal(_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0))
     earlier = _semantic("earlier", source=MemorySource.USER_ASSERTED, confidence=1.0)
 
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
-    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
 async def test_secret_tier_assertion_still_defers_before_superseding() -> None:
