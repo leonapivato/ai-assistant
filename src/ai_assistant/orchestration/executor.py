@@ -103,8 +103,9 @@ _UNEXPLAINED = "the tool reported a failure with nothing in it"
 #: ``result.outcome = ...`` and does nothing about
 #: ``result.__dict__["outcome"] = ...`` — the same ``__dict__``-bypass ADR-0018
 #: §3 puts inside the threat model for the inbound call. Recording such a value
-#: verbatim would raise past the claim (:func:`_detached_result`), so it is
-#: closed with this instead. ``kind`` is ``None``: no tool classified it (§3).
+#: verbatim would raise past the claim (:func:`_detached_result`), so the step is
+#: closed ``INDETERMINATE`` with this instead (ADR-0051, :meth:`_discard_unusable`).
+#: ``kind`` is ``None``: no tool classified it (§3).
 _UNUSABLE = "the invoker returned a result that did not survive revalidation, so it is unusable"
 
 
@@ -423,9 +424,9 @@ class StepExecutor:
         - a ``CancelledError`` commits the interrupted-call classification and
           propagates, because swallowing it would break shutdown;
         - a result that does not survive revalidation is tampered past
-          ``frozen=True`` (ADR-0018 §3) and is closed here — ``INDETERMINATE`` or
-          ``FAILED`` by the interrupted-call rule — rather than read verbatim into
-          a ``KeyError``/``AttributeError`` past the claim
+          ``frozen=True`` (ADR-0018 §3) and is closed ``INDETERMINATE`` here
+          (ADR-0051) rather than read verbatim into a
+          ``KeyError``/``AttributeError`` past the claim
           (:func:`_detached_result`, :meth:`_discard_unusable`).
 
         Only the last case is new; the first two are the seam's two contracted
@@ -442,7 +443,7 @@ class StepExecutor:
             raise
         result = _detached_result(returned)
         if result is None:
-            return await self._discard_unusable(state, step_id, trusted), None
+            return await self._discard_unusable(state, step_id), None
         return await self._record(state, step_id, result), result
 
     # --- the transitions ------------------------------------------------
@@ -576,10 +577,8 @@ class StepExecutor:
             state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_REFUSED)
         )
 
-    async def _discard_unusable(
-        self, state: ExecutionState, step_id: str, trusted: ToolDefinition | None
-    ) -> ExecutionState:
-        """Close a claimed step whose returned result cannot be read.
+    async def _discard_unusable(self, state: ExecutionState, step_id: str) -> ExecutionState:
+        """Close a claimed step whose returned result cannot be read (ADR-0051).
 
         The claim precedes the call, so a result tampered past ``frozen=True``
         (ADR-0018 §3, :func:`_detached_result`) is discovered **after**
@@ -587,28 +586,36 @@ class StepExecutor:
         ``KeyError``/``AttributeError`` out of :meth:`_record` and strand the step
         durably ``RUNNING``, so it is closed here instead.
 
-        **The close is not a flat ``FAILED``, and that is the whole point.**
-        Every other executor-authored ``FAILED`` here rests on "nothing ran"
-        being a *known* fact — the pre-invocation exits (:meth:`_refuse`,
+        **The close is ``INDETERMINATE``, not ``FAILED``, and unconditionally
+        so.** Every other executor-authored ``FAILED`` here rests on "nothing
+        ran" being a *known* fact — the pre-invocation exits (:meth:`_refuse`,
         :meth:`_close_unstarted`) all sit before the callable is reached. This one
-        does not: the tool was invoked and may have acted, and the tampered
-        outcome was the only thing that could have told us whether it did.
-        Asserting ``FAILED`` would record a possible irreversible effect as
-        certainly-nothing-happened — the one use ADR-0034 §1 forbids. So it
-        classifies exactly as an interrupted call does (:func:`_interrupted`,
-        ADR-0031 §1's single copy of the rule): ``INDETERMINATE`` for a
-        side-effecting non-``NATURAL`` tool, whose effect is now unknowable, and
-        ``FAILED`` for a read-only or naturally-idempotent one, where there is no
-        side effect to be uncertain about.
+        does not: the tool was invoked and may have acted, and the result whose
+        ``outcome`` is now unreadable was the only evidence of whether it did.
+        ``FAILED`` would record a possible irreversible effect as
+        certainly-nothing-happened, the one use ADR-0014 §4 and ADR-0034 §1
+        refuse — so this records ADR-0014 §4's durable ignorance instead, the
+        same widened live-executor use as a deadline expiry (ADR-0029 §8, #208).
 
-        Schedules nothing on either branch: the failure takes ``kind=None`` — no
-        tool classified it — and ADR-0029 §5's conjuncts read
-        ``result.failure.kind``, so a ``None`` kind is never retried (ADR-0039
-        §3), the same shape as :meth:`_refuse`.
+        Not the interrupted-call classification (:func:`_interrupted`): that rule
+        maps a ``NATURAL`` side-effecting tool to ``FAILED`` *because a repeat
+        does the same thing* — a premise that holds only when a retry follows.
+        An unusable return is terminal (below), so the premise is absent and the
+        honest answer is ignorance for every tool kind. Recording it needs no
+        ``trusted`` declaration, which matters because the same corruption that
+        produced this return may be why one is unavailable (ADR-0051 §2).
+
+        Schedules nothing: the failure takes ``kind=None`` — no tool classified
+        it — and ADR-0029 §5's conjuncts read ``result.failure.kind``, so a
+        ``None`` kind is never retried (ADR-0039 §3). ``INDETERMINATE`` is outside
+        automatic retry regardless (ADR-0014 §4), which is a second lock on the
+        same door.
         """
-        status = _STATUS_BY_OUTCOME[_interrupted(trusted)]
         return await self._finish(
-            state, step_id, status, failure=StepFailure(kind=None, message=_UNUSABLE)
+            state,
+            step_id,
+            StepStatus.INDETERMINATE,
+            failure=StepFailure(kind=None, message=_UNUSABLE),
         )
 
     async def _record(
