@@ -359,6 +359,35 @@ async def test_resolution_of_reports_a_corrupt_resolution_row_not_none(
         await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
 
 
+async def test_resolution_of_rejects_a_projection_that_disagrees_with_the_record(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """The blob is the record; a tampered index column must not misroute a ruling (ADR-0059 §2).
+
+    The ``execution_id``/``step_id`` columns are only the fast filter ``record``
+    maintains — the decoded decision is authoritative. A resolution whose column
+    was tampered to match a binding its blob does not name is a corrupt store, and
+    ``resolution_of`` must report it rather than hand it back as another binding's
+    ruling — the recovery it feeds would otherwise *act* on a mis-attributed
+    resolution.
+    """
+    bind: dict[str, object] = {"execution_id": "exec-b"}  # the resolution genuinely names exec-b
+    await ephemeral.record(decision("c-1", request=action(**bind)))
+    await ephemeral.record(
+        decision(
+            "r-1",
+            request=action(**bind),
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+            resolves="c-1",
+        )
+    )
+    # Tamper only the projection column, leaving the JSON blob (which names exec-b) intact.
+    ephemeral._conn.execute("UPDATE decisions SET execution_id = ? WHERE id = ?", ("exec-a", "r-1"))
+
+    with pytest.raises(AuditError):
+        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
+
+
 async def test_expires_at_is_persisted_and_read_back(ephemeral: SqliteAuditTrail) -> None:
     """The durable deadline survives ``record`` → read, in the blob and the column (ADR-0059 §1).
 

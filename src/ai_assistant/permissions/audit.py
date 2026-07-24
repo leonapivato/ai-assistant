@@ -537,13 +537,32 @@ class SqliteAuditTrail:
         rebuilt from JSON; always an ALLOW or DENY, since a resolving CONFIRM is
         unconstructable.
 
+        **The decoded blob is authoritative, not the projection columns.** The
+        ``execution_id``/``step_id`` columns are only the fast filter
+        :meth:`_record_sync` maintains; the SQL narrows by them, but the returned
+        decision's *own* binding is then re-checked against the query. A row whose
+        projection was tampered to match a binding its blob does not name is a
+        corrupt store, reported rather than mis-routed as another binding's ruling
+        -- load-bearing here because the recovery this feeds *acts* on the ruling.
+
         Raises:
-            AuditError: If the trail cannot be read, or holds a resolution that no
-                longer validates.
+            AuditError: If the trail cannot be read, holds a resolution that no
+                longer validates, or holds one whose stored binding disagrees with
+                its projection.
         """
         async with self._lock:
             data = await _run_to_completion(self._resolution_of_sync, execution_id, step_id)
-        return None if data is None else _decode(data)
+        if data is None:
+            return None
+        resolution = _decode(data)
+        if resolution.execution_id != execution_id or resolution.step_id != step_id:
+            msg = (
+                f"the audit trail holds a resolution whose stored binding "
+                f"({resolution.execution_id!r}, {resolution.step_id!r}) disagrees with the "
+                f"projection it was found by ({execution_id!r}, {step_id!r})"
+            )
+            raise AuditError(msg)
+        return resolution
 
     def _resolution_of_sync(self, execution_id: str, step_id: str) -> str | None:
         try:
