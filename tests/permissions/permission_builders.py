@@ -79,13 +79,14 @@ def ruling(
     return PermissionRuling(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
-def decision(
+def decision(  # noqa: PLR0913 — one builder knob per PermissionDecision field a suite varies
     decision_id: str = "d-1",
     *,
     request: ActionRequest | None = None,
     ruled: PermissionRuling | None = None,
     decided_at: datetime | None = None,
     resolves: str | None = None,
+    expires_at: datetime | None = None,
 ) -> PermissionDecision:
     """Build a decision through ``from_request``, the sanctioned construction path.
 
@@ -95,6 +96,10 @@ def decision(
     builder cannot arrange a decision whose subject disagrees with its request,
     which is a shape the contract makes unreachable and a suite should not be
     able to fake.
+
+    ``expires_at`` (ADR-0059 §1) is the durable confirmation deadline, permitted
+    only on a ``CONFIRM``; it defaults ``None`` — no lifetime — so existing
+    callers are unaffected.
     """
     return PermissionDecision.from_request(
         request if request is not None else action(),
@@ -102,4 +107,5 @@ def decision(
         id=decision_id,
         decided_at=decided_at if decided_at is not None else AT,
         resolves=resolves,
+        expires_at=expires_at,
     )

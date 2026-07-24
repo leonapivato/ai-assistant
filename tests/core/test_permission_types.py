@@ -544,6 +544,94 @@ def test_a_resolving_decision_may_not_itself_be_a_confirmation() -> None:
         )
 
 
+def test_a_confirmation_may_carry_a_lifetime_deadline() -> None:
+    """``expires_at`` is fixed on the record at ask time (ADR-0059 §1)."""
+    deadline = AT + timedelta(hours=1)
+
+    made = PermissionDecision.from_request(
+        ActionRequest(tool=tool()),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="risky"),
+        id="d-1",
+        decided_at=AT,
+        expires_at=deadline,
+    )
+
+    assert made.expires_at == deadline
+
+
+def test_a_decision_has_no_lifetime_by_default() -> None:
+    """``None`` — no lifetime — is the unbounded default (ADR-0059 §1)."""
+    made = PermissionDecision.from_request(
+        ActionRequest(tool=tool()),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="risky"),
+        id="d-1",
+        decided_at=AT,
+    )
+
+    assert made.expires_at is None
+
+
+@pytest.mark.parametrize("outcome", [PermissionOutcome.ALLOW, PermissionOutcome.DENY])
+def test_only_a_confirmation_may_carry_a_lifetime(outcome: PermissionOutcome) -> None:
+    """A lifetime belongs to an open question; a resolved outcome carries none (ADR-0059 §1).
+
+    The same "only the coherent outcome may carry this" shape ``authorised_by``
+    uses — an ``ALLOW``/``DENY`` naming a deadline is incoherent.
+    """
+    with pytest.raises(ValidationError, match="carries no lifetime"):
+        PermissionDecision.from_request(
+            ActionRequest(tool=tool()),
+            PermissionRuling(outcome=outcome, reason="done"),
+            id="d-1",
+            decided_at=AT,
+            expires_at=AT + timedelta(hours=1),
+        )
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [AT, AT - timedelta(seconds=1)],
+    ids=["at the ask instant", "before the ask instant"],
+)
+def test_a_deadline_not_after_the_ask_instant_is_refused(deadline: datetime) -> None:
+    """A deadline at or before ``decided_at`` expires the question the moment it is asked.
+
+    The same shape as ``confirmation_ttl``'s strictly-positive check — refused at
+    construction, not silently normalised.
+    """
+    with pytest.raises(ValidationError, match="strictly after decided_at"):
+        PermissionDecision.from_request(
+            ActionRequest(tool=tool()),
+            PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="risky"),
+            id="d-1",
+            decided_at=AT,
+            expires_at=deadline,
+        )
+
+
+def test_a_lifetime_is_ordered_by_instant_not_wall_clock() -> None:
+    """``expires_at`` is a ``UtcInstant``: an offset is preserved as an instant (ADR-0059 §1).
+
+    The deadline below reads ``15:00 +02:00`` — the same instant as ``13:00 UTC``,
+    an hour after the noon-UTC ask — so it is normalised to UTC and passes the
+    strictly-after check by instant, not by the wall-clock hour ``15 > 12``.
+    """
+    deadline = datetime(2026, 7, 20, 15, 0, tzinfo=timezone(timedelta(hours=2)))
+
+    made = PermissionDecision.from_request(
+        ActionRequest(tool=tool()),
+        PermissionRuling(outcome=PermissionOutcome.CONFIRM, reason="risky"),
+        id="d-1",
+        decided_at=AT,
+        expires_at=deadline,
+    )
+
+    assert made.expires_at == deadline
+    assert made.expires_at == AT + timedelta(hours=1)
+    assert made.expires_at is not None
+    assert made.expires_at.tzinfo is UTC
+
+
 @pytest.mark.parametrize("field", ["id", "step_id", "resolves"])
 def test_a_decision_identifier_with_no_utf8_encoding_is_refused(field: str) -> None:
     """The last field family that could break the round-trip guarantee.

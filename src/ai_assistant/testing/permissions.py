@@ -345,6 +345,32 @@ class FakeAuditTrail:
         newest = sorted(by_id, key=lambda held: held.decided_at, reverse=True)[0]
         return newest.model_copy(deep=True)
 
+    async def resolution_of(self, *, execution_id: str, step_id: str) -> PermissionDecision | None:
+        """The recorded resolution of this binding's confirmation, or ``None`` (ADR-0059 §2).
+
+        The complement of :meth:`pending_confirmation`: it returns the resolving
+        decision (``resolves`` set) whose ``(execution_id, step_id)`` equals the
+        binding — the ALLOW or DENY the binding already received. By ADR-0044 §2a a
+        resolution's own binding equals its confirmation's, so a stored resolving
+        decision sharing this binding *is* a resolution of one of its CONFIRMs; and
+        by §2b the concrete binding carries at most one, so the match is unique. The
+        result is always an ALLOW or a DENY — a resolving ``CONFIRM`` is
+        unconstructable (``_a_resolution_is_not_itself_a_question``) — never a
+        question. ``None`` means the binding carries no resolution; a dict read
+        cannot fail, so ``None`` never stands in for an unreadable trail.
+        """
+        resolution = next(
+            (
+                held
+                for held in self._decisions.values()
+                if held.resolves is not None
+                and held.execution_id == execution_id
+                and held.step_id == step_id
+            ),
+            None,
+        )
+        return None if resolution is None else resolution.model_copy(deep=True)
+
     async def get(self, decision_id: str) -> PermissionDecision | None:
         """Return the decision with ``decision_id`` as a detached snapshot, or ``None``."""
         stored = self._decisions.get(decision_id)

@@ -2392,9 +2392,18 @@ class PermissionDecision(BaseModel):
     resolves: DurableIdentifier | None = Field(
         default=None, description="The CONFIRM decision this one answers, if any."
     )
+    expires_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "The instant past which this CONFIRM is no longer answerable, fixed "
+            "when the question was asked (ADR-0059 §1). None for a decision with no "
+            "lifetime — every non-CONFIRM decision, and a CONFIRM parked by a "
+            "deployment that set no confirmation lifetime."
+        ),
+    )
 
     @classmethod
-    def from_request(
+    def from_request(  # noqa: PLR0913 — the ADR-0059 §1 signature: recorder-supplied id, decided_at, resolves, expires_at
         cls,
         request: ActionRequest,
         ruling: PermissionRuling,
@@ -2402,6 +2411,7 @@ class PermissionDecision(BaseModel):
         id: Identifier,  # noqa: A002 — names the field it fills; the ADR fixes the signature
         decided_at: datetime,
         resolves: Identifier | None = None,
+        expires_at: datetime | None = None,
     ) -> PermissionDecision:
         """Bind a ruling to the request it was made about.
 
@@ -2436,6 +2446,16 @@ class PermissionDecision(BaseModel):
             id: Identifier for this decision, minted by the caller that records.
             decided_at: When the ruling was made; must be timezone-aware.
             resolves: The recorded ``CONFIRM`` this decision answers, if any.
+            expires_at: The instant past which a ``CONFIRM`` stops being
+                answerable, fixed here at ask time (ADR-0059 §1). Supplied by the
+                *recorder* like ``decided_at`` and ``resolves``, not transcribed
+                from the request, because the deadline is the recorder's concern
+                (its deployment lifetime), not a fact the policy authored. The
+                recorder derives it — ``decided_at + confirmation_ttl`` under
+                bounded arithmetic, resolving an unrepresentable sum to ``None``
+                — before calling this; no deadline is computed here. ``None`` for
+                a decision with no lifetime. Permitted only on a ``CONFIRM`` and
+                only strictly after ``decided_at`` (both checked at construction).
 
         Returns:
             The decision, ready to record.
@@ -2449,6 +2469,7 @@ class PermissionDecision(BaseModel):
             step_id=request.step_id,
             execution_id=request.execution_id,
             resolves=resolves,
+            expires_at=expires_at,
         )
 
     def authorises(self, request: ActionRequest) -> bool:
@@ -2518,6 +2539,37 @@ class PermissionDecision(BaseModel):
         """
         if self.resolves is not None and self.ruling.outcome is PermissionOutcome.CONFIRM:
             msg = "a resolving decision may not itself be a CONFIRM"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _a_lifetime_belongs_only_to_an_open_question(self) -> PermissionDecision:
+        """Permit ``expires_at`` only on a ``CONFIRM``, and only after ``decided_at`` (ADR-0059 §1).
+
+        A lifetime is a property of an *open question*: a resolving ``ALLOW`` or
+        ``DENY``, or a direct grant, carries none — the same "only the coherent
+        outcome may carry this" shape :meth:`PermissionRuling._only_an_allow_cites_an_authorisation`
+        uses for ``authorised_by``.
+
+        And a deadline at or before the ask instant would expire the question the
+        moment it is recorded, so ``expires_at`` must fall *strictly after*
+        ``decided_at`` — the same shape as ``confirmation_ttl``'s strictly-positive
+        check. Both comparands are :data:`UtcInstant`, already normalised to UTC,
+        so the comparison is by instant.
+
+        ``None`` — no lifetime — is always permitted; there is deliberately no
+        answer-time recompute, which is what keeps ``None`` unambiguous.
+        """
+        if self.expires_at is None:
+            return self
+        if self.ruling.outcome is not PermissionOutcome.CONFIRM:
+            msg = f"a {self.ruling.outcome} decision carries no lifetime, got {self.expires_at!r}"
+            raise ValueError(msg)
+        if self.expires_at <= self.decided_at:
+            msg = (
+                f"expires_at must fall strictly after decided_at, got "
+                f"expires_at={self.expires_at!r}, decided_at={self.decided_at!r}"
+            )
             raise ValueError(msg)
         return self
 
