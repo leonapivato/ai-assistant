@@ -236,8 +236,16 @@ class SqlitePlanStore:
         ``provenance`` and ``created_at`` are its identity: rewriting them would
         make every plan and execution already recorded against this id describe
         an objective the user never set, so a changed objective needs a new goal.
+
+        The input is **revalidated before it is persisted**, not merely copied
+        (like ``SqliteAuditTrail`` does with a decision): ``Goal`` is mutable and
+        does not validate on assignment, so a caller can build a valid goal, set
+        ``goal.statement = "   "``, and hand it here. Storing that unchecked would
+        write a record every later ``get_goal``/``export`` fails to decode — the
+        store would poison its own reads. Revalidating turns it into a
+        ``PlanningError`` at the write, before anything is persisted.
         """
-        snapshot = goal.model_copy(deep=True)
+        snapshot = _revalidated_goal(goal)
         async with self._lock:
             await asyncio.to_thread(self._save_goal_sync, snapshot)
         return goal.id
@@ -285,8 +293,12 @@ class SqlitePlanStore:
         durable backstop beneath the app-level check (ADR-0049 §1). Rejecting a
         *reused* id keeps a plan an audit record: re-planning takes a new id
         (ADR-0014 §2). An identical re-save is idempotent, so a retry is harmless.
+
+        Revalidated before it is persisted, for the same reason as ``save_goal``:
+        a mutable ``ActionPlan`` mutated past its validators must fail at the write
+        rather than poison every later decode.
         """
-        snapshot = plan.model_copy(deep=True)
+        snapshot = _revalidated_plan(plan)
         async with self._lock:
             await asyncio.to_thread(self._save_plan_sync, snapshot)
         return plan.id
@@ -603,6 +615,40 @@ def _wrap(action: str, subject: str, exc: sqlite3.Error) -> PlanningError:
     """Translate a raw ``sqlite3`` fault into `planning`'s own error at the seam."""
     target = f" {subject!r}" if subject else ""
     return PlanningError(f"failed to {action}{target}: {exc}")
+
+
+def _revalidated_goal(goal: Goal) -> Goal:
+    """Rebuild ``goal`` as a validated, detached :class:`Goal`, or refuse it.
+
+    Both the snapshot (so a caller mutating its instance after the call cannot
+    reach stored state) and the guard against persisting an invalid record: a
+    mutable ``Goal`` mutated past its validators would otherwise be stored and
+    break every later decode. Rebuilt as ``Goal`` specifically, so a subclass's
+    extra fields are refused by ``extra="forbid"`` rather than silently dropped.
+
+    Raises:
+        PlanningError: If the goal does not satisfy its own model.
+    """
+    try:
+        return Goal.model_validate(goal.model_dump())
+    except ValidationError as exc:
+        msg = f"goal {goal.id!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
+
+
+def _revalidated_plan(plan: ActionPlan) -> ActionPlan:
+    """Rebuild ``plan`` as a validated, detached :class:`ActionPlan`, or refuse it.
+
+    Same reasoning as :func:`_revalidated_goal`.
+
+    Raises:
+        PlanningError: If the plan does not satisfy its own model.
+    """
+    try:
+        return ActionPlan.model_validate(plan.model_dump())
+    except ValidationError as exc:
+        msg = f"plan {plan.id!r} is not a valid record and will not be stored: {exc}"
+        raise PlanningError(msg) from exc
 
 
 def _decode_goal(data: str) -> Goal:
