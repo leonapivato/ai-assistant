@@ -172,43 +172,57 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
     value that reaches the commit is one nothing else holds a reference to, so it
     cannot be edited between revalidation and the write.
 
-    **Total over any return, not only a tampered ``ToolResult``.** The parameter
-    is typed ``ToolResult``, but the point of a post-claim guard is to survive a
-    value that violates its type: a non-conforming seam that returns ``None`` or
-    some other object would raise out of ``model_dump`` *before*
-    ``model_validate`` is reached, and a subclass could override serialization to
-    raise anything. Any of those escaping would strand the claim exactly as the
-    ``KeyError``/``AttributeError`` this exists to prevent would. So every
-    ordinary exception is caught and reported as "unusable".
+    **Only an exact ``ToolResult`` is trusted; a subclass is unusable.** The
+    revalidation reads the value's *own* ``model_dump`` — an overridable instance
+    method — so a subclass could override it to return a valid-but-false dict
+    (an ``INDETERMINATE`` result dumping as ``{"outcome": "succeeded", ...}``),
+    and ``model_validate`` would then mint a genuine ``SUCCEEDED`` result the
+    executor commits: a forged outcome, not merely a rejected one. It could also
+    override ``model_dump`` to raise. So the type is checked *before* any
+    overridable method runs — ``type(result) is ToolResult``, not
+    ``isinstance`` — and anything that is not exactly a ``ToolResult`` (a
+    subclass, a ``None`` or other object a non-conforming seam returned) is
+    unusable. ADR-0029 §3 has the seam return a ``ToolResult``; the executor
+    records the contract type and nothing that only claims to be one.
+
+    **The revalidation is then total over a genuine instance tampered past
+    ``frozen=True``.** Past the type gate ``model_dump`` is the real serializer,
+    but a ``__dict__``-injected field can still hold an object whose own
+    serialization raises. Every ordinary exception from the round-trip is caught
+    and reported as "unusable", so such a value cannot strand the claim either.
 
     **``asyncio.CancelledError`` is caught too, and only because this body is
     synchronous.** The event loop delivers a genuine task cancellation at an
     ``await``, and there is none here — the revalidation is two synchronous
-    pydantic calls. A ``CancelledError`` surfacing from them can therefore only
-    have been raised by the untrusted value's own ``model_dump``/``__class__``,
-    i.e. forged, and letting it propagate would strand the claimed step by
-    masquerading as a teardown that is not happening. A *real* cancellation of
-    the executing task is unaffected: it is delivered at the next ``await`` — the
-    commit — where :meth:`_commit_shielded` still lands the write and re-raises.
-    ``KeyboardInterrupt`` and ``SystemExit`` are deliberately *not* named, so a
-    real process signal still propagates. This does not replace the seam's
-    contract to return a valid result and is not meant to.
+    pydantic calls. A ``CancelledError`` surfacing from serializing a
+    ``__dict__``-injected field can therefore only have been raised by that
+    untrusted object, i.e. forged, and letting it propagate would strand the
+    claimed step by masquerading as a teardown that is not happening. A *real*
+    cancellation of the executing task is unaffected: it is delivered at the next
+    ``await`` — the commit — where :meth:`_commit_shielded` still lands the write
+    and re-raises. ``KeyboardInterrupt`` and ``SystemExit`` are deliberately
+    *not* named, so a real process signal still propagates. This does not replace
+    the seam's contract to return a valid result and is not meant to.
 
     Returns:
-        A revalidated, detached copy, or ``None`` if the returned value does not
-        survive revalidation, is not a ``ToolResult`` at all, or cannot even be
-        serialized to attempt it.
+        A revalidated, detached copy, or ``None`` if the returned value is not
+        exactly a ``ToolResult`` or does not survive revalidation.
     """
+    if type(result) is not ToolResult:
+        # A subclass's `model_dump`/validators are not the contract's, and could
+        # forge or raise; a non-`ToolResult` is not a result at all. Rejected
+        # before any overridable method is called.
+        return None
     try:
         # `warnings=False`: serializing a `__dict__`-tampered enum value emits a
         # `PydanticSerializationUnexpectedValue` warning that is noise here — the
         # round-trip's `model_validate` is what rejects it, by return.
         return ToolResult.model_validate(result.model_dump(warnings=False))
     except Exception, asyncio.CancelledError:
-        # Total over what the seam returned (see docstring). CancelledError is
-        # named explicitly: this body is synchronous, so a genuine cancellation
-        # cannot originate here — one that surfaces is forged by the untrusted
-        # value and must become "unusable", not an escape that strands the claim.
+        # Total over a genuine instance tampered past `frozen=True` (see
+        # docstring). CancelledError is named because this body is synchronous:
+        # one surfacing here is forged by an injected field, not a real teardown,
+        # and must become "unusable" rather than strand the claim.
         return None
 
 

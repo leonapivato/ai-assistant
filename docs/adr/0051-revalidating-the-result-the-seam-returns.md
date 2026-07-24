@@ -63,19 +63,33 @@ and both `_record` and the retry decision read *that* copy, never the raw value.
 Unlike `_detached`, it returns a sentinel rather than raising, because of where
 it sits (Context): an unusable return becomes a commit, not an escape.
 
-It is **total over any return, not only a tampered `ToolResult`.** The parameter
-is typed `ToolResult`, but the point of a post-claim guard is to survive a value
-that violates its type: a non-conforming seam that returns `None` or some other
-object raises out of `model_dump` before `model_validate` is reached, and a
-subclass could override serialization to raise anything. Any of those escaping
-would strand the claim exactly as the `KeyError`/`AttributeError` this exists to
-prevent would. So it catches every ordinary `Exception` and reports "unusable".
+It is **total over any return, not only a tampered `ToolResult`** — and the two
+threats it must survive are different, so it meets them in two steps.
+
+**Only an exact `ToolResult` is trusted.** The round-trip reads the value's own
+`model_dump`, an *overridable* instance method, so a subclass could override it
+to return a valid-but-false dict — an `INDETERMINATE` result dumping as
+`{"outcome": "succeeded", ...}` — and `model_validate` would then mint a genuine
+`SUCCEEDED` result the executor commits. That is a *forged* outcome, worse than a
+rejected one, and no amount of catching exceptions detects it, because nothing
+raised. So the type is checked before any overridable method runs —
+`type(result) is ToolResult`, not `isinstance`, so a subclass is refused — and a
+non-`ToolResult` (a `None` or other object a non-conforming seam returned) fails
+the same gate. ADR-0029 §3 has the seam return a `ToolResult`; the executor
+records the contract type, not a thing that only claims to be one, and there are
+no `ToolResult` subclasses in the system for the gate to wrongly exclude.
+
+**Then the revalidation is total over a genuine instance tampered past
+`frozen=True`.** Past the gate `model_dump` is the real serializer, but a
+`__dict__`-injected field can hold an object whose own serialization raises. Every
+ordinary `Exception` from the round-trip is caught and reported "unusable", so
+such a value cannot strand the claim either.
 
 `asyncio.CancelledError` is caught too, and the reason is precise: the guard's
 body is **synchronous** — two pydantic calls, no `await` — so the event loop
 cannot deliver a genuine task cancellation into it. A `CancelledError` surfacing
-from `model_dump`/`model_validate` can only have been raised by the untrusted
-value's own code, i.e. forged, and letting it propagate would strand the claimed
+from serializing a `__dict__`-injected field can only have been raised by that
+untrusted object, i.e. forged, and letting it propagate would strand the claimed
 step by masquerading as a teardown that is not happening. A *real* cancellation
 is unaffected: it is delivered at the next `await` — the commit — where
 `_commit_shielded` already lands the write and re-raises. `KeyboardInterrupt` and
@@ -178,19 +192,24 @@ once this lands (ADR-0029 §9's test).
 
 ### 6. What the implementation owes
 
-- **`_detached_result` is total**: a revalidated, detached copy on success;
-  the sentinel on a tampered `ToolResult`, a non-`ToolResult`/`None` return, a
-  serializer that raises an ordinary exception, and a serializer that raises a
-  (necessarily forged) `asyncio.CancelledError`. `KeyboardInterrupt` and
-  `SystemExit` still propagate.
+- **`_detached_result` trusts only an exact `ToolResult`**: a subclass — whether
+  its overridden `model_dump` would forge a valid-but-false dict or raise — and a
+  non-`ToolResult`/`None` return are refused before any overridable method runs.
+- **The forged-valid-dump is pinned specifically**: a subclass whose `model_dump`
+  returns a valid `SUCCEEDED` dict for an `INDETERMINATE` instance closes
+  `INDETERMINATE`, *not* `SUCCEEDED`. Testing only overrides that raise would
+  leave the forgery that does not raise — the worst case — uncovered.
+- **The revalidation is total over a genuine tampered instance**: a
+  `__dict__`-injected field whose serialization raises an ordinary exception, or a
+  (necessarily forged) `asyncio.CancelledError`, closes `INDETERMINATE` rather
+  than escaping; `KeyboardInterrupt`/`SystemExit` still propagate.
 - **An unusable return closes `INDETERMINATE` with `kind=None`**, and is not
   retried.
 - **The close is unconditional over tool kind** — pinned on a read-only tool as
   well as a side-effecting one, so the rule is shown not to be tool-derived.
-- **The pre-existing surfaces #270 names are covered**: the `outcome` lookup, the
-  `FAILED`-branch and the `INDETERMINATE`-branch `failure` dereference, each via a
-  `__dict__`-poisoned result; plus the non-result return, the raising serializer,
-  and the forged-`CancelledError` serializer that motivate the total catch.
+- **The pre-existing surfaces #270 names are covered**: the `outcome` lookup and
+  the `FAILED`- and `INDETERMINATE`-branch `failure` dereference, each via a
+  `__dict__`-poisoned genuine result.
 
 ## Consequences
 
