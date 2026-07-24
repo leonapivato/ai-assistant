@@ -17,7 +17,9 @@ from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.types import Reversibility, RiskLevel
 from ai_assistant.orchestration import Engine
+from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 
 if TYPE_CHECKING:
@@ -80,6 +82,70 @@ async def test_build_engine_defaults_the_runner_to_no_confirmation_lifetime(
     engine = build_engine(Settings(), data_dir=tmp_path)
     try:
         assert engine._runner._confirmation_ttl is None
+    finally:
+        await engine.aclose()
+
+
+def _spy_on_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Capture the kwargs ``build_engine`` constructs the policy with.
+
+    Returns a list the builder appends one call's kwargs to, so a test asserts on
+    exactly what reached ``ThresholdActionPolicy`` — which settings field mapped
+    to which constructor parameter — without depending on the policy's private,
+    deliberately opaque rule table.
+    """
+    calls: list[dict[str, object]] = []
+
+    def factory(**kwargs: object) -> ThresholdActionPolicy:
+        calls.append(kwargs)
+        return ThresholdActionPolicy(**kwargs)  # type: ignore[arg-type]  # forwarded kwargs
+
+    monkeypatch.setattr(composition_module, "ThresholdActionPolicy", factory)
+    return calls
+
+
+async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each Settings threshold reaches its own policy parameter, unswapped (#239)."""
+    calls = _spy_on_policy(monkeypatch)
+    settings = Settings(
+        confirm_at_risk=RiskLevel.HIGH,
+        confirm_at_reversibility=Reversibility.RECOVERABLE,
+        deny_at_risk=RiskLevel.CRITICAL,
+        deny_at_reversibility=Reversibility.IRREVERSIBLE,
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert calls == [
+            {
+                "confirm_at_risk": RiskLevel.HIGH,
+                "confirm_at_reversibility": Reversibility.RECOVERABLE,
+                "deny_at_risk": RiskLevel.CRITICAL,
+                "deny_at_reversibility": Reversibility.IRREVERSIBLE,
+            }
+        ]
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_defaults_the_policy_to_todays_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With nothing configured, the policy is built with the pre-#239 defaults (#239)."""
+    calls = _spy_on_policy(monkeypatch)
+    engine = build_engine(Settings(), data_dir=tmp_path)
+    try:
+        assert calls == [
+            {
+                "confirm_at_risk": RiskLevel.MEDIUM,
+                "confirm_at_reversibility": Reversibility.IRREVERSIBLE,
+                "deny_at_risk": None,
+                "deny_at_reversibility": None,
+            }
+        ]
     finally:
         await engine.aclose()
 

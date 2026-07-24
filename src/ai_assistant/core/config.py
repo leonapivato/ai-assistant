@@ -9,12 +9,48 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic import BeforeValidator, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.types import Reversibility, RiskLevel
+
+#: The string an operator sets a permission threshold to in the environment to
+#: **disable** that gate entirely — "never gate on this field alone", i.e. the
+#: field's ``None`` value. Environment variables arrive as strings, so a
+#: non-None-default gate (``confirm_at_risk``, ``confirm_at_reversibility``)
+#: would otherwise be un-disable-able from the environment: omitting the variable
+#: restores the default, and no scale member spells ``None``. Case-insensitive,
+#: and distinct from every ``RiskLevel``/``Reversibility`` member value, so it
+#: cannot collide with a real threshold.
+_THRESHOLD_DISABLE_SENTINEL = "none"
+
+
+def _disable_threshold(value: object) -> object:
+    """Map the disable sentinel to ``None`` before a threshold's scale validation.
+
+    A per-field :class:`BeforeValidator` rather than the model-wide
+    ``env_parse_none_str``: that switch would turn a literal ``"none"`` into
+    ``None`` on *every* setting, including ``str``-typed ones like
+    ``default_model`` where ``"none"`` is a legitimate value rather than a request
+    to disable anything. Restricting the sentinel to the four threshold fields
+    keeps the disable path where it belongs. Any other value — a scale member, an
+    enum instance passed directly, an already-``None`` — falls through unchanged,
+    so off-scale input is still refused by the scale validation that follows.
+    """
+    if isinstance(value, str) and value.strip().lower() == _THRESHOLD_DISABLE_SENTINEL:
+        return None
+    return value
+
+
+#: A permission threshold on the risk / reversibility scale, or ``None`` to
+#: disable that gate. The :class:`BeforeValidator` accepts the environment
+#: disable sentinel (:data:`_THRESHOLD_DISABLE_SENTINEL`) as ``None``.
+_RiskThreshold = Annotated[RiskLevel | None, BeforeValidator(_disable_threshold)]
+_ReversibilityThreshold = Annotated[Reversibility | None, BeforeValidator(_disable_threshold)]
 
 
 class Settings(BaseSettings):
@@ -118,6 +154,59 @@ class Settings(BaseSettings):
         default=None,
         gt=timedelta(0),
         description="Lifetime of a parked confirmation before its answer is refused as stale.",
+    )
+
+    # --- Permissions -----------------------------------------------------
+    # The four thresholds ThresholdActionPolicy gates on (ADR-0036 §1). These are
+    # the *user's* configuration, not the contract's — ADR-0021 §5 records that
+    # "confirm at or above MEDIUM" is a deployment setting, not a decision the
+    # policy makes for the operator — so they belong here rather than hardcoded at
+    # the composition root (#239, the scope PR #237 cut per ADR-0036 §1). The
+    # defaults reproduce the policy constructor's own defaults exactly, so an
+    # unset deployment keeps today's behaviour: confirm at or above MEDIUM risk,
+    # confirm on an IRREVERSIBLE effect, deny nothing outright.
+    #
+    # Each is the scale it names or ``None``. pydantic parses the lowercase member
+    # value from the environment (e.g. ``ASSISTANT_CONFIRM_AT_RISK=high``,
+    # ``ASSISTANT_DENY_AT_REVERSIBILITY=irreversible``) and refuses anything off
+    # the scale at load, as a ConfigurationError. To **disable** a gate entirely —
+    # "never confirm/deny on this field alone", the field's ``None`` — set the
+    # variable to ``none`` (case-insensitive), the sentinel a per-field
+    # BeforeValidator maps to ``None`` before scale validation
+    # (:data:`_THRESHOLD_DISABLE_SENTINEL`); this matters most for the two confirm
+    # gates, whose non-None defaults omission cannot reach.
+    #
+    # No cross-field ordering is imposed: the policy accepts a deny threshold below
+    # its matching confirm one (the combination is still a maximum, so the result
+    # only ever denies where it would otherwise ask — strictly safer), so imposing
+    # an order here would be this layer deciding how cautious the operator is
+    # allowed to be. The floors — off-device disclosure and unknown cost — are the
+    # contract's and take no setting.
+    confirm_at_risk: _RiskThreshold = Field(
+        default=RiskLevel.MEDIUM,
+        description=(
+            "Risk at or above which an action needs confirmation; 'none' never confirms on risk."
+        ),
+    )
+    confirm_at_reversibility: _ReversibilityThreshold = Field(
+        default=Reversibility.IRREVERSIBLE,
+        description=(
+            "Reversibility at or above which an action needs confirmation; "
+            "'none' never confirms on reversibility."
+        ),
+    )
+    deny_at_risk: _RiskThreshold = Field(
+        default=None,
+        description=(
+            "Risk at or above which an action is refused outright; 'none' never denies on risk."
+        ),
+    )
+    deny_at_reversibility: _ReversibilityThreshold = Field(
+        default=None,
+        description=(
+            "Reversibility at or above which an action is refused outright; "
+            "'none' never denies on reversibility."
+        ),
     )
 
     @field_validator("timezone")
