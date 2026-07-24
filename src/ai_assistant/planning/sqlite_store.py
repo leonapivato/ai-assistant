@@ -170,15 +170,33 @@ class SqlitePlanStore:
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                 (str(_SCHEMA_VERSION),),
             )
-        elif int(stored) > _SCHEMA_VERSION:
+        elif self._meta_int("schema_version", stored) > _SCHEMA_VERSION:
             msg = (
                 f"the plan store at {self._path!r} was written by a newer version "
                 f"(schema_version={stored}, this code understands {_SCHEMA_VERSION}); "
                 f"refusing to open it rather than read it blindly"
             )
             raise PlanningError(msg)
-        if "exec_counter" not in existing:
+        if "exec_counter" in existing:
+            self._meta_int("exec_counter", existing["exec_counter"])  # validate on open
+        else:
             conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
+
+    def _meta_int(self, key: str, raw: str) -> int:
+        """Parse a stored ``meta`` integer, translating corruption to ``PlanningError``.
+
+        A non-numeric ``schema_version`` or ``exec_counter`` is a corrupt or
+        tampered store, not a Python ``ValueError`` to leak past this layer's
+        initialisation boundary (ADR-0049 §1).
+        """
+        try:
+            return int(raw)
+        except ValueError as exc:
+            msg = (
+                f"the plan store at {self._path!r} holds a non-numeric {key} "
+                f"({raw!r}); the store is corrupt"
+            )
+            raise PlanningError(msg) from exc
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as `planning`'s own error (ADR-0026 §4).
@@ -342,7 +360,7 @@ class SqlitePlanStore:
         counter rewinds nor two executions share an ordinal (ADR-0049 §3).
         """
         (current,) = conn.execute("SELECT value FROM meta WHERE key = 'exec_counter'").fetchone()
-        nxt = int(current) + 1
+        nxt = self._meta_int("exec_counter", current) + 1
         conn.execute("UPDATE meta SET value = ? WHERE key = 'exec_counter'", (str(nxt),))
         return nxt
 
@@ -440,14 +458,22 @@ class SqlitePlanStore:
     def _export_sync(self) -> tuple[list[str], list[str], list[str]]:
         conn = self._conn
         try:
-            goals = [str(r[0]) for r in conn.execute("SELECT data FROM goals").fetchall()]
-            plans = [str(r[0]) for r in conn.execute("SELECT data FROM plans").fetchall()]
-            executions = [
-                str(r[0])
-                for r in conn.execute(
-                    "SELECT data FROM executions ORDER BY created_seq ASC"
-                ).fetchall()
-            ]
+            # All three reads inside one transaction, so the export is a single
+            # database snapshot: a concurrent connection cannot commit a goal+plan
+            # between the goals read and the plans read and leave the export with a
+            # plan whose goal is missing — the dangling, PlanExport-rejected state
+            # ADR-0004 §6's "internally consistent" forbids. BEGIN IMMEDIATE takes
+            # the write lock, so no writer interleaves the reads.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                goals = [str(r[0]) for r in conn.execute("SELECT data FROM goals").fetchall()]
+                plans = [str(r[0]) for r in conn.execute("SELECT data FROM plans").fetchall()]
+                executions = [
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT data FROM executions ORDER BY created_seq ASC"
+                    ).fetchall()
+                ]
         except sqlite3.Error as exc:
             raise _wrap("export planning state", "", exc) from exc
         return goals, plans, executions
