@@ -627,6 +627,76 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         assert resumed.step.disposition is Disposition.EXECUTED
 
 
+async def test_a_resume_cannot_resolve_a_binding_mid_recovery() -> None:
+    """Recovery and same-engine resolution are mutually exclusive (round 3 review).
+
+    Recovery reads a binding's live ``CONFIRM`` and then mints its token; a resume
+    records the resolving decision and evicts the binding's ``_parked`` entry. Both
+    touch the trail and ``_parked``, so were they able to interleave, a resume could
+    resolve a binding *after* recovery read it live but *before* recovery minted —
+    handing back a stale, unanswerable token. The shared ``_recovery_lock`` makes
+    that impossible: a resume launched while recovery holds the lock cannot make
+    progress until recovery releases it.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    token = parked.step.confirmation.token
+
+    # Gate the trail so recovery suspends *after* it has read the pending decision,
+    # exactly the window the review describes.
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GateAfterRead:
+        """Wraps the trail, suspending the first ``pending_confirmation`` after it reads."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+            self._gated = False
+
+        async def pending_confirmation(self, **kwargs: object) -> object:
+            result = await self._inner.pending_confirmation(**kwargs)  # type: ignore[attr-defined]
+            if not self._gated:
+                self._gated = True
+                entered.set()
+                await release.wait()
+            return result
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    harness.engine._trail = _GateAfterRead(harness.trail)  # type: ignore[assignment]  # test double
+
+    recovering = asyncio.ensure_future(harness.engine.pending_confirmations())
+    await entered.wait()  # recovery has read the live CONFIRM and now holds the lock
+
+    # A same-engine resume of the very binding recovery is looking at. It must not
+    # resolve while recovery holds the lock — without the shared lock it would run to
+    # completion here and strand recovery's about-to-be-minted token.
+    resuming = asyncio.ensure_future(harness.engine.resume(token, approved=True, timeout=PATIENT))
+    # Give a lock-free resume ample opportunity to run to completion over the fakes
+    # (all its awaits resolve immediately); with the shared lock it stays blocked.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not resuming.done()  # blocked on the shared recovery lock — the fix
+
+    release.set()
+    recovered = await recovering
+    # Recovery saw the binding live (the resume was blocked), so it reused the one
+    # existing token rather than fabricating a second entry for it.
+    assert len(recovered) == 1
+    assert recovered[0].token == token
+    assert len(harness.engine._parked) == 1
+
+    resumed = await resuming  # only now does the resume proceed and resolve
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    # The binding is resolved exactly once and the table is clean — no stale token.
+    assert harness.engine._parked == {}
+
+
 async def test_aclose_closes_owned_resources_in_order() -> None:
     """The façade releases every resource, in the order it was handed them."""
     order: list[str] = []
