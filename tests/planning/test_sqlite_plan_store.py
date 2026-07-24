@@ -8,8 +8,10 @@ id space surviving the process that made them — say so via ``tmp_path``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -25,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
+    from ai_assistant.core.types import Goal
 
 
 def _fixed_now() -> datetime:
@@ -543,4 +546,66 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
     try:
         assert (path.stat().st_mode & 0o777) == 0o600
     finally:
+        store.close()
+
+
+async def _spin(iterations: int = 50) -> None:
+    """Yield to the event loop repeatedly so a pending cancellation can unwind."""
+    for _ in range(iterations):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.integration
+async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path) -> None:
+    """A cancelled write must not free the lock while its worker thread runs (ADR-0054).
+
+    ``asyncio.to_thread`` cannot interrupt a running worker, so a cancellation that
+    unwound the awaiting coroutine here would release the connection lock while the
+    worker was still inside its ``BEGIN IMMEDIATE`` transaction on the shared
+    connection. This blocks a worker inside ``save_goal``, cancels the awaiting
+    task, and asserts the lock stays held until the worker finishes, then that a
+    second write lands on an intact connection.
+    """
+    store = SqlitePlanStore(path=tmp_path / "cancel.db", now=_fixed_now)
+    entered = threading.Event()
+    release = threading.Event()
+    original_save = store._save_goal_sync
+
+    def blocking_save(goal: Goal) -> None:
+        if not entered.is_set():
+            entered.set()
+            if not release.wait(timeout=5):  # pragma: no cover - only on a hang
+                msg = "the blocked worker was never released"
+                raise AssertionError(msg)
+        original_save(goal)
+
+    store._save_goal_sync = blocking_save  # type: ignore[method-assign]
+    try:
+        first = asyncio.ensure_future(store.save_goal(_goal("g1")))
+        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
+        assert store._lock.locked()
+
+        first.cancel()
+        await _spin()
+        # The invariant: cancellation did NOT release the lock — the worker is
+        # still running, so the connection is still exclusively held.
+        assert store._lock.locked()
+
+        second = asyncio.ensure_future(store.save_goal(_goal("g2")))
+        await _spin()
+        assert not second.done()
+        assert store._lock.locked()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await second  # must not raise on a concurrently-used connection
+
+        # The connection is intact: the deferred-to-completion first write
+        # committed, and the second landed cleanly on top of it.
+        assert await store.get_goal("g1") is not None
+        assert await store.get_goal("g2") is not None
+        assert not store._lock.locked()
+    finally:
+        release.set()
         store.close()

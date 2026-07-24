@@ -11,6 +11,7 @@ import asyncio
 import sqlite3
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -767,3 +768,113 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         self, make_store: Callable[..., SqliteMemoryStore]
     ) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: make_store(now=now)
+
+
+async def _spin(iterations: int = 50) -> None:
+    """Yield to the event loop repeatedly so a pending cancellation can unwind."""
+    for _ in range(iterations):
+        await asyncio.sleep(0)
+
+
+async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path) -> None:
+    """A cancelled write must not free the lock while its worker thread runs (ADR-0054).
+
+    The bug: ``asyncio.to_thread`` cannot interrupt a running worker, so if the
+    awaiting coroutine were simply cancelled the ``async with self._lock`` would
+    unwind and release the lock while the worker was still using the shared
+    connection — letting a second caller use the same connection concurrently,
+    which SQLite refuses. This blocks a worker mid-``add``, cancels the awaiting
+    task, and asserts the lock stays held until the worker finishes, then that a
+    second write lands on an intact connection.
+    """
+    store = SqliteMemoryStore(path=tmp_path / "cancel.db", embedder=HashingEmbedder(dimensions=8))
+    entered = threading.Event()
+    release = threading.Event()
+    original_add = store._add_sync
+
+    def blocking_add(record: MemoryRecord, vector: Embedding) -> None:
+        # Block only the first worker (record "a"): it enters, signals, and waits
+        # inside the connection's turn until the test lets it finish.
+        if not entered.is_set():
+            entered.set()
+            if not release.wait(timeout=5):  # pragma: no cover - only on a hang
+                msg = "the blocked worker was never released"
+                raise AssertionError(msg)
+        original_add(record, vector)
+
+    store._add_sync = blocking_add  # type: ignore[method-assign]
+    try:
+        first = asyncio.ensure_future(store.add(_semantic("a", "alpha")))
+        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
+        assert store._lock.locked()  # the worker holds the connection under the lock
+
+        first.cancel()
+        await _spin()
+        # The invariant: cancellation did NOT release the lock — the worker thread
+        # is still running, so the connection is still exclusively held. On the
+        # pre-ADR-0054 code the lock would already be free here.
+        assert store._lock.locked()
+
+        # A second write queues on the lock; it must not begin on the shared
+        # connection while the first worker is still running.
+        second = asyncio.ensure_future(store.add(_semantic("b", "bravo")))
+        await _spin()
+        assert not second.done()
+        assert store._lock.locked()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await second  # must not raise "recursive use of cursors"/locked
+
+        # The connection is intact: the deferred-to-completion first write did
+        # commit, and the second landed cleanly on top of it.
+        assert await store.get("a") is not None
+        assert await store.get("b") is not None
+        assert not store._lock.locked()
+    finally:
+        release.set()
+        store.close()
+
+
+async def test_cancellation_takes_precedence_over_a_worker_error(tmp_path: Path) -> None:
+    """A cancelled call whose worker then fails still raises CancelledError (ADR-0054).
+
+    Once a cancellation has been absorbed, the worker's own failure is moot: the
+    caller asked to cancel, so it must see ``CancelledError`` — not the store error
+    the worker happened to raise as it finished. And the connection must survive
+    both, so the next call lands cleanly.
+    """
+    store = SqliteMemoryStore(path=tmp_path / "cancel.db", embedder=HashingEmbedder(dimensions=8))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def failing_add(record: MemoryRecord, vector: Embedding) -> None:
+        entered.set()
+        if not release.wait(timeout=5):  # pragma: no cover - only on a hang
+            msg = "the blocked worker was never released"
+            raise AssertionError(msg)
+        raise MemoryStoreError("worker failed as it finished")
+
+    store._add_sync = failing_add  # type: ignore[method-assign]
+    try:
+        first = asyncio.ensure_future(store.add(_semantic("a", "alpha")))
+        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
+        first.cancel()
+        await _spin()
+        assert store._lock.locked()
+
+        release.set()
+        # The worker raises MemoryStoreError as it finishes, but the caller was
+        # cancelled: it must observe the cancellation, not the store error.
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        # The connection is intact despite the worker's error under cancellation.
+        del store._add_sync  # restore the real implementation
+        assert await store.add(_semantic("b", "bravo")) == "b"
+        assert await store.get("b") is not None
+        assert not store._lock.locked()
+    finally:
+        release.set()
+        store.close()

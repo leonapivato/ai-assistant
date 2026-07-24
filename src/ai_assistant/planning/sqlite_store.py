@@ -23,9 +23,10 @@ import asyncio
 import contextlib
 import os
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -69,6 +70,57 @@ _RECORD_SCHEMA = (
     "version INTEGER NOT NULL, active INTEGER NOT NULL, "
     "created_seq INTEGER NOT NULL, data TEXT NOT NULL)",
 )
+
+
+async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
+    """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
+
+    The store serialises one ``sqlite3`` connection behind an :class:`asyncio.Lock`
+    and runs the SQL in a worker thread. A thread cannot be interrupted, so if the
+    awaiting coroutine were simply cancelled the enclosing ``async with self._lock``
+    would unwind and release the lock **while the worker was still using the
+    connection** — letting a second caller use the same connection concurrently,
+    which SQLite refuses.
+
+    The worker records its own outcome and sets a :class:`threading.Event` when it
+    physically returns. This coroutine waits on *that* signal — not on the
+    cancellable state of any task — so the lock is held for the whole life of the
+    worker even if the awaiting task, or a blanket :func:`asyncio.all_tasks`
+    cancellation, is cancelled. Nothing here is an :class:`asyncio.Task`: the work
+    runs on an executor future and the fallback wait is another, so a task sweep
+    finds nothing to cancel out from under the running thread. An absorbed
+    cancellation takes precedence over the worker's own result or failure and is
+    re-raised once the thread has finished: the caller's task still cancels; what
+    is prevented is connection reuse, not the cancellation itself.
+    """
+    done = threading.Event()
+    outcome: list[T] = []
+    failure: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            outcome.append(fn(*args))
+        except Exception as exc:  # relayed to the caller once the thread has finished
+            failure.append(exc)
+        finally:
+            done.set()
+
+    loop = asyncio.get_running_loop()
+    pending: asyncio.Future[Any] = loop.run_in_executor(None, worker)
+    cancellation: asyncio.CancelledError | None = None
+    while not done.is_set():
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError as exc:
+            # Absorb the cancellation and keep waiting on the worker's physical
+            # completion signal, so the lock outlives the still-running thread.
+            cancellation = exc
+            pending = loop.run_in_executor(None, done.wait)
+    if cancellation is not None:
+        raise cancellation
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 def _utcnow() -> datetime:
@@ -247,7 +299,7 @@ class SqlitePlanStore:
         """
         snapshot = _revalidated_goal(goal)
         async with self._lock:
-            await asyncio.to_thread(self._save_goal_sync, snapshot)
+            await _run_to_completion(self._save_goal_sync, snapshot)
         return goal.id
 
     def _save_goal_sync(self, goal: Goal) -> None:
@@ -282,7 +334,7 @@ class SqlitePlanStore:
     async def get_goal(self, goal_id: str) -> Goal | None:
         """Return the goal with ``goal_id``, or ``None``."""
         async with self._lock:
-            row = await asyncio.to_thread(self._read_one, "goals", goal_id)
+            row = await _run_to_completion(self._read_one, "goals", goal_id)
         return None if row is None else _decode_goal(row)
 
     async def save_plan(self, plan: ActionPlan) -> str:
@@ -300,7 +352,7 @@ class SqlitePlanStore:
         """
         snapshot = _revalidated_plan(plan)
         async with self._lock:
-            await asyncio.to_thread(self._save_plan_sync, snapshot)
+            await _run_to_completion(self._save_plan_sync, snapshot)
         return plan.id
 
     def _save_plan_sync(self, plan: ActionPlan) -> None:
@@ -333,7 +385,7 @@ class SqlitePlanStore:
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
         """Return the plan with ``plan_id``, or ``None``."""
         async with self._lock:
-            row = await asyncio.to_thread(self._read_one, "plans", plan_id)
+            row = await _run_to_completion(self._read_one, "plans", plan_id)
         return None if row is None else _decode_plan(row)
 
     # --- executions -------------------------------------------------------
@@ -350,7 +402,7 @@ class SqlitePlanStore:
         safety. Together they meet ADR-0044 §1's non-reuse guarantee.
         """
         async with self._lock:
-            return await asyncio.to_thread(self._start_execution_sync, plan_id)
+            return await _run_to_completion(self._start_execution_sync, plan_id)
 
     def _start_execution_sync(self, plan_id: str) -> ExecutionState:
         conn = self._conn
@@ -403,7 +455,7 @@ class SqlitePlanStore:
         rejects it (ADR-0049 §1).
         """
         async with self._lock:
-            return await asyncio.to_thread(self._commit_transition_sync, transition)
+            return await _run_to_completion(self._commit_transition_sync, transition)
 
     def _commit_transition_sync(self, transition: StepTransition) -> ExecutionState:
         conn = self._conn
@@ -434,7 +486,7 @@ class SqlitePlanStore:
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
         """Return the execution with ``execution_id``, or ``None``."""
         async with self._lock:
-            row = await asyncio.to_thread(self._read_one, "executions", execution_id)
+            row = await _run_to_completion(self._read_one, "executions", execution_id)
         return None if row is None else _decode_execution(row)
 
     async def active_executions(self) -> list[ExecutionState]:
@@ -445,7 +497,7 @@ class SqlitePlanStore:
         stored ``active`` flag so only outstanding executions are decoded.
         """
         async with self._lock:
-            rows = await asyncio.to_thread(self._active_executions_sync)
+            rows = await _run_to_completion(self._active_executions_sync)
         return [_decode_execution(data) for data in rows]
 
     def _active_executions_sync(self) -> list[str]:
@@ -476,7 +528,7 @@ class SqlitePlanStore:
         """Return a portable, internally consistent snapshot (ADR-0004 §6)."""
         exported_at = self._now()
         async with self._lock:
-            goals, plans, executions = await asyncio.to_thread(self._export_sync)
+            goals, plans, executions = await _run_to_completion(self._export_sync)
         return PlanExport(
             exported_at=exported_at,
             goals=tuple(_decode_goal(data) for data in goals),
@@ -517,7 +569,7 @@ class SqlitePlanStore:
         (ADR-0049 §1).
         """
         async with self._lock:
-            return await asyncio.to_thread(self._delete_goal_sync, goal_id)
+            return await _run_to_completion(self._delete_goal_sync, goal_id)
 
     def _delete_goal_sync(self, goal_id: str) -> GoalDeletion:
         conn = self._conn
@@ -579,7 +631,7 @@ class SqlitePlanStore:
         trail already names (ADR-0049 §3).
         """
         async with self._lock:
-            return await asyncio.to_thread(self._clear_sync)
+            return await _run_to_completion(self._clear_sync)
 
     def _clear_sync(self) -> int:
         conn = self._conn
