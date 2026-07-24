@@ -441,6 +441,84 @@ async def test_no_capable_tool_skips_the_step_with_the_reserved_reason() -> None
     assert await harness.trail.export() == []
 
 
+# --- capability aliasing at selection (ADR-0053, #296) ------------------
+
+
+async def test_a_capability_synonym_resolves_onto_a_wired_tool_and_runs() -> None:
+    """A plan naming a synonym selects and runs the tool advertising the real name.
+
+    The end-to-end shape #296 asked for: the planner emits ``get_time`` from its
+    open vocabulary, the only tool advertises ``report_current_time``, and the
+    alias layer (ADR-0053) bridges the two so the step executes rather than
+    skipping ``NO_CAPABLE_TOOL``.
+    """
+    harness = Harness(tools=(tool("clock", capability="report_current_time"),))
+    step = plan_step(capability="get_time")
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert result.tool_id == "clock"
+    # The gate and the seam both ruled on/ran the tool's advertised capability,
+    # not the synonym the planner named.
+    assert [request.tool.capability for request in harness.policy.requests] == [
+        "report_current_time"
+    ]
+    assert [call.request.tool.id for call in harness.invoker.invocations] == ["clock"]
+
+
+async def test_a_case_and_separator_variant_selects_the_advertised_tool() -> None:
+    """Surface folding matches a rendering variant of the advertised name itself."""
+    harness = Harness(tools=(tool("clock", capability="report_current_time"),))
+    step = plan_step(capability="Report-Current-Time")
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.EXECUTED
+    assert result.tool_id == "clock"
+
+
+async def test_an_unknown_capability_still_skips_no_capable_tool() -> None:
+    """Aliasing never invents a tool: an unrecognised name skips honestly.
+
+    ``teleport`` is neither advertised, a variant of an advertised name, nor a
+    curated synonym, so it reaches ``find`` unchanged and the step is skipped with
+    the reserved reason — the alias layer added no false selection.
+    """
+    harness = Harness(tools=(tool("clock", capability="report_current_time"),))
+    step = plan_step(capability="teleport")
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.NO_CAPABLE_TOOL
+    stored = await stored_step(harness.plans, state)
+    assert stored.skip_reason is SkipReason.NO_CAPABLE_TOOL
+    assert harness.policy.requests == []
+    assert harness.invoker.invocations == []
+
+
+async def test_a_synonym_whose_target_is_unregistered_skips_no_capable_tool() -> None:
+    """A synonym is inert when nothing advertises its target.
+
+    ``get_time`` is a curated synonym of ``report_current_time``, but here only a
+    ``send_email`` tool is registered, so the target is not advertised, nothing is
+    rewritten, and selection reports ``NO_CAPABLE_TOOL`` — a rewrite never lands on
+    a capability no tool serves.
+    """
+    harness = Harness(tools=(tool("smtp"),))
+    step = plan_step(capability="get_time")
+    state = await an_execution(harness.plans, step)
+
+    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert result.disposition is Disposition.NO_CAPABLE_TOOL
+    assert harness.policy.requests == []
+    assert harness.invoker.invocations == []
+
+
 async def test_several_candidates_commit_nothing_and_leave_the_step_pending() -> None:
     """No rule chooses, so no rule is invented and no falsehood is written."""
     harness = Harness(tools=(tool("a-sender"), tool("b-sender")))

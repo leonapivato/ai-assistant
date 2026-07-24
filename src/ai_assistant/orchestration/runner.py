@@ -62,6 +62,7 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolCall,
 )
+from ai_assistant.orchestration.capability_alias import resolve_capability
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -395,7 +396,8 @@ class StepRunner:
         opened = await self._opened(state)
         step = await self._planned(opened, step_id)
         self._check_pending(opened, step_id)
-        candidates = await self._registry.find(step.capability)
+        capability = await self._resolve_capability(step)
+        candidates = await self._registry.find(capability)
         if not candidates:
             skipped = await self._skip(state, step, SkipReason.NO_CAPABLE_TOOL)
             return StepDisposition(Disposition.NO_CAPABLE_TOOL, skipped)
@@ -405,7 +407,7 @@ class StepRunner:
             _log.info(
                 "step_capability_ambiguous",
                 step_id=step.id,
-                capability=step.capability,
+                capability=capability,
                 candidates=len(candidates),
             )
             return StepDisposition(Disposition.AMBIGUOUS_CAPABILITY, state)
@@ -968,6 +970,38 @@ class StepRunner:
             msg = f"plan {plan.id!r} has no step {step_id!r}"
             raise PlanningError(msg)
         return _detached_step(planned)
+
+    async def _resolve_capability(self, step: PlanStep) -> str:
+        """Map the step's capability onto an advertised one before selection (ADR-0053).
+
+        The planner emits capability strings from an open vocabulary and is blind
+        to the tool set (ADR-0014 §2), so a synonym of an advertised capability —
+        ``get_time`` for ``report_current_time`` — would otherwise select nothing
+        and skip the step ``NO_CAPABLE_TOOL`` (#296). This resolves a *known*
+        synonym, or a case/separator variant, onto the advertised name, using the
+        registry as the authority on the vocabulary (``capabilities()``).
+
+        **It never guesses a capability onto a tool.** :func:`resolve_capability`
+        rewrites only onto a name the registry currently advertises, and returns
+        the step's own string unchanged for anything it does not recognise — so an
+        unknown capability still reaches ``find`` verbatim and is still reported
+        ``NO_CAPABLE_TOOL`` honestly. A rewrite does not weaken the single-candidate
+        rule either: it changes which capability is looked up, and the ambiguity
+        refusal (ADR-0037 §1) still applies to whatever ``find`` returns.
+
+        This is a pure normalisation over the injected registry — no new
+        collaborator, so it needs no composition wiring.
+        """
+        advertised = await self._registry.capabilities()
+        resolved = resolve_capability(step.capability, advertised)
+        if resolved != step.capability:
+            _log.info(
+                "step_capability_aliased",
+                step_id=step.id,
+                emitted=step.capability,
+                resolved=resolved,
+            )
+        return resolved
 
     # --- the dispositions -----------------------------------------------
 
