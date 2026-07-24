@@ -181,8 +181,11 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
     a non-zero exit code rather than escaping (ADR-0042 §7).
     """
     timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
+    # _drive_resume renders each recovered action itself (below), so the approver
+    # only decides yes/no — a bare confirm, not _prompt_for_approval, or the action
+    # would be rendered twice interactively.
     approver: Callable[[Confirmation], bool] = (
-        (lambda _confirmation: True) if assume_yes else _prompt_for_approval
+        (lambda _confirmation: True) if assume_yes else _confirm
     )
     try:
         settings = load_settings()
@@ -209,8 +212,11 @@ async def _drive_resume(
 
     Renders each recovered action so a person can judge it, collects the yes/no,
     and relays the opaque token via ``resume`` — the adapter transports consent, it
-    authors no ruling (ADR-0042 §6). An :class:`AssistantError` from any stage is
-    rendered and mapped to a non-zero exit code.
+    authors no ruling (ADR-0042 §6). Rendering happens here, **before** the
+    approver, so the action and the policy's reason are shown whether the answer is
+    interactive or supplied by ``--yes`` (ADR-0052 §4): a non-interactive approval
+    must not run a recovered action the user never saw. An :class:`AssistantError`
+    from any stage is rendered and mapped to a non-zero exit code.
     """
     try:
         pending = await engine.pending_confirmations()
@@ -218,6 +224,7 @@ async def _drive_resume(
             console.print("[dim]Nothing is awaiting confirmation.[/]")
             return _EXIT_OK
         for confirmation in pending:
+            _render_confirmation(confirmation)
             approved = approver(confirmation)
             resumed = await engine.resume(confirmation.token, approved=approved, timeout=timeout)
             _render_turn(resumed)
@@ -349,6 +356,15 @@ def _render_confirmation(confirmation: Confirmation) -> None:
 def _prompt_for_approval(confirmation: Confirmation) -> bool:
     """Render the confirmation and read the human's yes/no (I/O; ADR-0042 §6)."""
     _render_confirmation(confirmation)
+    return typer.confirm("Proceed?", default=False)
+
+
+def _confirm(_confirmation: Confirmation) -> bool:
+    """Read the human's yes/no *without* rendering — the caller already displayed it.
+
+    Used by the ``resume`` flow, where :func:`_drive_resume` renders each recovered
+    action before prompting, so rendering here too would show it twice (I/O; §6).
+    """
     return typer.confirm("Proceed?", default=False)
 
 

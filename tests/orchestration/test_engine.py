@@ -461,7 +461,102 @@ async def test_pending_confirmations_recovers_a_dropped_in_process_token() -> No
     assert resumed.step.disposition is Disposition.EXECUTED
 
 
-# --- shutdown: drain, then close in order (ADR-0042 §2) -----------------
+async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling() -> None:
+    """A recovered park applies no backpressure: only turn-carrying parks count (§2).
+
+    Were recovered entries counted, a durably-parked step — or one resolved by
+    another engine that left a stale entry — would block new turns forever. With a
+    ceiling of one, a recovered entry present, a fresh turn is still admitted; the
+    ceiling bites only once a *turn-carrying* park exists.
+    """
+    harness = Harness(tools=(confirmable(),))
+    await harness.engine.converse("send it", timeout=PATIENT)  # park one durably (g-1)
+
+    goals = iter(f"g-{n}" for n in range(2, 100))
+    harness.engine._loop._id_factory = lambda: next(goals)  # fresh goal ids for new turns
+    facade = Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        id_factory=lambda: next(harness.handles),
+        max_outstanding_confirmations=1,
+    )
+    pending = await facade.pending_confirmations()
+    assert len(pending) == 1
+    assert len(facade._parked) == 1  # a recovered entry (turn is None) is registered
+
+    # The recovered entry does not count: a fresh turn is admitted under the ceiling.
+    outcome = await facade.converse("send it", timeout=PATIENT)
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
+
+    # Now a turn-carrying park exists, so the ceiling of one bites.
+    with pytest.raises(RuntimeError, match="awaiting an answer"):
+        await facade.converse("send it", timeout=PATIENT)
+
+
+async def test_a_recovered_entry_resolved_elsewhere_is_pruned() -> None:
+    """A recovered park resolved by another façade is pruned on the next recovery (§2)."""
+    harness = Harness(tools=(confirmable(),))
+    await harness.engine.converse("send it", timeout=PATIENT)
+
+    facade_a = _fresh_facade(harness)
+    await facade_a.pending_confirmations()
+    assert len(facade_a._parked) == 1  # A holds a recovered entry
+
+    # Façade B, over the same durable stores, resolves the binding out from under A.
+    facade_b = _fresh_facade(harness)
+    b_pending = await facade_b.pending_confirmations()
+    await facade_b.resume(b_pending[0].token, approved=True, timeout=PATIENT)
+
+    # A recovers again: nothing pending now, and A's stale entry is pruned.
+    assert await facade_a.pending_confirmations() == []
+    assert facade_a._parked == {}
+
+
+async def test_pending_confirmations_is_drained_before_shutdown_closes_resources() -> None:
+    """Recovery is a tracked operation, so ``aclose`` awaits it before closing (§2).
+
+    Recovery reads the plan store and the audit trail; were it untracked, ``aclose``
+    could close those connections while it was still mid-read. Gating the store read
+    lets us start ``aclose`` while recovery is suspended and observe that shutdown
+    waits for the tracked recovery to finish.
+    """
+    harness = Harness(tools=(confirmable(),))
+    await harness.engine.converse("send it", timeout=PATIENT)
+    fresh = _fresh_facade(harness)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _GatedPlans:
+        """Wraps the real store, suspending the first ``active_executions`` read."""
+
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        async def active_executions(self) -> object:
+            entered.set()
+            await release.wait()
+            return await self._inner.active_executions()  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._inner, name)
+
+    fresh._plans = _GatedPlans(harness.plans)  # type: ignore[assignment]  # test double
+
+    recovering = asyncio.ensure_future(fresh.pending_confirmations())
+    await entered.wait()  # recovery is now suspended mid-read
+
+    closing = asyncio.ensure_future(fresh.aclose())
+    await asyncio.sleep(0)  # give aclose a chance to (wrongly) proceed
+    assert not closing.done()  # it must be waiting for the tracked recovery to drain
+
+    release.set()
+    recovered = await recovering
+    assert len(recovered) == 1  # the still-parked confirmation was recovered
+    await closing  # shutdown completes only after the drain
 
 
 async def test_aclose_closes_owned_resources_in_order() -> None:

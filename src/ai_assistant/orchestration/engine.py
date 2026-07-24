@@ -41,7 +41,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 
@@ -59,6 +59,8 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 
 _log = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
 
 #: Default ceiling on unanswered parked confirmations held in memory (see
 #: :class:`Engine`). Generous enough that a real interactive session never reaches
@@ -303,7 +305,7 @@ class Engine:
         self._max_outstanding = max_outstanding_confirmations
         self._parked: dict[str, _Parked] = {}
         self._reserved: set[str] = set()
-        self._inflight: set[asyncio.Task[TurnOutcome]] = set()
+        self._inflight: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
 
@@ -406,12 +408,17 @@ class Engine:
         recovery (ADR-0044 §3) rather than a cached id.
 
         **Idempotent and bounded.** A binding already named by a ``_parked`` entry
-        reuses that entry's token rather than minting a second, so repeated calls
-        return stable tokens and the table stays bounded by the number of distinct
-        durably-parked bindings, not by how often recovery is called. Recovery does
-        not consult the confirmation ceiling: it presents parks that already
-        happened and are already durable, and refusing to surface one would strand
-        it (ADR-0052 §2).
+        reuses that entry's token rather than minting a second, and every recovered
+        entry whose binding is *no longer* pending — resolved since a previous call,
+        here or by another engine over the same durable stores — is pruned
+        (:meth:`_prune_recovered`). So repeated calls return stable tokens, the table
+        stays bounded by the number of distinct durably-parked bindings, and a
+        resolved recovery leaves no stranded entry. Recovered entries are also
+        **excluded from the confirmation ceiling** (:meth:`_admit_and_reserve`):
+        they are bounded by durable state, not by client behaviour, so a lingering
+        one applies no backpressure. Recovery presents parks that already happened
+        and are already durable — refusing to surface one would strand it (ADR-0052
+        §2).
 
         Returns:
             One :class:`Confirmation` per durably-parked, still-unresolved step,
@@ -424,7 +431,14 @@ class Engine:
             AuditError: If the trail cannot be read.
         """
         self._reject_if_closing()
+        # Tracked like converse/resume: recovery reads the plan store and the audit
+        # trail, so shutdown must drain it before closing those connections (§2).
+        return await self._tracked(self._pending_confirmations())
+
+    async def _pending_confirmations(self) -> list[Confirmation]:
+        """Enumerate the durably-parked confirmations and reconcile the table."""
         recovered: list[Confirmation] = []
+        live: set[tuple[str, str]] = set()
         for state in await self._plans.active_executions():
             plan = await self._plans.get_plan(state.plan_id)
             if plan is None:  # pragma: no cover — an execution without its plan is a corrupt store
@@ -442,12 +456,34 @@ class Engine:
                 planned = next((s for s in plan.steps if s.id == step.step_id), None)
                 if planned is None:  # pragma: no cover — a step not in its plan is a corrupt store
                     continue
+                live.add((state.id, step.step_id))
                 recovered.append(
                     self._recovered_confirmation(
                         state.id, step.step_id, planned.parameters, confirmed
                     )
                 )
+        self._prune_recovered(live)
         return recovered
+
+    def _prune_recovered(self, live: set[tuple[str, str]]) -> None:
+        """Drop recovered entries whose binding is no longer pending (ADR-0052 §2).
+
+        A recovered ``_parked`` entry (``turn is None``) is registered from durable
+        state; once its ``(execution_id, step_id)`` binding is resolved — here or by
+        another engine over the same stores — it is dead, and leaving it would leak
+        an entry the table can never remove on its own. Pruning against the freshly
+        enumerated set of still-pending bindings keeps recovery bounded and
+        self-healing. Only recovered entries are touched: an in-process converse
+        park (``turn is not None``) is the driving turn's to resolve or evict, not
+        recovery's.
+        """
+        stale = [
+            handle
+            for handle, parked in self._parked.items()
+            if parked.turn is None and (parked.execution_id, parked.step_id) not in live
+        ]
+        for handle in stale:
+            del self._parked[handle]
 
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.
@@ -527,18 +563,22 @@ class Engine:
         if errors:
             raise ExceptionGroup("one or more resources failed to close on shutdown", errors)
 
-    async def _tracked(self, coro: Awaitable[TurnOutcome]) -> TurnOutcome:
+    async def _tracked(self, coro: Awaitable[_T]) -> _T:
         """Run ``coro`` as a tracked, shielded task, so shutdown can drain it.
 
         The task is what :meth:`aclose` awaits, and the shield is what keeps the
         underlying work alive when the *caller* cancels: a cancelled
-        ``converse()``/``resume()`` abandons this await, but the task keeps running
-        and stays tracked until it finishes, which is what lets the drain wait for
-        work a cancelled call orphaned (ADR-0042 §2). The public methods reject a
-        closing engine *before* building ``coro`` (:meth:`_reject_if_closing`), so
-        this never receives work it must throw away un-awaited.
+        ``converse()``/``resume()``/``pending_confirmations()`` abandons this await,
+        but the task keeps running and stays tracked until it finishes, which is
+        what lets the drain wait for work a cancelled call orphaned (ADR-0042 §2).
+        Every public method that touches a connection-owning store runs through
+        here, so none can be racing a store call when :meth:`aclose` closes it —
+        recovery reads the plan store and the audit trail, so it is tracked too. The
+        public methods reject a closing engine *before* building ``coro``
+        (:meth:`_reject_if_closing`), so this never receives work it must throw away
+        un-awaited.
         """
-        task: asyncio.Task[TurnOutcome] = asyncio.ensure_future(coro)
+        task: asyncio.Task[_T] = asyncio.ensure_future(coro)
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
         return await asyncio.shield(task)
@@ -564,13 +604,23 @@ class Engine:
 
         **Admission and reservation are one atomic step.** This runs to completion
         with no ``await``, so concurrency cannot bypass the ceiling: capacity counts
-        the parked table *and* the slots reserved by turns still in flight
+        the in-process parks *and* the slots reserved by turns still in flight
         (``_reserved``), and the reserving write happens before this returns, so the
         Nth concurrent turn sees the N-1 already-reserved slots and is refused once
         they fill the ceiling. This is why the limit is **hard**, not merely a
         post-hoc check that several turns could pass together. The slot is released
         by :meth:`_converse` once the turn parks (moving into ``_parked``, which
         then counts it) or does not.
+
+        **Recovered entries do not count.** The ceiling bounds the memory a client
+        can pin by requesting confirmable actions and abandoning their tokens — the
+        *converse* path, whose entries carry the turn (``turn is not None``). An
+        entry recovered from durable state (``turn is None``,
+        :meth:`pending_confirmations`) is bounded by durable state and reconciled on
+        each recovery, so counting it would let durably-parked work apply false
+        backpressure to new turns (a resolution by another engine could otherwise
+        leave a stale entry that blocks forever). So capacity counts only
+        turn-carrying parks.
 
         Called *before* the runner can park and before the turn is persisted, so a
         refusal leaves neither durable execution state nor a durable goal/plan.
@@ -579,7 +629,8 @@ class Engine:
             RuntimeError: If ``max_outstanding_confirmations`` confirmations are
                 already outstanding or reserved.
         """
-        if len(self._parked) + len(self._reserved) >= self._max_outstanding:
+        outstanding = sum(1 for parked in self._parked.values() if parked.turn is not None)
+        if outstanding + len(self._reserved) >= self._max_outstanding:
             msg = (
                 f"{self._max_outstanding} confirmations are already awaiting an answer; resolve "
                 "some before starting another action"
