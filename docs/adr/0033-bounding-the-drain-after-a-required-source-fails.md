@@ -1,7 +1,17 @@
 # 33. Bounding the drain after a required source fails
 
-- Status: Accepted
+- Status: Accepted; the Consequences bullet that deferred the caller-cancellation
+  path (issue #231) is superseded by ADR-0057
 - Date: 2026-07-22
+- Note (2026-07-24): the Consequences bullet "The bound covers the
+  required-failure path only, and one adjacent path stays unbounded … filed
+  rather than folded in (issue #231)" is now resolved. **ADR-0057** takes the
+  success path off the bare `asyncio.gather`, so a caller's cancellation of
+  `assemble()` is observed and honoured even against a source that suppresses
+  cancellation, closing #231 and making §4's "the caller owns the deadline" a
+  real offer. Everything else here stands, and ADR-0057 reuses §§1–3's drain and
+  §4's `source_timeout=None` unchanged. This is a status/linkage update only — no
+  ratified text below is rewritten (ADR-0001).
 - Decides issue #211, raised by Codex against the ADR-0026 §4 implementation and
   triaged out of that PR. It is a behaviour decision for `context`, not a defect
   in required-source propagation, which is why it gets an ADR rather than a
