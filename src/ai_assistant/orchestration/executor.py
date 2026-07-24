@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolCall,
     ToolOutcome,
+    ToolResult,
 )
 
 if TYPE_CHECKING:
@@ -58,7 +59,6 @@ if TYPE_CHECKING:
         ExecutionState,
         FrozenJsonValue,
         ToolDefinition,
-        ToolResult,
     )
 
 _log = structlog.get_logger(__name__)
@@ -96,6 +96,16 @@ _UNSTARTED = "the attempt ended after the claim and before the tool was reached,
 #: ``ToolResult``'s own validator makes that unconstructable; this exists so the
 #: mapping stays total against a value tampered past ``frozen=True``.
 _UNEXPLAINED = "the tool reported a failure with nothing in it"
+
+#: What a returned result that does not survive revalidation records. The seam
+#: is contracted to return a valid ``ToolResult`` (ADR-0029 §3) and the executor
+#: records it verbatim (ADR-0039 §6), but ``frozen=True`` refuses
+#: ``result.outcome = ...`` and does nothing about
+#: ``result.__dict__["outcome"] = ...`` — the same ``__dict__``-bypass ADR-0018
+#: §3 puts inside the threat model for the inbound call. Recording such a value
+#: verbatim would raise past the claim (:func:`_detached_result`), so it is
+#: closed with this instead. ``kind`` is ``None``: no tool classified it (§3).
+_UNUSABLE = "the invoker returned a result that did not survive revalidation, so it is unusable"
 
 
 def _utcnow() -> datetime:
@@ -135,6 +145,45 @@ def _detached(call: ToolCall) -> ToolCall:
     except ValidationError as exc:
         msg = "the call did not survive revalidation, so it is not the call that was authorised"
         raise ToolBindingError(msg) from exc
+
+
+def _detached_result(result: ToolResult) -> ToolResult | None:
+    """Revalidate and detach the result the seam returned, or reject it.
+
+    The mirror of :func:`_detached` for the seam's *output*. ADR-0029 §3 makes
+    :meth:`~ai_assistant.core.protocols.ToolInvoker.invoke` return a valid
+    ``ToolResult`` and ADR-0039 §6 has the executor record it verbatim — but
+    ``frozen=True`` refuses ``result.outcome = ...`` and does nothing about
+    ``result.__dict__["outcome"] = ...``, the same ``__dict__``-bypass ADR-0018
+    §3 already puts inside this repository's threat model for the inbound
+    ``ToolCall``. A result tampered that way — ``outcome`` a non-member,
+    ``failure`` an object without ``kind``/``message`` — would raise a
+    ``KeyError`` out of :data:`_STATUS_BY_OUTCOME` or an ``AttributeError`` out
+    of :func:`_failure_of`, and both raise **after** the claim, stranding the
+    step durably ``RUNNING`` for recovery to read as ``INDETERMINATE`` about a
+    call that did in fact finish.
+
+    Unlike :func:`_detached`, this returns ``None`` rather than raising, because
+    of where it sits: the claim precedes it, so an unusable result must become a
+    deterministic ``FAILED`` close (``_UNUSABLE``) rather than an escaping
+    exception — the same reason :meth:`StepExecutor._refuse` commits the seam's
+    own rejection instead of propagating it. Detaching also means the value that
+    reaches the commit is one nothing else holds a reference to, so it cannot be
+    edited between revalidation and the write. This does not replace the seam's
+    contract to return a valid result and is not meant to; like every other guard
+    here, it is total over what it is handed.
+
+    Returns:
+        A revalidated, detached copy, or ``None`` if the result does not survive
+        revalidation.
+    """
+    try:
+        # `warnings=False`: serializing a `__dict__`-tampered enum value emits a
+        # `PydanticSerializationUnexpectedValue` warning that is noise here — the
+        # round-trip's `model_validate` is what rejects it, loudly and by return.
+        return ToolResult.model_validate(result.model_dump(warnings=False))
+    except ValidationError:
+        return None
 
 
 def _checked_timeout(timeout: object) -> timedelta:
@@ -327,16 +376,12 @@ class StepExecutor:
                 raise asyncio.CancelledError(msg) from None
             raise
         while True:
-            try:
-                result = await self._invoker.invoke(authorised, timeout=timeout)
-            except ToolBindingError:
-                return await self._refuse(state, step_id)
-            except asyncio.CancelledError:
-                await self._commit_through_cancellation(state, step_id, _interrupted(trusted))
-                raise
-
-            state = await self._record(state, step_id, result)
-            if not self._may_retry(result, trusted, started):
+            state, result = await self._run_once(state, step_id, authorised, trusted, timeout)
+            # A `None` result is a terminal close — a seam rejection, a
+            # cancellation's classification, or a returned value too tampered to
+            # read (`_run_once`) — none of which ADR-0029 §5 retries. A recorded
+            # result is retried only while §5 permits: retryable *and* safe.
+            if result is None or not self._may_retry(result, trusted, started):
                 return state
             try:
                 state = await self._claim(state, step_id, authorised)
@@ -346,6 +391,45 @@ class StepExecutor:
                 # already durably FAILED with the reason the tool gave.
                 _log.info("step_retries_exhausted", step_id=step_id)
                 return state
+
+    async def _run_once(
+        self,
+        state: ExecutionState,
+        step_id: str,
+        authorised: ToolCall,
+        trusted: ToolDefinition | None,
+        timeout: timedelta,  # noqa: ASYNC109 — the seam owns the deadline (ADR-0029 §4)
+    ) -> tuple[ExecutionState, ToolResult | None]:
+        """Invoke the seam once and commit what it says, revalidating the result.
+
+        Returns the state after the commit, and the *revalidated* result the
+        retry decision reads — or ``None`` where nothing retryable was produced:
+
+        - a ``ToolBindingError`` is the seam's own rejection, committed ``FAILED``
+          and never retried (:meth:`_refuse`, ADR-0029 §5 reads a result's kind);
+        - a ``CancelledError`` commits the interrupted-call classification and
+          propagates, because swallowing it would break shutdown;
+        - a result that does not survive revalidation is tampered past
+          ``frozen=True`` (ADR-0018 §3) and is closed ``FAILED`` here rather than
+          read verbatim into a ``KeyError``/``AttributeError`` past the claim
+          (:func:`_detached_result`, :meth:`_discard_unusable`).
+
+        Only the last case is new; the first two are the seam's two contracted
+        exits (ADR-0029 §8). Detaching the result before either the record or the
+        retry decision reads it is what makes both total over what the seam
+        returned, the mirror of :func:`_detached` for the inbound call.
+        """
+        try:
+            returned = await self._invoker.invoke(authorised, timeout=timeout)
+        except ToolBindingError:
+            return await self._refuse(state, step_id), None
+        except asyncio.CancelledError:
+            await self._commit_through_cancellation(state, step_id, _interrupted(trusted))
+            raise
+        result = _detached_result(returned)
+        if result is None:
+            return await self._discard_unusable(state, step_id), None
+        return await self._record(state, step_id, result), result
 
     # --- the transitions ------------------------------------------------
 
@@ -478,6 +562,28 @@ class StepExecutor:
             state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_REFUSED)
         )
 
+    async def _discard_unusable(self, state: ExecutionState, step_id: str) -> ExecutionState:
+        """Commit ``RUNNING → FAILED`` for a returned result that cannot be read.
+
+        The claim precedes the call, so a result tampered past ``frozen=True``
+        (ADR-0018 §3, :func:`_detached_result`) is discovered **after** the step
+        is durably ``RUNNING``. Recording it verbatim would raise a
+        ``KeyError``/``AttributeError`` out of :meth:`_record`, stranding the
+        step for recovery to read as ``INDETERMINATE`` about a call that did in
+        fact finish — the one thing ``INDETERMINATE`` must not be used for. So it
+        is closed here, deterministically, exactly as :meth:`_refuse` closes the
+        seam's own rejection.
+
+        Schedules nothing: like every executor-authored close, the failure takes
+        ``kind=None`` — no tool classified it — and ADR-0029 §5's conjuncts read
+        ``result.failure.kind``, so a ``None`` kind is never retried (ADR-0039
+        §3). Returning from here rather than falling into the retry decision is
+        that rule, the same shape as :meth:`_refuse`.
+        """
+        return await self._finish(
+            state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_UNUSABLE)
+        )
+
     async def _record(
         self, state: ExecutionState, step_id: str, result: ToolResult
     ) -> ExecutionState:
@@ -490,6 +596,12 @@ class StepExecutor:
         deadline expiry too, where it used to drop it (#208); ADR-0029 §3
         requires ``failure`` present on a non-``SUCCEEDED`` result, so nothing is
         fabricated.
+
+        ``result`` here is the revalidated, detached copy
+        (:func:`_detached_result`), never the raw value the seam handed back: the
+        ``outcome`` lookup and the ``failure`` dereference below are total only
+        because a value tampered past ``frozen=True`` was already turned into a
+        close before this runs (:meth:`_discard_unusable`).
         """
         status = _STATUS_BY_OUTCOME[result.outcome]
         if status is StepStatus.SUCCEEDED:
