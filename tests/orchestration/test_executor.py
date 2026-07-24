@@ -970,6 +970,22 @@ class ExplodingDump(ToolResult):
         raise RuntimeError(msg)
 
 
+class CancellingDump(ToolResult):
+    """A ``ToolResult`` whose serialization raises a *forged* ``CancelledError``.
+
+    The one ``BaseException`` :func:`_detached_result` absorbs. Its body is
+    synchronous, so a genuine task cancellation cannot originate there — this one
+    is raised by the untrusted value's own ``model_dump``, and if it were allowed
+    to propagate as a teardown it would strand the already-claimed step, the very
+    thing the guard exists to prevent.
+    """
+
+    def model_dump(self, **kwargs: object) -> dict[str, object]:
+        """Raise a cancellation the executing task never requested."""
+        del kwargs
+        raise asyncio.CancelledError
+
+
 async def _assert_unusable_indeterminate(definition: ToolDefinition, seam: ScriptedInvoker) -> None:
     """Drive the executor over ``seam`` and assert the deterministic close (ADR-0051).
 
@@ -1065,6 +1081,20 @@ async def test_a_result_whose_serialization_raises_is_closed_not_stranded() -> N
     """
     exploding = ExplodingDump(outcome=ToolOutcome.SUCCEEDED, output="ok")
     await _assert_unusable_indeterminate(tool(), ReturningInvoker(tool(), exploding))
+
+
+async def test_a_forged_cancellederror_from_serialization_does_not_strand_the_step() -> None:
+    """A ``CancelledError`` the executing task never requested must not escape.
+
+    A tampered result whose ``model_dump`` raises ``asyncio.CancelledError`` is
+    not a teardown: the guard's body is synchronous, so no genuine cancellation
+    can originate there. Letting it propagate would strand the durably ``RUNNING``
+    step exactly as an uncaught ``KeyError`` would. ``_detached_result`` absorbs it
+    and the step closes ``INDETERMINATE`` — and crucially ``execute`` returns
+    normally rather than raising ``CancelledError``.
+    """
+    cancelling = CancellingDump(outcome=ToolOutcome.SUCCEEDED, output="ok")
+    await _assert_unusable_indeterminate(tool(), ReturningInvoker(tool(), cancelling))
 
 
 async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() -> None:

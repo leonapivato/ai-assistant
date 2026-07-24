@@ -69,9 +69,20 @@ that violates its type: a non-conforming seam that returns `None` or some other
 object raises out of `model_dump` before `model_validate` is reached, and a
 subclass could override serialization to raise anything. Any of those escaping
 would strand the claim exactly as the `KeyError`/`AttributeError` this exists to
-prevent would. So it catches every ordinary `Exception` and reports "unusable";
-`BaseException` — a cancellation, a shutdown — is deliberately *not* caught, so
-structured concurrency is unaffected.
+prevent would. So it catches every ordinary `Exception` and reports "unusable".
+
+`asyncio.CancelledError` is caught too, and the reason is precise: the guard's
+body is **synchronous** — two pydantic calls, no `await` — so the event loop
+cannot deliver a genuine task cancellation into it. A `CancelledError` surfacing
+from `model_dump`/`model_validate` can only have been raised by the untrusted
+value's own code, i.e. forged, and letting it propagate would strand the claimed
+step by masquerading as a teardown that is not happening. A *real* cancellation
+is unaffected: it is delivered at the next `await` — the commit — where
+`_commit_shielded` already lands the write and re-raises. `KeyboardInterrupt` and
+`SystemExit` are deliberately not named, so a real process signal still
+propagates. This is why the guard is placed around a synchronous body and not
+extended over the commit: the one `BaseException` it absorbs is the one that
+provably cannot be genuine there.
 
 This does not replace the seam's own contract to return a valid result (ADR-0029
 §2, §3) and is not meant to, exactly as `_detached` does not replace the seam's
@@ -168,16 +179,18 @@ once this lands (ADR-0029 §9's test).
 ### 6. What the implementation owes
 
 - **`_detached_result` is total**: a revalidated, detached copy on success;
-  the sentinel on a tampered `ToolResult`, a non-`ToolResult`/`None` return, or a
-  serializer that raises an ordinary exception; `BaseException` still propagates.
+  the sentinel on a tampered `ToolResult`, a non-`ToolResult`/`None` return, a
+  serializer that raises an ordinary exception, and a serializer that raises a
+  (necessarily forged) `asyncio.CancelledError`. `KeyboardInterrupt` and
+  `SystemExit` still propagate.
 - **An unusable return closes `INDETERMINATE` with `kind=None`**, and is not
   retried.
 - **The close is unconditional over tool kind** — pinned on a read-only tool as
   well as a side-effecting one, so the rule is shown not to be tool-derived.
 - **The pre-existing surfaces #270 names are covered**: the `outcome` lookup, the
   `FAILED`-branch and the `INDETERMINATE`-branch `failure` dereference, each via a
-  `__dict__`-poisoned result; plus the non-result return and the raising
-  serializer that motivate the broad catch.
+  `__dict__`-poisoned result; plus the non-result return, the raising serializer,
+  and the forged-`CancelledError` serializer that motivate the total catch.
 
 ## Consequences
 
