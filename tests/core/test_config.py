@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from pydantic import ValidationError
 
@@ -50,3 +52,41 @@ def test_unknown_log_level_is_rejected(value: str) -> None:
 @pytest.mark.parametrize("value", ["debug", "Warning", "critical"])
 def test_log_level_is_normalised_to_upper_case(value: str) -> None:
     assert Settings(log_level=value).log_level == value.upper()
+
+
+def test_confirmation_ttl_defaults_to_none() -> None:
+    # No lifetime by default preserves the pre-#243 behaviour: no legitimate
+    # answer to a parked confirmation is refused (#310).
+    assert Settings().confirmation_ttl is None
+
+
+def test_confirmation_ttl_accepts_a_positive_duration() -> None:
+    assert Settings(confirmation_ttl=timedelta(hours=1)).confirmation_ttl == timedelta(hours=1)
+
+
+def test_confirmation_ttl_accepts_an_explicit_none() -> None:
+    assert Settings(confirmation_ttl=None).confirmation_ttl is None
+
+
+@pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1), timedelta(hours=-1)])
+def test_non_positive_confirmation_ttl_is_rejected(value: timedelta) -> None:
+    # Mirrors StepRunner's own non-positive guard: a zero or negative lifetime
+    # expires every confirmation the instant it is recorded, making the flow
+    # unanswerable by misconfiguration (#310). Refused at load, not per answer.
+    with pytest.raises(ValidationError):
+        Settings(confirmation_ttl=value)
+
+
+def test_confirmation_ttl_parses_an_iso_duration_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_CONFIRMATION_TTL", "PT1H")
+    assert load_settings().confirmation_ttl == timedelta(hours=1)
+
+
+def test_load_settings_rejects_a_non_positive_confirmation_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_CONFIRMATION_TTL", "PT0S")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()

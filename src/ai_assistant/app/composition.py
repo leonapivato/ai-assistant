@@ -67,7 +67,8 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
 
     Args:
         settings: Loaded application settings — the model spec and its resilience
-            knobs, and the context localisation window.
+            knobs, the context localisation window, and the parked-confirmation
+            lifetime the runner enforces (``confirmation_ttl``, #310).
         data_dir: Where the SQLite stores live. Defaults to a per-user directory
             (``~/.ai-assistant``), created if absent; a test passes a temporary
             path.
@@ -135,6 +136,9 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             policy=ThresholdActionPolicy(),
             trail=trail,
             executor=StepExecutor(plans=plans, registry=tools, invoker=tools),
+            # A parked confirmation's lifetime is a deployment value (#310); ``None``
+            # (the default) keeps the pre-#243 behaviour of no lifetime.
+            confirmation_ttl=settings.confirmation_ttl,
         )
         return Engine(
             loop=loop,
