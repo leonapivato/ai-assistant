@@ -20,9 +20,10 @@ import asyncio
 import contextlib
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -34,9 +35,61 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import PermissionDecision, PermissionOutcome
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 _OWNER_ONLY = 0o600
+
+
+async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
+    """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
+
+    The trail serialises one ``sqlite3`` connection behind an :class:`asyncio.Lock`
+    and runs the SQL in a worker thread. A thread cannot be interrupted, so if the
+    awaiting coroutine were simply cancelled the enclosing ``async with self._lock``
+    would unwind and release the lock **while the worker was still using the
+    connection** — letting a second caller use the same connection concurrently,
+    which SQLite refuses.
+
+    The worker records its own outcome and sets a :class:`threading.Event` when it
+    physically returns. This coroutine waits on *that* signal — not on the
+    cancellable state of any task — so the lock is held for the whole life of the
+    worker even if the awaiting task, or a blanket :func:`asyncio.all_tasks`
+    cancellation, is cancelled. Nothing here is an :class:`asyncio.Task`: the work
+    runs on an executor future and the fallback wait is another, so a task sweep
+    finds nothing to cancel out from under the running thread. An absorbed
+    cancellation takes precedence over the worker's own result or failure and is
+    re-raised once the thread has finished: the caller's task still cancels; what
+    is prevented is connection reuse, not the cancellation itself.
+    """
+    done = threading.Event()
+    outcome: list[T] = []
+    failure: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            outcome.append(fn(*args))
+        except Exception as exc:  # relayed to the caller once the thread has finished
+            failure.append(exc)
+        finally:
+            done.set()
+
+    loop = asyncio.get_running_loop()
+    pending: asyncio.Future[Any] = loop.run_in_executor(None, worker)
+    cancellation: asyncio.CancelledError | None = None
+    while not done.is_set():
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError as exc:
+            # Absorb the cancellation and keep waiting on the worker's physical
+            # completion signal, so the lock outlives the still-running thread.
+            cancellation = exc
+            pending = loop.run_in_executor(None, done.wait)
+    if cancellation is not None:
+        raise cancellation
+    if failure:
+        raise failure[0]
+    return outcome[0]
+
 
 #: The widest value SQLite will bind to an INTEGER parameter. A Python int is
 #: unbounded, so ``recent`` clamps to this before binding ``LIMIT``.
@@ -262,7 +315,7 @@ class SqliteAuditTrail:
         """
         snapshot = _revalidated(decision)
         async with self._lock:
-            await asyncio.to_thread(self._record_sync, snapshot)
+            await _run_to_completion(self._record_sync, snapshot)
         return snapshot.id
 
     def _record_sync(self, snapshot: PermissionDecision) -> None:
@@ -396,7 +449,7 @@ class SqliteAuditTrail:
                 longer validates.
         """
         async with self._lock:
-            row = await asyncio.to_thread(self._get_sync, decision_id)
+            row = await _run_to_completion(self._get_sync, decision_id)
         return None if row is None else _decode(row)
 
     def _get_sync(self, decision_id: str) -> str | None:
@@ -424,7 +477,7 @@ class SqliteAuditTrail:
             AuditError: If the trail cannot be read.
         """
         async with self._lock:
-            data = await asyncio.to_thread(self._pending_confirmation_sync, execution_id, step_id)
+            data = await _run_to_completion(self._pending_confirmation_sync, execution_id, step_id)
         return None if data is None else _decode(data)
 
     def _pending_confirmation_sync(self, execution_id: str, step_id: str) -> str | None:
@@ -464,7 +517,7 @@ class SqliteAuditTrail:
         # the query then returns. This is not the `limit=-1` case, where
         # clamping would have served something the caller did not ask for.
         async with self._lock:
-            rows = await asyncio.to_thread(self._ordered_sync, min(limit, _MAX_SQLITE_INT))
+            rows = await _run_to_completion(self._ordered_sync, min(limit, _MAX_SQLITE_INT))
         return [_decode(row) for row in rows]
 
     async def export(self) -> list[PermissionDecision]:
@@ -474,7 +527,7 @@ class SqliteAuditTrail:
             AuditError: If the trail cannot be read.
         """
         async with self._lock:
-            rows = await asyncio.to_thread(self._ordered_sync, None)
+            rows = await _run_to_completion(self._ordered_sync, None)
         return [_decode(row) for row in rows]
 
     def _ordered_sync(self, limit: int | None) -> Sequence[str]:
@@ -507,7 +560,7 @@ class SqliteAuditTrail:
             AuditError: If the trail cannot be cleared.
         """
         async with self._lock:
-            return await asyncio.to_thread(self._clear_sync)
+            return await _run_to_completion(self._clear_sync)
 
     def _clear_sync(self) -> int:
         """Delete everything in one statement, counting what the delete removed.
