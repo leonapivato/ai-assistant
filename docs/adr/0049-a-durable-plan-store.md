@@ -64,21 +64,39 @@ are only about that.
 
 ### 1. The schema and the migration
 
-Four tables, created `IF NOT EXISTS` at construction inside one transaction:
+Four tables, created `IF NOT EXISTS` at construction inside one transaction,
+with `PRAGMA foreign_keys = ON` set on every connection:
 
 ```sql
 meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)
-plans(id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, data TEXT NOT NULL)
+plans(
+    id       TEXT PRIMARY KEY,
+    goal_id  TEXT NOT NULL REFERENCES goals(id),
+    data     TEXT NOT NULL
+)
 executions(
     id       TEXT PRIMARY KEY,
-    plan_id  TEXT NOT NULL,
+    plan_id  TEXT NOT NULL REFERENCES plans(id),
     version  INTEGER NOT NULL,
     active   INTEGER NOT NULL,   -- 1 iff ExecutionState.is_active, maintained on write
     created_seq INTEGER NOT NULL,-- the allocation ordinal (see §3), for oldest-first order
     data     TEXT NOT NULL
 )
 ```
+
+**The foreign keys are enforced, not decorative, and they close a cross-process
+orphan race.** `save_plan`'s app-level orphan check (ADR-0014 §5 rejects a plan
+whose goal is unknown, so `export` can promise referential integrity without
+repair) is a read; on its own it leaves a window in which one connection deletes
+goal `g` between another's check and its insert, committing a plan whose
+`goal_id` no longer resolves — the export-integrity violation the contract
+forbids, and the same race between `start_execution` and `delete_goal`. The
+`REFERENCES` constraints make that window unreachable: with foreign keys on, an
+insert of a plan or execution whose parent has been deleted is refused by SQLite
+and rolls back, rather than committing an orphan. This is the DB enforcing the
+binding, beneath the app-level check that gives the caller the ADR-0014 error
+shape.
 
 The `data` column is the record: each row stores the pydantic model's
 `model_dump_json()` and is rebuilt with `model_validate_json` on read, exactly as
@@ -104,6 +122,19 @@ blob:
   `active_executions` returns oldest-first (`ORDER BY created_seq`) — the
   insertion order the contract requires — deterministically and without relying
   on rowid reuse behaviour.
+
+**Every operation that reads-then-writes runs its whole read-check-write in one
+`BEGIN IMMEDIATE` transaction** — not only `commit_transition` and
+`start_execution`, but `save_goal` (its identity-change check), `save_plan` (its
+orphan check), `delete_goal` (its live-step check and the cascade), and `clear`
+(its live-step check). The immediate transaction takes SQLite's write lock at the
+start, so no second connection can mutate what the check just read before the
+write lands; the per-instance `asyncio.Lock` serialises writers within one
+process, and the immediate transaction serialises them across processes sharing
+the file. `delete_goal`'s cascade deletes children before parents — executions,
+then plans, then the goal — so the enforced foreign keys are satisfied at each
+step while the live-execution refusal still runs first, before anything is
+removed.
 
 **The migration is table creation only.** There is no prior persistent
 `PlanStore` and therefore no on-disk schema to evolve: a fresh database is the
@@ -190,8 +221,8 @@ read-incremented under the SQLite write lock:
   and fake stores, which are out of this lane's fence and, per that issue,
   unreachable in the current single-process model anyway. #305's second item —
   injecting the nonce for deterministic restart tests — also does not arise here:
-  the durable ordinal is already deterministic, so the restart tests (§ below)
-  assert non-reuse by reopening the same file, needing no injected entropy.
+  the durable ordinal is already deterministic, so the restart tests (§5) assert
+  non-reuse by reopening the same file, needing no injected entropy.
 
 Uniqueness is thus met "by keying on durable state it reopens", the mechanism the
 `PlanStore.start_execution` docstring already designates for a persistent store —
@@ -213,6 +244,37 @@ substitutability #253 closed (the two obvious fixes #308 already rejects). So
 `PlanStore` is a prerequisite for any real upgrade-boundary scenario but not the
 place the fix belongs (#308 routes it to the durable-continuation design in
 #287/#242). No new state is added here to pre-empt it.
+
+### 5. Tests: the durable behaviour the conformance suite cannot reach
+
+Passing the shared `PlanStore` conformance suite unchanged is necessary but not
+sufficient: that suite is instantiated for `InMemoryPlanStore` and the fake, and
+by its own note "restart" is persistence-model-specific, so it deliberately does
+*not* exercise reopening a file. The durable guarantees in §§2–3 therefore get
+their own SQLite-specific, deterministic tests in the implementation PR, opening a
+real database at a temp path (not `:memory:`, which shares nothing across
+connections):
+
+- **Close/reopen state recovery** — save a goal and plan, park an execution at
+  `AWAITING_APPROVAL` with a `bound_tool`, drop the store object, reopen against
+  the same file, and assert the reloaded step's status, `bound_tool`, `version`
+  and other fields are intact and the step is resumable (a `RUNNING` transition
+  commits).
+- **Execution-id non-reuse across a reopen** — start an execution, `delete_goal`
+  (and, separately, `clear`), reopen the file, start another execution, and
+  assert the new id differs from the first: the durable `exec_counter` did not
+  rewind.
+- **Atomic rollback of an interrupted write** — a `commit_transition` whose
+  transaction does not complete leaves the store reloading the prior version, never
+  a half-applied one (no version without its blob, no blob without its version).
+- **Concurrent-connection CAS and allocation** — two connections on one file:
+  two writers computing a transition against the same version leave exactly one
+  committing and the other seeing `StaleExecutionError`; two `start_execution`
+  calls receive distinct ids; and the foreign keys refuse an orphaning insert.
+
+These sit in an impl-level test module (as #303's restart tests do), not in the
+shared suite, because they assert this store's persistence model rather than the
+contract every store owes.
 
 ## Consequences
 
