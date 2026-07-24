@@ -375,6 +375,109 @@ async def test_write_atomic_snapshots_records_against_mid_call_mutation(tmp_path
         store.close()
 
 
+async def test_add_snapshots_record_against_mid_embed_mutation(tmp_path: Path) -> None:
+    # issue #286: add reads the record's content for the embedder, then serialises
+    # the record after that await. A caller aliasing the submitted record and
+    # mutating it mid-embed must not be able to tear the write — persist JSON for
+    # the new state alongside a vector for the old. The snapshot taken before the
+    # first await makes the mutation a no-op: the returned id, the stored id, and
+    # the stored content all come from the snapshot the vector was computed for.
+    rec = _semantic("orig", "alpha")
+
+    class _MutatingEmbedder:
+        """Mutates a caller-held record from inside embed(), simulating aliasing."""
+
+        def __init__(self) -> None:
+            self._inner = HashingEmbedder(dimensions=8)
+
+        @property
+        def model_id(self) -> str:
+            return "mutating-8"
+
+        @property
+        def dimensions(self) -> int:
+            return 8
+
+        async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+            rec.id = "changed"  # would relocate the row if add read the live record
+            rec.content = "mutated"  # would desync JSON from the embedded vector
+            return await self._inner.embed(texts)
+
+    store = SqliteMemoryStore(path=tmp_path / "snap.db", embedder=_MutatingEmbedder())
+    try:
+        returned = await store.add(rec)
+
+        assert returned == "orig"  # the snapshot's id, not the mutated live record's
+        assert await store.get("changed") is None  # the mutation did not relocate it
+        got = await store.get("orig")
+        assert got is not None
+        assert got.content == "alpha"  # JSON agrees with the vector computed for it
+    finally:
+        store.close()
+
+
+async def test_add_snapshot_boundary_is_coroutine_start_and_stays_consistent(
+    tmp_path: Path,
+) -> None:
+    # Pins ADR-0056's boundary: add() snapshots on its coroutine's *first line*,
+    # not at the add(...) call expression (an async def's body runs only when the
+    # coroutine is first awaited). A mutation made after the coroutine is built but
+    # before it is awaited IS captured — but consistently, as one whole state, so
+    # the stored JSON and vector still agree. This is not a tear; it documents the
+    # chosen semantics so a later change can't silently move the boundary.
+    store = SqliteMemoryStore(path=tmp_path / "boundary.db", embedder=HashingEmbedder(dimensions=8))
+    try:
+        rec = _semantic("orig", "alpha")
+        pending = store.add(rec)  # coroutine built; body (and the snapshot) not run yet
+        rec.content = "mutated coffee"  # mutate in the construct-then-await window
+        returned = await pending  # body runs now, snapshotting the mutated record
+
+        assert returned == "orig"
+        got = await store.get("orig")
+        assert got is not None
+        assert got.content == "mutated coffee"  # captured as of the write's start
+        # Consistency, not a tear: the vector came from the same captured content,
+        # so a search for it matches — JSON and vector agree.
+        assert [r.id for r in await store.search("mutated coffee")] == ["orig"]
+    finally:
+        store.close()
+
+
+async def test_expiry_precision_survives_at_the_datetime_range_extreme(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    # issue #289: near year 9999 a REAL POSIX-seconds column cannot resolve
+    # microseconds — its ulp is tens of µs — so an expires_at one µs after now
+    # would collapse onto now and the ``expires_at > now`` pre-filter would hide a
+    # record that is still live. With an integer µs epoch the comparison is exact.
+    expires = datetime(9999, 1, 1, tzinfo=UTC)
+    just_before = datetime(9998, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)  # 1 µs earlier
+    assert expires.timestamp() == just_before.timestamp()  # the float collision, proven
+    store = make_store(now=lambda: just_before)
+    await store.add(_semantic("edge", "coffee at the range extreme", expires_at=expires))
+
+    assert await store.get("edge") is not None  # not expired: expires_at > now, exactly
+    assert [r.id for r in await store.search("coffee")] == ["edge"]  # search agrees
+
+
+async def test_valid_until_precision_survives_at_the_datetime_range_extreme(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    # issue #289, the validity axis: search has no exact backstop for valid_until,
+    # so a float collision at the range extreme would wrongly retire a live record.
+    # A valid_until one µs after now must keep the record live in get AND search.
+    valid_until = datetime(9999, 1, 1, tzinfo=UTC)
+    just_before = datetime(9998, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)  # 1 µs earlier
+    assert valid_until.timestamp() == just_before.timestamp()  # the float collision
+    store = make_store(now=lambda: just_before)
+    await store.add(
+        _semantic("edge", "coffee still valid", validity=Validity(valid_until=valid_until))
+    )
+
+    assert await store.get("edge") is not None  # window still open: now < valid_until
+    assert [r.id for r in await store.search("coffee")] == ["edge"]
+
+
 async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Path) -> None:
     # ADR-0046 §4's durability obligation, which the in-process fault test above
     # cannot reach: a process killed mid-batch (after the first transactional write,
@@ -592,6 +695,12 @@ def _epoch_or_none(instant: datetime | None) -> float | None:
     return instant.timestamp() if instant is not None else None
 
 
+def _micros(instant: datetime) -> int:
+    """Exact integer microsecond UTC epoch, mirroring the store's representation."""
+    delta = instant - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
 async def test_migration_adds_expires_at_column_and_accepts_writes(tmp_path: Path) -> None:
     db = tmp_path / "legacy.db"
     _write_legacy_db(db, [])
@@ -630,19 +739,20 @@ async def test_migration_backfills_expiry_so_legacy_expired_stays_forgotten(
         store.close()
 
 
-def _valid_until_column(store: SqliteMemoryStore, record_id: str) -> float | None:
+def _valid_until_column(store: SqliteMemoryStore, record_id: str) -> int | None:
     """Read the raw ``records.valid_until`` column for a record, bypassing decode.
 
     The migration's whole job is to *populate this column* from the JSON blob, so
     a test of the backfill must assert the column itself — ``get``/``search``
     decode ``valid_from`` from JSON and could pass with the column empty, and
-    ``search`` over an unpopulated ``vec_records`` yields nothing regardless.
+    ``search`` over an unpopulated ``vec_records`` yields nothing regardless. The
+    column is an integer microsecond epoch (issue #289).
     """
     row = store._conn.execute(
         "SELECT valid_until FROM records WHERE id = ?", (record_id,)
     ).fetchone()
     assert row is not None
-    return cast("float | None", row[0])
+    return cast("int | None", row[0])
 
 
 async def test_migration_backfills_valid_until_column_from_json(tmp_path: Path) -> None:
@@ -668,7 +778,7 @@ async def test_migration_backfills_valid_until_column_from_json(tmp_path: Path) 
         assert "valid_until" in columns
         # The backfill populated the column for the retired record and left the
         # live one NULL (= open) — the property search's column pre-filter relies on.
-        assert _valid_until_column(store, "retired") == retired_deadline.timestamp()
+        assert _valid_until_column(store, "retired") == _micros(retired_deadline)
         assert _valid_until_column(store, "live") is None
         # And the read paths honour it: retired is hidden from get, retained by export.
         assert await store.get("retired") is None
@@ -699,15 +809,134 @@ async def test_migration_adds_valid_until_to_a_post_expires_at_table(
 
     store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
     try:
-        columns = {row[1] for row in store._conn.execute("PRAGMA table_info(records)")}
-        assert {"expires_at", "valid_until"} <= columns
+        types = {row[1]: row[2] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert {"expires_at", "valid_until"} <= types.keys()
+        # Both columns are INTEGER µs epochs: the legacy REAL expires_at was
+        # re-created with INTEGER affinity (issue #289), not left as REAL — the
+        # affinity, not just the value, is what a far-future boundary depends on.
+        assert types["expires_at"] == "INTEGER"
+        assert types["valid_until"] == "INTEGER"
         # The valid_until block ran on its own and backfilled the column.
-        assert _valid_until_column(store, "retired") == retired_deadline.timestamp()
+        assert _valid_until_column(store, "retired") == _micros(retired_deadline)
         assert _valid_until_column(store, "live") is None
         assert await store.get("retired") is None
         assert {r.id for r in await store.export()} == {"retired", "live"}
     finally:
         store.close()
+
+
+async def _write_real_schema_db(
+    path: Path, records: list[MemoryRecord], embedder: HashingEmbedder
+) -> None:
+    """Create the pre-#289 installed schema: both lifecycle columns ``REAL``.
+
+    Unlike :func:`_write_legacy_db` this builds the *complete* prior on-disk
+    shape — ``expires_at REAL, valid_until REAL`` — with a populated
+    ``vec_records`` virtual table, so a migration test can prove the affinity
+    rebuild carries each row's vector forward (its rowid preserved) and search
+    still finds it. Lifecycle deadlines are written through ``timestamp()``, the
+    lossy ``REAL`` representation the rebuild then corrects from JSON.
+    """
+    conn = sqlite3.connect(path)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            [("embedding_model", embedder.model_id), ("dimensions", str(embedder.dimensions))],
+        )
+        conn.execute(
+            "CREATE TABLE records(rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL, expires_at REAL, valid_until REAL)"
+        )
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_records "
+            f"USING vec0(embedding float[{embedder.dimensions}] distance_metric=cosine)"
+        )
+        vectors = await embedder.embed([r.content for r in records])
+        for record, vector in zip(records, vectors, strict=True):
+            cursor = conn.execute(
+                "INSERT INTO records(id, kind, data, expires_at, valid_until) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    record.id,
+                    record.kind,
+                    record.model_dump_json(),
+                    _epoch_or_none(record.expires_at),
+                    _epoch_or_none(record.validity.valid_until),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO vec_records(rowid, embedding) VALUES (?, ?)",
+                (cursor.lastrowid, sqlite_vec.serialize_float32(list(vector))),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def test_migration_rebuilds_a_full_real_schema_preserving_vectors(tmp_path: Path) -> None:
+    # issue #289, the actual pre-change installed schema: BOTH lifecycle columns
+    # REAL, with populated vec_records. The rebuild must flip both to INTEGER µs,
+    # backfill exact epochs, and carry each rowid forward so the vector join
+    # survives — a far-future record stays live AND still matches in search, where
+    # the lossy REAL column would have hidden it and a lost vector would drop it.
+    embedder = HashingEmbedder(dimensions=8)
+    far_future = datetime(9999, 1, 1, tzinfo=UTC)
+    just_before = datetime(9998, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)  # 1 µs earlier
+    records = [
+        _semantic("live", "coffee beans", validity=Validity(valid_until=far_future)),
+        _semantic("plain", "coffee grounds"),
+    ]
+    db = tmp_path / "real.db"
+    await _write_real_schema_db(db, records, embedder)
+
+    store = SqliteMemoryStore(path=db, embedder=embedder, now=lambda: just_before)
+    try:
+        types = {row[1]: row[2] for row in store._conn.execute("PRAGMA table_info(records)")}
+        assert types["expires_at"] == "INTEGER"  # affinity flipped, not left REAL
+        assert types["valid_until"] == "INTEGER"
+        # The far-future deadline is exact after the rebuild (a REAL column would
+        # have rounded it and hidden the record one µs early).
+        assert _valid_until_column(store, "live") == _micros(far_future)
+        assert await store.get("live") is not None  # still live: now < valid_until
+        # The carried-forward vectors still match — the rowid join survived.
+        assert {r.id for r in await store.search("coffee")} == {"live", "plain"}
+    finally:
+        store.close()
+
+
+async def test_migration_rolls_back_a_rebuild_that_hits_a_corrupt_row(tmp_path: Path) -> None:
+    # A corrupt legacy JSON blob makes the backfill raise mid-rebuild. Because the
+    # rewrite runs in an explicit transaction, the schema swap must roll back whole
+    # — never leave INTEGER columns with un-backfilled NULLs that a reopen would
+    # skip, silently resurrecting expired rows (issue #289 review, blocker 1).
+    embedder = HashingEmbedder(dimensions=8)
+    good = _semantic("good", "coffee", expires_at=datetime(2026, 1, 2, tzinfo=UTC))
+    db = tmp_path / "corrupt.db"
+    await _write_real_schema_db(db, [good], embedder)
+    legacy = sqlite3.connect(db)
+    legacy.execute("UPDATE records SET data = ? WHERE id = ?", ("not-json", "good"))
+    legacy.commit()
+    legacy.close()
+
+    with pytest.raises(MemoryStoreError):
+        SqliteMemoryStore(path=db, embedder=embedder, now=_fixed_now)
+
+    # The rebuild rolled back: the original REAL schema is intact, so a fixed
+    # process could migrate cleanly later rather than being stuck half-swapped.
+    check = sqlite3.connect(db)
+    try:
+        types = {row[1]: row[2] for row in check.execute("PRAGMA table_info(records)")}
+        assert types["expires_at"] == "REAL"  # unchanged — the swap did not commit
+        assert types["valid_until"] == "REAL"
+        assert not list(
+            check.execute("SELECT name FROM sqlite_master WHERE name='records_migrated'")
+        )
+    finally:
+        check.close()
 
 
 async def test_export_wraps_corrupt_stored_record(

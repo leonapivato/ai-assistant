@@ -100,6 +100,25 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _to_micros(instant: datetime) -> int:
+    """Exact integer microsecond UTC epoch for an aware datetime (issue #289).
+
+    Lifecycle deadlines are stored and compared as integer microsecond epochs
+    rather than ``REAL`` POSIX seconds. ``datetime.timestamp()`` returns an
+    IEEE-754 double whose 53-bit mantissa cannot resolve microseconds near the
+    far end of the datetime range: approaching year 9999 its ulp is tens of
+    microseconds, so two instants ~1 µs apart collapse to one float and a
+    ``deadline > now`` pre-filter can hide a record that must stay live. The
+    ``timedelta`` here is exact integer arithmetic (days/seconds/microseconds
+    are ints), so no precision is lost at any point in the localizable range.
+    """
+    delta = instant - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
 class SqliteMemoryStore:
     """A persistent, semantically-searchable ``MemoryStore``."""
 
@@ -119,9 +138,9 @@ class SqliteMemoryStore:
             now: Clock used to decide whether a record has expired; injectable
                 for deterministic tests. Defaults to UTC wall-clock. Guarded by
                 :func:`~ai_assistant.core.clock.checked_clock`: this seam never
-                reaches a `core` field validator — the reading becomes a float
-                through ``timestamp()`` — so the producer is the only place a
-                naive or indeterminate reading can be caught (ADR-0026 §7).
+                reaches a `core` field validator — the reading becomes an integer
+                microsecond epoch (issue #289) — so the producer is the only place
+                a naive or indeterminate reading can be caught (ADR-0026 §7).
 
         Raises:
             MemoryStoreError: If the store was previously built with a different
@@ -150,7 +169,8 @@ class SqliteMemoryStore:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS records("
                 "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
-                "kind TEXT NOT NULL, data TEXT NOT NULL, expires_at REAL, valid_until REAL)"
+                "kind TEXT NOT NULL, data TEXT NOT NULL, "
+                "expires_at INTEGER, valid_until INTEGER)"
             )
             self._migrate_records(conn)
             self._verify_or_init_meta(conn)
@@ -170,44 +190,80 @@ class SqliteMemoryStore:
         return conn
 
     def _migrate_records(self, conn: sqlite3.Connection) -> None:
-        """Add and backfill the ``expires_at`` and ``valid_until`` columns.
+        """Bring ``expires_at`` and ``valid_until`` to INTEGER microsecond epochs.
 
-        Records written before a column existed carry the value only inside their
-        JSON blob. Adding a column alone would leave it ``NULL``: for
-        ``expires_at`` that resurrects already-expired memories (pre-ADR-0007
-        tables); for ``valid_until`` ``NULL`` correctly *means* "open" so no row
-        is wrongly hidden, but we still backfill it so an already-retired belief
-        (a closed window persisted in JSON) keeps its column filter after the
-        upgrade. Both backfills run transactionally within the setup commit, from
-        each record's stored value (ADR-0045 §9). The two columns are migrated
-        independently, so a table that has one but not the other is handled.
+        Every legacy table shape is handled by one rebuild: a pre-ADR-0007 table
+        (neither column), a post-ADR-0007 table (``expires_at REAL`` only), and
+        the current-but-``REAL`` table (both columns ``REAL``) all become a table
+        whose lifecycle columns are ``INTEGER`` microsecond epochs. Both are
+        backfilled from each record's *exact* ISO instant in its JSON blob
+        (ADR-0045 §9), so a value a prior ``REAL`` column had already rounded is
+        restored to full precision, and a pre-column table does not resurrect an
+        already-expired memory as ``NULL`` (no deadline).
+
+        The rebuild is required rather than an in-place ``ALTER``: SQLite has no
+        ``ALTER COLUMN TYPE``, and ``REAL`` affinity would silently re-float any
+        integer written to a legacy column, so the *affinity* itself must change.
+        We recreate the table and copy the rows rather than ``DROP COLUMN`` (which
+        needs SQLite 3.35+); the copy carries each original ``rowid`` forward
+        explicitly, so the ``vec_records`` join by rowid stays intact.
+
+        It runs in an **explicit** transaction. SQLite auto-commits a bare DDL
+        statement when no transaction is open (issue #289 review), so without the
+        ``BEGIN`` a failure during the row copy would leave the schema already
+        swapped and the values un-backfilled — permanently, since a later open
+        would see ``INTEGER`` columns and skip migration, resurrecting expired
+        rows. Inside the transaction every statement — the DDL included — rolls
+        back together on any failure.
         """
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(records)")}
-        if "expires_at" not in columns:
-            conn.execute("ALTER TABLE records ADD COLUMN expires_at REAL")
-            for rowid, data in conn.execute("SELECT rowid, data FROM records").fetchall():
-                expires = self._epoch_from_json(data, "expires_at")
-                if expires is not None:
-                    conn.execute(
-                        "UPDATE records SET expires_at = ? WHERE rowid = ?", (expires, rowid)
-                    )
-        if "valid_until" not in columns:
-            conn.execute("ALTER TABLE records ADD COLUMN valid_until REAL")
-            for rowid, data in conn.execute("SELECT rowid, data FROM records").fetchall():
-                valid_until = self._epoch_from_json(data, "valid_until", nested="validity")
-                if valid_until is not None:
-                    conn.execute(
-                        "UPDATE records SET valid_until = ? WHERE rowid = ?", (valid_until, rowid)
-                    )
+        info = {row[1]: str(row[2]).upper() for row in conn.execute("PRAGMA table_info(records)")}
+        if info.get("expires_at") == "INTEGER" and info.get("valid_until") == "INTEGER":
+            return  # already on the microsecond-epoch schema; nothing to do
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "CREATE TABLE records_migrated("
+                "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+                "kind TEXT NOT NULL, data TEXT NOT NULL, "
+                "expires_at INTEGER, valid_until INTEGER)"
+            )
+            # Stream the source rows through a dedicated read cursor rather than
+            # ``fetchall()``, so migrating a large legacy store does not
+            # materialise the whole ``records`` table in memory at once. Reads
+            # come from ``records`` and writes go to ``records_migrated`` — a
+            # different table — so the scan cursor stays valid across the inserts.
+            read = conn.execute("SELECT rowid, id, kind, data FROM records")
+            for rowid, id_, kind, data in read:
+                expires = self._micros_from_json(data, "expires_at")
+                valid_until = self._micros_from_json(data, "valid_until", nested="validity")
+                conn.execute(
+                    "INSERT INTO records_migrated"
+                    "(rowid, id, kind, data, expires_at, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
+                    (rowid, id_, kind, data, expires, valid_until),
+                )
+            conn.execute("DROP TABLE records")
+            conn.execute("ALTER TABLE records_migrated RENAME TO records")
+            conn.commit()
+        except Exception:
+            # A backfill failure (e.g. a corrupt legacy JSON blob) or any error
+            # must undo the whole rewrite, DDL included, so a reopen re-attempts a
+            # clean migration rather than finding a half-swapped schema. A crash
+            # mid-rebuild is covered too: the uncommitted BEGIN is discarded by
+            # SQLite on the next open.
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+            raise
 
-    def _epoch_from_json(self, data: str, key: str, *, nested: str | None = None) -> float | None:
-        """Read a stored ISO instant from a record's JSON, as a UTC epoch or None.
+    def _micros_from_json(self, data: str, key: str, *, nested: str | None = None) -> int | None:
+        """Read a stored ISO instant from a record's JSON, as a µs epoch or None.
 
         Reads ``data[key]`` at the top level, or ``data[nested][key]`` when
         ``nested`` is given (the validity window lives under ``"validity"``). A
         missing container, a missing key, or a ``null`` value all read as
         ``None`` — an absent window end is *open*, exactly as an absent
-        ``expires_at`` is *no deadline*.
+        ``expires_at`` is *no deadline*. The instant is converted with
+        :func:`_to_micros`, so the read-back is exact even at the range extremes
+        (issue #289).
         """
         try:
             payload = json.loads(data)
@@ -222,7 +278,7 @@ class SqliteMemoryStore:
             raise MemoryStoreError(msg) from exc
         if instant.tzinfo is None:
             instant = instant.replace(tzinfo=UTC)
-        return instant.timestamp()
+        return _to_micros(instant)
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
         want = {
@@ -276,15 +332,25 @@ class SqliteMemoryStore:
     async def add(self, record: MemoryRecord) -> str:
         """Embed the record's content and persist it, returning its id.
 
+        Snapshots the record *before the first await* (issue #286). ``add`` awaits
+        the embedder between reading the record and serialising it, and
+        ``MemoryBase`` models are mutable, so a caller aliasing the submitted
+        record and mutating it across that await could otherwise persist JSON for
+        the *new* state alongside a vector computed from the *old* one — a torn
+        write a later search matches on an unrelated vector. The stored id, JSON,
+        and vector are all derived from this one immutable snapshot, matching the
+        shape :meth:`write_atomic` already uses for its batch (ADR-0056).
+
         Raises:
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 vector, or the write fails (the write is transactional — a
                 failure leaves the store unchanged).
         """
-        vector = await self._embed_one(record.content)
+        snapshot = record.model_copy(deep=True)
+        vector = await self._embed_one(snapshot.content)
         async with self._lock:
-            await _run_to_completion(self._add_sync, record, vector)
-        return record.id
+            await _run_to_completion(self._add_sync, snapshot, vector)
+        return snapshot.id
 
     def _add_sync(self, record: MemoryRecord, vector: Embedding) -> None:
         conn = self._conn
@@ -313,9 +379,9 @@ class SqliteMemoryStore:
         conn = self._conn
         blob = sqlite_vec.serialize_float32(list(vector))
         data = record.model_dump_json()
-        expires = record.expires_at.timestamp() if record.expires_at is not None else None
+        expires = _to_micros(record.expires_at) if record.expires_at is not None else None
         valid_until = (
-            record.validity.valid_until.timestamp()
+            _to_micros(record.validity.valid_until)
             if record.validity.valid_until is not None
             else None
         )
@@ -436,20 +502,22 @@ class SqliteMemoryStore:
         except ClockReadingError as exc:
             raise MemoryStoreError(str(exc)) from exc
 
-    def _now_epoch(self) -> float:
-        """The guarded clock's reading as a POSIX timestamp, in UTC.
+    def _now_micros(self) -> int:
+        """The guarded clock's reading as an integer microsecond UTC epoch.
 
-        The guard is what makes this comparable with the UTC ``expires_at`` and
-        ``valid_until`` stored on each record: an indeterminate reading would
-        otherwise be read as *host-local* by ``timestamp()`` and silently shift
-        every lifecycle decision by the host offset.
+        The guard is what makes this comparable with the ``expires_at`` and
+        ``valid_until`` microsecond epochs stored on each record: an
+        indeterminate reading would otherwise be localized to the *host* offset
+        and silently shift every lifecycle decision. Microseconds (not
+        :meth:`datetime.timestamp` floats) so the comparison stays exact at the
+        range extremes (issue #289).
 
         Raises:
             MemoryStoreError: If the injected clock's reading is not a conforming
                 one — naive, indeterminate, or outside the localizable range
                 (ADR-0026 §4).
         """
-        return self._now().timestamp()
+        return _to_micros(self._now())
 
     @staticmethod
     def _decode(data: str) -> MemoryRecord:
@@ -476,13 +544,13 @@ class SqliteMemoryStore:
         """
         async with self._lock:
             now = self._now()
-            data = await _run_to_completion(self._get_sync, record_id, now.timestamp())
+            data = await _run_to_completion(self._get_sync, record_id, _to_micros(now))
         if data is None:
             return None
         record = self._decode(data)
         return record if record.validity.live_at(now) else None
 
-    def _get_sync(self, record_id: str, now: float) -> str | None:
+    def _get_sync(self, record_id: str, now: int) -> str | None:
         row = self._conn.execute(
             "SELECT data FROM records WHERE id = ? "
             "AND (expires_at IS NULL OR expires_at > ?) "
@@ -521,7 +589,7 @@ class SqliteMemoryStore:
         vector = await self._embed_one(query)
         async with self._lock:
             rows = await _run_to_completion(
-                self._search_sync, vector, limit, kinds, self._now_epoch()
+                self._search_sync, vector, limit, kinds, self._now_micros()
             )
         return [self._decode(data).model_copy(update={"score": score}) for data, score in rows]
 
@@ -530,7 +598,7 @@ class SqliteMemoryStore:
         vector: Embedding,
         limit: int,
         kinds: Sequence[MemoryKind] | None,
-        now: float,
+        now: int,
     ) -> list[tuple[str, float]]:
         wanted = {str(kind) for kind in kinds} if kinds is not None else None
         # Over-fetch to leave room for kind-, expiry-, and window-filtered rows.
@@ -553,7 +621,7 @@ class SqliteMemoryStore:
             # same post-KNN pass so a filtered row still counts against over-fetch.
             if valid_until is not None and valid_until <= now:
                 continue
-            valid_from = self._epoch_from_json(data, "valid_from", nested="validity")
+            valid_from = self._micros_from_json(data, "valid_from", nested="validity")
             if valid_from is not None and valid_from > now:
                 continue
             # vec0 uses cosine distance; similarity is 1 - distance, floored at 0.
@@ -615,10 +683,10 @@ class SqliteMemoryStore:
                 corrupt.
         """
         async with self._lock:
-            rows = await _run_to_completion(self._export_sync, self._now_epoch())
+            rows = await _run_to_completion(self._export_sync, self._now_micros())
         return [self._decode(data) for data in rows]
 
-    def _export_sync(self, now: float) -> list[str]:
+    def _export_sync(self, now: int) -> list[str]:
         try:
             rows = self._conn.execute(
                 "SELECT data FROM records "
@@ -633,9 +701,9 @@ class SqliteMemoryStore:
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
         async with self._lock:
-            return await _run_to_completion(self._purge_expired_sync, self._now_epoch())
+            return await _run_to_completion(self._purge_expired_sync, self._now_micros())
 
-    def _purge_expired_sync(self, now: float) -> int:
+    def _purge_expired_sync(self, now: int) -> int:
         conn = self._conn
         try:
             rowids = [
