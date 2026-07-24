@@ -54,9 +54,12 @@ order:
    separators fold — an ASCII-only rule would treat `é` as a separator and fold
    `deleteéaccount` onto `delete_account`. If two *distinct* advertised
    capabilities fold to the same key (`delete-user` and `delete_user`), the fold
-   is ambiguous and this branch declines, because choosing one would be a ranking
-   rule (ADR-0037 §1).
-3. **Curated synonym** — `emitted` folds onto a key of a hand-maintained
+   is ambiguous and this branch declines *without falling through* — the emitted
+   name is a variant of advertised names, so an alias must not leapfrog it to a
+   different capability, and choosing one advertised side would be a ranking rule
+   (ADR-0037 §1).
+3. **Curated synonym** — reached only when `emitted` folds onto *no* advertised
+   capability. `emitted` folds onto a key of a hand-maintained
    `CAPABILITY_ALIASES` table whose target **is currently advertised**: return
    the target. The table holds *retrieval/read* synonyms only — a write-intent
    like `remember` is deliberately absent, since ADR-0048 ships no memory writer
