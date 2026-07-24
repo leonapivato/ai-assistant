@@ -99,9 +99,9 @@ class DefaultMemoryPolicy:
        resolves it (ADR-0050 §2, #245).
     4. A user-asserted proposal *supersedes* the conflicting inferences: it rules
        ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED`` conflict,
-       and the applier retires the *whole* supersedable conflict set it leads, so
-       no stale belief on the topic stays on the read path (ADR-0038, ADR-0040,
-       ADR-0050 §1, #244).
+       and the applier retires the *whole* supersedable conflict set it leads (up
+       to the detection cap), so a second and third stale inference on the topic do
+       not survive the correction (ADR-0038, ADR-0040, ADR-0050 §1, #244).
     5. A user-asserted proposal with nothing to supersede is trusted and
        accepted.
     6. A proposal that conflicts with an existing (non-asserted) record rules

@@ -251,6 +251,47 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
     assert exported["imported"].validity.valid_until is None  # never retired
 
 
+async def test_a_correction_retires_at_most_the_conflict_limit_leaving_a_bounded_surplus() -> None:
+    # ADR-0050 §1's honest bound: "full set" means the full *detected* set, which
+    # `_detect_conflicts` caps at `conflict_limit`. With more matching inferences than
+    # the cap, one supersession retires exactly `conflict_limit` of them and the
+    # surplus stays live — a bounded residual, still a strict improvement over
+    # retiring only the best-ranked (issue #244 was 1-of-N; this is cap-of-N). Pinned
+    # so the boundary is documented and honest, not accidental. The residual is
+    # filed, not claimed converged: a re-proposal would itself see the landed
+    # correction as an asserted conflict and defer (ASK_USER, §2).
+    store = InMemoryMemoryStore()
+    stale_ids = ("s1", "s2", "s3")  # three matching inferences, cap set to two below
+    for stale_id in stale_ids:
+        await store.add(
+            _preference(
+                stale_id,
+                "user prefers morning meetings",
+                confidence=0.6,
+                source=MemorySource.INFERRED,
+            )
+        )
+    ingestor = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        conflict_limit=2,
+        id_factory=lambda: "corrected",
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    retired = [sid for sid in stale_ids if await store.get(sid) is None]
+    live = [sid for sid in stale_ids if await store.get(sid) is not None]
+    assert len(retired) == 2  # exactly the cap
+    assert len(live) == 1  # the surplus beyond the cap
+    assert await store.get("corrected") is not None  # the correction is live
+
+
 async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_nothing() -> None:
     # ADR-0050 §2 (#245): a user assertion that contradicts a prior *assertion* is
     # deferred to the user (ASK_USER). Neither is destroyed on a topical-similarity
