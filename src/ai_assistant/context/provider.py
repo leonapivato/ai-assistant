@@ -140,6 +140,30 @@ def _first_failure(
     return None
 
 
+def _consume_pending_exceptions(
+    tasks: Sequence[asyncio.Task[Mapping[str, object]]],
+) -> None:
+    """Read every completed non-cancelled task's exception so none is reported unread.
+
+    ``asyncio.gather`` kept a done-callback on each child and read its exception,
+    so no sibling was ever left with an unretrieved one. The observing
+    ``asyncio.wait`` does not, and :func:`_first_failure` reads only the task it
+    selects. A sibling can complete with an exception either *before* the wait
+    resumes or *during* the drain — catching the drain's ``CancelledError`` and
+    raising anew — and in that second case nothing else retrieves it, so asyncio
+    reports "Task exception was never retrieved" when the task is collected.
+    Reading each here closes that on both drain entry paths.
+
+    Cancelled tasks are skipped: a cancellation is not an unretrieved exception,
+    and ``task.exception()`` raises on one. A task still running at drain-end is
+    not ``done()`` and is handled by its abandonment done-callback instead
+    (ADR-0033 §3), so it is skipped here too.
+    """
+    for task in tasks:
+        if task.done() and not task.cancelled():
+            task.exception()  # read to mark retrieved; the outcome to raise is chosen apart
+
+
 def _is_required(source: ContextSource) -> bool:
     """Whether ``source``'s failure aborts assembly rather than degrading it.
 
@@ -286,21 +310,21 @@ class AssemblingContextProvider:
                 # is tearing down. Cancel and drain the siblings on the way out —
                 # bounded, so a suppressing source cannot hold the caller's
                 # cancellation the way a bare `gather` let it hold a required
-                # failure (issue #231) — then re-raise whatever we caught.
+                # failure (issue #231) — read any co-failed sibling's exception so
+                # it is not reported unread, then re-raise whatever we caught.
                 await self._drain(tasks)
+                _consume_pending_exceptions(tasks)
                 raise
             failure = _first_failure(tasks)
             if failure is not None:
-                # A source failed or was cancelled. Drain the siblings, then
-                # re-raise. No separate step is needed to retrieve the exceptions
-                # of *other* sources that failed in the same turn: `_drain`
-                # cancels every task first, and `asyncio.Task.cancel()` marks an
-                # already-done task's exception retrieved (it clears
-                # `_log_traceback` before its done-check), so a batch of
-                # simultaneous failures leaves nothing for asyncio to report as
-                # "never retrieved". The property is pinned by
-                # `test_concurrent_required_failures_leave_no_unretrieved_exception`.
+                # A source failed or was cancelled. Drain the siblings, read every
+                # other completed source's exception so none is later reported
+                # "never retrieved" (a sibling can fail *during* the drain —
+                # catching its cancellation and raising anew — as well as before
+                # it; `gather` read them via per-child callbacks, `asyncio.wait`
+                # does not), then re-raise the selected outcome.
                 await self._drain(tasks)
+                _consume_pending_exceptions(tasks)
                 raise failure
         return [task.result() for task in tasks]
 
