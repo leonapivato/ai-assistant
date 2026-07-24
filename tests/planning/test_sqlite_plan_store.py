@@ -250,6 +250,51 @@ async def test_a_refused_transition_leaves_the_execution_untouched(tmp_path: Pat
         reopened.close()
 
 
+async def test_a_mutated_invalid_goal_is_refused_and_does_not_poison_reads(
+    tmp_path: Path,
+) -> None:
+    """An input mutated past its validators is rejected at the write, not on read.
+
+    ``Goal`` is mutable and does not validate on assignment, so a caller can build
+    a valid goal and blank its ``statement`` before saving. The store revalidates
+    before persisting, so the write raises ``PlanningError`` and nothing durable
+    is written — the store cannot poison its own later reads (round-4 review).
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        tampered = _goal(goal_id="g-bad")
+        tampered.statement = "   "  # blank once stripped — invalid, but assignment sticks
+
+        with pytest.raises(PlanningError):
+            await store.save_goal(tampered)
+
+        assert await store.get_goal("g-bad") is None  # nothing was stored
+        # And a good goal still writes and reads back — the store is not poisoned.
+        await store.save_goal(_goal())
+        stored = await store.get_goal("g1")
+        assert stored is not None
+        assert stored.statement == "relocate to Lisbon"
+    finally:
+        store.close()
+
+
+async def test_a_mutated_invalid_plan_is_refused(tmp_path: Path) -> None:
+    """The same write-time revalidation guards plans (round-4 review)."""
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        tampered = _plan()
+        tampered.__dict__["goal_id"] = "   "  # blank Identifier — invalid
+
+        with pytest.raises(PlanningError):
+            await store.save_plan(tampered)
+        assert await store.get_plan("p1") is None
+    finally:
+        store.close()
+
+
 async def test_two_connections_serialise_a_compare_and_swap(tmp_path: Path) -> None:
     """Two stores on one file: only one writer of a version wins (ADR-0049 §1)."""
     path = tmp_path / "plans.db"
