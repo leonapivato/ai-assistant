@@ -632,7 +632,11 @@ def _revalidated_goal(goal: Goal) -> Goal:
     try:
         return Goal.model_validate(goal.model_dump())
     except ValidationError as exc:
-        msg = f"goal {goal.id!r} is not a valid record and will not be stored: {exc}"
+        # getattr, not goal.id: a model_construct'd instance may have no id at
+        # all, and reading it while composing the message would leak an
+        # AttributeError past this helper's PlanningError boundary.
+        subject = getattr(goal, "id", "<no id>")
+        msg = f"goal {subject!r} is not a valid record and will not be stored: {exc}"
         raise PlanningError(msg) from exc
 
 
@@ -647,7 +651,8 @@ def _revalidated_plan(plan: ActionPlan) -> ActionPlan:
     try:
         return ActionPlan.model_validate(plan.model_dump())
     except ValidationError as exc:
-        msg = f"plan {plan.id!r} is not a valid record and will not be stored: {exc}"
+        subject = getattr(plan, "id", "<no id>")  # id-less model_construct: see _revalidated_goal
+        msg = f"plan {subject!r} is not a valid record and will not be stored: {exc}"
         raise PlanningError(msg) from exc
 
 

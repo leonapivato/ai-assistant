@@ -295,6 +295,26 @@ async def test_a_mutated_invalid_plan_is_refused(tmp_path: Path) -> None:
         store.close()
 
 
+async def test_an_id_less_constructed_goal_or_plan_is_a_planning_error(tmp_path: Path) -> None:
+    """A model_construct'd instance missing its id fails as PlanningError, not AttributeError.
+
+    The revalidation helper reads the id only via ``getattr`` when composing its
+    message, so an id-less input stays inside this layer's error boundary rather
+    than leaking a raw ``AttributeError`` (round-5 review).
+    """
+    from ai_assistant.core.types import ActionPlan, Goal  # noqa: PLC0415 — test-local
+
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(PlanningError):
+            await store.save_goal(Goal.model_construct())
+        with pytest.raises(PlanningError):
+            await store.save_plan(ActionPlan.model_construct())
+    finally:
+        store.close()
+
+
 async def test_two_connections_serialise_a_compare_and_swap(tmp_path: Path) -> None:
     """Two stores on one file: only one writer of a version wins (ADR-0049 §1)."""
     path = tmp_path / "plans.db"
