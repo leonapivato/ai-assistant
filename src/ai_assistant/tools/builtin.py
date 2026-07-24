@@ -49,6 +49,14 @@ if TYPE_CHECKING:
 #: no ``limit``. Small, because a recall folds into a turn a person reads.
 _DEFAULT_RECALL_LIMIT = 5
 
+#: Upper bound on ``recall_memory``'s ``limit``. Low double digits — a few times
+#: the default of 5 — because a recall exists to fold into a turn a person reads,
+#: not to page a corpus; a plan naming a larger ``limit`` is refused rather than
+#: forwarded. The cap also keeps the argument well inside SQLite's integer range
+#: once a store multiplies it by an overfetch factor (#298), so a huge ``limit``
+#: cannot reach a backend as an out-of-range bind.
+_MAX_RECALL_LIMIT = 25
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -160,7 +168,7 @@ RECALL_MEMORY = ToolDefinition(
         "type": "object",
         "properties": {
             "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1},
+            "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_RECALL_LIMIT},
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -202,8 +210,8 @@ class RecallMemory:
 
         Raises:
             ValueError: If an unexpected argument is given, ``query`` is absent
-                or not a string, or ``limit`` is present and not a positive
-                integer.
+                or not a string, or ``limit`` is present and not an integer in
+                ``[1, _MAX_RECALL_LIMIT]``.
         """
         _reject_unknown(parameters, ("query", "limit"), RECALL_MEMORY.id)
         query = parameters.get("query")
@@ -212,8 +220,15 @@ class RecallMemory:
             raise ValueError(msg)
         limit = parameters.get("limit", _DEFAULT_RECALL_LIMIT)
         # A bool is an int subclass and is not a count; reject it like the rest.
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            msg = "recall_memory 'limit' must be a positive integer"
+        # The upper bound enforces the schema this tool advertises (ADR-0016 §7):
+        # an over-cap limit is refused here, never forwarded to the store (#298).
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 1
+            or limit > _MAX_RECALL_LIMIT
+        ):
+            msg = f"recall_memory 'limit' must be an integer in [1, {_MAX_RECALL_LIMIT}]"
             raise ValueError(msg)
         records = await self._memory.search(query, limit=limit)
         return [record.model_dump(mode="json") for record in records]
