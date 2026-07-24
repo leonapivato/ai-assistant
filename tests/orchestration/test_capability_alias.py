@@ -144,3 +144,29 @@ def test_a_unicode_letter_is_not_treated_as_a_separator() -> None:
     # A genuine separator around a Unicode word still folds, and a Unicode word
     # advertised is still matched by its own case variant.
     assert resolve_capability("Café-Search", ("café_search",)) == "café_search"
+
+
+def test_a_casefold_combining_mark_does_not_fold_a_letter_away() -> None:
+    """``İ`` casefolds to ``i`` plus a combining dot; the dot is kept, not dropped.
+
+    Treating the combining mark as a separator would fold ``İ`` onto a plain
+    ``i`` and select its tool — rewriting one word into another. Keeping marks
+    keeps the two distinct, so the emitted string passes through unchanged.
+    """
+    assert resolve_capability("İ", ("i",)) == "İ"
+
+
+def test_an_ambiguous_advertised_fold_is_not_rescued_by_the_alias_table() -> None:
+    """A variant of advertised names never leapfrogs to a different capability.
+
+    ``get_time`` is both an advertised capability (ambiguously, alongside
+    ``get-time``) and a synonym key for ``report_current_time``. An emitted
+    ``GET TIME`` folds onto the advertised pair, so it is a variant of *those*
+    names — the alias table must not carry it to the time capability instead. The
+    fold is ambiguous, so it declines rather than ranking the two advertised sides.
+    """
+    advertised = ("get-time", "get_time", "report_current_time")
+    assert resolve_capability("GET TIME", advertised) == "GET TIME"
+    # And when the fold is unambiguous it resolves to that advertised name, still
+    # without consulting the alias table's different target.
+    assert resolve_capability("Get_Time", ("get_time", "report_current_time")) == "get_time"

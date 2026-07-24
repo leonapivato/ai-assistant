@@ -36,10 +36,20 @@ which stays the authority on the vocabulary (ADR-0016 §5):
 
 from __future__ import annotations
 
+import unicodedata
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
+
+#: Unicode general-category initials that are *word-forming* — letters (``L``),
+#: numbers (``N``) and marks (``M``, the combining marks a decomposition or a
+#: casefold can attach to a letter). Everything else — spaces, hyphens,
+#: underscores, punctuation — is a separator. Keeping marks is deliberate:
+#: ``"İ".casefold()`` is ``"i"`` + a combining dot, and dropping the dot as a
+#: separator would fold ``İ`` onto a plain ``i`` — rewriting one word into another,
+#: the very thing surface folding must not do.
+_WORD_CATEGORIES = frozenset({"L", "N", "M"})
 
 #: Curated synonym → advertised-capability map (ADR-0053).
 #:
@@ -83,18 +93,20 @@ def _normalize(capability: str) -> str:
     single underscore and strips leading/trailing underscores, so ``"Get Time"``,
     ``"get-time"`` and ``"GET_TIME"`` all yield ``"get_time"``.
 
-    "Alphanumeric" is :meth:`str.isalnum`, which is **Unicode-aware**: a letter or
-    digit in any script is kept, only genuine separators (spaces, hyphens,
-    underscores, punctuation) fold. That is what makes this surface folding *only*
-    — it never rewrites one word into another. An ASCII-only rule would treat a
-    letter like ``é`` as a separator, so ``"deleteéaccount"`` would fold onto
-    ``"delete_account"`` and select a tool the plan never named; keeping Unicode
-    letters intact is what forecloses that.
+    A character is word-forming if its Unicode general category is a letter,
+    number or mark (:data:`_WORD_CATEGORIES`) — **Unicode-aware**, so a letter or
+    digit in any script is kept and only genuine separators fold. That is what
+    makes this surface folding *only* — it never rewrites one word into another.
+    An ASCII-only rule would treat a letter like ``é`` as a separator, so
+    ``"deleteéaccount"`` would fold onto ``"delete_account"`` and select a tool
+    the plan never named; and dropping the combining mark ``casefold`` attaches to
+    ``İ`` would fold it onto a plain ``i``. Keeping letters *and* their marks
+    forecloses both.
     """
     out: list[str] = []
     prev_separator = False
     for char in capability.casefold():
-        if char.isalnum():
+        if unicodedata.category(char)[0] in _WORD_CATEGORIES:
             out.append(char)
             prev_separator = False
         elif not prev_separator:
@@ -157,8 +169,12 @@ def resolve_capability(emitted: str, advertised: Collection[str]) -> str:
             canonical[folded] = capability
 
     key = _normalize(emitted)
-    if key in canonical and key not in ambiguous:
-        return canonical[key]
+    if key in canonical:
+        # The emitted name is a surface variant of at least one advertised
+        # capability, so the synonym table does not apply — it is for names that
+        # match no advertised capability. Resolve the unique fold; decline the
+        # ambiguous one rather than letting an alias leapfrog it (ADR-0037 §1).
+        return emitted if key in ambiguous else canonical[key]
 
     target = CAPABILITY_ALIASES.get(key)
     if target is not None and target in advertised_set:
