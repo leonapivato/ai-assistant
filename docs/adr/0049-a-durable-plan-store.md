@@ -309,6 +309,11 @@ connections):
   two writers computing a transition against the same version leave exactly one
   committing and the other seeing `StaleExecutionError`; two `start_execution`
   calls receive distinct ids; and the foreign keys refuse an orphaning insert.
+- **A newer on-disk schema is refused loudly (§1)** — seed a database file whose
+  `meta("schema_version")` exceeds the supported version, then assert constructing
+  a `SqlitePlanStore` on it raises `PlanningError` *before* any record is read or
+  written, rather than silently opening it or leaking a raw `sqlite3`/parsing
+  error through the subsystem boundary.
 
 These sit in an impl-level test module (as #303's restart tests do), not in the
 shared suite, because they assert this store's persistence model rather than the
