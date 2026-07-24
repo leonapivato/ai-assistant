@@ -323,6 +323,127 @@ async def test_a_row_the_model_no_longer_accepts_is_reported_not_returned(
         await ephemeral.export()
 
 
+async def test_resolution_of_reports_an_unreadable_trail_as_an_audit_error(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """A read failure must raise, not return ``None`` (ADR-0059 §2).
+
+    ``None`` on an unreadable trail would let recovery classify a still-resolved
+    step as trail-unanswerable and route it to cancellation, discarding a durable
+    ruling. Closing the connection is the reachable "closed store" the boundary
+    names; the query then hits ``sqlite3`` and must surface as this layer's error.
+    """
+    ephemeral.close()
+
+    with pytest.raises(AuditError):
+        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
+
+
+async def test_resolution_of_reports_a_corrupt_resolution_row_not_none(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """A resolution row that no longer validates is reported, like ``get``/``export``.
+
+    Returning ``None`` for a row the model rejects would make a tampered
+    resolution indistinguishable from an unresolved binding — the ambiguity the
+    ``AuditError`` boundary exists to remove.
+    """
+    ephemeral._conn.execute(
+        "INSERT INTO decisions("
+        "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("r-bad", 0, "c-1", "exec-a", "step-1", "allow", '{"id": "r-bad"}'),
+    )
+
+    with pytest.raises(AuditError):
+        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
+
+
+async def test_expires_at_is_persisted_and_read_back(ephemeral: SqliteAuditTrail) -> None:
+    """The durable deadline survives ``record`` → read, in the blob and the column (ADR-0059 §1).
+
+    The blob round-trips the value like every other field; the ``expires_at_us``
+    column is the queryable projection a future expiry filter reads without
+    decoding every record.
+    """
+    deadline = AT + timedelta(hours=1)
+    parked = decision("c-1", ruled=ruling(PermissionOutcome.CONFIRM), expires_at=deadline)
+    await ephemeral.record(parked)
+
+    reloaded = await ephemeral.get("c-1")
+    assert reloaded is not None
+    assert reloaded.expires_at == deadline
+    row = ephemeral._conn.execute(
+        "SELECT expires_at_us FROM decisions WHERE id = ?", ("c-1",)
+    ).fetchone()
+    assert row[0] is not None
+
+
+async def test_a_decision_with_no_lifetime_stores_a_null_deadline(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """``expires_at is None`` — no lifetime — is a ``NULL`` column, its single meaning (§1)."""
+    await ephemeral.record(decision("d-1"))
+
+    row = ephemeral._conn.execute(
+        "SELECT expires_at_us FROM decisions WHERE id = ?", ("d-1",)
+    ).fetchone()
+    assert row[0] is None
+
+
+@pytest.mark.integration
+async def test_a_pre_0059_database_grows_the_deadline_column(tmp_path: Path) -> None:
+    """A table with the ADR-0044 columns but no deadline column grows it ``NULL`` (§1).
+
+    ``expires_at`` did not exist before ADR-0059, so a legacy row is left ``NULL``
+    — "no lifetime", the same shape the ADR-0044 ``execution_id`` migration used —
+    and stays readable. The reopened trail then records and reads a new deadline
+    end to end, proving the migrated schema is fully functional.
+    """
+    path = tmp_path / "audit.db"
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, execution_id TEXT, step_id TEXT, outcome TEXT, data TEXT NOT NULL)"
+        )
+        old = decision("c-old", request=action(step_id="step-1"))
+        raw = json.loads(old.model_dump_json())
+        del raw["expires_at"]  # a genuinely pre-ADR-0059 record had no such key
+        legacy.execute(
+            "INSERT INTO decisions("
+            "id, decided_at_us, resolves, execution_id, step_id, outcome, data"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("c-old", 0, None, None, "step-1", "confirm", json.dumps(raw)),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.get("c-old") == old  # readable, expires_at defaults to None
+        row = reopened._conn.execute(
+            "SELECT expires_at_us FROM decisions WHERE id = ?", ("c-old",)
+        ).fetchone()
+        assert row == (None,)  # a legacy row has no deadline
+
+        deadline = AT + timedelta(hours=1)
+        await reopened.record(
+            decision(
+                "c-new",
+                request=action(execution_id="exec-a"),
+                ruled=ruling(PermissionOutcome.CONFIRM),
+                expires_at=deadline,
+            )
+        )
+        found = await reopened.get("c-new")
+        assert found is not None
+        assert found.expires_at == deadline
+    finally:
+        reopened.close()
+
+
 @pytest.mark.integration
 async def test_a_recorded_decision_survives_the_process_that_made_it(tmp_path: Path) -> None:
     """The reason this implementation exists (ADR-0036 §2).

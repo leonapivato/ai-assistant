@@ -934,6 +934,42 @@ class AuditTrail(Protocol):
         """
         ...
 
+    async def resolution_of(self, *, execution_id: str, step_id: str) -> PermissionDecision | None:
+        """The recorded resolution of this binding's confirmation, or None.
+
+        The complement of ``pending_confirmation``. Where that method answers "what
+        unresolved CONFIRM does this binding still await?", this answers "what
+        resolution has this binding already received?" — the ALLOW or DENY whose
+        ``resolves`` names a CONFIRM of the concrete ``(execution_id, step_id)``
+        binding (ADR-0044 §2). It exists so a step stranded ``AWAITING_APPROVAL``
+        with its ruling durable but its disposition transition uncommitted (#257) can
+        be driven to the disposition already decided — idempotently, authoring
+        nothing new — rather than re-authored, which the single-resolution rule
+        (§2b) refuses.
+
+        Returns None **only for a successful read of a binding that carries no
+        resolution** (it is genuinely pending — ``pending_confirmation`` answers it —
+        or carries no confirmation at all); None never stands in for a failure to
+        read. By §2b a concrete binding carries at most one resolution, so when a
+        resolution exists it is unique and this returns it. Query-only and returns a
+        detached snapshot, like every other ``AuditTrail`` read (ADR-0018 §3).
+
+        The ALLOW-or-DENY guarantee needs no new invariant: a resolving decision
+        (``resolves`` set) whose own ruling is ``CONFIRM`` is already unconstructable
+        (``PermissionDecision._a_resolution_is_not_itself_a_question``), so a
+        resolving-``CONFIRM`` can never occupy the binding's resolution slot and
+        this can never return one.
+
+        Raises:
+            AuditError: If the trail cannot be read (a closed or corrupt store, an
+                I/O error). This is the same boundary ``pending_confirmation`` draws,
+                and it is load-bearing: a read failure returned as None would let
+                recovery classify a still-resolved step as trail-unanswerable and
+                route it to cancellation, discarding a durable ruling. The cause is
+                preserved.
+        """
+        ...
+
     async def get(self, decision_id: str) -> PermissionDecision | None:
         """Return the decision with ``decision_id``, or ``None`` if absent."""
         ...

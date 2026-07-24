@@ -451,6 +451,135 @@ class AuditTrailContract:
 
         assert await trail.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
 
+    # --- recovering a resolved binding (ADR-0059 §2) ---------------------
+
+    @pytest.mark.parametrize(
+        "approved", [True, False], ids=["an ALLOW resolution", "a DENY resolution"]
+    )
+    async def test_resolution_of_returns_the_recorded_resolution(
+        self, trail: AuditTrail, approved: bool
+    ) -> None:
+        """The mirror of ``pending_confirmation`` — both outcomes are recoverable.
+
+        A step stranded ``AWAITING_APPROVAL`` with its ruling durable but its
+        disposition transition uncommitted (#257) is driven to the decided
+        disposition by this lookup, so an ``ALLOW`` and a ``DENY`` must both be
+        found — not only the grant — and the result is never the question itself.
+        """
+        bind = {"execution_id": "exec-a"}  # step_id defaults to "step-1": a concrete binding
+        await trail.record(decision("c-1", request=action(**bind)))
+        answer = decision(
+            "r-1",
+            request=action(**bind),
+            ruled=(
+                ruling(PermissionOutcome.ALLOW, authorised_by="c-1")
+                if approved
+                else ruling(PermissionOutcome.DENY)
+            ),
+            resolves="c-1",
+        )
+        await trail.record(answer)
+
+        found = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
+
+        assert found == answer
+        assert found is not None
+        assert found.ruling.outcome is not PermissionOutcome.CONFIRM
+
+    async def test_resolution_of_is_none_while_the_binding_is_only_pending(
+        self, trail: AuditTrail
+    ) -> None:
+        """An unanswered park has no resolution yet — ``pending_confirmation`` owns it."""
+        await trail.record(decision("c-1", request=action(execution_id="exec-a")))
+
+        assert await trail.resolution_of(execution_id="exec-a", step_id="step-1") is None
+
+    async def test_resolution_of_is_none_for_an_unparked_binding(self, trail: AuditTrail) -> None:
+        """No confirmation, so no resolution; ``None`` is a clean read, not a failure."""
+        assert await trail.resolution_of(execution_id="exec-a", step_id="step-1") is None
+
+    @pytest.mark.parametrize(
+        ("query_execution", "query_step"),
+        [("exec-b", "step-1"), ("exec-a", "step-2")],
+        ids=["another execution", "another step"],
+    )
+    async def test_resolution_of_is_isolated_by_binding(
+        self, trail: AuditTrail, query_execution: str, query_step: str
+    ) -> None:
+        """A resolution under ``(E, s)`` is never returned for ``(E', s)`` or ``(E, s')``.
+
+        The same execution/step key ``record``'s §2a conjunct enforces, so recovery
+        can never replay another execution's — or another step's — ruling.
+        """
+        bind = {"execution_id": "exec-a"}
+        await trail.record(decision("c-1", request=action(**bind)))
+        await trail.record(
+            decision(
+                "r-1",
+                request=action(**bind),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+                resolves="c-1",
+            )
+        )
+
+        assert await trail.resolution_of(execution_id=query_execution, step_id=query_step) is None
+
+    async def test_resolution_of_finds_a_resolution_of_a_sibling_confirm(
+        self, trail: AuditTrail
+    ) -> None:
+        """§2b makes the *binding*, not one confirmation, the unit of resolution.
+
+        Two unresolved ``CONFIRM``s (a compare-and-swap loser, ADR-0037 §2) share
+        the binding; resolving one decides it. The lookup is keyed on the binding,
+        not on which confirmation was answered, so it finds the resolution even
+        though the caller no longer holds the confirmation id it named (the whole
+        of #242).
+        """
+        bind = {"execution_id": "exec-a"}
+        await trail.record(decision("c-1", request=action(**bind)))
+        await trail.record(decision("c-2", request=action(**bind)))  # the sibling actually answered
+        answer = decision(
+            "r-1",
+            request=action(**bind),
+            ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-2"),
+            resolves="c-2",
+        )
+        await trail.record(answer)
+
+        found = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
+
+        assert found == answer
+
+    async def test_resolution_of_returns_a_detached_snapshot(self, trail: AuditTrail) -> None:
+        """Recursive detachment, like every other read (ADR-0018 §3).
+
+        A resolution reaches its embedded ``ToolDefinition`` and the ``ToolCost``
+        nested in that, so a shallow copy would hand back a decision sharing the
+        stored cost — and rewriting it would rewrite the record of what was
+        approved through something technically detached.
+        """
+        priced = tool(cost=ToolCost(basis=CostBasis.PER_CALL, amount=Decimal("5"), currency="USD"))
+        bind: dict[str, object] = {"tool": priced, "execution_id": "exec-a"}
+        await trail.record(decision("c-1", request=action(**bind)))
+        await trail.record(
+            decision(
+                "r-1",
+                request=action(**bind),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by="c-1"),
+                resolves="c-1",
+            )
+        )
+
+        leaked = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
+        assert leaked is not None
+        object.__setattr__(leaked.tool.cost, "amount", Decimal("0"))
+        object.__setattr__(leaked.ruling, "outcome", PermissionOutcome.DENY)
+
+        refetched = await trail.resolution_of(execution_id="exec-a", step_id="step-1")
+        assert refetched is not None
+        assert refetched.tool.cost.amount == Decimal("5")
+        assert refetched.ruling.outcome is PermissionOutcome.ALLOW
+
     # --- ordering and bounds ---------------------------------------------
 
     async def test_recent_is_newest_first_with_an_id_tie_break(self, trail: AuditTrail) -> None:
