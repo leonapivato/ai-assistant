@@ -251,42 +251,61 @@ async def test_a_correction_retires_every_conflicting_inference_not_only_the_bes
     assert exported["imported"].validity.valid_until is None  # never retired
 
 
-async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_live() -> None:
+@pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
+async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_live(
+    backend: str, tmp_path: Path
+) -> None:
     # ADR-0050 §1 / ADR-0045 §8: the widened supersession closes N windows and inserts
     # the correction as one atomic `write_atomic` batch, so a failure part-way must
     # leave *every* target live and unchanged — not some retired with no replacement.
     # Driven deterministically by an always-colliding id factory: after the bounded
     # re-mints the applier raises, and the atomic batch rolls back all N window-closes.
-    store = InMemoryMemoryStore()
-    for stale_id in ("morning", "early", "dawn"):
-        await store.add(
-            _preference(
-                stale_id,
-                "user prefers morning meetings",
-                confidence=0.6,
-                source=MemorySource.INFERRED,
-            )
+    # Run over SQLite too, where `write_atomic` *applies* the target UPSERTs before it
+    # discovers the correction's INSERT_IF_ABSENT collision — so rollback happens after
+    # real writes, the integration path the in-memory store (which validates the
+    # collision first) does not exercise.
+    store: MemoryStore
+    if backend == "in-memory":
+        store = InMemoryMemoryStore()
+    else:
+        store = SqliteMemoryStore(
+            path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=32)
         )
-    # An unrelated record occupying the id the factory always mints, so every
-    # INSERT_IF_ABSENT collides and the correction can never land.
-    await store.add(_semantic("wall", "an unrelated fact", confidence=0.9))
-    ingestor = MemoryIngestor(
-        store=store,
-        policy=DefaultMemoryPolicy(),
-        now=_fixed_now,
-        conflict_threshold=0.5,
-        id_factory=lambda: "wall",
-    )
+    try:
+        for stale_id in ("morning", "early", "dawn"):
+            await store.add(
+                _preference(
+                    stale_id,
+                    "user prefers morning meetings",
+                    confidence=0.6,
+                    source=MemorySource.INFERRED,
+                )
+            )
+        # An unrelated record occupying the id the factory always mints, so every
+        # INSERT_IF_ABSENT collides and the correction can never land.
+        await store.add(_semantic("wall", "an unrelated fact", confidence=0.9))
+        ingestor = MemoryIngestor(
+            store=store,
+            policy=DefaultMemoryPolicy(),
+            now=_fixed_now,
+            conflict_threshold=0.5,
+            id_factory=lambda: "wall",
+        )
 
-    with pytest.raises(MemoryStoreError):
-        await ingestor.ingest(_proposal(_asserted("correction", "user prefers afternoon meetings")))
+        with pytest.raises(MemoryStoreError):
+            await ingestor.ingest(
+                _proposal(_asserted("correction", "user prefers afternoon meetings"))
+            )
 
-    # Every target is still live with an open window — the multi-close rolled back.
-    for stale_id in ("morning", "early", "dawn"):
-        record = await store.get(stale_id)
-        assert record is not None
-        assert record.validity.valid_until is None
-    assert await store.get("wall") is not None  # the collided-with record is intact
+        # Every target is still live with an open window — the multi-close rolled back.
+        for stale_id in ("morning", "early", "dawn"):
+            record = await store.get(stale_id)
+            assert record is not None
+            assert record.validity.valid_until is None
+        assert await store.get("wall") is not None  # the collided-with record is intact
+    finally:
+        if isinstance(store, SqliteMemoryStore):
+            store.close()
 
 
 async def test_a_correction_retires_at_most_the_conflict_limit_leaving_a_bounded_surplus() -> None:
