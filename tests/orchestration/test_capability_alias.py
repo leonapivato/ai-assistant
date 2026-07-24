@@ -104,3 +104,43 @@ def test_empty_advertised_vocabulary_rewrites_nothing() -> None:
     """With no tools registered, every capability passes through unchanged."""
     assert resolve_capability("get_time", ()) == "get_time"
     assert resolve_capability("report_current_time", ()) == "report_current_time"
+
+
+def test_a_write_synonym_is_not_aliased_onto_the_read_capability() -> None:
+    """ "remember" is a store-intent, not a synonym of the read-only recall.
+
+    ADR-0048 ships no memory writer, and aliasing a write-shaped capability onto
+    ``recall_memory`` would fire the wrong tool — the exact hazard the layer
+    disclaims — so ``remember`` stays unresolved and skips ``NO_CAPABLE_TOOL``.
+    """
+    assert "remember" not in CAPABILITY_ALIASES
+    assert resolve_capability("remember", ADVERTISED) == "remember"
+
+
+def test_a_fold_two_advertised_capabilities_share_is_left_unresolved() -> None:
+    """A normalized collision is ambiguous, so nothing is ranked (ADR-0037 §1).
+
+    Both ``delete-user`` and ``delete_user`` fold to ``delete_user``; an emitted
+    ``DELETE USER`` matches neither exactly, and resolving it onto one would pick a
+    side-effecting tool over another by lexical accident. It passes through
+    unchanged instead.
+    """
+    colliding = ("delete-user", "delete_user")
+    assert resolve_capability("DELETE USER", colliding) == "DELETE USER"
+    # An exact name is still returned as itself — the collision only blocks the
+    # surface-variant branch, never an exact match.
+    assert resolve_capability("delete_user", colliding) == "delete_user"
+    assert resolve_capability("delete-user", colliding) == "delete-user"
+
+
+def test_a_unicode_letter_is_not_treated_as_a_separator() -> None:
+    """Surface folding keeps Unicode letters, so it never rewrites a word.
+
+    An ASCII-only rule would fold ``deleteéaccount`` onto ``delete_account`` and
+    select a tool the plan never named; ``é`` is a letter, so the two stay
+    distinct and the emitted string passes through unchanged.
+    """
+    assert resolve_capability("deleteéaccount", ("delete_account",)) == "deleteéaccount"
+    # A genuine separator around a Unicode word still folds, and a Unicode word
+    # advertised is still matched by its own case variant.
+    assert resolve_capability("Café-Search", ("café_search",)) == "café_search"

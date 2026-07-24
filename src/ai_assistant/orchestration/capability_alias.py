@@ -36,7 +36,6 @@ which stays the authority on the vocabulary (ADR-0016 §5):
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -62,10 +61,12 @@ CAPABILITY_ALIASES: Mapping[str, str] = {
     "time_now": "report_current_time",
     "get_current_time": "report_current_time",
     "check_time": "report_current_time",
-    # recall_memory (recall_memory, ADR-0048 §2)
+    # recall_memory (recall_memory, ADR-0048 §2). Retrieval synonyms only: a
+    # *write* synonym like "remember" is deliberately absent — ADR-0048 ships no
+    # writer, and aliasing a store-intent onto a read is the wrong-tool hazard
+    # this layer exists to avoid. It is added when a memory-write tool exists.
     "recall": "recall_memory",
     "recall_memories": "recall_memory",
-    "remember": "recall_memory",
     "search_memory": "recall_memory",
     "search_memories": "recall_memory",
     "retrieve_memory": "recall_memory",
@@ -74,22 +75,32 @@ CAPABILITY_ALIASES: Mapping[str, str] = {
     "lookup_memory": "recall_memory",
 }
 
-#: Any run of characters that is not a lowercase letter or digit, used to fold
-#: separators (spaces, hyphens, underscores, punctuation) to a single ``_``.
-_SEPARATOR = re.compile(r"[^a-z0-9]+")
-
 
 def _normalize(capability: str) -> str:
     """Fold a capability string to a case- and separator-insensitive key.
 
-    Lowercases, then collapses every run of non-alphanumeric characters to a
+    Case-folds, then collapses every run of *non-alphanumeric* characters to a
     single underscore and strips leading/trailing underscores, so ``"Get Time"``,
-    ``"get-time"`` and ``"GET_TIME"`` all yield ``"get_time"``. This is surface
-    folding only — it never changes which *word* was named, so it cannot turn one
-    capability into a different one; it only lets a trivial rendering variant of a
-    name match the same name.
+    ``"get-time"`` and ``"GET_TIME"`` all yield ``"get_time"``.
+
+    "Alphanumeric" is :meth:`str.isalnum`, which is **Unicode-aware**: a letter or
+    digit in any script is kept, only genuine separators (spaces, hyphens,
+    underscores, punctuation) fold. That is what makes this surface folding *only*
+    — it never rewrites one word into another. An ASCII-only rule would treat a
+    letter like ``é`` as a separator, so ``"deleteéaccount"`` would fold onto
+    ``"delete_account"`` and select a tool the plan never named; keeping Unicode
+    letters intact is what forecloses that.
     """
-    return _SEPARATOR.sub("_", capability.lower()).strip("_")
+    out: list[str] = []
+    prev_separator = False
+    for char in capability.casefold():
+        if char.isalnum():
+            out.append(char)
+            prev_separator = False
+        elif not prev_separator:
+            out.append("_")
+            prev_separator = True
+    return "".join(out).strip("_")
 
 
 def resolve_capability(emitted: str, advertised: Collection[str]) -> str:
@@ -104,8 +115,12 @@ def resolve_capability(emitted: str, advertised: Collection[str]) -> str:
 
     1. **Exact.** ``emitted`` is already an advertised capability — return it
        untouched, so the common case pays no folding and no table lookup.
-    2. **Surface variant.** ``emitted`` folds (:func:`_normalize`) onto an
-       advertised capability — return that advertised name in its canonical form.
+    2. **Surface variant.** ``emitted`` folds (:func:`_normalize`) onto exactly
+       one advertised capability — return that advertised name in its canonical
+       form. If two *distinct* advertised capabilities fold to the same key
+       (``delete-user`` and ``delete_user``), the fold is ambiguous and this
+       branch declines: choosing one would be a ranking rule this layer refuses
+       to invent (ADR-0037 §1), so ``emitted`` falls through unresolved.
     3. **Curated synonym.** ``emitted`` folds onto a key of
        :data:`CAPABILITY_ALIASES` whose target is *currently advertised* — return
        the target. The advertised-set check is what keeps a synonym from ever
@@ -129,14 +144,20 @@ def resolve_capability(emitted: str, advertised: Collection[str]) -> str:
     if emitted in advertised_set:
         return emitted
 
-    # Fold the advertised names once; first writer wins so the result is stable
-    # under the caller's ordering (`capabilities()` is sorted and de-duplicated).
+    # Fold the advertised names once. A key that two *distinct* advertised
+    # capabilities fold to is ambiguous — resolving it would silently rank them —
+    # so it is dropped rather than decided (ADR-0037 §1).
     canonical: dict[str, str] = {}
+    ambiguous: set[str] = set()
     for capability in advertised:
-        canonical.setdefault(_normalize(capability), capability)
+        folded = _normalize(capability)
+        if folded in canonical and canonical[folded] != capability:
+            ambiguous.add(folded)
+        else:
+            canonical[folded] = capability
 
     key = _normalize(emitted)
-    if key in canonical:
+    if key in canonical and key not in ambiguous:
         return canonical[key]
 
     target = CAPABILITY_ALIASES.get(key)
