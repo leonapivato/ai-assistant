@@ -215,7 +215,13 @@ alone covers every mode this store can be constructed in. The id is
   `start_execution`"), applied to **both** modes rather than parked. A pid the OS
   later recycles for an unrelated process is not a reuse: that process constructs
   its own store and mints a fresh nonce, so only a *fork* shares the nonce, and a
-  fork never shares a live pid.
+  fork never shares a live pid. The nonce comes from an **injectable factory**
+  (constructor parameter, defaulting to `uuid4().hex`), the same seam
+  `planner.py` exposes as `id_factory` and the deterministic-nonce follow-up #305
+  asks for. Production never passes it; the §5 tests do, pinning known nonces —
+  distinct for the fresh-instance test, deliberately *identical* for the fork
+  test (so the pid, not the nonce, is what differentiates the children) — so they
+  assert the id composition rather than leaning on two real `uuid4()`s differing.
 - **`ordinal` is a durable monotonic counter** in `meta("exec_counter")`,
   read-incremented inside the *same* `BEGIN IMMEDIATE` transaction that inserts
   the execution row. It carries the two guarantees the incarnation cannot:
@@ -285,12 +291,15 @@ connections):
   where the durable counter is *worthless* (a `:memory:` database is fresh per
   instance), so this is what proves the incarnation (§3) actually carries
   non-reuse there. Two independently-constructed
-  `SqlitePlanStore(path=":memory:")` stores each start `p1`; assert the two ids
-  differ. Mirrors `InMemoryPlanStore`'s own fresh-instance test.
+  `SqlitePlanStore(path=":memory:")` stores, each given a *distinct* injected
+  nonce, each start `p1`; assert the two ids differ and each embeds its injected
+  nonce. Deterministic (the nonces are fixed, not two real `uuid4()`s), and
+  mirrors `InMemoryPlanStore`'s own fresh-instance test.
 - **Execution-id non-reuse across a `fork`** — a `:memory:` store constructed in
-  a parent, then two children forked before either calls `start_execution`; each
-  child starts `p1` and reports its id back (through a pipe). Assert the two
-  children's ids differ, proving the pid-in-incarnation (§3) closes #305's
+  a parent with a *single fixed* injected nonce, then two children forked before
+  either calls `start_execution`; each child starts `p1` and reports its id back
+  (through a pipe). Assert the two children's ids differ *despite the identical
+  nonce*, proving the pid-in-incarnation (§3) — not the nonce — closes #305's
   copied-nonce/private-counter case. Guarded on `hasattr(os, "fork")` so it is
   skipped where the platform has no `fork`.
 - **Atomic rollback of an interrupted write** — a `commit_transition` whose
