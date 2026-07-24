@@ -16,9 +16,10 @@ import asyncio
 import contextlib
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sqlite_vec
 from pydantic import TypeAdapter, ValidationError
@@ -28,7 +29,7 @@ from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import MemoryRecord, MemoryWriteMode
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
@@ -42,6 +43,57 @@ _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # neighbours are all filtered out.
 _RESULT_OVERFETCH = 8
 _OWNER_ONLY = 0o600
+
+
+async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
+    """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
+
+    The store serialises one ``sqlite3`` connection behind an :class:`asyncio.Lock`
+    and runs the SQL in a worker thread. A thread cannot be interrupted, so if the
+    awaiting coroutine were simply cancelled the enclosing ``async with self._lock``
+    would unwind and release the lock **while the worker was still using the
+    connection** — letting a second caller use the same connection concurrently,
+    which SQLite refuses.
+
+    The worker records its own outcome and sets a :class:`threading.Event` when it
+    physically returns. This coroutine waits on *that* signal — not on the
+    cancellable state of any task — so the lock is held for the whole life of the
+    worker even if the awaiting task, or a blanket :func:`asyncio.all_tasks`
+    cancellation, is cancelled. Nothing here is an :class:`asyncio.Task`: the work
+    runs on an executor future and the fallback wait is another, so a task sweep
+    finds nothing to cancel out from under the running thread. An absorbed
+    cancellation takes precedence over the worker's own result or failure and is
+    re-raised once the thread has finished: the caller's task still cancels; what
+    is prevented is connection reuse, not the cancellation itself.
+    """
+    done = threading.Event()
+    outcome: list[T] = []
+    failure: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            outcome.append(fn(*args))
+        except Exception as exc:  # relayed to the caller once the thread has finished
+            failure.append(exc)
+        finally:
+            done.set()
+
+    loop = asyncio.get_running_loop()
+    pending: asyncio.Future[Any] = loop.run_in_executor(None, worker)
+    cancellation: asyncio.CancelledError | None = None
+    while not done.is_set():
+        try:
+            await asyncio.shield(pending)
+        except asyncio.CancelledError as exc:
+            # Absorb the cancellation and keep waiting on the worker's physical
+            # completion signal, so the lock outlives the still-running thread.
+            cancellation = exc
+            pending = loop.run_in_executor(None, done.wait)
+    if cancellation is not None:
+        raise cancellation
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 def _utcnow() -> datetime:
@@ -231,7 +283,7 @@ class SqliteMemoryStore:
         """
         vector = await self._embed_one(record.content)
         async with self._lock:
-            await asyncio.to_thread(self._add_sync, record, vector)
+            await _run_to_completion(self._add_sync, record, vector)
         return record.id
 
     def _add_sync(self, record: MemoryRecord, vector: Embedding) -> None:
@@ -322,7 +374,7 @@ class SqliteMemoryStore:
             vector = await self._embed_one(record.content)
             prepared.append((record, mode, vector))
         async with self._lock:
-            await asyncio.to_thread(self._write_atomic_sync, prepared)
+            await _run_to_completion(self._write_atomic_sync, prepared)
         return ids
 
     def _write_atomic_sync(
@@ -424,7 +476,7 @@ class SqliteMemoryStore:
         """
         async with self._lock:
             now = self._now()
-            data = await asyncio.to_thread(self._get_sync, record_id, now.timestamp())
+            data = await _run_to_completion(self._get_sync, record_id, now.timestamp())
         if data is None:
             return None
         record = self._decode(data)
@@ -468,7 +520,7 @@ class SqliteMemoryStore:
             return []
         vector = await self._embed_one(query)
         async with self._lock:
-            rows = await asyncio.to_thread(
+            rows = await _run_to_completion(
                 self._search_sync, vector, limit, kinds, self._now_epoch()
             )
         return [self._decode(data).model_copy(update={"score": score}) for data, score in rows]
@@ -513,7 +565,7 @@ class SqliteMemoryStore:
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""
         async with self._lock:
-            return await asyncio.to_thread(self._delete_sync, record_id)
+            return await _run_to_completion(self._delete_sync, record_id)
 
     def _delete_sync(self, record_id: str) -> bool:
         conn = self._conn
@@ -535,7 +587,7 @@ class SqliteMemoryStore:
     async def clear(self) -> int:
         """Delete every record in this store, returning the number removed."""
         async with self._lock:
-            return await asyncio.to_thread(self._clear_sync)
+            return await _run_to_completion(self._clear_sync)
 
     def _clear_sync(self) -> int:
         conn = self._conn
@@ -563,7 +615,7 @@ class SqliteMemoryStore:
                 corrupt.
         """
         async with self._lock:
-            rows = await asyncio.to_thread(self._export_sync, self._now_epoch())
+            rows = await _run_to_completion(self._export_sync, self._now_epoch())
         return [self._decode(data) for data in rows]
 
     def _export_sync(self, now: float) -> list[str]:
@@ -581,7 +633,7 @@ class SqliteMemoryStore:
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
         async with self._lock:
-            return await asyncio.to_thread(self._purge_expired_sync, self._now_epoch())
+            return await _run_to_completion(self._purge_expired_sync, self._now_epoch())
 
     def _purge_expired_sync(self, now: float) -> int:
         conn = self._conn

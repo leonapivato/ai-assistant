@@ -12,8 +12,10 @@ and needs no ``integration`` mark. The tests that open a real file say so.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+import threading
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.protocols import AuditTrail
+    from ai_assistant.core.types import PermissionDecision
 
 
 @pytest.fixture
@@ -448,3 +451,66 @@ async def test_a_limit_wider_than_sqlite_can_bind_returns_everything(
     found = await ephemeral.recent(limit=10**1000)
 
     assert [each.id for each in found] == ["d-2", "d-1"]
+
+
+async def _spin(iterations: int = 50) -> None:
+    """Yield to the event loop repeatedly so a pending cancellation can unwind."""
+    for _ in range(iterations):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.integration
+async def test_cancelling_a_record_does_not_release_the_connection(tmp_path: Path) -> None:
+    """A cancelled append must not free the lock while its worker thread runs (ADR-0054).
+
+    ``asyncio.to_thread`` cannot interrupt a running worker, so a cancellation that
+    unwound the awaiting coroutine here would release the connection lock while the
+    worker was still mid-transaction on the shared connection. This blocks a worker
+    inside ``record``, cancels the awaiting task, and asserts the lock stays held
+    until the worker finishes, then that a second append lands on an intact trail.
+    """
+    trail = SqliteAuditTrail(path=tmp_path / "cancel.db")
+    entered = threading.Event()
+    release = threading.Event()
+    original_record = trail._record_sync
+
+    def blocking_record(snapshot: PermissionDecision) -> None:
+        if not entered.is_set():
+            entered.set()
+            if not release.wait(timeout=5):  # pragma: no cover - only on a hang
+                msg = "the blocked worker was never released"
+                raise AssertionError(msg)
+        original_record(snapshot)
+
+    trail._record_sync = blocking_record  # type: ignore[method-assign]
+    try:
+        first = asyncio.ensure_future(trail.record(decision("d-1")))
+        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
+        assert trail._lock.locked()
+
+        first.cancel()
+        await _spin()
+        # The invariant: cancellation did NOT release the lock — the worker is
+        # still running, so the connection is still exclusively held.
+        assert trail._lock.locked()
+
+        second = asyncio.ensure_future(
+            trail.record(decision("d-2", decided_at=AT + timedelta(hours=1)))
+        )
+        await _spin()
+        assert not second.done()
+        assert trail._lock.locked()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await second  # must not raise on a concurrently-used connection
+
+        # The connection is intact: the deferred-to-completion first append
+        # committed, and the second landed cleanly on top of it.
+        assert await trail.get("d-1") is not None
+        assert await trail.get("d-2") is not None
+        assert not trail._lock.locked()
+    finally:
+        release.set()
+        trail.close()
