@@ -439,14 +439,23 @@ class Engine:
     async def _pending_confirmations(self) -> list[Confirmation]:
         """Enumerate the durably-parked confirmations and reconcile the table.
 
-        **Serialized against itself** (``_recovery_lock``): enumeration spans several
-        ``await``s and ends in :meth:`_prune_recovered`, and the two are not atomic.
-        Without the lock, one call could enumerate a stale snapshot and then prune a
-        binding a concurrently-running call had just registered and returned, leaving
-        that returned token unresumable. The lock makes enumerate-and-reconcile one
-        critical section per engine, so a call's prune only ever runs against the
-        bindings it itself observed. Recovery is not on the latency-critical path, so
-        serializing it costs nothing that matters (round 2 review).
+        **Serialized against recovery *and* resolution** (``_recovery_lock``):
+        enumeration spans several ``await``s and ends in :meth:`_prune_recovered`,
+        reading both the trail (``pending_confirmation``) and ``_parked`` and then
+        minting into ``_parked`` — all state :meth:`_resume` also mutates when it
+        resolves a binding (it records the resolving decision through the runner and
+        evicts the binding's ``_parked`` entry). Both :meth:`_pending_confirmations`
+        and :meth:`_resume` take this one lock, so a resolution can neither run
+        *during* an enumeration nor leave it half-observed: recovery never reads a
+        live ``CONFIRM`` that a concurrent resume then resolves before recovery mints
+        its token (which would hand back a stale, unanswerable confirmation), and a
+        prune only ever runs against the bindings the same call observed. Without the
+        shared lock this held only *incidentally*, by the await placement between the
+        read and the mint here and between the resolve and the evict in
+        :meth:`_resume` — an invariant a later edit could silently break (round 3
+        review). Recovery and resolution are both off the latency-critical path
+        (human-paced confirmations, a cold restart path), so serializing them costs
+        nothing that matters.
         """
         async with self._recovery_lock:
             recovered: list[Confirmation] = []
@@ -738,33 +747,43 @@ class Engine:
         approved: bool,
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
     ) -> TurnOutcome:
-        """Reload the parked execution and continue its step."""
-        parked = self._parked.get(token.handle)
-        if parked is None:
-            msg = (
-                "this token names no step awaiting confirmation in this engine; it may be "
-                "from an earlier run of the process, or already resolved"
+        """Reload the parked execution and continue its step.
+
+        Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
+        recovery enumeration: resolving records the decision through the runner and
+        evicts the binding's ``_parked`` entry, both of which recovery reads, so the
+        two must not interleave (:meth:`_pending_confirmations`, round 3 review). The
+        lock is held across the runner call — the resolve and any execution it drives
+        — so recovery cannot observe a binding mid-resolution. Resolutions are
+        human-paced, so serializing them behind this one lock is free in practice.
+        """
+        async with self._recovery_lock:
+            parked = self._parked.get(token.handle)
+            if parked is None:
+                msg = (
+                    "this token names no step awaiting confirmation in this engine; it may be "
+                    "from an earlier run of the process, or already resolved"
+                )
+                raise PlanningError(msg)
+            state = await self._plans.get_execution(parked.execution_id)
+            if state is None:
+                msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
+                raise PlanningError(msg)
+            disposition = await self._runner.resume(
+                state,
+                parked.step_id,
+                confirmation_id=parked.confirmation_id,
+                approved=approved,
+                timeout=timeout,
             )
-            raise PlanningError(msg)
-        state = await self._plans.get_execution(parked.execution_id)
-        if state is None:
-            msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
-            raise PlanningError(msg)
-        disposition = await self._runner.resume(
-            state,
-            parked.step_id,
-            confirmation_id=parked.confirmation_id,
-            approved=approved,
-            timeout=timeout,
-        )
-        # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
-        # so no new handle is needed here.
-        step = self._step_outcome(parked.turn, disposition, handle=None)
-        # Resolved once: a second answer would be refused by the trail's
-        # single-resolution index anyway; evicting keeps the table bounded and
-        # turns a replay into a clean "unknown token" (ADR-0042 §4).
-        self._parked.pop(token.handle, None)
-        return TurnOutcome(turn=parked.turn, step=step)
+            # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
+            # so no new handle is needed here.
+            step = self._step_outcome(parked.turn, disposition, handle=None)
+            # Resolved once: a second answer would be refused by the trail's
+            # single-resolution index anyway; evicting keeps the table bounded and
+            # turns a replay into a clean "unknown token" (ADR-0042 §4).
+            self._parked.pop(token.handle, None)
+            return TurnOutcome(turn=parked.turn, step=step)
 
     def _step_outcome(
         self, turn: TurnResult | None, disposition: StepDisposition, *, handle: str | None
