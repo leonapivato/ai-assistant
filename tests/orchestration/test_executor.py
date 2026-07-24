@@ -933,67 +933,121 @@ def _poisoned_failure(outcome: ToolOutcome) -> ToolResult:
     return result
 
 
-async def _assert_unusable_closed_failed(seam: ScriptedInvoker) -> None:
+class ReturningInvoker(ScriptedInvoker):
+    """A seam whose ``invoke`` hands back an arbitrary object.
+
+    For the return that is not a ``ToolResult`` at all — a non-conforming seam,
+    or a wiring bug — which the type annotation cannot rule out and which
+    :func:`_detached_result` must survive, since it too arrives after the claim.
+    """
+
+    def __init__(self, definition: ToolDefinition, returned: object) -> None:
+        """Answer every ``invoke`` with ``returned``."""
+        super().__init__(definition, [])
+        self._returned = returned
+
+    async def invoke(self, call: ToolCall, *, timeout: timedelta) -> ToolResult:  # noqa: ASYNC109 — the seam's signature (ADR-0029 §4)
+        """Return the non-conforming value, deliberately violating the annotation."""
+        del call, timeout
+        self.calls += 1
+        return self._returned  # type: ignore[return-value]  # the point is a bad return
+
+
+async def _assert_unusable_closed(
+    definition: ToolDefinition, seam: ScriptedInvoker, *, expect: StepStatus
+) -> None:
     """Drive the executor over ``seam`` and assert the deterministic close.
 
-    The tampered result is discovered *after* the claim, so the step is durably
+    The unusable result is discovered *after* the claim, so the step is durably
     ``RUNNING`` when ``_record`` would have raised. Revalidation converts it into
-    an executor-authored ``FAILED`` close (``kind=None``, ADR-0039 §3) rather
-    than an escaping exception that strands the step for recovery to read as
-    ``INDETERMINATE`` about a call that did in fact finish.
+    an executor-authored close (``kind=None``, ADR-0039 §3, so never retried)
+    rather than an escaping exception that strands the step. The *status* is the
+    interrupted-call classification: the tool was reached and may have acted, so
+    a side-effecting tool reaches ``INDETERMINATE`` and only a tool with no
+    side-effect ambiguity reaches ``FAILED`` (ADR-0034 §1).
     """
     store = FakePlanStore()
-    state = await a_claimed_execution(store)
+    state = await a_claimed_execution(store, capability=definition.capability)
 
     final = await executor_over(store, seam).execute(
-        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+        state, step_id=STEP, call=call_for(definition, execution_id=state.id), timeout=PATIENT
     )
 
     assert final.step(STEP) is not None
     assert seam.calls == 1, "an unusable result is a terminal close, not a retry"
     step = await stored_step(store, state)
-    assert step.status is StepStatus.FAILED, "the durable RUNNING was closed, not stranded"
+    assert step.status is expect, "the durable RUNNING was closed, and by the right classification"
     assert step.failure is not None
     assert step.failure.kind is None, "no tool classified an executor-authored close (ADR-0039 §3)"
     assert "did not survive revalidation" in step.failure.message
     assert step.finished_at is not None
 
 
-async def test_a_result_with_a_tampered_outcome_is_closed_failed_not_stranded() -> None:
+async def test_a_tampered_outcome_on_a_side_effecting_tool_reaches_indeterminate() -> None:
     """A ``__dict__``-poisoned ``outcome`` would ``KeyError`` out of the mapping.
 
     ``_STATUS_BY_OUTCOME`` is total over ``ToolOutcome`` and takes no default, so
     a non-member ``outcome`` raises rather than acquiring a status nobody chose.
-    Read verbatim past the claim that is a stranded step; revalidated, it is a
-    close.
+    The tool was reached and may have acted, and the poisoned outcome is exactly
+    what could have said whether it did — so ``INDETERMINATE``, not a ``FAILED``
+    that would assert a possible irreversible effect never happened (ADR-0034 §1).
     """
-    await _assert_unusable_closed_failed(ScriptedInvoker(tool(), [_poisoned_outcome()]))
-
-
-async def test_a_failed_result_with_a_tampered_failure_is_closed_failed_not_stranded() -> None:
-    """A ``__dict__``-poisoned ``failure`` on a FAILED result would ``AttributeError``.
-
-    ``_failure_of`` dereferences ``failure.kind``/``.message`` on the
-    non-``SUCCEEDED`` branch, and an object substituted past ``frozen=True`` has
-    neither.
-    """
-    await _assert_unusable_closed_failed(
-        ScriptedInvoker(tool(), [_poisoned_failure(ToolOutcome.FAILED)])
+    await _assert_unusable_closed(
+        tool(), ScriptedInvoker(tool(), [_poisoned_outcome()]), expect=StepStatus.INDETERMINATE
     )
 
 
-async def test_an_indeterminate_result_with_a_tampered_failure_is_closed_failed_not_stranded() -> (
-    None
-):
-    """The INDETERMINATE branch reaches ``_failure_of`` too (ADR-0039 §2, #208).
+async def test_a_tampered_outcome_on_a_read_only_tool_reaches_failed() -> None:
+    """The other half of the interrupted-call rule: no side effect, so ``FAILED``.
 
-    Since #208 the INDETERMINATE branch records the failure rather than
-    discarding it, so it dereferences the same ``failure`` a ``__dict__`` write
-    can poison — and closes ``FAILED``, not ``INDETERMINATE``, because the result
-    itself is what is unusable.
+    A read-only tool cannot have acted, so there is nothing for ``INDETERMINATE``
+    to be uncertain about — the unusable result is an honest ``FAILED``.
     """
-    await _assert_unusable_closed_failed(
-        ScriptedInvoker(tool(), [_poisoned_failure(ToolOutcome.INDETERMINATE)])
+    await _assert_unusable_closed(
+        read_only(), ScriptedInvoker(read_only(), [_poisoned_outcome()]), expect=StepStatus.FAILED
+    )
+
+
+async def test_a_tampered_failure_on_a_side_effecting_tool_reaches_indeterminate() -> None:
+    """A ``__dict__``-poisoned ``failure`` would ``AttributeError`` out of ``_failure_of``.
+
+    ``_failure_of`` dereferences ``failure.kind``/``.message`` on the
+    non-``SUCCEEDED`` branch, and an object substituted past ``frozen=True`` has
+    neither. Same classification as any unusable return from a tool that was
+    reached: ``INDETERMINATE``.
+    """
+    await _assert_unusable_closed(
+        tool(),
+        ScriptedInvoker(tool(), [_poisoned_failure(ToolOutcome.FAILED)]),
+        expect=StepStatus.INDETERMINATE,
+    )
+
+
+async def test_a_tampered_failure_on_the_indeterminate_branch_is_still_caught() -> None:
+    """The INDETERMINATE-input branch reaches ``_failure_of`` too (ADR-0039 §2, #208).
+
+    Since #208 an INDETERMINATE result records its failure rather than discarding
+    it, so it dereferences the same ``failure`` a ``__dict__`` write can poison.
+    Shown on a read-only tool, so the close is a clean ``FAILED`` — the surface
+    is the point here, the classification is covered above.
+    """
+    await _assert_unusable_closed(
+        read_only(),
+        ScriptedInvoker(read_only(), [_poisoned_failure(ToolOutcome.INDETERMINATE)]),
+        expect=StepStatus.FAILED,
+    )
+
+
+async def test_a_seam_that_returns_a_non_result_is_closed_not_stranded() -> None:
+    """The guard is total over *any* return, not only a tampered ``ToolResult``.
+
+    A non-conforming seam that hands back a bare object raises out of
+    ``model_dump`` before ``model_validate`` is even reached — an escape past the
+    claim that ``_detached_result`` catches like any other, rather than stranding
+    the step. The tool was reached, so a side-effecting one is ``INDETERMINATE``.
+    """
+    await _assert_unusable_closed(
+        tool(), ReturningInvoker(tool(), object()), expect=StepStatus.INDETERMINATE
     )
 
 
