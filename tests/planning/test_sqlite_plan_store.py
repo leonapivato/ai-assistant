@@ -296,26 +296,46 @@ async def test_two_connections_do_not_reuse_an_execution_id(tmp_path: Path) -> N
         b.close()
 
 
-async def test_two_stores_can_open_one_fresh_file(tmp_path: Path) -> None:
-    """Concurrent first-time opens do not race on the meta initialisation (§1).
+def test_concurrent_first_opens_of_one_fresh_file_both_succeed(tmp_path: Path) -> None:
+    """Two threads opening the same *absent* file at once both construct (§1).
 
-    Setup runs under ``BEGIN IMMEDIATE``, so a second store opening the same
-    freshly-created file finds the schema and meta already there rather than
-    losing a primary-key race on the ``schema_version`` insert. Both stores are
-    then usable, and their durable counter is shared (distinct ids).
+    Released together by a barrier so both hit ``connect`` + setup on a fresh file
+    concurrently — the race a sequential open cannot provoke. Setup runs under
+    ``BEGIN IMMEDIATE``, so one thread creates and initialises while the other
+    waits and finds it done, instead of both observing empty ``meta`` and losing a
+    primary-key race on the ``schema_version`` insert. Both constructors succeed.
     """
+    import threading  # noqa: PLC0415 — test-local
+
     path = tmp_path / "plans.db"
-    a = SqlitePlanStore(path=path, now=_fixed_now)
-    b = SqlitePlanStore(path=path, now=_fixed_now)  # second open of the fresh file
+    barrier = threading.Barrier(2)
+    opened: list[SqlitePlanStore] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def _open() -> None:
+        barrier.wait()  # both threads proceed into setup together
+        try:
+            store = SqlitePlanStore(path=path, now=_fixed_now)
+        except BaseException as exc:
+            with lock:
+                errors.append(exc)
+        else:
+            with lock:
+                opened.append(store)
+
+    threads = [threading.Thread(target=_open) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
     try:
-        await a.save_goal(_goal())
-        await a.save_plan(_plan())
-        id_a = (await a.start_execution("p1")).id
-        id_b = (await b.start_execution("p1")).id
-        assert id_a != id_b
+        assert not errors, f"a concurrent first open failed: {errors}"
+        assert len(opened) == 2
     finally:
-        a.close()
-        b.close()
+        for store in opened:
+            store.close()
 
 
 async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path: Path) -> None:
@@ -323,8 +343,7 @@ async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path
 
     A database holding only a ``meta`` table marked ``schema_version = 999`` must
     be refused *before* ``goals``/``plans``/``executions`` are created — creating a
-    table is a write, and the refusal must precede any write. The rollback of the
-    setup transaction also removes the ``meta`` table this attempt would create.
+    table is a write, and the refusal must precede any write.
     """
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
@@ -333,7 +352,7 @@ async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="newer version"):
+    with pytest.raises(PlanningError, match="supports only version"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
     check = sqlite3.connect(path)
@@ -379,7 +398,27 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
     raw.commit()
     raw.close()
 
-    with pytest.raises(PlanningError, match="newer version"):
+    with pytest.raises(PlanningError, match="supports only version"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+async def test_an_older_on_disk_schema_is_refused(tmp_path: Path) -> None:
+    """An older, unmigrated schema is refused too — v1 is the only supported one.
+
+    Accepting ``schema_version = '0'`` and letting ``CREATE TABLE IF NOT EXISTS``
+    leave an incompatible table would construct successfully and only fail on the
+    first query. There is no migration, so any version other than the current one
+    is a fault to report at open (ADR-0049 §1).
+    """
+    path = tmp_path / "plans.db"
+    SqlitePlanStore(path=path, now=_fixed_now).close()
+
+    raw = sqlite3.connect(path)
+    raw.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(PlanningError, match="supports only version"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
