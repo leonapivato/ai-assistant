@@ -47,12 +47,21 @@ order:
 
 1. **Exact** — `emitted` is already an advertised capability: return it
    untouched.
-2. **Surface variant** — `emitted` folds (lowercase, and every run of
-   non-alphanumeric characters collapsed to a single `_`) onto an advertised
-   capability: return that advertised name.
+2. **Surface variant** — `emitted` folds (case-fold, and every run of
+   *non-alphanumeric* characters collapsed to a single `_`) onto exactly one
+   advertised capability: return that advertised name. Folding is Unicode-aware
+   (`str.isalnum`), so a letter in any script is preserved and only genuine
+   separators fold — an ASCII-only rule would treat `é` as a separator and fold
+   `deleteéaccount` onto `delete_account`. If two *distinct* advertised
+   capabilities fold to the same key (`delete-user` and `delete_user`), the fold
+   is ambiguous and this branch declines, because choosing one would be a ranking
+   rule (ADR-0037 §1).
 3. **Curated synonym** — `emitted` folds onto a key of a hand-maintained
    `CAPABILITY_ALIASES` table whose target **is currently advertised**: return
-   the target.
+   the target. The table holds *retrieval/read* synonyms only — a write-intent
+   like `remember` is deliberately absent, since ADR-0048 ships no memory writer
+   and aliasing a store-intent onto the read-only `recall_memory` would be the
+   wrong-tool hazard this layer exists to avoid.
 4. **Unknown** — none of the above: return `emitted` unchanged.
 
 The registry is the authority on the vocabulary (ADR-0016 §5): every rewrite
