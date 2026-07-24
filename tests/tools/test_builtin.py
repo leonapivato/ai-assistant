@@ -13,6 +13,7 @@ tool and the pipeline, not to re-test the fakes.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -22,6 +23,8 @@ from ai_assistant.core.types import (
     ActionPlan,
     ExecutionState,
     Goal,
+    MemoryKind,
+    MemoryRecord,
     MemorySource,
     PlanStep,
     Provenance,
@@ -39,6 +42,7 @@ from ai_assistant.tools import (
     RecallMemory,
     build_default_registry,
 )
+from ai_assistant.tools.builtin import _MAX_RECALL_LIMIT
 
 #: A fixed instant, so nothing here depends on how fast the suite runs.
 AT = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
@@ -142,6 +146,81 @@ async def test_recall_memory_rejects_a_non_positive_limit() -> None:
         await tool({"query": "x", "limit": 0}, idempotency_key=None)
     with pytest.raises(ValueError, match="limit"):
         await tool({"query": "x", "limit": True}, idempotency_key=None)
+
+
+class _SearchRecordingStore(FakeMemoryStore):
+    """A store that records every `search` limit, to prove validation runs first.
+
+    The over-cap rejection's whole point is that an out-of-range `limit` never
+    reaches the store (#298): a bare `FakeMemoryStore` accepts the huge value
+    harmlessly, so a `pytest.raises(ValueError)` alone cannot tell "rejected
+    before search" from "searched, then raised". This records the `limit` of
+    every `search` call so a test can assert the store was never touched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(now=_at)
+        self.search_limits: list[int] = []
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+    ) -> list[MemoryRecord]:
+        self.search_limits.append(limit)
+        return await super().search(query, limit=limit, kinds=kinds)
+
+
+@pytest.mark.parametrize("over_cap", [_MAX_RECALL_LIMIT + 1, 2_500_000_000_000_000_000])
+async def test_recall_memory_rejects_an_over_cap_limit_before_any_search(over_cap: int) -> None:
+    """A `limit` above the cap is refused before the store is ever searched (#298)."""
+    store = _SearchRecordingStore()
+    tool = RecallMemory(store)
+
+    with pytest.raises(ValueError, match="limit"):
+        await tool({"query": "x", "limit": over_cap}, idempotency_key=None)
+
+    # The unbounded value from the issue never reaches the store's integer bind:
+    # validation raised before any search ran.
+    assert store.search_limits == []
+
+
+async def test_recall_memory_accepts_the_cap_boundary() -> None:
+    """`limit` exactly at the cap is in bounds and drives a real search."""
+    store = FakeMemoryStore(now=_at)
+    await store.add(
+        SemanticMemory(
+            id="m-1",
+            content="the wifi password is on the fridge",
+            fact="wifi password location",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+            ),
+        )
+    )
+
+    output = await RecallMemory(store)(
+        {"query": "wifi", "limit": _MAX_RECALL_LIMIT}, idempotency_key=None
+    )
+
+    assert isinstance(output, list)
+    assert len(output) == 1
+    assert output[0]["id"] == "m-1"
+
+
+def test_recall_memory_schema_advertises_the_cap() -> None:
+    """The advertised schema declares the same maximum the callable enforces."""
+    schema = RECALL_MEMORY.parameters_schema
+    assert isinstance(schema, Mapping)
+    properties = schema["properties"]
+    assert isinstance(properties, Mapping)
+    limit_schema = properties["limit"]
+    assert isinstance(limit_schema, Mapping)
+
+    assert limit_schema["maximum"] == _MAX_RECALL_LIMIT
+    assert limit_schema["minimum"] == 1
 
 
 async def test_recall_memory_rejects_an_unexpected_argument() -> None:
