@@ -55,8 +55,12 @@ _OWNER_ONLY = 0o600
 #: database labelled newer than this is refused loudly rather than read blindly.
 _SCHEMA_VERSION = 1
 
-_SCHEMA = (
-    "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+# The ``meta`` table is created first and on its own, so the schema version can be
+# read and a newer store refused *before* any record table is created (ADR-0049
+# §1: refuse before reading or writing records — creating a table is a write).
+_META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+
+_RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS plans("
     "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), data TEXT NOT NULL)",
@@ -140,9 +144,18 @@ class SqlitePlanStore:
             # ADR-0049 §1 is only in force while this pragma is on.
             conn.execute("PRAGMA foreign_keys = ON")
             with conn:
-                for statement in _SCHEMA:
-                    conn.execute(statement)
+                # BEGIN IMMEDIATE takes the write lock for the whole of setup, so
+                # two processes opening a fresh file are serialised — one creates
+                # and initialises, the other finds it done — rather than racing on
+                # the meta insert (ADR-0049 §1).
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(_META_SCHEMA)
+                # Refuse a newer store *before* creating any record table, so a
+                # rejected open leaves no schema behind (the transaction rolls the
+                # meta table back too on the raise).
                 self._verify_or_init_meta(conn)
+                for statement in _RECORD_SCHEMA:
+                    conn.execute(statement)
             if self._path != ":memory:":
                 Path(self._path).chmod(_OWNER_ONLY)
         except PlanningError:

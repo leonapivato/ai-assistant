@@ -166,45 +166,46 @@ async def test_two_fresh_memory_instances_do_not_reuse_an_id() -> None:
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
 async def test_execution_ids_do_not_collide_across_a_fork() -> None:
-    """#305's copied-nonce/private-counter case, closed by pid-in-incarnation.
+    """#305's copied-store case, closed by reading the pid *at allocation*.
 
-    A fork copies the incarnation nonce, so two children that share it must still
-    mint distinct ids — the pid, read at allocation, is what differentiates them.
-    Each child builds its own :memory: store with the *same* injected nonce (the
-    faithful, connection-safe model of a forked child: fork copies the nonce, and
-    a child must not reuse the parent's SQLite connection), then starts ``p1`` and
-    writes its id back through a pipe. The two children have distinct pids, so the
-    ids differ despite the identical nonce.
+    The store — nonce and all — is constructed and seeded in the **parent**, then
+    ``fork``ed. A fork copies the incarnation nonce (and the whole store object)
+    into both children, so the only thing that can differentiate their ids is the
+    pid — and only if it is read at allocation, not captured in ``__init__``. Each
+    child drives ``_start_execution_sync`` directly on its own copied ``:memory:``
+    database (a forked child is the sole user of its copy, and this avoids reusing
+    the parent's event loop), then writes its id through a pipe. A buggy impl that
+    stored ``os.getpid()`` at construction would give both children the *parent's*
+    pid and identical ids — this test fails on that; the real impl reads the pid in
+    ``_start_execution_sync`` and the ids differ.
     """
-
-    async def _child_id() -> str:
-        store = SqlitePlanStore(
-            path=":memory:", now=_fixed_now, incarnation_factory=lambda: "SHARED"
-        )
-        try:
-            return await _seed_and_start(store)
-        finally:
-            store.close()
+    parent = SqlitePlanStore(path=":memory:", now=_fixed_now, incarnation_factory=lambda: "SHARED")
+    await parent.save_goal(_goal())
+    await parent.save_plan(_plan())
 
     def _run_child(write_fd: int) -> None:
-        import asyncio  # noqa: PLC0415 — child-only import, after fork
-
-        exec_id = asyncio.run(_child_id())
+        # Drive the sync allocation path directly: no event loop (the parent's is
+        # copied into the child and must not be reused), the sole user of this
+        # child's copied in-memory database.
+        exec_id = parent._start_execution_sync("p1").id
         with os.fdopen(write_fd, "w") as pipe:
             pipe.write(exec_id)
         os._exit(0)
 
     ids: list[str] = []
-    for _ in range(2):
-        read_fd, write_fd = os.pipe()
-        pid = os.fork()
-        if pid == 0:  # child
-            os.close(read_fd)
-            _run_child(write_fd)
-        os.close(write_fd)  # parent
-        with os.fdopen(read_fd) as pipe:
-            ids.append(pipe.read())
-        os.waitpid(pid, 0)  # noqa: ASYNC222 — reaping a forked child in a test
+    try:
+        for _ in range(2):
+            read_fd, write_fd = os.pipe()
+            pid = os.fork()
+            if pid == 0:  # child
+                os.close(read_fd)
+                _run_child(write_fd)
+            os.close(write_fd)  # parent
+            with os.fdopen(read_fd) as pipe:
+                ids.append(pipe.read())
+            os.waitpid(pid, 0)  # noqa: ASYNC222 — reaping a forked child in a test
+    finally:
+        parent.close()
 
     assert "SHARED" in ids[0]
     assert ids[0] != ids[1], "forked children sharing a nonce must differ by pid"
@@ -293,6 +294,58 @@ async def test_two_connections_do_not_reuse_an_execution_id(tmp_path: Path) -> N
     finally:
         a.close()
         b.close()
+
+
+async def test_two_stores_can_open_one_fresh_file(tmp_path: Path) -> None:
+    """Concurrent first-time opens do not race on the meta initialisation (§1).
+
+    Setup runs under ``BEGIN IMMEDIATE``, so a second store opening the same
+    freshly-created file finds the schema and meta already there rather than
+    losing a primary-key race on the ``schema_version`` insert. Both stores are
+    then usable, and their durable counter is shared (distinct ids).
+    """
+    path = tmp_path / "plans.db"
+    a = SqlitePlanStore(path=path, now=_fixed_now)
+    b = SqlitePlanStore(path=path, now=_fixed_now)  # second open of the fresh file
+    try:
+        await a.save_goal(_goal())
+        await a.save_plan(_plan())
+        id_a = (await a.start_execution("p1")).id
+        id_b = (await b.start_execution("p1")).id
+        assert id_a != id_b
+    finally:
+        a.close()
+        b.close()
+
+
+async def test_a_newer_schema_is_refused_before_any_record_table_exists(tmp_path: Path) -> None:
+    """A rejected newer-schema open leaves no schema behind (§1).
+
+    A database holding only a ``meta`` table marked ``schema_version = 999`` must
+    be refused *before* ``goals``/``plans``/``executions`` are created — creating a
+    table is a write, and the refusal must precede any write. The rollback of the
+    setup transaction also removes the ``meta`` table this attempt would create.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '999')")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(PlanningError, match="newer version"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+    check = sqlite3.connect(path)
+    try:
+        tables = {
+            row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "goals" not in tables
+        assert "plans" not in tables
+        assert "executions" not in tables
+    finally:
+        check.close()
 
 
 def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
