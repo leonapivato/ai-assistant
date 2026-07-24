@@ -179,10 +179,20 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
     ``model_validate`` is reached, and a subclass could override serialization to
     raise anything. Any of those escaping would strand the claim exactly as the
     ``KeyError``/``AttributeError`` this exists to prevent would. So every
-    ordinary exception is caught and reported as "unusable"; ``BaseException``
-    (a cancellation, a shutdown) is deliberately *not* caught, so structured
-    concurrency is unaffected. This does not replace the seam's contract to
-    return a valid result and is not meant to.
+    ordinary exception is caught and reported as "unusable".
+
+    **``asyncio.CancelledError`` is caught too, and only because this body is
+    synchronous.** The event loop delivers a genuine task cancellation at an
+    ``await``, and there is none here — the revalidation is two synchronous
+    pydantic calls. A ``CancelledError`` surfacing from them can therefore only
+    have been raised by the untrusted value's own ``model_dump``/``__class__``,
+    i.e. forged, and letting it propagate would strand the claimed step by
+    masquerading as a teardown that is not happening. A *real* cancellation of
+    the executing task is unaffected: it is delivered at the next ``await`` — the
+    commit — where :meth:`_commit_shielded` still lands the write and re-raises.
+    ``KeyboardInterrupt`` and ``SystemExit`` are deliberately *not* named, so a
+    real process signal still propagates. This does not replace the seam's
+    contract to return a valid result and is not meant to.
 
     Returns:
         A revalidated, detached copy, or ``None`` if the returned value does not
@@ -194,9 +204,11 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
         # `PydanticSerializationUnexpectedValue` warning that is noise here — the
         # round-trip's `model_validate` is what rejects it, by return.
         return ToolResult.model_validate(result.model_dump(warnings=False))
-    except Exception:
-        # A post-claim guard is total over what the seam returned (see docstring):
-        # every ordinary failure to read it becomes "unusable", never an escape.
+    except Exception, asyncio.CancelledError:
+        # Total over what the seam returned (see docstring). CancelledError is
+        # named explicitly: this body is synchronous, so a genuine cancellation
+        # cannot originate here — one that surfaces is forged by the untrusted
+        # value and must become "unusable", not an escape that strands the claim.
         return None
 
 
