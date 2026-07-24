@@ -330,6 +330,55 @@ async def test_a_newer_on_disk_schema_is_refused(tmp_path: Path) -> None:
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
+async def test_a_non_numeric_schema_version_is_a_planning_error(tmp_path: Path) -> None:
+    """A corrupt/tampered meta value is refused as PlanningError, not a raw ValueError.
+
+    ``int('not-a-number')`` must not leak past the initialisation boundary
+    (ADR-0049 §1); opening a store with a garbled ``schema_version`` is a fault to
+    report in this layer's own error type.
+    """
+    path = tmp_path / "plans.db"
+    SqlitePlanStore(path=path, now=_fixed_now).close()
+
+    raw = sqlite3.connect(path)
+    raw.execute("UPDATE meta SET value = 'not-a-number' WHERE key = 'schema_version'")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(PlanningError, match="non-numeric schema_version"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+async def test_export_is_a_single_consistent_snapshot(tmp_path: Path) -> None:
+    """A committed goal+plan pair is exported whole, never as a dangling plan.
+
+    ``export`` reads all three tables inside one ``BEGIN IMMEDIATE`` transaction
+    (ADR-0004 §6), so a second connection cannot interleave a write between the
+    reads and leave a plan whose goal is missing — the referential inconsistency
+    ``PlanExport`` rejects. Two connections on one file: writer ``b`` commits a
+    goal and its plan; reader ``a``'s export then sees *both*, and (before ``b``
+    writes) sees *neither* — all-or-nothing visibility, which is exactly the
+    anti-dangling guarantee. A torn half would raise ``ValidationError`` here.
+    """
+    path = tmp_path / "plans.db"
+    a = SqlitePlanStore(path=path, now=_fixed_now)
+    b = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        empty = await a.export()
+        assert empty.goals == ()
+        assert empty.plans == ()
+
+        await b.save_goal(_goal())
+        await b.save_plan(_plan())
+
+        whole = await a.export()
+        assert [g.id for g in whole.goals] == ["g1"]
+        assert [p.id for p in whole.plans] == ["p1"]
+    finally:
+        a.close()
+        b.close()
+
+
 async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
     """A Tier 1 store's file is created owner-only (ADR-0004), like the others."""
     path = tmp_path / "plans.db"
