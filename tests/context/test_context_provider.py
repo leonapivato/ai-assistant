@@ -454,11 +454,15 @@ async def test_a_source_that_suppresses_cancellation_cannot_stall_the_failure(
     delivered into the gather, which re-cancels the same source and goes on
     awaiting it. Only ``asyncio.wait``'s observing timeout returns.
 
-    Asserted with a *time bound*, not merely eventual propagation: an
-    implementation that ignored the budget and waited seconds would satisfy
-    "the failure arrives" while violating the thing §1 decides.
+    Asserted with a *latency bound tied to the patched budget*, not merely
+    eventual propagation (issue #232): an implementation that ignored the budget
+    and waited seconds before abandoning the straggler would satisfy "the failure
+    arrives" while violating the thing §1 decides. The ceiling is the budget plus
+    generous scheduling slack, so it scales with the budget instead of sitting at
+    a flat second that a seconds-scale overrun would slip under.
     """
-    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    budget = 0.05
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
     stubborn = _StubbornSource()
     provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
 
@@ -467,7 +471,7 @@ async def test_a_source_that_suppresses_cancellation_cannot_stall_the_failure(
         await provider.assemble()
     elapsed = time.monotonic() - started
 
-    assert elapsed < 1.0  # a 50 ms budget, with an order of magnitude of slack
+    assert elapsed < budget + 0.5  # bounded by the drain budget, not seconds beyond it
     assert stubborn.started.is_set()
     assert stubborn.cancels >= 1  # it was cancelled, it simply declined to stop
     assert len(provider_module._abandoned) == 1  # detached, and held so it cannot vanish
@@ -745,6 +749,70 @@ async def test_a_numeric_source_timeout_is_no_defence_against_a_suppressing_sour
         await assembling
 
 
+async def test_a_caller_timeout_around_assemble_is_honoured_against_a_suppressing_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #231: with ``source_timeout=None`` the caller's own deadline must fire.
+
+    ADR-0033 §4 offers the caller that deadline, but a bare ``gather`` on the
+    success path reneged on it against a source that suppresses cancellation:
+    ``gather`` does not yield a cancellation until every child has finished, so an
+    ``asyncio.timeout`` wrapped around ``assemble()`` never fired and the pipeline
+    hung behind the source. Observing the sources with ``asyncio.wait`` makes the
+    offer real — the caller's timeout fires, and the straggler is drained and
+    abandoned rather than awaited forever. No required source is involved, so the
+    drain runs off the caller's cancellation alone.
+    """
+    budget = 0.05
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_clock(), stubborn], source_timeout=None)
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await provider.assemble()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.05 + budget + 0.5  # the caller's deadline fired; it was not swallowed
+    assert stubborn.cancels >= 1  # the drain cancelled it; it simply declined to stop
+    assert len(provider_module._abandoned) == 1  # detached, and held so it cannot vanish
+    await _retire(stubborn)
+    assert not provider_module._abandoned
+
+
+async def test_cancelling_the_assembling_task_propagates_past_a_suppressing_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #231: a direct ``cancel()`` of ``assemble()`` must not be swallowed.
+
+    The bare-``gather`` success path never yielded the cancellation while a
+    suppressing source ran, so the ``CancelledError`` a cancelled request delivers
+    vanished and the task hung. The observing ``asyncio.wait`` surfaces it, drains
+    the straggler within the budget, and re-raises it to the caller.
+    """
+    budget = 0.05
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
+    stubborn = _StubbornSource()
+    provider = AssemblingContextProvider([_clock(), stubborn], source_timeout=None)
+
+    assembling = asyncio.ensure_future(provider.assemble())
+    async with asyncio.timeout(2):
+        await stubborn.started.wait()  # it is really running before we cancel
+    assembling.cancel()
+
+    started = time.monotonic()
+    with pytest.raises(asyncio.CancelledError):
+        await assembling
+    elapsed = time.monotonic() - started
+
+    assert elapsed < budget + 0.5  # bounded by the drain, not hung on the source
+    assert stubborn.cancels >= 1
+    assert len(provider_module._abandoned) == 1
+    await _retire(stubborn)
+    assert not provider_module._abandoned
+
+
 async def test_each_assembly_abandons_its_own_straggler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -757,14 +825,22 @@ async def test_each_assembly_abandons_its_own_straggler(
     Before the bound the count was one only because the first such failure
     deadlocked the caller and there was never a second request.
     """
-    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.05)
+    budget = 0.05
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
     stubborn = _StubbornSource()
     provider = AssemblingContextProvider([_RequiredFailingSource(), stubborn], source_timeout=None)
 
+    started = time.monotonic()
     for _ in range(3):
         with pytest.raises(RuntimeError, match="source down"):
             await provider.assemble()  # every call still propagates, which is the point
+    elapsed = time.monotonic() - started
 
     assert len(provider_module._abandoned) == 3
+    # Each assembly is bounded by the drain budget, not merely eventually
+    # propagating (issue #232): three of them stay within three budgets plus
+    # scheduling slack. An implementation that waited seconds past the budget
+    # before abandoning each straggler would blow this even though the count held.
+    assert elapsed < 3 * budget + 0.5
     await _retire(stubborn)
     assert not provider_module._abandoned
