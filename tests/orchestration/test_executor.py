@@ -901,6 +901,102 @@ async def test_a_call_substituted_while_the_claim_is_in_flight_does_not_run() ->
     assert step.approval_ref == "d-1"
 
 
+# --- §8: the returned result is revalidated too -------------------------
+
+
+def _poisoned_outcome() -> ToolResult:
+    """A result whose ``outcome`` was replaced past ``frozen=True`` (ADR-0018 §3).
+
+    A ``__dict__`` write substitutes a non-member for the enum value, so
+    ``_STATUS_BY_OUTCOME[result.outcome]`` — the ``outcome`` lookup the issue
+    names — would raise a ``KeyError`` *after* the claim if the executor read it
+    without revalidating.
+    """
+    result = ToolResult(outcome=ToolOutcome.SUCCEEDED, output="ok")
+    result.__dict__["outcome"] = "not-a-member"
+    return result
+
+
+def _poisoned_failure(outcome: ToolOutcome) -> ToolResult:
+    """A non-``SUCCEEDED`` result whose ``failure`` was replaced with an object.
+
+    The substitute has no ``kind``/``message``, so ``_failure_of``'s
+    ``failure.kind``/``.message`` dereference — the FAILED-branch and the
+    INDETERMINATE-branch surface the issue names — would raise an
+    ``AttributeError`` after the claim without revalidation.
+    """
+    result = ToolResult(
+        outcome=outcome,
+        failure=ToolFailure(kind=ToolFailureKind.UNAVAILABLE, message="the upstream is down"),
+    )
+    result.__dict__["failure"] = object()
+    return result
+
+
+async def _assert_unusable_closed_failed(seam: ScriptedInvoker) -> None:
+    """Drive the executor over ``seam`` and assert the deterministic close.
+
+    The tampered result is discovered *after* the claim, so the step is durably
+    ``RUNNING`` when ``_record`` would have raised. Revalidation converts it into
+    an executor-authored ``FAILED`` close (``kind=None``, ADR-0039 §3) rather
+    than an escaping exception that strands the step for recovery to read as
+    ``INDETERMINATE`` about a call that did in fact finish.
+    """
+    store = FakePlanStore()
+    state = await a_claimed_execution(store)
+
+    final = await executor_over(store, seam).execute(
+        state, step_id=STEP, call=call_for(tool(), execution_id=state.id), timeout=PATIENT
+    )
+
+    assert final.step(STEP) is not None
+    assert seam.calls == 1, "an unusable result is a terminal close, not a retry"
+    step = await stored_step(store, state)
+    assert step.status is StepStatus.FAILED, "the durable RUNNING was closed, not stranded"
+    assert step.failure is not None
+    assert step.failure.kind is None, "no tool classified an executor-authored close (ADR-0039 §3)"
+    assert "did not survive revalidation" in step.failure.message
+    assert step.finished_at is not None
+
+
+async def test_a_result_with_a_tampered_outcome_is_closed_failed_not_stranded() -> None:
+    """A ``__dict__``-poisoned ``outcome`` would ``KeyError`` out of the mapping.
+
+    ``_STATUS_BY_OUTCOME`` is total over ``ToolOutcome`` and takes no default, so
+    a non-member ``outcome`` raises rather than acquiring a status nobody chose.
+    Read verbatim past the claim that is a stranded step; revalidated, it is a
+    close.
+    """
+    await _assert_unusable_closed_failed(ScriptedInvoker(tool(), [_poisoned_outcome()]))
+
+
+async def test_a_failed_result_with_a_tampered_failure_is_closed_failed_not_stranded() -> None:
+    """A ``__dict__``-poisoned ``failure`` on a FAILED result would ``AttributeError``.
+
+    ``_failure_of`` dereferences ``failure.kind``/``.message`` on the
+    non-``SUCCEEDED`` branch, and an object substituted past ``frozen=True`` has
+    neither.
+    """
+    await _assert_unusable_closed_failed(
+        ScriptedInvoker(tool(), [_poisoned_failure(ToolOutcome.FAILED)])
+    )
+
+
+async def test_an_indeterminate_result_with_a_tampered_failure_is_closed_failed_not_stranded() -> (
+    None
+):
+    """The INDETERMINATE branch reaches ``_failure_of`` too (ADR-0039 §2, #208).
+
+    Since #208 the INDETERMINATE branch records the failure rather than
+    discarding it, so it dereferences the same ``failure`` a ``__dict__`` write
+    can poison — and closes ``FAILED``, not ``INDETERMINATE``, because the result
+    itself is what is unusable.
+    """
+    await _assert_unusable_closed_failed(
+        ScriptedInvoker(tool(), [_poisoned_failure(ToolOutcome.INDETERMINATE)])
+    )
+
+
 async def test_a_claim_cancelled_before_the_tool_is_closed_not_left_running() -> None:
     """A claim lands *before* the tool is reachable, so it must not stand.
 
