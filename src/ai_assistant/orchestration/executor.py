@@ -165,24 +165,37 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
 
     Unlike :func:`_detached`, this returns ``None`` rather than raising, because
     of where it sits: the claim precedes it, so an unusable result must become a
-    deterministic ``FAILED`` close (``_UNUSABLE``) rather than an escaping
-    exception — the same reason :meth:`StepExecutor._refuse` commits the seam's
-    own rejection instead of propagating it. Detaching also means the value that
-    reaches the commit is one nothing else holds a reference to, so it cannot be
-    edited between revalidation and the write. This does not replace the seam's
-    contract to return a valid result and is not meant to; like every other guard
-    here, it is total over what it is handed.
+    committed close (:meth:`StepExecutor._discard_unusable`) rather than an
+    escaping exception — the same reason :meth:`StepExecutor._refuse` commits the
+    seam's own rejection instead of propagating it. Detaching also means the
+    value that reaches the commit is one nothing else holds a reference to, so it
+    cannot be edited between revalidation and the write.
+
+    **Total over any return, not only a tampered ``ToolResult``.** The parameter
+    is typed ``ToolResult``, but the point of a post-claim guard is to survive a
+    value that violates its type: a non-conforming seam that returns ``None`` or
+    some other object would raise out of ``model_dump`` *before*
+    ``model_validate`` is reached, and a subclass could override serialization to
+    raise anything. Any of those escaping would strand the claim exactly as the
+    ``KeyError``/``AttributeError`` this exists to prevent would. So every
+    ordinary exception is caught and reported as "unusable"; ``BaseException``
+    (a cancellation, a shutdown) is deliberately *not* caught, so structured
+    concurrency is unaffected. This does not replace the seam's contract to
+    return a valid result and is not meant to.
 
     Returns:
-        A revalidated, detached copy, or ``None`` if the result does not survive
-        revalidation.
+        A revalidated, detached copy, or ``None`` if the returned value does not
+        survive revalidation, is not a ``ToolResult`` at all, or cannot even be
+        serialized to attempt it.
     """
     try:
         # `warnings=False`: serializing a `__dict__`-tampered enum value emits a
         # `PydanticSerializationUnexpectedValue` warning that is noise here — the
-        # round-trip's `model_validate` is what rejects it, loudly and by return.
+        # round-trip's `model_validate` is what rejects it, by return.
         return ToolResult.model_validate(result.model_dump(warnings=False))
-    except ValidationError:
+    except Exception:
+        # A post-claim guard is total over what the seam returned (see docstring):
+        # every ordinary failure to read it becomes "unusable", never an escape.
         return None
 
 
@@ -410,8 +423,9 @@ class StepExecutor:
         - a ``CancelledError`` commits the interrupted-call classification and
           propagates, because swallowing it would break shutdown;
         - a result that does not survive revalidation is tampered past
-          ``frozen=True`` (ADR-0018 §3) and is closed ``FAILED`` here rather than
-          read verbatim into a ``KeyError``/``AttributeError`` past the claim
+          ``frozen=True`` (ADR-0018 §3) and is closed here — ``INDETERMINATE`` or
+          ``FAILED`` by the interrupted-call rule — rather than read verbatim into
+          a ``KeyError``/``AttributeError`` past the claim
           (:func:`_detached_result`, :meth:`_discard_unusable`).
 
         Only the last case is new; the first two are the seam's two contracted
@@ -428,7 +442,7 @@ class StepExecutor:
             raise
         result = _detached_result(returned)
         if result is None:
-            return await self._discard_unusable(state, step_id), None
+            return await self._discard_unusable(state, step_id, trusted), None
         return await self._record(state, step_id, result), result
 
     # --- the transitions ------------------------------------------------
@@ -562,26 +576,39 @@ class StepExecutor:
             state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_REFUSED)
         )
 
-    async def _discard_unusable(self, state: ExecutionState, step_id: str) -> ExecutionState:
-        """Commit ``RUNNING → FAILED`` for a returned result that cannot be read.
+    async def _discard_unusable(
+        self, state: ExecutionState, step_id: str, trusted: ToolDefinition | None
+    ) -> ExecutionState:
+        """Close a claimed step whose returned result cannot be read.
 
         The claim precedes the call, so a result tampered past ``frozen=True``
-        (ADR-0018 §3, :func:`_detached_result`) is discovered **after** the step
-        is durably ``RUNNING``. Recording it verbatim would raise a
-        ``KeyError``/``AttributeError`` out of :meth:`_record`, stranding the
-        step for recovery to read as ``INDETERMINATE`` about a call that did in
-        fact finish — the one thing ``INDETERMINATE`` must not be used for. So it
-        is closed here, deterministically, exactly as :meth:`_refuse` closes the
-        seam's own rejection.
+        (ADR-0018 §3, :func:`_detached_result`) is discovered **after**
+        ``invoke`` has returned. Recording it verbatim would raise a
+        ``KeyError``/``AttributeError`` out of :meth:`_record` and strand the step
+        durably ``RUNNING``, so it is closed here instead.
 
-        Schedules nothing: like every executor-authored close, the failure takes
-        ``kind=None`` — no tool classified it — and ADR-0029 §5's conjuncts read
+        **The close is not a flat ``FAILED``, and that is the whole point.**
+        Every other executor-authored ``FAILED`` here rests on "nothing ran"
+        being a *known* fact — the pre-invocation exits (:meth:`_refuse`,
+        :meth:`_close_unstarted`) all sit before the callable is reached. This one
+        does not: the tool was invoked and may have acted, and the tampered
+        outcome was the only thing that could have told us whether it did.
+        Asserting ``FAILED`` would record a possible irreversible effect as
+        certainly-nothing-happened — the one use ADR-0034 §1 forbids. So it
+        classifies exactly as an interrupted call does (:func:`_interrupted`,
+        ADR-0031 §1's single copy of the rule): ``INDETERMINATE`` for a
+        side-effecting non-``NATURAL`` tool, whose effect is now unknowable, and
+        ``FAILED`` for a read-only or naturally-idempotent one, where there is no
+        side effect to be uncertain about.
+
+        Schedules nothing on either branch: the failure takes ``kind=None`` — no
+        tool classified it — and ADR-0029 §5's conjuncts read
         ``result.failure.kind``, so a ``None`` kind is never retried (ADR-0039
-        §3). Returning from here rather than falling into the retry decision is
-        that rule, the same shape as :meth:`_refuse`.
+        §3), the same shape as :meth:`_refuse`.
         """
+        status = _STATUS_BY_OUTCOME[_interrupted(trusted)]
         return await self._finish(
-            state, step_id, StepStatus.FAILED, failure=StepFailure(kind=None, message=_UNUSABLE)
+            state, step_id, status, failure=StepFailure(kind=None, message=_UNUSABLE)
         )
 
     async def _record(
