@@ -19,7 +19,7 @@ from ai_assistant.models import HashingEmbedder, PydanticAIProvider, RetryingPro
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import Engine, LearningLoop, StepExecutor, StepRunner
 from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
-from ai_assistant.planning import InMemoryPlanStore, ModelBackedPlanner
+from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.tools import build_default_registry
 
 if TYPE_CHECKING:
@@ -45,10 +45,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       persistence), so the closed learning loop is not silently open (ADR-0028 §4);
     * one :class:`InMemoryToolRegistry` object is injected as both the selecting
       ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8);
-    * one :class:`InMemoryPlanStore` is shared by the runner, the executor, and
-      the façade, and one :class:`SqliteAuditTrail` by the runner.
+    * one :class:`SqlitePlanStore` is shared by the runner, the executor, and
+      the façade, and one :class:`SqliteAuditTrail` by the runner and the façade
+      — the façade reads the trail (query-only) to recover a durably-parked
+      confirmation after a restart (ADR-0052 §1).
 
-    **It owns the resources it opens.** The two connection-owning stores are
+    **It owns the resources it opens.** The three connection-owning stores are
     opened first; if any *later* construction fails, the ones already opened are
     closed before the error propagates, so no half-built engine leaks a connection
     (ADR-0042 §2). On success, their ``close`` methods are handed to the façade as
@@ -94,12 +96,15 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         opened.append(memory.close)
         trail = SqliteAuditTrail(path=directory / "audit.db")
         opened.append(trail.close)
+        # Durable plan/execution state, so a parked AWAITING_APPROVAL step survives
+        # a restart and can be recovered through the façade (ADR-0049, ADR-0052; #318).
+        plans = SqlitePlanStore(path=directory / "plans.db")
+        opened.append(plans.close)
 
         model = RetryingProvider(
             PydanticAIProvider(settings.default_model),
             policy=RetryPolicy.from_settings(settings),
         )
-        plans = InMemoryPlanStore()
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
         # memory-backed `recall_memory` reads the *same* store the loop retrieves
@@ -135,7 +140,8 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             loop=loop,
             runner=runner,
             plans=plans,
-            closers=[_as_async(memory.close), _as_async(trail.close)],
+            trail=trail,
+            closers=[_as_async(memory.close), _as_async(trail.close), _as_async(plans.close)],
         )
     except BaseException:
         # Close anything already opened before re-raising, so a failed build

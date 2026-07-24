@@ -46,14 +46,15 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ai_assistant.core.errors import PlanningError
+from ai_assistant.core.types import StepStatus
 from ai_assistant.orchestration.runner import Disposition
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from datetime import timedelta
 
-    from ai_assistant.core.protocols import PlanStore
-    from ai_assistant.core.types import ExecutionState, FrozenJsonMapping
+    from ai_assistant.core.protocols import AuditTrail, PlanStore
+    from ai_assistant.core.types import ExecutionState, FrozenJsonMapping, PermissionDecision
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 
@@ -160,22 +161,36 @@ class TurnOutcome:
         turn: The turn's goal, context, retrieved memories, plan, and — obliged to
             be surfaced, not swallowed — whether retrieval degraded
             (:attr:`~ai_assistant.orchestration.loop.TurnResult.memory_degraded`).
+            ``None`` on a resume driven from a **recovered** park (ADR-0052 §3):
+            a confirmation reconstructed from durable state after a restart has no
+            live turn — context and retrieved memories are ephemeral and were never
+            persisted — so a fabricated ``TurnResult`` would misrepresent what the
+            turn saw. The ``step`` — the resolution — is what a resume is for and is
+            always present.
         step: The disposition of the step the engine drove, or ``None`` when the
             plan had no step to drive. On a resumption this is the resolved step.
     """
 
-    turn: TurnResult
+    turn: TurnResult | None
     step: StepOutcome | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _Parked:
-    """The private state one continuation token names (never seen by an adapter)."""
+    """The private state one continuation token names (never seen by an adapter).
 
-    turn: TurnResult
+    ``turn`` is ``None`` and ``confirmation_id`` is ``None`` for an entry
+    reconstructed from durable state by :meth:`Engine.pending_confirmations`
+    (ADR-0052): a recovered park has no live turn, and a ``None`` confirmation id
+    routes :meth:`Engine.resume` through the runner's restart recovery path
+    (recover the ``CONFIRM`` by its ``(execution_id, step_id)`` binding, ADR-0044
+    §3) rather than caching a decision id a concurrent resolution could stale.
+    """
+
+    turn: TurnResult | None
     execution_id: str
     step_id: str
-    confirmation_id: str
+    confirmation_id: str | None
 
 
 class Engine:
@@ -193,6 +208,7 @@ class Engine:
         loop: LearningLoop,
         runner: StepRunner,
         plans: PlanStore,
+        trail: AuditTrail,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -218,6 +234,16 @@ class Engine:
             plans: Durable planning state — the same instance ``runner`` holds.
                 The façade persists the turn's goal and plan and starts the
                 execution it drives, and reloads it to resume.
+            trail: The audit trail — the same instance ``runner`` holds (a
+                composition-root single-instance obligation of the same shape as
+                ``plans``; ADR-0052 §1). The façade reads it **query-only** to
+                recover a durably-parked confirmation's display content after a
+                restart (:meth:`pending_confirmations`): the ruling ``reason`` and
+                the tool declaration live only in the trail (ADR-0042 §4), and a
+                restarted façade has no in-process disposition to read them from. It
+                records nothing; authoring rulings stays the runner's (ADR-0042 §6).
+                A façade wired to a *second* trail would recover confirmations the
+                runner's own ``resume`` cannot resolve.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -271,6 +297,7 @@ class Engine:
         self._loop = loop
         self._runner = runner
         self._plans = plans
+        self._trail = trail
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -355,6 +382,72 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._resume(token, approved=approved, timeout=timeout))
+
+    async def pending_confirmations(self) -> list[Confirmation]:
+        """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
+
+        The durable counterpart to the in-process ``_parked`` table. A restarted
+        process has an empty table, and a park whose process-scoped token was
+        dropped — or that :meth:`converse` never handed back because it raised after
+        the runner durably parked the step — is likewise unreachable in memory
+        (#287). This reconstructs each such confirmation from state that *is*
+        durable: the parked executions in the :class:`PlanStore` and the recorded
+        ``CONFIRM`` in the :class:`AuditTrail`.
+
+        It enumerates ``plans.active_executions()``, finds each ``AWAITING_APPROVAL``
+        step, recovers its still-pending ``CONFIRM`` by the ``(execution_id,
+        step_id)`` binding (``trail.pending_confirmation``; a binding already
+        resolved returns ``None`` and is skipped — the #257 hazard ADR-0044 §2b
+        closes is not re-presented), and reads the raw parameters from the plan step
+        (the trail holds only a digest). Each recovered confirmation is assigned a
+        continuation token and registered in ``_parked`` so a subsequent
+        :meth:`resume` resolves it through the ordinary path — routed, because the
+        entry carries ``confirmation_id=None``, through the runner's restart
+        recovery (ADR-0044 §3) rather than a cached id.
+
+        **Idempotent and bounded.** A binding already named by a ``_parked`` entry
+        reuses that entry's token rather than minting a second, so repeated calls
+        return stable tokens and the table stays bounded by the number of distinct
+        durably-parked bindings, not by how often recovery is called. Recovery does
+        not consult the confirmation ceiling: it presents parks that already
+        happened and are already durable, and refusing to surface one would strand
+        it (ADR-0052 §2).
+
+        Returns:
+            One :class:`Confirmation` per durably-parked, still-unresolved step,
+            each carrying an opaque token to relay on :meth:`resume`. Empty when no
+            execution is parked awaiting an answer.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            PlanningError: If the store cannot be read.
+            AuditError: If the trail cannot be read.
+        """
+        self._reject_if_closing()
+        recovered: list[Confirmation] = []
+        for state in await self._plans.active_executions():
+            plan = await self._plans.get_plan(state.plan_id)
+            if plan is None:  # pragma: no cover — an execution without its plan is a corrupt store
+                continue
+            for step in state.steps:
+                if step.status is not StepStatus.AWAITING_APPROVAL:
+                    continue
+                confirmed = await self._trail.pending_confirmation(
+                    execution_id=state.id, step_id=step.step_id
+                )
+                if confirmed is None:
+                    # The binding is already resolved (ADR-0044 §3 step 1), or holds
+                    # no CONFIRM; either way there is nothing to present.
+                    continue
+                planned = next((s for s in plan.steps if s.id == step.step_id), None)
+                if planned is None:  # pragma: no cover — a step not in its plan is a corrupt store
+                    continue
+                recovered.append(
+                    self._recovered_confirmation(
+                        state.id, step.step_id, planned.parameters, confirmed
+                    )
+                )
+        return recovered
 
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.
@@ -611,13 +704,15 @@ class Engine:
         return TurnOutcome(turn=parked.turn, step=step)
 
     def _step_outcome(
-        self, turn: TurnResult, disposition: StepDisposition, *, handle: str | None
+        self, turn: TurnResult | None, disposition: StepDisposition, *, handle: str | None
     ) -> StepOutcome:
         """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4).
 
         ``handle`` is the continuation handle minted *before* the runner could park
         (:meth:`_converse`); it is consumed only on the parked branch, and is
-        ``None`` where no park is possible (a resumption).
+        ``None`` where no park is possible (a resumption, whose ``turn`` may itself
+        be ``None`` on the recovered path — but a resolving disposition is never
+        ``AWAITING_CONFIRMATION``, so the parked branch below is never taken there).
         """
         confirmation: Confirmation | None = None
         if disposition.disposition is Disposition.AWAITING_CONFIRMATION:
@@ -625,6 +720,11 @@ class Engine:
                 # Only a resumption passes None, and a resolving disposition is never
                 # AWAITING_CONFIRMATION, so reaching here would be an internal fault.
                 msg = "a parked step reached rendering without a pre-minted continuation handle"
+                raise PlanningError(msg)
+            if turn is None:  # pragma: no cover — the parked branch is only reached from _converse
+                # A pre-minted handle is only present on the converse path, which
+                # always carries a real turn; a recovered resume never parks anew.
+                msg = "a parked step reached rendering without its originating turn"
                 raise PlanningError(msg)
             confirmation = self._confirmation(turn, disposition, handle)
         return StepOutcome(
@@ -670,6 +770,55 @@ class Engine:
             reason=recorded.ruling.reason,
             token=ContinuationToken(handle),
         )
+
+    def _recovered_confirmation(
+        self,
+        execution_id: str,
+        step_id: str,
+        parameters: FrozenJsonMapping,
+        confirmed: PermissionDecision,
+    ) -> Confirmation:
+        """Assemble a :class:`Confirmation` for a durably-parked step (ADR-0052 §1).
+
+        The counterpart to :meth:`_confirmation` on the recovery path: the tool
+        content and ruling ``reason`` come from the ``CONFIRM`` recovered from the
+        trail, and the parameters from the plan step (the trail holds only a
+        digest). The token names a ``_parked`` entry with ``turn=None`` and
+        ``confirmation_id=None`` (:meth:`_handle_for_binding`), so a subsequent
+        :meth:`resume` routes through the runner's restart recovery.
+        """
+        handle = self._handle_for_binding(execution_id, step_id)
+        return Confirmation(
+            tool_id=confirmed.tool.id,
+            tool_description=confirmed.tool.description,
+            parameters=parameters,
+            reason=confirmed.ruling.reason,
+            token=ContinuationToken(handle),
+        )
+
+    def _handle_for_binding(self, execution_id: str, step_id: str) -> str:
+        """A continuation handle for a recovered binding, reused if already held.
+
+        Idempotency and boundedness (ADR-0052 §2): if a ``_parked`` entry already
+        names this ``(execution_id, step_id)`` binding — from an earlier recovery
+        call — its handle is returned rather than a second minted, so repeated
+        :meth:`pending_confirmations` calls yield stable tokens and the table stays
+        bounded by the number of distinct durably-parked bindings. Otherwise a fresh
+        unique handle is minted and the recovered entry registered. Runs to
+        completion with no ``await`` from the uniqueness check to the write, so the
+        mint-and-register is atomic against concurrency, as :meth:`_mint_handle` is.
+        """
+        for existing, parked in self._parked.items():
+            if parked.execution_id == execution_id and parked.step_id == step_id:
+                return existing
+        handle = self._mint_handle()
+        # _mint_handle reserves the handle against in-flight turns; a recovered park
+        # goes straight into the table it counts against, so the reservation is released.
+        self._reserved.discard(handle)
+        self._parked[handle] = _Parked(
+            turn=None, execution_id=execution_id, step_id=step_id, confirmation_id=None
+        )
+        return handle
 
 
 __all__ = [

@@ -17,6 +17,7 @@ from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.orchestration import Engine
+from ai_assistant.planning import SqlitePlanStore
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,6 +31,31 @@ async def test_build_engine_returns_a_ready_engine(tmp_path: Path) -> None:
         # The connection-owning stores were opened on disk.
         assert (tmp_path / "memory.db").exists()
         assert (tmp_path / "audit.db").exists()
+        # The production plan store is now the durable SqlitePlanStore (#318), so a
+        # parked execution survives a restart.
+        assert (tmp_path / "plans.db").exists()
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
+    tmp_path: Path,
+) -> None:
+    """The default is a durable ``SqlitePlanStore``, one instance shared everywhere (#318).
+
+    The single-instance obligation ADR-0042 §2 documents: the *same* plan store
+    object is injected into the runner, the executor behind it, and the façade, so
+    the façade drives and resumes the execution the runner started. The audit trail
+    is likewise the one instance the façade and the runner share (ADR-0052 §1).
+    """
+    engine = build_engine(Settings(), data_dir=tmp_path)
+    try:
+        plans = engine._plans
+        assert isinstance(plans, SqlitePlanStore)
+        assert engine._runner._plans is plans
+        assert engine._runner._executor._plans is plans
+        # The façade and the runner read the very same audit trail.
+        assert engine._trail is engine._runner._trail
     finally:
         await engine.aclose()
 

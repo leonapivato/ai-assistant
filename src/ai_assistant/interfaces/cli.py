@@ -116,6 +116,30 @@ def ask(
     raise typer.Exit(code)
 
 
+@app.command()
+def resume(
+    timeout_seconds: float = typer.Option(
+        60.0,
+        "--timeout",
+        callback=_positive_finite_seconds,
+        help="Per-attempt deadline for the engine's work, in seconds (positive).",
+    ),
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Approve every pending confirmation without prompting."
+    ),
+) -> None:
+    """Answer confirmations parked by an earlier run — including across a restart.
+
+    A confirmable action from a previous ``ask`` may still be awaiting an answer: it
+    was parked durably (ADR-0052) and survives a process exit. This reconstructs
+    each such confirmation from stored state, shows the action and the policy's
+    reason, and relays the opaque token back to the engine to resolve it.
+    """
+    code = asyncio.run(_resume_pending(timeout_seconds=timeout_seconds, assume_yes=yes))
+    raise typer.Exit(code)
+
+
 async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> int:
     """Load settings, build the engine, drive one turn, and close it (ADR-0042 §2, §7).
 
@@ -144,6 +168,63 @@ async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> i
     # A failure closing an owned resource is itself a failure to report (§7): the
     # turn may have succeeded, but the process did not shut down cleanly.
     return max(code, shutdown_code)
+
+
+async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
+    """Recover durably-parked confirmations, answer them, and close the engine (ADR-0052).
+
+    The restart-recovery counterpart to :func:`_ask`: it builds the engine over the
+    same durable stores an earlier run wrote, asks the façade for the confirmations
+    still awaiting an answer, and resolves each. One error boundary spans every
+    stage that can fail — loading settings, building the engine, recovering,
+    resuming, and shutdown — so an :class:`AssistantError` is rendered and mapped to
+    a non-zero exit code rather than escaping (ADR-0042 §7).
+    """
+    timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
+    approver: Callable[[Confirmation], bool] = (
+        (lambda _confirmation: True) if assume_yes else _prompt_for_approval
+    )
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        engine = build_engine(settings)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_resume(engine, timeout=timeout, approver=approver)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _drive_resume(
+    engine: Engine,
+    *,
+    timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
+    approver: Callable[[Confirmation], bool],
+) -> int:
+    """Recover the pending confirmations and resolve each one.
+
+    Renders each recovered action so a person can judge it, collects the yes/no,
+    and relays the opaque token via ``resume`` — the adapter transports consent, it
+    authors no ruling (ADR-0042 §6). An :class:`AssistantError` from any stage is
+    rendered and mapped to a non-zero exit code.
+    """
+    try:
+        pending = await engine.pending_confirmations()
+        if not pending:
+            console.print("[dim]Nothing is awaiting confirmation.[/]")
+            return _EXIT_OK
+        for confirmation in pending:
+            approved = approver(confirmation)
+            resumed = await engine.resume(confirmation.token, approved=approved, timeout=timeout)
+            _render_turn(resumed)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    return _EXIT_OK
 
 
 async def _close(engine: Engine) -> int:
@@ -211,20 +292,29 @@ def _safe(value: str) -> str:
 
 
 def _render_turn(outcome: TurnOutcome) -> None:
-    """Render one turn's plan, degraded-memory notice, and step disposition."""
-    turn = outcome.turn
-    if turn.memory_degraded:
-        console.print(
-            "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
-        )
+    """Render one turn's plan, degraded-memory notice, and step disposition.
 
-    plan = turn.plan
-    if plan.rationale:
-        console.print(f"[bold]Plan:[/] {_safe(plan.rationale)}")
-    if not plan.steps:
-        console.print("[dim]No action was needed.[/]")
-    for index, planned in enumerate(plan.steps, start=1):
-        console.print(f"  {index}. {_safe(planned.intent)} [dim]({_safe(planned.capability)})[/]")
+    ``outcome.turn`` is ``None`` on a resume driven from a **recovered** park
+    (ADR-0052 §3) — a confirmation reconstructed from durable state after a restart
+    has no live turn to render — so only the step disposition is shown there. The
+    action itself was already shown from the recovered confirmation before the user
+    answered.
+    """
+    turn = outcome.turn
+    if turn is not None:
+        if turn.memory_degraded:
+            console.print(
+                "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
+            )
+        plan = turn.plan
+        if plan.rationale:
+            console.print(f"[bold]Plan:[/] {_safe(plan.rationale)}")
+        if not plan.steps:
+            console.print("[dim]No action was needed.[/]")
+        for index, planned in enumerate(plan.steps, start=1):
+            console.print(
+                f"  {index}. {_safe(planned.intent)} [dim]({_safe(planned.capability)})[/]"
+            )
 
     step = outcome.step
     if step is not None and step.confirmation is None:

@@ -151,7 +151,7 @@ def _engine(
         now=lambda: AT,
         id_factory=lambda: next(ids),
     )
-    return Engine(loop=loop, runner=runner, plans=plans, closers=closers)
+    return Engine(loop=loop, runner=runner, plans=plans, trail=trail, closers=closers)
 
 
 # --- rendering: escaping is the adapter's, per target (ADR-0042 §4) ------
@@ -246,6 +246,54 @@ async def test_ask_surfaces_an_error_with_a_nonzero_exit(output: StringIO) -> No
     )
     assert code == 1
     assert "Error" in output.getvalue()
+    await engine.aclose()
+
+
+# --- resume: answering a durably-parked confirmation (ADR-0052) ---------
+
+
+async def test_resume_reports_nothing_awaiting_when_no_park_exists(output: StringIO) -> None:
+    """With no durably-parked confirmation, ``resume`` says so and exits 0."""
+    engine = _engine(tools=(confirmable(),))
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
+    assert code == 0
+    assert "Nothing is awaiting confirmation" in output.getvalue()
+    await engine.aclose()
+
+
+async def test_resume_recovers_a_park_prompts_and_relays_the_token(output: StringIO) -> None:
+    """A step parked by an earlier turn is recovered, shown, approved, and run (§1)."""
+    engine = _engine(tools=(confirmable(),))
+    # Park a confirmation, then drop the in-process token (as a restart would).
+    parked = await engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.disposition is Disposition.AWAITING_CONFIRMATION
+    engine._parked.clear()
+
+    seen: list[Confirmation] = []
+
+    def approve(confirmation: Confirmation) -> bool:
+        seen.append(confirmation)
+        return True
+
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=approve)
+    assert code == 0
+    assert len(seen) == 1  # the recovered confirmation was presented for judgement
+    assert isinstance(seen[0].token, ContinuationToken)  # relayed opaquely
+    assert seen[0].tool_id == "smtp"
+    assert "Done" in output.getvalue()  # after approval the recovered step ran
+    await engine.aclose()
+
+
+async def test_resume_renders_a_recovered_refusal_as_declined(output: StringIO) -> None:
+    """Answering no to a recovered confirmation yields a DENY the CLI reports."""
+    engine = _engine(tools=(confirmable(),))
+    await engine.converse("send it", timeout=PATIENT)
+    engine._parked.clear()
+
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: False)
+    assert code == 0
+    assert "Declined" in output.getvalue()
     await engine.aclose()
 
 

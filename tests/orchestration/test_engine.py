@@ -187,6 +187,7 @@ class Harness:
             loop=loop,
             runner=runner,
             plans=self.plans,
+            trail=self.trail,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
         )
@@ -205,6 +206,7 @@ async def test_converse_with_no_step_ends_at_the_plan() -> None:
     outcome = await harness.engine.converse("hello", timeout=PATIENT)
     assert isinstance(outcome, TurnOutcome)
     assert outcome.step is None
+    assert outcome.turn is not None  # a converse always carries its turn
     assert outcome.turn.plan.steps == ()
     assert outcome.turn.memory_degraded is False
     # A no-action decision is still a decision: its goal and plan are persisted as
@@ -254,6 +256,7 @@ async def test_converse_surfaces_degraded_memory() -> None:
     """A retrieval failure is reported on the outcome, not swallowed (§3)."""
     harness = Harness(tools=(tool(),), memory=RaisingMemoryStore(now=lambda: AT))
     outcome = await harness.engine.converse("send it", timeout=PATIENT)
+    assert outcome.turn is not None
     assert outcome.turn.memory_degraded is True
 
 
@@ -308,7 +311,9 @@ async def test_resume_approved_executes_the_parked_step() -> None:
     assert resumed.step is not None
     assert resumed.step.disposition is Disposition.EXECUTED
     assert resumed.step.state.step("step-1").status is StepStatus.SUCCEEDED  # type: ignore[union-attr]
-    # The resumed turn carries the parked turn's own plan.
+    # The resumed turn carries the parked turn's own plan (in-process resume).
+    assert resumed.turn is not None
+    assert parked.turn is not None
     assert resumed.turn.plan == parked.turn.plan
 
 
@@ -350,6 +355,110 @@ async def test_the_token_is_opaque_process_scoped_state() -> None:
     second = Harness(tools=(confirmable(),))
     with pytest.raises(PlanningError):
         await second.engine.resume(token, approved=True, timeout=PATIENT)
+
+
+# --- durable recovery of a parked confirmation (ADR-0052) ---------------
+
+
+def _fresh_facade(harness: Harness) -> Engine:
+    """A new ``Engine`` over ``harness``'s durable state, with an empty in-process table.
+
+    The fakes are the same instances, so plan/execution state and the audit trail
+    persist — this stands in for a restarted process whose ``_parked`` table starts
+    empty (ADR-0052 §1). It reuses the harness's stage objects, which already hold
+    the same ``plans`` and ``trail``.
+    """
+    return Engine(
+        loop=harness.engine._loop,
+        runner=harness.engine._runner,
+        plans=harness.plans,
+        trail=harness.trail,
+        id_factory=lambda: next(harness.handles),
+    )
+
+
+async def test_pending_confirmations_is_empty_when_nothing_is_parked() -> None:
+    """A turn that executed outright leaves nothing awaiting an answer (ADR-0052 §1)."""
+    harness = Harness(tools=(tool(),))
+    executed = await harness.engine.converse("send it", timeout=PATIENT)
+    assert executed.step is not None
+    assert executed.step.disposition is Disposition.EXECUTED
+    assert await harness.engine.pending_confirmations() == []
+
+
+async def test_pending_confirmations_recovers_a_park_for_a_fresh_facade() -> None:
+    """A durably-parked step is recoverable via a fresh façade — the #287 fix (ADR-0052)."""
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.disposition is Disposition.AWAITING_CONFIRMATION
+    original = parked.step.confirmation
+    assert original is not None
+
+    # A fresh façade over the same durable state has no in-process token at all.
+    fresh = _fresh_facade(harness)
+    assert fresh._parked == {}
+
+    pending = await fresh.pending_confirmations()
+    assert len(pending) == 1
+    recovered = pending[0]
+    # The content is reconstructed from durable state: tool and reason from the
+    # recorded CONFIRM, parameters from the plan step.
+    assert recovered.tool_id == "smtp"
+    assert recovered.tool_description == "Send an email."
+    assert dict(recovered.parameters) == PARAMETERS
+    assert recovered.reason == original.reason
+
+    resumed = await fresh.resume(recovered.token, approved=True, timeout=PATIENT)
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
+    # A recovered resume has no live turn — context and memories were never persisted.
+    assert resumed.turn is None
+    assert resumed.step.state.step("step-1").status is StepStatus.SUCCEEDED  # type: ignore[union-attr]
+
+
+async def test_pending_confirmations_is_idempotent_and_bounded() -> None:
+    """Repeated recovery yields stable tokens and mints no duplicate entry (ADR-0052 §2)."""
+    harness = Harness(tools=(confirmable(),))
+    await harness.engine.converse("send it", timeout=PATIENT)
+    fresh = _fresh_facade(harness)
+
+    first = await fresh.pending_confirmations()
+    second = await fresh.pending_confirmations()
+    assert [c.token for c in first] == [c.token for c in second]  # stable tokens
+    assert len(fresh._parked) == 1  # the same binding is reused, not re-minted
+
+
+async def test_a_recovered_confirmation_resolved_is_no_longer_presented() -> None:
+    """Once answered, a recovered park is not re-presented (ADR-0044 §2b via ADR-0052)."""
+    harness = Harness(tools=(confirmable(),))
+    await harness.engine.converse("send it", timeout=PATIENT)
+    fresh = _fresh_facade(harness)
+
+    pending = await fresh.pending_confirmations()
+    assert len(pending) == 1
+    denied = await fresh.resume(pending[0].token, approved=False, timeout=PATIENT)
+    assert denied.step is not None
+    assert denied.step.disposition is Disposition.DENIED
+
+    # The binding is decided; recovery presents nothing further.
+    assert await fresh.pending_confirmations() == []
+
+
+async def test_pending_confirmations_recovers_a_dropped_in_process_token() -> None:
+    """A park whose token was dropped in the *same* process is still recoverable (#287)."""
+    harness = Harness(tools=(confirmable(),))
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+    assert outcome.step is not None
+    # Simulate the token being lost/dropped before it reached the adapter: clear the
+    # engine's own table. The step is still durably parked in the plan store.
+    harness.engine._parked.clear()
+
+    pending = await harness.engine.pending_confirmations()
+    assert len(pending) == 1
+    resumed = await harness.engine.resume(pending[0].token, approved=True, timeout=PATIENT)
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED
 
 
 # --- shutdown: drain, then close in order (ADR-0042 §2) -----------------
@@ -632,6 +741,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
+        trail=harness.trail,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
     )
@@ -690,6 +800,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
+        trail=harness.trail,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
     )
@@ -714,6 +825,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             loop=harness.engine._loop,
             runner=harness.engine._runner,
             plans=harness.plans,
+            trail=harness.trail,
             max_outstanding_confirmations=0,
         )
 
@@ -727,6 +839,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             loop=harness.engine._loop,
             runner=harness.engine._runner,
             plans=harness.plans,
+            trail=harness.trail,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
         )
 
