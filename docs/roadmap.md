@@ -187,12 +187,19 @@ when a user can exercise it, not when a test can.
   central claim — it learns from your corrections — is currently test-only.
 - **Production memory retrieval is not semantic.** The composition root wires
   the deterministic test embedder (see the `Embedder` entry).
-- **No tool exercises the permission path in practice.** Both local tools
-  (`report_current_time`, `recall_memory`) are read-only and low-risk, so
-  `ThresholdActionPolicy` never returns `CONFIRM` in real use and the durable
-  park/resume machinery (ADR-0044/0052/0059) runs only under test.
-- **No ranking among capable tools** (#241), so a second tool advertising a
-  capability makes selection arbitrary rather than reasoned.
+- **No consequential tool.** The permission path itself *is* exercised in
+  practice — `current_time` is `LOW` risk and runs straight through, while
+  `recall_memory` is `MEDIUM` and so parks for confirmation under the default
+  `confirm_at_risk`, driving the durable park/resume machinery
+  (ADR-0044/0052/0059) for real. What no local tool exercises is the rest of the
+  scale: both are read-only and `REVERSIBLE`, so nothing writes, nothing is
+  irreversible, nothing discloses, and the `confirm_at_reversibility` floor and
+  the egress rule have no live case.
+- **No ranking among capable tools** (#241). Selection is not arbitrary when two
+  tools match — `StepRunner` returns `AMBIGUOUS_CAPABILITY` and leaves the step
+  `PENDING`, deliberately writing nothing (ADR-0037 §1). The consequence is that
+  a second tool advertising a capability *stalls* the step instead of resolving
+  it; ranking is the missing mechanism.
 - **Context has one facet.** `ClockContextSource` only — no calendar, tasks,
   location, device, or attention source, so "whether to act at all" is decided
   on time of day alone.
