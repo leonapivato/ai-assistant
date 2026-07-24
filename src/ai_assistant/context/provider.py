@@ -114,17 +114,25 @@ def _first_failure(
     order rather than completion order is chosen because it is deterministic and
     matches the merge loop.
 
-    A cancelled task is reported as a fresh ``CancelledError``, exactly as
-    ``gather`` propagated a cancelled child. This matters because
-    ``asyncio.wait(return_when=FIRST_EXCEPTION)`` does **not** treat a cancelled
-    task as a raised exception — it would keep waiting on the suppressing sibling
-    forever — so the caller loops on ``FIRST_COMPLETED`` and scans for the
-    cancelled task explicitly (issue #231's regression, caught in review).
+    A cancelled task propagates its *own* ``CancelledError`` — with its args and
+    cause intact, exactly as ``gather`` propagated a cancelled child — recovered
+    by letting ``task.result()`` re-raise it rather than fabricating a blank one.
+    This branch matters because ``asyncio.wait(return_when=FIRST_EXCEPTION)`` does
+    **not** treat a cancelled task as a raised exception — it would keep waiting
+    on a suppressing sibling forever — so the caller loops on ``FIRST_COMPLETED``
+    and scans for the cancelled task explicitly (issue #231's regression, caught
+    in review).
     """
     for task in tasks:
         if not task.done():
             continue
         if task.cancelled():
+            try:
+                task.result()
+            except asyncio.CancelledError as cancelled_exc:
+                return cancelled_exc
+            # A cancelled task's result() always re-raises; keep the function
+            # total for the type checker in the branch that cannot be reached.
             return asyncio.CancelledError()
         exc = task.exception()
         if exc is not None:
