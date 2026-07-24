@@ -1,13 +1,15 @@
 # 59. A durable, robust confirmation record: a lifetime deadline, resolution recovery, and the legacy park narrowed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-24
 - **This is a contract change.** It adds a field to `PermissionDecision` in
   `core/types.py` (with a matching parameter on `PermissionDecision.from_request`
   and a validator), and adds one query method to the `AuditTrail` Protocol in
   `core/protocols.py`. Golden rule 5 therefore governs it: **the contract must be
-  ratified — this ADR must be flipped to `Accepted` (it stands `Proposed` on this
-  PR) — and merged as its own PR before anything implements against it**. The
+  ratified — this ADR flipped to `Accepted` and merged as its own PR — before
+  anything implements against it. This PR is that ratification: it flips the
+  status to `Accepted`, leaving the contract surface reviewed at `Proposed`
+  byte-for-byte unchanged.** The
   implementation lands later as a triad — the extended `AuditTrail` conformance
   suite, the updated `FakeAuditTrail`, and `SqliteAuditTrail` (with a nullable-
   column migration) — one unit of work, plus the within-contract `orchestration`
@@ -15,18 +17,18 @@
   `core/protocols.py` are the two highest-collision files in the repository, so
   the dispatcher sequences the implementation wave against other `core/` work
   (CONTRIBUTING's "two agents needing `core/` at once are not independent").
-- **Status is `Proposed` on this PR, deliberately, and is the gate — not the
-  authorisation — for the triad.** This ADR proposes the contract surface for a
-  design question earlier ADRs deferred (ADR-0037 §4, ADR-0044); it does not
-  implement it, and while it stands `Proposed` it does **not** authorise the
-  implementation. Golden rule 5's ratified-before-implementation ordering is
-  satisfied by the flip to `Accepted` that ratifies this surface (the review-then-
-  ratify step CONTRIBUTING's "Contract ADRs land before their implementation"
-  describes); only then may the triad land. So no triad implements against a
-  merely-`Proposed` contract — ratification is the explicit intervening gate. The
-  surface is stated precisely enough to review and ratify, and precise enough that
-  the triad has no open design fork to settle beyond the storage mechanics each ADR
-  already leaves to its implementer.
+- **Ratification is the gate — not the authorisation — for the triad.** This ADR
+  proposed the contract surface for a design question earlier ADRs deferred
+  (ADR-0037 §4, ADR-0044); it does not implement it, and while it stood `Proposed`
+  it did **not** authorise the implementation. Golden rule 5's
+  ratified-before-implementation ordering is satisfied by this flip to `Accepted`,
+  which ratifies the surface (the review-then-ratify step CONTRIBUTING's "Contract
+  ADRs land before their implementation" describes); only now may the triad land.
+  So no triad implemented against a merely-`Proposed` contract — ratification was
+  the explicit intervening gate, and this PR is it. The surface was stated
+  precisely enough to review and ratify, and precise enough that the triad has no
+  open design fork to settle beyond the storage mechanics each ADR already leaves
+  to its implementer.
 
 ## Context
 
@@ -710,10 +712,10 @@ and is deferred to a follow-up (§Consequences).
   trail does not yet carry, to hold no resolution — is likewise a deferred
   follow-up, constrained by those hazards. **Follow-up issues to file: the
   cancellation/reclamation sweep, and the guarded re-park.**
-- **This is a contract change and lands in stages (golden rule 5).** This ADR is
-  reviewed at `Proposed`, then ratified — flipped to `Accepted` — and merged as
-  its own contract-only PR ahead of the implementation; nothing is built against
-  it while it is merely `Proposed` (header). The implementation follows as a triad
+- **This is a contract change and lands in stages (golden rule 5).** This ADR was
+  reviewed at `Proposed`, then ratified — flipped to `Accepted` by this
+  contract-only PR — and merged ahead of the implementation; nothing is built
+  against it while it is merely `Proposed` (header). The implementation follows as a triad
   — the extended
   `AuditTrail` conformance suite, `FakeAuditTrail`, and `SqliteAuditTrail`
   implementing `resolution_of` — together with the `PermissionDecision` field and
