@@ -168,13 +168,17 @@ class SqlitePlanStore:
         return conn
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
-        """Write the version and counter on a fresh DB, or refuse a newer one.
+        """Write the version and counter on a fresh DB, or refuse any other version.
 
-        Runs inside the setup transaction. A database whose ``schema_version``
-        exceeds this code's is refused with ``PlanningError`` *before any record
-        is read or written* — a downgrade is a fault to report, not a best-effort
-        read (ADR-0049 §1), matching how the audit trail treats a row that no
-        longer validates.
+        Runs inside the setup transaction. ADR-0049 §1 makes v1 the first and only
+        on-disk schema — a fresh database is the sole prior state — so a stored
+        ``schema_version`` that is anything *other than* the supported one, newer
+        **or** older, is refused with ``PlanningError`` *before any record table is
+        created, read, or written*. There is no migration yet, and an older label
+        on an incompatible ``goals`` table would otherwise construct successfully
+        and only fail on the first query with a raw "no such column" — a fault to
+        report at open, not defer, matching how the audit trail treats a row that
+        no longer validates.
         """
         existing = dict(conn.execute("SELECT key, value FROM meta").fetchall())
         stored = existing.get("schema_version")
@@ -183,10 +187,10 @@ class SqlitePlanStore:
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                 (str(_SCHEMA_VERSION),),
             )
-        elif self._meta_int("schema_version", stored) > _SCHEMA_VERSION:
+        elif self._meta_int("schema_version", stored) != _SCHEMA_VERSION:
             msg = (
-                f"the plan store at {self._path!r} was written by a newer version "
-                f"(schema_version={stored}, this code understands {_SCHEMA_VERSION}); "
+                f"the plan store at {self._path!r} has schema_version={stored}, but this "
+                f"code supports only version {_SCHEMA_VERSION} and has no migration; "
                 f"refusing to open it rather than read it blindly"
             )
             raise PlanningError(msg)
