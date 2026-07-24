@@ -172,35 +172,40 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
     value that reaches the commit is one nothing else holds a reference to, so it
     cannot be edited between revalidation and the write.
 
-    **Only an exact ``ToolResult`` is trusted; a subclass is unusable.** The
-    revalidation reads the value's *own* ``model_dump`` — an overridable instance
-    method — so a subclass could override it to return a valid-but-false dict
-    (an ``INDETERMINATE`` result dumping as ``{"outcome": "succeeded", ...}``),
-    and ``model_validate`` would then mint a genuine ``SUCCEEDED`` result the
-    executor commits: a forged outcome, not merely a rejected one. It could also
-    override ``model_dump`` to raise. So the type is checked *before* any
-    overridable method runs — ``type(result) is ToolResult``, not
-    ``isinstance`` — and anything that is not exactly a ``ToolResult`` (a
-    subclass, a ``None`` or other object a non-conforming seam returned) is
-    unusable. ADR-0029 §3 has the seam return a ``ToolResult``; the executor
-    records the contract type and nothing that only claims to be one.
+    **Only an exact ``ToolResult`` is trusted, and it is serialized through the
+    *class*, never the instance.** Two ``__dict__`` bypasses have to be closed,
+    not one. A *subclass* could override ``model_dump``/validators to forge or to
+    raise, so the type is checked before anything else — ``type(result) is
+    ToolResult``, not ``isinstance`` — and a subclass, a ``None`` or any other
+    object a non-conforming seam returned fails it. But an *exact* ``ToolResult``
+    can still shadow the method per-instance: ``result.__dict__["model_dump"]`` is
+    an ordinary attribute, and a plain method loses to the instance dict, so
+    ``result.model_dump(...)`` would call an injected callable returning a
+    valid-but-false ``{"outcome": "succeeded", ...}`` for a genuinely
+    ``INDETERMINATE`` result — a forged commit past the type gate. So the
+    serialization goes through ``ToolResult.__pydantic_serializer__`` — the class
+    serializer, resolved on the class and reading ``result``'s *field values*
+    directly — which consults no instance attribute and is inert to a shadowed
+    ``model_dump`` or ``__pydantic_serializer__``. ADR-0029 §3 has the seam return
+    a ``ToolResult``; the executor records the contract type, serialized by the
+    contract's own code.
 
-    **The revalidation is then total over a genuine instance tampered past
-    ``frozen=True``.** Past the type gate ``model_dump`` is the real serializer,
-    but a ``__dict__``-injected field can still hold an object whose own
-    serialization raises. Every ordinary exception from the round-trip is caught
-    and reported as "unusable", so such a value cannot strand the claim either.
+    **The round-trip is then total over a genuine instance tampered past
+    ``frozen=True``.** The class serializer reads the actual field values, so a
+    ``__dict__``-injected ``outcome`` or ``failure`` is what ``model_validate``
+    sees and rejects; a field holding an object whose own serialization raises is
+    caught. Every ordinary exception from the round-trip is reported as "unusable"
+    rather than allowed to strand the claim.
 
     **``asyncio.CancelledError`` is caught too, and only because this body is
     synchronous.** The event loop delivers a genuine task cancellation at an
-    ``await``, and there is none here — the revalidation is two synchronous
-    pydantic calls. A ``CancelledError`` surfacing from serializing a
-    ``__dict__``-injected field can therefore only have been raised by that
-    untrusted object, i.e. forged, and letting it propagate would strand the
-    claimed step by masquerading as a teardown that is not happening. A *real*
-    cancellation of the executing task is unaffected: it is delivered at the next
-    ``await`` — the commit — where :meth:`_commit_shielded` still lands the write
-    and re-raises. ``KeyboardInterrupt`` and ``SystemExit`` are deliberately
+    ``await``, and there is none here — the serialize-then-validate is synchronous.
+    A ``CancelledError`` surfacing from it can therefore only have been raised by
+    the untrusted value's own code, i.e. forged, and letting it propagate would
+    strand the claimed step by masquerading as a teardown that is not happening. A
+    *real* cancellation of the executing task is unaffected: it is delivered at the
+    next ``await`` — the commit — where :meth:`_commit_shielded` still lands the
+    write and re-raises. ``KeyboardInterrupt`` and ``SystemExit`` are deliberately
     *not* named, so a real process signal still propagates. This does not replace
     the seam's contract to return a valid result and is not meant to.
 
@@ -214,10 +219,15 @@ def _detached_result(result: ToolResult) -> ToolResult | None:
         # before any overridable method is called.
         return None
     try:
-        # `warnings=False`: serializing a `__dict__`-tampered enum value emits a
+        # Serialize via the *class* serializer, never `result.model_dump`: a plain
+        # method loses to `result.__dict__["model_dump"]`, so an exact ToolResult
+        # could shadow it to forge a valid dict past the type gate. The class
+        # serializer reads the field values and consults no instance attribute.
+        # `warnings=False`: a `__dict__`-tampered enum serializes with a
         # `PydanticSerializationUnexpectedValue` warning that is noise here — the
-        # round-trip's `model_validate` is what rejects it, by return.
-        return ToolResult.model_validate(result.model_dump(warnings=False))
+        # `model_validate` is what rejects it, by return.
+        dumped = ToolResult.__pydantic_serializer__.to_python(result, warnings=False)
+        return ToolResult.model_validate(dumped)
     except Exception, asyncio.CancelledError:
         # Total over a genuine instance tampered past `frozen=True` (see
         # docstring). CancelledError is named because this body is synchronous:

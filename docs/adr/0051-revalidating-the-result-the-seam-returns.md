@@ -199,6 +199,11 @@ once this lands (ADR-0029 §9's test).
   returns a valid `SUCCEEDED` dict for an `INDETERMINATE` instance closes
   `INDETERMINATE`, *not* `SUCCEEDED`. Testing only overrides that raise would
   leave the forgery that does not raise — the worst case — uncovered.
+- **The instance-shadow forgery is pinned too**: an *exact* `ToolResult` with
+  `__dict__["model_dump"]` set to a callable returning a valid `SUCCEEDED` dict is
+  recorded as its true `INDETERMINATE` outcome — the class serializer ignores the
+  shadow. This is the case the exact-type gate alone does not catch, which is why
+  the serialization path is class-level, not `result.model_dump`.
 - **The revalidation is total over a genuine tampered instance**: a
   `__dict__`-injected field whose serialization raises an ordinary exception, or a
   (necessarily forged) `asyncio.CancelledError`, closes `INDETERMINATE` rather
