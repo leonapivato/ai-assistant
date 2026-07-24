@@ -192,6 +192,89 @@ async def test_user_assertion_supersedes_the_inference_it_contradicts() -> None:
     assert exported["stale"].validity.valid_until is not None
 
 
+async def test_a_correction_retires_every_conflicting_inference_not_only_the_best_ranked() -> None:
+    # ADR-0050 §1 (#244): a correction that contradicts *several* stale inferences
+    # must retire the whole set in one supersession, not just the policy's best-ranked
+    # target — otherwise the second and third stale belief stay live on the read path,
+    # the exact leak issue #244 reports. Asserted end to end: which windows closed is
+    # a property of the store.
+    store = InMemoryMemoryStore()
+    for stale_id in ("morning", "early", "dawn"):
+        await store.add(
+            _preference(
+                stale_id,
+                "user prefers morning meetings",
+                confidence=0.6,
+                source=MemorySource.INFERRED,
+            )
+        )
+    # An EXTERNAL conflict on the same topic: warranted to supersede at the writer
+    # floor (ADR-0045 §5b) but held out of the auto-retire set, because adopting
+    # EXTERNAL supersession is a separate deferred choice (ADR-0050 §1). It must stay
+    # live.
+    await store.add(
+        _preference(
+            "imported", "user prefers noon meetings", confidence=1.0, source=MemorySource.EXTERNAL
+        )
+    )
+    # A low threshold so all four near-duplicates are detected (they score at the
+    # default 0.75 boundary; the headroom keeps the test off the knife-edge).
+    ingestor = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        id_factory=lambda: "corrected",
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert result.record_id == "corrected"
+    # Every inferred belief on the topic is retired: off the read path, retained.
+    for retired_id in ("morning", "early", "dawn"):
+        assert await store.get(retired_id) is None
+    # The EXTERNAL conflict is NOT swept in — still live.
+    assert await store.get("imported") is not None
+    # The correction is live; the whole retained set is the four originals plus it.
+    assert await store.get("corrected") is not None
+    exported = {record.id: record for record in await store.export()}
+    assert set(exported) == {"morning", "early", "dawn", "imported", "corrected"}
+    for retired_id in ("morning", "early", "dawn"):
+        assert exported[retired_id].validity.valid_until is not None
+    # The one the policy did not name still closed on the same instant as the named
+    # target — one atomic close, not a partial one.
+    closes = {exported[i].validity.valid_until for i in ("morning", "early", "dawn")}
+    assert len(closes) == 1
+    assert exported["imported"].validity.valid_until is None  # never retired
+
+
+async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_nothing() -> None:
+    # ADR-0050 §2 (#245): a user assertion that contradicts a prior *assertion* is
+    # deferred to the user (ASK_USER). Neither is destroyed on a topical-similarity
+    # signal (ADR-0045 §5 / clause 1), and the new one is not silently committed
+    # beside the old — so the profile never holds two live contradictory assertions.
+    store = InMemoryMemoryStore()
+    await store.add(_asserted("earlier", "user works from the Berlin office"))
+
+    result = await _ingestor(store).ingest(
+        _proposal(_asserted("later", "user works from the Munich office"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.ASK_USER
+    assert result.record_id is None
+    # Nothing written: the earlier assertion is untouched and still live, the new one
+    # is not stored. The contradiction is surfaced for the user to resolve, not
+    # resolved by the heuristic.
+    earlier = await store.get("earlier")
+    assert earlier is not None
+    assert earlier.validity.valid_until is None
+    assert await store.get("later") is None
+    assert {record.id for record in await store.export()} == {"earlier"}
+
+
 @pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
 async def test_a_superseded_targets_hiding_is_read_time_relative(
     backend: str, tmp_path: Path

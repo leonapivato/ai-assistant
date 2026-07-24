@@ -207,6 +207,48 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
     return minted
 
 
+def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list[MemoryRecord]:
+    """The full set of conflicting beliefs a ``SUPERSEDE`` retires (ADR-0050 §1, #244).
+
+    A ``SUPERSEDE`` names the *relation* — the proposal overturns the belief the
+    conflict set holds — not a single record (ADR-0040 §1). Every entry in
+    ``conflicts`` is a same-kind, at-or-above-threshold contradiction the proposal
+    just displaced, so retiring only the policy's best-ranked ``target`` would leave
+    a second and third stale belief on the same topic live: exactly the honesty gap
+    issue #244 reports. The applier therefore closes the window of the target **and**
+    of every other conflict it is *warranted* to retire.
+
+    The set is the named ``target`` plus every other conflict whose source is in
+    :data:`_SUPERSEDABLE` (``OBSERVED``/``INFERRED``) — the derived beliefs a
+    correction may displace. Two sources are held out of the *widening* on purpose:
+
+    - ``USER_ASSERTED`` conflicts are never swept in — clause 1 stands, record-keyed,
+      for both rulings (ADR-0045 §5): topical similarity may not retire a record the
+      user gave us. ``DefaultMemoryPolicy`` never even reaches ``SUPERSEDE`` with an
+      asserted conflict present (it rules ``ASK_USER``, ADR-0050 §2), but the applier
+      excludes them regardless, since it takes rulings from any injected policy.
+    - ``EXTERNAL`` conflicts are not auto-retired even though ADR-0045 §5b now permits
+      an ``EXTERNAL`` supersession at the writer floor. Adopting ``EXTERNAL``
+      supersession is a separate, still-deferred policy choice (ADR-0045 §5/§7); the
+      widening stays within the ``{OBSERVED, INFERRED}`` class ``DefaultMemoryPolicy``
+      already supersedes. An ``EXTERNAL`` target a custom policy *names* is still
+      retired — it is the explicit ``target`` — but sibling ``EXTERNAL`` conflicts are
+      left live.
+
+    ``target`` leads the list (it is the primary the policy named and
+    ``MemoryDecision`` audits); order among the rest follows ``conflicts`` (retrieval
+    score), so the batch is deterministic. This needs no ``target_id`` widening in
+    ``core`` — closing N windows is N atomic upserts, exactly what issue #244 and
+    ADR-0045 §7 said the validity window makes possible without growing the contract.
+    """
+    others = [
+        conflict
+        for conflict in conflicts
+        if conflict.id != target.id and conflict.provenance.source in _SUPERSEDABLE
+    ]
+    return [target, *others]
+
+
 def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
     """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
 
@@ -462,72 +504,89 @@ class MemoryIngestor:
                 _refuse_unsafe_fold(target, proposed, decision.kind)
                 # Past the refusal, the ruling names the relation, so the ingestor
                 # no longer reads provenance to recover it (ADR-0040 §3): SUPERSEDE
-                # retires the target (window-close) and writes the correction as a
-                # new record, REINFORCE folds the two at the target's id.
+                # retires the contradicted belief (window-close) and writes the
+                # correction as a new record, REINFORCE folds the two at the target's
+                # id.
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    return await self._apply_supersede(target, proposed)
+                    return await self._apply_supersede(_retirement_set(target, conflicts), proposed)
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
 
-    async def _apply_supersede(self, target: MemoryRecord, proposed: MemoryRecord) -> str:
-        """Close ``target``'s window and write ``proposed`` as a new record (ADR-0045 §4).
+    async def _apply_supersede(self, targets: list[MemoryRecord], proposed: MemoryRecord) -> str:
+        """Close every ``target``'s window and write ``proposed`` as a new record.
 
-        The two writes are one atomic batch — ``[UPSERT(T_closed),
-        INSERT_IF_ABSENT(P_new)]`` — via :meth:`MemoryStore.write_atomic` (ADR-0046),
-        so a failure between them cannot leave the target retired with no live
-        replacement (the regression ADR-0045 §8 refused to ship). The correction's
-        id is minted by the guarded id factory and written insert-if-absent, so a
-        collision with any stored record — the retained target included — is
-        *rejected*, not clobbered; on the resulting
+        ``targets`` is the full conflicting set a ``SUPERSEDE`` retires
+        (:func:`_retirement_set`, ADR-0050 §1 / #244): the policy's best-ranked
+        target leads, followed by every other supersedable conflict the correction
+        contradicts. All of them plus the correction are one atomic batch —
+        ``[UPSERT(T_closed) for each target] + [INSERT_IF_ABSENT(P_new)]`` — via
+        :meth:`MemoryStore.write_atomic` (ADR-0046), so a failure part-way cannot
+        leave some beliefs retired with no live replacement (the regression ADR-0045
+        §8 refused to ship). Retiring N is as atomic and reversible-in-history as
+        retiring one, which is why closing N windows needs no ``target_id`` widening
+        in ``core`` (issue #244, ADR-0045 §7).
+
+        The correction's id is minted by the guarded id factory and written
+        insert-if-absent, so a collision with any stored record — every retained
+        target included — is *rejected*, not clobbered; on the resulting
         :class:`~ai_assistant.core.errors.MemoryStoreConflictError` the applier
         re-mints and retries, bounded by :data:`_MAX_SUPERSEDE_ATTEMPTS`. Any other
-        ``MemoryStoreError`` aborts with the target left **live and unchanged**,
-        because the atomic batch rolls the window-close back with it.
+        ``MemoryStoreError`` aborts with **every** target left **live and unchanged**,
+        because the atomic batch rolls all the window-closes back together.
 
-        The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), so
-        the retired target leaves the read path once the *store's* read clock
-        reaches it — the same read-time semantics ``expires_at`` has. In production
-        the store and this ingestor each *independently sample* the real wall clock
-        (neither is given a ``now`` in ``build_engine``), and a ``get`` after
-        ``ingest`` returns samples at or after the close — provided the wall clock
-        advances forward between the two — so the target is hidden. A store read that
-        samples *behind* the close (an injected test clock, or the wall clock
-        stepping backward between the two samples) keeps it briefly visible, exactly
-        as a backward step un-expires an ``expires_at`` record — a read-time-filtering
-        property, not a supersession bug (issue #306 tracks an absolute guarantee).
+        The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), so a
+        retired target leaves the read path once the *store's* read clock reaches it —
+        the same read-time semantics ``expires_at`` has. In production the store and
+        this ingestor each *independently sample* the real wall clock (neither is
+        given a ``now`` in ``build_engine``), and a ``get`` after ``ingest`` returns
+        samples at or after the close — provided the wall clock advances forward
+        between the two — so the target is hidden. A store read that samples *behind*
+        the close (an injected test clock, or the wall clock stepping backward between
+        the two samples) keeps it briefly visible, exactly as a backward step
+        un-expires an ``expires_at`` record — a read-time-filtering property, not a
+        supersession bug (issue #306 tracks an absolute guarantee).
 
         Returns:
-            The **live** record's id — the correction's freshly-minted id, not the
-            target's (ADR-0045 §4).
+            The **live** record's id — the correction's freshly-minted id, not any
+            retired target's (ADR-0045 §4).
 
         Raises:
-            MemoryStoreError: If the id factory is malformed (:func:`_checked_id`),
-                if the bounded re-mint cannot find a free id, or on any other store
-                failure — in every case the target is left live and unchanged.
+            MemoryStoreError: If the id factory is malformed (:func:`_checked_id`), if
+                a target's window cannot be closed (:func:`_close_window`), if the
+                bounded re-mint cannot find a free id, or on any other store failure —
+                in every case every target is left live and unchanged.
         """
-        closed_target = _close_window(target, self._now_utc())
+        # Close every target's window up front, before any write: a `_close_window`
+        # that refuses (a future-dated `valid_from`, issue #306) then aborts the whole
+        # supersession with nothing written and every target still live.
+        now = self._now_utc()
+        closed = [_close_window(target, now) for target in targets]
+        retired_ids = {target.id for target in targets}
         last_conflict: MemoryStoreConflictError | None = None
         for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
             new_id = _checked_id(self._id_factory, owner="MemoryIngestor")
-            if new_id == target.id:
-                # The minted id names the retained target itself — a *stored* id, so
+            if new_id in retired_ids:
+                # The minted id names one of the retained targets — a *stored* id, so
                 # it must be re-minted (ADR-0045 §4: the absent-id obligation covers
-                # "the retained target T included"). Writing it would make the batch
-                # two writes to one id, which `write_atomic` rejects as a hard
+                # "the retained target included"). Writing it would make the batch two
+                # writes to one id, which `write_atomic` rejects as a hard
                 # `MemoryStoreError` (repeated id, ADR-0046 §3) rather than the
                 # retryable conflict this is, aborting a re-mint the ADR requires.
                 last_conflict = MemoryStoreConflictError(
-                    f"minted id {new_id!r} names the superseded target; re-minting"
+                    f"minted id {new_id!r} names a superseded target; re-minting"
                 )
                 continue
             batch = [
-                MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT),
+                MemoryWrite(record=closed_target, mode=MemoryWriteMode.UPSERT)
+                for closed_target in closed
+            ]
+            batch.append(
                 MemoryWrite(
                     record=_supersede(proposed, new_id),
                     mode=MemoryWriteMode.INSERT_IF_ABSENT,
-                ),
-            ]
+                )
+            )
             try:
                 await self._store.write_atomic(batch)
             except MemoryStoreConflictError as exc:
@@ -535,8 +594,8 @@ class MemoryIngestor:
                 continue
             return new_id
         msg = (
-            f"supersession could not mint a free id for a correction to {target.id!r} "
-            f"after {_MAX_SUPERSEDE_ATTEMPTS} attempts; the target is left live and unchanged"
+            f"supersession could not mint a free id for a correction to {retired_ids!r} "
+            f"after {_MAX_SUPERSEDE_ATTEMPTS} attempts; the targets are left live and unchanged"
         )
         raise MemoryStoreError(msg) from last_conflict
 
