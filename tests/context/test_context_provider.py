@@ -830,7 +830,7 @@ class _RequiredCancellingSource:
         return "cancels"
 
     async def contribute(self) -> Mapping[str, object]:
-        raise asyncio.CancelledError
+        raise asyncio.CancelledError("source cancelled mid-flight")
 
 
 class _OtherRequiredFailingSource:
@@ -856,7 +856,8 @@ async def test_a_required_source_ending_in_cancellation_still_drains_and_propaga
     required source raising ``CancelledError`` beside a source that suppresses
     cancellation would hang the assembler. Looping on ``FIRST_COMPLETED`` and
     treating the cancelled task as terminal drains the sibling within the budget
-    and propagates the cancellation.
+    and propagates the cancellation — with its payload intact, exactly as
+    ``gather`` did, not blanked into a fresh ``CancelledError``.
     """
     budget = 0.05
     monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", budget)
@@ -866,10 +867,11 @@ async def test_a_required_source_ending_in_cancellation_still_drains_and_propaga
     )
 
     started = time.monotonic()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as excinfo:
         await provider.assemble()
     elapsed = time.monotonic() - started
 
+    assert excinfo.value.args == ("source cancelled mid-flight",)  # payload preserved, not blanked
     assert elapsed < budget + 0.5  # bounded by the drain, not hung on the sibling
     assert stubborn.cancels >= 1
     assert len(provider_module._abandoned) == 1
