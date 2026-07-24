@@ -884,13 +884,12 @@ async def test_concurrent_required_failures_leave_no_unretrieved_exception() -> 
 
     ``_first_failure`` selects one exception in source order; a sibling that
     failed in the same turn must not be left for asyncio to report as "Task
-    exception was never retrieved" when it is garbage-collected. It is not,
-    because ``_drain`` cancels every task before the failure is re-raised and
-    ``asyncio.Task.cancel()`` marks an already-done task's exception retrieved
-    (it clears ``_log_traceback`` ahead of its done-check). This pins that
-    property — an implementation that stopped cancelling done siblings would
-    resurrect the warning. Verified through the loop's exception handler, since
-    the report only fires when the unretrieved task is collected.
+    exception was never retrieved" when it is garbage-collected.
+    ``_consume_pending_exceptions`` reads every completed sibling after the drain
+    so none is. Verified through the loop's exception handler, since the report
+    only fires when the unretrieved task is collected. (The neighbouring
+    during-drain tests cover the harder case where the sibling fails *after* the
+    drain begins.)
     """
     loop = asyncio.get_running_loop()
     unhandled: list[dict[str, object]] = []
@@ -907,6 +906,107 @@ async def test_concurrent_required_failures_leave_no_unretrieved_exception() -> 
         del provider
         gc.collect()  # force the tasks' __del__, which is what would report an unread exception
         await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert not any("never retrieved" in str(ctx.get("message", "")) for ctx in unhandled)
+
+
+class _RequiredFailsDuringCleanupSource:
+    """A required source that catches the drain's cancellation and raises anew.
+
+    Its task therefore completes *during* the drain with a fresh exception — not
+    a re-raised cancellation — which ``_drain``'s ``asyncio.wait`` observes
+    without reading. Unless that exception is consumed it is reported "never
+    retrieved" when the task is collected, and unlike a source that failed before
+    the drain it is not covered by ``Task.cancel()`` marking an already-done
+    task's exception read (it was still running when cancelled).
+    """
+
+    required = True
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    @property
+    def name(self) -> str:
+        return "cleanup-boom"
+
+    async def contribute(self) -> Mapping[str, object]:
+        self.started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            msg = "failed during cleanup, for a request already over"
+            raise RuntimeError(msg) from None
+        return {}
+
+
+async def test_a_sibling_that_fails_during_the_required_drain_is_still_observed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling that fails *during* the required-failure drain must be read.
+
+    The first required source fails; the second catches the drain's cancellation
+    and raises anew, completing within the budget. ``_first_failure`` reads only
+    the first, and ``_drain``'s ``asyncio.wait`` does not read the second — so
+    ``_consume_pending_exceptions`` must, or asyncio reports it "never retrieved"
+    once the task is collected.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.5)  # long enough to join the cleanup
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+    try:
+        cleanup = _RequiredFailsDuringCleanupSource()
+        provider = AssemblingContextProvider(
+            [_RequiredFailingSource(), cleanup], source_timeout=None
+        )
+        with pytest.raises(RuntimeError, match="source down"):
+            await provider.assemble()
+
+        assert not provider_module._abandoned  # it finished inside the drain, so it was joined
+        del provider
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert not any("never retrieved" in str(ctx.get("message", "")) for ctx in unhandled)
+
+
+async def test_a_sibling_that_fails_during_a_caller_initiated_drain_is_still_observed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same, on the caller-cancellation drain entry path.
+
+    No required source fails here — the clock succeeds and the caller cancels
+    ``assemble()`` while the second source is blocked. The drain the cancellation
+    triggers cancels that source, which raises during cleanup; its exception must
+    be consumed on this path too.
+    """
+    monkeypatch.setattr(provider_module, "_DRAIN_SECONDS", 0.5)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: unhandled.append(ctx))
+    try:
+        cleanup = _RequiredFailsDuringCleanupSource()
+        provider = AssemblingContextProvider([_clock(), cleanup], source_timeout=None)
+        assembling = asyncio.ensure_future(provider.assemble())
+        async with asyncio.timeout(2):
+            await cleanup.started.wait()
+        assembling.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await assembling
+
+        assert not provider_module._abandoned  # it finished inside the drain, so it was joined
+        del provider, assembling
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
     finally:
         loop.set_exception_handler(previous)
 
