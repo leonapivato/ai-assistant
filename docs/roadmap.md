@@ -119,10 +119,14 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       query-only `ToolRegistry` that returns candidates without ranking them
       (ADR-0016). Settles ADR-0014's capability vocabulary as an open,
       registry-authoritative set. Since landed: invocation — the `ToolInvoker`
-      seam with parameter-schema enforcement and ADR-0004 §2's egress rule
-      (ADR-0029) — and the first local tools behind a default-registry factory
-      (ADR-0048). Still deferred: **ranking** — the registry returns capable
-      candidates unordered and there is no rule for choosing among several
+      seam, carrying ADR-0004 §2's egress rule (ADR-0029) — and the first local
+      tools behind a default-registry factory (ADR-0048). Still deferred:
+      **parameter-schema enforcement** — ADR-0029 §7 carries it forward for want
+      of a JSON Schema validator, so `parameters_schema` is declarative and the
+      invoker forwards parameters to the callable unchecked; the local tools
+      validate their own arguments, which is not the same guarantee. Also
+      **ranking** — the registry returns capable candidates unordered and there
+      is no rule for choosing among several
       (#241); ADR-0053's selection-time alias layer resolves a *synonym* onto an
       advertised capability, which is not ranking. Also deferred: registry
       persistence (only `InMemoryToolRegistry` exists) and per-call data reach.
@@ -130,8 +134,10 @@ Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
       rule table (`ThresholdActionPolicy`) whose user thresholds cannot configure
       it below the contract's floors, and a durable `SqliteAuditTrail` recording
       every decision (ADR-0021, ADR-0036). A `CONFIRM` binds durably to its
-      execution and is recoverable after a restart (ADR-0044), under a lifetime
-      deadline with resolution recovery (ADR-0059). Deferred from ADR-0004's
+      execution and is recoverable after a restart (ADR-0044), with resolution
+      recovery and — where `confirmation_ttl` is configured, which it is not by
+      default — a lifetime deadline after which a stale answer is refused
+      (ADR-0059). Deferred from ADR-0004's
       catalogue: spend limits, approved recipients, and time windows — the policy
       rules today on risk and reversibility only.
 - [x] **`learning` — `FeedbackEvent` capture.** `FeedbackEvent` +
@@ -193,8 +199,8 @@ when a user can exercise it, not when a test can.
   `confirm_at_risk`, driving the durable park/resume machinery
   (ADR-0044/0052/0059) for real. What no local tool exercises is the rest of the
   scale: both are read-only and `REVERSIBLE`, so nothing writes, nothing is
-  irreversible, nothing discloses, and the `confirm_at_reversibility` floor and
-  the egress rule have no live case.
+  irreversible, nothing discloses, and the `confirm_at_reversibility` threshold
+  and the contract's disclosure floor have no live case.
 - **No ranking among capable tools** (#241). Selection is not arbitrary when two
   tools match — `StepRunner` returns `AMBIGUOUS_CAPABILITY` and leaves the step
   `PENDING`, deliberately writing nothing (ADR-0037 §1). The consequence is that
