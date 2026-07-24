@@ -281,7 +281,30 @@ async def test_resume_recovers_a_park_prompts_and_relays_the_token(output: Strin
     assert len(seen) == 1  # the recovered confirmation was presented for judgement
     assert isinstance(seen[0].token, ContinuationToken)  # relayed opaquely
     assert seen[0].tool_id == "smtp"
-    assert "Done" in output.getvalue()  # after approval the recovered step ran
+    rendered = output.getvalue()
+    assert "Confirmation required" in rendered  # the action was shown before approval
+    assert "smtp" in rendered
+    assert "Done" in rendered  # after approval the recovered step ran
+    await engine.aclose()
+
+
+async def test_resume_renders_the_action_even_when_auto_approved(output: StringIO) -> None:
+    """A non-interactive (--yes) approver still sees the action rendered first (§4).
+
+    The action and reason are shown by ``_drive_resume`` itself, before the
+    approver, so ``--yes`` never runs a recovered action the user never saw.
+    """
+    engine = _engine(tools=(confirmable(),))
+    await engine.converse("send it", timeout=PATIENT)
+    engine._parked.clear()
+
+    # An approver that renders nothing itself and blindly approves (as --yes does).
+    code = await cli._drive_resume(engine, timeout=PATIENT, approver=lambda _c: True)
+    assert code == 0
+    rendered = output.getvalue()
+    assert "Confirmation required" in rendered  # shown despite no prompt
+    assert "smtp" in rendered
+    assert "Done" in rendered
     await engine.aclose()
 
 
