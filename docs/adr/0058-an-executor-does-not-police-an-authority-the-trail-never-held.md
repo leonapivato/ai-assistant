@@ -19,8 +19,12 @@ invoke `StepExecutor.execute` directly, and have the executor pin
 `approval_ref = call.decision.id` onto the claimed step (`executor.py`,
 `_claim`). The step's `approval_ref` is then a foreign key into the audit trail
 that resolves to nothing — exactly the "silent, automatic action that cannot be
-correlated with its authorisation" that ADR-0014 §4 requires `approval_ref` to
-make impossible, and that ADR-0004 §7's gate-and-record rule exists to prevent.
+correlated with its authorisation" that ADR-0014 §4's `approval_ref` is *meant*
+to make impossible, and that ADR-0004 §7's gate-and-record rule exists to
+prevent. (ADR-0014 §4's *enforced* rule is only that the field be present and
+non-null, which the executor always satisfies; the resolution property is a path
+guarantee, not a planning invariant — the distinction this decision turns on, set
+out under "This neither amends nor supersedes ADR-0014 §4".)
 
 This ADR does not implement anything. It **decides whether that gap is closed or
 accepted**, and records the decision so #259 can be resolved either way rather
@@ -156,6 +160,40 @@ it.
 (ADR-0037 §3). The pipeline guarantees that id came from the trail; the residue
 is that a caller stepping outside the pipeline can hand it one that did not, and
 that caller is the party the trail records rather than an adversary it stops.
+
+### This neither amends nor supersedes ADR-0014 §4
+
+This decision leaves ADR-0014 §4 intact and enforceable, and it is worth stating
+why, because the two can be misread as contradicting. ADR-0014 §4's *enforced*
+rule is a **presence** check: "every transition into `RUNNING` carries an
+`approval_ref`" and "`PlanExecution` rejects a `→ RUNNING` transition without
+one" — a non-null id. The executor satisfies that unconditionally, hand-built
+call or not: it pins `approval_ref = call.decision.id`, which is always a
+non-null `Identifier`. No `→ RUNNING` transition without an `approval_ref` is
+ever produced, so no mechanically-enforced ADR-0014 §4 invariant is violated and
+none is left unsatisfiable.
+
+What ADR-0014 §4 additionally *describes* — that `approval_ref` is "a *reference*
+to the permission subsystem's durable decision", a foreign key that resolves to a
+recorded ruling — is a **referential-resolution** property, and it is not a rule
+`planning` enforces or can enforce: `PlanExecution` holds no `AuditTrail` and
+never resolves the key. That property is supplied by *whoever built the call*,
+and ADR-0037 §3 — Accepted, and later than ADR-0014 — already drew exactly this
+line: the resolution guarantee is "a property of the path, not of the type", and
+ADR-0037 §3 scoped its own guarantee "to the pipeline until [#259] lands"
+**without amending ADR-0014**. ADR-0037 §3 is therefore the precedent that this
+residue and ADR-0014 §4 already coexist: the presence rule holds, and the
+resolution property is a pipeline guarantee, not a planning invariant.
+
+ADR-0058 changes neither. It resolves #259 by *ratifying* ADR-0037 §3's line
+rather than moving it: on the pipeline path (and confirmation recovery through
+`StepRunner.resume`, ADR-0044 §3) `approval_ref` resolves by construction, and
+only a caller that steps outside the pipeline can commit one that does not — the
+`ADR-0021 §1` residue. So there is no ADR-0014 §4 clause to amend or supersede,
+and this ADR touches no other ADR's text. Were referential resolution ever
+promoted from a path property to an enforced invariant, *that* would be the
+change requiring an amendment to ADR-0037 §3 and ADR-0014 §4 — and it is exactly
+the rejected fix below, which this ADR declines.
 
 ### Rejected alternative: the pre-claim trail-presence check
 
