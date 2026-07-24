@@ -194,47 +194,56 @@ same id. The `PlanStore.start_execution` docstring names two acceptable
 mechanisms: minted entropy (a nonce or uuid), or keying on durable state the
 store reopens. This store uses **both**, and each earns its place because neither
 alone covers every mode this store can be constructed in. The id is
-`{plan_id}-exec-{incarnation}-{ordinal}`, matching `InMemoryPlanStore`'s format:
+`{plan_id}-exec-{incarnation}-{ordinal}`, matching `InMemoryPlanStore`'s shape:
 
-- **`incarnation` is a per-construction random nonce** (`uuid4().hex`), minted
-  once when the store object is built, exactly as `InMemoryPlanStore` does. It is
-  what makes non-reuse hold when the backing store is **not** durable — a
-  `SqlitePlanStore(path=":memory:")`, whose database is fresh per connection and
-  whose counter therefore rewinds to zero on every new instance just as the
-  in-memory store's does. Two such instances get two different nonces, so
-  `p-exec-<nonce-a>-1` and `p-exec-<nonce-b>-1` never collide. **This is the
-  reason `:memory:` remains a safe construction** rather than a hole: the ordinal
-  is worthless there, and the nonce carries non-reuse alone.
+- **`incarnation` binds the running process, not just the constructed object.**
+  It is a random nonce (`uuid4().hex`) **prefixed with the current process id
+  read at allocation time** — `f"{os.getpid()}-{nonce}"`, composed inside
+  `start_execution`, not frozen at construction. The nonce alone makes non-reuse
+  hold across two *independently constructed* stores, including the case the
+  durable ordinal cannot cover — a `SqlitePlanStore(path=":memory:")`, whose
+  database is fresh per connection and whose counter therefore rewinds to zero on
+  every new instance. Two such instances get two different nonces, so
+  `…-<nonce-a>-1` and `…-<nonce-b>-1` never collide. But a nonce **frozen at
+  construction is copied by `fork`**: two children forked before either's first
+  `start_execution` would share it and, on `:memory:`, each hold a private
+  zero counter — the #305 hazard, reintroduced. Reading `os.getpid()` at
+  allocation closes it structurally: forked children have distinct pids (distinct
+  from the parent and each other while alive), so their ids differ in the
+  incarnation prefix regardless of the shared nonce or a private counter. This is
+  exactly the fix #305 names ("fold in `os.getpid()`, or mint lazily at first
+  `start_execution`"), applied to **both** modes rather than parked. A pid the OS
+  later recycles for an unrelated process is not a reuse: that process constructs
+  its own store and mints a fresh nonce, so only a *fork* shares the nonce, and a
+  fork never shares a live pid.
 - **`ordinal` is a durable monotonic counter** in `meta("exec_counter")`,
   read-incremented inside the *same* `BEGIN IMMEDIATE` transaction that inserts
-  the execution row. It carries the two guarantees the nonce cannot:
+  the execution row. It carries the two guarantees the incarnation cannot:
   - **Monotonic within one incarnation, never reset.** `delete_goal` and `clear`
     delete rows from `goals`/`plans`/`executions` but never touch
     `meta("exec_counter")`, so a deleted or bulk-erased execution's id is never
     re-minted — which the conformance suite already pins
     (`test_a_deleted_executions_id_is_never_reused`,
-    `test_an_execution_id_is_not_reused_after_clear`). The nonce is constant
-    within an incarnation, so intra-incarnation uniqueness is the ordinal's job.
-  - **Fork- and multi-process-safe (the #305 hazard).** #305's fork case is two
-    children inheriting one parent's in-memory nonce (copied by `fork`) and each
-    starting a private counter at zero, so a nonce copied across the fork does
-    *not* save them. A durable ordinal does: it is allocated by a read-increment
-    under SQLite's write lock, so two processes — or two forked children — opening
-    the same file are serialised and receive distinct ordinals, even sharing a
-    copied nonce. So on a **file-backed** store the ordinal closes #305's fork
-    hazard by construction rather than parking it, and additionally never rewinds
-    across a restart (a reopened file resumes the counter, so a pre-restart id
-    cannot recur even before the fresh nonce is considered — belt and braces).
+    `test_an_execution_id_is_not_reused_after_clear`). The incarnation is constant
+    within one process, so intra-process uniqueness is the ordinal's job.
+  - **Serialised across processes sharing a file.** Two processes opening the same
+    database and allocating concurrently are serialised by the SQLite write lock
+    the immediate transaction takes, so each read-increment sees the other's, and
+    the counter never hands the same ordinal to two file-backed executions. (Their
+    incarnations differ by pid anyway; this is the belt to that braces, and is
+    what also makes the durable ordinal never rewind across a restart of a
+    file-backed store.)
 
-So the two mechanisms are not redundant: on a file the ordinal gives fork-safety
-and cross-restart monotonicity while the nonce is spare entropy; on `:memory:` the
-nonce gives cross-instance non-reuse while the ordinal is spare. Every
-construction mode is covered by at least one, and the sharp `:memory:` case — a
-fresh in-memory instance paired with a persistent audit trail — is covered by the
-nonce, not left open. #305's second item (injecting the nonce for deterministic
-tests) is a follow-up on the in-memory/fake stores, out of this fence; the
-file-backed restart test here asserts non-reuse by reopening the same file, where
-the durable ordinal alone already proves it without depending on nonce entropy.
+So the two mechanisms are not redundant, and no construction mode is left open:
+the incarnation (pid + nonce) covers every *cross-process and cross-instance*
+case — independent construction, restart, and `fork` — for both `:memory:` and
+file-backed; the durable ordinal covers *intra-incarnation* monotonicity
+(surviving `delete_goal`/`clear`) and same-file concurrency. The sharp cases the
+earlier drafts left open — a fresh `:memory:` instance, and a `:memory:` store
+forked before first use, each paired with a persistent audit trail — are both
+closed by the pid-in-incarnation. #305's remaining item (injecting the nonce for
+deterministic in-memory/fake tests) is a follow-up on those stores, out of this
+fence.
 
 ### 4. #308 is deferred, and this store neither closes nor widens it
 
@@ -274,10 +283,16 @@ connections):
   rewind.
 - **Execution-id non-reuse across two fresh `:memory:` instances** — the mode
   where the durable counter is *worthless* (a `:memory:` database is fresh per
-  instance), so this is what proves the per-incarnation nonce (§3) actually
-  carries non-reuse there. Two independently-constructed
+  instance), so this is what proves the incarnation (§3) actually carries
+  non-reuse there. Two independently-constructed
   `SqlitePlanStore(path=":memory:")` stores each start `p1`; assert the two ids
   differ. Mirrors `InMemoryPlanStore`'s own fresh-instance test.
+- **Execution-id non-reuse across a `fork`** — a `:memory:` store constructed in
+  a parent, then two children forked before either calls `start_execution`; each
+  child starts `p1` and reports its id back (through a pipe). Assert the two
+  children's ids differ, proving the pid-in-incarnation (§3) closes #305's
+  copied-nonce/private-counter case. Guarded on `hasattr(os, "fork")` so it is
+  skipped where the platform has no `fork`.
 - **Atomic rollback of an interrupted write** — a `commit_transition` whose
   transaction does not complete leaves the store reloading the prior version, never
   a half-applied one (no version without its blob, no blob without its version).
@@ -310,9 +325,11 @@ contract every store owes.
   argument. `Settings` gains nothing here (ADR-0036 §3's precedent: a filesystem
   location is the composition root's, not a `Settings` field), which also keeps
   this ADR off `core/`.
-- **#305 does not gate this store and is not reopened by it.** Its hazards are
-  structurally absent from a durable counter (§3); it remains an in-memory/fake
-  concern outside the fence.
+- **#305's fork/multi-process hazard is closed for this store, not parked.** The
+  pid-in-incarnation and the write-lock-serialised durable ordinal (§3) remove it
+  by construction for both `:memory:` and file-backed modes; its only residual
+  item — injecting the nonce for the in-memory/fake stores' deterministic tests —
+  stays an out-of-fence follow-up on those stores.
 - **#308 stays open** (§4), a narrow upgrade-instant edge in `permissions`, to be
   settled with the durable-continuation work (#287), not here.
 - **Revisit when** the composition root switches its default to this store (the
