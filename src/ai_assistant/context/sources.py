@@ -46,7 +46,19 @@ class ContextSource(Protocol):
 
     @property
     def name(self) -> str:
-        """A stable identifier, used for collision reporting and logging."""
+        """A stable identifier, used for collision reporting and logging.
+
+        It is **Tier 2 / operational** (ADR-0004 §1) and must stay that way: the
+        assembler logs it verbatim when a source degrades, times out, or is
+        abandoned, so it must never embed Tier 0/1 data — no secret, and no value
+        derived from user or third-party personal data (ADR-0004 §5). A source
+        that wraps personal data names *itself* (``"calendar"``), never the data
+        it holds (``"alice@example.com calendar"``). This obligation is what lets
+        the assembler log ``name`` verbatim in the same line where it reduces an
+        exception to its class, and is stated so a future source cannot read
+        "used for logging" as licence to smuggle personal data through it
+        (ADR-0055).
+        """
         ...
 
     async def contribute(self) -> Mapping[str, object]:
