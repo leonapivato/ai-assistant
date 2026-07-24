@@ -7,6 +7,13 @@
   (below), but the question under it — whether `name` is *contractually* safe to
   log or merely happens to be — was left open, and it should be settled across
   every diagnostic at once rather than one call site at a time.
+- **Scope: this ADR governs the #233 loggability decision only.** Its single
+  code diff is the one-line obligation added to `ContextSource.name`'s docstring.
+  The PR that carries it also carries the `context` cancellation-behaviour change
+  for #231/#232 (`assemble()` observing its sources so a caller's cancellation is
+  honoured); that behaviour is governed by **ADR-0057**, not by this ADR. Read
+  the two decisions separately — this one changes a seam contract and no
+  behaviour; ADR-0057 changes `assemble()`'s cancellation semantics.
 - **Not a `core` contract change.** The `ContextSource` seam lives inside
   `context/`, not in `core/protocols.py` (ADR-0008 §2 keeps it there so the only
   data crossing a subsystem boundary is the typed `CurrentContext`). So golden
@@ -90,9 +97,11 @@ decision does not ask it to redact a conforming value.
   ignores `CancelledError` is (ADR-0033). The assembler is entitled to log the
   value on that basis, and the `type(exc).__name__` care around the *message*
   is what still guards the genuinely untrusted half of each log line.
-- **No behaviour changes.** The code already logs `_safe_name(source)`; this
-  makes the contract it relies on explicit. The only diff outside this ADR is
-  one docstring.
+- **This decision changes no behaviour.** The code already logs
+  `_safe_name(source)`; the #233 decision only makes the contract it relies on
+  explicit, and its sole code diff is the `name` docstring. (This speaks for the
+  #233 decision, not the whole PR: the cancellation-behaviour change the PR also
+  carries belongs to ADR-0057.)
 - **It is stated once, for all three call sites**, which is what the issue asked
   for and what a per-site fix could not give.
 - **Revisit if** a real source ever needs a user-derived identifier for its own
