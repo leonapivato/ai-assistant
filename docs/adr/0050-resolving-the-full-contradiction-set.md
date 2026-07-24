@@ -154,8 +154,12 @@ ADR-0038 §3's mixed case. When the conflict set holds *both* a prior assertion 
 supersedable inference, superseding the inference (ADR-0038 §3's behaviour) would
 still *commit the contradicting assertion* beside the prior one — the #245 gap,
 merely reached by a different path. Deferring the whole proposal is the only outcome
-that does not leave two live contradictory assertions. The inference is not lost: on
-the user's confirmation a re-proposal supersedes it under §1.
+that does not leave two live contradictory assertions. The inference is not lost — it
+stays live and correctable — but note it is **not** cleaned up by a plain re-proposal
+of the correction: once any correction on the topic is deferred, and more so once one
+lands as a `USER_ASSERTED` record, a re-proposal conflicts with *that* assertion and
+defers again. Retiring the inference in the mixed case therefore waits on the
+confirmation-driven flow this ADR defers (below), not on a normal re-ingest.
 
 **The precedence rule, once a contradiction is confirmed, is recency** — the later
 assertion supersedes the earlier, closing its window and keeping it in `export`, as
