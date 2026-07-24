@@ -538,23 +538,35 @@ class SqliteAuditTrail:
         unconstructable.
 
         **The decoded blob is authoritative, not the projection columns.** The
-        ``execution_id``/``step_id`` columns are only the fast filter
-        :meth:`_record_sync` maintains; the SQL narrows by them, but the returned
-        decision's *own* binding is then re-checked against the query. A row whose
-        projection was tampered to match a binding its blob does not name is a
-        corrupt store, reported rather than mis-routed as another binding's ruling
-        -- load-bearing here because the recovery this feeds *acts* on the ruling.
+        ``resolves``, ``execution_id`` and ``step_id`` columns are only the fast
+        filter :meth:`_record_sync` maintains; the SQL narrows by all three, but
+        the returned decision's *own* fields are then re-checked against them. A
+        row whose ``resolves`` projection was tampered non-``NULL`` (a pending
+        ``CONFIRM`` or a direct decision masquerading as a resolution), or whose
+        binding projection names a binding its blob does not, is a corrupt store —
+        reported rather than mis-routed as this binding's ruling. Load-bearing
+        here because the recovery this feeds *acts* on the ruling, and because the
+        ALLOW-or-DENY guarantee rests on the blob's ``resolves`` (by
+        ``_a_resolution_is_not_itself_a_question`` a decision that resolves is
+        never a ``CONFIRM``), not on the column the SQL selected by.
 
         Raises:
             AuditError: If the trail cannot be read, holds a resolution that no
-                longer validates, or holds one whose stored binding disagrees with
-                its projection.
+                longer validates, or holds a row whose stored ``resolves`` or
+                binding disagrees with the projection it was found by.
         """
         async with self._lock:
             data = await _run_to_completion(self._resolution_of_sync, execution_id, step_id)
         if data is None:
             return None
         resolution = _decode(data)
+        if resolution.resolves is None:
+            msg = (
+                f"the audit trail holds a row found as the resolution of "
+                f"({execution_id!r}, {step_id!r}) whose record resolves nothing; its "
+                f"resolves projection was tampered"
+            )
+            raise AuditError(msg)
         if resolution.execution_id != execution_id or resolution.step_id != step_id:
             msg = (
                 f"the audit trail holds a resolution whose stored binding "

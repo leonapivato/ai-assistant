@@ -388,6 +388,28 @@ async def test_resolution_of_rejects_a_projection_that_disagrees_with_the_record
         await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
 
 
+async def test_resolution_of_rejects_a_confirm_masquerading_as_a_resolution(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """A tampered ``resolves`` projection must not turn a pending CONFIRM into a resolution.
+
+    ``_BINDING_RESOLUTION`` selects on ``resolves IS NOT NULL``, so corrupting only
+    that column makes a still-pending ``CONFIRM`` (or a direct decision) match. Its
+    binding blob agrees with the query, so the binding check passes — but the
+    decoded record resolves nothing, so it is not a resolution at all. The
+    ALLOW-or-DENY guarantee rests on the blob's ``resolves``, not the column: a
+    corrupt store is reported, never returned as the question it actually is.
+    """
+    await ephemeral.record(decision("c-1", request=action(execution_id="exec-a")))
+    assert await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1") is None
+
+    # Tamper only the resolves projection; the blob is still a pending CONFIRM.
+    ephemeral._conn.execute("UPDATE decisions SET resolves = ? WHERE id = ?", ("d-phantom", "c-1"))
+
+    with pytest.raises(AuditError):
+        await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
+
+
 async def test_expires_at_is_persisted_and_read_back(ephemeral: SqliteAuditTrail) -> None:
     """The durable deadline survives ``record`` → read, in the blob and the column (ADR-0059 §1).
 
