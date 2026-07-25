@@ -240,8 +240,11 @@ class SqlitePlanStore:
                     # brought to the current shape — and a failure rolls the mark
                     # back rather than leaving a database falsely labelled. This is
                     # `SqliteAuditTrail._check_schema_version`'s ordering (#346),
-                    # applied to the second marker this store backfills.
-                    conn.execute(_WRITE_HIGH_WATER, (str(unstamped),))
+                    # applied to the second marker this store backfills. It is also
+                    # what puts `executions` in scope for the corroboration below.
+                    conn.execute(
+                        _WRITE_HIGH_WATER, (str(self._corroborated_mark(conn, unstamped)),)
+                    )
             if self._path != ":memory:":
                 Path(self._path).chmod(_OWNER_ONLY)
         except PlanningError:
@@ -284,7 +287,10 @@ class SqlitePlanStore:
             before ADR-0064 has a counter and no mark; it is **backfilled, not
             refused**, because its counter is the highest ordinal it has issued —
             that is exactly what the pre-ADR-0064 code maintained — so stamping it
-            records what is already true rather than assuming anything.
+            records what is already true rather than assuming anything. A deleted
+            mark is indistinguishable from an absent one here, so the value is
+            cross-checked against the surviving records before it is written; see
+            :meth:`_corroborated_mark`.
 
         Raises:
             PlanningError: If the schema version is unsupported, a marker is
@@ -312,6 +318,54 @@ class SqlitePlanStore:
         if mark := self._read_meta(conn, _HIGH_WATER):
             self._refuse_a_rewound_counter(counter, self._meta_int(_HIGH_WATER, mark[0]))
             return None
+        return counter
+
+    def _corroborated_mark(self, conn: sqlite3.Connection, counter: int) -> int:
+        """Cross-check a backfilled mark against the ordinals the records still carry.
+
+        The backfill in :meth:`_verify_or_init_meta` trusts the counter, and it has
+        to: a database predating the mark has nothing else to be stamped from. But
+        a *deleted* mark is indistinguishable from one that was never written, so
+        that branch would otherwise launder a two-row tamper — drop the mark, lower
+        the counter — into a fresh, agreeing pair. The executions the file still
+        holds are the witness that closes it. Every one records the ordinal it was
+        allocated with in ``created_seq``, written in the same transaction that
+        advanced the counter, and ``clear``/``delete_goal`` only ever *remove*
+        rows — so ``MAX(created_seq) <= exec_counter`` holds for every file this
+        store wrote, and a violation is corruption whatever the mark says.
+
+        Deliberately only on the backfill path, and that is exactly as strong as
+        the harm: rewinding past a retained execution is what makes two rows share
+        a ``created_seq`` and stops ``active_executions``/``export`` being the
+        oldest-first order the contract promises. Where no execution survives there
+        is nothing to corroborate *and* nothing to corrupt — the residual case
+        ADR-0064 §5 keeps out of scope. A store whose mark is intact never reaches
+        here, so this costs one aggregate read once in a database's life.
+
+        Returns:
+            ``counter``, unchanged — the records can only refuse a backfill, never
+            raise it. Repairing the counter from them is the wrong move: they are
+            what ``clear``/``delete_goal`` erase, which is why ADR-0049 §3 keeps
+            the ordinal in ``meta`` in the first place.
+
+        Raises:
+            PlanningError: If an execution survives that was allocated an ordinal
+                above the counter being backfilled, or ``created_seq`` does not
+                read as an integer.
+        """
+        row = conn.execute("SELECT MAX(created_seq) FROM executions").fetchone()
+        if row is None or row[0] is None:  # no executions survive: nothing to check
+            return counter
+        highest = self._meta_int("created_seq", row[0])
+        if counter < highest:
+            msg = (
+                f"the plan store at {self._path!r} has exec_counter={counter} and no "
+                f"exec_high_water, but still holds an execution allocated at "
+                f"created_seq={highest}: the counter has been rewound and its mark "
+                f"removed, so there is nothing left to back the ordinal ADR-0049 §3 "
+                f"rests on. Refusing rather than backfilling a rewound counter"
+            )
+            raise PlanningError(msg)
         return counter
 
     def _refuse_a_rewound_counter(self, counter: int, mark: int) -> None:
@@ -384,11 +438,13 @@ class SqlitePlanStore:
         return [row[0] for row in rows]
 
     def _meta_int(self, key: str, raw: Any) -> int:
-        """Parse a stored ``meta`` integer, translating corruption to ``PlanningError``.
+        """Parse a stored integer, translating corruption to ``PlanningError``.
 
-        A non-numeric ``schema_version`` or ``exec_counter`` is a corrupt or
-        tampered store, not a Python exception to leak past this layer's
-        initialisation boundary (ADR-0049 §1).
+        A non-numeric ``schema_version``, ``exec_counter`` or ``exec_high_water``
+        is a corrupt or tampered store, not a Python exception to leak past this
+        layer's initialisation boundary (ADR-0049 §1). ``created_seq`` is read the
+        same way by :meth:`_corroborated_mark`: it is declared ``INTEGER NOT
+        NULL``, but only in a table *this* code created.
         """
         msg = (
             f"the plan store at {self._path!r} holds a non-numeric {key} "

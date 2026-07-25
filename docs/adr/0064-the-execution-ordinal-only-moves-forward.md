@@ -143,16 +143,53 @@ created, inside the same setup transaction. A create that fails therefore rolls
 the mark back with it, leaving an unlabelled database the next open will stamp
 correctly, rather than one falsely labelled by an open that never completed.
 
+**The backfill is corroborated against the records, so it is not a way around the
+invariant.** A *deleted* mark is indistinguishable from one that was never
+written, so on its own this branch would launder a two-row tamper — drop the
+mark, lower the counter — into a fresh, agreeing pair at the next open. The
+executions the file still holds close that: each records in `created_seq` the
+ordinal it was allocated with, written in the same transaction that advanced the
+counter, and `clear`/`delete_goal` only ever *remove* rows. So
+`MAX(created_seq) <= exec_counter` holds for every file this store wrote, and a
+violation is corruption whatever the mark says. A backfill below it is refused.
+
+That corroboration is deliberately confined to this path and is exactly as strong
+as the harm. Rewinding past a retained execution is what makes two rows share a
+`created_seq` and stops `active_executions`/`export` being the oldest-first order
+the contract promises; where no execution survives there is nothing to
+corroborate *and* nothing to corrupt. The records are **not** a substitute for the
+mark and cannot raise it — they are precisely what `clear`/`delete_goal` erase,
+which is why ADR-0049 §3 keeps the ordinal in `meta` at all. They can only refuse.
+A store whose mark is intact never reaches the check, so it costs one aggregate
+read once in a database's life.
+
+The alternative considered and rejected was durable provenance — bumping
+`schema_version` to 2 so a missing mark is refusable on a file expected to carry
+one. It works, but it makes an older build refuse the file outright, and an older
+build opening a post-ADR-0064 file is *harmless*: it advances the counter without
+the witness, which §3's one-sided test already accepts. Paying a downgrade
+refusal to detect a case the records already detect is the worse trade.
+
 ### 5. What this does not defend against, and why that is the right line
 
 **The mark is a consistency witness, not a tamper-proof seal.** A writer who
-lowers *both* rows is undetectable, and no scheme confined to the same file could
-be otherwise: the same writer can rewrite the `data` blobs, forge whole
-executions, or delete the file. This store's threat model is not an adversary
-with write access — it is **accident and partial corruption**: a hand-edit of one
-row, a script that "resets" the counter, a table-level restore, a bug in a
-migration tool. Every one of those moves the counter and leaves the mark, and
-every one of them is now a `PlanningError` instead of a silently reissued id.
+lowers *both* rows **and** leaves no execution behind to corroborate (§4) is
+undetectable, and no scheme confined to the same file could be otherwise: the
+same writer can rewrite the `data` blobs, forge whole executions, or delete the
+file. This store's threat model is not an adversary with write access — it is
+**accident and partial corruption**: a hand-edit of one row, a script that
+"resets" the counter, a table-level restore, a bug in a migration tool. Every one
+of those moves the counter and leaves the mark, and every one of them is now a
+`PlanningError` instead of a silently reissued id.
+
+It is worth being exact about what the residual case costs, because it is less
+than it looks. A rewind performed while the file is **closed** does not reissue an
+execution id at all: the reopened store mints a fresh nonce, which is the job
+ADR-0049 §3 assigns it, and the reproduction in the Context above needs one
+running incarnation for precisely that reason. What a closed-file rewind corrupts
+is the durable *ordering* — two executions at one `created_seq` — which §4's
+corroboration catches wherever there is an execution left to be out of order
+with.
 
 That is the answer to issue #356's open question, recorded so it is not re-raised:
 the store does *not* attempt to defend an audit-relevant invariant against a
