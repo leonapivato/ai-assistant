@@ -225,9 +225,10 @@ warns about. It belongs on the method it constrains.
 
 **Enforcement lands with the binding, unlike ADR-0060 §5's `ModelProvider`
 deferral.** That deferral was about cancellation, which needs a fake modelling a
-resource it does not own; this is a two-line offline assertion — pass
-`[USER, ASSISTANT]`, expect `ModelError` — that is deterministic,
-implementation-independent and needs no network. There is no reason to defer it,
+resource it does not own; this is a handful of offline assertions — pass
+`[USER, ASSISTANT]`, expect a `ModelError` that is neither retryable nor
+routable (§6) — each deterministic,
+implementation-independent and needing no network. There is no reason to defer it,
 so `CONTRIBUTING.md`'s "extend the suite in the same change, so the new
 obligation is enforced rather than assumed" is satisfied outright.
 
@@ -252,20 +253,43 @@ does.
    refusal, as it already mirrors the empty and tool-role rejections and for the
    same stated reason.
 4. **`tests/models/model_provider_contract.py`** — shared cases for both halves
-   of the precondition, so every implementation is held to them; the standing
-   NOTE about empty input is retired, and the per-implementation empty tests that
+   of the precondition **and one for the boundary the rule deliberately does not
+   cross** (below), so every implementation is held to them; the standing NOTE
+   about empty input is retired, and the per-implementation empty tests that
    describe themselves as "not a shared-contract requirement" are reconciled with
    the suite rather than left contradicting it.
 5. **`tests/models/test_provider.py`** — a case pinning `PydanticAIProvider`'s
    refusal specifically.
 
-Test *design* is the lane's; one property is not. **The assertion must be that a
-`ModelError` is raised, not that no request was recorded.** "Zero request bodies"
-is true of the fixed code and of the broken code alike — the whole defect is that
-the broken code makes no request either — so a recorder-based case would certify
-the bug it was written to catch. The `vendor_stacks.py` recorder is the right
-tool for showing *what* went on the wire and the wrong one for showing that
-something should have.
+Test *design* is the lane's; three properties are not, because a suite missing
+any of them certifies something this ADR decided against.
+
+**The refusal must pin the failure's *disposition*, not merely its base class.**
+`pytest.raises(ModelError)` is satisfied by `ModelUnavailableError`, which is
+`retryable = True, routable = True` — so an implementation could pass the case
+while `RetryingProvider` burned its whole attempt budget and `RoutingProvider`
+walked the malformed conversation down every fallback route. That is precisely
+the waste §2 and §3 rest on avoiding, so the assertion is on `retryable is False`
+and `routable is False`. Deliberately the disposition rather than
+`type(exc) is ModelError`: identity would forbid a future implementation from
+raising a more specific subclass that behaves correctly, and the class was never
+the property — the flag pair is.
+
+**A history ending on `Role.SYSTEM` must be asserted to *succeed*.** §1 draws the
+rule at the trailing assistant turn and not at "ends on `Role.USER`", on the
+strength of a verified fact; but every positive case in the suite today ends on a
+user turn, so an implementation that wrote the over-broad
+`if messages[-1].role is not Role.USER: raise` would pass the refusal cases and
+the existing conversation cases alike, while rejecting a call that works today. A
+rule whose boundary nothing tests is a rule the next implementation gets to
+redraw, so the suite pins both sides of it.
+
+**The refusal must be asserted by the raise, not by an absent request.** "Zero
+request bodies" is true of the fixed code and of the broken code alike — the
+whole defect is that the broken code makes no request either — so a
+recorder-based case would certify the bug it was written to catch. The
+`vendor_stacks.py` recorder is the right tool for showing *what* went on the wire
+and the wrong one for showing that something should have.
 
 The lane inherits a useful fact: with this refusal spiked into **both**
 `PydanticAIProvider` and `FakeModelProvider`, the entire existing suite passes
