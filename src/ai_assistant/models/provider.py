@@ -9,6 +9,7 @@ translate the result (and any failure) back into our own types.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Final
 
 from pydantic_ai import Agent, models
@@ -112,6 +113,57 @@ def _classify_status(status_code: int, message: str) -> ModelError:
     return ModelError(message)
 
 
+def _classify_unwrapped(exc: Exception, message: str) -> ModelError:
+    """Classify a failure that never entered pydantic-ai's exception hierarchy.
+
+    An exception raised by the vendor SDK — or by pydantic-ai's adapter for it —
+    that pydantic-ai does not wrap arrives at the seam as whatever the vendor
+    raised, which is usually a bare builtin. ADR-0063 admits those into the
+    taxonomy by **allowlist**, never by a blanket "unrecognised means transient",
+    and the admission rule is deliberately narrow: the type must be unambiguous
+    evidence that *the response body was not the wire format*. Such a failure can
+    only have happened after bytes came back, so it says nothing about our
+    request — the fault is in the path, which is what makes it both retryable and
+    routable.
+
+    Everything else keeps the conservative default, because the alternative
+    retries and re-routes failures that reproduce identically on every attempt
+    from every route: a provider extra that was never installed surfaces here as
+    ``ImportError`` (ADR-0061 §1), and a model spec naming an unknown provider as
+    ``ValueError``. Both would burn the whole retry budget and every fallback
+    before failing anyway.
+
+    Args:
+        exc: The unwrapped exception raised during a completion.
+        message: The already-formatted message for the resulting error.
+
+    Returns:
+        The most specific :class:`ModelError` subclass for ``exc``.
+    """
+    match exc:
+        case json.JSONDecodeError():
+            # An intermediary (load balancer, proxy, captive portal) substituted
+            # its own HTML error page for the model's answer, or the response was
+            # cut off partway. Both vendor SDKs let this escape as a bare
+            # JSONDecodeError, so before ADR-0063 it fell through as neither
+            # retryable nor routable — wrong on both counts for the most
+            # transient failure there is.
+            #
+            # Matched on JSONDecodeError itself and never on its ValueError base:
+            # the unknown-provider ValueError above is the exact thing the base
+            # would over-match, and a typo in configuration must stay permanent.
+            #
+            # ModelUnavailableError for its disposition, which is the part that
+            # matters: retryable, because the next attempt may not meet the
+            # broken hop, and routable, because a different provider is a
+            # different path. Its "unreachable or failing" reads correctly here —
+            # a 200 carrying someone else's error page is the provider's path
+            # failing, whatever status the failing hop chose to put on it.
+            return ModelUnavailableError(message)
+        case _:
+            return ModelError(message)
+
+
 def _classify(exc: Exception) -> ModelError:
     """Translate a pydantic-ai failure into our own error taxonomy.
 
@@ -120,6 +172,10 @@ def _classify(exc: Exception) -> ModelError:
     the subclass. Unrecognised failures stay a bare, non-retryable
     ``ModelError`` — misclassifying something as retryable is worse than not
     classifying it at all.
+
+    This function handles pydantic-ai's own hierarchy. Anything else the vendor
+    SDK raised falls through to :func:`_classify_unwrapped`, which holds the
+    narrow allowlist ADR-0063 admits from outside it.
 
     Args:
         exc: The exception pydantic-ai raised during a completion.
@@ -153,7 +209,10 @@ def _classify(exc: Exception) -> ModelError:
             # applied outside this adapter, so it never reaches here.
             return ModelTimeoutError(message)
         case _:
-            return ModelError(message)
+            # Nothing in pydantic-ai's hierarchy matched, so this is whatever the
+            # vendor SDK itself raised. ADR-0063 decides which of those, if any,
+            # are transient.
+            return _classify_unwrapped(exc, message)
 
 
 class PydanticAIProvider:

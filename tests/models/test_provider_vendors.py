@@ -22,6 +22,7 @@ prompt *means* — and no other test in this repository would see it.
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,8 @@ from vendor_stacks import (
     VendorStack,
     connection_refused,
     failing_status,
+    non_json_body,
+    truncated_json_body,
 )
 
 from ai_assistant.core.errors import (
@@ -47,6 +50,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIProvider
+from ai_assistant.models.routing import Route, RoutingProvider
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -187,6 +191,60 @@ async def test_a_transport_failure_is_unavailable_on_either_vendor(vendor: Vendo
     assert type(caught.value) is ModelUnavailableError
     assert caught.value.retryable
     assert caught.value.routable
+
+
+# The two ways a response body fails to decode. Both are the *path* failing, not
+# the request: an intermediary answering with its own page, and a response cut
+# off partway. Neither reaches pydantic-ai's exception hierarchy on either
+# vendor — the SDK's JSON decode raises first — which is why `_classify` needs an
+# arm outside it (ADR-0063).
+_UNDECODABLE_BODIES = [
+    pytest.param(non_json_body, id="gateway-error-page"),
+    pytest.param(truncated_json_body, id="truncated"),
+]
+
+
+@pytest.mark.parametrize("vendor", VENDORS, ids=str)
+@pytest.mark.parametrize("handler", _UNDECODABLE_BODIES)
+async def test_an_undecodable_body_is_unavailable_on_either_vendor(
+    vendor: VendorStack,
+    handler: Handler,
+) -> None:
+    # The regression #352 records, asserted at the level it actually occurs: not
+    # a constructed `JSONDecodeError` handed to `_classify`, but the real vendor
+    # SDK deciding, from a real canned body, that it cannot parse a response.
+    # Before ADR-0063 both vendors landed on a bare `ModelError` here — neither
+    # retryable nor routable — so a load balancer's HTML page was a permanent
+    # failure of the whole request.
+    async with _provider(vendor, handler) as provider:
+        with pytest.raises(ModelError) as caught:
+            await provider.complete([Message(role=Role.USER, content="hi")])
+
+    assert type(caught.value) is ModelUnavailableError
+    assert caught.value.retryable
+    assert caught.value.routable
+    # The classification must follow from the decode failure itself. Without
+    # this, an SDK that started wrapping the body error in something pydantic-ai
+    # recognises would keep the assertions above passing while the arm under
+    # test went dead.
+    assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+
+
+@pytest.mark.parametrize("vendor", VENDORS, ids=str)
+async def test_an_undecodable_body_falls_over_to_the_next_route(vendor: VendorStack) -> None:
+    # Why the disposition matters rather than the label. `routable` is consumed
+    # by `RoutingProvider` alone, so the only honest check that the fix does
+    # anything is that a router actually leaves the broken path — which is the
+    # behaviour a fallback-model list (#353) exists to buy.
+    async with (
+        _provider(vendor, non_json_body) as broken,
+        _provider(vendor, vendor.success) as healthy,
+    ):
+        router = RoutingProvider([Route(provider=broken), Route(provider=healthy)])
+
+        reply = await router.complete([Message(role=Role.USER, content="hi")])
+
+    assert reply.content == vendor.reply
 
 
 async def _record(vendor: VendorStack, messages: list[Message]) -> dict[str, Any]:

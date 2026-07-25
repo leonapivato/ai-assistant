@@ -7,6 +7,7 @@ tests are deterministic and never touch the network.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -224,6 +225,31 @@ async def test_unknown_failure_is_not_retryable() -> None:
 
     assert type(error) is ModelError
     assert not error.retryable
+
+
+async def test_an_undecodable_response_body_is_unavailable() -> None:
+    # ADR-0063: the one exception admitted from outside pydantic-ai's hierarchy.
+    # A body that will not decode says nothing about the request — it says the
+    # path substituted something for the answer — so it is retryable *and*
+    # routable, where before it was neither. `tests/models/test_provider_vendors.py`
+    # pins that both real vendor SDKs actually raise this; here the arm itself.
+    error = await _complete_raising(json.JSONDecodeError("Expecting value", "<html>", 0))
+
+    assert type(error) is ModelUnavailableError
+    assert error.retryable
+    assert error.routable
+
+
+async def test_a_plain_value_error_stays_permanent() -> None:
+    # The boundary the arm above must not cross. `json.JSONDecodeError` subclasses
+    # `ValueError`, and pydantic-ai raises a plain `ValueError` for a model spec
+    # naming a provider it does not know ("Unknown provider: ..."). Matching the
+    # base would make a typo in configuration retryable on every route.
+    error = await _complete_raising(ValueError("Unknown provider: nope"))
+
+    assert type(error) is ModelError
+    assert not error.retryable
+    assert not error.routable
 
 
 @pytest.mark.parametrize(
