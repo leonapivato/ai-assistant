@@ -566,11 +566,17 @@ class SqlitePlanStore:
         write a record every later ``get_goal``/``export`` fails to decode — the
         store would poison its own reads. Revalidating turns it into a
         ``PlanningError`` at the write, before anything is persisted.
+
+        That revalidation is also this method's ADR-0065 snapshot: it runs on the
+        coroutine's first executed line, before the first ``await``, and the id
+        returned is read from **it** rather than from the caller's instance. A
+        caller that mutates ``goal.id`` while the write is in flight would
+        otherwise be handed an id that names no row.
         """
         snapshot = _revalidated_goal(goal)
         async with self._lock:
             await _run_to_completion(self._save_goal_sync, snapshot)
-        return goal.id
+        return snapshot.id
 
     def _save_goal_sync(self, goal: Goal) -> None:
         conn = self._conn
