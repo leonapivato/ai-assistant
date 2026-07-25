@@ -122,10 +122,19 @@ class FakeMemoryStore:
         Stores a deep copy, so a caller mutating the record after ``add`` cannot
         reach into stored state — matching the isolation the persistent store gets
         for free by serialising to the database.
+
+        The copy is taken on the coroutine's **first executed line**, before the
+        first ``await``, and nothing downstream reads ``record`` again — the
+        returned id included (``core.protocols``' input clause, ADR-0065). The
+        copy was already here for post-call isolation; taking it before the
+        resource is what closes the *mid-call* window too, so the id returned and
+        the row it names can never come from two different versions of one record
+        — the shape ``SqliteMemoryStore.add`` snapshots for (ADR-0056).
         """
+        snapshot = record.model_copy(deep=True)
         async with self._resource.held():
-            self._records[record.id] = record.model_copy(deep=True)
-        return record.id
+            self._records[snapshot.id] = snapshot
+        return snapshot.id
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
         """Apply every write in one atomic unit — all commit, or none do.
@@ -136,6 +145,16 @@ class FakeMemoryStore:
         mutation is staged, then applied only once every check has passed — a
         mid-batch failure mutates nothing (ADR-0046 §4).
 
+        The whole batch — the caller's ``Sequence`` and each element's mutable
+        record — is snapshotted on the **first executed line**, before the first
+        ``await``, and every later step reads only that snapshot: the repeated-id
+        check, the collision check, what is committed, and the ids returned
+        (``core.protocols``' input clause, ADR-0065). A ``MemoryWrite`` being
+        ``frozen`` is not a discharge — it holds a record that is not — and
+        validating one observation while committing another is exactly how a
+        batch passes its duplicate-id check and then writes an id twice
+        (ADR-0046 §3). Mirrors ``SqliteMemoryStore.write_atomic``.
+
         Raises:
             MemoryStoreConflictError: an ``INSERT_IF_ABSENT`` element's id names a
                 stored record — physical presence, so an expired or window-closed
@@ -143,26 +162,19 @@ class FakeMemoryStore:
             MemoryStoreError: the batch names the same id twice (ADR-0046 §3).
                 Nothing is written.
         """
-        ids = [write.record.id for write in writes]
+        staged = [(write.record.model_copy(deep=True), write.mode) for write in writes]
+        ids = [record.id for record, _ in staged]
         if len(set(ids)) != len(ids):
             msg = "an atomic batch may not write the same id twice"
             raise MemoryStoreError(msg)
         async with self._resource.held():
-            staged: list[MemoryRecord] = []
-            for write in writes:
-                if (
-                    write.mode is MemoryWriteMode.INSERT_IF_ABSENT
-                    and write.record.id in self._records
-                ):
-                    msg = (
-                        f"cannot insert {write.record.id!r}: "
-                        "a record with that id is already stored"
-                    )
+            for record, mode in staged:
+                if mode is MemoryWriteMode.INSERT_IF_ABSENT and record.id in self._records:
+                    msg = f"cannot insert {record.id!r}: a record with that id is already stored"
                     raise MemoryStoreConflictError(msg)
-                staged.append(write.record.model_copy(deep=True))
-            for record in staged:
+            for record, _ in staged:
                 self._records[record.id] = record
-        return [record.id for record in staged]
+        return ids
 
     async def get(self, record_id: str) -> MemoryRecord | None:
         """Return the record with ``record_id``, or ``None`` if not readable.

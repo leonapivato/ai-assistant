@@ -17,8 +17,9 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -27,7 +28,7 @@ from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
@@ -91,6 +92,79 @@ def _semantic(
 def _preference(record_id: str, content: str) -> MemoryRecord:
     return PreferenceMemory(
         id=record_id, content=content, preference=content, provenance=_provenance()
+    )
+
+
+#: What a failure of either input-observation case below means, in one place
+#: (ADR-0065): the call read the caller's argument more than once and the reads
+#: disagreed, so one result now describes two versions of one input.
+_TORN_INPUT = (
+    "the write derived its outcome from more than one observation of its input: a "
+    "caller's mid-flight mutation reached part of what was committed and not the "
+    "rest, so no single version of the argument describes the result"
+)
+
+
+@contextlib.asynccontextmanager
+async def _held_at_its_first_await(
+    gate: SuspendedCall | None, call: Coroutine[Any, Any, Any]
+) -> AsyncIterator[asyncio.Task[Any]]:
+    """Run ``call`` and hold it at its first ``await`` for the body of the block.
+
+    The body is where the caller mutates what it passed; leaving the block lets
+    the call finish. The task is yielded rather than its result: the mutation has
+    to happen *while* the call is in flight, so the case awaits it afterwards.
+
+    ``gate`` of ``None`` is ADR-0065 §3's reduction for an implementation that
+    declares no suspension window: the call is run to completion first, so the
+    body's mutation is a post-call one. That is the right weakening and not a
+    hole — a store that performs no ``await`` between reading its input and
+    committing it has no window for a mutation to land in, so the only thing left
+    to assert is the isolation the suite has asserted since ADR-0045.
+    """
+    task = asyncio.ensure_future(call)
+    try:
+        if gate is None:
+            await asyncio.wait([task])
+        else:
+            await gate.reached()
+        yield task
+    finally:
+        if gate is not None:
+            gate.release()
+
+
+async def _assert_indexed_from_the_content_it_carries(
+    store: MemoryStore, record_id: str, *, echo_id: str
+) -> None:
+    """Assert the stored record's retrieval entry was built from its own content.
+
+    The half of ADR-0065's ``add`` obligation the record itself cannot show. A
+    torn write persists one version of the content and indexes another — the
+    ADR-0056 tear (#286), where the row's JSON and the vector beside it described
+    two different records — and a store that returns the row for *any* query hides
+    that completely.
+
+    So this asks the store a question only the index can answer: a second record
+    carrying **identical** content is written, and the two are searched for that
+    content. Relevance is a function of content, so a store that indexed what it
+    persisted ranks them together; one that embedded a version it did not keep is
+    out-scored by its own echo. Nothing about *how* the store scores is assumed —
+    only that two records saying the same thing are equally relevant to it, which
+    holds for a lexical fake and a vector backend alike.
+    """
+    stored = await store.get(record_id)
+    assert stored is not None
+    await store.add(_semantic(echo_id, stored.content))
+    scored = {record.id: (record.score or 0.0) for record in await store.search(stored.content)}
+    assert record_id in scored, (
+        f"{record_id!r} carries {stored.content!r} but is not retrieved by it — its "
+        f"retrieval entry was built from something else. {_TORN_INPUT}"
+    )
+    assert scored[record_id] >= scored[echo_id], (
+        f"{record_id!r} is less relevant to its own content than an identical echo "
+        f"of it ({scored[record_id]} < {scored[echo_id]}) — it was indexed from a "
+        f"version of the record it did not store. {_TORN_INPUT}"
     )
 
 
@@ -314,6 +388,20 @@ class MemoryStoreContract:
     async def test_stored_records_are_isolated_from_caller_mutation(
         self, store: MemoryStore
     ) -> None:
+        """Post-call **aliasing** isolation, and deliberately nothing more (ADR-0045 §4).
+
+        Read the name narrowly: both mutations below happen *after* their call has
+        returned, so what this pins is that the store copied rather than aliased
+        the caller's object. It says nothing about a mutation made **while** a
+        write is in flight, and the difference is not academic — the torn ``add``
+        of #286 passed this case, on every backend, for the whole time the tear was
+        live, because by the time it mutates there is nothing left to tear
+        (ADR-0065 §"The suite already appears to cover this"). Kept because
+        non-aliasing is a real property this is the only case for; the mid-flight
+        window is
+        :meth:`test_add_derives_everything_from_one_observation_of_its_record` and
+        :meth:`test_write_atomic_derives_everything_from_one_observation_of_its_batch`.
+        """
         # The window drives read filtering, so a caller must not be able to retire
         # or revive a stored record by mutating the nested Validity — neither the
         # object it passed to add, nor one a read handed back.
@@ -633,3 +721,160 @@ class MemoryStoreContract:
             cancelled_record = await store.get("cancel-1")
             assert cancelled_record is None or cancelled_record.content == "alpha"
             assert {record.id for record in await store.export()} >= {"cancel-2"}
+
+    # --- input observation (ADR-0065) ---------------------------------------
+
+    #: Whether this implementation performs no ``await`` between the coroutine's
+    #: first executed line and the point its input is committed — no suspension
+    #: window for a caller's mutation to land in. ``core.protocols``' input clause
+    #: is then discharged by "do not suspend" and the two cases below reduce to a
+    #: post-call assertion, correctly: a write with no window has none to tear in.
+    #: Left ``False``, the suite requires the implementation to open that window by
+    #: overriding :meth:`store_suspended_at_its_first_await` — so a backend that
+    #: reintroduces the #286 tear fails here rather than passing a suite that never
+    #: looked. Deliberately *not* the same declaration as
+    #: :attr:`acquires_no_shared_resource`: the two clauses are different axes with
+    #: different vacuity sets (ADR-0065 §"This is not ADR-0060's axis"), so a store
+    #: may well be vacuous under one and live under the other.
+    writes_without_suspending: bool = False
+
+    def store_suspended_at_its_first_await(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[MemoryStore, SuspendedCall]]:
+        """Supply a store whose next write stops at **its own first ``await``**.
+
+        Override unless :attr:`writes_without_suspending` is set. The next
+        :meth:`~ai_assistant.core.protocols.MemoryStore.add` or
+        :meth:`~ai_assistant.core.protocols.MemoryStore.write_atomic` must suspend
+        there and stay suspended until the case releases it; later calls run free,
+        because the cases go on to read the store back.
+
+        **The position is part of the hook's contract, not the implementer's
+        choice** (ADR-0065 §3). A hook fired at method *entry* would let the
+        mutation land before the method had read anything, so the store would
+        observe one coherent mutated version, the case would pass, and a tear at
+        the real window would survive untested. The first ``await`` is exactly the
+        boundary the clause draws: a conforming write has taken its one observation
+        before that point and cannot be reached by the mutation, while a write that
+        reads its argument again afterwards is torn by it. It is also well-defined
+        for a *non*-conforming implementation, which matters — a conforming one has
+        no second read to position a hook against.
+
+        What to suspend on is implementation-specific — a store's injected
+        collaborator, a fake's modelled resource — which is why this is a hook and
+        not something the suite can build. It is a real, if small, obligation on
+        anything handed to this suite, taken deliberately: ADR-0060 §3 settled the
+        same trade for its own hook, and a test-only affordance on the production
+        seam would buy observability by widening the contract every consumer
+        depends on. Returned as a context manager so the subject is disposed of the
+        way that implementation needs.
+        """
+        raise NotImplementedError
+
+    @contextlib.asynccontextmanager
+    async def _write_subject(
+        self, store: MemoryStore
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall | None]]:
+        """The store the two cases below drive, and the gate holding its next write.
+
+        ``None`` for the gate where the implementation declares
+        :attr:`writes_without_suspending`; the ``store`` fixture is then the
+        subject, since there is no window to open and nothing to build.
+        """
+        if self.writes_without_suspending:
+            yield store, None
+            return
+        async with self.store_suspended_at_its_first_await() as (subject, gate):
+            yield subject, gate
+
+    async def test_add_derives_everything_from_one_observation_of_its_record(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``add`` (ADR-0065, ADR-0056/#286).
+
+        With the write held at its first ``await``, the caller mutates the record
+        it still holds. Which version the store commits is *not* asserted — the
+        clause makes that indeterminate, and both "snapshot first" and "read once,
+        after suspending" are conforming discharges. What is asserted is that one
+        version describes the whole outcome: the returned id names the row that was
+        written, that row is some single version of the record rather than a mix of
+        two, and its retrieval entry was built from the content the row carries.
+
+        The last of those is the point. ``test_stored_records_are_isolated_from_
+        caller_mutation`` mutates *after* ``add`` returns, and the torn code passed
+        it on every backend for the whole time the tear was live (ADR-0065
+        §"The suite already appears to cover this"): a post-call assertion cannot
+        distinguish a store that snapshots from one that tears, because by then
+        there is nothing left to tear.
+        """
+        async with self._write_subject(store) as (subject, gate):
+            record = _semantic("obs-add", "alpha alpha alpha")
+            before = record.model_copy(deep=True)
+            async with _held_at_its_first_await(gate, subject.add(record)) as call:
+                record.id = "obs-add-moved"
+                record.content = "bravo bravo bravo"
+                after = record.model_copy(deep=True)
+            returned = await call
+
+            stored = await subject.get(returned)
+            assert stored is not None, (
+                f"add returned {returned!r}, which names no readable row. {_TORN_INPUT}"
+            )
+            assert stored in (before, after), _TORN_INPUT
+            # One record was written, at one id — not the old id and the new one.
+            assert {r.id for r in await subject.export()} == {returned}, _TORN_INPUT
+            await _assert_indexed_from_the_content_it_carries(
+                subject, returned, echo_id="obs-add-echo"
+            )
+
+    async def test_write_atomic_derives_everything_from_one_observation_of_its_batch(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``write_atomic`` (ADR-0065, ADR-0046 §3).
+
+        Not a rewording of the ``add`` case: this argument is a caller-owned
+        ``Sequence`` whose elements are ``frozen`` ``MemoryWrite``s holding
+        *mutable* records — the clause's own example of why "the argument is
+        frozen" is not a discharge — and the batch is validated for repeated ids
+        before it is committed. A backend that validates one observation and
+        commits another can pass its duplicate-id check on a batch it does not
+        write.
+
+        So all three axes move at once while the write is held: an element's id
+        (the one the check validated), an element's content, and the caller's list
+        itself. Either outcome is conforming — the batch commits, or the store saw
+        the repeated id and rejected the whole thing — but each must rest on one
+        observation.
+        """
+        async with self._write_subject(store) as (subject, gate):
+            first = _semantic("obs-batch-1", "alpha alpha alpha")
+            second = _semantic("obs-batch-2", "bravo bravo bravo")
+            writes = [MemoryWrite(record=first), MemoryWrite(record=second)]
+            before = [write.record.model_copy(deep=True) for write in writes]
+            async with _held_at_its_first_await(gate, subject.write_atomic(writes)) as call:
+                first.id = second.id  # a repeated id the pre-await check did not see
+                second.content = "charlie charlie charlie"
+                writes.append(MemoryWrite(record=_semantic("obs-batch-3", "delta delta delta")))
+                after = [write.record.model_copy(deep=True) for write in writes]
+
+            try:
+                returned = list(await call)
+            except MemoryStoreError:
+                # Conforming the other way: a store that took its one observation
+                # *after* suspending saw the repeated id and refused the batch. The
+                # refusal is all-or-nothing like any other (ADR-0046 §4).
+                assert await subject.export() == [], _TORN_INPUT
+                return
+
+            committed = {record.id: record for record in await subject.export()}
+            assert len(returned) == len(committed), (
+                f"write_atomic returned {returned} but committed {sorted(committed)}: an id "
+                f"was written twice, so the repeated-id check and the commit disagreed. "
+                f"{_TORN_INPUT}"
+            )
+            assert set(returned) == set(committed), _TORN_INPUT
+            assert committed in ({r.id: r for r in before}, {r.id: r for r in after}), _TORN_INPUT
+            for index, record_id in enumerate(returned):
+                await _assert_indexed_from_the_content_it_carries(
+                    subject, record_id, echo_id=f"obs-batch-echo-{index}"
+                )
