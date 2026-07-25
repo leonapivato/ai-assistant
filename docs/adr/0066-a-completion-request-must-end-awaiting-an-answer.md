@@ -108,9 +108,15 @@ conversation which is not one raises `ModelError`:
 Stated on the roles of `messages`, deliberately — not on any translated
 representation — so it binds an implementation that never touches pydantic-ai.
 `Role.SYSTEM` is unaffected: a history ending in a system turn is a request and
-stays one. `Role.TOOL` is out of scope here; it is not representable at this
-layer at all and `PydanticAIProvider` already rejects it (issue #351 is not
-about it).
+stays one.
+
+The clause is a **necessary condition, not a sufficient one** — it names two
+shapes that are never a request, and admits nothing by omission. `Role.TOOL` is
+the case that makes the distinction bite: a tool turn is not representable at
+this layer at all, and both implementations already reject any history containing
+one. Passing this clause does not make such a history acceptable, and nothing
+here relaxes that rejection or promises tool support (issue #351 is not about
+it).
 
 ### 2. Why refuse, rather than document the echo as defined behaviour
 
@@ -252,10 +258,13 @@ does.
 3. **`src/ai_assistant/testing/models.py`** — `FakeModelProvider` mirrors the
    refusal, as it already mirrors the empty and tool-role rejections and for the
    same stated reason.
-4. **`tests/models/model_provider_contract.py`** — shared cases pinning the rule
-   **at its boundary, in both directions**: every shape §1 refuses is refused,
-   and every shape §1 still admits is admitted. That principle, not the list, is
-   the obligation; the list below is its floor, and an implementation that
+4. **`tests/models/model_provider_contract.py`** — shared cases pinning **this
+   ADR's boundary, in both directions**: of the shapes the rule in §1 speaks to,
+   every one it refuses is refused, and every one it admits is admitted. The
+   boundary is emptiness and the terminal turn, and only those — this obligation
+   says nothing about `Role.TOOL`, whose rejection is prior to this ADR,
+   unchanged by it, and not a shape §1 admits (§1). That principle, not the list,
+   is the obligation; the list below is its floor, and an implementation that
    satisfies the principle by other cases satisfies this ADR.
 
    Refused: the empty history; a history ending on `Role.ASSISTANT`; and that
