@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -46,7 +46,7 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
 
     from pydantic_ai.models import Model
 
@@ -149,6 +149,18 @@ def _openai_model(handler: Callable[[httpx.Request], httpx.Response]) -> Model:
     return OpenAIChatModel(_OPENAI_MODEL_NAME, provider=OpenAIProvider(openai_client=client))
 
 
+def _anthropic_turn_text(turn: Mapping[str, Any]) -> str:
+    """Read one serialised Anthropic turn's text out of its content blocks."""
+    blocks: Sequence[Mapping[str, Any]] = turn["content"]
+    return "".join(block["text"] for block in blocks)
+
+
+def _openai_turn_text(turn: Mapping[str, Any]) -> str:
+    """Read one serialised OpenAI turn's text, which is a bare string."""
+    text: str = turn["content"]
+    return text
+
+
 @dataclass(frozen=True, slots=True)
 class VendorStack:
     """One vendor's real SDK, wired to a replaceable transport.
@@ -160,23 +172,53 @@ class VendorStack:
         success: The handler that answers with that vendor's success shape.
         reply: The assistant text ``success`` returns, so a test can assert the
             reply came back through the vendor's own response parsing.
+        turn_text: Reads the text out of one serialised turn in that vendor's
+            request body. The two vendors disagree about the shape — Anthropic
+            sends a list of typed content blocks, OpenAI a bare string — so a
+            test that wants to assert *what was said* (not merely who said it)
+            has to go through the vendor to get at it.
     """
 
     name: str
     build: Callable[[Callable[[httpx.Request], httpx.Response]], Model]
     success: Callable[[httpx.Request], httpx.Response]
     reply: str
+    turn_text: Callable[[Mapping[str, Any]], str]
 
     def __str__(self) -> str:
         """Name the vendor, so parametrised test ids read as the vendor name."""
         return self.name
 
+    def transcript(self, body: Mapping[str, Any]) -> list[tuple[str, str]]:
+        """Return ``(role, text)`` for every turn in a serialised request body.
+
+        The pair, not the role alone: a vendor adapter that dropped or rewrote a
+        turn's *content* while keeping the role sequence intact would send a
+        materially different prompt, and a canned response would hide it.
+
+        Args:
+            body: One request body the vendor SDK put on the wire.
+
+        Returns:
+            Each turn as ``(role, text)``, in the order sent.
+        """
+        turns: Sequence[Mapping[str, Any]] = body["messages"]
+        return [(turn["role"], self.turn_text(turn)) for turn in turns]
+
 
 ANTHROPIC = VendorStack(
-    name="anthropic", build=_anthropic_model, success=anthropic_success, reply=_ANTHROPIC_REPLY
+    name="anthropic",
+    build=_anthropic_model,
+    success=anthropic_success,
+    reply=_ANTHROPIC_REPLY,
+    turn_text=_anthropic_turn_text,
 )
 OPENAI = VendorStack(
-    name="openai", build=_openai_model, success=openai_success, reply=_OPENAI_REPLY
+    name="openai",
+    build=_openai_model,
+    success=openai_success,
+    reply=_OPENAI_REPLY,
+    turn_text=_openai_turn_text,
 )
 
 #: Every vendor stack the conformance suite is run against.
