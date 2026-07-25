@@ -214,3 +214,52 @@ def test_building_a_provider_with_no_specs_is_a_configuration_error() -> None:
     """An empty route list fails at wiring time, not at the first completion."""
     with pytest.raises(ConfigurationError, match="at least one route"):
         _build_model_provider(Settings(), ())
+
+
+def test_an_uninstalled_vendor_stops_the_build_rather_than_the_first_request(
+    tmp_path: Path,
+) -> None:
+    """ADR-0062 §2's deferred half: the check runs before an engine exists.
+
+    Reproduced before it was fixed: ``build_engine`` returned a perfectly healthy
+    two-route ``Engine``, and the first completion raised ``ModelError`` wrapping
+    ``ImportError: Please install the 'groq' package`` — with ``retryable`` and
+    ``routable`` both false, so ``RoutingProvider`` re-raised it without ever
+    trying the working ``anthropic`` route behind it (ADR-0013 §5). One
+    misconfigured spec truncated the whole order, on every request. Now the
+    operator is told at startup, which is the only moment they can act on it.
+
+    ``groq`` stands in for "a vendor whose extra was never installed" — see
+    ``tests/models/test_vendor_availability.py``, which guards that precondition.
+    """
+    settings = Settings(default_model="groq:llama-3", fallback_models=("anthropic:claude-x",))
+
+    with pytest.raises(ConfigurationError, match="not installed"):
+        build_engine(settings, data_dir=tmp_path)
+
+
+def test_an_uninstalled_fallback_vendor_also_stops_the_build(tmp_path: Path) -> None:
+    """The check covers the fallbacks, not only ``default_model``.
+
+    A fallback is the case the check was argued for: it is exercised only once
+    the primary has already failed, so an unusable one converts a degraded state
+    into an outage at the exact moment it was being relied on, and nothing about
+    a healthy primary would ever reveal it.
+    """
+    settings = Settings(default_model="anthropic:claude-x", fallback_models=("groq:llama-3",))
+
+    with pytest.raises(ConfigurationError, match="groq:llama-3"):
+        build_engine(settings, data_dir=tmp_path)
+
+
+def test_every_spec_is_checked_not_merely_the_first() -> None:
+    """A bad spec anywhere in the order stops the build, and names itself.
+
+    The failure mode this rules out is a check written as a guard on the primary:
+    it would pass a router whose *second* route is unusable, which is the very
+    configuration ADR-0062 §2 argues is worst — a fallback that only fails once
+    something else already has. An unknown vendor is used rather than an
+    uninstalled one so the two error paths are both exercised from here.
+    """
+    with pytest.raises(ConfigurationError, match="nosuchvendor"):
+        _build_model_provider(Settings(), ("anthropic:claude-x", "nosuchvendor:whatever"))

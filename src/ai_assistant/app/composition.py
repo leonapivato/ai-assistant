@@ -21,6 +21,7 @@ from ai_assistant.models import (
     RetryingProvider,
     Route,
     RoutingProvider,
+    ensure_vendor_available,
 )
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import Engine, LearningLoop, StepExecutor, StepRunner
@@ -92,7 +93,9 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         ConfigurationError: If the data directory cannot be prepared — blocked by
             permissions, or a file occupies its path. Converted from the raw
             ``OSError`` so an adapter's ``AssistantError`` boundary surfaces it
-            rather than letting it escape as a traceback.
+            rather than letting it escape as a traceback. Or if a configured model
+            spec names a vendor pydantic-ai does not know or whose optional package
+            is not installed (ADR-0062 §2, see :func:`_build_model_provider`).
     """
     directory = data_dir if data_dir is not None else _default_data_dir()
     try:
@@ -211,6 +214,18 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
     policy: the resilience knobs (``model_timeout_seconds`` and friends) are a
     property of how patient this deployment is, not of which vendor answered.
 
+    **Every spec's vendor is checked here, before any route is built** — the half
+    of ADR-0062 §2 that was decided in principle and deferred for want of a
+    mechanism. ``core.config`` validated each spec's *form* at load but cannot ask
+    whether the vendor behind it is installed: answering that means reaching
+    pydantic-ai, which the import contract forbids this layer (golden rule 4). So
+    ``models`` answers it and this layer asks — reaching the SDK only indirectly,
+    through the seam, exactly as the contract permits.
+
+    The check covers ``default_model`` as well as the fallbacks, because ``specs``
+    is the whole preference order and an unresolvable *primary* is the worse case:
+    it disables the entire fallback order rather than the tail of it (ADR-0062 §2).
+
     Args:
         settings: Loaded application settings — the resilience knobs each route's
             retry wrapper is built from.
@@ -221,9 +236,15 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
         The routed, retrying provider the planner is given.
 
     Raises:
-        ConfigurationError: If ``specs`` is empty — raised by ``RoutingProvider``,
-            which refuses a router with nothing to route to.
+        ConfigurationError: If any spec names a vendor that is unknown to
+            pydantic-ai or whose optional package is not installed — raised by
+            ``ensure_vendor_available``, so an operator learns at startup rather
+            than on some user's request weeks later. Or if ``specs`` is empty —
+            raised by ``RoutingProvider``, which refuses a router with nothing to
+            route to.
     """
+    for spec in specs:
+        ensure_vendor_available(spec)
     policy = RetryPolicy.from_settings(settings)
     return RoutingProvider(
         [Route(RetryingProvider(PydanticAIProvider(spec), policy=policy)) for spec in specs]

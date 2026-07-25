@@ -5,6 +5,11 @@ so the rest of the system stays model-agnostic. The adapter's only jobs are to
 translate our provider-independent :class:`~ai_assistant.core.types.Message`
 list into pydantic-ai's message history, drive a single completion, and
 translate the result (and any failure) back into our own types.
+
+It also owns the one question about a model spec that cannot be answered
+anywhere else: whether the vendor it names is actually importable
+(:func:`ensure_vendor_available`, ADR-0062 §2). Answering it means reaching
+pydantic-ai's provider registry, which only this layer may do.
 """
 
 from __future__ import annotations
@@ -26,8 +31,10 @@ from pydantic_ai.messages import (
     TextPart,
     UserPromptPart,
 )
+from pydantic_ai.providers import infer_provider_class
 
 from ai_assistant.core.errors import (
+    ConfigurationError,
     ModelAuthError,
     ModelContentFilterError,
     ModelError,
@@ -48,6 +55,85 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from pydantic_ai.messages import ModelMessage, ModelRequestPart
+
+
+def ensure_vendor_available(spec: str) -> None:
+    """Fail now if ``spec``'s vendor cannot be resolved (ADR-0062 §2).
+
+    ADR-0062 §1 and §3 moved three model-spec mistakes from a user's request to
+    startup; this closes the fourth and last, the one that ADR-0062 §2 decided in
+    principle and deferred in mechanism because the mechanism lives here.
+
+    Why it is worth a check at all: an unresolvable spec fails at the first
+    completion as a bare, **non-routable** ``ModelError`` (:func:`_classify` has
+    nothing better to say about an ``ImportError``, and deliberately keeps it
+    that way — see :func:`_classify_unwrapped`). ``RoutingProvider`` re-raises a
+    non-routable failure without trying the next route (ADR-0013 §5), so one bad
+    spec does not degrade the router, it **truncates** it: an unresolvable
+    primary kills the whole configured fallback order, on every request. And a
+    fallback is only ever reached once the primary has already failed, so the
+    mistake surfaces at the exact moment it was being relied on.
+
+    **This is deliberately key-free and offline.** It calls pydantic-ai's
+    :func:`~pydantic_ai.providers.infer_provider_class`, which performs the
+    vendor import and nothing else — it returns the provider *class* rather than
+    an instance, so no API key is read and no client is built. That is why the
+    check exists in this shape at all: the two obvious alternatives, flipping
+    ``PydanticAIProvider``'s ``defer_model_check`` or calling
+    ``models.infer_model``, both construct the vendor provider and therefore
+    demand live credentials of anything that merely wires the system together
+    (ADR-0062 §2 verified this: ``UserError: Set the ANTHROPIC_API_KEY …``).
+
+    Only the **vendor** half of the spec is checked. Whether the vendor offers
+    the named model is the vendor's own answer, available only from a live call.
+
+    **It raises ``ConfigurationError``, never a ``ModelError``**, and the choice
+    is load-bearing rather than cosmetic. A ``ModelError`` carries a routing
+    disposition — ``retryable`` and ``routable`` — which only means something to
+    a caller deciding whether to *try again*; there is nothing to try again here,
+    because a missing package reproduces identically on every attempt from every
+    route. Putting a completion-time type on a wiring failure is exactly the
+    confusion ADR-0063's allowlist keeps out of :func:`_classify_unwrapped`.
+    ``ConfigurationError`` is also where ADR-0062 §§1, 3 put the other three
+    spec mistakes, and what ``RoutingProvider`` raises for an empty route list,
+    so an adapter's ``AssistantError`` boundary already reports it as a startup
+    misconfiguration rather than a failed request. The raw ``ImportError`` is
+    chained but does not cross the subsystem boundary on its own.
+
+    Args:
+        spec: A pydantic-ai ``"provider:model"`` spec, e.g.
+            ``"anthropic:claude-opus-4-8"``.
+
+    Raises:
+        ConfigurationError: If ``spec`` names no provider, names one pydantic-ai
+            does not know, or names one whose optional package is not installed.
+    """
+    # pydantic-ai's own split, so this can never disagree with `infer_model`
+    # about where the provider half ends (the model half may contain colons).
+    provider_name, _ = models.parse_model_id(spec)
+    if provider_name is None:
+        msg = (
+            f"model spec {spec!r} names no provider; expected pydantic-ai's "
+            f"'provider:model' form, e.g. 'anthropic:claude-opus-4-8'"
+        )
+        raise ConfigurationError(msg)
+
+    try:
+        infer_provider_class(provider_name)
+    except ImportError as exc:
+        # The vendor is one pydantic-ai knows, but its optional package was never
+        # installed (ADR-0061 §1 installs two). pydantic-ai's own message names
+        # the extra to install, so it is quoted rather than paraphrased.
+        msg = (
+            f"model spec {spec!r} names provider {provider_name!r}, whose package "
+            f"is not installed: {exc}"
+        )
+        raise ConfigurationError(msg) from exc
+    except ValueError as exc:
+        # Well-formed (ADR-0062 §1 checked that) but naming a vendor pydantic-ai
+        # has never heard of — a typo, or a provider from a different release.
+        msg = f"model spec {spec!r} names an unknown provider {provider_name!r}: {exc}"
+        raise ConfigurationError(msg) from exc
 
 
 def _to_model_messages(messages: Sequence[Message]) -> list[ModelMessage]:
