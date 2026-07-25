@@ -47,6 +47,7 @@ from itertools import product
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
@@ -262,18 +263,27 @@ class MemoryPolicyContract:
 
         assert decision.kind not in _TARGET_CARRYING
 
-    async def test_decide_does_not_mutate_its_inputs(self, policy: MemoryPolicy) -> None:
+    async def test_the_proposal_decide_receives_is_immutable(self, policy: MemoryPolicy) -> None:
         # #40's input-immutability obligation, asserted in the shared suite rather
         # than stranded in each implementation's own tests (ADR-0068 §5). A
         # conforming producer hands `decide` a validly-constructed, frozen proposal
-        # (its `conflicts` a tuple by §1's depth rule), so the policy cannot mutate
-        # it; this pins that property against the real subject.
+        # whose `conflicts` is a tuple (§1's depth rule), so `decide` cannot mutate
+        # it — the property is pinned against the real subject.
+        #
+        # Deliberately asserts nothing about the caller-owned `conflicts`
+        # *Sequence* argument: a callee mutating a caller's container is the
+        # reverse-direction question ADR-0065 §5 leaves open and ADR-0068 keeps
+        # open (Consequences), so a conformance suite must not silently ratify it.
         conflicts = [_record("existing")]
         proposal = _proposal(conflicts=conflicts)
-        proposal_before = proposal.model_copy(deep=True)
-        conflicts_before = [c.model_copy(deep=True) for c in conflicts]
+        before = proposal.model_copy(deep=True)
 
         await policy.decide(proposal, conflicts=conflicts)
 
-        assert proposal == proposal_before
-        assert conflicts == conflicts_before
+        # The proposal is frozen end to end, so `decide` left it untouched and
+        # could not have mutated it: its own fields, its tuple `conflicts`, and its
+        # nested record all reject mutation.
+        assert proposal == before
+        assert isinstance(proposal.conflicts, tuple)
+        with pytest.raises(ValidationError):
+            proposal.proposed.content = "rewritten"  # the nested record is frozen
