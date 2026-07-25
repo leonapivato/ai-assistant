@@ -22,25 +22,39 @@ from typing import TYPE_CHECKING
 
 from model_provider_contract import encode_conversation
 
+from ai_assistant.core.types import Role
+
 if TYPE_CHECKING:
     from model_provider_contract import ConversationLog, FirstAwaitGate
     from pydantic_ai.messages import ModelMessage
 
     from ai_assistant.models import PydanticAIProvider
 
+#: Which conversation role each rendered pydantic-ai part came from, so the
+#: transport records the same (role, content, name) turn identity the wrapper
+#: recorder does — a single direct-provider observation cannot tear across
+#: attempts, but the log format must still match for the shared assertions.
+_PART_ROLE = {
+    "SystemPromptPart": Role.SYSTEM,
+    "UserPromptPart": Role.USER,
+    "TextPart": Role.ASSISTANT,
+}
 
-def _contents_of(history: list[ModelMessage]) -> tuple[str, ...]:
-    """The string contents ``PydanticAIProvider`` rendered its conversation into.
 
-    Read back off the rendered ``ModelMessage`` history so the transport records
-    the version it was handed in the same string space the recorder-backed
-    wrappers use.
+def _fingerprint_of(history: list[ModelMessage]) -> tuple[tuple[Role, str, str | None], ...]:
+    """The turn identities ``PydanticAIProvider`` rendered its conversation into.
+
+    Read back off the rendered ``ModelMessage`` history, mapping each part to the
+    role it came from, so the transport records in the same (role, content, name)
+    space the recorder-backed wrappers use. Name is unrepresented in the rendered
+    parts and is ``None`` here, matching the wrapper turns the case builds.
     """
     return tuple(
-        content
+        (_PART_ROLE[type(part).__name__], content, None)
         for message in history
         for part in message.parts
-        if isinstance(content := getattr(part, "content", None), str)
+        if type(part).__name__ in _PART_ROLE
+        and isinstance(content := getattr(part, "content", None), str)
     )
 
 
@@ -58,9 +72,9 @@ def suspend_the_transport(
     async def suspending_run(
         *, message_history: list[ModelMessage], **_kwargs: object
     ) -> SimpleNamespace:
-        observed = _contents_of(message_history)
+        observed = _fingerprint_of(message_history)
         log.record(observed)
         await gate.hold()
-        return SimpleNamespace(output=encode_conversation(observed))
+        return SimpleNamespace(output=encode_conversation(tuple(c for _r, c, _n in observed)))
 
     provider._agent.run = suspending_run  # type: ignore[assignment]
