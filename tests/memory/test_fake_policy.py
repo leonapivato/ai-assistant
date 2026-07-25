@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from memory_policy_contract import MemoryPolicyContract
+from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     DataTier,
@@ -134,17 +135,19 @@ async def test_recorded_conflicts_survive_the_caller_clearing_the_list() -> None
     assert len(policy.calls[0].conflicts) == 1
 
 
-async def test_recorded_call_survives_mutation_of_the_records_themselves() -> None:
-    # Snapshotting the containers is not enough: the records inside them are
-    # mutable models, so a caller reusing one after the call could otherwise
-    # rewrite history and make an assertion about the call silently pass.
+async def test_recorded_call_is_immune_to_caller_mutation() -> None:
+    # ADR-0068 freezes the record graph, so a caller reusing a record or proposal
+    # after the call cannot rewrite the fake's recorded history: the snapshot is
+    # subsumed by immutability rather than defended by copying.
     policy = FakeMemoryPolicy()
     proposal = _proposal()
     conflict = _record("original")
 
     await policy.decide(proposal, conflicts=[conflict])
-    conflict.id = "changed"
-    proposal.rationale = "rewritten"
+    with pytest.raises(ValidationError):
+        conflict.id = "changed"
+    with pytest.raises(ValidationError):
+        proposal.rationale = "rewritten"
 
     assert policy.calls[0].conflicts[0].id == "original"
     assert policy.last_proposal.rationale == "because"
@@ -158,18 +161,8 @@ def test_last_proposal_raises_before_any_call() -> None:
         _ = FakeMemoryPolicy().last_proposal
 
 
-async def test_decide_does_not_mutate_its_inputs() -> None:
-    # As in test_policy.py: an expectation of this implementation, not a stated
-    # obligation of the Protocol, so it lives here rather than in the suite.
-    conflicts = [_record("existing")]
-    proposal = _proposal()
-    proposal_before = proposal.model_copy(deep=True)
-    conflicts_before = [c.model_copy(deep=True) for c in conflicts]
-
-    await FakeMemoryPolicy().decide(proposal, conflicts=conflicts)
-
-    assert proposal == proposal_before
-    assert conflicts == conflicts_before
+# `test_decide_does_not_mutate_its_inputs` moved to the shared `MemoryPolicyContract`
+# (ADR-0068 §5), which runs it against this fake too.
 
 
 async def test_decision_carries_a_non_blank_reason() -> None:

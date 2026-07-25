@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import (
     AuditError,
@@ -1083,12 +1084,13 @@ async def test_a_state_repointed_mid_ruling_claims_the_execution_it_authenticate
 
     `run` authenticates the stored execution through `_opened`, then — after the
     registry, the policy and the trail have awaited — commits and hands the
-    executor a claim. `ExecutionState` is mutable (`frozen=True` is not set), so a
-    caller sharing the object could repoint `state.id`/`state.version` to a
-    *second* execution of the same plan, whose matching step is still `PENDING`
-    and claimable at its own version, while a write is suspended. The private
-    snapshot `run` takes on entry (`_detached_state`) is what keeps the claim on
-    the authenticated execution.
+    executor a claim. The attack this guarded was a caller sharing the object and
+    repointing `state.id`/`state.version` to a *second* execution of the same
+    plan, whose matching step is still `PENDING` and claimable at its own version,
+    while a write is suspended. ADR-0068 freezes `ExecutionState`, so that
+    mid-ruling repoint is unrepresentable — it raises rather than moving the claim
+    — which is a stronger guarantee than the private `_detached_state` snapshot
+    that used to defend against it.
     """
     plans = FakePlanStore(now=lambda: AT)
     step = plan_step()
@@ -1097,8 +1099,11 @@ async def test_a_state_repointed_mid_ruling_claims_the_execution_it_authenticate
     a_id = first.id
 
     def repoint() -> None:
-        first.id = second.id
-        first.version = second.version
+        # Frozen: the repoint cannot land, so the claim stays on the authenticated A.
+        with pytest.raises(ValidationError):
+            first.id = second.id
+        with pytest.raises(ValidationError):
+            first.version = second.version
 
     harness = Harness(tools=(tool(),), plans=plans, trail=RedirectingTrail(repoint))
 

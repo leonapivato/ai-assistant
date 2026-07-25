@@ -53,7 +53,7 @@ def _prov(
         source=source,
         confidence=confidence,
         last_updated=_WHEN,
-        evidence=list(evidence),
+        evidence=evidence,
     )
 
 

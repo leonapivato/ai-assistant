@@ -414,7 +414,7 @@ async def test_learn_hands_every_proposal_to_the_writer() -> None:
     assert [call.proposed.id for call in writer.calls] == ["pref-0", "pref-1"]
     # The loop resolves no conflicts of its own: what it hands over is the
     # proposal as proposed, ids and all.
-    assert [call.conflicts for call in writer.calls] == [[], []]
+    assert [call.conflicts for call in writer.calls] == [(), ()]
 
 
 async def test_learn_applies_every_proposal_in_order() -> None:

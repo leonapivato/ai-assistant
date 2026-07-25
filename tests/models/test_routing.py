@@ -734,25 +734,17 @@ def _append_a_turn(conversation: list[Message]) -> None:
     conversation.append(Message(role=Role.USER, content="wait, actually"))
 
 
-def _rewrite_the_first_turn(conversation: list[Message]) -> None:
-    # In place, without touching the list: `Message` is not frozen, so this is
-    # invisible to a router that only copies the container.
-    conversation[0].content = "rewritten"
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [_append_a_turn, _rewrite_the_first_turn],
-    ids=["appended-turn", "rewritten-turn"],
-)
+@pytest.mark.parametrize("mutate", [_append_a_turn], ids=["appended-turn"])
 async def test_every_route_answers_the_conversation_the_call_began_with(
     mutate: Callable[[list[Message]], None],
 ) -> None:
     # ADR-0065: the loop hands the caller's sequence to the next route after the
-    # previous route's await has failed. Neither the container nor a turn's own
-    # fields may change under the call — otherwise two vendors are sent two
-    # different requests and only one reply comes back, attributed to one
-    # `complete`.
+    # previous route's await has failed. Freezing `Message` (ADR-0068) removes the
+    # element-rewrite tear — a turn's own fields can no longer change under the
+    # call — so what survives is the container tear (ADR-0068 §4): the caller's
+    # list is still theirs and mutable, and only one observation of it may drive
+    # the routes, otherwise two vendors are sent two different requests and only
+    # one reply comes back, attributed to one `complete`.
     conversation = [Message(role=Role.USER, content="hi")]
     down = MutatingProvider(conversation, mutate)
     backup = RecordingConversationProvider()

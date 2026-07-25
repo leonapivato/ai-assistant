@@ -222,20 +222,9 @@ def test_non_positive_temporary_ttl_is_rejected_at_construction(ttl: timedelta) 
         DefaultMemoryPolicy(temporary_ttl=ttl)
 
 
-async def test_decide_does_not_mutate_its_inputs() -> None:
-    # Not part of the shared suite: the MemoryPolicy Protocol does not promise
-    # this, and a conformance suite may not invent obligations (TODO item 7
-    # tracks ratifying it). It is still true of this policy, which holds no state
-    # and only reads its arguments.
-    conflicts = [_semantic("existing")]
-    proposal = _proposal(_semantic("new"))
-    proposal_before = proposal.model_copy(deep=True)
-    conflicts_before = [c.model_copy(deep=True) for c in conflicts]
-
-    await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
-
-    assert proposal == proposal_before
-    assert conflicts == conflicts_before
+# `test_decide_does_not_mutate_its_inputs` moved to the shared `MemoryPolicyContract`
+# (ADR-0068 §5): freezing makes input-immutability an obligation every conforming
+# producer satisfies, so it belongs in the suite, held against every implementation.
 
 
 async def test_decision_carries_a_non_blank_reason() -> None:

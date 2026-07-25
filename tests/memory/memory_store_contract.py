@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
@@ -400,35 +401,28 @@ class MemoryStoreContract:
         assert "at_from" in found
         assert "after_from" not in found
 
-    async def test_stored_records_are_isolated_from_caller_mutation(
-        self, store: MemoryStore
-    ) -> None:
-        """Post-call **aliasing** isolation, and deliberately nothing more (ADR-0045 §4).
+    async def test_stored_records_cannot_be_mutated_by_the_caller(self, store: MemoryStore) -> None:
+        """Immutability subsumes post-call aliasing isolation (ADR-0068).
 
-        Read the name narrowly: both mutations below happen *after* their call has
-        returned, so what this pins is that the store copied rather than aliased
-        the caller's object. It says nothing about a mutation made **while** a
-        write is in flight, and the difference is not academic — the torn ``add``
-        of #286 passed this case, on every backend, for the whole time the tear was
-        live, because by the time it mutates there is nothing left to tear
-        (ADR-0065 §"The suite already appears to cover this"). Kept because
-        non-aliasing is a real property this is the only case for; the mid-flight
-        window is
-        :meth:`test_add_derives_everything_from_one_observation_of_its_record` and
-        :meth:`test_write_atomic_derives_everything_from_one_observation_of_its_batch`.
+        The property the old aliasing case protected — a handed-out copy cannot
+        reach stored state — is now guaranteed by the record graph being frozen:
+        there is no mutation to isolate against, because none is representable.
+        Both mutations below (the object the caller passed to ``add``, and one a
+        read handed back) raise on a validly-constructed record, so the caller can
+        neither retire nor revive a stored record by editing the nested
+        ``Validity``.
         """
-        # The window drives read filtering, so a caller must not be able to retire
-        # or revive a stored record by mutating the nested Validity — neither the
-        # object it passed to add, nor one a read handed back.
         original = _semantic("iso", "coffee", validity=Validity(valid_until=_FAR_FUTURE))
         await store.add(original)
 
-        original.validity.valid_until = _LONG_AGO  # mutate the caller's own object
+        with pytest.raises(ValidationError):
+            original.validity.valid_until = _LONG_AGO  # the caller's own object is frozen
         assert await store.get("iso") is not None  # stored copy is still live
 
         got = await store.get("iso")
         assert got is not None
-        got.validity.valid_until = _LONG_AGO  # mutate a returned object
+        with pytest.raises(ValidationError):
+            got.validity.valid_until = _LONG_AGO  # a returned object is frozen too
         assert await store.get("iso") is not None  # stored copy is still live
 
     async def test_search_judges_every_record_against_one_clock_reading(
@@ -802,105 +796,71 @@ class MemoryStoreContract:
         async with self.store_suspended_at_its_first_await() as (subject, gate):
             yield subject, gate
 
-    async def test_add_derives_everything_from_one_observation_of_its_record(
+    async def test_add_cannot_tear_on_a_mid_flight_mutation_of_its_record(
         self, store: MemoryStore
     ) -> None:
-        """``core.protocols``' input clause, on ``add`` (ADR-0065, ADR-0056/#286).
+        """The ``add`` single-element tear is unrepresentable under ADR-0068.
 
-        With the write held at its first ``await``, the caller mutates the record
-        it still holds. Which version the store commits is *not* asserted — the
-        clause makes that indeterminate, and both "snapshot first" and "read once,
-        after suspending" are conforming discharges. What is asserted is that one
-        version describes the whole outcome: the returned id names the row that was
-        written, that row is some single version of the record rather than a mix of
-        two, and its retrieval entry was built from the content the row carries.
-
-        The last of those is the point. ``test_stored_records_are_isolated_from_
-        caller_mutation`` mutates *after* ``add`` returns, and the torn code passed
-        it on every backend for the whole time the tear was live (ADR-0065
-        §"The suite already appears to cover this"): a post-call assertion cannot
-        distinguish a store that snapshots from one that tears, because by then
-        there is nothing left to tear.
+        ADR-0065's input clause guarded ``add`` against the #286 tear, where the
+        caller rewrote the record's id/content while the write was suspended and a
+        backend that observed the record twice committed a mix of two versions.
+        Freezing ``MemoryRecord`` makes that *stimulus* unrepresentable — the very
+        point of ADR-0068: the mutation raises rather than tearing, so no backend
+        can observe two versions of a single validly-constructed record. The clause
+        survives only for the ``Sequence`` arguments (ADR-0068 §4), which
+        :meth:`test_write_atomic_derives_everything_from_one_observation_of_its_batch`
+        still exercises through the caller-owned, mutable list.
         """
         async with self._write_subject(store) as (subject, gate):
             record = _semantic("obs-add", "alpha alpha alpha")
-            before = record.model_copy(deep=True)
             async with _held_at_its_first_await(gate, subject.add(record)) as call:
-                record.id = "obs-add-moved"
-                record.content = "bravo bravo bravo"
-                after = record.model_copy(deep=True)
+                # The tear needed these two rewrites mid-flight; the frozen record
+                # refuses both, so there is no second version to commit.
+                with pytest.raises(ValidationError):
+                    record.id = "obs-add-moved"
+                with pytest.raises(ValidationError):
+                    record.content = "bravo bravo bravo"
             returned = await call
 
             stored = await subject.get(returned)
             assert stored is not None, (
                 f"add returned {returned!r}, which names no readable row. {_TORN_INPUT}"
             )
-            assert stored in (before, after), _TORN_INPUT
-            # One record was written, at one id — not the old id and the new one.
+            assert stored == record, _TORN_INPUT  # the one and only version
             assert {r.id for r in await subject.export()} == {returned}, _TORN_INPUT
-            rejected = after.content if stored.content == before.content else before.content
             await _assert_indexed_from_the_content_it_carries(
-                subject, returned, rejected_content=rejected
+                subject, returned, rejected_content="bravo bravo bravo"
             )
 
     async def test_write_atomic_derives_everything_from_one_observation_of_its_batch(
         self, store: MemoryStore
     ) -> None:
-        """``core.protocols``' input clause, on ``write_atomic`` (ADR-0065, ADR-0046 §3).
+        """``core.protocols``' input clause, on ``write_atomic`` (ADR-0065, ADR-0068 §4).
 
-        Not a rewording of the ``add`` case: this argument is a caller-owned
-        ``Sequence`` whose elements are ``frozen`` ``MemoryWrite``s holding
-        *mutable* records — the clause's own example of why "the argument is
-        frozen" is not a discharge — and the batch is validated for repeated ids
-        before it is committed. A backend that validates one observation and
-        commits another can pass its duplicate-id check on a batch it does not
-        write.
-
-        So all three axes move at once while the write is held: an element's id
-        (the one the check validated), an element's content, and the caller's list
-        itself. Either outcome is conforming — the batch commits, or the store saw
-        the repeated id and rejected the whole thing — but each must rest on one
-        observation.
+        Not a rewording of the ``add`` case: freezing removes ``add``'s
+        single-element tear, but this argument is a caller-owned ``Sequence``
+        whose *container* is mutable whatever its (now-frozen) elements are — so
+        the input clause survives here, exactly as ADR-0068 §4 states. The element
+        rewrites the older form used (an id collision, a content edit) can no
+        longer be made, but the caller can still grow the list while the write is
+        suspended. The store must therefore rest its whole outcome on one
+        observation of the batch: either it saw the two-element list, or it saw the
+        three-element one, and what it commits matches what it returns — never a
+        mix of the two observations.
         """
         async with self._write_subject(store) as (subject, gate):
             first = _semantic("obs-batch-1", "alpha alpha alpha")
             second = _semantic("obs-batch-2", "bravo bravo bravo")
             writes = [MemoryWrite(record=first), MemoryWrite(record=second)]
-            before = [write.record.model_copy(deep=True) for write in writes]
+            before = {write.record.id for write in writes}
+            third = MemoryWrite(record=_semantic("obs-batch-3", "delta delta delta"))
             async with _held_at_its_first_await(gate, subject.write_atomic(writes)) as call:
-                first.id = second.id  # a repeated id the pre-await check did not see
-                second.content = "charlie charlie charlie"
-                writes.append(MemoryWrite(record=_semantic("obs-batch-3", "delta delta delta")))
-                after = [write.record.model_copy(deep=True) for write in writes]
+                writes.append(third)  # grow the caller's own list while the write is held
+                after = {write.record.id for write in writes}
+            returned = set(await call)
 
-            try:
-                returned = list(await call)
-            except MemoryStoreError:
-                # Conforming the other way: a store that took its one observation
-                # *after* suspending saw the repeated id and refused the batch. The
-                # refusal is all-or-nothing like any other (ADR-0046 §4).
-                assert await subject.export() == [], _TORN_INPUT
-                return
-
-            committed = {record.id: record for record in await subject.export()}
-            assert len(returned) == len(committed), (
-                f"write_atomic returned {returned} but committed {sorted(committed)}: an id "
-                f"was written twice, so the repeated-id check and the commit disagreed. "
-                f"{_TORN_INPUT}"
-            )
-            assert set(returned) == set(committed), _TORN_INPUT
-            assert committed in ({r.id: r for r in before}, {r.id: r for r in after}), _TORN_INPUT
-            # The second element is the one whose *content* moved (its id did not),
-            # so it is where a batch that persisted one version and indexed the
-            # other shows up.
-            surviving = committed.get(before[1].id)
-            assert surviving is not None, _TORN_INPUT
-            await _assert_indexed_from_the_content_it_carries(
-                subject,
-                surviving.id,
-                rejected_content=(
-                    after[1].content
-                    if surviving.content == before[1].content
-                    else before[1].content
-                ),
-            )
+            committed = {record.id for record in await subject.export()}
+            # One observation: what was returned is exactly what was committed, and
+            # both correspond to a single reading of the caller's list.
+            assert returned == committed, _TORN_INPUT
+            assert committed in (before, after), _TORN_INPUT

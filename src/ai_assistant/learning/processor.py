@@ -96,6 +96,6 @@ class RuleBasedFeedbackProcessor:
         return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
-            evidence=list(event.evidence),
+            evidence=event.evidence,
             last_updated=event.created_at,
         )

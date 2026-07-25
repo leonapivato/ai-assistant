@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from memory_store_contract import MemoryStoreContract
+from pydantic import ValidationError
 
 from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory
 from ai_assistant.testing import FakeMemoryStore
@@ -99,46 +100,58 @@ async def test_search_orders_by_overlap_and_populates_scores() -> None:
     assert results[1].score == 0.5  # one of two matched
 
 
-async def test_returned_records_are_isolated_from_stored_state() -> None:
+async def test_returned_records_cannot_be_mutated_to_reach_stored_state() -> None:
+    # Under ADR-0068 the record graph is frozen, so isolation is subsumed by
+    # immutability: there is no handed-out copy to diverge from stored state,
+    # because none of these mutations is representable at all.
     store = FakeMemoryStore(now=_fixed_now)
     original = _semantic("1", "original content")
     await store.add(original)
 
-    original.content = "mutated after add"  # ingress: caller keeps a reference
+    with pytest.raises(ValidationError):
+        original.content = "mutated after add"  # ingress: caller keeps a reference
     got = await store.get("1")
     assert got is not None
-    got.content = "mutated on egress"  # egress: top-level field
-    got.provenance.evidence.append("injected")  # egress: nested mutable field
+    with pytest.raises(ValidationError):
+        got.content = "mutated on egress"  # egress: top-level field
+    with pytest.raises(ValidationError):
+        got.provenance.confidence = 0.1  # egress: nested model is frozen too
+    assert isinstance(got.provenance.evidence, tuple)  # egress: nested collection is immutable
 
     fresh = await store.get("1")
     assert fresh is not None
-    assert fresh.content == "original content"  # no mutation reached stored state
-    assert fresh.provenance.evidence == []
+    assert fresh.content == "original content"  # stored state untouched
+    assert fresh.provenance.evidence == ()
 
 
-async def test_search_results_are_isolated_from_stored_state() -> None:
+async def test_search_results_cannot_be_mutated_to_reach_stored_state() -> None:
     store = FakeMemoryStore(now=_fixed_now)
     await store.add(_semantic("1", "coffee note"))
 
     results = await store.search("coffee")
     assert results
-    results[0].provenance.evidence.append("injected")  # mutate a nested field of a result
+    with pytest.raises(ValidationError):
+        results[0].provenance.confidence = 0.1  # nested model of a result is frozen
+    assert isinstance(results[0].provenance.evidence, tuple)
 
     fresh = await store.get("1")
     assert fresh is not None
-    assert fresh.provenance.evidence == []
+    assert fresh.provenance.evidence == ()
 
 
-async def test_exported_records_are_isolated_from_stored_state() -> None:
+async def test_exported_records_cannot_be_mutated_to_reach_stored_state() -> None:
     store = FakeMemoryStore(now=_fixed_now)
     await store.add(_semantic("1", "coffee note"))
 
     exported = await store.export()
     assert exported
-    exported[0].content = "mutated"
-    exported[0].provenance.evidence.append("injected")
+    with pytest.raises(ValidationError):
+        exported[0].content = "mutated"
+    with pytest.raises(ValidationError):
+        exported[0].provenance.confidence = 0.1
+    assert isinstance(exported[0].provenance.evidence, tuple)
 
     fresh = await store.get("1")
     assert fresh is not None
     assert fresh.content == "coffee note"
-    assert fresh.provenance.evidence == []
+    assert fresh.provenance.evidence == ()

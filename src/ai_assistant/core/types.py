@@ -280,6 +280,8 @@ class Role(StrEnum):
 class Message(BaseModel):
     """A single turn in a conversation, provider-independent."""
 
+    model_config = ConfigDict(frozen=True)
+
     role: Role
     content: str
     name: str | None = Field(default=None, description="Optional author/tool name.")
@@ -317,14 +319,16 @@ class Provenance(BaseModel):
     unusual interaction from hardening into a permanent, wrong "preference".
     """
 
+    model_config = ConfigDict(frozen=True)
+
     source: MemorySource
     confidence: float = Field(
         ge=0.0,
         le=1.0,
         description="Belief strength in [0, 1]; user-asserted records are 1.0.",
     )
-    evidence: list[str] = Field(
-        default_factory=list,
+    evidence: tuple[str, ...] = Field(
+        default=(),
         description="References (e.g. episode ids) supporting this record.",
     )
     last_updated: UtcInstant = Field(
@@ -361,6 +365,8 @@ class Validity(BaseModel):
     not by the producer of the belief, which is why it sits on
     :class:`MemoryBase` beside ``expires_at`` rather than on :class:`Provenance`.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     valid_from: UtcInstant | None = Field(
         default=None,
@@ -415,6 +421,8 @@ class Validity(BaseModel):
 class MemoryBase(BaseModel):
     """Fields shared by every memory record, regardless of kind."""
 
+    model_config = ConfigDict(frozen=True)
+
     id: str
     content: str = Field(description="Canonical text rendering, used for retrieval.")
     provenance: Provenance
@@ -445,7 +453,7 @@ class EpisodicMemory(MemoryBase):
 
     kind: Literal["episodic"] = "episodic"
     occurred_at: UtcInstant
-    participants: list[str] = Field(default_factory=list)
+    participants: tuple[str, ...] = Field(default=())
     outcome: str | None = None
     importance: float = Field(default=0.0, ge=0.0, le=1.0)
 
@@ -475,7 +483,7 @@ class ProceduralMemory(MemoryBase):
 
     kind: Literal["procedural"] = "procedural"
     situation: str
-    steps: list[str] = Field(default_factory=list)
+    steps: tuple[str, ...] = Field(default=())
 
 
 MemoryRecord = Annotated[
@@ -565,14 +573,16 @@ class MemoryUpdateProposal(BaseModel):
     deterministic :class:`~ai_assistant.core.protocols.MemoryPolicy` disposes of.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     proposed: MemoryRecord
     rationale: str = Field(description="Why this memory is being proposed.")
     sensitivity: DataTier = Field(
         default=DataTier.PERSONAL,
         description="How sensitive the proposed memory is.",
     )
-    conflicts: list[str] = Field(
-        default_factory=list,
+    conflicts: tuple[str, ...] = Field(
+        default=(),
         description="Ids of existing records this proposal contradicts (from the conflict check).",
     )
 
@@ -609,6 +619,8 @@ _TARGET_CARRYING_KINDS = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecision
 
 class MemoryDecision(BaseModel):
     """A policy's ruling on a :class:`MemoryUpdateProposal`."""
+
+    model_config = ConfigDict(frozen=True)
 
     kind: MemoryDecisionKind
     reason: str = Field(description="Human-readable justification, for transparency.")
@@ -655,6 +667,8 @@ class MemoryDecision(BaseModel):
 class MemoryIngestResult(BaseModel):
     """The outcome of ingesting a :class:`MemoryUpdateProposal`."""
 
+    model_config = ConfigDict(frozen=True)
+
     decision: MemoryDecision
     record_id: str | None = Field(
         default=None,
@@ -687,7 +701,7 @@ class CurrentContext(BaseModel):
     state: it is assembled fresh per request and never stored.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     now: UtcInstant = Field(description="The tz-aware reference instant for this context.")
     time_of_day: TimeOfDay
@@ -716,14 +730,16 @@ class FeedbackEvent(BaseModel):
     fact becomes a :class:`SemanticMemory`, not a preference).
     """
 
+    model_config = ConfigDict(frozen=True)
+
     kind: FeedbackKind
     memory_kind: MemoryKind = Field(description="The typed memory this feedback establishes.")
     content: str = Field(description="Canonical text of the feedback, e.g. 'office is in Boston'.")
     subject: str | None = Field(
         default=None, description="Optional scope/context, e.g. 'email tone'."
     )
-    evidence: list[str] = Field(
-        default_factory=list,
+    evidence: tuple[str, ...] = Field(
+        default=(),
         description="Interaction/episode ids supporting this, carried into provenance.",
     )
     created_at: UtcInstant = Field(description="When the feedback was given (tz-aware).")
@@ -920,7 +936,7 @@ class Goal(BaseModel):
     indistinguishable from one the user *stated*.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier
     statement: str = Field(description="Canonical text rendering of the objective.")
@@ -1150,7 +1166,7 @@ class StepFailure(BaseModel):
     ``frozen=True`` because it is a record of something that already happened:
     what an operator reads while resolving an ``INDETERMINATE`` step must not be
     editable after the fact, the same argument ADR-0014 makes for freezing the
-    plan. (:class:`StepExecution` itself stays mutable — a different change.)
+    plan. (:class:`StepExecution` is now frozen too, under ADR-0068.)
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -1191,7 +1207,7 @@ class StepExecution(BaseModel):
     cleared it, and the tool that actually ran.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     step_id: Identifier
     status: StepStatus = StepStatus.PENDING
@@ -1352,7 +1368,7 @@ class ExecutionState(BaseModel):
     same step and run a non-idempotent tool twice (ADR-0014 §5).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier
     plan_id: Identifier

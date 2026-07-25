@@ -71,9 +71,11 @@ class FakeContextProvider:
                 describe incompatible outcomes, and silently letting one win would
                 hide a mis-wired test), or if ``context.now`` carries a timezone
                 whose offset is indeterminate. Re-validation additionally raises
-                ``ValidationError`` (itself a ``ValueError``) for a ``now``
-                mutated naive after construction — ADR-0023 refuses it rather
-                than assuming UTC.
+                ``ValidationError`` (itself a ``ValueError``) for a ``now`` made
+                naive through the ``__dict__`` bypass after construction —
+                ``CurrentContext`` is frozen (ADR-0068), but that bypass survives
+                (ADR-0018 §3), and ADR-0023 refuses the value rather than
+                assuming UTC.
         """
         if context is not None and failure is not None:
             msg = "pass either context or failure, not both"
@@ -96,12 +98,13 @@ class FakeContextProvider:
         # must not be able to change what assemble returns. Snapshotting the default
         # too keeps the module-level constant from being reachable at all.
         #
-        # Re-validated rather than `model_copy`d: `CurrentContext` does not validate
-        # on assignment, so a caller can hand over a model it mutated into an
+        # Re-validated rather than `model_copy`d: `CurrentContext` is frozen
+        # (ADR-0068), but the validation-skipping `__dict__` bypass survives
+        # (ADR-0018 §3), so a caller can still hand over a model corrupted into an
         # invalid state (a naive `now`, most likely) — and the fake would then fail
-        # the tz-aware assertion in its own conformance suite. Validating here
-        # rejects it at the point the mistake was made, exactly as constructing the
-        # model would have (ADR-0023: refused, not assumed UTC).
+        # the tz-aware assertion in its own conformance suite. Dumping and
+        # re-validating rejects it at the point the mistake was made, exactly as
+        # constructing the model would have (ADR-0023: refused, not assumed UTC).
         source = context if context is not None else _DEFAULT_CONTEXT
         self._context = CurrentContext.model_validate(source.model_dump())
         self._failure = failure

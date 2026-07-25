@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from planner_contract import PlannerContract
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import ModelError, PlanningError
 from ai_assistant.core.types import (
@@ -349,14 +350,14 @@ class _GatedModel:
         return Message(role=Role.ASSISTANT, content=self._replies.popleft())
 
 
-async def test_the_plan_names_the_goal_the_model_was_shown() -> None:
-    """A goal mutated *during* the model call cannot reach the plan (ADR-0065).
+async def test_a_goal_cannot_be_mutated_during_the_model_call() -> None:
+    """ADR-0068 freezes ``Goal``, so the mid-call tear ADR-0065 guarded is unrepresentable.
 
-    The mutation lands while ``plan`` is parked inside ``complete`` — not before
-    the call and not after it returned, which is the only window that
-    distinguishes one observation from two. ``ActionPlan`` is frozen, so a
-    ``goal_id`` taken from a second observation would be permanently wrong in an
-    auditable record (ADR-0014 §2).
+    The mutation would land while ``plan`` is parked inside ``complete`` — not
+    before the call and not after it returned, which is the only window that
+    distinguishes one observation from two. Freezing makes it raise rather than
+    tear, so the plan necessarily names the single goal the prompt was rendered
+    from, permanently correct in the auditable record (ADR-0014 §2, ADR-0068 §4).
     """
     model = _GatedModel(_VALID_REPLY)
     planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
@@ -364,8 +365,10 @@ async def test_the_plan_names_the_goal_the_model_was_shown() -> None:
 
     task = asyncio.ensure_future(planner.plan(goal, context=_context()))
     await model.reached.wait()
-    goal.id = "g-tampered"
-    goal.statement = "relocate to Berlin"
+    with pytest.raises(ValidationError):
+        goal.id = "g-tampered"
+    with pytest.raises(ValidationError):
+        goal.statement = "relocate to Berlin"
     model.resume.set()
     plan = await task
 
@@ -378,10 +381,12 @@ async def test_the_plan_names_the_goal_the_model_was_shown() -> None:
 
 
 async def test_the_exhaustion_message_names_the_goal_the_call_began_with() -> None:
-    """The give-up message is derived from the same one observation (ADR-0065).
+    """The give-up message names the single goal the call began with (ADR-0065, ADR-0068 §4).
 
-    It is read after every model call, so it is the second post-await read of the
-    caller's goal in this method, and it names a goal in an error a human acts on.
+    The message is read after every model call — the second post-await read of the
+    caller's goal — and it names a goal in an error a human acts on. ADR-0068
+    freezes ``Goal``, so the mid-call mutation raises rather than reaching that
+    read.
     """
     model = _GatedModel("garbage one", "garbage two")
     planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
@@ -389,7 +394,8 @@ async def test_the_exhaustion_message_names_the_goal_the_call_began_with() -> No
 
     task = asyncio.ensure_future(planner.plan(goal, context=_context()))
     await model.reached.wait()
-    goal.id = "g-tampered"
+    with pytest.raises(ValidationError):
+        goal.id = "g-tampered"
     model.resume.set()
 
     with pytest.raises(PlanningError) as caught:
