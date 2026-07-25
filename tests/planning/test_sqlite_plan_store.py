@@ -23,7 +23,7 @@ from ai_assistant.core.types import StepStatus, StepTransition
 from ai_assistant.planning import SqlitePlanStore
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
@@ -506,6 +506,168 @@ async def test_a_non_numeric_schema_version_is_a_planning_error(tmp_path: Path) 
     raw.close()
 
     with pytest.raises(PlanningError, match="non-numeric schema_version"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+# --- a `meta` table this store did not shape (issue #349) -------------------
+
+#: A ``meta`` **without** ``key TEXT PRIMARY KEY``, so it can hold two rows for
+#: one key. ``CREATE TABLE IF NOT EXISTS`` is a no-op against it, so this is the
+#: table the store actually opens.
+_META_WITHOUT_PK = "CREATE TABLE meta(key TEXT, value TEXT NOT NULL)"
+
+#: The same, with no declared type on ``value``: SQLite then hands back whatever
+#: was stored — a REAL, a NULL — rather than coercing it to TEXT.
+_META_UNTYPED = "CREATE TABLE meta(key TEXT, value)"
+
+
+def _hand_built_meta(path: Path, rows: Sequence[tuple[str, object]], *, typed: bool = True) -> None:
+    """Seed a database whose ``meta`` this store did not create."""
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute(_META_WITHOUT_PK if typed else _META_UNTYPED)
+        raw.executemany("INSERT INTO meta(key, value) VALUES (?, ?)", rows)
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def _refusal(path: Path, pattern: str) -> str:
+    """Open ``path``, require a ``PlanningError`` matching ``pattern``, return it."""
+    with pytest.raises(PlanningError, match=pattern) as caught:
+        SqlitePlanStore(path=path, now=_fixed_now)
+    return str(caught.value).replace(str(path), "<db>")
+
+
+async def test_conflicting_schema_version_rows_are_refused_whatever_their_order(
+    tmp_path: Path,
+) -> None:
+    """Two rows for one key are refused, and by the *rows*, not by their order.
+
+    ``meta``'s primary key makes this unreachable for a table the store created,
+    but ``CREATE TABLE IF NOT EXISTS`` accepts a pre-existing one declared without
+    it. Collapsing the table into a ``dict`` kept whichever row SQLite returned
+    last, so these two databases — identical row *sets*, differing only in
+    insertion order — behaved oppositely: ``('1', '999')`` refused a supported
+    schema, and ``('999', '1')`` **opened** on an unsupported one. Asserting the
+    two messages are equal is what pins the order out of the answer.
+    """
+    ascending, descending = tmp_path / "asc.db", tmp_path / "desc.db"
+    _hand_built_meta(ascending, (("schema_version", "1"), ("schema_version", "999")))
+    _hand_built_meta(descending, (("schema_version", "999"), ("schema_version", "1")))
+
+    assert _refusal(ascending, "2 schema_version rows") == _refusal(
+        descending, "2 schema_version rows"
+    )
+
+    # And refused before any record table exists: ADR-0049 §1 puts the refusal
+    # ahead of every write, and creating a table is a write.
+    check = sqlite3.connect(ascending)
+    try:
+        tables = {
+            row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        check.close()
+    assert tables.isdisjoint({"goals", "plans", "executions"})
+
+
+async def test_conflicting_exec_counter_rows_are_refused_whatever_their_order(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous durable ordinal is refused too, for a sharper reason (§3).
+
+    ADR-0049 §3 makes ``exec_counter`` the durable half of execution-id
+    non-reuse. A losing row here does not merely mislabel the file: it **rewinds
+    the counter**, re-minting ordinals already handed out. Before the fix, a file
+    recording ``7`` allocated ordinal 3 — an id ADR-0044 §1 promises is never
+    issued twice, and the one a parked confirmation's recovery keys against.
+    """
+    low_first, high_first = tmp_path / "low.db", tmp_path / "high.db"
+    rows = (("schema_version", "1"), ("exec_counter", "2"), ("exec_counter", "7"))
+    _hand_built_meta(low_first, rows)
+    _hand_built_meta(high_first, (rows[0], rows[2], rows[1]))
+
+    assert _refusal(low_first, "2 exec_counter rows") == _refusal(high_first, "2 exec_counter rows")
+
+
+async def test_a_duplicated_exec_counter_appearing_after_the_open_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The allocation read refuses on the same terms the open read does.
+
+    The open validates one counter row; nothing stops an outside writer adding a
+    second to a ``meta`` that has no primary key. Taking the first row at
+    allocation would rewind the ordinal on a file whose open had validated the
+    *other* row, so ``_next_ordinal`` re-reads defensively rather than trusting
+    what the open established.
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_meta(path, (("schema_version", "1"), ("exec_counter", "7")))
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        raw = sqlite3.connect(path)
+        try:
+            raw.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '2')")
+            raw.commit()
+        finally:
+            raw.close()
+
+        with pytest.raises(PlanningError, match="2 exec_counter rows"):
+            await store.start_execution("p1")
+    finally:
+        store.close()
+
+
+async def test_a_lost_exec_counter_is_refused_at_allocation(tmp_path: Path) -> None:
+    """An allocator with no durable counter refuses rather than restarting at zero.
+
+    Restarting would re-mint every ordinal the store has issued (ADR-0049 §3),
+    and unpacking the empty ``fetchone()`` would have raised a raw ``TypeError``
+    past this layer's boundary either way.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        raw = sqlite3.connect(path)
+        try:
+            raw.execute("DELETE FROM meta WHERE key = 'exec_counter'")
+            raw.commit()
+        finally:
+            raw.close()
+
+        with pytest.raises(PlanningError, match="lost its exec_counter"):
+            await store.start_execution("p1")
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("key", ["schema_version", "exec_counter"])
+@pytest.mark.parametrize("value", [float("inf"), None, b"1", 1.5])
+def test_an_untyped_meta_value_never_leaks_a_non_domain_error(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    """A ``value`` column with no declared type returns whatever was stored.
+
+    ``int(float("inf"))`` raises ``OverflowError`` and ``int(None)`` a
+    ``TypeError`` — neither a ``ValueError`` nor an ``AssistantError``, so both
+    escaped the ``PlanningError`` boundary ``_setup`` exists to hold (ADR-0049
+    §1). A stored ``NULL`` also has to read as a *present* row rather than an
+    absent key, or the store would insert a second row beside it.
+    """
+    path = tmp_path / "plans.db"
+    rows: list[tuple[str, object]] = [(key, value)]
+    if key != "schema_version":
+        rows.insert(0, ("schema_version", "1"))
+    _hand_built_meta(path, rows, typed=False)
+
+    with pytest.raises(PlanningError, match=f"non-numeric {key}"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 

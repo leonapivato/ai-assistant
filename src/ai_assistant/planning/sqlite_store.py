@@ -61,6 +61,11 @@ _SCHEMA_VERSION = 1
 # §1: refuse before reading or writing records — creating a table is a write).
 _META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
 
+#: Every row stored under one ``meta`` key — read as a *set* of rows rather than
+#: as a single value, because ``_META_SCHEMA``'s primary key is only in force for
+#: a table this code created (see :meth:`SqlitePlanStore._read_meta`).
+_READ_META = "SELECT value FROM meta WHERE key = ?"
+
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS plans("
@@ -231,40 +236,95 @@ class SqlitePlanStore:
         and only fail on the first query with a raw "no such column" — a fault to
         report at open, not defer, matching how the audit trail treats a row that
         no longer validates.
+
+        Both markers are read through :meth:`_read_meta`, so a store holding
+        conflicting rows for either key is refused rather than resolved by row
+        order (issue #349).
         """
-        existing = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-        stored = existing.get("schema_version")
-        if stored is None:
+        version = self._read_meta(conn, "schema_version")
+        if not version:
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                 (str(_SCHEMA_VERSION),),
             )
-        elif self._meta_int("schema_version", stored) != _SCHEMA_VERSION:
+        elif (stored := self._meta_int("schema_version", version[0])) != _SCHEMA_VERSION:
             msg = (
                 f"the plan store at {self._path!r} has schema_version={stored}, but this "
                 f"code supports only version {_SCHEMA_VERSION} and has no migration; "
                 f"refusing to open it rather than read it blindly"
             )
             raise PlanningError(msg)
-        if "exec_counter" in existing:
-            self._meta_int("exec_counter", existing["exec_counter"])  # validate on open
+        if counter := self._read_meta(conn, "exec_counter"):
+            self._meta_int("exec_counter", counter[0])  # validate on open
         else:
             conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
 
-    def _meta_int(self, key: str, raw: str) -> int:
+    def _read_meta(self, conn: sqlite3.Connection, key: str) -> list[Any]:
+        """Return every value stored under ``key``, refusing an ambiguous store.
+
+        ``meta``'s ``key TEXT PRIMARY KEY`` makes a second row for one key
+        unreachable in a table *this* code created — but ``CREATE TABLE IF NOT
+        EXISTS`` is a no-op against a pre-existing ``meta`` declared without that
+        constraint, so a corrupt, hand-built or externally-migrated file can hold
+        both ``('schema_version', '1')`` and ``('schema_version', '999')``.
+        Collapsing the table into a ``dict`` kept whichever row SQLite returned
+        last, which left the refusal in :meth:`_verify_or_init_meta` decided by
+        **row order**: the same two rows in the other order opened the store on an
+        unsupported schema (issue #349). That is a fail-open in a check whose only
+        job is to refuse a database this code cannot read.
+
+        ``exec_counter`` is read the same way, and ADR-0049 §3 is why it must be:
+        the ordinal is the durable half of execution-id non-reuse, so a losing row
+        does not merely mislabel the file — it **rewinds the counter**, re-minting
+        ordinals the store has already handed out and breaking the ADR-0044 §1
+        guarantee a parked confirmation's recovery rests on. Taking the largest of
+        the conflicting rows would preserve non-reuse, but it is a *repair* of a
+        table this code did not write, and ADR-0049 §1's posture for this store is
+        to refuse rather than read on regardless.
+
+        Returns:
+            The values found: empty when ``key`` is absent, otherwise exactly one.
+            A row holding SQL ``NULL`` is a *present* row rather than an absent
+            key — it comes back as ``[None]`` and is refused by :meth:`_meta_int`,
+            instead of being silently re-inserted beside.
+
+        Raises:
+            PlanningError: If ``key`` has more than one row.
+        """
+        rows = conn.execute(_READ_META, (key,)).fetchall()
+        if len(rows) > 1:
+            found = ", ".join(sorted({repr(row[0]) for row in rows}))
+            msg = (
+                f"the plan store at {self._path!r} holds {len(rows)} {key} rows "
+                f"({found}); the store cannot say which one it is and is corrupt"
+            )
+            raise PlanningError(msg)
+        return [row[0] for row in rows]
+
+    def _meta_int(self, key: str, raw: Any) -> int:
         """Parse a stored ``meta`` integer, translating corruption to ``PlanningError``.
 
         A non-numeric ``schema_version`` or ``exec_counter`` is a corrupt or
-        tampered store, not a Python ``ValueError`` to leak past this layer's
+        tampered store, not a Python exception to leak past this layer's
         initialisation boundary (ADR-0049 §1).
         """
+        msg = (
+            f"the plan store at {self._path!r} holds a non-numeric {key} "
+            f"({raw!r}); the store is corrupt"
+        )
+        # The values this code writes are always TEXT, but `CREATE TABLE IF NOT
+        # EXISTS` also accepts a pre-existing `meta` whose `value` column has no
+        # declared type, and SQLite then returns whatever was stored — a REAL, a
+        # BLOB, a NULL. Only a string or an integer is parsed: `int(float("inf"))`
+        # raises `OverflowError` and `int(None)` a `TypeError`, neither of which is
+        # a `ValueError` nor an `AssistantError`, so both would leave this layer's
+        # boundary through a hole. `bool` is an `int` in Python, so it is named
+        # rather than left to read as version 0 or 1.
+        if isinstance(raw, bool) or not isinstance(raw, str | int):
+            raise PlanningError(msg)
         try:
             return int(raw)
         except ValueError as exc:
-            msg = (
-                f"the plan store at {self._path!r} holds a non-numeric {key} "
-                f"({raw!r}); the store is corrupt"
-            )
             raise PlanningError(msg) from exc
 
     def _now(self) -> datetime:
@@ -439,9 +499,28 @@ class SqlitePlanStore:
         The write lock is already held (``BEGIN IMMEDIATE``), so this read then
         write is atomic against another process on the same file: neither the
         counter rewinds nor two executions share an ordinal (ADR-0049 §3).
+
+        Read through :meth:`_read_meta` like the open-time check, so the counter
+        is refused here on the same terms it is refused there. This is the second
+        read of the same value, and the one whose answer becomes an execution id:
+        taking the first of two conflicting rows here would rewind the ordinal
+        even for a file whose *open* had validated the other row.
+
+        Raises:
+            PlanningError: If the counter is missing, ambiguous, or unparseable.
         """
-        (current,) = conn.execute("SELECT value FROM meta WHERE key = 'exec_counter'").fetchone()
-        nxt = self._meta_int("exec_counter", current) + 1
+        current = self._read_meta(conn, "exec_counter")
+        if not current:
+            # `_verify_or_init_meta` seeds the row at open, so reaching this needs
+            # an outside writer to have deleted it since. An allocator with no
+            # counter cannot promise non-reuse (ADR-0049 §3), so it refuses rather
+            # than restarting from zero — and refuses in this layer's own error,
+            # where unpacking an empty `fetchone()` would have raised `TypeError`.
+            msg = (
+                f"the plan store at {self._path!r} has lost its exec_counter; the store is corrupt"
+            )
+            raise PlanningError(msg)
+        nxt = self._meta_int("exec_counter", current[0]) + 1
         conn.execute("UPDATE meta SET value = ? WHERE key = 'exec_counter'", (str(nxt),))
         return nxt
 
