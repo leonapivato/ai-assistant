@@ -51,6 +51,47 @@ Most Protocols here say nothing further about it, because no implementation of
 them holds anything across an ``await`` — silence marks where the rule has no
 bite today, never a seam it cannot reach (ADR-0060 §2).
 
+Input observation (ADR-0065), binding on **every** Protocol below:
+
+    **A call observes its inputs at one instant, before its first await.**
+
+    Arguments belong to the caller, several types crossing these seams are
+    mutable, and a ``Sequence`` argument is a container the caller may still be
+    holding. So everything one call derives from one argument — what it stores,
+    what it computes, what it returns — comes from **one** observation of that
+    argument. A caller that mutates what it passed while the call is suspended
+    may make the call act on the wrong version; it must never make one result
+    describe two different versions.
+
+    Three ways to discharge this, and the choice is the implementation's: do not
+    suspend; do not read an argument again after suspending; or take a snapshot
+    on the coroutine's first executed line — before the first ``await`` — and
+    read only the snapshot thereafter, the returned value included. A snapshot
+    must be deep enough to cover everything the call goes on to read. A frozen
+    argument is not a discharge on its own: ``MemoryWrite`` is frozen and holds a
+    mutable ``MemoryRecord``.
+
+    The boundary is the coroutine's **first executed line**, not the call
+    expression. Calling an ``async def`` only builds a coroutine, so a mutation
+    made after construction and before the first await is captured whole. That is
+    not a tear — the caller gets the state as of the moment the work began — and
+    no invocation-time capture is claimed (ADR-0056).
+
+    **The caller's side.** A caller may not assume a mid-flight mutation was
+    ignored, nor that it was honoured. What it is owed is that the outcome is
+    *coherent*, not that it reflects any chosen version. Mutating an argument
+    across a call still in flight remains a caller error; this rule bounds the
+    damage rather than blessing the practice.
+
+    Silent where a method does not suspend, or where its arguments are immutable
+    all the way down — which is most of this file.
+
+The two clauses are a **different axis each**, deliberately, and neither is
+scoped from the other's list (ADR-0065 §"This is not ADR-0060's axis"): one is
+about a resource the implementation acquired, the other about an object the
+caller still owns. ``AuditTrail`` is enforced under the first and wholly vacuous
+under the second; ``Planner`` is the reverse.
+
 Each subsystem declared in the architecture map adds its Protocol here as it is
 designed, so this file grows to hold every seam that crosses a subsystem
 boundary. ``tests/core/test_protocol_triad.py`` is what keeps that growth
@@ -180,7 +221,8 @@ class MemoryStore(Protocol):
     together, never leaving the first without the second (ADR-0045 §8).
 
     Cancelling any method here is governed by this module's cancellation clause
-    (ADR-0060).
+    (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
+    are handed is governed by this module's input-observation clause (ADR-0065).
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -330,6 +372,9 @@ class MemoryWriter(Protocol):
     neither. **The store it writes to must be the one its caller retrieves
     from** — a composition-root obligation, unenforceable here precisely because
     no store is on this seam (ADR-0028 §4).
+
+    How :meth:`ingest` observes the proposal it is handed is governed by this
+    module's input-observation clause (ADR-0065).
     """
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
