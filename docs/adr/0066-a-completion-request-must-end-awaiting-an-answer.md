@@ -255,6 +255,16 @@ does.
 2. **`models/provider.py`** — `PydanticAIProvider.complete` rejects a history
    ending on `Role.ASSISTANT` *before* reaching `Agent.run`, with a bare
    `ModelError`, alongside the existing empty check.
+
+   Two levels, not one promise, and they are deliberately not the same width.
+   What the **contract** requires of *every* implementation is a `ModelError`
+   that is neither retryable nor routable — the disposition, never the class
+   identity (below). Raising the base class is what *these two* implementations
+   do, chosen to match the empty check sitting next to it rather than to add a
+   promise; §3 rejects minting a subclass here, and does not oblige a future
+   third implementation to raise the base class if it has a well-behaved
+   subclass of its own. An implementation may be narrower than the contract it
+   satisfies; that is not the contract narrowing.
 3. **`src/ai_assistant/testing/models.py`** — `FakeModelProvider` mirrors the
    refusal, as it already mirrors the empty and tool-role rejections and for the
    same stated reason.
