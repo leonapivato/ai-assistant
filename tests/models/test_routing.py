@@ -7,6 +7,7 @@ one routing rule.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import traceback
 from typing import TYPE_CHECKING, Any, cast
@@ -32,7 +33,7 @@ from ai_assistant.models.routing import _classify
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, MutableMapping, Sequence
+    from collections.abc import Callable, Iterator, MutableMapping, Sequence
 
     from ai_assistant.core.protocols import ModelProvider
 
@@ -675,3 +676,92 @@ async def test_no_fallback_is_announced_when_there_is_nowhere_to_fall_back_to() 
         await RoutingProvider(routes).complete(PROMPT)
 
     assert [e["event"] for e in logs] == ["all routes failed"]
+
+
+class MutatingProvider:
+    """Fails routably once, mutating the caller's own conversation from inside that call.
+
+    The mutation is performed after this provider's own ``await``, so it lands
+    while ``RoutingProvider.complete`` is itself suspended — the only window
+    ADR-0065's input-observation clause is about. A mutation applied after
+    ``complete`` returns cannot tell a router that snapshots from one that
+    re-reads: that is the failure ADR-0065 §"The suite already appears to cover
+    this, and does not" documents, so this stands in for a concurrent caller
+    rather than asserting isolation afterwards.
+
+    What the route saw is recorded as plain strings, not as ``Message`` objects:
+    a recorded object would be re-read at assertion time and would show the
+    *final* state of a turn mutated in place, hiding the very tear the case is
+    looking for. :class:`RecordingConversationProvider` does the same.
+    """
+
+    def __init__(
+        self, conversation: list[Message], mutate: Callable[[list[Message]], None]
+    ) -> None:
+        self._conversation = conversation
+        self._mutate = mutate
+        self.seen: list[tuple[str, ...]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> Message:
+        await asyncio.sleep(0)
+        self.seen.append(tuple(m.content for m in messages))
+        self._mutate(self._conversation)
+        raise ModelUnavailableError("503")
+
+
+class RecordingConversationProvider:
+    """Records the conversation each call was handed, then echoes it back."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, ...]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> Message:
+        self.seen.append(tuple(m.content for m in messages))
+        return Message(role=Role.ASSISTANT, content="|".join(m.content for m in messages))
+
+
+def _append_a_turn(conversation: list[Message]) -> None:
+    conversation.append(Message(role=Role.USER, content="wait, actually"))
+
+
+def _rewrite_the_first_turn(conversation: list[Message]) -> None:
+    # In place, without touching the list: `Message` is not frozen, so this is
+    # invisible to a router that only copies the container.
+    conversation[0].content = "rewritten"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_append_a_turn, _rewrite_the_first_turn],
+    ids=["appended-turn", "rewritten-turn"],
+)
+async def test_every_route_answers_the_conversation_the_call_began_with(
+    mutate: Callable[[list[Message]], None],
+) -> None:
+    # ADR-0065: the loop hands the caller's sequence to the next route after the
+    # previous route's await has failed. Neither the container nor a turn's own
+    # fields may change under the call — otherwise two vendors are sent two
+    # different requests and only one reply comes back, attributed to one
+    # `complete`.
+    conversation = [Message(role=Role.USER, content="hi")]
+    down = MutatingProvider(conversation, mutate)
+    backup = RecordingConversationProvider()
+
+    reply = await RoutingProvider([Route(down), Route(backup)]).complete(conversation)
+
+    assert down.seen == [("hi",)]
+    assert backup.seen == [("hi",)]
+    assert reply.content == "hi"
+    # The caller's conversation really was mutated mid-flight, so the case is not
+    # vacuously green on a mutation that never happened.
+    assert [m.content for m in conversation] != ["hi"]

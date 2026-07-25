@@ -249,6 +249,25 @@ class RetryingProvider:
                 an attempt that overruns its deadline surfaces as
                 :class:`~ai_assistant.core.errors.ModelTimeoutError`.
         """
+        # ADR-0065's input-observation clause. `messages` is the caller's own
+        # container and this loop hands it to a fresh attempt *after* the
+        # previous attempt's await has returned, so without this line a caller
+        # mutating it mid-flight makes attempt 2 answer a different request than
+        # attempt 1 was making — while the single Message returned is attributed
+        # to one `complete`.
+        #
+        # The elements are detached too, not just the container. `Message` is a
+        # non-frozen model, so a caller can rewrite a turn's `content` or `role`
+        # in place without touching the list, and the clause is explicit that a
+        # snapshot must be deep enough to cover everything the call goes on to
+        # read. "The inner provider takes its own observation" does not discharge
+        # it: each attempt's observation would then be a *different* one, which
+        # is the desync ADR-0065 identifies one level up from a store that
+        # snapshots correctly. `role` makes the cost concrete — flipped to
+        # ASSISTANT between attempts, it turns a retryable transient failure into
+        # a non-retryable malformed-argument ModelError (ADR-0066 §1) about a
+        # history that was well-formed when the call began.
+        conversation = [message.model_copy(deep=True) for message in messages]
         attempt = 0
         while True:
             attempt += 1
@@ -256,7 +275,7 @@ class RetryingProvider:
             cause: BaseException | None = None
             try:
                 async with asyncio.timeout(self._policy.timeout_seconds) as deadline:
-                    reply = await self._call_inner(messages, model=model)
+                    reply = await self._call_inner(conversation, model=model)
                 # Expiry does not always surface as an exception. `asyncio`
                 # abandons a call by *cancelling* it, and a provider that
                 # swallows that CancelledError can still return normally — in
