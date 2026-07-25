@@ -232,30 +232,49 @@ class EmbedderContract:
         is correct behaviour, and requiring otherwise would forbid the very shape
         ``asyncio.to_thread`` gives ``FastEmbedEmbedder``. What the clause still
         forbids is the other direction — a call left holding something with
-        nothing running that will release it — which is what the second ``embed``
-        below detects, by completing at all.
+        nothing running that will release it — which is what the overlapping and
+        the subsequent ``embed`` below detect, by completing at all.
+
+        **When the cancellation is delivered is likewise not asserted.** The
+        clause permits a method to "defer delivery while it makes its resources
+        safe", so an embedder that waited out its worker before re-raising is as
+        conforming as one that raises at once. The work is therefore released
+        *before* the cancellation is awaited, so both shapes pass; pinning
+        promptness here would invent a guarantee the contract does not give.
         """
         if self.holds_nothing_across_an_await:
             pytest.skip("embed reaches no await, so a cancellation cannot land inside it")
 
         async with self.embedder_suspended_mid_embed() as (embedder, suspended):
             embedding = asyncio.ensure_future(embedder.embed(["alpha beta"]))
+            overlapping = None
             try:
                 await suspended.reached()
                 embedding.cancel()
 
-                # Never absorbed into a return value, and not deferred until the
-                # abandoned work finishes — it is still suspended right here.
-                async with asyncio.timeout(_CANCELLATION_SECONDS):
-                    with pytest.raises(asyncio.CancelledError):
-                        await embedding
+                # A second call issued while the abandoned work is still running.
+                # ADR-0060 §5: "the moment an `Embedder` acquires something the
+                # event loop releases, it is the ADR-0054 bug again" — and an
+                # embedder that unwound out of such a resource would serve this
+                # one off state its own cancelled worker is still using. It is
+                # started here, and read after everything is released.
+                overlapping = asyncio.ensure_future(embedder.embed(["gamma delta"]))
             finally:
                 suspended.release()
+
+            # Delivered onward, never converted into a return value. Awaited only
+            # after the release, because the clause allows delivery to be deferred
+            # until the work is safe — see the docstring.
+            async with asyncio.timeout(_CANCELLATION_SECONDS):
+                with pytest.raises(asyncio.CancelledError):
+                    await embedding
+                [overlapped] = await overlapping
 
             # Nothing was stranded: the same embedder still serves the same text.
             # An implementation that unwound out of a lock it never releases would
             # hang here rather than answer, which the timeout turns into a failure.
             async with asyncio.timeout(_CANCELLATION_SECONDS):
                 [vector] = await embedder.embed(["alpha beta"])
-            assert len(vector) == embedder.dimensions
-            assert all(math.isfinite(value) for value in vector)
+            for produced in (overlapped, vector):
+                assert len(produced) == embedder.dimensions
+                assert all(math.isfinite(value) for value in produced)
