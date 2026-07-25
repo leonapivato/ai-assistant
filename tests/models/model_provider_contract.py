@@ -463,7 +463,11 @@ class ModelProviderContract:
             # One version across every attempt: a wrapper that re-read the caller's
             # list after suspending would have handed a later attempt the mutated one.
             assert len(set(log.observed)) == 1, _TORN_INPUT
-            # ...and the single reply rests on that same one observation.
+            # ...and the single reply rests on that same one observation — both its
+            # content and its role, so a subject that derived the reply from a
+            # post-await re-read of the caller's list (e.g. its role from the
+            # replaced turn) is caught, not just one that tore an attempt.
+            assert reply.role is Role.ASSISTANT, _TORN_INPUT
             assert reply.content == encode_conversation(_contents(log.observed[-1])), _TORN_INPUT
             # The list really was mutated mid-flight (grown, or its turn replaced),
             # so the case is not vacuously green on a mutation that never happened.
