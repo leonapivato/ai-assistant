@@ -150,7 +150,12 @@ class ThreadSuspension:
 
     def __init__(self) -> None:
         """Create an unreached, unreleased suspension."""
-        self._entered = threading.Event()
+        #: Set by the worker on arrival *and* by :meth:`release`. :meth:`reached`
+        #: waits on it, so a wait an outer cancellation abandoned in the executor
+        #: wakes on the release the case issues rather than at the ``_WAIT_SECONDS``
+        #: ceiling — where, repeated, it would occupy the default executor's
+        #: workers and stall unrelated async tests (#376).
+        self._reached = threading.Event()
         self._released = threading.Event()
 
     def hold(self) -> None:
@@ -159,7 +164,7 @@ class ThreadSuspension:
         Raises:
             AssertionError: If the suite never releases it.
         """
-        self._entered.set()
+        self._reached.set()
         if not self._released.wait(_WAIT_SECONDS):  # pragma: no cover - only on a hang
             msg = "the suspended worker was never released"
             raise AssertionError(msg)
@@ -167,16 +172,23 @@ class ThreadSuspension:
     async def reached(self) -> None:
         """Wait — without blocking the event loop — until the worker is inside.
 
+        A wait the awaiting task never sees the end of — because an outer timeout
+        or test teardown cancelled it — is woken by :meth:`release` rather than
+        left parked until ``_WAIT_SECONDS`` (#376): the timeout below therefore
+        fires only when *neither* the worker arrived nor the case released, which
+        is a genuine hang.
+
         Raises:
-            AssertionError: If the worker never arrives.
+            AssertionError: If neither arrival nor release ever happens.
         """
-        if not await asyncio.to_thread(self._entered.wait, _WAIT_SECONDS):
+        if not await asyncio.to_thread(self._reached.wait, _WAIT_SECONDS):
             msg = "the call never reached its suspension point"  # pragma: no cover
             raise AssertionError(msg)  # pragma: no cover - only on a hang
 
     def release(self) -> None:
-        """Let the worker finish."""
+        """Let the worker finish, and wake any :meth:`reached` wait left abandoned."""
         self._released.set()
+        self._reached.set()
 
 
 @final
