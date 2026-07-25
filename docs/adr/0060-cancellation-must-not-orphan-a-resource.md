@@ -140,17 +140,23 @@ not a hypothetical one.
 
 ### 2. No filler clauses
 
-We will **not** write a cancellation paragraph on every Protocol. `Planner`,
-`MemoryPolicy`, `FeedbackProcessor` and `ToolRegistry` acquire nothing that
-outlives their coroutine; the rule is vacuous for them **by construction**, and
-saying so seam by seam is how a contract file becomes unread. A rule that mostly
-says "nothing to do here" trains readers to skip it, and then it is not there
-when it bites.
+We will **not** write a cancellation paragraph on every Protocol. Today's
+`Planner`, `MemoryPolicy`, `FeedbackProcessor` and `ToolRegistry`
+implementations acquire nothing that outlives their coroutine, so the rule has
+nothing to say about them, and saying so seam by seam is how a contract file
+becomes unread. A rule that mostly says "nothing to do here" trains readers to
+skip it, and then it is not there when it bites.
 
-Vacuous is a claim about the seam, so it is made only where it is checkable.
-`Embedder` is **not** on that list — `FastEmbedEmbedder.embed` hands
-`_embed_sync` to `asyncio.to_thread`, and a cancelled `embed()` abandons a
-worker thread that keeps running (§5).
+**That is a fact about the implementations we have, not an exemption for the
+Protocols.** Nothing in `Planner` forbids a future implementation that fans out
+concurrent model calls and can be cancelled with one outstanding —
+`ModelBackedPlanner` already does I/O through an injected `ModelProvider`, and
+fanning it out is a design no ADR rules out. Such a planner is bound by the rule
+the moment it exists, without amending this ADR. Silence in `protocols.py` marks
+where the rule currently has no bite; it never marks a seam the rule cannot
+reach. The same care applies to `Embedder`, which is **not** on the list above:
+`FastEmbedEmbedder.embed` hands `_embed_sync` to `asyncio.to_thread`, so a
+cancelled `embed()` already abandons a running worker (§5).
 
 The four Protocols whose conformance suites gain cancellation cases (§3) each
 carry a **one-sentence pointer** to the module clause — not a restatement. A
@@ -378,11 +384,14 @@ only by a boundary.
   "nothing below the façade enforces this" becomes false once the implementation
   lands — the façade's ordering obligation is unchanged, but it is no longer the
   only thing holding the line.
-- **Vacuous where it should be.** `Planner`, `MemoryPolicy`,
-  `FeedbackProcessor` and `ToolRegistry` are untouched and gain no text.
-  `Embedder` is bound and unenforced rather than vacuous (§5) — a distinction
-  the first draft of this ADR got wrong, and the reason §2 now states vacuity
-  only where it is checkable.
+- **Silent where it currently has no bite.** `Planner`, `MemoryPolicy`,
+  `FeedbackProcessor` and `ToolRegistry` are untouched and gain no text, because
+  no implementation of them holds anything — not because the Protocols are
+  exempt. A future `Planner` that fans out concurrent model calls is bound
+  without amending this ADR (§2). `Embedder` is bound and unenforced rather than
+  silent (§5). Both distinctions are ones earlier drafts of this ADR got wrong,
+  which is itself the argument for stating the rule once and generally rather
+  than seam by seam: a per-seam claim is a per-seam chance to be wrong.
 - **Two things stay open, on purpose.** ADR-0056's universal snapshot obligation
   (issue #348) and `ModelProvider`/`Embedder` conformance (issue #347), each
   filed rather than absorbed here. Both are deferrals of *enforcement*; neither
