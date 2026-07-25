@@ -1,12 +1,17 @@
 # 65. A call observes its inputs at one instant, before its first await
 
-- Status: Accepted, §4 amended 2026-07-25 (its `ModelProvider` row was false)
+- Status: Accepted, §4 amended 2026-07-25 (its `ModelProvider` row was false),
+  §3 amended 2026-07-25 by ADR-0069 (enforcement widened to `ModelProvider`)
 - Date: 2026-07-24
 - Amended: 2026-07-25 (§4 — `ModelProvider` was listed as "bound and already
   satisfied". It was bound and **violated**: the survey behind that row read
   `PydanticAIProvider` and missed the two wrapper providers, both of which
   re-read the caller's `Sequence` after suspending. See the amendment; §3's
   enforcement scope is unchanged.)
+- Amended: 2026-07-25 by ADR-0069 (§3 — enforcement is widened to a third seam,
+  `ModelProvider`, which the earlier §4 amendment showed was bound and violated.
+  §3's original two-seam scope stands; the amendment appends `ModelProvider` as a
+  third enforced seam. See the second amendment below.)
 - **This is a contract change.** It adds a second standing clause to
   `core/protocols.py`'s module docstring, binding on every Protocol in the file,
   and it extends the shared conformance suites and canonical fakes of two of
@@ -562,3 +567,37 @@ does not" gives.
 would be a change to what every implementation of that Protocol owes, and needs
 its own ADR rather than a paragraph here. What this amendment corrects is a
 false premise, not a scope.
+
+## Amendment (2026-07-25) by ADR-0069: §3 widens to `ModelProvider`
+
+The scope the first amendment declined to change is now changed, in its own ADR
+as that amendment said it must be. **ADR-0069 widens §3's shared conformance
+enforcement to a third seam, `ModelProvider`.** ADR-0069 holds the decision, the
+general trigger it rests on ("a clause earns a *shared conformance case* at a
+seam when a violation is observable through that seam's suite and has been reached
+there, at a seam that admits further implementations a point-fix cannot reach"),
+and the reasoning; this note records only what §3 now enforces, append-only.
+
+§3's original table scoped enforcement to `MemoryStore` and `MemoryWriter`. That
+text stands (ADR-0001). Add a third enforced seam:
+
+| suite | fake | production implementations it must hold for |
+| --- | --- | --- |
+| `tests/models/model_provider_contract.py` (`ModelProviderContract`) | `FakeModelProvider` (`testing/models.py`) | `PydanticAIProvider`, `RetryingProvider`, `RoutingProvider` |
+
+The criterion §3 states for `MemoryStore`/`MemoryWriter` — "those two because
+they are where the rule has been broken" — is met here: the clause was broken in
+`RetryingProvider` and `RoutingProvider` (two of the three implementations), per
+#380/#384, and the seam *multiplies* (`ModelProvider` is the one contract this
+codebase composes by wrapping — ADR-0011/0013), so the `models`-local #384 fix
+protects nothing beyond the two wrappers that exist today.
+
+The `ModelProviderContract` case, like §3's `MemoryStore` case, must establish
+**mid-flight** observation (not post-call isolation) and needs a
+**fixture-supplied suspension hook** positioned at `complete`'s first suspension
+point — a wrapper suspends inside its inner provider, a direct provider on its
+transport, neither owned by the suite — with the same **"or declare this
+implementation performs no `await` between reading its input and answering"**
+escape, which `FakeModelProvider` takes. The case and its fixture are a separate
+follow-up lane (ADR-0069 §3); this note widens the scope, it does not build the
+case. Nothing else in §3 changes.
