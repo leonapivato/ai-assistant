@@ -69,6 +69,7 @@ abstract base directly; it is collected via a ``Test``-prefixed subclass.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
@@ -327,6 +328,74 @@ class _FoldToAbsentTargetPolicy:
     ) -> MemoryDecision:
         """Name a target the writer was never offered."""
         return MemoryDecision(kind=self._kind, target_id="ghost", reason="contract: misdirection")
+
+
+#: How long :class:`_SuspendingPolicy` waits for ``decide`` to be reached before
+#: declaring the scenario broken. Generous — only hit when a case has already hung.
+_GATE_SECONDS = 5.0
+
+#: Content sharing no term with ``_CONTENT``, so a proposal mutated to it is
+#: unmistakably a *different* belief from the one conflicts were detected for.
+_UNRELATED = "keeps a canoe in the garage"
+
+#: What a failure of the input-observation case below means, in one place
+#: (ADR-0065): the writer read the caller's proposal more than once and the reads
+#: disagreed, so what it retired and what it stored describe two different beliefs.
+_TORN_PROPOSAL = (
+    "ingest derived its outcome from more than one observation of the proposal: the "
+    "conflicts it resolved and the ruling it applied describe one version, and the "
+    "record it wrote describes another — beliefs retired over a statement that was "
+    "never stored"
+)
+
+
+class _SuspendingPolicy:
+    """Rules on the proposal, then suspends *inside* ``decide`` until released.
+
+    ADR-0065 §3's lever for ``MemoryWriter``, and it needs no new hook: a writer
+    hides its store and its policy, so the suite already has to hand it both
+    (ADR-0028 §4), and a policy that suspends is therefore a window **every**
+    conforming writer must reach. Its position needs no clause either — ``ingest``
+    resolves conflicts before it asks and writes after, so a suspension inside
+    ``decide`` necessarily falls between the two reads the clause is about. That
+    ordering is not an assumption about any one writer; it is what
+    ``test_conflicts_are_resolved_before_the_policy_is_asked`` already enforces.
+
+    The proposal and the conflicts are copied *before* the suspension, so
+    :attr:`ruled_on` is the version the ruling was actually derived from —
+    whatever the caller does to its own object next.
+    """
+
+    def __init__(self, kind: MemoryDecisionKind) -> None:
+        """Rule with ``kind`` (through :class:`FakeMemoryPolicy`), then suspend."""
+        self._delegate = FakeMemoryPolicy(kind)
+        self.ruled_on: MemoryUpdateProposal | None = None
+        self.conflicts: tuple[MemoryRecord, ...] = ()
+        self._entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+    ) -> MemoryDecision:
+        """Capture what is being ruled on, rule, then hold the writer here."""
+        self.ruled_on = proposal.model_copy(deep=True)
+        self.conflicts = tuple(record.model_copy(deep=True) for record in conflicts)
+        decision = await self._delegate.decide(proposal, conflicts=conflicts)
+        self._entered.set()
+        await self._released.wait()
+        return decision
+
+    async def reached(self) -> None:
+        """Wait until the writer is suspended inside ``decide``."""
+        async with asyncio.timeout(_GATE_SECONDS):
+            await self._entered.wait()
+
+    def release(self) -> None:
+        """Let the writer finish; idempotent."""
+        self._released.set()
 
 
 class MemoryWriterContract:
@@ -809,3 +878,68 @@ class MemoryWriterContract:
         live = await store.get(result.record_id)
         assert live is not None
         assert "p-ev" in live.provenance.evidence
+
+    # --- input observation (ADR-0065) ---------------------------------------
+
+    async def test_ingest_derives_everything_from_one_observation_of_its_proposal(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """``core.protocols``' input clause, on ``ingest`` (ADR-0065, #366).
+
+        ``ingest`` reads the caller's proposal to find conflicts, hands it to the
+        policy to rule on, and reads it a third time to decide what to write. With
+        the policy suspended between the first read and the last, the caller
+        mutates the record it still holds — and the three had better still describe
+        one belief.
+
+        A ``SUPERSEDE`` is the sharpest form of it, because the damage is not a
+        torn record (the store beneath snapshots its own input) but a semantic
+        desync one level up: the writer closes the validity windows of beliefs that
+        contradict the content it *searched*, while installing a correction built
+        from the content it read *last*. Get those from two versions and beliefs are
+        retired over a statement nobody stored.
+
+        Which version wins is not asserted — the clause leaves that to the
+        implementation, and both "snapshot first" and "read once, after suspending"
+        discharge it. What is asserted is that one version accounts for the whole
+        outcome.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        # INFERRED so neither fold refusal fires; content a superset of the
+        # proposal's terms so the conflict is found; no expiry so the far-forward
+        # store clock does not retire it before the window does.
+        target = _preference(
+            "existing", "prefers concise emails, an older note", source=MemorySource.INFERRED
+        )
+        await store.add(target)
+        policy = _SuspendingPolicy(MemoryDecisionKind.SUPERSEDE)
+        writer = make_writer(store, policy, id_factory=_scripted("corrected"))
+        proposal = _proposal(_preference("new"))
+
+        call = asyncio.ensure_future(writer.ingest(proposal))
+        try:
+            await policy.reached()
+            proposal.proposed.content = _UNRELATED  # the caller still holds it
+        finally:
+            policy.release()
+        result = await call
+
+        ruled_on = policy.ruled_on
+        assert ruled_on is not None
+        # The conflicts the ruling was made on are the ones the writer found for
+        # the version it ruled on, and they are named on that proposal (ADR-0028).
+        assert [record.id for record in policy.conflicts] == ["existing"]
+        assert list(ruled_on.conflicts) == ["existing"]
+        # And the record installed is that same version — every field of it, not
+        # just the content, at the minted id with the fresh open window a
+        # supersession always gives (ADR-0045 §4).
+        assert result.record_id == "corrected"
+        written = await store.get("corrected")
+        assert written is not None
+        assert written == ruled_on.proposed.model_copy(
+            update={"id": "corrected", "validity": Validity()}
+        ), _TORN_PROPOSAL
+        # The belief retired is the one that contradicted what was actually stored.
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", "corrected"}
+        assert retained["existing"].validity.live_at(_AFTER_CLOSE) is False

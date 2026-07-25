@@ -453,14 +453,31 @@ class MemoryIngestor:
         Returns:
             The policy's decision and the id written, if anything was written.
         """
+        # One observation of the caller's proposal, taken on this coroutine's
+        # first executed line — before the lock, which is `ingest`'s first await
+        # (`core.protocols`' input clause, ADR-0065; issue #366). Everything below
+        # reads only this copy. Without it the sequence reads `proposal.proposed`
+        # three times across two awaits: once to search for conflicts, once inside
+        # the injected policy, and once to build what is written. `MemoryRecord`
+        # is mutable and `DefaultMemoryPolicy` is only one of the policies this
+        # seam accepts — a model-backed one would widen the window to a network
+        # call — so a caller that mutated its own record mid-flight could make
+        # `_retirement_set` close the windows of beliefs contradicting the content
+        # searched *first* while the record installed came from the read *last*.
+        # Not a torn record (the store snapshots its own input, ADR-0056) but a
+        # semantic desync one level up: beliefs retired over a statement that was
+        # never stored.
+        observed = proposal.model_copy(deep=True)
         async with self._lock:
-            return await self._ingest(proposal)
+            return await self._ingest(observed)
 
-    async def _ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        conflicts = await self._detect_conflicts(proposal.proposed)
-        proposal = proposal.model_copy(update={"conflicts": [record.id for record in conflicts]})
-        decision = await self._policy.decide(proposal, conflicts=conflicts)
-        record_id = await self._apply(decision, proposal.proposed, conflicts)
+    async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
+        conflicts = await self._detect_conflicts(observed.proposed)
+        # Shallow is right here: this copies the ingestor's *own* snapshot, whose
+        # `proposed` no caller holds a reference to.
+        observed = observed.model_copy(update={"conflicts": [record.id for record in conflicts]})
+        decision = await self._policy.decide(observed, conflicts=conflicts)
+        record_id = await self._apply(decision, observed.proposed, conflicts)
         return MemoryIngestResult(decision=decision, record_id=record_id)
 
     async def _detect_conflicts(self, record: MemoryRecord) -> list[MemoryRecord]:

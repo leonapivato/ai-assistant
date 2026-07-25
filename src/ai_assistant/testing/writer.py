@@ -121,12 +121,27 @@ class FakeMemoryWriter:
         self.calls: list[MemoryUpdateProposal] = []
 
     async def ingest(self, proposal: MemoryUpdateProposal) -> MemoryIngestResult:
-        """Record the proposal, then resolve, rule and apply."""
-        self.calls.append(proposal.model_copy(deep=True))
-        conflicts = await self._conflicts_for(proposal.proposed)
-        proposal = proposal.model_copy(update={"conflicts": [record.id for record in conflicts]})
-        decision = await self._policy.decide(proposal, conflicts=conflicts)
-        record_id = await self._apply(decision, proposal.proposed, conflicts)
+        """Record the proposal, then resolve, rule and apply.
+
+        The caller's proposal is observed exactly once, on the coroutine's first
+        executed line, and everything below — the conflict search, what the policy
+        is handed, and what is written — reads only that copy (``core.protocols``'
+        input clause, ADR-0065). ``MemoryIngestor`` does the same, and a fake that
+        did not would let a consumer's test pass on a desync the production writer
+        refuses: conflicting beliefs retired over content that was never stored.
+
+        Two copies, not one. :attr:`calls` is public and a consumer's test may
+        mutate what it reads there, so the call log gets its own; the working
+        snapshot stays private to this call.
+        """
+        observed = proposal.model_copy(deep=True)
+        self.calls.append(observed.model_copy(deep=True))
+        conflicts = await self._conflicts_for(observed.proposed)
+        # Shallow is right here: it copies this writer's own snapshot, whose
+        # ``proposed`` no caller holds a reference to.
+        observed = observed.model_copy(update={"conflicts": [record.id for record in conflicts]})
+        decision = await self._policy.decide(observed, conflicts=conflicts)
+        record_id = await self._apply(decision, observed.proposed, conflicts)
         return MemoryIngestResult(decision=decision, record_id=record_id)
 
     async def _conflicts_for(self, record: MemoryRecord) -> list[MemoryRecord]:
