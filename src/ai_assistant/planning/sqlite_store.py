@@ -18,7 +18,8 @@ non-reuse by a per-incarnation ``pid``-and-nonce plus a durable ordinal
 
 The durable ordinal is only worth what its *monotonicity* is worth, so it carries
 a high-water mark beside it in ``meta`` and the store refuses a counter that has
-fallen below it — at open and again at every allocation (ADR-0064).
+fallen below it — at open and again at every allocation — with the records and a
+unique ``created_seq`` beneath that as the durable backstop (ADR-0064).
 """
 
 from __future__ import annotations
@@ -93,6 +94,19 @@ _RECORD_SCHEMA = (
     "version INTEGER NOT NULL, active INTEGER NOT NULL, "
     "created_seq INTEGER NOT NULL, data TEXT NOT NULL)",
 )
+
+#: ``created_seq`` is unique by construction — every allocation takes it from the
+#: counter it increments in the same ``BEGIN IMMEDIATE`` transaction — so declaring
+#: it makes ADR-0049 §1's oldest-first ordering a property of the *schema* rather
+#: than a convention the counter is trusted to keep (ADR-0064 §4). It is the
+#: backstop beneath the high-water mark, in the same way the foreign keys sit
+#: beneath ``save_plan``'s app-level orphan check: whatever route a second row at
+#: one ordinal arrives by — a rewound counter this code did not see, a concurrent
+#: writer that does not maintain the mark — SQLite refuses it rather than letting
+#: ``active_executions``/``export`` quietly stop being an order. Created after the
+#: table and before the mark is reconciled, so a file that *already* holds
+#: duplicates is refused at the open (ADR-0049 §1's posture) rather than carried.
+_INDEXES = ("CREATE UNIQUE INDEX IF NOT EXISTS executions_created_seq ON executions(created_seq)",)
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -232,7 +246,7 @@ class SqlitePlanStore:
                 # schema behind (the transaction rolls the meta table back too on
                 # the raise).
                 counter, mark = self._verify_or_init_meta(conn)
-                for statement in _RECORD_SCHEMA:
+                for statement in (*_RECORD_SCHEMA, *_INDEXES):
                     conn.execute(statement)
                 # Reconciled *after* the schema above, in the same transaction, so
                 # the mark is only written for a file this open has actually brought
@@ -339,6 +353,10 @@ class SqlitePlanStore:
         erase, which is why ADR-0049 §3 keeps the ordinal in ``meta`` at all. They
         can only refuse — and where no execution survives there is nothing to
         corroborate *and* nothing to corrupt (ADR-0064 §5).
+
+        This runs at the open, never per allocation. The unique index in
+        :data:`_INDEXES` is what holds the same line on the allocation path, where
+        scanning ``executions`` would be a cost on every ``start_execution``.
 
         **The mark is then brought level with the counter**, written where it is
         absent and *promoted* where it lags. Promoting is not a repair: the counter

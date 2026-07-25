@@ -165,6 +165,31 @@ keeps the ordinal in `meta` at all. They can only refuse — and where no execut
 survives there is nothing to corroborate *and* nothing to corrupt (§5). The cost
 is one aggregate read per open, never per allocation.
 
+**Beneath all of it, `executions.created_seq` is declared UNIQUE.** The markers
+are read at two points in time, and between them the file can change: a writer
+that does not maintain the mark — a concurrently running older build, most
+plausibly — can advance the counter after this store has opened, and a subsequent
+one-row rewind then leaves counter and mark agreeing at a value the file has
+already passed. No amount of re-reading the two `meta` rows sees that, and
+re-scanning `executions` on every allocation would put a full table scan on the
+hot path of the operation this store exists to make cheap.
+
+Declaring the constraint costs nothing and is not a new invariant: every
+allocation takes `created_seq` from the counter it increments in the same
+`BEGIN IMMEDIATE` transaction, so it is already unique for every file this store
+wrote. Saying so makes ADR-0049 §1's oldest-first ordering a property of the
+*schema* rather than a convention the counter is trusted to keep — the same
+relationship the enforced foreign keys have to `save_plan`'s app-level orphan
+check. Whatever route a second row at one ordinal arrives by, SQLite refuses it.
+
+It does not make the mark redundant, and the mark does not make it redundant. The
+index cannot catch #356's original reproduction — `clear()` removes the row the
+duplicate would have collided with, which is exactly what made that reissue
+silent — and the mark cannot catch a stale-mark window it never observes. Each
+covers what the other cannot. A file that *already* holds duplicate ordinals is
+refused at the open, since nothing here can decide which of two rows at one
+ordinal came first.
+
 **A database predating the mark is stamped, not refused.** Every plan store
 written before this change has a counter and no mark. Making a durable record
 unopenable by the code that wrote it is a far worse failure than the one the mark
@@ -231,6 +256,12 @@ named seam.
 - **One extra `UPDATE` per allocation**, inside a transaction already open and
   already writing the counter, plus one `MAX(created_seq)` aggregate per *open*.
   No new lock, no new round trip, and nothing added to the allocation's read path.
+- **A unique index on `executions.created_seq`.** Created `IF NOT EXISTS` like the
+  rest of the schema, so it is additive and idempotent and needs no schema-version
+  bump; it also speeds the `ORDER BY created_seq` that `active_executions` and
+  `export` already run. A pre-existing database that already holds duplicate
+  ordinals will not open — the only such database is one this invariant was
+  already broken on.
 - **ADR-0049 §3's ordinal claim is now enforced rather than assumed.** Its text
   stands unchanged; this is the mechanism behind it.
 - **Revisit when** a second on-disk schema version arrives — the mark is a `meta`

@@ -998,6 +998,90 @@ async def test_a_rewind_down_to_a_lagging_mark_is_refused_by_the_records(
         SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "B")
 
 
+async def test_two_executions_cannot_share_a_created_seq(tmp_path: Path) -> None:
+    """The oldest-first ordering is a property of the schema, not of the counter alone.
+
+    Adversarial review, round 3: a *concurrently running* older build can advance
+    the counter without the mark **after** this store has opened, so a subsequent
+    one-row rewind leaves counter and mark agreeing at a value the file has already
+    passed. The allocation-time mark test cannot see that, and re-scanning
+    ``executions`` on every ``start_execution`` would put a full scan on the hot
+    path. The uniqueness ``created_seq`` already has by construction is declared
+    instead, so a second row at one ordinal is refused whatever route it arrives by
+    — the same relationship the enforced foreign keys have to ``save_plan``'s
+    app-level orphan check (ADR-0049 §1).
+
+    Staged exactly as the finding describes: the store is open at counter 3, an
+    outside writer plays the older build (a row at ``created_seq = 4``, counter
+    advanced, mark untouched), then a reset script puts the counter back to 3.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        for _ in range(3):
+            await store.start_execution("p1")
+
+        raw = sqlite3.connect(path)
+        try:
+            data = raw.execute("SELECT data FROM executions LIMIT 1").fetchone()[0]
+            raw.execute(
+                "INSERT INTO executions(id, plan_id, version, active, created_seq, data) "
+                "VALUES ('older-build-4', 'p1', 1, 1, 4, ?)",
+                (data,),
+            )
+            # The older build advances only the counter; the mark stays at 3.
+            raw.execute("UPDATE meta SET value = '4' WHERE key = 'exec_counter'")
+            # Then the reset script puts it back, so counter and mark agree again.
+            raw.execute("UPDATE meta SET value = '3' WHERE key = 'exec_counter'")
+            raw.commit()
+        finally:
+            raw.close()
+
+        with pytest.raises(PlanningError, match="UNIQUE constraint failed"):
+            await store.start_execution("p1")
+    finally:
+        store.close()
+
+    seqs = [row[0] for row in sqlite3.connect(path).execute("SELECT created_seq FROM executions")]
+    assert sorted(seqs) == [1, 2, 3, 4]  # no duplicate survived the refusal
+
+
+async def test_a_file_already_holding_duplicate_ordinals_is_refused_at_open(
+    tmp_path: Path,
+) -> None:
+    """A database that already lost the ordering is refused, not carried forward.
+
+    The unique index is created at every open, so a file whose ``created_seq``
+    duplicates predate this code cannot be opened — ADR-0049 §1's posture, and the
+    only honest answer: nothing here can decide which of two rows at one ordinal
+    came first.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    await store.save_goal(_goal())
+    await store.save_plan(_plan())
+    await store.start_execution("p1")
+    store.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        data = raw.execute("SELECT data FROM executions LIMIT 1").fetchone()[0]
+        raw.execute("DROP INDEX executions_created_seq")
+        raw.execute(
+            "INSERT INTO executions(id, plan_id, version, active, created_seq, data) "
+            "VALUES ('dupe-1', 'p1', 1, 1, 1, ?)",
+            (data,),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="failed to initialise the plan store"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
 async def test_a_lost_high_water_mark_is_refused_at_allocation(tmp_path: Path) -> None:
     """An allocator that cannot witness its counter refuses, like one with no counter.
 
