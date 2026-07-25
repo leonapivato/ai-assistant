@@ -286,11 +286,28 @@ This is not a note about test style; it is the whole content of the enforcement,
 for the reason §"The suite already appears to cover this" documents: the existing
 post-call case passed on the torn code. The minimum each suite must establish:
 
-- For `MemoryStore`: with the write suspended mid-flight, mutate the caller-held
-  record from inside that suspension, then assert every part of what the store
-  committed agrees with **one** version of the record — the returned id names the
-  row that was written, and the stored content is the content the vector was
-  computed from.
+- For `MemoryStore`, **two cases — one for `add`, one for `write_atomic`.** With
+  the write suspended mid-flight, mutate the caller-held record from inside that
+  suspension, then assert every part of what the store committed agrees with
+  **one** version of the input.
+
+  For `add` that is: the returned id names the row that was written, and the
+  stored content is the content the vector was computed from.
+
+  `write_atomic` needs its own case and is not a rewording of the first, because
+  it carries three obligations `add` does not. Its argument is a caller-owned
+  **`Sequence`** — the container is mutable whatever its elements are, which the
+  clause calls out specifically. Its elements are the `MemoryWrite`s whose
+  `frozen=True` does *not* freeze the `MemoryRecord` inside them — this ADR's own
+  headline example of why "the argument is frozen" is not a discharge. And its
+  duplicate-id check (ADR-0046 §3) validates ids that must be the *same* ids
+  subsequently written, so a backend that revalidates pre-await and rereads
+  post-await can pass validation on one batch and commit another. The case must
+  therefore establish that the returned ids, the persisted records and vectors,
+  the duplicate-id rejection and the all-or-nothing boundary all rest on one
+  observation of the batch. A store could snapshot correctly in `add` and tear
+  here; `SqliteMemoryStore` snapshots both, but nothing in a suite that tests only
+  `add` would have said so.
 
   **How the suite suspends an arbitrary backend needs deciding here, because the
   obvious answer does not generalise.** `SqliteMemoryStore`'s lever is its
@@ -303,12 +320,28 @@ post-call case passed on the torn code. The minimum each suite must establish:
   So the suite requires a **mid-write suspension hook, supplied through its
   fixture**, exactly as it already requires `store_factory` for the case the
   fixed `store` fixture cannot express. An implementation's test module overrides
-  it either with a handle that blocks the write and releases it, or with an
-  explicit declaration that this backend performs no `await` between reading a
-  record and committing it — in which case the case reduces to the post-call
-  assertion, correctly, because a store with no suspension window has no window
-  to tear in. `SqliteMemoryStore` supplies the handle through its embedder;
+  it either with a handle the case can synchronise on, or with an explicit
+  declaration that this backend performs no `await` between reading its input and
+  committing it — in which case the case reduces to the post-call assertion,
+  correctly, because a store with no suspension window has no window to tear in.
+  `SqliteMemoryStore` supplies the handle through its embedder;
   `InMemoryMemoryStore` and `FakeMemoryStore` declare the second.
+
+  **The hook's position is part of its contract, not the implementer's choice.**
+  "Blocks the write" is under-determined and would let a test module defeat its
+  own case: a hook fired at method *entry* lets the mutation land before the
+  method has read anything, so the store observes one coherent mutated version,
+  the case passes, and a tear at the real suspension window survives untested.
+  The hook must fire at **the method's own first suspension point** — its first
+  `await` — and resume when the case releases it. That position is well-defined
+  for every implementation, conforming or not, and it is well-defined *without*
+  reference to where the implementation reads its input, which matters because a
+  conforming implementation has no second read to position against. It is also
+  exactly the boundary the clause draws: a conforming store has snapshotted
+  before that point and cannot be reached by the mutation, while pre-ADR-0056
+  `add` — content read, embedder awaited, id and JSON read after — is torn by it.
+  Entry is the wrong side of that boundary, and the clause already says why: a
+  mutation before the first await is captured whole and is not a tear.
 
   The hook is a requirement of the **conformance suite**, expressed through its
   fixture; it does **not** go on the `MemoryStore` Protocol. ADR-0060 §3 settled
@@ -333,6 +366,13 @@ post-call case passed on the torn code. The minimum each suite must establish:
   that. The lever is general here because the collaborator is on the *suite's*
   side of the seam, and it is not general for `MemoryStore` because no
   collaborator is.
+
+  It needs no position clause either, for the same reason: `decide`'s position is
+  fixed by the contract rather than chosen by the implementer. `ingest` resolves
+  conflicts itself and rules on them, so a suspension inside `decide` necessarily
+  falls after the conflict read and before the write — which is the window the
+  case needs. That ordering is not an assumption about `MemoryIngestor`; it is
+  what the suite case named above already enforces on every conforming writer.
 
 The existing post-call case stays. It tests a real and different property —
 that the store does not alias the caller's object into its own state — and
