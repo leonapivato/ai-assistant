@@ -34,7 +34,7 @@ def _event(
         memory_kind=memory_kind,
         content=content,
         subject=subject,
-        evidence=list(evidence),
+        evidence=evidence,
         created_at=_WHEN,
     )
 
@@ -67,7 +67,7 @@ async def test_preference_feedback_becomes_a_user_asserted_preference() -> None:
     assert record.context == "email tone"
     assert record.provenance.source is MemorySource.USER_ASSERTED
     assert record.provenance.confidence == 1.0
-    assert record.provenance.evidence == ["ep-9"]
+    assert record.provenance.evidence == ("ep-9",)
     assert record.provenance.last_updated == _WHEN
 
 

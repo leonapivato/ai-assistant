@@ -200,12 +200,14 @@ async def test_a_naive_injected_clock_is_the_subsystems_error() -> None:
         await store.get("1")
 
 
-async def test_export_is_an_independent_snapshot() -> None:
+async def test_exported_records_cannot_be_mutated_into_stored_state() -> None:
     store = InMemoryMemoryStore()
     await store.add(_semantic("1", "original"))
 
     exported = await store.export()
-    exported[0].content = "mutated"  # must not reach into stored state
+    # ADR-0068: an exported record is frozen, so it cannot reach into stored state.
+    with pytest.raises(ValidationError):
+        exported[0].content = "mutated"
 
     got = await store.get("1")
     assert got is not None

@@ -180,7 +180,7 @@ class FakeFeedbackProcessor:
                     content=event.content,
                     provenance=provenance,
                     situation=event.subject if event.subject else event.content,
-                    steps=[event.content],
+                    steps=(event.content,),
                 )
             case MemoryKind.EPISODIC:
                 return EpisodicMemory(
@@ -196,7 +196,7 @@ class FakeFeedbackProcessor:
         return Provenance(
             source=MemorySource.USER_ASSERTED,
             confidence=_FULL_CONFIDENCE,
-            evidence=list(event.evidence),
+            evidence=event.evidence,
             last_updated=event.created_at,
         )
 

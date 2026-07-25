@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from model_provider_contract import ModelProviderContract
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import Message, Role
@@ -180,11 +181,14 @@ async def test_calls_record_the_conversation_and_model_override() -> None:
     assert provider.last_messages == call.messages
 
 
-async def test_recorded_calls_are_isolated_from_caller_mutation() -> None:
+async def test_recorded_calls_cannot_be_corrupted_by_caller_mutation() -> None:
     provider = FakeModelProvider()
     sent = [Message(role=Role.USER, content="original")]
 
     await provider.complete(sent)
-    sent[0].content = "mutated after the call"  # caller keeps and mutates its list
+    # `Message` is frozen (ADR-0068), so a caller reusing its list cannot rewrite
+    # a recorded turn's content after the call.
+    with pytest.raises(ValidationError):
+        sent[0].content = "mutated after the call"
 
     assert provider.calls[0].messages[0].content == "original"

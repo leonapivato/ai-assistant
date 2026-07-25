@@ -687,10 +687,11 @@ class PlanStoreContract:
     async def test_a_retained_goal_reference_cannot_edit_stored_state(
         self, store: PlanStore
     ) -> None:
-        """Otherwise a caller could rewrite a goal after the fact, unrecorded."""
+        """ADR-0068 freezes ``Goal``, so a retained reference cannot rewrite it."""
         goal = _goal()
         await store.save_goal(goal)
-        goal.statement = "tampered"
+        with pytest.raises(ValidationError):
+            goal.statement = "tampered"
 
         stored = await store.get_goal("g1")
         assert stored is not None
@@ -702,7 +703,8 @@ class PlanStoreContract:
         await store.save_goal(_goal())
         got = await store.get_goal("g1")
         assert got is not None
-        got.statement = "tampered"
+        with pytest.raises(ValidationError):
+            got.statement = "tampered"
 
         fresh = await store.get_goal("g1")
         assert fresh is not None
@@ -755,10 +757,17 @@ class PlanStoreContract:
     async def test_mutating_a_returned_execution_cannot_edit_stored_state(
         self, store: PlanStore
     ) -> None:
-        """Execution state is the audit record; only commit_transition may move it."""
+        """Execution state is the audit record; only commit_transition may move it.
+
+        ADR-0068 freezes ``ExecutionState`` and its ``StepExecution`` elements, so
+        the audit record cannot be edited in place at all — neither the nested
+        step status nor the version.
+        """
         state = await self._started(store)
-        state.steps[0].status = StepStatus.SUCCEEDED
-        state.version = 99
+        with pytest.raises(ValidationError):
+            state.steps[0].status = StepStatus.SUCCEEDED
+        with pytest.raises(ValidationError):
+            state.version = 99
 
         fresh = await store.get_execution(state.id)
         assert fresh is not None

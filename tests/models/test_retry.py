@@ -476,24 +476,16 @@ def _append_a_turn(conversation: list[Message]) -> None:
     conversation.append(Message(role=Role.USER, content="wait, actually"))
 
 
-def _rewrite_the_first_turn(conversation: list[Message]) -> None:
-    # In place, without touching the list: `Message` is not frozen, so this is
-    # invisible to a wrapper that only copies the container.
-    conversation[0].content = "rewritten"
-
-
-@pytest.mark.parametrize(
-    "mutate",
-    [_append_a_turn, _rewrite_the_first_turn],
-    ids=["appended-turn", "rewritten-turn"],
-)
+@pytest.mark.parametrize("mutate", [_append_a_turn], ids=["appended-turn"])
 async def test_every_attempt_answers_the_conversation_the_call_began_with(
     mutate: Callable[[list[Message]], None],
 ) -> None:
     # ADR-0065: `complete` loops, so each attempt hands the caller's sequence to
-    # the inner provider after the previous attempt's await returned. Neither the
-    # container nor a turn's own fields may change under the call, and the reply
-    # must rest on that one observation.
+    # the inner provider after the previous attempt's await returned. Freezing
+    # `Message` (ADR-0068) removes the element-rewrite tear entirely — a turn's
+    # own fields can no longer change under the call — so what survives is the
+    # container tear (ADR-0068 §4): the caller's *list* is still theirs and
+    # mutable, and the reply must still rest on one observation of it.
     conversation = [Message(role=Role.USER, content="hi")]
     inner = MutatingProvider(conversation, mutate)
     provider = RetryingProvider(inner, sleep=SleepSpy(), jitter=lambda: 1.0)

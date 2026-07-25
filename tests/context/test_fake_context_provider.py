@@ -100,26 +100,31 @@ async def test_repeated_assembly_returns_an_equal_context() -> None:
     assert await provider.assemble() == await provider.assemble()
 
 
-async def test_mutating_the_supplied_context_after_construction_has_no_effect() -> None:
-    # Ingress: the caller keeps its reference to the context it passed in. The
-    # context is fixed at construction, so a later mutation must not reach the fake.
+async def test_the_supplied_context_cannot_be_mutated_after_construction() -> None:
+    # Ingress: the caller keeps its reference to the context it passed in.
+    # CurrentContext is frozen (ADR-0068), so a later mutation raises and cannot
+    # reach the fake — isolation is subsumed by immutability.
     supplied = _saturday_night()
     provider = FakeContextProvider(supplied)
 
-    supplied.is_weekend = False
-    supplied.time_of_day = TimeOfDay.MORNING
+    with pytest.raises(ValidationError):
+        supplied.is_weekend = False
+    with pytest.raises(ValidationError):
+        supplied.time_of_day = TimeOfDay.MORNING
 
     context = await provider.assemble()
     assert context.is_weekend is True
     assert context.time_of_day is TimeOfDay.NIGHT
 
 
-async def test_mutating_a_returned_context_does_not_affect_later_calls() -> None:
+async def test_a_returned_context_cannot_be_mutated() -> None:
     provider = FakeContextProvider(_saturday_night())
 
     first = await provider.assemble()
-    first.is_weekend = False
-    first.time_of_day = TimeOfDay.MORNING
+    with pytest.raises(ValidationError):
+        first.is_weekend = False
+    with pytest.raises(ValidationError):
+        first.time_of_day = TimeOfDay.MORNING
 
     second = await provider.assemble()
     assert second.is_weekend is True
@@ -129,10 +134,12 @@ async def test_mutating_a_returned_context_does_not_affect_later_calls() -> None
 async def test_the_default_context_cannot_be_corrupted_between_instances() -> None:
     # The default lives in a module-level constant shared by every instance, so a
     # leak here would contaminate unrelated test modules — the worst failure mode
-    # a shared fake can have.
+    # a shared fake can have. CurrentContext is frozen, so the mutation raises.
     first = await FakeContextProvider().assemble()
-    first.is_weekend = True
-    first.time_of_day = TimeOfDay.NIGHT
+    with pytest.raises(ValidationError):
+        first.is_weekend = True
+    with pytest.raises(ValidationError):
+        first.time_of_day = TimeOfDay.NIGHT
 
     fresh = await FakeContextProvider().assemble()
     assert fresh.is_weekend is False
@@ -140,22 +147,22 @@ async def test_the_default_context_cannot_be_corrupted_between_instances() -> No
 
 
 def test_a_supplied_context_is_revalidated_on_the_way_in() -> None:
-    # CurrentContext does not validate on assignment, so a caller can mutate one
-    # into an invalid state and hand it over. Re-validating here is what keeps the
-    # fake passing the tz-aware assertion in its own suite — and since ADR-0023 the
-    # re-validation *refuses* a naive `now` rather than assuming UTC for it, so the
-    # mistake is reported at the point it was made instead of being papered over.
+    # CurrentContext is frozen, but the validation-skipping `__dict__` bypass
+    # survives (ADR-0018 §3), so a caller can still hand over a model corrupted
+    # into an invalid state behind pydantic's back. Re-validating here is what
+    # keeps the fake passing the tz-aware assertion in its own suite — and since
+    # ADR-0023 the re-validation *refuses* a naive `now` rather than assuming UTC.
     corrupted = _saturday_night()
-    corrupted.now = datetime(2026, 6, 6, 23, 0)  # noqa: DTZ001  deliberately naive
+    corrupted.__dict__["now"] = datetime(2026, 6, 6, 23, 0)  # noqa: DTZ001  deliberately naive
 
     with pytest.raises(ValidationError, match="now must be timezone-aware"):
         FakeContextProvider(corrupted)
 
 
 def test_an_indeterminate_timezone_is_rejected() -> None:
-    # CurrentContext requires only `tzinfo is not None`, which this satisfies while
-    # still having no offset — enough to fail the suite's tz-aware assertion and to
-    # raise on any downstream aware comparison.
+    # A `tzinfo` that is set but has no offset — enough to fail the suite's tz-aware
+    # assertion and to raise on any downstream aware comparison. Installed via the
+    # `__dict__` bypass, since assignment on the frozen model would raise first.
     class _NoOffset(tzinfo):
         def utcoffset(self, dt: datetime | None) -> timedelta | None:
             return None
@@ -167,7 +174,7 @@ def test_an_indeterminate_timezone_is_rejected() -> None:
             return "indeterminate"
 
     corrupted = _saturday_night()
-    corrupted.now = datetime(2026, 6, 6, 23, 0, tzinfo=_NoOffset())
+    corrupted.__dict__["now"] = datetime(2026, 6, 6, 23, 0, tzinfo=_NoOffset())
 
     with pytest.raises(ValueError, match="determinate UTC offset"):
         FakeContextProvider(corrupted)

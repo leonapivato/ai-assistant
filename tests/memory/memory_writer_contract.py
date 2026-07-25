@@ -74,6 +74,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.protocols import MemoryWriter
@@ -270,7 +271,7 @@ def _preference(
             source=source,
             confidence=confidence,
             last_updated=_WHEN,
-            evidence=list(evidence),
+            evidence=evidence,
         ),
     )
 
@@ -429,7 +430,13 @@ class MemoryWriterContract:
         await make_writer(store, policy).ingest(_proposal(_preference("new")))
 
         assert [record.id for record in policy.calls[0].conflicts] == ["existing"]
-        assert policy.last_proposal.conflicts == ["existing"]
+        # ADR-0068 §1: `conflicts` is populated on the real ingest path via
+        # `model_copy(update=...)`, which skips validation — so the ingestor must
+        # pre-build a tuple, or a mutable list would be installed past the frozen
+        # proposal. A `list` here would fail the equality (`["existing"] !=
+        # ("existing",)`); the `isinstance` pins it unambiguously.
+        assert policy.last_proposal.conflicts == ("existing",)
+        assert isinstance(policy.last_proposal.conflicts, tuple)
 
     async def test_accept_stores_the_record_and_returns_its_id(
         self, make_writer: WriterFactory
@@ -535,7 +542,7 @@ class MemoryWriterContract:
             provenance=Provenance(
                 source=MemorySource.INFERRED,
                 confidence=0.9,
-                evidence=["t-ev"],
+                evidence=("t-ev",),
                 last_updated=_WHEN,
             ),
         )
@@ -550,7 +557,7 @@ class MemoryWriterContract:
             provenance=Provenance(
                 source=MemorySource.OBSERVED,
                 confidence=0.6,
-                evidence=["p-ev"],
+                evidence=("p-ev",),
                 last_updated=datetime(2026, 2, 1, tzinfo=UTC),
             ),
         )
@@ -881,28 +888,22 @@ class MemoryWriterContract:
 
     # --- input observation (ADR-0065) ---------------------------------------
 
-    async def test_ingest_derives_everything_from_one_observation_of_its_proposal(
+    async def test_ingest_cannot_tear_on_a_mid_flight_mutation_of_its_proposal(
         self, make_writer: WriterFactory
     ) -> None:
-        """``core.protocols``' input clause, on ``ingest`` (ADR-0065, #366).
+        """The single-proposal ``ingest`` tear is unrepresentable under ADR-0068.
 
         ``ingest`` reads the caller's proposal to find conflicts, hands it to the
-        policy to rule on, and reads it a third time to decide what to write. With
-        the policy suspended between the first read and the last, the caller
-        mutates the record it still holds — and the three had better still describe
-        one belief.
-
-        A ``SUPERSEDE`` is the sharpest form of it, because the damage is not a
-        torn record (the store beneath snapshots its own input) but a semantic
-        desync one level up: the writer closes the validity windows of beliefs that
-        contradict the content it *searched*, while installing a correction built
-        from the content it read *last*. Get those from two versions and beliefs are
-        retired over a statement nobody stored.
-
-        Which version wins is not asserted — the clause leaves that to the
-        implementation, and both "snapshot first" and "read once, after suspending"
-        discharge it. What is asserted is that one version accounts for the whole
-        outcome.
+        policy to rule on, and reads it a third time to decide what to write.
+        ADR-0065's input clause guarded the window between the first read and the
+        last against a caller mutating the record it still holds — a ``SUPERSEDE``
+        desync being the sharpest form, where beliefs contradicting the *searched*
+        content are retired while a correction is built from the content read
+        *last*. Freezing ``MemoryUpdateProposal`` and ``MemoryRecord`` makes that
+        stimulus unrepresentable (ADR-0068 §4): the mid-flight mutation raises
+        rather than tearing, so the three reads necessarily see one belief. The
+        clause survives only for the ``Sequence`` arguments (``decide``'s
+        ``conflicts``), not for this single-value one.
         """
         store = FakeMemoryStore(now=_after_close)
         # INFERRED so neither fold refusal fires; content a superset of the
@@ -919,7 +920,8 @@ class MemoryWriterContract:
         call = asyncio.ensure_future(writer.ingest(proposal))
         try:
             await policy.reached()
-            proposal.proposed.content = _UNRELATED  # the caller still holds it
+            with pytest.raises(ValidationError):
+                proposal.proposed.content = _UNRELATED  # frozen: the caller cannot rewrite it
         finally:
             policy.release()
         result = await call

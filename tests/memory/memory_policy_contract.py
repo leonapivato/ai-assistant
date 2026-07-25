@@ -174,7 +174,7 @@ def _proposal(
         proposed=record if record is not None else _record("proposed"),
         rationale="because",
         sensitivity=sensitivity,
-        conflicts=[c.id for c in conflicts],
+        conflicts=tuple(c.id for c in conflicts),
     )
 
 
@@ -261,3 +261,19 @@ class MemoryPolicyContract:
         decision = await policy.decide(_proposal(), conflicts=[])
 
         assert decision.kind not in _TARGET_CARRYING
+
+    async def test_decide_does_not_mutate_its_inputs(self, policy: MemoryPolicy) -> None:
+        # #40's input-immutability obligation, asserted in the shared suite rather
+        # than stranded in each implementation's own tests (ADR-0068 §5). A
+        # conforming producer hands `decide` a validly-constructed, frozen proposal
+        # (its `conflicts` a tuple by §1's depth rule), so the policy cannot mutate
+        # it; this pins that property against the real subject.
+        conflicts = [_record("existing")]
+        proposal = _proposal(conflicts=conflicts)
+        proposal_before = proposal.model_copy(deep=True)
+        conflicts_before = [c.model_copy(deep=True) for c in conflicts]
+
+        await policy.decide(proposal, conflicts=conflicts)
+
+        assert proposal == proposal_before
+        assert conflicts == conflicts_before

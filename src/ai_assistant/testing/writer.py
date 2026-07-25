@@ -139,7 +139,9 @@ class FakeMemoryWriter:
         conflicts = await self._conflicts_for(observed.proposed)
         # Shallow is right here: it copies this writer's own snapshot, whose
         # ``proposed`` no caller holds a reference to.
-        observed = observed.model_copy(update={"conflicts": [record.id for record in conflicts]})
+        observed = observed.model_copy(
+            update={"conflicts": tuple(record.id for record in conflicts)}
+        )
         decision = await self._policy.decide(observed, conflicts=conflicts)
         record_id = await self._apply(decision, observed.proposed, conflicts)
         return MemoryIngestResult(decision=decision, record_id=record_id)
@@ -402,7 +404,7 @@ def _merge(target: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     provenance = Provenance(
         source=incoming.provenance.source,
         confidence=max(target.provenance.confidence, incoming.provenance.confidence),
-        evidence=list(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence])),
+        evidence=tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence])),
         last_updated=incoming.provenance.last_updated,
     )
     return incoming.model_copy(update={"id": target.id, "provenance": provenance})

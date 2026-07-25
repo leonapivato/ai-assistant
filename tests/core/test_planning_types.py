@@ -752,3 +752,42 @@ def test_export_round_trips_through_json() -> None:
     assert step.failure is not None
     assert step.failure.kind is ToolFailureKind.UNAVAILABLE
     assert step.failure.message == "down"
+
+
+# --- ADR-0068: the planning record graph is frozen all the way down -----
+
+
+def test_goal_is_frozen_including_its_provenance() -> None:
+    """A ``Goal`` and the ``Provenance`` it carries reject post-construction edits."""
+    goal = _goal()
+    with pytest.raises(ValidationError):
+        goal.statement = "tampered"
+    with pytest.raises(ValidationError):
+        goal.provenance.confidence = 0.1  # the nested model is frozen too
+
+
+def test_step_execution_is_frozen() -> None:
+    step = _step()
+    with pytest.raises(ValidationError):
+        step.status = StepStatus.SUCCEEDED
+
+
+def test_execution_state_is_frozen_including_its_step_elements() -> None:
+    execution = _execution(_step())
+    with pytest.raises(ValidationError):
+        execution.version = 99
+    with pytest.raises(ValidationError):
+        execution.steps[0].status = StepStatus.SUCCEEDED  # the nested element is frozen
+
+
+def test_plan_export_is_deeply_immutable() -> None:
+    """Issue #41's cited scenario: a caller cannot rewrite a goal inside an export.
+
+    ``PlanExport`` was already ``frozen=True`` around a mutable ``Goal``, so
+    ``export.goals[0].statement = ...`` used to succeed and silently break the
+    export's referential integrity. ADR-0068 freezes ``Goal``, so it now raises —
+    the wrapper needed no change of its own.
+    """
+    export = PlanExport(exported_at=_WHEN, goals=(_goal(),))
+    with pytest.raises(ValidationError):
+        export.goals[0].statement = "tampered"

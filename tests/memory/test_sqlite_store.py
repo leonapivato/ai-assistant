@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 import sqlite_vec
 from memory_store_contract import MemoryStoreContract
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
@@ -338,113 +339,33 @@ async def test_write_atomic_rolls_back_a_non_sqlite_mid_batch_error(
     assert await store.get("c") is not None
 
 
-async def test_write_atomic_snapshots_records_against_mid_call_mutation(tmp_path: Path) -> None:
-    # write_atomic reads record fields across the embedding awaits. A caller
-    # aliasing a submitted record and mutating it mid-call must not be able to
-    # subvert the batch: it is snapshotted before the first await. Here an embedder
-    # rewrites the *second* record's id to collide with the first and changes its
-    # content, mid-embed — the corruption ADR-0046 §3 forbids. The snapshot makes
-    # the mutation a no-op: both original ids persist with their original content.
-    rec_a = _semantic("a", "alpha")
-    rec_b = _semantic("b", "beta")
-
-    class _MutatingEmbedder:
-        """Mutates a caller-held record from inside embed(), simulating aliasing."""
-
-        def __init__(self) -> None:
-            self._inner = HashingEmbedder(dimensions=8)
-
-        @property
-        def model_id(self) -> str:
-            return "mutating-8"
-
-        @property
-        def dimensions(self) -> int:
-            return 8
-
-        async def embed(self, texts: Sequence[str]) -> list[Embedding]:
-            rec_b.id = "a"  # would collide with rec_a if the batch read the live record
-            rec_b.content = "mutated"
-            return await self._inner.embed(texts)
-
-    store = SqliteMemoryStore(path=tmp_path / "snap.db", embedder=_MutatingEmbedder())
-    try:
-        await store.write_atomic([MemoryWrite(record=rec_a), MemoryWrite(record=rec_b)])
-
-        got_a = await store.get("a")
-        got_b = await store.get("b")
-        assert got_a is not None
-        assert got_a.content == "alpha"  # not overwritten by a second write to "a"
-        assert got_b is not None  # b survived under its original id...
-        assert got_b.content == "beta"  # ...with content matching its embedding
-    finally:
-        store.close()
-
-
-async def test_add_snapshots_record_against_mid_embed_mutation(tmp_path: Path) -> None:
-    # issue #286: add reads the record's content for the embedder, then serialises
-    # the record after that await. A caller aliasing the submitted record and
-    # mutating it mid-embed must not be able to tear the write — persist JSON for
-    # the new state alongside a vector for the old. The snapshot taken before the
-    # first await makes the mutation a no-op: the returned id, the stored id, and
-    # the stored content all come from the snapshot the vector was computed for.
-    rec = _semantic("orig", "alpha")
-
-    class _MutatingEmbedder:
-        """Mutates a caller-held record from inside embed(), simulating aliasing."""
-
-        def __init__(self) -> None:
-            self._inner = HashingEmbedder(dimensions=8)
-
-        @property
-        def model_id(self) -> str:
-            return "mutating-8"
-
-        @property
-        def dimensions(self) -> int:
-            return 8
-
-        async def embed(self, texts: Sequence[str]) -> list[Embedding]:
-            rec.id = "changed"  # would relocate the row if add read the live record
-            rec.content = "mutated"  # would desync JSON from the embedded vector
-            return await self._inner.embed(texts)
-
-    store = SqliteMemoryStore(path=tmp_path / "snap.db", embedder=_MutatingEmbedder())
-    try:
-        returned = await store.add(rec)
-
-        assert returned == "orig"  # the snapshot's id, not the mutated live record's
-        assert await store.get("changed") is None  # the mutation did not relocate it
-        got = await store.get("orig")
-        assert got is not None
-        assert got.content == "alpha"  # JSON agrees with the vector computed for it
-    finally:
-        store.close()
-
-
-async def test_add_snapshot_boundary_is_coroutine_start_and_stays_consistent(
+async def test_a_frozen_record_cannot_be_mutated_in_the_construct_then_await_window(
     tmp_path: Path,
 ) -> None:
-    # Pins ADR-0056's boundary: add() snapshots on its coroutine's *first line*,
-    # not at the add(...) call expression (an async def's body runs only when the
-    # coroutine is first awaited). A mutation made after the coroutine is built but
-    # before it is awaited IS captured — but consistently, as one whole state, so
-    # the stored JSON and vector still agree. This is not a tear; it documents the
-    # chosen semantics so a later change can't silently move the boundary.
+    # ADR-0056 pinned add()'s snapshot boundary at the coroutine's first line so a
+    # mutation made after the coroutine was built but before it was awaited would
+    # be captured consistently. ADR-0068 freezes the record, so that mutation is
+    # now unrepresentable and the boundary question is moot: the write can only
+    # ever reflect the record as it was constructed.
+    #
+    # The mid-embed aliasing tears that ADR-0056/#286 and ADR-0046 §3 guarded
+    # against — an embedder rewriting a submitted record's id or content while the
+    # write is suspended — are likewise unrepresentable now, and the generic
+    # defence is verified for this backend by
+    # ``TestSqliteMemoryStoreContract.test_add_cannot_tear_on_a_mid_flight_mutation_of_its_record``.
     store = SqliteMemoryStore(path=tmp_path / "boundary.db", embedder=HashingEmbedder(dimensions=8))
     try:
         rec = _semantic("orig", "alpha")
         pending = store.add(rec)  # coroutine built; body (and the snapshot) not run yet
-        rec.content = "mutated coffee"  # mutate in the construct-then-await window
-        returned = await pending  # body runs now, snapshotting the mutated record
+        with pytest.raises(ValidationError):
+            rec.content = "mutated coffee"  # frozen: the window carries no mutation
+        returned = await pending
 
         assert returned == "orig"
         got = await store.get("orig")
         assert got is not None
-        assert got.content == "mutated coffee"  # captured as of the write's start
-        # Consistency, not a tear: the vector came from the same captured content,
-        # so a search for it matches — JSON and vector agree.
-        assert [r.id for r in await store.search("mutated coffee")] == ["orig"]
+        assert got.content == "alpha"  # the constructed record, unchanged
+        assert [r.id for r in await store.search("alpha")] == ["orig"]
     finally:
         store.close()
 

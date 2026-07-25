@@ -16,15 +16,18 @@ from ai_assistant.core.types import (
     FeedbackKind,
     MemoryDecision,
     MemoryDecisionKind,
+    MemoryIngestResult,
     MemoryKind,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
     MemoryWrite,
     MemoryWriteMode,
+    Message,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
+    Role,
     SemanticMemory,
     TimeOfDay,
     Validity,
@@ -310,7 +313,7 @@ def test_feedback_event_constructs_with_defaults() -> None:
         created_at=_WHEN,
     )
     assert event.subject is None
-    assert event.evidence == []
+    assert event.evidence == ()
 
 
 def test_feedback_event_created_at_naive_is_refused() -> None:
@@ -366,3 +369,114 @@ def test_proposal_defaults_to_personal_sensitivity() -> None:
     )
     proposal = MemoryUpdateProposal(proposed=record, rationale="because")
     assert proposal.sensitivity is DataTier.PERSONAL
+
+
+# --- ADR-0068: the memory record graph is frozen all the way down -------
+
+
+def test_message_is_frozen() -> None:
+    message = Message(role=Role.USER, content="hi")
+    with pytest.raises(ValidationError):
+        message.content = "rewritten"
+
+
+def test_memory_record_is_frozen_including_its_nested_models() -> None:
+    """A record and every model it reaches reject post-construction edits."""
+    record = _semantic("1")
+    with pytest.raises(ValidationError):
+        record.content = "rewritten"
+    with pytest.raises(ValidationError):
+        record.provenance.confidence = 0.9  # the nested Provenance is frozen
+    with pytest.raises(ValidationError):
+        record.validity.valid_until = _LATER  # the nested Validity is frozen
+
+
+def test_memory_update_proposal_is_frozen_including_its_record() -> None:
+    proposal = MemoryUpdateProposal(proposed=_semantic("1"), rationale="because")
+    with pytest.raises(ValidationError):
+        proposal.rationale = "rewritten"
+    with pytest.raises(ValidationError):
+        proposal.proposed.content = "rewritten"  # the nested record is frozen
+
+
+def test_memory_decision_and_ingest_result_are_frozen() -> None:
+    decision = MemoryDecision(kind=MemoryDecisionKind.ACCEPT, reason="ok")
+    with pytest.raises(ValidationError):
+        decision.reason = "rewritten"
+    result = MemoryIngestResult(decision=decision, record_id="r1")
+    with pytest.raises(ValidationError):
+        result.record_id = "other"
+    with pytest.raises(ValidationError):
+        result.decision.reason = "rewritten"  # the nested decision is frozen
+
+
+def test_current_context_is_frozen() -> None:
+    ctx = CurrentContext(
+        now=_WHEN, time_of_day=TimeOfDay.MORNING, is_weekend=False, within_working_hours=True
+    )
+    with pytest.raises(ValidationError):
+        ctx.is_weekend = True
+
+
+def test_feedback_event_is_frozen() -> None:
+    event = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="prefers tea",
+        created_at=_WHEN,
+    )
+    with pytest.raises(ValidationError):
+        event.content = "rewritten"
+
+
+def test_memory_write_is_deeply_immutable() -> None:
+    """ADR-0065's counterexample resolved: the frozen wrapper's record is frozen too."""
+    write = MemoryWrite(record=_semantic("1"))
+    with pytest.raises(ValidationError):
+        write.record.content = "rewritten"
+
+
+def test_ex_list_fields_are_immutable_tuples_that_round_trip() -> None:
+    """The ADR-0068 depth rule: the five former ``list`` fields read back as tuples.
+
+    Constructing through validation still accepts a ``list`` (pydantic coerces),
+    the read is an immutable ``tuple``, and ``model_dump``/``model_validate``
+    round-trips it unchanged — a tuple serialises as a JSON array, so there is no
+    wire change.
+    """
+    # `model_validate` takes the coercion path a JSON/dict caller uses, so a list
+    # on the wire is accepted and comes back a tuple.
+    prov = Provenance.model_validate(
+        {
+            "source": MemorySource.OBSERVED,
+            "confidence": 0.4,
+            "last_updated": _WHEN,
+            "evidence": ["e1", "e2"],
+        }
+    )
+    assert prov.evidence == ("e1", "e2")
+    assert isinstance(prov.evidence, tuple)
+    assert prov.model_dump(mode="json")["evidence"] == ["e1", "e2"]  # JSON array — no wire change
+    assert Provenance.model_validate(prov.model_dump()).evidence == ("e1", "e2")
+
+    episodic = EpisodicMemory(
+        id="1", content="c", provenance=prov, occurred_at=_WHEN, participants=("a", "b")
+    )
+    procedural = ProceduralMemory(
+        id="2", content="c", provenance=prov, situation="s", steps=("one", "two")
+    )
+    proposal = MemoryUpdateProposal(proposed=_semantic("3"), rationale="r", conflicts=("x",))
+    feedback = FeedbackEvent(
+        kind=FeedbackKind.PREFERENCE,
+        memory_kind=MemoryKind.PREFERENCE,
+        content="c",
+        created_at=_WHEN,
+        evidence=("ev",),
+    )
+    for value in (
+        episodic.participants,
+        procedural.steps,
+        proposal.conflicts,
+        feedback.evidence,
+    ):
+        assert isinstance(value, tuple)

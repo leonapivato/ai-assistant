@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from feedback_processor_contract import FeedbackProcessorContract
+from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     EpisodicMemory,
@@ -46,12 +47,14 @@ def _event(
         memory_kind=memory_kind,
         content=content,
         subject=subject,
-        evidence=list(evidence),
+        evidence=evidence,
         created_at=_WHEN,
     )
 
 
-def _proposal(content: str = "scripted memory") -> MemoryUpdateProposal:
+def _proposal(
+    content: str = "scripted memory", rationale: str = "scripted by the test"
+) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
         proposed=SemanticMemory(
             id="scripted-1",
@@ -59,7 +62,7 @@ def _proposal(content: str = "scripted memory") -> MemoryUpdateProposal:
             fact=content,
             provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.5, last_updated=_WHEN),
         ),
-        rationale="scripted by the test",
+        rationale=rationale,
     )
 
 
@@ -121,7 +124,7 @@ async def test_synthesised_record_carries_the_feedbacks_provenance() -> None:
     assert record.preference == "prefers concise replies"
     assert record.context == "email tone"
     assert record.provenance.source is MemorySource.USER_ASSERTED
-    assert record.provenance.evidence == ["ep-9"]
+    assert record.provenance.evidence == ("ep-9",)
     assert record.provenance.last_updated == _WHEN
 
 
@@ -236,22 +239,25 @@ async def test_an_empty_script_proposes_nothing() -> None:
     assert await FakeFeedbackProcessor([]).process(_event()) == []
 
 
-async def test_mutating_a_scripted_proposal_after_construction_has_no_effect() -> None:
+async def test_a_scripted_proposal_cannot_be_mutated_after_construction() -> None:
     # Ingress: the caller keeps its reference to the proposal it passed in.
+    # MemoryUpdateProposal is frozen (ADR-0068), so the mutation raises.
     scripted = _proposal()
     processor = FakeFeedbackProcessor([scripted])
 
-    scripted.rationale = "mutated after the fact"
+    with pytest.raises(ValidationError):
+        scripted.rationale = "mutated after the fact"
 
     [returned] = await processor.process(_event())
     assert returned.rationale == "scripted by the test"
 
 
-async def test_mutating_a_returned_proposal_does_not_affect_later_calls() -> None:
+async def test_a_returned_proposal_cannot_be_mutated() -> None:
     processor = FakeFeedbackProcessor([_proposal()])
 
     [first] = await processor.process(_event())
-    first.rationale = "mutated by the caller"
+    with pytest.raises(ValidationError):
+        first.rationale = "mutated by the caller"
 
     [second] = await processor.process(_event())
     assert second.rationale == "scripted by the test"
@@ -269,17 +275,18 @@ async def test_records_every_event_and_counts_calls() -> None:
     assert processor.last_event.content == "likes coffee"
 
 
-async def test_a_recorded_event_is_a_snapshot_not_the_callers_object() -> None:
-    # Otherwise a caller that reuses one event object across calls would rewrite
-    # the record of what it already sent.
+async def test_a_recorded_event_cannot_be_rewritten_by_the_caller() -> None:
+    # Under ADR-0068 FeedbackEvent is frozen, so a caller that reuses one event
+    # object across calls cannot rewrite the record of what it already sent:
+    # isolation is subsumed by immutability.
     event = _event(content="likes tea")
     processor = FakeFeedbackProcessor()
 
     await processor.process(event)
-    event.content = "something else entirely"
+    with pytest.raises(ValidationError):
+        event.content = "something else entirely"
 
     assert processor.last_event.content == "likes tea"
-    assert processor.last_event is not event
 
 
 def test_last_event_before_any_call_raises() -> None:
@@ -299,9 +306,9 @@ def test_a_script_that_would_break_the_contract_is_rejected(
 ) -> None:
     # MemoryUpdateProposal permits both, but the conformance suite does not — so
     # the canonical fake must not be configurable into failing its own contract.
-    proposal = _proposal()
-    proposal.proposed.content = content
-    proposal.rationale = rationale
+    # The proposal is frozen (ADR-0068), so the bad value is passed at
+    # construction rather than mutated in afterwards.
+    proposal = _proposal(content=content, rationale=rationale)
 
     with pytest.raises(ValueError, match=match):
         FakeFeedbackProcessor([proposal])

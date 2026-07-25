@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from plan_store_contract import PlanStoreContract, _goal, _plan
+from pydantic import ValidationError
 
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import StepStatus, StepTransition
@@ -303,18 +304,20 @@ async def test_a_refused_transition_leaves_the_execution_untouched(tmp_path: Pat
 async def test_a_mutated_invalid_goal_is_refused_and_does_not_poison_reads(
     tmp_path: Path,
 ) -> None:
-    """An input mutated past its validators is rejected at the write, not on read.
+    """An input tampered past its validators is rejected at the write, not on read.
 
-    ``Goal`` is mutable and does not validate on assignment, so a caller can build
-    a valid goal and blank its ``statement`` before saving. The store revalidates
-    before persisting, so the write raises ``PlanningError`` and nothing durable
-    is written — the store cannot poison its own later reads (round-4 review).
+    ``Goal`` is frozen (ADR-0068), but the validation-skipping ``__dict__`` bypass
+    survives (ADR-0018 §3), so a caller can still blank a goal's ``statement``
+    behind pydantic's back — the same bypass ``test_a_mutated_invalid_plan_is_refused``
+    uses. The store revalidates before persisting, so the write raises
+    ``PlanningError`` and nothing durable is written — the store cannot poison its
+    own later reads (round-4 review).
     """
     path = tmp_path / "plans.db"
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
         tampered = _goal(goal_id="g-bad")
-        tampered.statement = "   "  # blank once stripped — invalid, but assignment sticks
+        tampered.__dict__["statement"] = "   "  # blank once stripped — invalid, via the bypass
 
         with pytest.raises(PlanningError):
             await store.save_goal(tampered)
@@ -1339,15 +1342,15 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
 # --- one observation of the caller's goal (ADR-0065) -------------------------
 
 
-async def test_save_goal_returns_the_id_it_wrote_not_a_mid_write_mutation() -> None:
-    """The id handed back comes from the snapshot, not the caller's instance.
+async def test_a_goal_cannot_be_mutated_mid_write() -> None:
+    """ADR-0068 freezes ``Goal``, so a mid-write mutation is unrepresentable.
 
     ``_revalidated_goal`` already detaches the record on the coroutine's first
     line, so the *row* was never at risk here — the return value was. This blocks
-    the worker inside the write, which is the method's own suspension window,
-    mutates the ``Goal`` the caller still holds, and requires the returned id to
-    name the row that now exists. Mutating after ``save_goal`` returned would
-    prove nothing: the read being tested happens before that.
+    the worker inside the write, which is the method's own suspension window, and
+    requires that the caller cannot mutate the ``Goal`` it still holds: freezing
+    makes the assignment raise, so the returned id necessarily names the row that
+    now exists (ADR-0068 §4).
     """
     store = SqlitePlanStore(path=":memory:", now=_fixed_now)
     entered = threading.Event()
@@ -1367,7 +1370,8 @@ async def test_save_goal_returns_the_id_it_wrote_not_a_mid_write_mutation() -> N
         writing = asyncio.ensure_future(store.save_goal(goal))
         assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
 
-        goal.id = "g-tampered"  # the caller mutates while the write is in flight
+        with pytest.raises(ValidationError):
+            goal.id = "g-tampered"  # frozen: the caller cannot mutate mid-write
         release.set()
         returned = await writing
 
