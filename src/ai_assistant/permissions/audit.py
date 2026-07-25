@@ -8,6 +8,14 @@ are claims about a record that outlives the process, so the trail persists —
 ADR-0036 §2 records why an in-process one would have satisfied the Protocol and
 not the decisions behind it.
 
+The on-disk schema carries a ``meta("schema_version")`` marker, the same shape
+:mod:`ai_assistant.planning.sqlite_store` writes (ADR-0049 §1). The *marker* is
+shared; the *mechanism* is not — evolution here stays the additive,
+column-presence ``ALTER`` of :meth:`SqliteAuditTrail._migrate`, which is what an
+append-only trail with existing rows can afford. A database predating the marker
+is stamped once this code has migrated it, never refused; see
+:meth:`SqliteAuditTrail._check_schema_version`.
+
 Local-first (ADR-0002), and **locally only**: ADR-0021 §4 applies ADR-0004 §2's
 residency clause to this store by name, so nothing here may reach a remote
 service. The database file is created owner-only (ADR-0004), following the
@@ -94,6 +102,24 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
 #: The widest value SQLite will bind to an INTEGER parameter. A Python int is
 #: unbounded, so ``recent`` clamps to this before binding ``LIMIT``.
 _MAX_SQLITE_INT = 2**63 - 1
+
+#: The only on-disk schema this code understands, recorded in ``meta`` so a
+#: future schema change has a marker to migrate *from* — the seam ADR-0049 §1
+#: describes and the ``SqlitePlanStore`` pattern this follows. Version 1 is the
+#: additive-column shape :meth:`SqliteAuditTrail._migrate` brings any earlier,
+#: unmarked file up to, so an unmarked database is stamped 1 rather than refused
+#: (see :meth:`SqliteAuditTrail._check_schema_version`).
+_SCHEMA_VERSION = 1
+
+#: Created first and on its own, so a database labelled with a schema this code
+#: cannot read is refused *before* the ``decisions`` table is created, migrated or
+#: read — creating a table is a write, and the refusal precedes any write
+#: (ADR-0049 §1's ordering, applied here).
+_META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+
+_READ_SCHEMA_VERSION = "SELECT value FROM meta WHERE key = 'schema_version'"
+
+_WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
 
 #: The epoch the sort key counts from. Any fixed instant would do; this one is
 #: conventional.
@@ -252,10 +278,20 @@ class SqliteAuditTrail:
             # the migrated schema instead (its `missing` set comes back empty).
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
+                conn.execute(_META_SCHEMA)
+                labelled = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
                 self._migrate(conn)
                 for statement in _INDEXES:
                     conn.execute(statement)
+                if not labelled:
+                    # Stamped *after* the create/migrate above, so the marker is
+                    # only written for a file this open has actually brought to
+                    # version 1. Both are in the one transaction, so a migration
+                    # that raises rolls the marker — and the `meta` table itself —
+                    # back with it, leaving an untouched legacy database rather
+                    # than one falsely labelled current.
+                    conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
             if self._path != ":memory:":
                 Path(self._path).chmod(_OWNER_ONLY)
         except AuditError:
@@ -268,6 +304,84 @@ class SqliteAuditTrail:
             msg = f"failed to initialise the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         return conn
+
+    def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
+        """Refuse a labelled schema this code cannot read; say whether one is labelled.
+
+        Runs inside the setup transaction, after ``meta`` exists and **before** the
+        ``decisions`` table is created, migrated or read.
+
+        Returns:
+            Whether the database already carries a ``schema_version``. ``False``
+            means it does not, and :meth:`_setup` stamps one once the migration
+            below has brought the file to :data:`_SCHEMA_VERSION`.
+
+        **An unmarked database is backfilled, not refused.** The marker arrives
+        after this store already had users, so every existing audit trail on disk
+        carries none — refusing them would make a Tier 1 record the user is
+        entitled to keep (ADR-0004 §7) unopenable by the code that wrote it, which
+        is a far worse failure than the one a marker exists to prevent. It is also
+        sound rather than merely lenient: :meth:`_migrate` is additive and
+        idempotent, keyed on column presence, so it brings *any* pre-marker file to
+        exactly the version-1 shape. The stamp records what this open has just
+        established, not an assumption about what was there before.
+
+        **Any other stored version is refused**, newer or older, matching
+        ``SqlitePlanStore`` (ADR-0049 §1). Version 1 is the first marker this store
+        has ever written, so absent is the only legacy state and a stored value
+        that is not 1 is either a database written by code that knows a schema this
+        one does not, or a corrupt/tampered marker. Reading it blindly would let a
+        downgrade construct successfully and fail later with a raw SQLite error —
+        a fault to report at open, matching how the trail treats a row that no
+        longer validates. When a version 2 does exist, the *older* branch becomes a
+        migrate-and-restamp; nothing here presumes it stays a refusal.
+
+        Raises:
+            AuditError: If the stored version is not one this code understands, is
+                not an integer at all, or is not a single unambiguous value.
+        """
+        rows = conn.execute(_READ_SCHEMA_VERSION).fetchall()
+        if not rows:
+            return False
+        if len(rows) > 1:
+            # `meta`'s primary key makes this unreachable for a table *this* code
+            # created — but `CREATE TABLE IF NOT EXISTS` accepts a pre-existing
+            # `meta` declared without one, so a corrupt or hand-built file can hold
+            # conflicting markers. Reading the first row would then let an
+            # unsupported version through the refusal below on the strength of a
+            # sibling row that agrees. A store that cannot say which version it is
+            # is a store this code cannot read.
+            found = sorted({str(row[0]) for row in rows})
+            msg = (
+                f"the audit trail at {self._path!r} holds {len(rows)} schema_version rows "
+                f"({', '.join(repr(value) for value in found)}); the store is corrupt"
+            )
+            raise AuditError(msg)
+        raw = rows[0][0]
+        msg = f"the audit trail at {self._path!r} holds a non-numeric schema_version {raw!r}"
+        # The marker this code writes is always TEXT, but `meta` may predate it
+        # with a column of no declared type, in which case SQLite hands back
+        # whatever was stored — a REAL, a BLOB, a NULL. Only a string or an
+        # integer is parsed; `int(float("inf"))` raises `OverflowError`, which is
+        # neither `ValueError` nor an `AssistantError` and would leave this
+        # layer's boundary through a hole. `bool` is an `int` in Python, so it is
+        # named rather than left to read as version 1.
+        if isinstance(raw, bool) or not isinstance(raw, str | int):
+            raise AuditError(msg)
+        try:
+            stored = int(raw)
+        except ValueError as exc:
+            # A non-numeric marker is a corrupt or tampered store, not a bare
+            # `ValueError` to leak past this layer's initialisation boundary.
+            raise AuditError(msg) from exc
+        if stored != _SCHEMA_VERSION:
+            msg = (
+                f"the audit trail at {self._path!r} has schema_version={stored}, but this "
+                f"code supports only version {_SCHEMA_VERSION}; refusing to open it rather "
+                f"than read it blindly"
+            )
+            raise AuditError(msg)
+        return True
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -660,6 +774,10 @@ class SqliteAuditTrail:
         has its own ``asyncio.Lock``, which arbitrates nothing across them. One
         statement makes the number exact by construction rather than by
         transaction discipline.
+
+        Only ``decisions`` is emptied: the ``meta`` schema marker describes the
+        file's shape rather than the user's history, so burning the book leaves a
+        database this code can still open (and would still count as version 1).
         """
         conn = self._conn
         try:
