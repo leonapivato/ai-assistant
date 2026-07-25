@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
     CurrentContext,
@@ -436,16 +436,12 @@ def test_memory_write_is_deeply_immutable() -> None:
         write.record.content = "rewritten"
 
 
-def test_ex_list_fields_are_immutable_tuples_that_round_trip() -> None:
-    """The ADR-0068 depth rule: the five former ``list`` fields read back as tuples.
+def test_construction_coerces_a_list_to_a_tuple_on_the_wire() -> None:
+    """A ``list`` on the wire is accepted and read back as an immutable tuple.
 
-    Constructing through validation still accepts a ``list`` (pydantic coerces),
-    the read is an immutable ``tuple``, and ``model_dump``/``model_validate``
-    round-trips it unchanged — a tuple serialises as a JSON array, so there is no
-    wire change.
+    ``model_validate`` takes the coercion path a JSON/dict caller uses, so an
+    ex-``list`` field constructed from a list still works (ADR-0068 §1, Class C).
     """
-    # `model_validate` takes the coercion path a JSON/dict caller uses, so a list
-    # on the wire is accepted and comes back a tuple.
     prov = Provenance.model_validate(
         {
             "source": MemorySource.OBSERVED,
@@ -456,16 +452,25 @@ def test_ex_list_fields_are_immutable_tuples_that_round_trip() -> None:
     )
     assert prov.evidence == ("e1", "e2")
     assert isinstance(prov.evidence, tuple)
-    assert prov.model_dump(mode="json")["evidence"] == ["e1", "e2"]  # JSON array — no wire change
-    assert Provenance.model_validate(prov.model_dump()).evidence == ("e1", "e2")
 
+
+def test_every_ex_list_field_is_an_immutable_tuple_that_round_trips() -> None:
+    """The ADR-0068 depth rule, for all five former ``list`` fields.
+
+    Each reads back as an immutable ``tuple``; ``model_dump(mode="json")`` renders
+    it as a JSON array (so there is no wire change); and ``model_validate`` of the
+    dumped form reconstructs the same tuple.
+    """
+    prov = Provenance(
+        source=MemorySource.OBSERVED, confidence=0.4, last_updated=_WHEN, evidence=("e1", "e2")
+    )
     episodic = EpisodicMemory(
         id="1", content="c", provenance=prov, occurred_at=_WHEN, participants=("a", "b")
     )
     procedural = ProceduralMemory(
         id="2", content="c", provenance=prov, situation="s", steps=("one", "two")
     )
-    proposal = MemoryUpdateProposal(proposed=_semantic("3"), rationale="r", conflicts=("x",))
+    proposal = MemoryUpdateProposal(proposed=_semantic("3"), rationale="r", conflicts=("x", "y"))
     feedback = FeedbackEvent(
         kind=FeedbackKind.PREFERENCE,
         memory_kind=MemoryKind.PREFERENCE,
@@ -473,10 +478,20 @@ def test_ex_list_fields_are_immutable_tuples_that_round_trip() -> None:
         created_at=_WHEN,
         evidence=("ev",),
     )
-    for value in (
-        episodic.participants,
-        procedural.steps,
-        proposal.conflicts,
-        feedback.evidence,
-    ):
-        assert isinstance(value, tuple)
+
+    cases: list[tuple[BaseModel, str, tuple[str, ...]]] = [
+        (prov, "evidence", ("e1", "e2")),
+        (episodic, "participants", ("a", "b")),
+        (procedural, "steps", ("one", "two")),
+        (proposal, "conflicts", ("x", "y")),
+        (feedback, "evidence", ("ev",)),
+    ]
+    for model, field, expected in cases:
+        value = getattr(model, field)
+        assert isinstance(value, tuple), field
+        assert value == expected, field
+        # A tuple serialises as a JSON array — no wire change.
+        assert model.model_dump(mode="json")[field] == list(expected), field
+        # And it reconstructs from its dumped form unchanged.
+        restored = type(model).model_validate(model.model_dump())
+        assert getattr(restored, field) == expected, field
