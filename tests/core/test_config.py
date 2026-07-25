@@ -6,8 +6,9 @@ from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
+from pydantic_ai.models import known_model_names
 
-from ai_assistant.core.config import Settings, load_settings
+from ai_assistant.core.config import _MODEL_SPEC_PATTERN, Settings, load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import Reversibility, RiskLevel
 
@@ -265,6 +266,9 @@ def test_a_tuple_passed_directly_is_not_run_through_the_string_splitter() -> Non
         "openai: gpt-5",  # a space inside the spec, not around it
         "none",  # the threshold sentinel, which is not a model
         '["openai:gpt-5"]',  # a JSON array, written by habit
+        "test",  # pydantic-ai's in-memory dummy: the one name it ships that we
+        # deliberately refuse, since the test path takes a `Model` instance
+        # instead (ADR-0062 §2)
     ],
 )
 def test_a_malformed_model_spec_is_rejected_at_load(spec: str) -> None:
@@ -289,9 +293,10 @@ def test_a_malformed_model_spec_is_rejected_at_load(spec: str) -> None:
     ],
 )
 def test_a_well_formed_model_spec_is_accepted(spec: str) -> None:
-    # Grounded in pydantic-ai's own `known_model_names()`: every shape here is
-    # one it really ships, so the pattern is not narrower than the thing it
-    # validates.
+    # The shapes that would most plausibly be over-rejected, spelled out so a
+    # reader can see what the pattern must tolerate. Exhaustiveness against
+    # pydantic-ai's real vocabulary is the test below; this one is the
+    # documentation.
     assert Settings(default_model=spec).default_model == spec
 
 
@@ -320,3 +325,32 @@ def test_load_settings_reports_a_bad_fallback_list_as_a_configuration_error(
     monkeypatch.setenv("ASSISTANT_FALLBACK_MODELS", "openai-gpt-5")
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
+
+
+def test_the_spec_pattern_accepts_every_model_name_pydantic_ai_ships() -> None:
+    """Refuse to over-reject: the pattern is checked against the real vocabulary.
+
+    ADR-0062 §Consequences promises that a pydantic-ai release adopting a
+    character this pattern does not permit is *a gate failure, not a production
+    surprise*. Five hand-picked examples do not deliver that promise — an upgrade
+    could add a legitimate name the pattern rejects, and a deployment naming it
+    would fail to start while the suite stayed green. So the check is exhaustive
+    over ``known_model_names()``, which is the set an operator can legitimately
+    draw from.
+
+    The one permitted exclusion is ``test``, pydantic-ai's in-memory dummy and the
+    only colon-less name it ships (ADR-0062 §2). It is subtracted rather than
+    asserted present, so this test fails only for the reason it exists — a *new*
+    name being rejected — and not if pydantic-ai stops shipping the dummy.
+    """
+    names = tuple(known_model_names())
+    accepted = {name for name in names if _MODEL_SPEC_PATTERN.match(name) is not None}
+    rejected = set(names) - accepted - {"test"}
+
+    # Guard against the vacuous pass: an empty or unreadable vocabulary would
+    # otherwise satisfy the assertion below while checking nothing at all.
+    assert accepted, "no pydantic-ai model name matched, so this test proved nothing"
+    assert not rejected, (
+        "the model-spec pattern rejects names pydantic-ai ships, so a deployment "
+        f"naming one could not start: {sorted(rejected)}"
+    )
