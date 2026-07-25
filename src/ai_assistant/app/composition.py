@@ -15,7 +15,13 @@ from ai_assistant.context import AssemblingContextProvider, ClockContextSource
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import DefaultMemoryPolicy, MemoryIngestor, SqliteMemoryStore
-from ai_assistant.models import HashingEmbedder, PydanticAIProvider, RetryingProvider
+from ai_assistant.models import (
+    HashingEmbedder,
+    PydanticAIProvider,
+    RetryingProvider,
+    Route,
+    RoutingProvider,
+)
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import Engine, LearningLoop, StepExecutor, StepRunner
 from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
@@ -23,7 +29,7 @@ from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.tools import build_default_registry
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.config import Settings
 
@@ -48,7 +54,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     * one :class:`SqlitePlanStore` is shared by the runner, the executor, and
       the façade, and one :class:`SqliteAuditTrail` by the runner and the façade
       — the façade reads the trail (query-only) to recover a durably-parked
-      confirmation after a restart (ADR-0052 §1).
+      confirmation after a restart (ADR-0052 §1);
+    * the model seam is composed **retry inside routing**, the order ADR-0013 §3
+      recommends and that nothing in `models/` can enforce, since enforcing it
+      would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`).
 
     **It owns the resources it opens.** The three connection-owning stores are
     opened first; if any *later* construction fails, the ones already opened are
@@ -103,10 +112,7 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         plans = SqlitePlanStore(path=directory / "plans.db")
         opened.append(plans.close)
 
-        model = RetryingProvider(
-            PydanticAIProvider(settings.default_model),
-            policy=RetryPolicy.from_settings(settings),
-        )
+        model = _build_model_provider(settings, _model_specs(settings))
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
         # memory-backed `recall_memory` reads the *same* store the loop retrieves
@@ -163,6 +169,62 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         for close in reversed(opened):
             close()
         raise
+
+
+def _model_specs(settings: Settings) -> tuple[str, ...]:
+    """The ``"provider:model"`` specs to route over, most preferred first (ADR-0061 §2).
+
+    Exactly one today, because :class:`~ai_assistant.core.config.Settings` carries
+    exactly one model spec (``default_model``). A second route needs a second spec
+    for an operator to name, which is a new setting — deliberately not invented
+    here, since the composition root reads configuration and does not define it.
+
+    It is a *sequence* rather than a single value so that adding that setting is a
+    change to this function alone: everything downstream — the route list, the
+    wrapper order, and the tests that pin them — is already shaped for more than
+    one route.
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The model specs in preference order.
+    """
+    return (settings.default_model,)
+
+
+def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingProvider:
+    """Build the production model seam: retry *inside* routing (ADR-0013 §3).
+
+    The seam every consumer sees is a ``ModelProvider``; what stands behind it is
+    this composition root's decision, and ADR-0013 §3 settled which order to
+    compose the two wrappers in. Retrying within a provider is the cheap
+    correction — a transient blip resolves without transmitting the prompt to a
+    second vendor or paying a second bill — so retry goes innermost and routing
+    wraps it. The opposite nesting re-routes on every attempt, spreading one
+    logical request across providers on the first blip.
+
+    Every route gets its own :class:`RetryingProvider` with the *same* configured
+    policy: the resilience knobs (``model_timeout_seconds`` and friends) are a
+    property of how patient this deployment is, not of which vendor answered.
+
+    Args:
+        settings: Loaded application settings — the resilience knobs each route's
+            retry wrapper is built from.
+        specs: The ``"provider:model"`` specs to route over, most preferred first.
+            Must be non-empty.
+
+    Returns:
+        The routed, retrying provider the planner is given.
+
+    Raises:
+        ConfigurationError: If ``specs`` is empty — raised by ``RoutingProvider``,
+            which refuses a router with nothing to route to.
+    """
+    policy = RetryPolicy.from_settings(settings)
+    return RoutingProvider(
+        [Route(RetryingProvider(PydanticAIProvider(spec), policy=policy)) for spec in specs]
+    )
 
 
 def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
