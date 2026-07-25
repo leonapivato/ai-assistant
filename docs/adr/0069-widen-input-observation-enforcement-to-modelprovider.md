@@ -1,6 +1,6 @@
 # 69. Widen input-observation enforcement to ModelProvider
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-25
 - **This is a contract-surface change.** It does not add or reword a Protocol,
   a method, or an exchanged type; it widens ADR-0065 §3's *shared conformance
@@ -53,14 +53,22 @@ the clause **broken in two of the three**:
   provider in turn, after the previous route's `await` has failed.
 
 PR #384 fixed both by snapshotting the conversation on `complete`'s first
-executed line — the container *and* its elements
-(`[m.model_copy(deep=True) for m in messages]`), because `Message` is non-frozen
-so copying only the list leaves a turn's `role`/`content` rewritable underneath
-it. Those fixes are pinned by **`models`-local** regression cases under
-`tests/models/`, parametrised over an appended turn and a rewritten one, mutating
-the caller's conversation from inside the inner provider's suspension. The
-shared `ModelProviderContract` gained nothing — it still asserts nothing about
-input observation, so a fourth provider passes the shared suite while tearing.
+executed line (`[m.model_copy(deep=True) for m in messages]`). At the time, two
+mutation vectors could tear a wrapper: the caller could **append/replace turns in
+the `Sequence`** (the container is the caller's and mutable), and — because
+`Message` was then non-frozen — the caller could **rewrite a turn's `role`/
+`content` in place**. ADR-0068 has since deep-frozen the shared record graph,
+`Message` included (`core/types.py`, `ConfigDict(frozen=True)`), which **closes
+the element-rewrite vector**: a turn's fields can no longer change under an
+observation. The **container vector survives** ADR-0068 — a wrapper that re-reads
+`messages` after an await still sees an appended or replaced turn — and it is
+what still justifies enforcement. The current `models`-local regression cases
+under `tests/models/` reflect exactly this: `test_routing.py` now parametrises
+over an **appended turn only** (`_append_a_turn`), its own comment noting the
+element-rewrite tear is gone. The shared `ModelProviderContract` still gained
+nothing — it asserts nothing about input observation — so a fourth provider that
+re-reads the caller's `Sequence` after an await passes the shared suite while
+tearing.
 
 So `ModelProvider` is exactly where `MemoryStore` was before ADR-0056/§3:
 demonstrably broken, and the shared suite silent about it. The §3 amendment
@@ -183,11 +191,13 @@ that lane's, exactly as ADR-0065 §3 leaves them for `MemoryStore`):
   suspends `complete` at its first await, mutates the caller-held conversation
   from inside that suspension, then asserts that the single `Message` returned —
   and, for a wrapper, the conversation each inner attempt was given — describes
-  **one** version of the input. #384's `models`-local cases are the working
-  template: parametrised over an **appended turn** and a **rewritten turn**
-  (`role` flipped to `ASSISTANT` is the sharp case — it converts a retryable
-  transient failure into a non-retryable malformed-argument `ModelError`, and
-  under `RoutingProvider` truncates the fallback order).
+  **one** version of the input. The mutation vector is **container mutation of the
+  caller's `Sequence`** — appending or replacing a turn — because ADR-0068's
+  deep-freeze of `Message` closes the element-rewrite vector: a turn's own fields
+  can no longer change under an observation, so the case need not (and cannot)
+  parametrise over a rewritten turn. `test_routing.py`'s current `_append_a_turn`
+  case is the working template — it mutates the caller's list from inside the
+  inner provider's suspension and asserts on what the next attempt observes.
 
 - **It needs a fixture-supplied suspension hook**, because the collaborator a
   provider suspends on is not owned by the suite. This is the `MemoryStore`
@@ -238,12 +248,15 @@ that amendment; the amendment points back here for the reasoning.
 
 **Consequences.**
 
-- **A fourth wrapper cannot tear while passing the shared suite.** The one thing
-  §3 exists to prevent — a new implementation passing the conformance suite while
-  violating the clause — is closed for the seam most likely to grow new
-  implementations. The `models`-local #384 cases stay (they pin `RetryingProvider`
-  and `RoutingProvider` specifically); the shared case is what binds the *next*
-  provider.
+- **Once the follow-up lane lands the case, a fourth wrapper cannot tear while
+  passing the shared suite.** That is the point of the decision — to close, for
+  the seam most likely to grow new implementations, the one thing §3 exists to
+  prevent (a new implementation passing the conformance suite while violating the
+  clause). **This ADR does not itself close it:** until the `ModelProviderContract`
+  case lands, `ModelProvider` stays enforced only by the `models`-local #384 cases
+  (which pin `RetryingProvider` and `RoutingProvider` specifically), and a fourth
+  provider still passes the shared suite. The shared case the follow-up builds is
+  what binds the *next* provider; this ADR decides that it must exist.
 - **The cost is one shared conformance case plus a fixture, and one escape.**
   `ModelProviderContract` gains a mid-flight case and a suspension-hook fixture;
   `FakeModelProvider` takes the "no `await`" escape. That machinery *is* the
@@ -259,10 +272,12 @@ that amendment; the amendment points back here for the reasoning.
 - **ADR-0065 §3 grows by one row and no ratified text is rewritten.** The
   amendment is append-only; §3's original scope and reasoning stand as the record
   of what was decided when.
-- **Revisit** if a wrapper seam's inner collaborator stops being injectable (the
-  fixture shape would have to change), or if the exchanged `Message` type is
-  deep-frozen (the clause survives for the `Sequence` container but its bite
-  narrows, per ADR-0065's own revisit note).
+- **The clause's bite at this seam is already narrowed.** ADR-0068 deep-froze
+  `Message`, so — exactly as ADR-0065's own revisit note anticipated — the clause
+  survives for the `Sequence` container but no longer for a turn's fields. The
+  case is therefore container-mutation only (§3). **Revisit** if a wrapper seam's
+  inner collaborator stops being injectable (the fixture shape would have to
+  change), or if `core` ever exchanges an un-frozen conversation element again.
 
 **Rejected.**
 
