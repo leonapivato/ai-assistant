@@ -34,8 +34,12 @@ from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, MutableMapping, Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from model_provider_contract import ConversationLog
 
     from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 PROMPT = [Message(role=Role.USER, content="hi")]
 
@@ -98,6 +102,18 @@ class TestRoutingProviderContract(ModelProviderContract):
     @pytest.fixture
     def provider(self) -> ModelProvider:
         return RoutingProvider([Route(FakeModelProvider())])
+
+    def provider_suspended_at_its_first_await(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[ModelProvider, SuspendedCall, ConversationLog]]:
+        # The loop hands the caller's `messages` to the next route after the
+        # previous route's await has failed (ADR-0065). The suite-owned primary
+        # recorder suspends route 1 at its first await and fails it routably, so
+        # the case mutates the caller's list before the router falls through to
+        # the secondary route and re-reads it.
+        return self._suspended_through_a_recording_inner(
+            lambda primary, secondary: RoutingProvider([Route(primary), Route(secondary)])
+        )
 
 
 def test_an_empty_route_list_is_rejected() -> None:

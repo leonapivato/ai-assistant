@@ -27,6 +27,12 @@ if TYPE_CHECKING:
 class TestFakeModelProviderContract(ModelProviderContract):
     """Runs FakeModelProvider through the shared ModelProvider conformance suite."""
 
+    # `complete` has no `await` between reading its conversation and answering, so
+    # it takes ADR-0069 §3's escape: the input-observation case reduces to the
+    # coherent post-call assertion, a completion with no suspension window having
+    # none to tear in. Record isolation is pinned separately below.
+    completes_without_suspending = True
+
     @pytest.fixture
     def provider(self) -> ModelProvider:
         return FakeModelProvider()

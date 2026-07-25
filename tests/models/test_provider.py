@@ -7,12 +7,13 @@ tests are deterministic and never touch the network.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from model_provider_contract import ModelProviderContract
+from model_provider_contract import ConversationLog, FirstAwaitGate, ModelProviderContract
 from pydantic_ai.exceptions import (
     ContentFilterError,
     ModelAPIError,
@@ -29,6 +30,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_transport import suspend_the_transport
 
 from ai_assistant.core.errors import (
     ModelAuthError,
@@ -46,7 +48,10 @@ from ai_assistant.models.provider import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 class TestPydanticAIProviderContract(ModelProviderContract):
@@ -59,6 +64,19 @@ class TestPydanticAIProviderContract(ModelProviderContract):
     @pytest.fixture
     def provider(self) -> ModelProvider:
         return PydanticAIProvider(default_model=TestModel())
+
+    @contextlib.asynccontextmanager
+    async def provider_suspended_at_its_first_await(
+        self,
+    ) -> AsyncIterator[tuple[ModelProvider, SuspendedCall, ConversationLog]]:
+        # A direct provider suspends on its *transport* (ADR-0069 §3), not on an
+        # inner ModelProvider. `complete`'s only await is `self._agent.run`, so the
+        # transport is stubbed to suspend there at that first await.
+        log = ConversationLog()
+        gate = FirstAwaitGate()
+        provider = PydanticAIProvider(default_model=TestModel())
+        suspend_the_transport(provider, log, gate)
+        yield provider, gate, log
 
 
 async def test_complete_returns_assistant_message() -> None:
