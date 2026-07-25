@@ -26,9 +26,13 @@ never be picked up; and every test runs under
 :func:`tests.models.network_guard.network_denied`, which turns "offline" from an
 assumption into an assertion.
 
-``max_retries=0`` on both clients: each vendor SDK retries 429/5xx internally by
-default, which would make one canned failure arrive as three requests and put
-the SDK's retry policy — not ours — in the path under test.
+``max_retries=0`` on both clients: each vendor SDK retries 429s and 5xx
+*internally* by default, so one canned failure would arrive as three requests
+and what got classified would be the SDK's last attempt rather than the failure.
+Nothing here wraps a ``RetryingProvider`` — our own retry semantics sit above
+this seam, never touch a vendor type, and are exercised over a fake in
+``tests/models/test_retry.py``. The vendor's retry behaviour is removed here, not
+measured.
 """
 
 from __future__ import annotations

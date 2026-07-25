@@ -136,8 +136,15 @@ expects — a different question, and not one a gate should ask.
 than allowed to fall back to the environment, so a developer's real key can never
 be picked up; and every test in the module runs inside `network_denied()`
 (`tests/models/network_guard.py`), which turns "offline" from an assumption into
-an assertion. `max_retries=0` on both clients, so a canned 429 exercises *our*
-retry policy and not the vendor SDK's.
+an assertion.
+
+`max_retries=0` on both clients, because each vendor SDK retries 429s and 5xx
+*internally* by default: a canned failure would otherwise arrive as three
+requests and the classification under test would be of the SDK's last attempt
+rather than of the failure. These tests assert **classification only** —
+`RetryingProvider` is deliberately not in this path, and our own retry semantics
+are exercised separately, over a fake, in `tests/models/test_retry.py`. So the
+vendor's retry behaviour is *removed* here, not measured.
 
 ### 4. Vendor divergence in message mapping is asserted, not discovered
 
