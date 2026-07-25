@@ -833,6 +833,79 @@ async def test_a_store_predating_the_mark_is_backfilled_not_refused(tmp_path: Pa
         store.close()
 
 
+async def test_deleting_the_mark_does_not_launder_a_rewound_counter(tmp_path: Path) -> None:
+    """The backfill must not be a way *around* the invariant it exists to preserve.
+
+    A deleted mark is indistinguishable from one that was never written, so a
+    two-row tamper — drop ``exec_high_water``, lower ``exec_counter`` — would
+    otherwise be stamped at the reopen as a fresh, agreeing pair. The executions
+    that survive are the witness: each records the ordinal it was allocated with,
+    and ``MAX(created_seq) <= exec_counter`` holds for every file this store wrote
+    (``clear``/``delete_goal`` only remove rows).
+
+    Before this check the reopen **succeeded**, and left the table holding two
+    executions at ``created_seq = 1`` — so ``active_executions``/``export``'s
+    oldest-first ordering silently stopped being an order::
+
+        created_seq: [("…-A-1", 1), ("…-B-1", 1), ("…-A-2", 2), ("…-A-3", 3)]
+
+    No execution *id* was reused there: the reopened store mints a fresh nonce,
+    which is exactly the job ADR-0049 §3 assigns it. The durable ordering is the
+    casualty, and it is enough.
+    """
+    path = tmp_path / "plans.db"
+    first = SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "A")
+    await first.save_goal(_goal())
+    await first.save_plan(_plan())
+    for _ in range(3):
+        await first.start_execution("p1")
+    first.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("DELETE FROM meta WHERE key = 'exec_high_water'")
+        raw.execute("UPDATE meta SET value = '0' WHERE key = 'exec_counter'")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="still holds an execution allocated at created_seq=3"):
+        SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "B")
+
+    assert _meta(path, "exec_high_water") is None  # the refusal wrote nothing
+
+
+async def test_a_deleted_mark_is_rebuilt_when_the_records_agree(tmp_path: Path) -> None:
+    """The corroboration refuses a rewind, not a missing mark on its own.
+
+    The same file with only the mark removed — the counter untouched — is a store
+    whose records are consistent with what it says, so it is re-stamped and the
+    ordinal carries on. This is what keeps the check above from being a second,
+    stricter refusal than the one ADR-0064 §4 argues for.
+    """
+    path = tmp_path / "plans.db"
+    first = SqlitePlanStore(path=path, now=_fixed_now)
+    await first.save_goal(_goal())
+    await first.save_plan(_plan())
+    for _ in range(3):
+        await first.start_execution("p1")
+    first.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("DELETE FROM meta WHERE key = 'exec_high_water'")
+        raw.commit()
+    finally:
+        raw.close()
+
+    reopened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert _meta(path, "exec_high_water") == "3"
+        assert (await reopened.start_execution("p1")).id.endswith("-4")
+    finally:
+        reopened.close()
+
+
 async def test_the_mark_is_not_stamped_when_the_open_fails(tmp_path: Path) -> None:
     """The backfill lands after the record schema, inside the one transaction.
 
