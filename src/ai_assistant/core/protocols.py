@@ -13,9 +13,12 @@ Guidelines when evolving these contracts:
   * Keep methods ``async`` where they touch I/O (models, memory, tools) so the
     whole system composes on one event loop.
 
-Only two exemplar contracts are defined for now (``ModelProvider`` and
-``MemoryStore``). The remaining subsystems declared in the architecture add
-their Protocols here as they are designed.
+Each subsystem declared in the architecture map adds its Protocol here as it is
+designed, so this file grows to hold every seam that crosses a subsystem
+boundary. ``tests/core/test_protocol_triad.py`` is what keeps that growth
+honest: it enumerates the Protocols declared here and fails the gate for any one
+missing its conformance suite, its canonical fake, or the binding that runs the
+two together.
 """
 
 from __future__ import annotations
