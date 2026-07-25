@@ -108,8 +108,16 @@ class FakeModelProvider:
     ) -> Message:
         """Record the call and return the configured assistant reply.
 
+        Every rejection below happens **before** the call is recorded and before
+        ``reply`` is evaluated, so a refused call is inert: it appends no
+        :class:`ModelCall` and does not advance a :meth:`scripted` queue
+        (ADR-0066 §6). Recording a request that was rejected would leave the next
+        *valid* call returning the reply the refused one ate, and every
+        ``call_count`` assertion above it off by one.
+
         Args:
-            messages: Conversation history, oldest first. Must be non-empty.
+            messages: Conversation history, oldest first. Must be non-empty, and
+                must not end on a ``Role.ASSISTANT`` turn.
             model: Optional ``"provider:model"`` override; recorded but otherwise
                 ignored (the fake has no real model to switch).
 
@@ -118,16 +126,30 @@ class FakeModelProvider:
             :class:`~ai_assistant.core.types.Message`.
 
         Raises:
-            ModelError: If ``messages`` is empty, contains a tool-role message,
-                or a callable ``reply`` fails — each matching
-                ``PydanticAIProvider``'s failure boundary, so code exercised with
-                this fake cannot pass on input (or recover from a failure)
-                differently than it would against the real provider.
+            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT``
+                turn, contains a tool-role message, or a callable ``reply``
+                fails — each matching ``PydanticAIProvider``'s failure boundary,
+                so code exercised with this fake cannot pass on input (or recover
+                from a failure) differently than it would against the real
+                provider.
             AssertionError: If a :meth:`scripted` provider runs out of replies (a
                 test-authoring error, deliberately not a ``ModelError``).
         """
         if not messages:
             msg = "complete() requires at least one message"
+            raise ModelError(msg)
+        if messages[-1].role is Role.ASSISTANT:
+            # The ModelProvider precondition (ADR-0066 §1): a history that already
+            # ends with an assistant turn is not asking for one. Mirrored here
+            # because this is the shape the two implementations used to disagree
+            # about — PydanticAIProvider echoed that trailing turn back without
+            # calling a model at all, while the fake answered it normally, so a
+            # subsystem built against the fake got behaviour production did not
+            # have.
+            msg = (
+                "complete() requires a conversation awaiting a reply; this "
+                "history already ends with an assistant turn"
+            )
             raise ModelError(msg)
         if any(m.role is Role.TOOL for m in messages):
             # Mirror PydanticAIProvider, which cannot yet represent a tool

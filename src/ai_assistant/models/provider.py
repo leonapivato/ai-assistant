@@ -345,8 +345,17 @@ class PydanticAIProvider:
     ) -> Message:
         """Produce the assistant's next message given the conversation so far.
 
+        Both malformed-argument shapes the Protocol's precondition names are
+        refused here, before :class:`Agent` is reached (ADR-0066 §6). The
+        trailing-assistant case is the one with teeth: ``Agent.run`` resolves a
+        history whose last entry is already a response as a *finished* run, so it
+        would return that assistant turn's text without a round trip — an echo
+        indistinguishable from a real answer, which no wrapper above this seam
+        could see (ADR-0066 §2, issue #351).
+
         Args:
-            messages: Conversation history, oldest first. Must be non-empty.
+            messages: Conversation history, oldest first. Must be non-empty, and
+                must not end on a ``Role.ASSISTANT`` turn.
             model: Optional ``"provider:model"`` override; falls back to the
                 configured default when ``None``.
 
@@ -354,7 +363,11 @@ class PydanticAIProvider:
             The assistant's reply as a :class:`~ai_assistant.core.types.Message`.
 
         Raises:
-            ModelError: If ``messages`` is empty or the provider call fails. A
+            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT``
+                turn, or the provider call fails. The two malformed-argument
+                cases raise the bare class — neither retryable nor routable,
+                which is the disposition the Protocol requires — because a caller
+                fixes them at the call site rather than by trying again. A
                 provider failure is narrowed to the most specific subclass
                 (e.g. :class:`~ai_assistant.core.errors.ModelRateLimitError`),
                 whose ``retryable`` attribute says whether another attempt could
@@ -362,6 +375,12 @@ class PydanticAIProvider:
         """
         if not messages:
             msg = "complete() requires at least one message"
+            raise ModelError(msg)
+        if messages[-1].role is Role.ASSISTANT:
+            msg = (
+                "complete() requires a conversation awaiting a reply; this "
+                "history already ends with an assistant turn"
+            )
             raise ModelError(msg)
 
         history = _to_model_messages(messages)
