@@ -1,6 +1,6 @@
 # 66. A completion request must end with a turn awaiting an answer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-24
 - **This is a contract change.** It adds a precondition and a `Raises:` clause to
   `ModelProvider.complete` in `core/protocols.py`, binding every implementation,
