@@ -15,6 +15,10 @@ authoritative in exactly one place and the two stores cannot drift on it. This
 store adds durability of that state across a restart (ADR-0049 §2), execution-id
 non-reuse by a per-incarnation ``pid``-and-nonce plus a durable ordinal
 (ADR-0049 §3), and referential integrity via enforced foreign keys (ADR-0049 §1).
+
+The durable ordinal is only worth what its *monotonicity* is worth, so it carries
+a high-water mark beside it in ``meta`` and the store refuses a counter that has
+fallen below it — at open and again at every allocation (ADR-0064).
 """
 
 from __future__ import annotations
@@ -65,6 +69,20 @@ _META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT
 #: as a single value, because ``_META_SCHEMA``'s primary key is only in force for
 #: a table this code created (see :meth:`SqlitePlanStore._read_meta`).
 _READ_META = "SELECT value FROM meta WHERE key = ?"
+
+#: The ``meta`` key holding the highest value ``exec_counter`` has ever reached
+#: (ADR-0064). ADR-0049 §3 rests execution-id non-reuse on the ordinal never
+#: rewinding, but nothing checked it: the counter is a single mutable row, and an
+#: outside writer that lowers it makes the store re-mint ids it has already handed
+#: out (issue #356). The mark is the durable witness that makes the rewind
+#: *detectable* — it advances in lockstep with the counter, in the same
+#: transaction, so the two only disagree when something outside this store moved
+#: one of them.
+_HIGH_WATER = "exec_high_water"
+
+_WRITE_HIGH_WATER = "INSERT INTO meta(key, value) VALUES ('exec_high_water', ?)"
+
+_UPDATE_HIGH_WATER = "UPDATE meta SET value = ? WHERE key = 'exec_high_water'"
 
 _RECORD_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)",
@@ -174,8 +192,10 @@ class SqlitePlanStore:
                 never passes it.
 
         Raises:
-            PlanningError: If the database cannot be opened or initialised, or is
-                labelled with a schema version newer than this code understands.
+            PlanningError: If the database cannot be opened or initialised, is
+                labelled with a schema version this code does not understand, or
+                holds an ``exec_counter`` rewound below the high-water mark of the
+                ordinals it has already issued (ADR-0064).
         """
         self._path = path if path == ":memory:" else str(Path(path))
         self._clock = checked_clock(now, owner="SqlitePlanStore")
@@ -207,12 +227,21 @@ class SqlitePlanStore:
                 # the meta insert (ADR-0049 §1).
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
-                # Refuse a newer store *before* creating any record table, so a
-                # rejected open leaves no schema behind (the transaction rolls the
-                # meta table back too on the raise).
-                self._verify_or_init_meta(conn)
+                # Refuse a newer store — or one whose counter has been rewound —
+                # *before* creating any record table, so a rejected open leaves no
+                # schema behind (the transaction rolls the meta table back too on
+                # the raise).
+                unstamped = self._verify_or_init_meta(conn)
                 for statement in _RECORD_SCHEMA:
                     conn.execute(statement)
+                if unstamped is not None:
+                    # Backfilled *after* the schema above, in the same transaction,
+                    # so the mark is only written for a file this open has actually
+                    # brought to the current shape — and a failure rolls the mark
+                    # back rather than leaving a database falsely labelled. This is
+                    # `SqliteAuditTrail._check_schema_version`'s ordering (#346),
+                    # applied to the second marker this store backfills.
+                    conn.execute(_WRITE_HIGH_WATER, (str(unstamped),))
             if self._path != ":memory:":
                 Path(self._path).chmod(_OWNER_ONLY)
         except PlanningError:
@@ -224,7 +253,7 @@ class SqlitePlanStore:
             raise PlanningError(msg) from exc
         return conn
 
-    def _verify_or_init_meta(self, conn: sqlite3.Connection) -> None:
+    def _verify_or_init_meta(self, conn: sqlite3.Connection) -> int | None:
         """Write the version and counter on a fresh DB, or refuse any other version.
 
         Runs inside the setup transaction. ADR-0049 §1 makes v1 the first and only
@@ -237,9 +266,30 @@ class SqlitePlanStore:
         report at open, not defer, matching how the audit trail treats a row that
         no longer validates.
 
-        Both markers are read through :meth:`_read_meta`, so a store holding
-        conflicting rows for either key is refused rather than resolved by row
-        order (issue #349).
+        Every marker is read through :meth:`_read_meta`, so a store holding
+        conflicting rows for any key is refused rather than resolved by row order
+        (issue #349).
+
+        The counter is also checked against its high-water mark (ADR-0064): a
+        stored ``exec_counter`` *below* ``exec_high_water`` is a counter something
+        outside this store has rewound, and re-minting from it would hand out
+        execution ids this store has already issued (issue #356). That refusal
+        joins the schema one *ahead of the record tables*, on ADR-0049 §1's
+        reasoning: a store that cannot promise non-reuse should not be opened at
+        all, rather than open and fail at the first allocation.
+
+        Returns:
+            The high-water mark this open must stamp once the record tables exist,
+            or ``None`` if the database already carries one. A database written
+            before ADR-0064 has a counter and no mark; it is **backfilled, not
+            refused**, because its counter is the highest ordinal it has issued —
+            that is exactly what the pre-ADR-0064 code maintained — so stamping it
+            records what is already true rather than assuming anything.
+
+        Raises:
+            PlanningError: If the schema version is unsupported, a marker is
+                ambiguous or unparseable, or the counter has been rewound below
+                its mark.
         """
         version = self._read_meta(conn, "schema_version")
         if not version:
@@ -254,10 +304,42 @@ class SqlitePlanStore:
                 f"refusing to open it rather than read it blindly"
             )
             raise PlanningError(msg)
-        if counter := self._read_meta(conn, "exec_counter"):
-            self._meta_int("exec_counter", counter[0])  # validate on open
+        if rows := self._read_meta(conn, "exec_counter"):
+            counter = self._meta_int("exec_counter", rows[0])  # validate on open
         else:
+            counter = 0
             conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
+        if mark := self._read_meta(conn, _HIGH_WATER):
+            self._refuse_a_rewound_counter(counter, self._meta_int(_HIGH_WATER, mark[0]))
+            return None
+        return counter
+
+    def _refuse_a_rewound_counter(self, counter: int, mark: int) -> None:
+        """Refuse a counter that has fallen below the highest ordinal already issued.
+
+        The invariant ADR-0049 §3 assumes and ADR-0064 enforces: ``exec_counter``
+        only ever moves forward, so the ordinal half of an execution id is never
+        re-issued within one incarnation. The mark advances with the counter in the
+        same transaction, so ``counter < mark`` cannot arise from anything this
+        store did — it means the counter was moved by something else.
+
+        The test is deliberately one-sided. A mark *below* the counter is harmless:
+        no ordinal has been re-issued, so the next allocation simply carries the
+        mark forward. Only the counter falling behind means ids already handed out
+        are about to be minted a second time.
+
+        Raises:
+            PlanningError: If ``counter`` is below ``mark``.
+        """
+        if counter >= mark:
+            return
+        msg = (
+            f"the plan store at {self._path!r} has exec_counter={counter}, below the "
+            f"exec_high_water={mark} it has already issued: the counter has been rewound "
+            f"outside this store and would re-mint execution ids it has already handed "
+            f"out (ADR-0049 §3). Refusing rather than reissuing an id"
+        )
+        raise PlanningError(msg)
 
     def _read_meta(self, conn: sqlite3.Connection, key: str) -> list[Any]:
         """Return every value stored under ``key``, refusing an ambiguous store.
@@ -506,22 +588,44 @@ class SqlitePlanStore:
         taking the first of two conflicting rows here would rewind the ordinal
         even for a file whose *open* had validated the other row.
 
+        **The high-water check is re-run here, and this is the site that closes
+        issue #356.** The open-time check cannot: the rewind that actually reissues
+        an id happens *mid-session*, after the open has validated, and its damage
+        is intra-incarnation — the pid and nonce folded into the id are constant
+        for the life of this object, so a counter rewound between two
+        ``start_execution`` calls yields a byte-identical id. (Across a reopen the
+        nonce already covers it, which is why the open-time refusal is about
+        reporting a corrupt file loudly rather than about non-reuse.) Same shape as
+        the ambiguous-counter check above: the open establishes nothing an outside
+        writer cannot undo a moment later, so the allocation re-reads.
+
         Raises:
-            PlanningError: If the counter is missing, ambiguous, or unparseable.
+            PlanningError: If the counter or its mark is missing, ambiguous or
+                unparseable, or the counter has been rewound below the mark.
         """
         current = self._read_meta(conn, "exec_counter")
-        if not current:
-            # `_verify_or_init_meta` seeds the row at open, so reaching this needs
-            # an outside writer to have deleted it since. An allocator with no
-            # counter cannot promise non-reuse (ADR-0049 §3), so it refuses rather
-            # than restarting from zero — and refuses in this layer's own error,
-            # where unpacking an empty `fetchone()` would have raised `TypeError`.
-            msg = (
-                f"the plan store at {self._path!r} has lost its exec_counter; the store is corrupt"
-            )
+        mark = self._read_meta(conn, _HIGH_WATER)
+        if not current or not mark:
+            # `_verify_or_init_meta` seeds both rows at open, so reaching this needs
+            # an outside writer to have deleted one since. An allocator with no
+            # counter cannot promise non-reuse (ADR-0049 §3), and one with no mark
+            # cannot tell whether the counter it does have has been rewound, so
+            # both refuse rather than restarting from zero or minting unwitnessed —
+            # and refuse in this layer's own error, where unpacking an empty
+            # `fetchone()` would have raised `TypeError`.
+            missing = "exec_counter" if not current else _HIGH_WATER
+            msg = f"the plan store at {self._path!r} has lost its {missing}; the store is corrupt"
             raise PlanningError(msg)
-        nxt = self._meta_int("exec_counter", current[0]) + 1
+        counter = self._meta_int("exec_counter", current[0])
+        self._refuse_a_rewound_counter(counter, self._meta_int(_HIGH_WATER, mark[0]))
+        nxt = counter + 1
         conn.execute("UPDATE meta SET value = ? WHERE key = 'exec_counter'", (str(nxt),))
+        # The check above leaves `counter >= mark`, so `nxt` is strictly above the
+        # mark and this is the new high water. Written in the same transaction as
+        # the counter — that lockstep is what makes a later disagreement mean
+        # tampering, and what lets a whole-file restore roll both back together and
+        # open cleanly (ADR-0064).
+        conn.execute(_UPDATE_HIGH_WATER, (str(nxt),))
         return nxt
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:

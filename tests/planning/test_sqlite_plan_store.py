@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -648,7 +649,7 @@ async def test_a_lost_exec_counter_is_refused_at_allocation(tmp_path: Path) -> N
         store.close()
 
 
-@pytest.mark.parametrize("key", ["schema_version", "exec_counter"])
+@pytest.mark.parametrize("key", ["schema_version", "exec_counter", "exec_high_water"])
 @pytest.mark.parametrize("value", [float("inf"), None, b"1", 1.5])
 def test_an_untyped_meta_value_never_leaks_a_non_domain_error(
     tmp_path: Path, key: str, value: object
@@ -669,6 +670,274 @@ def test_an_untyped_meta_value_never_leaks_a_non_domain_error(
 
     with pytest.raises(PlanningError, match=f"non-numeric {key}"):
         SqlitePlanStore(path=path, now=_fixed_now)
+
+
+# --- the ordinal only moves forward (issue #356, ADR-0064) ------------------
+
+
+def _meta(path: Path, key: str) -> str | None:
+    """The single value stored under ``key``, or ``None`` if there is no row."""
+    raw = sqlite3.connect(path)
+    try:
+        row = raw.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    finally:
+        raw.close()
+    return None if row is None else str(row[0])
+
+
+def _write_meta(path: Path, key: str, value: str) -> None:
+    """Play the outside writer: set one ``meta`` row on a store this test opened."""
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("UPDATE meta SET value = ? WHERE key = ?", (value, key))
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def _tables(path: Path) -> set[str]:
+    raw = sqlite3.connect(path)
+    try:
+        return {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        raw.close()
+
+
+async def test_a_mid_session_counter_rollback_cannot_reissue_an_execution_id(
+    tmp_path: Path,
+) -> None:
+    """Issue #356, reproduced: the rewind that hands out a byte-identical id.
+
+    ``exec_counter`` is one mutable row and nothing checked it only moves forward.
+    Rewinding it *mid-session* re-mints an ordinal already issued, and the rest of
+    the id is constant for the life of one store object — the pid, and the nonce
+    pinned here — so the id comes back **identical**, which ADR-0044 §1 makes
+    normative it never is and a parked confirmation's recovery keys against.
+
+    Against the code before ADR-0064 this exact sequence printed::
+
+        first id            : p1-exec-1087458-N-1
+        counter after clear : 1        (ADR-0049 §3: never reset)
+        counter rolled back : 0
+        after rollback      : p1-exec-1087458-N-1
+        SAME ID REISSUED    : True
+
+    ``clear()`` is what makes the reissue *silent*: it removes the earlier row, so
+    the ``executions.id`` primary key no longer catches the duplicate. The counter
+    surviving it is precisely the invariant being protected.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "N")
+    try:
+        first = await _seed_and_start(store)
+        assert first.endswith("-N-1")
+        await store.clear()
+        assert _meta(path, "exec_counter") == "1"  # never reset (ADR-0049 §3)
+        assert _meta(path, "exec_high_water") == "1"  # and neither is its witness
+
+        _write_meta(path, "exec_counter", "0")
+
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        with pytest.raises(PlanningError, match="has been rewound outside this store"):
+            await store.start_execution("p1")
+
+        # And nothing was allocated: the refusal precedes the insert, so the
+        # counter is still where the outside writer left it rather than one past.
+        assert _meta(path, "exec_counter") == "0"
+    finally:
+        store.close()
+
+
+async def test_a_rewound_counter_is_refused_at_open_before_any_record_table(
+    tmp_path: Path,
+) -> None:
+    """The same disagreement refuses the *open*, ahead of every record table.
+
+    ADR-0049 §1's posture: a store this code cannot vouch for is refused before it
+    creates, reads or writes a record. A counter below its mark is a file whose
+    ordinal is no longer the one this store maintained, so the open is where it is
+    loud and diagnosable rather than at whatever allocation happens to hit it.
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_meta(
+        path,
+        (("schema_version", "1"), ("exec_counter", "3"), ("exec_high_water", "9")),
+    )
+
+    with pytest.raises(PlanningError, match="exec_counter=3, below the exec_high_water=9"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+    assert _tables(path).isdisjoint({"goals", "plans", "executions"})
+
+
+async def test_a_whole_file_restore_rolls_both_markers_back_and_opens(tmp_path: Path) -> None:
+    """The trade that makes the refusal acceptable: an ordinary restore still opens.
+
+    The mark lives in the **same ``meta`` table** as the counter, so restoring the
+    database file moves them together and they still agree. That is what keeps
+    ADR-0064's refusal aimed at a hand-edit or a partial corruption rather than at
+    backup/restore — and the restore also removes the executions that used the
+    higher ordinals, so re-issuing those *ordinals* collides with nothing. The ids
+    still differ: a reopened store mints a fresh nonce (ADR-0049 §3).
+    """
+    path, backup = tmp_path / "plans.db", tmp_path / "plans.db.bak"
+
+    first = SqlitePlanStore(path=path, now=_fixed_now)
+    await _seed_and_start(first)
+    first.close()
+    shutil.copy(path, backup)  # the backup: counter and mark both at 1
+
+    second = SqlitePlanStore(path=path, now=_fixed_now)
+    later_ids = [(await second.start_execution("p1")).id for _ in range(2)]
+    second.close()
+    assert _meta(path, "exec_counter") == "3"
+
+    shutil.copy(backup, path)  # the restore
+    assert _meta(path, "exec_counter") == "1"
+    assert _meta(path, "exec_high_water") == "1"
+
+    restored = SqlitePlanStore(path=path, now=_fixed_now)  # opens: the two agree
+    try:
+        # The executions that held ordinals 2 and 3 went back with the file, so
+        # the ordinal is free again — and the new id differs from theirs anyway.
+        for erased in later_ids:
+            assert await restored.get_execution(erased) is None
+        fresh = (await restored.start_execution("p1")).id
+        assert fresh.endswith("-2")
+        assert fresh not in later_ids
+    finally:
+        restored.close()
+
+
+async def test_a_store_predating_the_mark_is_backfilled_not_refused(tmp_path: Path) -> None:
+    """A database with a counter and no mark opens, and is stamped from its counter.
+
+    Every store written before ADR-0064 is in this state. Refusing them would make
+    the durable record unopenable by the code that wrote it, and the stamp is
+    sound rather than merely lenient: the pre-ADR-0064 counter *was* the highest
+    ordinal that file had issued, so recording it asserts nothing new.
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_meta(path, (("schema_version", "1"), ("exec_counter", "7")))
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert _meta(path, "exec_high_water") == "7"
+        # And the counter is carried forward, not restarted: ordinal 8 is next.
+        assert (await _seed_and_start(store)).endswith("-8")
+        assert _meta(path, "exec_high_water") == "8"
+    finally:
+        store.close()
+
+
+async def test_the_mark_is_not_stamped_when_the_open_fails(tmp_path: Path) -> None:
+    """The backfill lands after the record schema, inside the one transaction.
+
+    Stamping before the create would leave a database labelled with a mark an open
+    that then failed never established — the failure mode ``SqliteAuditTrail``
+    avoids the same way (#346). Here the create fails part-way: SQLite shares one
+    namespace across tables and indexes, so an index already named ``plans`` makes
+    ``CREATE TABLE IF NOT EXISTS plans`` an error rather than a no-op — after
+    ``goals`` has been created.
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_meta(path, (("schema_version", "1"), ("exec_counter", "7")))
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE INDEX plans ON meta(key)")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="failed to initialise the plan store"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+    assert _meta(path, "exec_high_water") is None
+    assert _meta(path, "exec_counter") == "7"
+    assert "goals" not in _tables(path)  # the half-built schema rolled back with it
+
+
+async def test_a_mark_below_the_counter_is_not_refused(tmp_path: Path) -> None:
+    """The check is one-sided, and deliberately: only a rewound *counter* reissues.
+
+    A mark that lags — what an older build advancing the counter without the
+    witness would leave — means no ordinal has been handed out twice, so there is
+    nothing to refuse. The next allocation simply carries the mark forward.
+    """
+    path = tmp_path / "plans.db"
+    seeded = SqlitePlanStore(path=path, now=_fixed_now)
+    await _seed_and_start(seeded)
+    seeded.close()
+
+    _write_meta(path, "exec_counter", "9")  # advanced without its witness
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert (await store.start_execution("p1")).id.endswith("-10")
+        assert _meta(path, "exec_high_water") == "10"
+    finally:
+        store.close()
+
+
+async def test_a_lost_high_water_mark_is_refused_at_allocation(tmp_path: Path) -> None:
+    """An allocator that cannot witness its counter refuses, like one with no counter.
+
+    Minting on an unwitnessed counter is minting on a value that may already have
+    been rewound — the exact state ADR-0064 exists to detect — so the missing mark
+    is a corrupt store, not a mark to silently re-create from whatever is there.
+    """
+    path = tmp_path / "plans.db"
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        raw = sqlite3.connect(path)
+        try:
+            raw.execute("DELETE FROM meta WHERE key = 'exec_high_water'")
+            raw.commit()
+        finally:
+            raw.close()
+
+        with pytest.raises(PlanningError, match="lost its exec_high_water"):
+            await store.start_execution("p1")
+    finally:
+        store.close()
+
+
+async def test_a_duplicated_high_water_row_appearing_after_the_open_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The mark is read on the same terms as the counter, at both sites (#349).
+
+    ``meta``'s primary key does not hold for a table this code did not create, so
+    the mark can go ambiguous after the open validated it. Resolving that by row
+    order would let a low sibling row wave a rewound counter through.
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_meta(
+        path,
+        (("schema_version", "1"), ("exec_counter", "7"), ("exec_high_water", "7")),
+    )
+    store = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+
+        raw = sqlite3.connect(path)
+        try:
+            raw.execute("INSERT INTO meta(key, value) VALUES ('exec_high_water', '2')")
+            raw.commit()
+        finally:
+            raw.close()
+
+        with pytest.raises(PlanningError, match="2 exec_high_water rows"):
+            await store.start_execution("p1")
+    finally:
+        store.close()
 
 
 async def test_export_is_a_single_consistent_snapshot(tmp_path: Path) -> None:
