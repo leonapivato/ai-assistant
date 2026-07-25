@@ -37,10 +37,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, final
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 #: How long either side waits for the other before declaring the scenario broken.
 #: Generous — it is only ever reached when a test has hung, and a hung suite that
@@ -134,6 +135,32 @@ class SuspendedCall(Protocol):
         whether it already did.
         """
         ...
+
+
+@final
+@dataclass(frozen=True)
+class SuspendedMidWrite[T]:
+    """A store, and the lever to hold its next entry into one named locked operation.
+
+    ADR-0060's cancellation case runs against *every* distinct locked operation a
+    store has, not just one per store (#370): each ``async with self._lock``
+    site is a separate place the resource could be handed over early, so each
+    needs its own cancelled-first / concurrent-second scenario. The choreography
+    is identical across them and lives in the suite; what varies is *which*
+    operation to hold open mid-write, which is the implementation's business — a
+    ``sqlite3`` store parks that operation's worker thread, a fake arms its one
+    modelled resource. This is the seam between the two.
+
+    The suite runs any preconditions the operation needs, then calls :attr:`arm`
+    with the operation's name to get the :class:`SuspendedCall` lever back — after
+    the preconditions, so a fake arming its single resource suspends the operation
+    under test rather than a setup write. :attr:`log` is that resource's
+    :class:`ResourceLog`, read once the scenario is over.
+    """
+
+    store: T
+    log: ResourceLog
+    arm: Callable[[str], SuspendedCall]
 
 
 @final

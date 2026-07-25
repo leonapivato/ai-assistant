@@ -26,12 +26,12 @@ from ai_assistant.core.types import (
     TimeOfDay,
 )
 from ai_assistant.testing import FakePlanner, FakePlanStore
+from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import Planner, PlanStore
-    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 def _fixed_now() -> datetime:
@@ -48,16 +48,24 @@ class TestFakePlanStoreContract(PlanStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[PlanStore, SuspendedCall, ResourceLog]]:
+    ) -> AsyncIterator[SuspendedMidWrite[PlanStore]]:
         """The fake models the resource it does not really own (ADR-0060 §3).
 
         Dicts need no serialising, so without this the canonical fake could only
         opt out — and the cancellation case would run solely against the
-        ``sqlite3`` store that already holds the invariant. Nothing to dispose of,
-        hence the bare yield.
+        ``sqlite3`` store that already holds the invariant. Every write passes
+        through the *one* modelled resource, so ``arm`` ignores which operation it
+        is handed: the parametrised cases (#370) exercise the same ``held()`` path
+        on the fake and earn their keep on the ``sqlite3`` store, where each
+        operation is a separate lock site. Nothing to dispose of, hence the bare
+        yield.
         """
         store = FakePlanStore(now=_fixed_now)
-        yield store, store.suspend_next_write(), store.resource_log
+        yield SuspendedMidWrite(
+            store=store,
+            log=store.resource_log,
+            arm=lambda _operation: store.suspend_next_write(),
+        )
 
 
 class TestFakePlannerContract(PlannerContract):

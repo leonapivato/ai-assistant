@@ -36,7 +36,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
-from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
+from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -928,13 +928,17 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall, ResourceLog]]:
-        """Park the first ``add``'s worker thread inside the connection's turn.
+    ) -> AsyncIterator[SuspendedMidWrite[MemoryStore]]:
+        """Park a named write's worker thread inside the connection's turn.
 
-        The suspension goes in ``_add_sync``, i.e. inside ``async with
-        self._lock`` and inside the ``to_thread`` the event loop cannot interrupt
-        — which is exactly where ADR-0054's bug lived. Blocking there is what
-        makes the case deterministic: left to run, a commit finishes in
+        ``arm(operation)`` wraps that operation's ``_<operation>_sync`` — inside
+        ``async with self._lock`` and inside the ``to_thread`` the event loop
+        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
+        first worker to reach it blocks and every later one runs free. Each
+        distinct lock site is a separate place the bug can reappear (#370), and
+        the sync-method suffix matches the operation name (``add`` →
+        ``_add_sync``, ``write_atomic`` → ``_write_atomic_sync``). Blocking there
+        is what makes the case deterministic: left to run, a commit finishes in
         microseconds and whether the second caller arrives while the worker still
         holds the connection would be a race, so the invariant would be exercised
         only sometimes.
@@ -944,21 +948,25 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         make an unrelated failure hang instead of fail.
         """
         store = SqliteMemoryStore(path=":memory:", embedder=HashingEmbedder(dimensions=8))
-        suspension = ThreadSuspension()
         log = ResourceLog()
-        original_add = store._add_sync
-        armed = threading.Event()
+        suspension = ThreadSuspension()
 
-        def blocking_add(record: MemoryRecord, vector: Embedding) -> None:
-            with log.inside():  # the span the connection is genuinely in use for
-                if not armed.is_set():  # the first worker only; later ones run free
-                    armed.set()
-                    suspension.hold()
-                original_add(record, vector)
+        def arm(operation: str) -> SuspendedCall:
+            original = getattr(store, f"_{operation}_sync")
+            armed = threading.Event()
 
-        store._add_sync = blocking_add  # type: ignore[method-assign]
+            def blocking(*args: object) -> object:
+                with log.inside():  # the span the connection is genuinely in use for
+                    if not armed.is_set():  # the first worker only; later ones run free
+                        armed.set()
+                        suspension.hold()
+                    return original(*args)
+
+            setattr(store, f"_{operation}_sync", blocking)
+            return suspension
+
         try:
-            yield store, suspension, log
+            yield SuspendedMidWrite(store=store, log=log, arm=arm)
         finally:
             suspension.release()
             # An implementation that released the connection early leaves a

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from pydantic import ValidationError
@@ -46,11 +46,12 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import ExecutionState
-    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
+    from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -96,6 +97,208 @@ def _claim(state: ExecutionState, step_id: str = "s1") -> StepTransition:
         bound_tool="smtp",
         approval_ref="perm-1",
     )
+
+
+class _CancellationOp(Protocol):
+    """One locked ``PlanStore`` write the ADR-0060 case drives (#370).
+
+    Each :attr:`name` selects a distinct ``async with self._lock:
+    _run_to_completion(...)`` site; the suite runs the same
+    cancelled-first / concurrent-second scenario against every one, so a
+    regression reintroduced at any single site is caught rather than only at
+    ``save_goal``. :meth:`first` and :meth:`second` act on *independent* subjects,
+    so the concurrent second succeeds whatever the cancelled first's
+    indeterminate effect turns out to be — which matters most for
+    ``commit_transition``, whose compare-and-swap would otherwise couple them.
+    """
+
+    name: str
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Establish anything the operation needs before it can run."""
+        ...
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The call the case suspends mid-write and then cancels."""
+        ...
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        ...
+
+    async def verify(self, store: PlanStore) -> None:
+        """Assert the resource survived: the second write is whole and reads work."""
+        ...
+
+
+class _SaveGoalOp:
+    """The ``save_goal`` upsert — ADR-0060's original subject."""
+
+    name = "save_goal"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """No preconditions."""
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Save the goal whose write is cancelled."""
+        return store.save_goal(_goal("cancel-1"))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Save an independent goal concurrently."""
+        return store.save_goal(_goal("cancel-2"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """The second goal is durable; the first is absent-or-whole; reads work."""
+        assert await store.get_goal("cancel-2") == _goal("cancel-2")
+        cancelled = await store.get_goal("cancel-1")
+        assert cancelled is None or cancelled == _goal("cancel-1")
+        assert {goal.id for goal in (await store.export()).goals} >= {"cancel-2"}
+
+
+class _SavePlanOp:
+    """The ``save_plan`` write, on two plans under two pre-saved goals."""
+
+    name = "save_plan"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Save the goals the two plans hang off (``save_plan`` needs them)."""
+        await store.save_goal(_goal("gA"))
+        await store.save_goal(_goal("gB"))
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Save the plan whose write is cancelled."""
+        return store.save_plan(_plan("pA", "gA"))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Save an independent plan concurrently."""
+        return store.save_plan(_plan("pB", "gB"))
+
+    async def verify(self, store: PlanStore) -> None:
+        """The second plan is durable; the cancelled one is absent-or-whole."""
+        assert await store.get_plan("pB") == _plan("pB", "gB")
+        cancelled = await store.get_plan("pA")
+        assert cancelled is None or cancelled == _plan("pA", "gA")
+
+
+class _StartExecutionOp:
+    """The ``start_execution`` write, on two independent pre-saved plans."""
+
+    name = "start_execution"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Save two goal+plan pairs so each execution has its own plan."""
+        await store.save_goal(_goal("gA"))
+        await store.save_plan(_plan("pA", "gA"))
+        await store.save_goal(_goal("gB"))
+        await store.save_plan(_plan("pB", "gB"))
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Start the execution whose write is cancelled."""
+        return store.start_execution("pA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Start an independent execution concurrently."""
+        return store.start_execution("pB")
+
+    async def verify(self, store: PlanStore) -> None:
+        """The second execution is live and readable."""
+        assert "pB" in {state.plan_id for state in await store.active_executions()}
+
+
+class _CommitTransitionOp:
+    """The ``commit_transition`` compare-and-swap (#370, priority 2).
+
+    The two calls claim a step on *different* executions, so each swap turns on
+    its own execution's version and the concurrent second is decided
+    independently of the cancelled first — which, shielded, may itself commit.
+    """
+
+    name = "commit_transition"
+
+    def __init__(self) -> None:
+        """Hold the two started executions the transitions claim against."""
+        self._state_a: ExecutionState
+        self._state_b: ExecutionState
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Start two independent executions and remember their versions."""
+        await store.save_goal(_goal("gA"))
+        await store.save_plan(_plan("pA", "gA"))
+        self._state_a = await store.start_execution("pA")
+        await store.save_goal(_goal("gB"))
+        await store.save_plan(_plan("pB", "gB"))
+        self._state_b = await store.start_execution("pB")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim a step on execution A — the swap that is cancelled."""
+        return store.commit_transition(_claim(self._state_a))
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Claim a step on execution B concurrently."""
+        return store.commit_transition(_claim(self._state_b))
+
+    async def verify(self, store: PlanStore) -> None:
+        """Execution B took its claim; the store still serves reads."""
+        state = await store.get_execution(self._state_b.id)
+        assert state is not None
+        assert state.version > self._state_b.version
+
+
+class _DeleteGoalOp:
+    """The ``delete_goal`` write, on two independent pre-saved goals."""
+
+    name = "delete_goal"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Save the two goals the calls delete."""
+        await store.save_goal(_goal("gA"))
+        await store.save_goal(_goal("gB"))
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Delete goal A — the call that is cancelled."""
+        return store.delete_goal("gA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Delete goal B concurrently."""
+        return store.delete_goal("gB")
+
+    async def verify(self, store: PlanStore) -> None:
+        """Goal B is gone; the store still serves reads."""
+        assert await store.get_goal("gB") is None
+
+
+class _ClearOp:
+    """The ``clear`` write. No live step, so it is not refused (ADR-0014)."""
+
+    name = "clear"
+
+    async def prepare(self, store: PlanStore) -> None:
+        """A goal to remove, so ``clear`` does real connection work."""
+        await store.save_goal(_goal("gA"))
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Clear the store — the call that is cancelled."""
+        return store.clear()
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Clear again concurrently."""
+        return store.clear()
+
+    async def verify(self, store: PlanStore) -> None:
+        """The store is empty and still serves reads."""
+        assert not (await store.export()).goals
+
+
+#: Every locked ``PlanStore`` write ADR-0060's case is run against (#370). Each is
+#: a distinct lock site with its own ``_run_to_completion`` call.
+_CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
+    _SaveGoalOp,
+    _SavePlanOp,
+    _StartExecutionOp,
+    _CommitTransitionOp,
+    _DeleteGoalOp,
+    _ClearOp,
+)
 
 
 class PlanStoreContract:
@@ -900,8 +1103,8 @@ class PlanStoreContract:
 
     def store_suspended_mid_write(
         self,
-    ) -> AbstractAsyncContextManager[tuple[PlanStore, SuspendedCall, ResourceLog]]:
-        """Supply a store whose next ``save_goal`` stops *inside* the resource it took.
+    ) -> AbstractAsyncContextManager[SuspendedMidWrite[PlanStore]]:
+        """Supply a store whose named locked write can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
         cancels the call while it is suspended and then watches what a second
@@ -910,10 +1113,15 @@ class PlanStoreContract:
         and released the connection anyway, so a case that asserts only
         propagation certifies the bug (ADR-0060 §3).
 
-        How the call is made to stop there is implementation-specific — a worker
-        thread parked mid-SQL, a fake's modelled resource — which is why this is a
-        hook and not something the suite can build. Returned as a context manager
-        so the subject is disposed of the way that implementation needs.
+        The returned :class:`SuspendedMidWrite` carries the store, its
+        :class:`ResourceLog`, and an ``arm(operation)`` lever the case calls —
+        *after* its preconditions — to hold the next entry into that operation
+        (#370). Every distinct ``async with self._lock`` site is a separate place
+        the same regression can reappear, so the case is run against each; ``arm``
+        is where the implementation says how it stops a given one — a worker
+        thread parked mid-SQL, a fake's single modelled resource. Returned as a
+        context manager so the subject is disposed of the way that implementation
+        needs.
 
         The :class:`ResourceLog` records each call's time *inside* the resource,
         and the case reads it once the scenario is over. It is not redundant with
@@ -925,32 +1133,46 @@ class PlanStoreContract:
         raise NotImplementedError
 
     @pytest.mark.optional_obligation
-    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(self) -> None:
-        """``core.protocols``' cancellation clause, on the write path (ADR-0060).
+    @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
+    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(
+        self, make_op: Callable[[], _CancellationOp]
+    ) -> None:
+        """``core.protocols``' cancellation clause, on every locked write (ADR-0060, #370).
 
         A cancelled write must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a
         test of the invariant rather than of propagation: a single cancelled call
-        in isolation looks identical either way.
+        in isolation looks identical either way. Run once per locked operation, so
+        a regression reintroduced at any one lock site — not just ``save_goal`` —
+        is caught.
 
-        The first write's *effect* is deliberately not asserted. The clause's
-        third paragraph makes it indeterminate to the caller — under ADR-0054's
-        shield a cancelled write that reached ``COMMIT`` is durably written — so
-        the suite pins what a caller may actually rely on: the goal is absent or
-        whole, never torn, and the store still serves reads.
+        The first write's *effect* is deliberately not asserted here (the op's
+        ``verify`` pins only what a caller may rely on). The clause's third
+        paragraph makes it indeterminate to the caller — under ADR-0054's shield a
+        cancelled write that reached ``COMMIT`` is durably written — so the two
+        calls are independent subjects and what is pinned is that the second is
+        whole and the store still serves reads.
         """
         if self.acquires_no_shared_resource:
             pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
 
-        async with self.store_suspended_mid_write() as (store, suspended, log):
-            first = asyncio.ensure_future(store.save_goal(_goal("cancel-1")))
-            second = None
+        op = make_op()
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await op.prepare(store)
+            # Arm *after* the preconditions, so a fake arming its one resource
+            # suspends the operation under test rather than a setup write.
+            suspended = harness.arm(op.name)
+            visited_before = harness.log.visits
+
+            first = asyncio.ensure_future(op.first(store))
+            second: asyncio.Task[object] | None = None
             try:
                 await suspended.reached()
                 first.cancel()
                 await settle()
 
-                second = asyncio.ensure_future(store.save_goal(_goal("cancel-2")))
+                second = asyncio.ensure_future(op.second(store))
                 await settle()
                 assert not second.done(), _RELEASED_EARLY
 
@@ -967,16 +1189,14 @@ class PlanStoreContract:
             with pytest.raises(asyncio.CancelledError):
                 await first
             assert second is not None
-            assert await second == "cancel-2"
+            await second
 
             # Decisive where the blocked-caller check above is not: the two calls
-            # were never inside the resource at the same time.
-            assert not log.overlapped, _RELEASED_EARLY
-            assert log.visits == 2, "both calls should have reached the resource by now"
+            # were never inside the resource at the same time. A delta, because a
+            # fake's preconditions pass through the same logged resource.
+            assert not harness.log.overlapped, _RELEASED_EARLY
+            assert harness.log.visits - visited_before == 2, (
+                "both calls should have reached the resource by now"
+            )
 
-            # The resource survived both: the second write is durable, the first
-            # is absent-or-whole, and reads still work.
-            assert await store.get_goal("cancel-2") == _goal("cancel-2")
-            cancelled_goal = await store.get_goal("cancel-1")
-            assert cancelled_goal is None or cancelled_goal == _goal("cancel-1")
-            assert {goal.id for goal in (await store.export()).goals} >= {"cancel-2"}
+            await op.verify(store)
