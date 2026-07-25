@@ -71,6 +71,12 @@ class AbandonedStraggler:
         started: Waits until that source is really running.
         fail: Releases it into a *failure* — the outcome that leaves a trace if
             nobody retrieves it.
+        outstanding: How many abandoned tasks the implementation is currently
+            holding a strong reference to. The retention half of ADR-0060 §3 has
+            no signal reachable through ``assemble()``, so the suite is handed
+            one — without it, a provider that consumes a straggler's exception
+            in a done-callback but drops its reference passes on the "nothing
+            was reported" assertion alone while orphaning what the rule forbids.
         finished: Waits until that failure has actually happened, observed from
             the *source* rather than from the provider. Separate from
             ``quiesce`` on purpose: a provider that forgot its straggler
@@ -85,6 +91,7 @@ class AbandonedStraggler:
 
     provider: ContextProvider
     started: Callable[[], Awaitable[object]]
+    outstanding: Callable[[], int]
     fail: Callable[[], None]
     finished: Callable[[], Awaitable[object]]
     quiesce: Callable[[], Awaitable[object]]
@@ -231,6 +238,12 @@ class ContextProviderContract:
         reported to the event loop's exception handler when the task is collected.
         A straggler that merely *succeeds* reports nothing, which is why "nothing
         was logged" is not on its own evidence of observation (ADR-0060 §3).
+
+        And "nothing was logged" is not sufficient either, which is what
+        :attr:`AbandonedStraggler.outstanding` is for. A provider that retrieves
+        the exception in a done-callback but drops its reference emits no report
+        and still orphans the task; asserting it is *held* while pending, and let
+        go once it finishes, is the positive form of the retention obligation.
         """
         if self.spawns_no_abandonable_work:
             pytest.skip("implementation spawns nothing that can outlive an assembly")
@@ -255,12 +268,28 @@ class ContextProviderContract:
                     async with asyncio.timeout(_SCENARIO_SECONDS):
                         with pytest.raises(asyncio.CancelledError):
                             await assembling
+
+                    # Retained, not merely re-raised past: the still-running
+                    # source is held by the implementation, so it cannot be
+                    # collected mid-flight (asyncio's own references are weak).
+                    assert straggler.outstanding() == 1, (
+                        "the assembly left a source running without keeping a "
+                        "reference to it, so it can be collected mid-flight"
+                    )
                 finally:
                     straggler.fail()
 
                 async with asyncio.timeout(_SCENARIO_SECONDS):
                     await straggler.finished()
                     await straggler.quiesce()
+
+                # ...and let go once it finished, rather than retained forever:
+                # the same callback that drops the reference is the one that
+                # retrieves the late outcome.
+                assert straggler.outstanding() == 0, (
+                    "the abandoned source finished but the implementation still "
+                    "holds it, so nothing consumed its outcome"
+                )
 
             # Collect anything the provider has now let go of, so an unretrieved
             # exception would be reported before the assertion reads the log.

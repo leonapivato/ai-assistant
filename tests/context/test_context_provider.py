@@ -170,6 +170,7 @@ class TestAssemblingContextProviderContract(ContextProviderContract):
             yield AbandonedStraggler(
                 provider=provider,
                 started=stubborn.started.wait,
+                outstanding=lambda: len(provider_module._abandoned),
                 fail=stubborn.release.set,
                 finished=stubborn.failed.wait,
                 quiesce=quiesce,
