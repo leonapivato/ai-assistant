@@ -1,14 +1,16 @@
 # 60. Cancellation must not orphan a resource a seam acquired
 
-- Status: Accepted
+- Status: Proposed — to be flipped to `Accepted` on ratification, at merge
 - Date: 2026-07-24
 - **This is a contract change.** It adds a standing clause to
   `core/protocols.py` that binds every Protocol, and it extends the shared
   conformance suites and canonical fakes of four of them. Golden rule 5 therefore
-  applies: this ADR is ratified and **merged as its own PR, ahead of any
-  implementation** (ADR-0015). This PR is docs-only; the implementation is a
-  separate lane, and until it lands the clause is a decision on record and not
-  yet text in `protocols.py`.
+  applies: this ADR ships as **its own PR, ratified ahead of any
+  implementation** (ADR-0015 §5). It is reviewed while still `Proposed`, so a
+  finding can still change the decision, and flipped to `Accepted` on merge —
+  `CONTRIBUTING.md`, "Contract ADRs land before their implementation". This PR
+  is docs-only; the implementation is a separate lane, and until it lands the
+  clause is a decision on record and not yet text in `protocols.py`.
 - Refs: ADR-0029 §4 (the one cancellation contract we already have), ADR-0054,
   ADR-0057, ADR-0033, ADR-0042 §2, ADR-0056 (adjacent, and deliberately not
   covered — see "What this does not cover").
@@ -281,6 +283,27 @@ lands; they are deferred on *enforcement*, not exempted from the obligation.
 That distinction is the whole point of stating the rule generally — scoping the
 **rule** to the four suites, rather than only its enforcement, would leave a
 fifth resource-owning seam unbound, which is the hole this ADR exists to close.
+
+The objection to answer is `CONTRIBUTING.md`'s "the triad is what a Protocol
+*change* is measured against too — extend the suite in the same change, so the
+new obligation is enforced rather than assumed", read as: a clause that binds
+thirteen Protocols owes thirteen suite extensions. We do not read it that way,
+for two reasons. First, **no Protocol's surface changes here** — not a method,
+not a signature, not an exchanged type. That rule governs a Protocol whose own
+shape moved, and its remedy (extend *its* suite) has no referent for a clause
+that adds no member to anything. Second, **binding does not imply fully
+enforceable in this codebase, and never has**: ADR-0029 §4's cooperative limit —
+"no seam can prevent" a callable that suppresses its own cancellation — is
+binding contract text that no conformance suite can enforce, because the thing
+it rules out is undetectable from outside. A contract is what is written; a
+suite *samples* it. Insisting the two be coextensive would either shrink every
+contract to what a test can catch, or forbid stating a true general rule at all.
+
+That said, the enforcement gap is **incompleteness, not safety**. `Embedder` is
+a live case (below), and issue #347 is a debt against this contract rather than a
+nice-to-have — this rule is not fully enforced until it closes. Which lane closes
+it is a scoping call for whoever sequences the work, not a judgement this ADR
+makes.
 
 The deferral is a judgement about what a case would currently buy, and it is
 weakest for `Embedder`, so state its position exactly. `FastEmbedEmbedder.embed`
