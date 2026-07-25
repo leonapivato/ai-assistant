@@ -1,6 +1,6 @@
 # 60. Cancellation must not orphan a resource a seam acquired
 
-- Status: Proposed — to be flipped to `Accepted` on ratification, at merge
+- Status: Accepted
 - Date: 2026-07-24
 - **This is a contract change.** It adds a standing clause to
   `core/protocols.py` that binds every Protocol, and it extends the shared
