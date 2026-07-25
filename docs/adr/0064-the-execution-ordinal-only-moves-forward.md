@@ -177,10 +177,19 @@ hot path of the operation this store exists to make cheap.
 Declaring the constraint costs nothing and is not a new invariant: every
 allocation takes `created_seq` from the counter it increments in the same
 `BEGIN IMMEDIATE` transaction, so it is already unique for every file this store
-wrote. Saying so makes ADR-0049 §1's oldest-first ordering a property of the
-*schema* rather than a convention the counter is trusted to keep — the same
-relationship the enforced foreign keys have to `save_plan`'s app-level orphan
-check. Whatever route a second row at one ordinal arrives by, SQLite refuses it.
+wrote. Saying so makes the *uniqueness* ADR-0049 §1's oldest-first ordering rests
+on a property of the schema rather than a convention the counter is trusted to
+keep — the same relationship the enforced foreign keys have to `save_plan`'s
+app-level orphan check. Whatever route a second row at one ordinal arrives by,
+SQLite refuses it.
+
+The claim is about uniqueness and stops there. `ORDER BY created_seq` also needs
+the column to have the integer affinity `_RECORD_SCHEMA` declares, and
+`CREATE TABLE IF NOT EXISTS` accepts a pre-existing `executions` this code did not
+shape — a `created_seq TEXT` sorts `"1", "10", "2"`. That is a hazard of the whole
+record schema rather than of the ordinal (the same table's `version` would break
+the compare-and-swap, and `active` the filter), it pre-dates this ADR, and it is
+tracked as its own issue rather than answered here.
 
 It does not make the mark redundant, and the mark does not make it redundant. The
 index cannot catch #356's original reproduction — `clear()` removes the row the
