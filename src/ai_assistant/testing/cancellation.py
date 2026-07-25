@@ -174,43 +174,6 @@ class ThreadSuspension:
 
 
 @final
-class DetachedWork:
-    """A :class:`SuspendedCall` for work an ``await`` hands off and cannot recall.
-
-    The shape ``asyncio.to_thread`` has, and the one ADR-0060 §5 records for
-    ``FastEmbedEmbedder``: cancelling the awaiting coroutine raises straight away
-    while the work runs on to completion and releases what it holds by itself.
-    Deliberately *not* :class:`LoopSuspension`'s run-to-completion shape — a fake
-    that deferred here would model a stronger seam than the one it stands in for.
-    """
-
-    def __init__(self) -> None:
-        """Create an unreached, unreleased suspension."""
-        self._entered = asyncio.Event()
-        self._released = asyncio.Event()
-
-    async def hold(self) -> None:
-        """Suspend the caller until released, or until it is cancelled.
-
-        Raises:
-            CancelledError: Immediately, if the awaiting task is cancelled — the
-                work is abandoned rather than joined, which is what the caller
-                would see from ``asyncio.to_thread``.
-        """
-        self._entered.set()
-        await self._released.wait()
-
-    async def reached(self) -> None:
-        """Wait until the suspended call has reached the handoff."""
-        async with asyncio.timeout(_WAIT_SECONDS):
-            await self._entered.wait()
-
-    def release(self) -> None:
-        """Let the work finish."""
-        self._released.set()
-
-
-@final
 class LoopSuspension:
     """A :class:`SuspendedCall` for work that suspends on the event loop.
 

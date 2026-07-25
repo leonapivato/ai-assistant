@@ -30,12 +30,6 @@ def _dot(a: Sequence[float], b: Sequence[float]) -> float:
 class TestHashingEmbedderContract(EmbedderContract):
     """Runs HashingEmbedder through the shared Embedder conformance suite."""
 
-    #: ``embed`` hashes tokens and returns; it reaches no ``await``, hands work to
-    #: no thread, and holds nothing — so no ``CancelledError`` can land inside it.
-    #: Declared here rather than left to a silent skip: if this embedder ever
-    #: grows a handoff, the line has to be deleted deliberately.
-    holds_nothing_across_an_await = True
-
     @pytest.fixture
     def embedder(self) -> Embedder:
         return HashingEmbedder()

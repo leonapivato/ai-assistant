@@ -45,13 +45,10 @@ from ai_assistant.models.fastembed_embedder import (
     FastEmbedEmbedder,
     FastEmbedTextModel,
 )
-from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
     from pathlib import Path
-
-    from ai_assistant.testing.cancellation import SuspendedCall
 
 _BGE_SMALL_DIMENSIONS = 384
 
@@ -156,34 +153,6 @@ class TestFastEmbedEmbedderContract(EmbedderContract):
     @pytest.fixture
     def embedder(self) -> Embedder:
         return _stub_embedder()
-
-    @contextlib.asynccontextmanager
-    async def embedder_suspended_mid_embed(self) -> AsyncIterator[tuple[Embedder, SuspendedCall]]:
-        """Park the first batch inside the worker thread ``embed`` hands it to.
-
-        The suspension goes in the loaded model, i.e. below
-        ``asyncio.to_thread`` — the handoff ADR-0060 §5 names as the reason the
-        rule is live for this embedder rather than vacuous. Blocking there is what
-        makes the case deterministic: a stub batch resolves inside a single
-        event-loop turn, so a case that cancelled a freshly started task would
-        find it already done and assert nothing.
-        """
-        suspension = ThreadSuspension()
-        armed = threading.Event()
-        inner = _StubTextModel()
-
-        class _SuspendingModel:
-            def embed(self, documents: list[str]) -> Iterable[Iterable[float]]:
-                if not armed.is_set():  # the first batch only; later ones run free
-                    armed.set()
-                    suspension.hold()
-                return inner.embed(documents)
-
-        embedder = FastEmbedEmbedder(model=_STUB_MODEL, backend=_ModelBackend(_SuspendingModel()))
-        try:
-            yield embedder, suspension
-        finally:
-            suspension.release()
 
 
 def test_conforms_to_protocol() -> None:

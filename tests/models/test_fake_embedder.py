@@ -8,7 +8,6 @@ configurable id, and shared-token similarity — is pinned here.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,10 +16,9 @@ from embedder_contract import EmbedderContract
 from ai_assistant.testing import FakeEmbedder
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import Sequence
 
     from ai_assistant.core.protocols import Embedder
-    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 def _dot(a: Sequence[float], b: Sequence[float]) -> float:
@@ -33,18 +31,6 @@ class TestFakeEmbedderContract(EmbedderContract):
     @pytest.fixture
     def embedder(self) -> Embedder:
         return FakeEmbedder()
-
-    @contextlib.asynccontextmanager
-    async def embedder_suspended_mid_embed(self) -> AsyncIterator[tuple[Embedder, SuspendedCall]]:
-        """The fake models the worker handoff it does not really make (ADR-0060 §3).
-
-        Hashing a string suspends nowhere, so without this the canonical fake
-        could only opt out — and the cancellation case would run solely against
-        the one embedder that hands work to a thread. Nothing to dispose of,
-        hence the bare yield.
-        """
-        embedder = FakeEmbedder()
-        yield embedder, embedder.suspend_next_embed()
 
 
 @pytest.mark.parametrize("dimensions", [0, -1])
