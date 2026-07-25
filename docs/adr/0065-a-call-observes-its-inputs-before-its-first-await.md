@@ -1,0 +1,415 @@
+# 65. A call observes its inputs at one instant, before its first await
+
+- Status: Proposed
+- Date: 2026-07-24
+- **This is a contract change.** It adds a second standing clause to
+  `core/protocols.py`'s module docstring, binding on every Protocol in the file,
+  and it extends the shared conformance suites and canonical fakes of two of
+  them. Golden rule 5 therefore applies: this ADR ships as **its own PR,
+  ratified ahead of any implementation** (ADR-0015 §5). It is reviewed while
+  still `Proposed`, so a finding can still change the decision, and flipped to
+  `Accepted` on merge — `CONTRIBUTING.md`, "Contract ADRs land before their
+  implementation". This PR is docs-only; the implementation is a separate lane
+  (issue #366), and until it lands the clause is a decision on record and not
+  yet text in `protocols.py`.
+- Refs: ADR-0056 (the deferral this answers), ADR-0046 §3, ADR-0045 §4,
+  ADR-0060 (the adjacent rule, deliberately a *different* axis — see §5),
+  ADR-0028 §2.
+- Source: issue #348.
+
+## Context
+
+ADR-0056 fixed a torn write in `SqliteMemoryStore.add` (#286): the method
+embedded a record's content, awaited the embedder, and then serialised the
+record, so a caller that kept a reference to the submitted record and mutated it
+while the coroutine was suspended could make the persisted JSON, the row `id`
+and the persisted vector describe three different versions of one record. The
+fix was to deep-copy on the coroutine's first line and derive everything from
+that one snapshot.
+
+ADR-0056 declined to universalise the rule:
+
+> **We deliberately keep this a `SqliteMemoryStore` behaviour, not a universal
+> `MemoryWriter` obligation.**
+
+and noted the obligation as deferred. Two things about that deferral are worth
+recording before answering it. It pointed at "the shape of issue #314", but #314
+is `MemoryWriter` SUPERSEDE conflict-set parity — a different obligation
+entirely — so the deferral had no tracking issue of its own until #348. And it
+named `MemoryWriter`, while the method it is about, `add`, is on `MemoryStore`;
+`MemoryWriter` carries only `ingest`. The imprecision is small but it is
+symptomatic: the deferral did not know how wide its own subject was.
+
+The question this records: **is "a call observes its inputs at one instant,
+before its first await" an obligation of the contracts, or one implementation's
+private behaviour?**
+
+### What the tree actually looks like
+
+The issue frames the gap as *latent* — `InMemoryMemoryStore` and
+`FakeMemoryStore` both `model_copy(deep=True)` on store and have no await
+between reading a record and storing it, so nothing tears today. That is true,
+and it is true only of `MemoryStore`. Surveying the whole contract file changes
+the answer.
+
+**Eight methods on six Protocols take an argument that is mutable all the way
+down** — checked mechanically against `model_config["frozen"]`, transitively
+through every field:
+
+| seam | mutable argument |
+| --- | --- |
+| `MemoryStore.add` | `MemoryRecord` |
+| `MemoryStore.write_atomic` | `Sequence[MemoryWrite]` — the container, and each frozen `MemoryWrite`'s mutable `record` |
+| `MemoryWriter.ingest` | `MemoryUpdateProposal` |
+| `MemoryPolicy.decide` | `MemoryUpdateProposal`, `Sequence[MemoryRecord]` |
+| `Planner.plan` | `Goal`, `CurrentContext`, `Sequence[MemoryRecord]` |
+| `PlanStore.save_goal` | `Goal` |
+| `ModelProvider.complete` | `Sequence[Message]` |
+| `FeedbackProcessor.process` | `FeedbackEvent` |
+
+Of the rest: `ContextProvider.assemble()` takes no arguments at all, and
+`ToolInvoker`, `ToolRegistry`, `ActionPolicy`, `AuditTrail` and the remaining
+ten `PlanStore` methods exchange deeply-frozen types or plain strings. Two —
+`Embedder.embed(texts: Sequence[str])` and `MemoryStore.search(..., kinds:
+Sequence[MemoryKind] | None)` — take a **mutable container of immutable
+elements**, which is a weaker case worth naming rather than glossing: re-reading
+such an argument after suspending can change *which* values the call sees, but
+no single value can tear underneath it.
+
+`MemoryWrite` deserves its own line, because it is the trap. It is
+`frozen=True`, and it holds a `MemoryRecord` that is not. `frozen` stops field
+*reassignment*, not mutation of what the field points at — a fact `core/types.py`
+already states in its own comments. So "the argument is frozen" is not, on its
+own, evidence that a seam is safe.
+
+**Five implementations have already derived this rule independently, and gave
+four different reasons for it:**
+
+- `SqliteMemoryStore.write_atomic` snapshots every record before its first await
+  so a mid-flight mutation cannot change the id its duplicate-id check validated
+  (ADR-0046 §3).
+- `SqliteMemoryStore.add` snapshots for the torn write (ADR-0056, #286).
+- `SqlitePlanStore.save_goal` snapshots via `_revalidated_goal` on its first
+  line — reasoned as *revalidation*, to stop a mutated-past-its-validators
+  `Goal` poisoning every later decode, with the mid-flight property a
+  side-effect of where the call happened to be placed.
+- `InMemoryMemoryStore.add` and `FakeMemoryStore.add` deep-copy on store,
+  reasoned as post-call isolation.
+- `FastEmbedEmbedder.embed` opens with `documents = list(texts)` — the first
+  statement of the coroutine, before the model load and the worker-thread await
+  — materialising the caller's sequence so nothing downstream reads it again.
+  Reasoned as neither of the above; it is simply what you do before handing a
+  sequence to a thread.
+
+Five derivations, four rationales, no shared statement. That is the ADR-0060
+pattern exactly: the reasoning was right each time and it had nowhere to live.
+It is also why the clause below states a *property* rather than "deep-copy your
+record" — these five discharge it four different ways, and all four are correct.
+
+**And two seams read a mutable argument after suspending, today, unfixed.**
+Both verified against the source, both filed rather than fixed here:
+
+- `MemoryIngestor.ingest` (issue #366) reads `proposal.proposed` before
+  `store.search`, again inside the injected `MemoryPolicy.decide`, and a third
+  time in `_apply`, which is the read that gets written. The intermediate
+  `proposal.model_copy(update={"conflicts": ...})` is **shallow**, so it shares
+  the caller's `proposed` object rather than detaching it. The damage is not a
+  torn record — the store beneath snapshots its own input — it is a semantic
+  desync one level up: `_retirement_set` closes the windows of beliefs that
+  contradict the content searched at the *first* read, while the record
+  installed comes from the *third*. `FakeMemoryWriter.ingest` has the identical
+  shape.
+- `ModelBackedPlanner._build_plan` reads `goal.id` into the plan's `goal_id`
+  *after* `await self._model.complete(...)` (issue #367), so a `Goal` mutated
+  during the model call yields a frozen, auditable `ActionPlan` naming a goal
+  the model never saw. `SqlitePlanStore.save_goal`'s `return goal.id` is the
+  same defect in miniature — the row is written from the snapshot, only the
+  returned id escapes it, which is precisely the read ADR-0056 moved when it
+  changed `add`'s last line to `return snapshot.id`.
+
+No in-tree caller exploits any of this. `orchestration/loop.py:287` ingests
+proposals built fresh by `FeedbackProcessor.process` and keeps no aliased
+reference. That is a property of today's callers, not of the contract.
+
+### The suite already appears to cover this, and does not
+
+`tests/memory/memory_store_contract.py` has carried
+`test_stored_records_are_isolated_from_caller_mutation` since ADR-0045's commit
+`7c82a0c` — an ancestor of ADR-0056's fix `d9534d4`. It stores a record, mutates
+the caller's own object, and asserts the stored copy is unaffected.
+
+It mutates **after `add` returns**. The pre-ADR-0056 `add` serialised the record
+into SQLite before returning, so nothing done afterwards could reach the
+committed row: the torn code passed this case, on every backend, for the whole
+time the tear was live. A case named for caller-mutation isolation certified
+exactly the bug it is named for.
+
+This is the strongest single fact in the file. It is ADR-0060 §3's warning about
+a propagation-only cancellation case, in the wild and already shipped: the
+weakest reading of "isolate the stored record from the caller" is a post-call
+assertion, and a post-call assertion cannot distinguish a store that snapshots
+from one that tears.
+
+### This is not ADR-0060's axis
+
+`docs/review/architecture-validation-2026-07-24.md` (claim C1) groups ADR-0056's
+torn write with ADR-0054's and ADR-0057's cancellation bugs as one class. **That
+grouping is wrong**, and ADR-0060 §5 already said so; this ADR states the
+distinction rather than inheriting it.
+
+ADR-0060 is about *cancellation orphaning a resource the implementation
+acquired*. ADR-0056's tear involves no cancellation anywhere: nothing is
+cancelled, nothing is orphaned, and the object at risk is the **caller's**, not
+the implementation's. The two rules even have different vacuity sets, which is
+the cleanest proof they are different rules: `AuditTrail` is one of the four
+seams ADR-0060 enforces and is completely vacuous here (its inputs are deeply
+frozen), while `Planner` is one of the four ADR-0060 §2 names as holding nothing
+— and is a live instance of *this* rule (issue #367).
+
+What the two genuinely share is only the root cause one level up: **what may
+happen at an `await` was never written into any contract.** ADR-0060 wrote down
+one half of that. This ADR writes down the other.
+
+## Decision
+
+### 1. Yes — it is a contract obligation, stated once at module level
+
+We will state a second standing obligation in `core/protocols.py`'s module
+docstring, alongside ADR-0060's cancellation clause, binding on every Protocol
+in the file:
+
+> **A call observes its inputs at one instant, before its first await.**
+>
+> Arguments belong to the caller, several types crossing these seams are mutable,
+> and a `Sequence` argument is a container the caller may still be holding. So
+> everything one call derives from one argument — what it stores, what it
+> computes, what it returns — comes from **one** observation of that argument. A
+> caller that mutates what it passed while the call is suspended may make the
+> call act on the wrong version; it must never make one result describe two
+> different versions.
+>
+> Three ways to discharge this, and the choice is the implementation's: do not
+> suspend; do not read an argument again after suspending; or take a snapshot on
+> the coroutine's first executed line — before the first `await` — and read only
+> the snapshot thereafter, the returned value included. A snapshot must be deep
+> enough to cover everything the call goes on to read. A frozen argument is not
+> a discharge on its own: `MemoryWrite` is frozen and holds a mutable
+> `MemoryRecord`.
+>
+> The boundary is the coroutine's **first executed line**, not the call
+> expression. Calling an `async def` only builds a coroutine, so a mutation made
+> after construction and before the first await is captured whole. That is not a
+> tear — the caller gets the state as of the moment the work began — and no
+> invocation-time capture is claimed (ADR-0056).
+>
+> **The caller's side.** A caller may not assume a mid-flight mutation was
+> ignored, nor that it was honoured. What it is owed is that the outcome is
+> *coherent*, not that it reflects any chosen version. Mutating an argument
+> across a call still in flight remains a caller error; this rule bounds the
+> damage rather than blessing the practice.
+>
+> Silent where a method does not suspend, or where its arguments are immutable
+> all the way down — which is most of this file.
+
+The rule states a **property, not a mechanism**, for the reason ADR-0060 gives
+for keeping `_run_to_completion` out of `core`: "the contract states the
+obligation; the mechanism stays the implementation's." `model_copy(deep=True)`
+is one discharge. Rendering everything into a request before the first await, as
+`ModelProvider.complete`'s implementations do, is another and costs nothing. A
+future store on a native async driver may need neither.
+
+**Read-once, not copy-always** is the load-bearing choice. An unconditional
+"snapshot your input" clause would force `InMemoryMemoryStore.add` and every
+non-suspending method to deep-copy for nothing, and a rule that mostly says "do
+useless work here" is a rule readers learn to skip — ADR-0060 §2's argument,
+applied to cost rather than to verbosity.
+
+### 2. Why module level, and not on `MemoryStore`/`MemoryWriter`
+
+ADR-0060 answered this structural question once, for a different rule, and its
+reasoning — "divergent local paraphrases of one rule are the failure mode" —
+transfers. But it should not be adopted by reflex, so here is the argument on
+this rule's own facts.
+
+**The scope the issue asks about is factually too narrow.** #348 asks whether
+this is a `MemoryStore`/`MemoryWriter` obligation. The survey in Context says
+no: six Protocols take a mutable argument, and the two *unfixed* instances are
+in `MemoryWriter` **and `Planner`**. A clause written on `MemoryStore` and
+`MemoryWriter` would leave `ModelBackedPlanner`'s post-await `goal.id` read
+outside the contract, and it would leave it outside on the strength of a scope
+decision made before anyone looked.
+
+**Enumeration has already failed here once.** Three of the four existing
+snapshots were reasoned locally and reached three different justifications; the
+fourth seam, `save_goal`, got the snapshot right and the return value wrong,
+because "revalidate before persisting" does not imply "and read nothing else
+afterwards". Per-seam statements are per-seam chances to state a slightly
+different rule — which is the paraphrase failure mode already in progress, not a
+hypothetical one.
+
+**The two rules' vacuity sets differ**, so neither can be scoped from the
+other's list. ADR-0060 enforces on `MemoryStore`, `AuditTrail`, `ContextProvider`
+and `PlanStore`; of those, `AuditTrail` is wholly vacuous here (its arguments
+are deeply frozen) and `ContextProvider` more so still — `assemble()` takes no
+arguments at all. `Planner` and `MemoryPolicy` are vacuous there and live here.
+A rule stated at module level binds seams nobody enumerated; a rule stated
+per-Protocol binds the seams whoever wrote it happened to think of.
+
+**And the shape has a precedent that fits.** The module docstring will carry two
+clauses about what may happen at an `await` — one about a resource the
+implementation acquires, one about an object the caller owns. They belong
+together, and stating the second in a different *form* from the first would
+imply a distinction that does not exist.
+
+Following ADR-0060 §2, the Protocols whose suites gain cases (§3) carry a
+**one-sentence pointer** to the module clause, not a restatement. The pointer
+must point and not re-say.
+
+### 3. Enforcement is scoped to `MemoryStore` and `MemoryWriter`
+
+The shared conformance suites and canonical fakes the implementation lane owes,
+stated exactly so the follow-up is bounded:
+
+| suite | fake | production implementations it must hold for |
+| --- | --- | --- |
+| `tests/memory/memory_store_contract.py` | `FakeMemoryStore` (`testing/memory.py`) | `SqliteMemoryStore`, `InMemoryMemoryStore` |
+| `tests/memory/memory_writer_contract.py` | `FakeMemoryWriter` (`testing/writer.py`) | `MemoryIngestor` |
+
+Those two because they are where the rule has been broken: `MemoryStore` is the
+seam ADR-0056 fixed and the one whose suite currently gives false confidence,
+and `MemoryWriter` is the one live, unfixed instance inside `memory` (#366). The
+lane therefore also **fixes `MemoryIngestor.ingest`** — a suite case without the
+fix is a red gate, so the fix and the case are one change.
+
+**Each case must establish mid-flight observation, not post-call isolation.**
+This is not a note about test style; it is the whole content of the enforcement,
+for the reason §"The suite already appears to cover this" documents: the existing
+post-call case passed on the torn code. The minimum each suite must establish:
+
+- For `MemoryStore`: with a collaborator the suite controls suspending the write
+  mid-flight — the injected `Embedder` is the natural lever, and `FakeEmbedder`
+  already exists — mutate the caller-held record from inside that suspension,
+  then assert every part of what the store committed agrees with **one** version
+  of the record: the returned id names the row that was written, and the stored
+  content is the content the vector was computed from. A store with no await
+  between reading and storing satisfies this trivially, which is correct — it has
+  no window to tear in.
+- For `MemoryWriter`: with the injected `MemoryPolicy` suspending inside
+  `decide`, mutate the caller-held `proposal.proposed`, then assert the ruling,
+  the conflict set it was derived from, and the record written all describe one
+  version of the proposal. A writer that retires beliefs contradicting content it
+  did not store fails this; today's `MemoryIngestor` does.
+
+The existing post-call case stays. It tests a real and different property —
+that the store does not alias the caller's object into its own state — and
+retiring it would lose that.
+
+Test *design* beyond this minimum is the implementation lane's: how the
+suspension is coordinated, what the fakes stand in for.
+
+### 4. What the implementation lane does **not** do
+
+`Planner` and `PlanStore` are **bound and unenforced**, not exempt. The clause is
+at module level, so it binds them the day it lands; §3 defers their conformance
+cases and their two verified fixes to issue #367, a `planning` lane. This is the
+same distinction ADR-0060 §5 draws for `Embedder` and `ModelProvider`, and for
+the same reason: one subsystem per change, and `planning` is not `memory`.
+
+`MemoryPolicy`, `ModelProvider`, `FeedbackProcessor` and `Embedder` are bound
+and already satisfied, so they gain no cases and no issue — but for three
+different reasons, which is worth separating rather than lumping.
+`DefaultMemoryPolicy.decide` and `LearningLoop.process` contain no `await` at
+all, so the rule is vacuous for them. `PydanticAIProvider.complete` converts the
+conversation with `_to_model_messages(messages)` before its first await and
+never reads `messages` again, and `FastEmbedEmbedder.embed` materialises
+`list(texts)` on its first line — both *discharge* the rule rather than escape
+it. `MemoryPolicy` is the one to watch: ADR-0028 makes it an injected seam, and
+a model-backed policy would give it the widest suspension window in the write
+path overnight — while conforming, since nothing about it would have to change
+except that the clause would start to bite.
+
+The objection ADR-0060 §5 answers applies here unchanged and is not re-argued:
+`CONTRIBUTING.md`'s "extend the suite in the same change" governs a Protocol
+whose own shape moved, and no Protocol's surface moves here — not a method, not
+a signature, not an exchanged type. A contract is what is written; a suite
+samples it.
+
+### 5. What this does not cover
+
+**The reverse direction: a method mutating its caller's argument.** Nothing in
+the tree does — every transformation goes through `model_copy` — and forbidding
+it is a real obligation, but it is a *different* one and #348 does not ask it.
+Not decided here.
+
+**What a method hands *back*.** `MemoryStore.get` returns a deep copy so a
+caller mutating the result cannot reach stored state; that is established
+behaviour, already covered by the second half of the existing isolation case,
+and this clause does not restate it.
+
+**Cancellation.** ADR-0060, and a different axis (§"This is not ADR-0060's
+axis").
+
+### Rejected
+
+- **No — leave it a `SqliteMemoryStore` behaviour.** The strongest form of this
+  is: the gap is latent, and contract text nothing enforces is decoration. It
+  fails on the facts. The gap is latent only in `MemoryStore`; `MemoryWriter`
+  and `Planner` have live instances (#366, #367). And the *enforcement* half of
+  the objection is backwards here — there is already a conformance case that
+  looks like it enforces this and does not, so the status quo is not "unenforced"
+  but "falsely certified", which is the one thing `core/protocols.py` exists to
+  prevent.
+- **Freeze the types instead** — make `MemoryRecord`, `MemoryUpdateProposal`,
+  `Goal`, `CurrentContext` and `Message` `frozen=True`, so there is no mutation
+  to observe. Rejected on sufficiency before size: `frozen` stops field
+  reassignment, not mutation of what a field points at, so it would have to be
+  deep and total to close anything — and `MemoryWrite`, frozen today around a
+  mutable `MemoryRecord`, is the counter-example already in the file. It also
+  does nothing for the `Sequence` arguments, where the container itself is the
+  caller's and mutable whatever its elements are. A rule about *when* an input is
+  observed is orthogonal to whether it can change, and would still be needed.
+  Deep-freezing `core`'s mutable models may well be worth doing; it is a large
+  `core/types.py` change with its own blast radius and needs its own ADR, not a
+  paragraph in this one.
+- **A per-Protocol clause on `MemoryStore` and `MemoryWriter`.** §2 — the survey
+  refutes the scope, and the four existing local derivations are the paraphrase
+  failure mode already happening.
+- **A shared snapshot helper in `core`.** Rejected for exactly ADR-0060's
+  reason: it would make every subsystem depend on one *mechanism* instead of on
+  the *obligation*, and there are at least three valid mechanisms (§1).
+
+## Consequences
+
+- **A new backend has something to conform to, and a suite that fails if it does
+  not.** The #286 tear becomes something the gate catches on a second awaiting
+  writer rather than something that writer's author rediscovers — which is what
+  ADR-0056 said would be needed "if a second awaiting writer appears". One has:
+  `MemoryIngestor` is not a store, but it is a writer that reads its input across
+  two awaits.
+- **The existing `MemoryStore` isolation case is revealed as partial, and is
+  kept.** It tests non-aliasing, which is real. What changes is that it is no
+  longer the only caller-mutation case, so it can no longer be mistaken for
+  coverage of the mid-flight window.
+- **`core/protocols.py`'s module docstring will carry two standing clauses.**
+  ADR-0060's cancellation rule is being implemented concurrently and is not yet
+  merged; this ADR does not assume its exact wording. The implementation lane
+  should place the two clauses together, in the order they were ratified, and
+  match whatever form ADR-0060's landed in rather than reformatting it. If
+  ADR-0060's implementation has not merged when this one starts, the clause lands
+  on its own and the second is inserted alongside it later — the two are
+  independent text.
+- **Four ADRs are retrospectively grounded and none of them change.** ADR-0046
+  §3, ADR-0056 and ADR-0045 §4 stand exactly as ratified; their snapshots stop
+  being three local judgement calls and become one contract honoured three times.
+- **Two `planning` defects are now contract violations rather than curiosities**
+  (#367). They were reachable before this ADR and nothing about them changes
+  today; what changes is that fixing them is discharging an obligation rather
+  than a matter of taste.
+- **A cost, stated plainly.** Two conformance suites gain a case that needs a
+  collaborator to suspend on demand, which is more machinery than a post-call
+  assertion. That machinery is the enforcement; the cheap version of this case is
+  the one that already shipped and certified the bug.
+- **Revisit** if `core`'s exchanged types are deep-frozen — the clause would
+  survive for the `Sequence` arguments but its scope would shrink sharply — or if
+  a seam appears whose argument is genuinely too large to snapshot, where
+  "read it once" and "copy it" stop being interchangeable in practice.
