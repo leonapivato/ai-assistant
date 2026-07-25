@@ -9,8 +9,10 @@ plan reproducible byte-for-byte.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from collections import deque
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -22,6 +24,7 @@ from ai_assistant.core.types import (
     CurrentContext,
     Goal,
     MemorySource,
+    Message,
     PreferenceMemory,
     Provenance,
     Role,
@@ -31,7 +34,7 @@ from ai_assistant.planning import ModelBackedPlanner
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import Planner
 
@@ -308,3 +311,88 @@ async def test_clock_misread_surfaces_as_planning_error() -> None:
 
     with pytest.raises(PlanningError):
         await planner.plan(_goal(), context=_context())
+
+
+# --- one observation of the caller's goal (ADR-0065) -------------------------
+
+
+class _GatedModel:
+    """A ``ModelProvider`` that parks the first call until the test releases it.
+
+    Structurally implements
+    :class:`~ai_assistant.core.protocols.ModelProvider`. ``FakeModelProvider``
+    cannot express this: its ``complete`` never suspends, so a caller has no
+    moment at which ``plan`` is genuinely parked. Here the first ``complete``
+    announces that ``plan`` has reached its first — and widest — suspension
+    point, then waits, which hands control back to the test's own task while
+    ``plan`` is still in flight. Later calls (the bounded repair round) answer
+    immediately, so only one window has to be coordinated.
+    """
+
+    def __init__(self, *replies: str) -> None:
+        self._replies = deque(replies)
+        self.reached = asyncio.Event()
+        self.resume = asyncio.Event()
+        self.calls: list[tuple[Message, ...]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,  # part of the ModelProvider signature; unused here
+    ) -> Message:
+        """Record the conversation, park the first call, then reply."""
+        self.calls.append(tuple(m.model_copy(deep=True) for m in messages))
+        if not self.reached.is_set():
+            self.reached.set()
+            await self.resume.wait()
+        return Message(role=Role.ASSISTANT, content=self._replies.popleft())
+
+
+async def test_the_plan_names_the_goal_the_model_was_shown() -> None:
+    """A goal mutated *during* the model call cannot reach the plan (ADR-0065).
+
+    The mutation lands while ``plan`` is parked inside ``complete`` — not before
+    the call and not after it returned, which is the only window that
+    distinguishes one observation from two. ``ActionPlan`` is frozen, so a
+    ``goal_id`` taken from a second observation would be permanently wrong in an
+    auditable record (ADR-0014 §2).
+    """
+    model = _GatedModel(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    goal = _goal("g1")
+
+    task = asyncio.ensure_future(planner.plan(goal, context=_context()))
+    await model.reached.wait()
+    goal.id = "g-tampered"
+    goal.statement = "relocate to Berlin"
+    model.resume.set()
+    plan = await task
+
+    assert plan.goal_id == "g1"
+    # ...and that id agrees with the single observation the prompt was rendered
+    # from, which is the property: one result, one version of the input.
+    prompt = model.calls[0][1].content
+    assert "relocate to Lisbon" in prompt
+    assert "Berlin" not in prompt
+
+
+async def test_the_exhaustion_message_names_the_goal_the_call_began_with() -> None:
+    """The give-up message is derived from the same one observation (ADR-0065).
+
+    It is read after every model call, so it is the second post-await read of the
+    caller's goal in this method, and it names a goal in an error a human acts on.
+    """
+    model = _GatedModel("garbage one", "garbage two")
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    goal = _goal("g1")
+
+    task = asyncio.ensure_future(planner.plan(goal, context=_context()))
+    await model.reached.wait()
+    goal.id = "g-tampered"
+    model.resume.set()
+
+    with pytest.raises(PlanningError) as caught:
+        await task
+    assert "g1" in str(caught.value)
+    assert "g-tampered" not in str(caught.value)
