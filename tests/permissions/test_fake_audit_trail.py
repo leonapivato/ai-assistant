@@ -17,16 +17,23 @@ from permission_builders import decision, ruling
 from ai_assistant.core.errors import AuditError, DuplicateDecisionError
 from ai_assistant.core.types import PermissionOutcome
 from ai_assistant.testing import FakeAuditTrail
+from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import AuditTrail
-    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 class TestFakeAuditTrailContract(AuditTrailContract):
     """Runs FakeAuditTrail through the shared AuditTrail conformance suite."""
+
+    # ``FakeAuditTrail.clear`` empties a dict without entering the modelled
+    # resource its ``record`` uses, so the cancellation case has nothing to
+    # suspend on it — unlike the ``sqlite3`` trail, whose ``clear`` takes the
+    # connection lock and is exercised. Tracked in #396 (route the fake's ``clear``
+    # through the resource, as ``FakePlanStore``/``FakeMemoryStore`` already do).
+    operations_without_shared_resource = frozenset({"clear"})
 
     @pytest.fixture
     def trail(self) -> AuditTrail:
@@ -35,16 +42,24 @@ class TestFakeAuditTrailContract(AuditTrailContract):
     @contextlib.asynccontextmanager
     async def trail_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[AuditTrail, SuspendedCall, ResourceLog]]:
+    ) -> AsyncIterator[SuspendedMidWrite[AuditTrail]]:
         """The fake models the resource it does not really own (ADR-0060 §3).
 
         A dict needs no serialising, so without this the canonical fake could
         only opt out — and the cancellation case would run solely against the
-        ``sqlite3`` trail that already holds the invariant. Nothing to dispose of,
-        hence the bare yield.
+        ``sqlite3`` trail that already holds the invariant. Every write passes
+        through the *one* modelled resource, so ``arm`` ignores which operation it
+        is handed: the parametrised cases (#370) exercise the same ``held()`` path
+        on the fake and earn their keep on the ``sqlite3`` trail, where each
+        operation is a separate lock site. Nothing to dispose of, hence the bare
+        yield.
         """
         trail = FakeAuditTrail()
-        yield trail, trail.suspend_next_write(), trail.resource_log
+        yield SuspendedMidWrite(
+            store=trail,
+            log=trail.resource_log,
+            arm=lambda _operation: trail.suspend_next_write(),
+        )
 
 
 async def test_a_refused_write_leaves_the_trail_untouched() -> None:

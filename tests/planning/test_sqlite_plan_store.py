@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import StepStatus, StepTransition
 from ai_assistant.planning import SqlitePlanStore
-from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
+from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -75,37 +75,45 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[PlanStore, SuspendedCall, ResourceLog]]:
-        """Park the first ``save_goal``'s worker thread inside the connection's turn.
+    ) -> AsyncIterator[SuspendedMidWrite[PlanStore]]:
+        """Park a named write's worker thread inside the connection's turn.
 
-        The suspension goes in ``_save_goal_sync``, i.e. inside ``async with
-        self._lock`` and inside the ``to_thread`` the event loop cannot interrupt
-        — which is exactly where ADR-0054's bug lived. Blocking there is what
-        makes the case deterministic: left to run, a commit finishes in
-        microseconds and whether the second caller arrives while the worker still
-        holds the connection would be a race, so the invariant would be exercised
-        only sometimes.
+        ``arm(operation)`` wraps that operation's ``_<operation>_sync`` — inside
+        ``async with self._lock`` and inside the ``to_thread`` the event loop
+        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
+        first worker to reach it blocks and every later one runs free. Each
+        distinct lock site is a separate place the bug can reappear (#370), and
+        the sync-method suffix matches the operation name (``save_goal`` →
+        ``_save_goal_sync``, ``commit_transition`` → ``_commit_transition_sync``,
+        and so on). Blocking there is what makes the case deterministic: left to
+        run, a commit finishes in microseconds and whether the second caller
+        arrives while the worker still holds the connection would be a race, so
+        the invariant would be exercised only sometimes.
 
         Its own store on its own connection, not the ``store`` fixture's: the
         suspended worker is parked for the length of the case, and sharing would
         make an unrelated failure hang instead of fail.
         """
         realised = SqlitePlanStore(path=":memory:", now=_fixed_now)
-        suspension = ThreadSuspension()
         log = ResourceLog()
-        original_save = realised._save_goal_sync
-        armed = threading.Event()
+        suspension = ThreadSuspension()
 
-        def blocking_save(goal: Goal) -> None:
-            with log.inside():  # the span the connection is genuinely in use for
-                if not armed.is_set():  # the first worker only; later ones run free
-                    armed.set()
-                    suspension.hold()
-                original_save(goal)
+        def arm(operation: str) -> SuspendedCall:
+            original = getattr(realised, f"_{operation}_sync")
+            armed = threading.Event()
 
-        realised._save_goal_sync = blocking_save  # type: ignore[method-assign]
+            def blocking(*args: object) -> object:
+                with log.inside():  # the span the connection is genuinely in use for
+                    if not armed.is_set():  # the first worker only; later ones run free
+                        armed.set()
+                        suspension.hold()
+                    return original(*args)
+
+            setattr(realised, f"_{operation}_sync", blocking)
+            return suspension
+
         try:
-            yield realised, suspension, log
+            yield SuspendedMidWrite(store=realised, log=log, arm=arm)
         finally:
             suspension.release()
             # An implementation that released the connection early leaves a

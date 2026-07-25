@@ -27,7 +27,7 @@ from permission_builders import AT, action, decision, ruling, tool
 from ai_assistant.core.errors import AuditError, DuplicateDecisionError
 from ai_assistant.core.types import DataTier, PermissionOutcome
 from ai_assistant.permissions import SqliteAuditTrail
-from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
+from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -58,12 +58,16 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
     @contextlib.asynccontextmanager
     async def trail_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[AuditTrail, SuspendedCall, ResourceLog]]:
-        """Park the first ``record``'s worker thread inside the connection's turn.
+    ) -> AsyncIterator[SuspendedMidWrite[AuditTrail]]:
+        """Park a named write's worker thread inside the connection's turn.
 
-        The suspension goes in ``_record_sync``, i.e. inside ``async with
-        self._lock`` and inside the ``to_thread`` the event loop cannot interrupt
-        — which is exactly where ADR-0054's bug lived. Blocking there is what
+        ``arm(operation)`` wraps that operation's ``_<operation>_sync`` — inside
+        ``async with self._lock`` and inside the ``to_thread`` the event loop
+        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
+        first worker to reach it blocks and every later one runs free. Each
+        distinct lock site is a separate place the bug can reappear (#370), and
+        the sync-method suffix matches the operation name (``record`` →
+        ``_record_sync``, ``clear`` → ``_clear_sync``). Blocking there is what
         makes the case deterministic: left to run, a commit finishes in
         microseconds and whether the second caller arrives while the worker still
         holds the connection would be a race, so the invariant would be exercised
@@ -74,21 +78,25 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
         make an unrelated failure hang instead of fail.
         """
         trail = SqliteAuditTrail(path=":memory:")
-        suspension = ThreadSuspension()
         log = ResourceLog()
-        original_record = trail._record_sync
-        armed = threading.Event()
+        suspension = ThreadSuspension()
 
-        def blocking_record(snapshot: PermissionDecision) -> None:
-            with log.inside():  # the span the connection is genuinely in use for
-                if not armed.is_set():  # the first worker only; later ones run free
-                    armed.set()
-                    suspension.hold()
-                original_record(snapshot)
+        def arm(operation: str) -> SuspendedCall:
+            original = getattr(trail, f"_{operation}_sync")
+            armed = threading.Event()
 
-        trail._record_sync = blocking_record  # type: ignore[method-assign]
+            def blocking(*args: object) -> object:
+                with log.inside():  # the span the connection is genuinely in use for
+                    if not armed.is_set():  # the first worker only; later ones run free
+                        armed.set()
+                        suspension.hold()
+                    return original(*args)
+
+            setattr(trail, f"_{operation}_sync", blocking)
+            return suspension
+
         try:
-            yield trail, suspension, log
+            yield SuspendedMidWrite(store=trail, log=log, arm=arm)
         finally:
             suspension.release()
             # An implementation that released the connection early leaves a

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
 from pydantic import ValidationError
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
-    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
+    from ai_assistant.testing.cancellation import SuspendedCall, SuspendedMidWrite
 
     StoreFactory = Callable[[Callable[[], datetime]], MemoryStore]
 from ai_assistant.core.types import (
@@ -182,6 +182,196 @@ async def _assert_indexed_from_the_content_it_carries(
         f"to {rejected_content!r} ({rejected} > {carried}) — it was indexed from the "
         f"version of the record it did not store. {_TORN_INPUT}"
     )
+
+
+#: What a torn atomic batch looks like after the fact: some of its rows landed and
+#: some did not, which ``write_atomic`` forbids however its caller was cancelled.
+_TORN_ATOMIC = "the atomic batch committed some rows and not others"
+
+
+class _CancellationOp(Protocol):
+    """One locked ``MemoryStore`` write the ADR-0060 case drives (#370).
+
+    Each :attr:`name` selects a distinct ``async with self._lock:
+    _run_to_completion(...)`` site; the suite runs the same
+    cancelled-first / concurrent-second scenario against every one, so a
+    regression reintroduced at any single site is caught rather than only at
+    ``add``. :meth:`first` and :meth:`second` are two *independent* subjects, so
+    the concurrent second succeeds whatever the cancelled first's indeterminate
+    effect turns out to be.
+    """
+
+    name: str
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """Establish anything the operation needs before it can run."""
+        ...
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """The call the case suspends mid-write and then cancels."""
+        ...
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        ...
+
+    async def verify(self, store: MemoryStore) -> None:
+        """Assert the resource survived: the second write is whole and reads work."""
+        ...
+
+
+class _AddOp:
+    """The single-row ``add`` path — ADR-0060's original subject."""
+
+    name = "add"
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """No preconditions."""
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Add the record whose write is cancelled."""
+        return store.add(_semantic("cancel-1", "alpha"))
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Add an independent record concurrently."""
+        return store.add(_semantic("cancel-2", "bravo"))
+
+    async def verify(self, store: MemoryStore) -> None:
+        """The second record is durable; the first is absent-or-whole; reads work."""
+        assert await store.get("cancel-2") is not None
+        cancelled = await store.get("cancel-1")
+        assert cancelled is None or cancelled.content == "alpha"
+        assert {record.id for record in await store.export()} >= {"cancel-2"}
+
+
+class _WriteAtomicOp:
+    """The multi-row ``write_atomic`` transaction (#370, priority 1).
+
+    Two rows per call, so a torn intermediate state is reachable that ``add``'s
+    single row cannot produce: the case pins that the concurrent batch commits
+    whole and the cancelled batch is all-or-nothing.
+    """
+
+    name = "write_atomic"
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """No preconditions."""
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Commit a two-row batch whose write is cancelled."""
+        return store.write_atomic(
+            [
+                MemoryWrite(record=_semantic("wa-1a", "alpha one")),
+                MemoryWrite(record=_semantic("wa-1b", "alpha two")),
+            ]
+        )
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Commit an independent two-row batch concurrently."""
+        return store.write_atomic(
+            [
+                MemoryWrite(record=_semantic("wa-2a", "bravo one")),
+                MemoryWrite(record=_semantic("wa-2b", "bravo two")),
+            ]
+        )
+
+    async def verify(self, store: MemoryStore) -> None:
+        """The second batch is whole and correct; the cancelled batch is all-or-nothing.
+
+        Each present row is compared to the record it was *given*, not merely by
+        id: a torn write that kept the id but committed the wrong row — the
+        ADR-0056 shape — would slip past an id-only check.
+        """
+        by_id = {record.id: record for record in await store.export()}
+        assert by_id.get("wa-2a") == _semantic("wa-2a", "bravo one")
+        assert by_id.get("wa-2b") == _semantic("wa-2b", "bravo two")
+        cancelled = {"wa-1a", "wa-1b"} & by_id.keys()
+        assert cancelled in ({"wa-1a", "wa-1b"}, set()), _TORN_ATOMIC
+        for record_id, content in (("wa-1a", "alpha one"), ("wa-1b", "alpha two")):
+            if record_id in by_id:
+                assert by_id[record_id] == _semantic(record_id, content), _TORN_ATOMIC
+
+
+class _DeleteOp:
+    """The ``delete`` path, on two independent pre-seeded records."""
+
+    name = "delete"
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """Seed the two records the calls delete."""
+        await store.add(_semantic("del-a", "alpha"))
+        await store.add(_semantic("del-b", "bravo"))
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Delete record A — the call that is cancelled."""
+        return store.delete("del-a")
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Delete record B concurrently."""
+        return store.delete("del-b")
+
+    async def verify(self, store: MemoryStore) -> None:
+        """Record B is gone; the store still serves reads."""
+        assert await store.get("del-b") is None
+
+
+class _ClearOp:
+    """The ``clear`` path, with a seeded record so it does real connection work."""
+
+    name = "clear"
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """A record for ``clear`` to remove."""
+        await store.add(_semantic("seed", "alpha"))
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Clear the store — the call that is cancelled."""
+        return store.clear()
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Clear again concurrently."""
+        return store.clear()
+
+    async def verify(self, store: MemoryStore) -> None:
+        """The store is empty and still serves reads."""
+        assert not await store.export()
+
+
+class _PurgeExpiredOp:
+    """The ``purge_expired`` sweep, its own locked write distinct from ``clear``."""
+
+    name = "purge_expired"
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """Seed an expired record for the sweep to remove, and a live one to keep."""
+        await store.add(_semantic("expired", "alpha", expires_at=_LONG_AGO))
+        await store.add(_semantic("live", "bravo"))
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Sweep expired records — the call that is cancelled."""
+        return store.purge_expired()
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Sweep again concurrently."""
+        return store.purge_expired()
+
+    async def verify(self, store: MemoryStore) -> None:
+        """The live record survives; the store still serves reads."""
+        assert await store.get("live") is not None
+
+
+#: Every locked ``MemoryStore`` *write* ADR-0060's case is run against (#370):
+#: each is a distinct ``async with self._lock`` site with its own
+#: ``_run_to_completion``. The locked *read* paths (``get``, ``search``,
+#: ``export``) are the same invariant on a different axis and are tracked
+#: separately (#397), out of this write-focused lane.
+_CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
+    _AddOp,
+    _WriteAtomicOp,
+    _DeleteOp,
+    _ClearOp,
+    _PurgeExpiredOp,
+)
 
 
 class MemoryStoreContract:
@@ -650,8 +840,8 @@ class MemoryStoreContract:
 
     def store_suspended_mid_write(
         self,
-    ) -> AbstractAsyncContextManager[tuple[MemoryStore, SuspendedCall, ResourceLog]]:
-        """Supply a store whose next ``add`` stops *inside* the resource it took.
+    ) -> AbstractAsyncContextManager[SuspendedMidWrite[MemoryStore]]:
+        """Supply a store whose named locked write can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
         cancels the call while it is suspended and then watches what a second
@@ -660,10 +850,15 @@ class MemoryStoreContract:
         and released the connection anyway, so a case that asserts only
         propagation certifies the bug (ADR-0060 §3).
 
-        How the call is made to stop there is implementation-specific — a worker
-        thread parked mid-SQL, a fake's modelled resource — which is why this is a
-        hook and not something the suite can build. Returned as a context manager
-        so the subject is disposed of the way that implementation needs.
+        The returned :class:`SuspendedMidWrite` carries the store, its
+        :class:`ResourceLog`, and an ``arm(operation)`` lever the case calls —
+        *after* its preconditions — to hold the next entry into that operation
+        (#370). Every distinct ``async with self._lock`` site is a separate place
+        the same regression can reappear, so the case is run against each; ``arm``
+        is where the implementation says how it stops a given one — a worker
+        thread parked mid-SQL, a fake's single modelled resource. Returned as a
+        context manager so the subject is disposed of the way that implementation
+        needs.
 
         The :class:`ResourceLog` records each call's time *inside* the resource,
         and the case reads it once the scenario is over. It is not redundant with
@@ -675,32 +870,46 @@ class MemoryStoreContract:
         raise NotImplementedError
 
     @pytest.mark.optional_obligation
-    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(self) -> None:
-        """``core.protocols``' cancellation clause, on the write path (ADR-0060).
+    @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
+    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(
+        self, make_op: Callable[[], _CancellationOp]
+    ) -> None:
+        """``core.protocols``' cancellation clause, on every locked write (ADR-0060, #370).
 
         A cancelled write must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a
         test of the invariant rather than of propagation: a single cancelled call
-        in isolation looks identical either way.
+        in isolation looks identical either way. Run once per locked operation, so
+        a regression reintroduced at any one lock site — not just ``add`` — is
+        caught.
 
-        The first write's *effect* is deliberately not asserted. The clause's
-        third paragraph makes it indeterminate to the caller — under ADR-0054's
-        shield a cancelled write that reached ``COMMIT`` is durably written — so
-        the suite pins what a caller may actually rely on: the record is absent or
-        whole, never torn, and the store still serves reads.
+        The first write's *effect* is deliberately not asserted here (the op's
+        ``verify`` pins only what a caller may rely on). The clause's third
+        paragraph makes it indeterminate to the caller — under ADR-0054's shield a
+        cancelled write that reached ``COMMIT`` is durably written — so the two
+        calls are independent subjects and what is pinned is that the second is
+        whole and the store still serves reads.
         """
         if self.acquires_no_shared_resource:
             pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
 
-        async with self.store_suspended_mid_write() as (store, suspended, log):
-            first = asyncio.ensure_future(store.add(_semantic("cancel-1", "alpha")))
-            second = None
+        op = make_op()
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await op.prepare(store)
+            # Arm *after* the preconditions, so a fake arming its one resource
+            # suspends the operation under test rather than a setup write.
+            suspended = harness.arm(op.name)
+            visited_before = harness.log.visits
+
+            first = asyncio.ensure_future(op.first(store))
+            second: asyncio.Task[object] | None = None
             try:
                 await suspended.reached()
                 first.cancel()
                 await settle()
 
-                second = asyncio.ensure_future(store.add(_semantic("cancel-2", "bravo")))
+                second = asyncio.ensure_future(op.second(store))
                 await settle()
                 assert not second.done(), _RELEASED_EARLY
 
@@ -717,19 +926,17 @@ class MemoryStoreContract:
             with pytest.raises(asyncio.CancelledError):
                 await first
             assert second is not None
-            assert await second == "cancel-2"
+            await second
 
             # Decisive where the blocked-caller check above is not: the two calls
-            # were never inside the resource at the same time.
-            assert not log.overlapped, _RELEASED_EARLY
-            assert log.visits == 2, "both calls should have reached the resource by now"
+            # were never inside the resource at the same time. A delta, because a
+            # fake's preconditions pass through the same logged resource.
+            assert not harness.log.overlapped, _RELEASED_EARLY
+            assert harness.log.visits - visited_before == 2, (
+                "both calls should have reached the resource by now"
+            )
 
-            # The resource survived both: the second write is durable, the first
-            # is absent-or-whole, and reads still work.
-            assert await store.get("cancel-2") is not None
-            cancelled_record = await store.get("cancel-1")
-            assert cancelled_record is None or cancelled_record.content == "alpha"
-            assert {record.id for record in await store.export()} >= {"cancel-2"}
+            await op.verify(store)
 
     # --- input observation (ADR-0065) ---------------------------------------
 

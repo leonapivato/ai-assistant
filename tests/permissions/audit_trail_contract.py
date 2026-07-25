@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -40,11 +40,12 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import AuditTrail
     from ai_assistant.core.types import ActionRequest
-    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
+    from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 
 #: What a failure of the cancellation case below means, in one place: every
@@ -107,6 +108,88 @@ async def _refuses(
         await trail.record(rejected)
 
     assert await trail.export() == before, "a refused write must leave no trace"
+
+
+class _CancellationOp(Protocol):
+    """One locked ``AuditTrail`` write the ADR-0060 case drives (#370).
+
+    Each :attr:`name` selects a distinct ``async with self._lock:
+    _run_to_completion(...)`` site; the suite runs the same
+    cancelled-first / concurrent-second scenario against every one, so a
+    regression reintroduced at any single site is caught rather than only at
+    ``record``. :meth:`first` and :meth:`second` act on *independent* subjects, so
+    the concurrent second succeeds whatever the cancelled first's indeterminate
+    effect turns out to be.
+    """
+
+    name: str
+
+    async def prepare(self, trail: AuditTrail) -> None:
+        """Establish anything the operation needs before it can run."""
+        ...
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """The call the case suspends mid-write and then cancels."""
+        ...
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        ...
+
+    async def verify(self, trail: AuditTrail) -> None:
+        """Assert the resource survived: the second write is whole and reads work."""
+        ...
+
+
+class _RecordOp:
+    """The append-only ``record`` path — ADR-0060's original subject."""
+
+    name = "record"
+
+    async def prepare(self, trail: AuditTrail) -> None:
+        """No preconditions."""
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Record the decision whose write is cancelled."""
+        return trail.record(decision("cancel-1"))
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Record an independent decision concurrently."""
+        return trail.record(decision("cancel-2"))
+
+    async def verify(self, trail: AuditTrail) -> None:
+        """The second entry is durable; the first is absent-or-whole; reads work."""
+        assert await trail.get("cancel-2") == decision("cancel-2")
+        cancelled = await trail.get("cancel-1")
+        assert cancelled is None or cancelled == decision("cancel-1")
+        assert {entry.id for entry in await trail.export()} >= {"cancel-2"}
+
+
+class _ClearOp:
+    """The ``clear`` write, with a recorded entry so it does real work."""
+
+    name = "clear"
+
+    async def prepare(self, trail: AuditTrail) -> None:
+        """A recorded decision for ``clear`` to remove."""
+        await trail.record(decision("seed"))
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Clear the trail — the call that is cancelled."""
+        return trail.clear()
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Clear again concurrently."""
+        return trail.clear()
+
+    async def verify(self, trail: AuditTrail) -> None:
+        """The trail is empty and still serves reads."""
+        assert await trail.export() == []
+
+
+#: Every locked ``AuditTrail`` write ADR-0060's case is run against (#370). Each is
+#: a distinct lock site with its own ``_run_to_completion`` call.
+_CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (_RecordOp, _ClearOp)
 
 
 class AuditTrailContract:
@@ -882,10 +965,20 @@ class AuditTrailContract:
     #: provider.
     acquires_no_shared_resource: bool = False
 
+    #: Operations this implementation acquires no coroutine-outliving resource for,
+    #: even though others do — the per-operation form of
+    #: :attr:`acquires_no_shared_resource`, for a subject that takes the lock on
+    #: some writes but not this one. ``FakeAuditTrail.clear`` touches only a dict
+    #: where its ``record`` enters the modelled resource, so the ``clear`` case has
+    #: nothing to suspend on it while the ``sqlite3`` trail — whose ``clear`` takes
+    #: the connection lock — still runs it. Empty by default: an implementation
+    #: whose every locked write is resource-backed proves them all.
+    operations_without_shared_resource: frozenset[str] = frozenset()
+
     def trail_suspended_mid_write(
         self,
-    ) -> AbstractAsyncContextManager[tuple[AuditTrail, SuspendedCall, ResourceLog]]:
-        """Supply a trail whose next ``record`` stops *inside* the resource it took.
+    ) -> AbstractAsyncContextManager[SuspendedMidWrite[AuditTrail]]:
+        """Supply a trail whose named locked write can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
         cancels the call while it is suspended and then watches what a second
@@ -894,10 +987,15 @@ class AuditTrailContract:
         and released the connection anyway, so a case that asserts only
         propagation certifies the bug (ADR-0060 §3).
 
-        How the call is made to stop there is implementation-specific — a worker
-        thread parked mid-SQL, a fake's modelled resource — which is why this is a
-        hook and not something the suite can build. Returned as a context manager
-        so the subject is disposed of the way that implementation needs.
+        The returned :class:`SuspendedMidWrite` carries the trail, its
+        :class:`ResourceLog`, and an ``arm(operation)`` lever the case calls —
+        *after* its preconditions — to hold the next entry into that operation
+        (#370). Every distinct ``async with self._lock`` site is a separate place
+        the same regression can reappear, so the case is run against each; ``arm``
+        is where the implementation says how it stops a given one — a worker
+        thread parked mid-SQL, a fake's single modelled resource. Returned as a
+        context manager so the subject is disposed of the way that implementation
+        needs.
 
         The :class:`ResourceLog` records each call's time *inside* the resource,
         and the case reads it once the scenario is over. It is not redundant with
@@ -909,35 +1007,52 @@ class AuditTrailContract:
         raise NotImplementedError
 
     @pytest.mark.optional_obligation
-    async def test_a_cancelled_append_holds_its_resource_until_the_work_finishes(self) -> None:
-        """``core.protocols``' cancellation clause, on the append path (ADR-0060).
+    @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
+    async def test_a_cancelled_append_holds_its_resource_until_the_work_finishes(
+        self, make_op: Callable[[], _CancellationOp]
+    ) -> None:
+        """``core.protocols``' cancellation clause, on every locked write (ADR-0060, #370).
 
-        A cancelled append must not hand the resource to the next caller while the
+        A cancelled write must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a
         test of the invariant rather than of propagation: a single cancelled call
-        in isolation looks identical either way.
+        in isolation looks identical either way. Run once per locked operation, so
+        a regression reintroduced at any one lock site — not just ``record`` — is
+        caught.
 
-        The cancelled append's *effect* is deliberately not asserted. The clause's
-        third paragraph makes it indeterminate to the caller — under ADR-0054's
-        shield an append that reached ``COMMIT`` is durably written — so the suite
-        pins what a caller may actually rely on: the entry is absent or whole,
-        never half-appended, and the trail still serves reads. That an
-        append-only trail may hold an entry whose caller was cancelled is not a
-        gap: ADR-0021 §4's guarantee is that nothing recorded is rewritten, and
-        an indeterminate write is exactly the case the third clause names.
+        The cancelled write's *effect* is deliberately not asserted here (the op's
+        ``verify`` pins only what a caller may rely on). The clause's third
+        paragraph makes it indeterminate to the caller — under ADR-0054's shield a
+        write that reached ``COMMIT`` is durably written — so the two calls are
+        independent subjects and what is pinned is that the second is whole and
+        the trail still serves reads. That an append-only trail may hold an entry
+        whose caller was cancelled is not a gap: ADR-0021 §4's guarantee is that
+        nothing recorded is rewritten, and an indeterminate write is exactly the
+        case the third clause names.
         """
         if self.acquires_no_shared_resource:
             pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
 
-        async with self.trail_suspended_mid_write() as (trail, suspended, log):
-            first = asyncio.ensure_future(trail.record(decision("cancel-1")))
-            second = None
+        op = make_op()
+        if op.name in self.operations_without_shared_resource:
+            pytest.skip(f"{op.name} acquires nothing whose safety outlives the coroutine")
+
+        async with self.trail_suspended_mid_write() as harness:
+            trail = harness.store
+            await op.prepare(trail)
+            # Arm *after* the preconditions, so a fake arming its one resource
+            # suspends the operation under test rather than a setup write.
+            suspended = harness.arm(op.name)
+            visited_before = harness.log.visits
+
+            first = asyncio.ensure_future(op.first(trail))
+            second: asyncio.Task[object] | None = None
             try:
                 await suspended.reached()
                 first.cancel()
                 await settle()
 
-                second = asyncio.ensure_future(trail.record(decision("cancel-2")))
+                second = asyncio.ensure_future(op.second(trail))
                 await settle()
                 assert not second.done(), _RELEASED_EARLY
 
@@ -954,16 +1069,14 @@ class AuditTrailContract:
             with pytest.raises(asyncio.CancelledError):
                 await first
             assert second is not None
-            assert await second == "cancel-2"
+            await second
 
             # Decisive where the blocked-caller check above is not: the two calls
-            # were never inside the resource at the same time.
-            assert not log.overlapped, _RELEASED_EARLY
-            assert log.visits == 2, "both calls should have reached the resource by now"
+            # were never inside the resource at the same time. A delta, because a
+            # fake's preconditions pass through the same logged resource.
+            assert not harness.log.overlapped, _RELEASED_EARLY
+            assert harness.log.visits - visited_before == 2, (
+                "both calls should have reached the resource by now"
+            )
 
-            # The resource survived both: the second entry is durable, the first
-            # is absent-or-whole, and reads still work.
-            assert await trail.get("cancel-2") == decision("cancel-2")
-            cancelled_entry = await trail.get("cancel-1")
-            assert cancelled_entry is None or cancelled_entry == decision("cancel-1")
-            assert {entry.id for entry in await trail.export()} >= {"cancel-2"}
+            await op.verify(trail)
