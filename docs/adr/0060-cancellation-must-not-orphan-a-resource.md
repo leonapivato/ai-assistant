@@ -131,11 +131,16 @@ not a hypothetical one.
 ### 2. No filler clauses
 
 We will **not** write a cancellation paragraph on every Protocol. `Planner`,
-`MemoryPolicy`, `FeedbackProcessor`, `ToolRegistry` and `Embedder` acquire
-nothing that outlives their coroutine; the rule is vacuous for them **by
-construction**, and saying so seam by seam is how a contract file becomes
-unread. A rule that mostly says "nothing to do here" trains readers to skip it,
-and then it is not there when it bites.
+`MemoryPolicy`, `FeedbackProcessor` and `ToolRegistry` acquire nothing that
+outlives their coroutine; the rule is vacuous for them **by construction**, and
+saying so seam by seam is how a contract file becomes unread. A rule that mostly
+says "nothing to do here" trains readers to skip it, and then it is not there
+when it bites.
+
+Vacuous is a claim about the seam, so it is made only where it is checkable.
+`Embedder` is **not** on that list — `FastEmbedEmbedder.embed` hands
+`_embed_sync` to `asyncio.to_thread`, and a cancelled `embed()` abandons a
+worker thread that keeps running (§5).
 
 The four Protocols whose conformance suites gain cancellation cases (§3) each
 carry a **one-sentence pointer** to the module clause — not a restatement. A
@@ -163,8 +168,30 @@ its obligation through the store beneath it, so testing it there would test the
 store twice.
 
 `FakeToolInvoker`'s `Task.cancelling()`-delta technique is the reference for how
-a fake models this without a real resource. Designing the cases is the
-implementation lane's; this ADR fixes only *which* Protocols must have them.
+a fake models this without a real resource.
+
+**Each case must establish resource safety, not merely propagation.** Test
+*design* is the implementation lane's, but the property is not, because the
+weakest reading of §3 is a case that asserts `CancelledError` escapes and
+nothing more — and that case passes the **pre-ADR-0054 code**, which raised
+`CancelledError` correctly and released the lock anyway. A propagation-only
+suite would certify exactly the bug this ADR exists to catch. The minimum each
+suite must establish:
+
+- For `MemoryStore`, `AuditTrail` and `PlanStore`: with an operation blocked
+  mid-flight, cancelling the awaiting task must not let a **second** call reach
+  the resource until the first operation's work has actually finished — and once
+  it has, both operations' effects are intact and the store still serves reads.
+  It is the second caller that makes it a test of the invariant; a single
+  cancelled call in isolation cannot distinguish the fixed code from the broken
+  code.
+- For `ContextProvider`: with a source that *suppresses* its own cancellation,
+  a caller's cancellation of `assemble()` must still surface within the drain
+  bound, rather than being deferred until that source finishes. A well-behaved
+  source cannot distinguish the two implementations either.
+
+Anything beyond that minimum — how the block is coordinated, what the fakes
+stand in for — is the implementation lane's.
 
 ### 4. What carries over from `ToolInvoker`, and what does not
 
@@ -213,15 +240,36 @@ three, that grouping does not hold. What ADR-0056 shares with them is only the
 root cause one level up — reasoning about what may happen at an `await` was not
 in any contract — and ADR-0056 explicitly leaves universalising its rule to a
 separate lane. This ADR does not take that lane. Promoting call-time-snapshot to
-a universal `MemoryWriter`/`MemoryStore` obligation remains open.
+a universal `MemoryWriter`/`MemoryStore` obligation remains open, tracked as
+issue #348.
 
 **`ModelProvider` and `Embedder` are bound by the rule but gain no conformance
 cases here.** The rule is stated at module level, so it binds them the moment it
-lands. But their production implementations delegate resource ownership to
-`pydantic-ai` and its HTTP client rather than owning a connection we release,
-and `models/retry.py`'s derivation is about *deadline attribution* — telling a
-provider's `TimeoutError` from ours — which the rule does not speak to. Extending
-their suites is a real follow-up, filed rather than folded in.
+lands; they are deferred on *enforcement*, not exempted from the obligation.
+That distinction is the whole point of stating the rule generally — scoping the
+**rule** to the four suites, rather than only its enforcement, would leave a
+fifth resource-owning seam unbound, which is the hole this ADR exists to close.
+
+The deferral is a judgement about what a case would currently buy, and it is
+weakest for `Embedder`, so state its position exactly. `FastEmbedEmbedder.embed`
+awaits `asyncio.to_thread(self._embed_sync, documents)`, so a cancelled `embed()`
+does abandon a running worker — the rule is live for it, not vacuous. What it
+does **not** have is the ADR-0054 failure: `_loaded()`'s `_load_lock` is a
+`threading.Lock` acquired and released *inside* the worker thread, so an
+unwinding `CancelledError` on the event loop cannot release it early, and a
+concurrent `embed` blocks on it correctly rather than reusing a resource still in
+use. The orphaned worker wastes CPU and finishes; it corrupts nothing. So the
+gap is real but currently benign, which is a reason to file it rather than a
+reason to call it closed — and the moment an `Embedder` acquires something the
+event loop releases, it is the ADR-0054 bug again.
+
+`ModelProvider` is further out: its production implementations delegate resource
+ownership to `pydantic-ai` and its HTTP client rather than owning a connection we
+release, and `models/retry.py`'s derivation is about *deadline attribution* —
+telling a provider's `TimeoutError` from ours — which the rule does not speak to.
+
+Extending both suites is a real follow-up, filed as issue #347 rather than
+folded in.
 
 **Nothing is promoted into `core` as code.** A shared home for ADR-0054's
 `_run_to_completion` is the obvious next thought and we reject it: `core` holds
@@ -262,11 +310,14 @@ only by a boundary.
   lands — the façade's ordering obligation is unchanged, but it is no longer the
   only thing holding the line.
 - **Vacuous where it should be.** `Planner`, `MemoryPolicy`,
-  `FeedbackProcessor`, `ToolRegistry` and `Embedder` are untouched and gain no
-  text.
+  `FeedbackProcessor` and `ToolRegistry` are untouched and gain no text.
+  `Embedder` is bound and unenforced rather than vacuous (§5) — a distinction
+  the first draft of this ADR got wrong, and the reason §2 now states vacuity
+  only where it is checkable.
 - **Two things stay open, on purpose.** ADR-0056's universal snapshot obligation
-  (§5) and `ModelProvider`/`Embedder` conformance (§5), each filed as an issue
-  rather than absorbed here.
+  (issue #348) and `ModelProvider`/`Embedder` conformance (issue #347), each
+  filed rather than absorbed here. Both are deferrals of *enforcement*; neither
+  is a seam the rule fails to bind.
 - **Revisit** if a seam grows a genuinely unbounded synchronous operation — the
   bounded-deferral clause would then need a numeric ceiling rather than "wait for
   the work you started" — or if a store arrives on a native async driver, where
