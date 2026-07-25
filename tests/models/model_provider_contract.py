@@ -391,11 +391,22 @@ class ModelProviderContract:
         async with self.provider_suspended_at_its_first_await() as (subject, gate, log):
             conversation = [Message(role=Role.USER, content="hi")]
             async with _held_at_its_first_await(gate, subject.complete(conversation)) as call:
+                # The subject is genuinely suspended in flight here — not yet done —
+                # so the mutation lands *inside* `complete`, the only window the
+                # clause is about, and not after it (the post-call assertion that
+                # certified the MemoryStore bug, ADR-0065). Its collaborator has
+                # already taken its first observation (asserted below), so this
+                # exercises the re-read window after that observation.
+                assert not call.done(), "complete finished before it could be mutated mid-flight"
                 # Grow the caller's own list while `complete` is suspended.
                 conversation.append(Message(role=Role.USER, content="wait, actually"))
             reply = await call
 
             assert log.observed, "the subject's collaborator was never reached"
+            # The first observation was taken before the mutation, so the case
+            # tests the re-read window rather than the initial read — a subject
+            # that read only at entry would already have "hi" here regardless.
+            assert log.observed[0] == ("hi",)
             # One version across every attempt: a wrapper that re-read the caller's
             # list after suspending would have handed a later attempt the grown one.
             assert len(set(log.observed)) == 1, _TORN_INPUT
