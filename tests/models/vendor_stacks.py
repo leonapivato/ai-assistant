@@ -38,6 +38,7 @@ measured.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
@@ -50,9 +51,12 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from pydantic_ai.models import Model
+
+#: What stands in for the network: a callable answering one request.
+type Handler = Callable[[httpx.Request], httpx.Response]
 
 #: A dummy key, so no vendor client ever reads one from the environment.
 _DUMMY_KEY: Final = "test-key-not-a-credential"
@@ -105,7 +109,7 @@ def openai_success(request: httpx.Request) -> httpx.Response:
     )
 
 
-def failing_status(status_code: int) -> Callable[[httpx.Request], httpx.Response]:
+def failing_status(status_code: int) -> Handler:
     """Return a handler answering every request with ``status_code``.
 
     Args:
@@ -131,25 +135,17 @@ def connection_refused(request: httpx.Request) -> httpx.Response:
     raise httpx.ConnectError(msg)
 
 
-def _anthropic_model(handler: Callable[[httpx.Request], httpx.Response]) -> Model:
-    """Build a real ``AnthropicModel`` whose transport is ``handler``."""
-    client = AsyncAnthropic(
-        api_key=_DUMMY_KEY,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        max_retries=0,
-    )
+def _anthropic_model(http_client: httpx.AsyncClient) -> Model:
+    """Build a real ``AnthropicModel`` sending over ``http_client``."""
+    client = AsyncAnthropic(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
     return AnthropicModel(
         _ANTHROPIC_MODEL_NAME, provider=AnthropicProvider(anthropic_client=client)
     )
 
 
-def _openai_model(handler: Callable[[httpx.Request], httpx.Response]) -> Model:
-    """Build a real ``OpenAIChatModel`` whose transport is ``handler``."""
-    client = AsyncOpenAI(
-        api_key=_DUMMY_KEY,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        max_retries=0,
-    )
+def _openai_model(http_client: httpx.AsyncClient) -> Model:
+    """Build a real ``OpenAIChatModel`` sending over ``http_client``."""
+    client = AsyncOpenAI(api_key=_DUMMY_KEY, http_client=http_client, max_retries=0)
     return OpenAIChatModel(_OPENAI_MODEL_NAME, provider=OpenAIProvider(openai_client=client))
 
 
@@ -171,8 +167,9 @@ class VendorStack:
 
     Attributes:
         name: The vendor, for test ids and failure messages.
-        build: Builds a pydantic-ai ``Model`` over that vendor's real SDK, with
-            the given handler standing in for the network.
+        bind: Wraps an :class:`httpx.AsyncClient` in that vendor's real SDK and
+            returns a pydantic-ai ``Model`` over it. Not called directly — go
+            through :meth:`opened`, which owns the client's lifetime.
         success: The handler that answers with that vendor's success shape.
         reply: The assistant text ``success`` returns, so a test can assert the
             reply came back through the vendor's own response parsing.
@@ -184,14 +181,36 @@ class VendorStack:
     """
 
     name: str
-    build: Callable[[Callable[[httpx.Request], httpx.Response]], Model]
-    success: Callable[[httpx.Request], httpx.Response]
+    bind: Callable[[httpx.AsyncClient], Model]
+    success: Handler
     reply: str
     turn_text: Callable[[Mapping[str, Any]], str]
 
     def __str__(self) -> str:
         """Name the vendor, so parametrised test ids read as the vendor name."""
         return self.name
+
+    @asynccontextmanager
+    async def opened(self, handler: Handler) -> AsyncIterator[Model]:
+        """Yield a model over this vendor's real SDK, closing its client on exit.
+
+        The transport client is built here rather than inside ``bind`` so that
+        *something* owns it: a stack that hands back a bare ``Model`` leaves the
+        client reachable only through two layers of vendor internals, and closing
+        it becomes nobody's job. ``MockTransport`` allocates no pool and opens no
+        socket, so nothing leaks today (#354) — but the value of this harness is
+        that it is the real stack down to the transport, and the moment the
+        transport is swapped for one that allocates, ~34 clients a run would go
+        unclosed and present as exhausted descriptors late in a suite.
+
+        Args:
+            handler: What stands in for the network for this model's lifetime.
+
+        Yields:
+            A pydantic-ai ``Model`` over the vendor's real SDK.
+        """
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            yield self.bind(http_client)
 
     def transcript(self, body: Mapping[str, Any]) -> list[tuple[str, str]]:
         """Return ``(role, text)`` for every turn in a serialised request body.
@@ -212,14 +231,14 @@ class VendorStack:
 
 ANTHROPIC = VendorStack(
     name="anthropic",
-    build=_anthropic_model,
+    bind=_anthropic_model,
     success=anthropic_success,
     reply=_ANTHROPIC_REPLY,
     turn_text=_anthropic_turn_text,
 )
 OPENAI = VendorStack(
     name="openai",
-    build=_openai_model,
+    bind=_openai_model,
     success=openai_success,
     reply=_OPENAI_REPLY,
     turn_text=_openai_turn_text,
@@ -239,7 +258,7 @@ class RequestRecorder:
     having.
     """
 
-    def __init__(self, inner: Callable[[httpx.Request], httpx.Response]) -> None:
+    def __init__(self, inner: Handler) -> None:
         """Wrap ``inner``, recording each request before delegating to it."""
         self._inner = inner
         self.bodies: list[dict[str, object]] = []
