@@ -75,8 +75,9 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     alignment follow-up ADR-0048 records rather than solves.
 
     Args:
-        settings: Loaded application settings — the model spec and its resilience
-            knobs, the context localisation window, the parked-confirmation
+        settings: Loaded application settings — the model specs the router routes
+            over (``default_model`` then ``fallback_models``, ADR-0062) and their
+            resilience knobs, the context localisation window, the parked-confirmation
             lifetime the runner enforces (``confirmation_ttl``, #310), and the four
             permission gate thresholds the policy is constructed with (#239).
         data_dir: Where the SQLite stores live. Defaults to a per-user directory
@@ -172,25 +173,27 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
 
 
 def _model_specs(settings: Settings) -> tuple[str, ...]:
-    """The ``"provider:model"`` specs to route over, most preferred first (ADR-0061 §2).
+    """The ``"provider:model"`` specs to route over, most preferred first (ADR-0062).
 
-    Exactly one today, because :class:`~ai_assistant.core.config.Settings` carries
-    exactly one model spec (``default_model``). A second route needs a second spec
-    for an operator to name, which is a new setting — deliberately not invented
-    here, since the composition root reads configuration and does not define it.
+    The operator's ``default_model`` always leads, and ``fallback_models`` — empty
+    unless configured — supplies the rest, in the order it was written. So an
+    unset deployment gets exactly the single route ADR-0061 §2 described, and a
+    configured one gets a router that can genuinely fall back, which is what
+    retires that caveat.
 
-    It is a *sequence* rather than a single value so that adding that setting is a
-    change to this function alone: everything downstream — the route list, the
-    wrapper order, and the tests that pin them — is already shaped for more than
-    one route.
+    This *reads* the preference order rather than deciding it. Which models are
+    acceptable, and in what order, is the operator's call;
+    ``core.config.Settings`` is where it is named, parsed and validated
+    (ADR-0062 §§1, 3). What this layer owns is how those specs are composed —
+    :func:`_build_model_provider`.
 
     Args:
         settings: Loaded application settings.
 
     Returns:
-        The model specs in preference order.
+        The model specs in preference order. Never empty: ``default_model`` leads.
     """
-    return (settings.default_model,)
+    return (settings.default_model, *settings.fallback_models)
 
 
 def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingProvider:

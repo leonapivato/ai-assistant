@@ -201,3 +201,122 @@ def test_load_settings_rejects_an_off_scale_threshold_from_the_environment(
     monkeypatch.setenv("ASSISTANT_DENY_AT_RISK", "catastrophic")
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
+
+
+# --- Model specs: the default and its fallbacks (ADR-0062, #353) -------------
+
+
+def test_no_fallback_models_are_configured_by_default() -> None:
+    # An unset deployment must keep the single-route behaviour ADR-0061 §2
+    # described: the fallback list is opt-in, and adding the setting changes
+    # nothing for anyone who does not set it.
+    assert Settings().fallback_models == ()
+
+
+def test_fallback_models_parse_as_a_comma_separated_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The whole of decision 1: an operator writes specs the way they write a
+    # model name, not as a JSON array. pydantic-settings would otherwise parse
+    # this field's environment value as JSON, because its type is complex.
+    monkeypatch.setenv("ASSISTANT_FALLBACK_MODELS", "openai:gpt-5,anthropic:claude-x")
+    assert load_settings().fallback_models == ("openai:gpt-5", "anthropic:claude-x")
+
+
+def test_fallback_models_tolerate_spacing_and_a_trailing_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_FALLBACK_MODELS", " openai:gpt-5 , anthropic:claude-x , ")
+    assert load_settings().fallback_models == ("openai:gpt-5", "anthropic:claude-x")
+
+
+@pytest.mark.parametrize("value", ["", "   ", " , "])
+def test_an_empty_fallback_list_means_no_fallbacks(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Setting the variable to nothing must mean the same as not setting it, so an
+    # operator can switch fallbacks off without editing the deployment's shape.
+    monkeypatch.setenv("ASSISTANT_FALLBACK_MODELS", value)
+    assert load_settings().fallback_models == ()
+
+
+def test_fallback_models_keep_the_order_they_were_written_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Preference order is the operator's statement, so it is preserved verbatim —
+    # never sorted, never deduplicated into a set.
+    monkeypatch.setenv("ASSISTANT_FALLBACK_MODELS", "openai:z,openai:a,anthropic:m")
+    assert load_settings().fallback_models == ("openai:z", "openai:a", "anthropic:m")
+
+
+def test_a_tuple_passed_directly_is_not_run_through_the_string_splitter() -> None:
+    # Non-string input falls through untouched, so a caller constructing Settings
+    # in Python (a test, a harness) is not forced through the environment's
+    # encoding — and a spec that happens to contain a comma is not re-split.
+    assert Settings(fallback_models=("openai:gpt-5",)).fallback_models == ("openai:gpt-5",)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "openai-gpt-5",  # the separator omitted — the typo this exists to catch
+        "openai:",  # no model
+        ":gpt-5",  # no provider
+        "openai: gpt-5",  # a space inside the spec, not around it
+        "none",  # the threshold sentinel, which is not a model
+        '["openai:gpt-5"]',  # a JSON array, written by habit
+    ],
+)
+def test_a_malformed_model_spec_is_rejected_at_load(spec: str) -> None:
+    # Both fields, because the rule is about what a model spec is, not about
+    # which of the two it happens to be: a primary that fails to resolve leaves
+    # the router unable to fall back at all (a bare ModelError is not routable),
+    # so the primary needs this as much as a fallback does.
+    with pytest.raises(ValidationError, match="malformed model spec"):
+        Settings(default_model=spec)
+    with pytest.raises(ValidationError, match="malformed model spec"):
+        Settings(fallback_models=(spec,))
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "anthropic:claude-opus-4-8",
+        "openai:gpt-5",
+        "bedrock:us.anthropic.claude-3-5-sonnet-20240620-v1:0",  # colons in the model half
+        "gateway/openai:gpt-5",  # a slash in the provider half
+        "huggingface:Qwen/Qwen3-235B-A22B",  # a slash in the model half
+    ],
+)
+def test_a_well_formed_model_spec_is_accepted(spec: str) -> None:
+    # Grounded in pydantic-ai's own `known_model_names()`: every shape here is
+    # one it really ships, so the pattern is not narrower than the thing it
+    # validates.
+    assert Settings(default_model=spec).default_model == spec
+
+
+def test_a_fallback_repeating_the_default_model_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="repeats default_model"):
+        Settings(default_model="anthropic:claude-x", fallback_models=("anthropic:claude-x",))
+
+
+def test_a_fallback_repeating_an_earlier_fallback_is_rejected() -> None:
+    with pytest.raises(ValidationError, match=r"repeats fallback_models\[0\]"):
+        Settings(fallback_models=("openai:gpt-5", "openai:gpt-5"))
+
+
+def test_the_same_provider_at_a_different_model_is_a_legitimate_fallback() -> None:
+    # The duplicate rule is about the *spec*, not the vendor: a cheaper or older
+    # model at the same provider is a real alternative and must stay expressible.
+    settings = Settings(default_model="openai:gpt-5", fallback_models=("openai:gpt-4o",))
+    assert settings.fallback_models == ("openai:gpt-4o",)
+
+
+def test_load_settings_reports_a_bad_fallback_list_as_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The operator-facing path: a mistake in this variable surfaces through the
+    # same ConfigurationError boundary as every other setting, at load.
+    monkeypatch.setenv("ASSISTANT_FALLBACK_MODELS", "openai-gpt-5")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
