@@ -288,7 +288,13 @@ does.
    are reconciled with the suite rather than left contradicting it.
 5. **`tests/models/test_provider.py`** — a case pinning `PydanticAIProvider`'s
    refusal specifically, and one pinning that it refuses *before* `Agent.run`
-   (below).
+   (below). This is where obligation 2's base class is asserted —
+   `type(exc) is ModelError`, not merely `isinstance` — because that is the level
+   the obligation lives at. Nothing else pins it: the flag-only shared assertions
+   are satisfied by `ModelContentFilterError`, which is also non-retryable and
+   non-routable and would mislabel a caller-shape mistake as a content-policy
+   refusal. Identity belongs here and stays out of the shared suite, for the
+   reason below.
 
 Test *design* is the lane's; five properties are not, because a suite missing
 any of them certifies something this ADR decided against.
