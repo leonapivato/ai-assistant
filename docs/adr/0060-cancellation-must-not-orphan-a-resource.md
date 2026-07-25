@@ -103,12 +103,20 @@ docstring, binding on every Protocol in the file:
 > finishing. Never released while that work is still using it; never left held
 > with nothing running that will release it.
 >
-> **A cancellation is delivered, never absorbed.** A method may defer delivery
-> while it makes its resources safe, but it re-raises; it never converts a
-> cancellation into a return value, and never lets a collaborator's suppressed
-> cancellation stand in for its own. Where delivery is deferred, the wait is on
-> something the implementation can observe completing, and the deferral is
-> bounded or documented as unbounded.
+> **A cancellation delivered from outside the call is delivered onward, never
+> absorbed.** A method may defer delivery while it makes its resources safe, but
+> it re-raises; it never converts such a cancellation into a return value, and
+> never lets a collaborator's suppressed cancellation stand in for its own.
+> Where delivery is deferred, the wait is on something the implementation can
+> observe completing, and the deferral is bounded or documented as unbounded.
+>
+> *From outside* is load-bearing. A cancellation a method **issues itself**, to
+> enforce a deadline it owns, is its own control flow and may be classified into
+> a return value — that is exactly what `ToolInvoker.invoke` does on expiry
+> (ADR-0029 §4), and what its `Raises: CancelledError` clause distinguishes when
+> it says the seam does not convert a task "cancelled from outside". The
+> resource clause above is unconditional and binds both cases; only the
+> propagation clause turns on provenance.
 >
 > **A cancelled call's effect is indeterminate to the caller.** A cancelled
 > write may or may not have committed. The caller may assume neither, and in
@@ -234,9 +242,11 @@ its own deadline (ADR-0029 §4), so it does not transfer wholesale.
 
 **Carries over:**
 
-- `CancelledError` propagates and is never converted into a result —
-  "`BaseException` propagates unchanged … must not be swallowed into a result".
-  This is the general rule's second clause.
+- An **externally delivered** `CancelledError` propagates and is never converted
+  into a result — "`BaseException` propagates unchanged … must not be swallowed
+  into a result". This is the general rule's second clause, and `invoke`'s own
+  split between a task "cancelled from outside" and an expiry it triggers itself
+  is where that clause's provenance qualifier comes from.
 - The cooperative limit: "what the deadline buys is that the seam stops waiting,
   not that the tool stops working … a tool that suppresses its own cancellation
   can outlive it, and no seam can prevent that". The general rule inherits both
