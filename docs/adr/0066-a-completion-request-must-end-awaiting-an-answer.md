@@ -259,9 +259,10 @@ does.
    describe themselves as "not a shared-contract requirement" are reconciled with
    the suite rather than left contradicting it.
 5. **`tests/models/test_provider.py`** — a case pinning `PydanticAIProvider`'s
-   refusal specifically.
+   refusal specifically, and one pinning that it refuses *before* `Agent.run`
+   (below).
 
-Test *design* is the lane's; three properties are not, because a suite missing
+Test *design* is the lane's; four properties are not, because a suite missing
 any of them certifies something this ADR decided against.
 
 **The refusal must pin the failure's *disposition*, not merely its base class.**
@@ -290,6 +291,21 @@ whole defect is that the broken code makes no request either — so a
 recorder-based case would certify the bug it was written to catch. The
 `vendor_stacks.py` recorder is the right tool for showing *what* went on the wire
 and the wrong one for showing that something should have.
+
+**The "before `Agent.run`" ordering in obligation 2 must itself be pinned, and it
+is the one obligation that costs a reach into a private.** An implementation that
+calls `Agent.run`, gets the echo back and *then* raises satisfies every assertion
+above, because today's short-circuit means the reject-after ordering also issues
+no request and never reaches the model — so neither the recorder nor a
+`FunctionModel` spy can tell the two apart. The only instrument that can is a spy
+on the provider's own `_agent.run`, asserting it was never invoked for a
+trailing-assistant history. That belongs in `test_provider.py` and **not** in the
+shared suite, which must not know that an implementation has an `_agent` at all;
+it is acceptable there because the module already imports `_to_model_messages`
+under a `reportPrivateUsage` suppression, and because the alternative — putting an
+observability affordance on the production seam — is the trade ADR-0060 §5
+refused. The ordering is worth pinning rather than trusting: it is what keeps the
+refusal free of a vendor round trip if pydantic-ai ever stops short-circuiting.
 
 The lane inherits a useful fact: with this refusal spiked into **both**
 `PydanticAIProvider` and `FakeModelProvider`, the entire existing suite passes
