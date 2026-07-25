@@ -7,6 +7,7 @@ contract a durable trail is.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,7 +19,10 @@ from ai_assistant.core.types import PermissionOutcome
 from ai_assistant.testing import FakeAuditTrail
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ai_assistant.core.protocols import AuditTrail
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 class TestFakeAuditTrailContract(AuditTrailContract):
@@ -27,6 +31,18 @@ class TestFakeAuditTrailContract(AuditTrailContract):
     @pytest.fixture
     def trail(self) -> AuditTrail:
         return FakeAuditTrail()
+
+    @contextlib.asynccontextmanager
+    async def trail_suspended_mid_write(self) -> AsyncIterator[tuple[AuditTrail, SuspendedCall]]:
+        """The fake models the resource it does not really own (ADR-0060 §3).
+
+        A dict needs no serialising, so without this the canonical fake could
+        only opt out — and the cancellation case would run solely against the
+        ``sqlite3`` trail that already holds the invariant. Nothing to dispose of,
+        hence the bare yield.
+        """
+        trail = FakeAuditTrail()
+        yield trail, trail.suspend_next_write()
 
 
 async def test_a_refused_write_leaves_the_trail_untouched() -> None:

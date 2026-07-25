@@ -16,6 +16,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -42,10 +43,14 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolFailureKind,
 )
+from ai_assistant.testing.cancellation import BLOCKED_SECONDS, settle
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
+
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import ExecutionState
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -861,3 +866,81 @@ class PlanStoreContract:
         await store.commit_transition(_claim(state))
         with pytest.raises(ActiveExecutionError):
             await store.clear()
+
+    # --- cancellation (ADR-0060) -------------------------------------------
+
+    #: Whether this implementation acquires nothing whose safety outlives the
+    #: coroutine — no connection, lock, spawned task, file handle or transaction
+    #: that a ``CancelledError`` could unwind past. ``core.protocols``' clause is
+    #: then vacuously satisfied and there is nothing for the case below to
+    #: observe. Left ``False``, the suite requires the implementation to prove the
+    #: invariant by overriding :meth:`store_suspended_mid_write` — so a new
+    #: durable backend that reintroduces ADR-0054's bug fails here rather than
+    #: passing a suite that never looked. Opting out is a visible declaration in
+    #: the subclass, exactly as ``serves_a_fixed_instant`` is for the context
+    #: provider.
+    acquires_no_shared_resource: bool = False
+
+    def store_suspended_mid_write(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[PlanStore, SuspendedCall]]:
+        """Supply a store whose next ``save_goal`` stops *inside* the resource it took.
+
+        Override unless :attr:`acquires_no_shared_resource` is set. The suite
+        cancels the call while it is suspended and then watches what a second
+        caller can reach, which is the only way to tell the fixed code from the
+        broken code: pre-ADR-0054 the store raised ``CancelledError`` correctly
+        and released the connection anyway, so a case that asserts only
+        propagation certifies the bug (ADR-0060 §3).
+
+        How the call is made to stop there is implementation-specific — a worker
+        thread parked mid-SQL, a fake's modelled resource — which is why this is a
+        hook and not something the suite can build. Returned as a context manager
+        so the subject is disposed of the way that implementation needs.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.optional_obligation
+    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(self) -> None:
+        """``core.protocols``' cancellation clause, on the write path (ADR-0060).
+
+        A cancelled write must not hand the resource to the next caller while the
+        work it started is still using it. The second call is what makes this a
+        test of the invariant rather than of propagation: a single cancelled call
+        in isolation looks identical either way.
+
+        The first write's *effect* is deliberately not asserted. The clause's
+        third paragraph makes it indeterminate to the caller — under ADR-0054's
+        shield a cancelled write that reached ``COMMIT`` is durably written — so
+        the suite pins what a caller may actually rely on: the goal is absent or
+        whole, never torn, and the store still serves reads.
+        """
+        if self.acquires_no_shared_resource:
+            pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
+
+        async with self.store_suspended_mid_write() as (store, suspended):
+            first = asyncio.ensure_future(store.save_goal(_goal("cancel-1")))
+            try:
+                await suspended.reached()
+                first.cancel()
+                await settle()
+
+                second = asyncio.ensure_future(store.save_goal(_goal("cancel-2")))
+                finished, _ = await asyncio.wait([second], timeout=BLOCKED_SECONDS)
+                assert not finished, (
+                    "the cancelled write released its resource while its own work was "
+                    "still running, so a second caller reached it concurrently"
+                )
+            finally:
+                suspended.release()
+
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert await second == "cancel-2"
+
+            # The resource survived both: the second write is durable, the first
+            # is absent-or-whole, and reads still work.
+            assert await store.get_goal("cancel-2") == _goal("cancel-2")
+            cancelled_goal = await store.get_goal("cancel-1")
+            assert cancelled_goal is None or cancelled_goal == _goal("cancel-1")
+            assert {goal.id for goal in (await store.export()).goals} >= {"cancel-2"}

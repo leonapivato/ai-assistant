@@ -8,6 +8,11 @@ contract-correct embedder *without importing the models subsystem's internals*
 production code paths (``lint-imports`` forbids production modules from importing
 it).
 
+``embed`` can be suspended mid-flight (:meth:`FakeEmbedder.suspend_next_embed`)
+so the fake is a real subject for the cancellation clause ``core.protocols``
+states (ADR-0060), modelling the handoff ``FastEmbedEmbedder`` makes to
+``asyncio.to_thread`` rather than an event-loop resource no embedder owns.
+
 Like the production ``HashingEmbedder`` it maps text to a fixed-length vector by
 hashing tokens into buckets and L2-normalising, so shared tokens yield more
 similar vectors — enough for a store's similarity search to behave sensibly in a
@@ -22,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import math
 from typing import TYPE_CHECKING
+
+from ai_assistant.testing.cancellation import DetachedWork
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -65,6 +72,29 @@ class FakeEmbedder:
         self._dimensions = dimensions
         self._model_id = model_id if model_id is not None else f"fake-embedder-{dimensions}"
         self.calls: list[tuple[str, ...]] = []
+        self._armed: DetachedWork | None = None
+
+    def suspend_next_embed(self) -> DetachedWork:
+        """Hold the next :meth:`embed` open at a modelled worker handoff.
+
+        The hook ``EmbedderContract``'s cancellation case takes (ADR-0060 §3).
+        Test-only, and not part of the ``Embedder`` contract: the Protocol
+        deliberately grows no affordance for this, so the suite asks the *subject*
+        it was handed rather than the seam every consumer depends on.
+
+        Returns:
+            The handle to wait on and release.
+
+        Raises:
+            RuntimeError: If a suspension is already armed. Two would silently
+                make the second a no-op, which is a case expecting something the
+                fake does not do.
+        """
+        if self._armed is not None:
+            msg = "a suspension is already armed on this embedder"
+            raise RuntimeError(msg)
+        self._armed = DetachedWork()
+        return self._armed
 
     @property
     def model_id(self) -> str:
@@ -81,9 +111,19 @@ class FakeEmbedder:
 
         The batch is snapshotted as a tuple on record, so a caller mutating the
         passed sequence afterwards cannot reach into :attr:`calls`.
+
+        Suspends at a modelled worker handoff if :meth:`suspend_next_embed` armed
+        one — the call is recorded first, so a cancelled batch is still visible in
+        :attr:`calls`, matching a real embedder that has already started work.
+
+        Raises:
+            CancelledError: If the awaiting task is cancelled while suspended.
         """
         batch = tuple(texts)
         self.calls.append(batch)
+        armed, self._armed = self._armed, None
+        if armed is not None:
+            await armed.hold()
         return [self._embed_one(text) for text in batch]
 
     def _embed_one(self, text: str) -> list[float]:

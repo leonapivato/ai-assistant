@@ -11,6 +11,11 @@ They deliberately re-implement the transition graph rather than importing
 consumer's tests would then pull in the very subsystem the fake stands in for.
 The shared conformance suite is what keeps the two implementations honest — both
 must pass it, so a divergence is a test failure rather than a latent surprise.
+
+``FakePlanStore``'s writes go through a
+:class:`~ai_assistant.testing.cancellation.SuspendableResource` so it is a real
+subject for the cancellation clause ``core.protocols`` states (ADR-0060), rather
+than an implementation the obligation cannot reach.
 """
 
 from __future__ import annotations
@@ -36,12 +41,14 @@ from ai_assistant.core.types import (
     StepExecution,
     StepStatus,
 )
+from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, StepTransition
+    from ai_assistant.testing.cancellation import LoopSuspension
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
@@ -167,6 +174,20 @@ class FakePlanStore:
         # ADR-0044 §1 non-reuse guarantee (#280). The fake must not certify a
         # weaker contract than the real store keeps.
         self._incarnation = uuid4().hex
+        self._resource = SuspendableResource()
+
+    def suspend_next_write(self) -> LoopSuspension:
+        """Hold the next write open inside the store.
+
+        The hook ``PlanStoreContract``'s cancellation case takes (ADR-0060 §3).
+        Test-only, and not part of the ``PlanStore`` contract: the Protocol
+        deliberately grows no affordance for this, so the suite asks the *subject*
+        it was handed rather than the seam every consumer depends on.
+
+        Returns:
+            The handle to wait on and release.
+        """
+        return self._resource.suspend_next()
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as the error the real store raises.
@@ -190,20 +211,21 @@ class FakePlanStore:
         an objective the user never set — the same audit hazard ``save_plan``
         refuses, and the reason a changed objective needs a new goal.
         """
-        existing = self._goals.get(goal.id)
-        if existing is not None:
-            identity = ("statement", "provenance", "created_at")
-            changed = [
-                field for field in identity if getattr(existing, field) != getattr(goal, field)
-            ]
-            if changed:
-                msg = (
-                    f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
-                    "change: plans and executions already recorded against it would "
-                    "silently come to describe a different objective. Use a new id."
-                )
-                raise PlanningError(msg)
-        self._goals[goal.id] = goal.model_copy(deep=True)
+        async with self._resource.held():
+            existing = self._goals.get(goal.id)
+            if existing is not None:
+                identity = ("statement", "provenance", "created_at")
+                changed = [
+                    field for field in identity if getattr(existing, field) != getattr(goal, field)
+                ]
+                if changed:
+                    msg = (
+                        f"goal {goal.id} already exists and its {', '.join(changed)} cannot "
+                        "change: plans and executions already recorded against it would "
+                        "silently come to describe a different objective. Use a new id."
+                    )
+                    raise PlanningError(msg)
+            self._goals[goal.id] = goal.model_copy(deep=True)
         return goal.id
 
     async def get_goal(self, goal_id: str) -> Goal | None:
@@ -217,17 +239,18 @@ class FakePlanStore:
         Re-planning must take a new id so the previous plan stays an intact
         audit record; an identical re-save is idempotent (ADR-0014 §2).
         """
-        if plan.goal_id not in self._goals:
-            msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
-            raise PlanningError(msg)
-        existing = self._plans.get(plan.id)
-        if existing is not None and existing != plan:
-            msg = (
-                f"plan {plan.id} already exists and differs; re-planning must use a new "
-                "id so the previous plan stays an intact audit record"
-            )
-            raise PlanningError(msg)
-        self._plans[plan.id] = plan.model_copy(deep=True)
+        async with self._resource.held():
+            if plan.goal_id not in self._goals:
+                msg = f"plan {plan.id} refers to unknown goal {plan.goal_id}"
+                raise PlanningError(msg)
+            existing = self._plans.get(plan.id)
+            if existing is not None and existing != plan:
+                msg = (
+                    f"plan {plan.id} already exists and differs; re-planning must use a new "
+                    "id so the previous plan stays an intact audit record"
+                )
+                raise PlanningError(msg)
+            self._plans[plan.id] = plan.model_copy(deep=True)
         return plan.id
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
@@ -245,24 +268,31 @@ class FakePlanStore:
         makes normative (#280). The fake must not diverge here or it would
         certify a weaker contract than the real store keeps.
         """
-        plan = self._plans.get(plan_id)
-        if plan is None:
-            msg = f"cannot start an execution for unknown plan {plan_id}"
-            raise PlanningError(msg)
+        async with self._resource.held():
+            plan = self._plans.get(plan_id)
+            if plan is None:
+                msg = f"cannot start an execution for unknown plan {plan_id}"
+                raise PlanningError(msg)
 
-        self._sequence += 1
-        state = ExecutionState(
-            id=f"{plan_id}-exec-{self._incarnation}-{self._sequence}",
-            plan_id=plan.id,
-            steps=tuple(StepExecution(step_id=step.id) for step in plan.steps),
-            version=0,
-            updated_at=self._now(),
-        )
-        self._executions[state.id] = state
+            self._sequence += 1
+            state = ExecutionState(
+                id=f"{plan_id}-exec-{self._incarnation}-{self._sequence}",
+                plan_id=plan.id,
+                steps=tuple(StepExecution(step_id=step.id) for step in plan.steps),
+                version=0,
+                updated_at=self._now(),
+            )
+            self._executions[state.id] = state
         return state.model_copy(deep=True)
 
     async def commit_transition(self, transition: StepTransition) -> ExecutionState:
         """Apply one transition against the stored snapshot and persist it."""
+        async with self._resource.held():
+            state = self._commit_transition_locked(transition)
+        return state.model_copy(deep=True)
+
+    def _commit_transition_locked(self, transition: StepTransition) -> ExecutionState:
+        """Apply and store one transition; the caller holds the resource."""
         stored = self._executions.get(transition.execution_id)
         if stored is None:
             msg = f"unknown execution {transition.execution_id}"
@@ -300,7 +330,7 @@ class FakePlanStore:
             ).model_dump()
         )
         self._executions[state.id] = state
-        return state.model_copy(deep=True)
+        return state
 
     def _advance(self, step: StepExecution, transition: StepTransition) -> StepExecution:
         """Build the step's next value, re-validating so invariants still bite."""
@@ -416,6 +446,11 @@ class FakePlanStore:
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal and its plan history, refusing while work is live."""
+        async with self._resource.held():
+            return self._delete_goal_locked(goal_id)
+
+    def _delete_goal_locked(self, goal_id: str) -> GoalDeletion:
+        """Delete a goal and its history; the caller holds the resource."""
         if goal_id not in self._goals:
             return GoalDeletion(deleted=False, blocked_by=("<no such goal>",))
 
@@ -450,15 +485,16 @@ class FakePlanStore:
 
     async def clear(self) -> int:
         """Delete everything, refusing while any execution has a live step."""
-        live = sorted(state.id for state in self._executions.values() if state.has_live_step)
-        if live:
-            msg = f"cannot clear while executions are live: {', '.join(live)}"
-            raise ActiveExecutionError(msg)
+        async with self._resource.held():
+            live = sorted(state.id for state in self._executions.values() if state.has_live_step)
+            if live:
+                msg = f"cannot clear while executions are live: {', '.join(live)}"
+                raise ActiveExecutionError(msg)
 
-        removed = len(self._goals) + len(self._plans) + len(self._executions)
-        self._goals.clear()
-        self._plans.clear()
-        self._executions.clear()
+            removed = len(self._goals) + len(self._plans) + len(self._executions)
+            self._goals.clear()
+            self._plans.clear()
+            self._executions.clear()
         return removed
 
 

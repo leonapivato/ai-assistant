@@ -13,6 +13,7 @@ and needs no ``integration`` mark. The tests that open a real file say so.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 import threading
@@ -26,13 +27,15 @@ from permission_builders import AT, action, decision, ruling, tool
 from ai_assistant.core.errors import AuditError, DuplicateDecisionError
 from ai_assistant.core.types import DataTier, PermissionOutcome
 from ai_assistant.permissions import SqliteAuditTrail
+from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from ai_assistant.core.protocols import AuditTrail
     from ai_assistant.core.types import PermissionDecision
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 @pytest.fixture
@@ -51,6 +54,45 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
     @pytest.fixture
     def trail(self, ephemeral: SqliteAuditTrail) -> AuditTrail:
         return ephemeral
+
+    @contextlib.asynccontextmanager
+    async def trail_suspended_mid_write(self) -> AsyncIterator[tuple[AuditTrail, SuspendedCall]]:
+        """Park the first ``record``'s worker thread inside the connection's turn.
+
+        The suspension goes in ``_record_sync``, i.e. inside ``async with
+        self._lock`` and inside the ``to_thread`` the event loop cannot interrupt
+        — which is exactly where ADR-0054's bug lived. Blocking there is what
+        makes the case deterministic: left to run, a commit finishes in
+        microseconds and whether the second caller arrives while the worker still
+        holds the connection would be a race, so the invariant would be exercised
+        only sometimes.
+
+        Its own trail on its own connection, not the ``ephemeral`` fixture's: the
+        suspended worker is parked for the length of the case, and sharing would
+        make an unrelated failure hang instead of fail.
+        """
+        trail = SqliteAuditTrail(path=":memory:")
+        suspension = ThreadSuspension()
+        original_record = trail._record_sync
+        armed = threading.Event()
+
+        def blocking_record(snapshot: PermissionDecision) -> None:
+            if not armed.is_set():  # the first worker only; later ones run free
+                armed.set()
+                suspension.hold()
+            original_record(snapshot)
+
+        trail._record_sync = blocking_record  # type: ignore[method-assign]
+        try:
+            yield trail, suspension
+        finally:
+            suspension.release()
+            # An implementation that released the connection early leaves a
+            # worker still using it; closing under that is a native crash rather
+            # than a reported failure, so give the worker a turn to unwind and
+            # let the assertion above be the thing that speaks.
+            await asyncio.sleep(0.05)
+            trail.close()
 
 
 async def test_a_refused_write_leaves_the_trail_untouched(ephemeral: SqliteAuditTrail) -> None:

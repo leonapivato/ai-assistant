@@ -8,6 +8,11 @@ permissions subsystem's internals* (CLAUDE.md golden rule 1).
 
 Both are held to their Protocol's shared conformance suite, which is what stops
 a fake drifting from the contract it stands in for.
+
+``FakeAuditTrail`` appends through a
+:class:`~ai_assistant.testing.cancellation.SuspendableResource` so it is a real
+subject for the cancellation clause ``core.protocols`` states (ADR-0060), rather
+than an implementation the obligation cannot reach.
 """
 
 from __future__ import annotations
@@ -29,9 +34,11 @@ from ai_assistant.core.types import (
     Reversibility,
     RiskLevel,
 )
+from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActionRequest
+    from ai_assistant.testing.cancellation import LoopSuspension
 
 #: Reported when a policy is asked to resolve something nobody was ever shown.
 _NOT_A_CONFIRMATION = "fake: the decision resolved was not a CONFIRM, so it authorises nothing"
@@ -142,15 +149,34 @@ class FakeAuditTrail:
     ids, the resolution invariant, and detachment on both the write and the read
     path.
 
-    :meth:`record` performs no ``await``, which is how the atomicity ADR-0021 §4
-    requires is obtained on a single event loop: there is no interleaving point
-    between the checks and the append, so two concurrent resolutions of one
-    ``CONFIRM`` cannot both observe an unresolved question.
+    :meth:`record`'s checks and its append are separated by no interleaving
+    point, which is how the atomicity ADR-0021 §4 requires is obtained on a
+    single event loop: two concurrent resolutions of one ``CONFIRM`` cannot both
+    observe an unresolved question. The append runs inside a
+    :class:`~ai_assistant.testing.cancellation.SuspendableResource` so the fake
+    is a subject for ADR-0060's cancellation clause, and that does not weaken the
+    argument: acquiring an uncontended :class:`asyncio.Lock` does not suspend, so
+    nothing runs between the checks and the append that did not before — and
+    under contention the lock serialises the pair outright.
     """
 
     def __init__(self) -> None:
         """Create an empty trail."""
         self._decisions: dict[str, PermissionDecision] = {}
+        self._resource = SuspendableResource()
+
+    def suspend_next_write(self) -> LoopSuspension:
+        """Hold the next :meth:`record` open inside the trail.
+
+        The hook ``AuditTrailContract``'s cancellation case takes (ADR-0060 §3).
+        Test-only, and not part of the ``AuditTrail`` contract: the Protocol
+        deliberately grows no affordance for this, so the suite asks the *subject*
+        it was handed rather than the seam every consumer depends on.
+
+        Returns:
+            The handle to wait on and release.
+        """
+        return self._resource.suspend_next()
 
     async def record(self, decision: PermissionDecision) -> str:
         """Append ``decision`` and return its id.
@@ -192,15 +218,21 @@ class FakeAuditTrail:
         except ValidationError as exc:
             msg = f"decision {decision.id!r} is not a valid record: {exc}"
             raise AuditError(msg) from exc
-        if snapshot.id in self._decisions:
-            msg = (
-                f"decision {snapshot.id!r} is already recorded; the trail is "
-                f"append-only, so history cannot be rewritten by replaying a write"
-            )
-            raise DuplicateDecisionError(msg)
-        if snapshot.resolves is not None:
-            self._check_resolution(snapshot)
-        self._decisions[snapshot.id] = snapshot
+        # The checks are *inside* the resource, not before it: a caller that
+        # validated against a trail it no longer holds could pass a duplicate or
+        # resolution check that the append then contradicts. This is where the
+        # class docstring's "no interleaving point between the checks and the
+        # append" is actually kept once there is a lock at all.
+        async with self._resource.held():
+            if snapshot.id in self._decisions:
+                msg = (
+                    f"decision {snapshot.id!r} is already recorded; the trail is "
+                    f"append-only, so history cannot be rewritten by replaying a write"
+                )
+                raise DuplicateDecisionError(msg)
+            if snapshot.resolves is not None:
+                self._check_resolution(snapshot)
+            self._decisions[snapshot.id] = snapshot
         return snapshot.id
 
     def _check_resolution(self, decision: PermissionDecision) -> None:

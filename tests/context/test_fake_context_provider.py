@@ -39,6 +39,14 @@ class TestFakeContextProviderContract(ContextProviderContract):
     # opts out of the suite's per-request recomputation requirement.
     serves_a_fixed_instant = True
 
+    # It composes nothing and spawns nothing: ``assemble`` returns a copy of a
+    # context fixed at construction, without awaiting. So ADR-0060's clause has
+    # no straggler to observe here — and giving the fake one would mean building
+    # a task-spawning provider inside a double whose whole contract is "returns
+    # the context you handed it", which is the widening ``serves_a_fixed_instant``
+    # already refuses on the clock axis.
+    spawns_no_abandonable_work = True
+
     @pytest.fixture
     def provider(self) -> ContextProvider:
         return FakeContextProvider()
@@ -52,6 +60,7 @@ class TestFakeContextProviderWithSuppliedContextContract(ContextProviderContract
     """
 
     serves_a_fixed_instant = True
+    spawns_no_abandonable_work = True  # see the class above
 
     @pytest.fixture
     def provider(self) -> ContextProvider:

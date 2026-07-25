@@ -21,6 +21,13 @@ def _fixed_now() -> datetime:
 class TestInMemoryPlanStoreContract(PlanStoreContract):
     """Runs InMemoryPlanStore through the shared PlanStore conformance suite."""
 
+    #: Every method mutates dicts and returns without awaiting anything, so no
+    #: ``CancelledError`` can arrive while the store holds something — there is no
+    #: connection, lock or worker for ADR-0060's clause to bite on. Declared here
+    #: rather than left to a silent skip: if this store ever grows a resource, the
+    #: line has to be deleted deliberately.
+    acquires_no_shared_resource = True
+
     @pytest.fixture
     def store(self) -> PlanStore:
         return InMemoryPlanStore(now=_fixed_now)

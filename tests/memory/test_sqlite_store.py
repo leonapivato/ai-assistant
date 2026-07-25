@@ -8,6 +8,7 @@ retrieval is reproducible and offline.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import subprocess
 import sys
@@ -34,12 +35,14 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
+from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 pytestmark = pytest.mark.integration
 
@@ -997,6 +1000,47 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         self, make_store: Callable[..., SqliteMemoryStore]
     ) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: make_store(now=now)
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+        """Park the first ``add``'s worker thread inside the connection's turn.
+
+        The suspension goes in ``_add_sync``, i.e. inside ``async with
+        self._lock`` and inside the ``to_thread`` the event loop cannot interrupt
+        — which is exactly where ADR-0054's bug lived. Blocking there is what
+        makes the case deterministic: left to run, a commit finishes in
+        microseconds and whether the second caller arrives while the worker still
+        holds the connection would be a race, so the invariant would be exercised
+        only sometimes.
+
+        Its own store on its own connection, not the ``store`` fixture's: the
+        suspended worker is parked for the length of the case, and sharing would
+        make an unrelated failure hang instead of fail.
+        """
+        store = SqliteMemoryStore(path=":memory:", embedder=HashingEmbedder(dimensions=8))
+        suspension = ThreadSuspension()
+        original_add = store._add_sync
+        armed = threading.Event()
+
+        def blocking_add(record: MemoryRecord, vector: Embedding) -> None:
+            if not armed.is_set():  # the first worker only; later ones run free
+                armed.set()
+                suspension.hold()
+            original_add(record, vector)
+
+        store._add_sync = blocking_add  # type: ignore[method-assign]
+        try:
+            yield store, suspension
+        finally:
+            suspension.release()
+            # An implementation that released the connection early leaves a
+            # worker still using it; closing under that is a native crash rather
+            # than a reported failure, so give the worker a turn to unwind and
+            # let the assertion above be the thing that speaks.
+            await asyncio.sleep(0.05)
+            store.close()
 
 
 async def _spin(iterations: int = 50) -> None:

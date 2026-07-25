@@ -37,10 +37,14 @@ from ai_assistant.core.types import (
     RiskLevel,
     ToolCost,
 )
+from ai_assistant.testing.cancellation import BLOCKED_SECONDS, settle
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
+
     from ai_assistant.core.protocols import AuditTrail
     from ai_assistant.core.types import ActionRequest
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 async def _resolved(
@@ -855,3 +859,84 @@ class AuditTrailContract:
         refetched = await fetch()
         assert refetched.tool.cost.amount == Decimal("5")
         assert refetched.ruling.outcome is PermissionOutcome.CONFIRM
+
+    # --- cancellation (ADR-0060) -------------------------------------------
+
+    #: Whether this implementation acquires nothing whose safety outlives the
+    #: coroutine — no connection, lock, spawned task, file handle or transaction
+    #: that a ``CancelledError`` could unwind past. ``core.protocols``' clause is
+    #: then vacuously satisfied and there is nothing for the case below to
+    #: observe. Left ``False``, the suite requires the implementation to prove the
+    #: invariant by overriding :meth:`trail_suspended_mid_write` — so a new
+    #: durable backend that reintroduces ADR-0054's bug fails here rather than
+    #: passing a suite that never looked. Opting out is a visible declaration in
+    #: the subclass, exactly as ``serves_a_fixed_instant`` is for the context
+    #: provider.
+    acquires_no_shared_resource: bool = False
+
+    def trail_suspended_mid_write(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[AuditTrail, SuspendedCall]]:
+        """Supply a trail whose next ``record`` stops *inside* the resource it took.
+
+        Override unless :attr:`acquires_no_shared_resource` is set. The suite
+        cancels the call while it is suspended and then watches what a second
+        caller can reach, which is the only way to tell the fixed code from the
+        broken code: pre-ADR-0054 the trail raised ``CancelledError`` correctly
+        and released the connection anyway, so a case that asserts only
+        propagation certifies the bug (ADR-0060 §3).
+
+        How the call is made to stop there is implementation-specific — a worker
+        thread parked mid-SQL, a fake's modelled resource — which is why this is a
+        hook and not something the suite can build. Returned as a context manager
+        so the subject is disposed of the way that implementation needs.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.optional_obligation
+    async def test_a_cancelled_append_holds_its_resource_until_the_work_finishes(self) -> None:
+        """``core.protocols``' cancellation clause, on the append path (ADR-0060).
+
+        A cancelled append must not hand the resource to the next caller while the
+        work it started is still using it. The second call is what makes this a
+        test of the invariant rather than of propagation: a single cancelled call
+        in isolation looks identical either way.
+
+        The cancelled append's *effect* is deliberately not asserted. The clause's
+        third paragraph makes it indeterminate to the caller — under ADR-0054's
+        shield an append that reached ``COMMIT`` is durably written — so the suite
+        pins what a caller may actually rely on: the entry is absent or whole,
+        never half-appended, and the trail still serves reads. That an
+        append-only trail may hold an entry whose caller was cancelled is not a
+        gap: ADR-0021 §4's guarantee is that nothing recorded is rewritten, and
+        an indeterminate write is exactly the case the third clause names.
+        """
+        if self.acquires_no_shared_resource:
+            pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
+
+        async with self.trail_suspended_mid_write() as (trail, suspended):
+            first = asyncio.ensure_future(trail.record(decision("cancel-1")))
+            try:
+                await suspended.reached()
+                first.cancel()
+                await settle()
+
+                second = asyncio.ensure_future(trail.record(decision("cancel-2")))
+                finished, _ = await asyncio.wait([second], timeout=BLOCKED_SECONDS)
+                assert not finished, (
+                    "the cancelled append released its resource while its own work was "
+                    "still running, so a second caller reached it concurrently"
+                )
+            finally:
+                suspended.release()
+
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert await second == "cancel-2"
+
+            # The resource survived both: the second entry is durable, the first
+            # is absent-or-whole, and reads still work.
+            assert await trail.get("cancel-2") == decision("cancel-2")
+            cancelled_entry = await trail.get("cancel-1")
+            assert cancelled_entry is None or cancelled_entry == decision("cancel-1")
+            assert {entry.id for entry in await trail.export()} >= {"cancel-2"}
