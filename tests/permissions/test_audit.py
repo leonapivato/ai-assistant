@@ -303,6 +303,337 @@ async def test_a_second_trail_opens_a_migrated_legacy_database_without_failing(
         second.close()
 
 
+# --- the schema version marker ----------------------------------------------
+
+
+def _stored_schema_version(path: Path) -> str | None:
+    """Read the ``meta`` marker straight off the file, or ``None`` if there is none."""
+    raw = sqlite3.connect(str(path))
+    try:
+        if not raw.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+        ).fetchone():
+            return None
+        row = raw.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    finally:
+        raw.close()
+    return None if row is None else str(row[0])
+
+
+def _write_legacy_trail(path: Path, decision_id: str) -> PermissionDecision:
+    """Seed ``path`` with a pre-marker database holding one decision.
+
+    The pre-ADR-0044 table shape, which is what a real database predating the
+    version marker looks like: no ``meta`` table, and no binding columns either.
+    """
+    old = decision(decision_id, request=action(step_id="step-old"))
+    raw_record = json.loads(old.model_dump_json())
+    del raw_record["execution_id"]
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, data TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+            (decision_id, 0, None, json.dumps(raw_record)),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+    return old
+
+
+async def test_a_fresh_trail_records_the_schema_version(ephemeral: SqliteAuditTrail) -> None:
+    """A database created here is labelled, so a future migration has a marker to read.
+
+    The marker ``SqlitePlanStore`` writes from day one (ADR-0049 §1), which this
+    store had none of. Exactly one row, so the label is unambiguous.
+    """
+    rows = ephemeral._conn.execute(
+        "SELECT key, value FROM meta WHERE key = 'schema_version'"
+    ).fetchall()
+
+    assert rows == [("schema_version", "1")]
+
+
+@pytest.mark.integration
+async def test_a_pre_marker_database_is_stamped_rather_than_refused(tmp_path: Path) -> None:
+    """An existing audit trail with no marker still opens, and gains one.
+
+    The marker arrives after this store had users, so every trail already on disk
+    carries none. Refusing them would make a Tier 1 record the user is entitled to
+    keep unopenable by the code that wrote it. Backfilling is sound because
+    ``_migrate`` is additive and keyed on column presence: it brings any pre-marker
+    file to exactly the shape version 1 names, so the stamp records what this open
+    established rather than an assumption about what was there before.
+    """
+    path = tmp_path / "audit.db"
+    old = _write_legacy_trail(path, "c-old")
+    assert _stored_schema_version(path) is None  # the state every existing trail is in
+
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.get("c-old") == old  # the history survives the stamping
+        # ...and the migrated, now-labelled schema is fully functional.
+        await reopened.record(decision("c-new", request=action(execution_id="exec-a")))
+        found = await reopened.pending_confirmation(execution_id="exec-a", step_id="step-1")
+        assert found is not None
+        assert found.id == "c-new"
+    finally:
+        reopened.close()
+
+    assert _stored_schema_version(path) == "1"
+
+
+@pytest.mark.integration
+async def test_reopening_a_labelled_trail_keeps_the_one_marker(tmp_path: Path) -> None:
+    """A second open neither re-stamps nor trips over the marker already there.
+
+    The stamp is written only where none was found, so reopening cannot lose the
+    primary-key race a blind insert would.
+    """
+    path = tmp_path / "audit.db"
+    SqliteAuditTrail(path=path).close()
+
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        rows = reopened._conn.execute("SELECT key, value FROM meta").fetchall()
+    finally:
+        reopened.close()
+
+    assert rows == [("schema_version", "1")]
+
+
+@pytest.mark.integration
+async def test_a_failed_migration_leaves_no_marker_behind(tmp_path: Path) -> None:
+    """A refused upgrade must not label a database it did not manage to migrate.
+
+    The stamp shares the setup transaction with the create and the migration, so a
+    corrupt legacy row rolls back the marker — and the ``meta`` table itself — with
+    everything else. The alternative is a database falsely labelled current, which
+    the *next* open would then trust and never try to migrate again.
+    """
+    path = tmp_path / "audit.db"
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE decisions(id TEXT PRIMARY KEY, decided_at_us INTEGER NOT NULL, "
+            "resolves TEXT, data TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
+            ("c-bad", 0, None, "{not valid json"),
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    with pytest.raises(AuditError):
+        SqliteAuditTrail(path=path)
+
+    assert _stored_schema_version(path) is None
+
+
+@pytest.mark.integration
+async def test_a_newer_schema_is_refused_before_the_decisions_table_exists(
+    tmp_path: Path,
+) -> None:
+    """A database labelled newer than this code understands is refused, and untouched.
+
+    Refused *before* ``decisions`` is created or migrated — creating a table is a
+    write, and code that cannot read the label must not write to the file at all.
+    """
+    path = tmp_path / "audit.db"
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '999')")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(AuditError, match="supports only version"):
+        SqliteAuditTrail(path=path)
+
+    check = sqlite3.connect(str(path))
+    try:
+        tables = {
+            row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        check.close()
+    assert "decisions" not in tables
+
+
+@pytest.mark.integration
+async def test_a_newer_marker_on_a_populated_trail_is_refused_rather_than_read(
+    tmp_path: Path,
+) -> None:
+    """A downgrade is reported at open, not deferred to the first raw SQLite error.
+
+    The same rule the trail applies to a row that no longer validates: a database
+    this code cannot account for is a fault to report, not records to hand on.
+    """
+    path = tmp_path / "audit.db"
+    trail = SqliteAuditTrail(path=path)
+    try:
+        await trail.record(decision("c-1"))
+    finally:
+        trail.close()
+
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(AuditError, match="supports only version"):
+        SqliteAuditTrail(path=path)
+
+
+@pytest.mark.integration
+async def test_a_non_numeric_marker_is_reported_as_an_audit_error(tmp_path: Path) -> None:
+    """A corrupt marker surfaces as this layer's error, not a bare ``ValueError``.
+
+    ``int('')`` raises past ``_setup``'s ``sqlite3``/``OSError`` boundary, so the
+    parse is guarded — the same "reported, not returned" rule ``_decode`` applies.
+    """
+    path = tmp_path / "audit.db"
+    SqliteAuditTrail(path=path).close()
+
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("UPDATE meta SET value = 'one' WHERE key = 'schema_version'")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(AuditError, match="non-numeric schema_version"):
+        SqliteAuditTrail(path=path)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param(float("inf"), id="a-non-finite-real"),
+        pytest.param(1.5, id="a-fractional-real"),
+        pytest.param(b"\x01", id="a-blob"),
+        pytest.param(None, id="no-value-at-all"),
+    ],
+)
+async def test_a_marker_of_the_wrong_type_is_reported_as_an_audit_error(
+    tmp_path: Path, stored: object
+) -> None:
+    """A marker SQLite hands back as anything but text or an integer is refused.
+
+    The marker this code writes is always TEXT, but ``CREATE TABLE IF NOT EXISTS``
+    accepts a pre-existing ``meta`` whose ``value`` column declares no type — and
+    such a column stores whatever it is given. ``int(float('inf'))`` raises
+    ``OverflowError``, which is neither a ``ValueError`` nor an ``AssistantError``,
+    so an unguarded parse would abort construction with an exception no caller of
+    this layer can be asked to handle.
+    """
+    path = tmp_path / "audit.db"
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")  # no declared type
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (stored,))
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(AuditError, match="non-numeric schema_version"):
+        SqliteAuditTrail(path=path)
+
+
+@pytest.mark.integration
+async def test_an_integer_marker_of_the_supported_version_is_accepted(tmp_path: Path) -> None:
+    """A marker stored as INTEGER 1 rather than '1' still names version 1.
+
+    The type guard refuses what cannot be read as a version; it must not refuse a
+    version legibly stored in the other of SQLite's two integral forms, which is
+    what an untyped ``meta`` column yields for an unquoted literal.
+    """
+    path = tmp_path / "audit.db"
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value)")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', 1)")
+        raw.commit()
+    finally:
+        raw.close()
+
+    trail = SqliteAuditTrail(path=path)
+    try:
+        await trail.record(decision("c-1"))
+        assert len(await trail.export()) == 1
+    finally:
+        trail.close()
+
+
+@pytest.mark.integration
+async def test_conflicting_markers_are_refused_rather_than_resolved_by_row_order(
+    tmp_path: Path,
+) -> None:
+    """Two disagreeing markers refuse the open; the first row does not win.
+
+    ``meta``'s primary key makes duplicates unreachable in a table this code
+    created, but ``CREATE TABLE IF NOT EXISTS`` accepts a pre-existing ``meta``
+    declared without one — so a corrupt or hand-built file can hold both a
+    supported and an unsupported version. Reading only the first row would let the
+    unsupported one through on the strength of its sibling, which is the refusal
+    failing open on exactly the malformed input it exists for.
+    """
+    path = tmp_path / "audit.db"
+    raw = sqlite3.connect(str(path))
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT, value TEXT NOT NULL)")  # no primary key
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1')")
+        raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '999')")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(AuditError, match="2 schema_version rows"):
+        SqliteAuditTrail(path=path)
+
+    check = sqlite3.connect(str(path))
+    try:
+        tables = {
+            row[0] for row in check.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        check.close()
+    assert "decisions" not in tables  # refused before any record table was created
+
+
+@pytest.mark.integration
+async def test_clearing_the_trail_leaves_it_openable(tmp_path: Path) -> None:
+    """Burning the book erases the history, not the label the file is read by.
+
+    ``clear`` is wholesale over *decisions*; the marker describes the file's shape,
+    so an emptied trail still opens rather than looking like a pre-marker one.
+    """
+    path = tmp_path / "audit.db"
+    trail = SqliteAuditTrail(path=path)
+    try:
+        await trail.record(decision("c-1"))
+        assert await trail.clear() == 1
+    finally:
+        trail.close()
+
+    assert _stored_schema_version(path) == "1"
+    reopened = SqliteAuditTrail(path=path)
+    try:
+        assert await reopened.export() == []
+    finally:
+        reopened.close()
+
+
 async def test_a_row_the_model_no_longer_accepts_is_reported_not_returned(
     ephemeral: SqliteAuditTrail,
 ) -> None:
