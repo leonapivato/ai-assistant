@@ -131,9 +131,6 @@ class Embedder(Protocol):
     An embedder is bound to a single model. Per-call model selection is
     intentionally omitted: vectors from different models are not comparable, so
     a store must embed everything with one model (ADR-0006 §4).
-
-    Cancelling :meth:`embed` is governed by this module's cancellation clause
-    (ADR-0060).
     """
 
     @property
