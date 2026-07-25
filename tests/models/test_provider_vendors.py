@@ -192,9 +192,13 @@ async def test_a_leading_system_prompt_becomes_anthropics_top_level_system_field
     body = await _record(ANTHROPIC, _LEADING_SYSTEM)
 
     # Anthropic takes the system instruction *out* of the message array and into
-    # a sibling field; the three conversational turns keep their order.
+    # a sibling field; the three conversational turns keep their order and text.
     assert body["system"] == "be terse"
-    assert [turn["role"] for turn in body["messages"]] == ["user", "assistant", "user"]
+    assert ANTHROPIC.transcript(body) == [
+        ("user", "hi"),
+        ("assistant", "hello"),
+        ("user", "how are you?"),
+    ]
 
 
 async def test_a_leading_system_prompt_stays_a_system_role_message_for_openai() -> None:
@@ -203,11 +207,11 @@ async def test_a_leading_system_prompt_stays_a_system_role_message_for_openai() 
     # OpenAI keeps it inline as a fourth message with its own role — the same
     # `_to_model_messages` output, a materially different request.
     assert "system" not in body
-    assert [turn["role"] for turn in body["messages"]] == [
-        "system",
-        "user",
-        "assistant",
-        "user",
+    assert OPENAI.transcript(body) == [
+        ("system", "be terse"),
+        ("user", "hi"),
+        ("assistant", "hello"),
+        ("user", "how are you?"),
     ]
 
 
@@ -229,9 +233,16 @@ async def test_a_late_system_prompt_is_inlined_into_a_user_turn_for_anthropic() 
     body = await _record(ANTHROPIC, _LATE_SYSTEM)
 
     assert "system" not in body
-    last_turn = body["messages"][-1]
-    assert last_turn["role"] == "user"
-    assert [block["text"] for block in last_turn["content"]] == [
+    assert ANTHROPIC.transcript(body) == [
+        ("user", "u1"),
+        ("assistant", "a1"),
+        # The demotion: the instruction is concatenated into the *user* turn that
+        # follows it, wrapped in tags, rather than occupying a system slot.
+        ("user", "<system>now be terse</system>u2"),
+    ]
+    # Two separate content blocks, not one rewritten string — so the tags are the
+    # only thing marking it as having been an instruction.
+    assert [block["text"] for block in body["messages"][-1]["content"]] == [
         "<system>now be terse</system>",
         "u2",
     ]
@@ -243,21 +254,32 @@ async def test_a_late_system_prompt_keeps_its_role_for_openai() -> None:
     # has read a vendor's, not ours: `ModelProvider` promises neither.
     body = await _record(OPENAI, _LATE_SYSTEM)
 
-    assert [turn["role"] for turn in body["messages"]] == ["user", "assistant", "system", "user"]
-    assert body["messages"][2]["content"] == "now be terse"
+    assert OPENAI.transcript(body) == [
+        ("user", "u1"),
+        ("assistant", "a1"),
+        ("system", "now be terse"),
+        ("user", "u2"),
+    ]
 
 
 @pytest.mark.parametrize("vendor", VENDORS, ids=str)
-async def test_conversational_turns_survive_in_order_on_either_vendor(
+async def test_conversational_turns_survive_verbatim_on_either_vendor(
     vendor: VendorStack,
 ) -> None:
-    # Whatever each vendor does with the system slot, the user/assistant
-    # alternation and its order is the part `_to_model_messages` is actually
-    # responsible for, and it must be vendor-independent.
+    # Whatever each vendor does with the system slot, the user/assistant turns —
+    # their order *and their text* — are the part `_to_model_messages` is
+    # actually responsible for, and that must be vendor-independent. Asserting
+    # the text matters as much as the roles: a canned response comes back
+    # whatever was sent, so an adapter that dropped or rewrote a turn's content
+    # while preserving the role sequence would otherwise pass unnoticed.
     body = await _record(vendor, _LEADING_SYSTEM)
 
-    conversational = [turn for turn in body["messages"] if turn["role"] != "system"]
-    assert [turn["role"] for turn in conversational] == ["user", "assistant", "user"]
+    conversational = [turn for turn in vendor.transcript(body) if turn[0] != "system"]
+    assert conversational == [
+        ("user", "hi"),
+        ("assistant", "hello"),
+        ("user", "how are you?"),
+    ]
 
 
 @pytest.mark.parametrize("vendor", VENDORS, ids=str)
