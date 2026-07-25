@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.protocols import Embedder
+from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -235,6 +236,15 @@ class EmbedderContract:
         nothing running that will release it — which is what the overlapping and
         the subsequent ``embed`` below detect, by completing at all.
 
+        The overlapping call is how far this reaches, and it is worth being
+        exact about the limit. It runs while the cancelled call's work is still
+        suspended, so an embedder that released an event-loop resource early
+        would serve it off state that work still holds — observable here only in
+        what comes back. Proving *non-overlap* the way the store suites do needs
+        a resource to observe, and no ``Embedder`` has one; the hook for it
+        belongs to whichever change first gives an ``Embedder`` something the
+        event loop releases (issue #378).
+
         **When the cancellation is delivered is likewise not asserted.** The
         clause permits a method to "defer delivery while it makes its resources
         safe", so an embedder that waited out its worker before re-raising is as
@@ -256,9 +266,13 @@ class EmbedderContract:
                 # ADR-0060 §5: "the moment an `Embedder` acquires something the
                 # event loop releases, it is the ADR-0054 bug again" — and an
                 # embedder that unwound out of such a resource would serve this
-                # one off state its own cancelled worker is still using. It is
-                # started here, and read after everything is released.
+                # one off state its own cancelled worker is still using.
+                #
+                # `settle` is load-bearing, not decoration: `ensure_future` only
+                # *schedules* the call, so without it the release below runs
+                # first and the two never overlap at all.
                 overlapping = asyncio.ensure_future(embedder.embed(["gamma delta"]))
+                await settle()
             finally:
                 suspended.release()
 
