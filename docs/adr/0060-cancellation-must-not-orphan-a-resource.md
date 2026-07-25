@@ -179,9 +179,16 @@ behind an `asyncio.Lock` (the ADR-0054 pattern), and `AssemblingContextProvider`
 spawns per-source tasks it must drain (ADR-0033/0057). They are exactly the
 seams where the rule has already been broken once.
 
-`MemoryWriter` is not on the list: `ingest` holds nothing itself and discharges
-its obligation through the store beneath it, so testing it there would test the
-store twice.
+`MemoryWriter` is not on the list, but **not** because it holds nothing —
+`MemoryIngestor.ingest` takes its own `asyncio.Lock` and holds it across
+`_detect_conflicts`, the policy decision and `_apply`, so a cancellation at any
+of those awaits does release a writer-level lock. It is excluded because
+releasing it there orphans nothing: the cancelled `ingest` coroutine is itself
+dead, so no work of its own is left using the lock, and the store beneath it
+keeps its own connection safe under ADR-0054. What a mid-sequence cancellation
+*does* leave is a **partially applied read-modify-write**, and that is an
+atomicity question — ADR-0046's territory — not a resource-orphaning one. Worth
+naming precisely, because "holds nothing" would have been false.
 
 `FakeToolInvoker`'s `Task.cancelling()`-delta technique is the reference for how
 a fake models this without a real resource.
@@ -320,6 +327,16 @@ a live case (below), and issue #347 is a debt against this contract rather than 
 nice-to-have — this rule is not fully enforced until it closes. Which lane closes
 it is a scoping call for whoever sequences the work, not a judgement this ADR
 makes.
+
+**This is the ADR's one unsettled question, and it is flagged rather than
+buried.** Both review lenses pressed on it independently and repeatedly: the
+four-Protocol enforcement scope is the scope this work was dispatched with, and
+a reasonable reader can argue it should be five (adding `Embedder`, whose
+`to_thread` worker is a verified live case). The argument above is why four is
+defensible; it is not why five would be wrong. Widening it changes what the
+implementation lane must build, so it is settled at ratification by whoever
+sequences these lanes, not unilaterally here. If the answer is five, the only
+edit this ADR needs is `Embedder`'s name in §3 and the closure of #347.
 
 The deferral is a judgement about what a case would currently buy, and it is
 weakest for `Embedder`, so state its position exactly. `FastEmbedEmbedder.embed`
