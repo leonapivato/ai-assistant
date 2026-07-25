@@ -1,7 +1,17 @@
 # 3. Development standards and policies
 
-- Status: Accepted
+- Status: Accepted, §"Documentation"'s `CHANGELOG.md` clause superseded by
+  ADR-0067
 - Date: 2026-07-16
+- Superseded: 2026-07-25 by ADR-0067 — §"Documentation"'s "`CHANGELOG.md` in
+  Keep a Changelog format" is retired and the file deleted. The convention had
+  stopped being maintained 31 ratified ADRs earlier while still reading as
+  current, and the history it duplicated is carried by `docs/adr/`, the commit
+  log, and merged PRs. Every other clause of §"Documentation" stands, as does
+  §"Versioning" (SemVer, single version source in `pyproject.toml`) and the
+  Consequences note that declining to auto-generate versions/changelog from
+  commits keeps tooling simple. The §"Documentation" text below is unchanged
+  (ADR-0001 append-only).
 
 ## Context
 
