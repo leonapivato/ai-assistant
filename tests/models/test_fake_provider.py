@@ -31,13 +31,72 @@ class TestFakeModelProviderContract(ModelProviderContract):
         return FakeModelProvider()
 
 
-async def test_empty_conversation_is_rejected_like_the_real_provider() -> None:
-    # Not a shared-contract requirement (the Protocol is silent on empty input),
-    # but the fake mirrors PydanticAIProvider so code exercised against it cannot
-    # pass on an empty conversation the real provider would reject.
+async def test_a_refused_call_records_nothing() -> None:
+    # ADR-0066 §6: a refused call must be inert. The fake makes that sharp,
+    # because ``complete`` validates, *then* records, *then* evaluates the reply —
+    # a check placed after the record would append a ModelCall for a request that
+    # was rejected and put every ``call_count`` assertion above it off by one.
+    # Every refused shape is checked, since position is a property of the method
+    # rather than of any one check.
     provider = FakeModelProvider()
+    refused: list[list[Message]] = [
+        [],
+        [Message(role=Role.USER, content="u"), Message(role=Role.ASSISTANT, content="cached")],
+        [Message(role=Role.ASSISTANT, content="lone")],
+        [Message(role=Role.TOOL, content="result")],
+    ]
+
+    for history in refused:
+        with pytest.raises(ModelError):
+            await provider.complete(history)
+
+    assert provider.calls == []
+    assert provider.call_count == 0
+
+
+async def test_a_refused_call_does_not_advance_a_scripted_sequence() -> None:
+    # The other half of inertness, and the one that corrupts a *later* assertion
+    # rather than an earlier one: a refusal that popped the queue would leave the
+    # next valid call returning the reply the refused one ate (ADR-0066 §6).
+    provider = FakeModelProvider.scripted("first", "second")
 
     with pytest.raises(ModelError):
+        await provider.complete(
+            [
+                Message(role=Role.USER, content="u"),
+                Message(role=Role.ASSISTANT, content="cached"),
+            ]
+        )
+
+    assert (await provider.complete([Message(role=Role.USER, content="go")])).content == "first"
+
+
+async def test_a_conversation_awaiting_nothing_is_rejected_like_the_real_provider() -> None:
+    # This *is* a shared-contract requirement now (ADR-0066), and the suite above
+    # asserts the disposition on both implementations. Pinned again here for the
+    # message, and because this is the shape the two used to disagree about: the
+    # real provider echoed the trailing turn back without calling a model at all,
+    # while the fake answered it normally — so a subsystem built against the fake
+    # got behaviour production did not have. That divergence is why the promise
+    # binds the Protocol rather than one class.
+    provider = FakeModelProvider()
+
+    with pytest.raises(ModelError, match="already ends with an assistant turn"):
+        await provider.complete(
+            [
+                Message(role=Role.USER, content="u"),
+                Message(role=Role.ASSISTANT, content="cached reply"),
+            ]
+        )
+
+
+async def test_empty_conversation_is_rejected_like_the_real_provider() -> None:
+    # Also a shared-contract requirement since ADR-0066 promoted it; kept here for
+    # the parity statement, which the shared suite cannot make — that suite holds
+    # each implementation to the contract, not the fake to PydanticAIProvider.
+    provider = FakeModelProvider()
+
+    with pytest.raises(ModelError, match="at least one message"):
         await provider.complete([])
 
 

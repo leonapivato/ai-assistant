@@ -115,11 +115,71 @@ def test_tool_role_is_rejected() -> None:
         _to_model_messages([Message(role=Role.TOOL, content="result")])
 
 
-async def test_empty_messages_raise() -> None:
+@pytest.mark.parametrize(
+    ("history", "match"),
+    [
+        pytest.param([], "at least one message", id="empty"),
+        pytest.param(
+            [Message(role=Role.USER, content="u"), Message(role=Role.ASSISTANT, content="cached")],
+            "already ends with an assistant turn",
+            id="ends-on-assistant",
+        ),
+        pytest.param(
+            [Message(role=Role.ASSISTANT, content="lone")],
+            "already ends with an assistant turn",
+            id="lone-assistant",
+        ),
+    ],
+)
+async def test_a_malformed_conversation_is_refused_as_a_bare_model_error(
+    history: list[Message], match: str
+) -> None:
+    # The shared suite pins the *disposition* these carry, which is what the
+    # contract requires of any implementation (ADR-0066 §6). What is asserted
+    # here is narrower and belongs to this implementation alone: that it raises
+    # the base class, chosen to match the empty check the trailing-assistant
+    # shapes now sit beside. Nothing else pins that — the flag-only shared
+    # assertions are equally satisfied by ModelContentFilterError, which is also
+    # non-retryable and non-routable and would mislabel a caller-shape mistake as
+    # a content-policy refusal.
     provider = PydanticAIProvider(default_model=TestModel())
 
-    with pytest.raises(ModelError, match="at least one message"):
-        await provider.complete([])
+    with pytest.raises(ModelError, match=match) as caught:
+        await provider.complete(history)
+
+    assert type(caught.value) is ModelError
+
+
+async def test_a_trailing_assistant_turn_is_refused_before_the_agent_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ordering ADR-0066 §6 obligation 2 requires, and the one obligation that
+    # costs a reach into a private. An implementation that called ``Agent.run``,
+    # got the echo back and *then* raised would satisfy every other assertion in
+    # this change: today's short-circuit means the reject-after ordering also
+    # issues no request and never reaches the model, so neither the vendor
+    # recorder nor a FunctionModel spy can tell the two apart. A spy on the
+    # agent can. Worth pinning because it is what keeps the refusal free of a
+    # vendor round trip if pydantic-ai ever stops short-circuiting.
+    provider = PydanticAIProvider(default_model=TestModel(custom_output_text="MODEL WAS CALLED"))
+    ran = False
+
+    async def spy(**_kwargs: object) -> SimpleNamespace:
+        nonlocal ran
+        ran = True
+        return SimpleNamespace(output="unreached")
+
+    monkeypatch.setattr(provider._agent, "run", spy)  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(ModelError):
+        await provider.complete(
+            [
+                Message(role=Role.USER, content="u"),
+                Message(role=Role.ASSISTANT, content="cached reply"),
+            ]
+        )
+
+    assert not ran
 
 
 async def test_model_override_is_forwarded_to_the_agent(

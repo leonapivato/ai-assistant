@@ -151,13 +151,43 @@ class ModelProvider(Protocol):
     ) -> Message:
         """Produce the assistant's next message given the conversation so far.
 
+        ``messages`` must be a conversation **awaiting an assistant reply**: it
+        must be non-empty, and must not end with a ``Role.ASSISTANT`` turn. A
+        caller asks ``complete()`` for the *next* assistant message; a history
+        that already ends with one has nothing left to answer, and an empty
+        history has nothing to answer at all. Either is a malformed request and
+        raises ``ModelError`` before any model is contacted (ADR-0066 §1).
+
+        Stated on the roles of ``messages``, deliberately — not on any translated
+        representation — so it binds an implementation that never touches
+        pydantic-ai. ``Role.SYSTEM`` is unaffected: a history ending in a system
+        turn is a request and stays one.
+
+        This is a **necessary condition, not a sufficient one**. It names two
+        shapes that are never a request, and admits nothing by omission — a
+        history satisfying it may still be refused for reasons of its own. A
+        ``Role.TOOL`` turn is the case that makes the distinction bite: a tool
+        exchange is not representable at this seam, and both implementations
+        reject any history containing one. Passing this clause does not make such
+        a history acceptable, and nothing here promises tool support.
+
         Args:
-            messages: Conversation history, oldest first.
+            messages: Conversation history, oldest first. Non-empty, and not
+                ending on a ``Role.ASSISTANT`` turn.
             model: Optional ``"provider:model"`` override; falls back to the
                 configured default when ``None``.
 
         Returns:
             The assistant's reply as a :class:`~ai_assistant.core.types.Message`.
+
+        Raises:
+            ModelError: If ``messages`` is empty, or ends with a
+                ``Role.ASSISTANT`` turn. What binds every implementation is the
+                *disposition*, not the class identity: the error is neither
+                ``retryable`` nor ``routable``, because a malformed argument
+                reproduces identically on every attempt from every route
+                (ADR-0066 §3). An implementation is free to raise a subclass
+                carrying that disposition.
         """
         ...
 
