@@ -80,6 +80,25 @@ _TORN_INPUT = (
 _REACHED_TIMEOUT = 5.0
 
 
+#: One conversation turn's full identity — role, content, and optional name.
+#: Content alone is too coarse to catch every container tear ADR-0069 §3 names:
+#: a caller that *replaces* a turn with one of identical text but a different role
+#: (``USER("hi")`` → ``SYSTEM("hi")``) tears a wrapper that re-reads the list, yet
+#: a content-only fingerprint records both attempts as the same. Frozen ``Message``
+#: (ADR-0068) closes the in-place role rewrite, not this container replacement.
+_Turn = tuple[Role, str, str | None]
+
+
+def _fingerprint(messages: Sequence[Message]) -> tuple[_Turn, ...]:
+    """The full identity of every turn in ``messages`` — role, content, and name."""
+    return tuple((m.role, m.content, m.name) for m in messages)
+
+
+def _contents(turns: Sequence[_Turn]) -> tuple[str, ...]:
+    """Just the content strings of ``turns``, in order."""
+    return tuple(content for _role, content, _name in turns)
+
+
 def encode_conversation(contents: tuple[str, ...]) -> str:
     """Encode one observed conversation as a reply that names the version it saw.
 
@@ -87,7 +106,8 @@ def encode_conversation(contents: tuple[str, ...]) -> str:
     completion returns *carries* the version of the conversation the answering
     attempt observed — otherwise a reply is opaque about which observation it
     rests on, and the case cannot assert the clause on it. Plain strings, joined:
-    a recorded ``Message`` would be re-read at assertion time, hiding a tear.
+    a recorded turn re-read at assertion time would show the *final* state of a
+    list mutated mid-flight, hiding a tear.
     """
     return "|".join(contents)
 
@@ -127,22 +147,23 @@ class FirstAwaitGate:
 
 
 class ConversationLog:
-    """What conversation each collaborator invocation was handed, as content tuples.
+    """What conversation each collaborator invocation was handed, as turn fingerprints.
 
-    Recorded as plain strings at the instant the collaborator is handed the
-    conversation, never as ``Message`` objects: a recorded object would be re-read
-    at assertion time and show the *final* state of a list mutated mid-flight,
-    hiding the very tear the case exists to catch. Read once, after the scenario
-    is over.
+    Each entry is the full identity of the conversation one invocation observed —
+    a tuple of :data:`_Turn` (role, content, name) — captured at the instant the
+    collaborator is handed it, never as live ``Message`` objects: a recorded
+    fingerprint is a plain immutable tuple, so it cannot be re-read at assertion
+    time to show the *final* state of a list mutated mid-flight, which would hide
+    the very tear the case exists to catch. Read once, after the scenario is over.
     """
 
     def __init__(self) -> None:
         """Create an empty log."""
-        self.observed: list[tuple[str, ...]] = []
+        self.observed: list[tuple[_Turn, ...]] = []
 
-    def record(self, contents: Sequence[str]) -> None:
-        """Record one invocation's observed conversation."""
-        self.observed.append(tuple(contents))
+    def record(self, turns: Sequence[_Turn]) -> None:
+        """Record one invocation's observed conversation, by turn identity."""
+        self.observed.append(tuple(turns))
 
 
 class SuspendingRecorder:
@@ -180,17 +201,44 @@ class SuspendingRecorder:
     ) -> Message:
         """Record the conversation observed, then suspend/fail/answer as configured."""
         self._calls += 1
-        observed = tuple(m.content for m in messages)
+        observed = _fingerprint(messages)
         self._log.record(observed)
         if self._gate is not None and self._calls == 1:
             await self._gate.hold()
         if self._calls <= self._fail_times:
             raise ModelUnavailableError("503")
-        return Message(role=Role.ASSISTANT, content=encode_conversation(observed))
+        return Message(role=Role.ASSISTANT, content=encode_conversation(_contents(observed)))
 
 
 async def _no_sleep(_delay: float) -> None:
     """Stand in for a wrapper's backoff, so the case never waits in real time."""
+
+
+def _append_a_turn(conversation: list[Message]) -> None:
+    """Grow the caller's list — the length-changing container tear."""
+    conversation.append(Message(role=Role.USER, content="wait, actually"))
+
+
+def _replace_the_turn(conversation: list[Message]) -> None:
+    """Swap the caller's only turn for one of identical text but a different role.
+
+    The container tear ADR-0069 §3 names alongside append, and the reason the log
+    fingerprints role and not just content: ADR-0068 froze ``Message`` so the
+    turn's own role cannot be rewritten in place, but the caller can still replace
+    the element — and a wrapper that re-reads the list would hand a later attempt
+    ``SYSTEM("hi")`` where the first saw ``USER("hi")``, a tear invisible to a
+    content-only observation.
+    """
+    conversation[0] = Message(role=Role.SYSTEM, content="hi")
+
+
+#: Both container mutations ADR-0069 §3 names: append (length changes) and
+#: same-text replacement (only the role changes). The case must catch a tear
+#: under either.
+_MUTATIONS = [
+    pytest.param(_append_a_turn, id="appended-turn"),
+    pytest.param(_replace_the_turn, id="replaced-turn"),
+]
 
 
 @contextlib.asynccontextmanager
@@ -357,22 +405,25 @@ class ModelProviderContract:
         secondary = SuspendingRecorder(log)
         yield wrap(primary, secondary), gate, log
 
+    @pytest.mark.parametrize("mutate", _MUTATIONS)
     async def test_complete_rests_its_reply_on_one_observation_of_the_conversation(
-        self, provider: ModelProvider
+        self, provider: ModelProvider, mutate: Callable[[list[Message]], None]
     ) -> None:
         """``core.protocols``' input clause, on ``complete`` (ADR-0065, ADR-0069).
 
         The mutation vector is **container mutation of the caller's ``Sequence``**
-        — appending a turn — because ADR-0068's deep-freeze of ``Message`` closed
-        the element-rewrite vector: a turn's own fields can no longer change under
-        an observation, so the case need not (and cannot) parametrise over a
-        rewritten turn. With ``complete`` suspended at its first ``await``, the
-        case grows the caller's list, then asserts the reply and every inner
-        attempt describe one version — never a mix, which is the tear a wrapper
-        that re-reads the caller's ``Sequence`` after a suspension would commit
-        (#380/#384). Mid-flight, not post-call: a post-call assertion cannot tell a
-        subject that snapshots from one that re-reads, the failure ADR-0065
-        §"The suite already appears to cover this, and does not" documents.
+        — appending *or replacing* a turn (ADR-0069 §3) — not an element rewrite,
+        which ADR-0068's deep-freeze of ``Message`` closed: a turn's own fields can
+        no longer change under an observation, so the case need not (and cannot)
+        parametrise over a rewritten turn. It does exercise both container tears,
+        including a same-text role replacement, which is why the log fingerprints
+        each turn's role and name and not only its content. With ``complete``
+        suspended at its first ``await``, the case mutates the caller's list, then
+        asserts the reply and every inner attempt describe one version — never a
+        mix, the tear a wrapper that re-reads the caller's ``Sequence`` after a
+        suspension would commit (#380/#384). Mid-flight, not post-call: a post-call
+        assertion cannot tell a subject that snapshots from one that re-reads, the
+        failure ADR-0065 §"The suite already appears to cover this" documents.
         """
         if self.completes_without_suspending:
             # The reduction for a subject with no suspension window (ADR-0069 §3):
@@ -383,13 +434,14 @@ class ModelProviderContract:
             # commits without suspending, there is nothing mid-flight left to tear.
             conversation = [Message(role=Role.USER, content="hi")]
             reply = await provider.complete(conversation)
-            conversation.append(Message(role=Role.USER, content="wait, actually"))
+            mutate(conversation)
             assert reply.role is Role.ASSISTANT
             assert isinstance(reply.content, str)
             return
 
         async with self.provider_suspended_at_its_first_await() as (subject, gate, log):
             conversation = [Message(role=Role.USER, content="hi")]
+            before = _fingerprint(conversation)
             async with _held_at_its_first_await(gate, subject.complete(conversation)) as call:
                 # The subject is genuinely suspended in flight here — not yet done —
                 # so the mutation lands *inside* `complete`, the only window the
@@ -398,20 +450,21 @@ class ModelProviderContract:
                 # already taken its first observation (asserted below), so this
                 # exercises the re-read window after that observation.
                 assert not call.done(), "complete finished before it could be mutated mid-flight"
-                # Grow the caller's own list while `complete` is suspended.
-                conversation.append(Message(role=Role.USER, content="wait, actually"))
+                # Append to, or replace a turn in, the caller's own list while
+                # `complete` is suspended.
+                mutate(conversation)
             reply = await call
 
             assert log.observed, "the subject's collaborator was never reached"
             # The first observation was taken before the mutation, so the case
             # tests the re-read window rather than the initial read — a subject
-            # that read only at entry would already have "hi" here regardless.
-            assert log.observed[0] == ("hi",)
+            # that read only at entry would already carry this turn regardless.
+            assert log.observed[0] == ((Role.USER, "hi", None),)
             # One version across every attempt: a wrapper that re-read the caller's
-            # list after suspending would have handed a later attempt the grown one.
+            # list after suspending would have handed a later attempt the mutated one.
             assert len(set(log.observed)) == 1, _TORN_INPUT
             # ...and the single reply rests on that same one observation.
-            assert reply.content == encode_conversation(log.observed[-1]), _TORN_INPUT
-            # The list really was mutated mid-flight, so the case is not vacuously
-            # green on a mutation that never happened.
-            assert [m.content for m in conversation] != ["hi"]
+            assert reply.content == encode_conversation(_contents(log.observed[-1])), _TORN_INPUT
+            # The list really was mutated mid-flight (grown, or its turn replaced),
+            # so the case is not vacuously green on a mutation that never happened.
+            assert _fingerprint(conversation) != before
