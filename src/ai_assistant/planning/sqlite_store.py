@@ -231,20 +231,17 @@ class SqlitePlanStore:
                 # *before* creating any record table, so a rejected open leaves no
                 # schema behind (the transaction rolls the meta table back too on
                 # the raise).
-                unstamped = self._verify_or_init_meta(conn)
+                counter, mark = self._verify_or_init_meta(conn)
                 for statement in _RECORD_SCHEMA:
                     conn.execute(statement)
-                if unstamped is not None:
-                    # Backfilled *after* the schema above, in the same transaction,
-                    # so the mark is only written for a file this open has actually
-                    # brought to the current shape — and a failure rolls the mark
-                    # back rather than leaving a database falsely labelled. This is
-                    # `SqliteAuditTrail._check_schema_version`'s ordering (#346),
-                    # applied to the second marker this store backfills. It is also
-                    # what puts `executions` in scope for the corroboration below.
-                    conn.execute(
-                        _WRITE_HIGH_WATER, (str(self._corroborated_mark(conn, unstamped)),)
-                    )
+                # Reconciled *after* the schema above, in the same transaction, so
+                # the mark is only written for a file this open has actually brought
+                # to the current shape — and a failure rolls it back rather than
+                # leaving a database falsely labelled. This is
+                # `SqliteAuditTrail._check_schema_version`'s ordering (#346),
+                # applied to the second marker this store backfills; it is also what
+                # puts `executions` in scope for the corroboration.
+                self._reconcile_high_water(conn, counter, mark)
             if self._path != ":memory:":
                 Path(self._path).chmod(_OWNER_ONLY)
         except PlanningError:
@@ -256,7 +253,7 @@ class SqlitePlanStore:
             raise PlanningError(msg) from exc
         return conn
 
-    def _verify_or_init_meta(self, conn: sqlite3.Connection) -> int | None:
+    def _verify_or_init_meta(self, conn: sqlite3.Connection) -> tuple[int, int | None]:
         """Write the version and counter on a fresh DB, or refuse any other version.
 
         Runs inside the setup transaction. ADR-0049 §1 makes v1 the first and only
@@ -282,15 +279,9 @@ class SqlitePlanStore:
         all, rather than open and fail at the first allocation.
 
         Returns:
-            The high-water mark this open must stamp once the record tables exist,
-            or ``None`` if the database already carries one. A database written
-            before ADR-0064 has a counter and no mark; it is **backfilled, not
-            refused**, because its counter is the highest ordinal it has issued —
-            that is exactly what the pre-ADR-0064 code maintained — so stamping it
-            records what is already true rather than assuming anything. A deleted
-            mark is indistinguishable from an absent one here, so the value is
-            cross-checked against the surviving records before it is written; see
-            :meth:`_corroborated_mark`.
+            The validated counter, and the stored mark — or ``None`` where the
+            database carries none. :meth:`_reconcile_high_water` takes it from
+            there, once the record tables exist.
 
         Raises:
             PlanningError: If the schema version is unsupported, a marker is
@@ -316,57 +307,66 @@ class SqlitePlanStore:
             counter = 0
             conn.execute("INSERT INTO meta(key, value) VALUES ('exec_counter', '0')")
         if mark := self._read_meta(conn, _HIGH_WATER):
-            self._refuse_a_rewound_counter(counter, self._meta_int(_HIGH_WATER, mark[0]))
-            return None
-        return counter
+            stored_mark = self._meta_int(_HIGH_WATER, mark[0])
+            self._refuse_a_rewound_counter(counter, stored_mark)
+            return counter, stored_mark
+        return counter, None
 
-    def _corroborated_mark(self, conn: sqlite3.Connection, counter: int) -> int:
-        """Cross-check a backfilled mark against the ordinals the records still carry.
+    def _reconcile_high_water(
+        self, conn: sqlite3.Connection, counter: int, mark: int | None
+    ) -> None:
+        """Corroborate the counter against the records, then bring the mark level.
 
-        The backfill in :meth:`_verify_or_init_meta` trusts the counter, and it has
-        to: a database predating the mark has nothing else to be stamped from. But
-        a *deleted* mark is indistinguishable from one that was never written, so
-        that branch would otherwise launder a two-row tamper — drop the mark, lower
-        the counter — into a fresh, agreeing pair. The executions the file still
-        holds are the witness that closes it. Every one records the ordinal it was
-        allocated with in ``created_seq``, written in the same transaction that
-        advanced the counter, and ``clear``/``delete_goal`` only ever *remove*
-        rows — so ``MAX(created_seq) <= exec_counter`` holds for every file this
-        store wrote, and a violation is corruption whatever the mark says.
+        Runs inside the setup transaction, once the record tables exist — which is
+        what puts ``executions`` in scope. Two things happen here, and each closes
+        a hole the ``counter >= mark`` test in :meth:`_verify_or_init_meta` cannot
+        see on its own.
 
-        Deliberately only on the backfill path, and that is exactly as strong as
-        the harm: rewinding past a retained execution is what makes two rows share
-        a ``created_seq`` and stops ``active_executions``/``export`` being the
-        oldest-first order the contract promises. Where no execution survives there
-        is nothing to corroborate *and* nothing to corrupt — the residual case
-        ADR-0064 §5 keeps out of scope. A store whose mark is intact never reaches
-        here, so this costs one aggregate read once in a database's life.
+        **The records corroborate the counter.** Every execution stores in
+        ``created_seq`` the ordinal it was allocated with, written by the same
+        transaction that advanced the counter, and ``clear``/``delete_goal`` only
+        ever *remove* rows — so ``MAX(created_seq) <= exec_counter`` holds for every
+        file this store wrote, and a violation is corruption whatever the mark says.
+        The mark alone cannot catch two cases: a *deleted* mark is indistinguishable
+        from one that was never written, so the backfill below would otherwise
+        launder a two-row tamper into a fresh, agreeing pair; and a mark left
+        *lagging* (§3) agrees with a counter rewound down to meet it. Both were
+        reproduced before this check existed, and both end the same way — a second
+        execution allocated a ``created_seq`` an existing one already holds, so
+        ``active_executions``/``export`` silently stop being the oldest-first order
+        the contract promises. The records are not a substitute for the mark and
+        never *raise* the counter: they are exactly what ``clear``/``delete_goal``
+        erase, which is why ADR-0049 §3 keeps the ordinal in ``meta`` at all. They
+        can only refuse — and where no execution survives there is nothing to
+        corroborate *and* nothing to corrupt (ADR-0064 §5).
 
-        Returns:
-            ``counter``, unchanged — the records can only refuse a backfill, never
-            raise it. Repairing the counter from them is the wrong move: they are
-            what ``clear``/``delete_goal`` erase, which is why ADR-0049 §3 keeps
-            the ordinal in ``meta`` in the first place.
+        **The mark is then brought level with the counter**, written where it is
+        absent and *promoted* where it lags. Promoting is not a repair: the counter
+        is the highest ordinal issued, so that is what the high water is. Doing it
+        eagerly at open rather than lazily at the next allocation is what makes the
+        allocation-time test in :meth:`_next_ordinal` sound for the rest of the
+        session — with the two level, any mid-session rewind falls below the mark
+        and is refused, without the allocation having to re-scan the records.
 
         Raises:
             PlanningError: If an execution survives that was allocated an ordinal
-                above the counter being backfilled, or ``created_seq`` does not
-                read as an integer.
+                above the counter, or ``created_seq`` does not read as an integer.
         """
         row = conn.execute("SELECT MAX(created_seq) FROM executions").fetchone()
-        if row is None or row[0] is None:  # no executions survive: nothing to check
-            return counter
-        highest = self._meta_int("created_seq", row[0])
+        highest = 0 if row is None or row[0] is None else self._meta_int("created_seq", row[0])
         if counter < highest:
             msg = (
-                f"the plan store at {self._path!r} has exec_counter={counter} and no "
-                f"exec_high_water, but still holds an execution allocated at "
-                f"created_seq={highest}: the counter has been rewound and its mark "
-                f"removed, so there is nothing left to back the ordinal ADR-0049 §3 "
-                f"rests on. Refusing rather than backfilling a rewound counter"
+                f"the plan store at {self._path!r} has exec_counter={counter} but still "
+                f"holds an execution allocated at created_seq={highest}: the counter has "
+                f"been rewound past ordinals the store has already issued, and its "
+                f"exec_high_water no longer witnesses that (ADR-0049 §3). Refusing rather "
+                f"than allocating an ordinal a stored execution already carries"
             )
             raise PlanningError(msg)
-        return counter
+        if mark is None:
+            conn.execute(_WRITE_HIGH_WATER, (str(counter),))
+        elif mark < counter:
+            conn.execute(_UPDATE_HIGH_WATER, (str(counter),))
 
     def _refuse_a_rewound_counter(self, counter: int, mark: int) -> None:
         """Refuse a counter that has fallen below the highest ordinal already issued.
@@ -377,10 +377,10 @@ class SqlitePlanStore:
         same transaction, so ``counter < mark`` cannot arise from anything this
         store did — it means the counter was moved by something else.
 
-        The test is deliberately one-sided. A mark *below* the counter is harmless:
-        no ordinal has been re-issued, so the next allocation simply carries the
-        mark forward. Only the counter falling behind means ids already handed out
-        are about to be minted a second time.
+        The test is deliberately one-sided. A mark *below* the counter is not a
+        rewind — no ordinal has been re-issued — so it is levelled up rather than
+        refused (:meth:`_reconcile_high_water`). Only the counter falling behind
+        means ids already handed out are about to be minted a second time.
 
         Raises:
             PlanningError: If ``counter`` is below ``mark``.
@@ -443,7 +443,7 @@ class SqlitePlanStore:
         A non-numeric ``schema_version``, ``exec_counter`` or ``exec_high_water``
         is a corrupt or tampered store, not a Python exception to leak past this
         layer's initialisation boundary (ADR-0049 §1). ``created_seq`` is read the
-        same way by :meth:`_corroborated_mark`: it is declared ``INTEGER NOT
+        same way by :meth:`_reconcile_high_water`: it is declared ``INTEGER NOT
         NULL``, but only in a table *this* code created.
         """
         msg = (
