@@ -190,6 +190,18 @@ covers what the other cannot. A file that *already* holds duplicate ordinals is
 refused at the open, since nothing here can decide which of two rows at one
 ordinal came first.
 
+**And the index is verified, not assumed.** `CREATE UNIQUE INDEX IF NOT EXISTS`
+keys on the *name*, so a pre-existing index called `executions_created_seq` and
+shaped differently — non-unique, over another column, partial — makes the creation
+a silent no-op and leaves no constraint behind while everything above claims one.
+That is the same fail-open issue #349 found in a `meta` table this code did not
+shape, and the same answer applies: an object's name is not evidence about the
+object. The index is read back from `PRAGMA index_list`/`index_info` at every open
+and required to be unique, total, and over exactly `created_seq`; anything else is
+refused. Verifying the index is the *whole* check rather than half of one — an
+index with those properties cannot coexist with duplicate rows, and creating one
+over a table that already held them would have raised.
+
 **A database predating the mark is stamped, not refused.** Every plan store
 written before this change has a counter and no mark. Making a durable record
 unopenable by the code that wrote it is a far worse failure than the one the mark

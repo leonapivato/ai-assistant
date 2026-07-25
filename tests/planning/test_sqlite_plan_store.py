@@ -1082,6 +1082,54 @@ async def test_a_file_already_holding_duplicate_ordinals_is_refused_at_open(
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
+@pytest.mark.parametrize(
+    "collision",
+    [
+        pytest.param(
+            "CREATE INDEX executions_created_seq ON executions(created_seq)", id="not-unique"
+        ),
+        pytest.param(
+            "CREATE UNIQUE INDEX executions_created_seq ON executions(id)", id="wrong-column"
+        ),
+        pytest.param(
+            "CREATE UNIQUE INDEX executions_created_seq ON executions(created_seq) "
+            "WHERE active = 1",
+            id="partial",
+        ),
+    ],
+)
+async def test_an_index_that_only_shares_the_name_is_refused(
+    tmp_path: Path, collision: str
+) -> None:
+    """``IF NOT EXISTS`` keys on the name, so the name is not evidence about the object.
+
+    Adversarial review, round 4. A pre-existing index *called*
+    ``executions_created_seq`` but shaped differently makes the creation a silent
+    no-op, leaving no uniqueness constraint while every message in the module
+    claims one — the same fail-open issue #349 found in a ``meta`` table this code
+    did not shape. Verified against the previous commit: with a same-name
+    non-unique index in place, two rows at ``created_seq = 1`` inserted cleanly.
+
+    So the index is read back and required to be unique, total, and over exactly
+    ``created_seq``.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute(
+            "CREATE TABLE executions("
+            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, version INTEGER NOT NULL, "
+            "active INTEGER NOT NULL, created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
+        )
+        raw.execute(collision)
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="not a unique index over executions"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
 async def test_a_lost_high_water_mark_is_refused_at_allocation(tmp_path: Path) -> None:
     """An allocator that cannot witness its counter refuses, like one with no counter.
 
