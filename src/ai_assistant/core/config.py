@@ -8,12 +8,20 @@ configuration knob is discoverable, typed, and validated in one place.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BeforeValidator, Field, ValidationError, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import Reversibility, RiskLevel
@@ -34,10 +42,11 @@ def _disable_threshold(value: object) -> object:
 
     A per-field :class:`BeforeValidator` rather than the model-wide
     ``env_parse_none_str``: that switch would turn a literal ``"none"`` into
-    ``None`` on *every* setting, including ``str``-typed ones like
-    ``default_model`` where ``"none"`` is a legitimate value rather than a request
-    to disable anything. Restricting the sentinel to the four threshold fields
-    keeps the disable path where it belongs. Any other value — a scale member, an
+    ``None`` on *every* setting, so no other field could ever take ``"none"`` as
+    a value in its own right — it would arrive as ``None`` and be judged against
+    that field's own type instead. Restricting the sentinel to the four threshold
+    fields keeps the disable path where it belongs, and leaves every other field
+    free to say for itself what ``"none"`` means. Any other value — a scale member, an
     enum instance passed directly, an already-``None`` — falls through unchanged,
     so off-scale input is still refused by the scale validation that follows.
     """
@@ -51,6 +60,90 @@ def _disable_threshold(value: object) -> object:
 #: disable sentinel (:data:`_THRESHOLD_DISABLE_SENTINEL`) as ``None``.
 _RiskThreshold = Annotated[RiskLevel | None, BeforeValidator(_disable_threshold)]
 _ReversibilityThreshold = Annotated[Reversibility | None, BeforeValidator(_disable_threshold)]
+
+
+#: The shape of a pydantic-ai model spec: a non-empty ``provider`` and a non-empty
+#: ``model``, separated by the first colon. The character classes are not invented
+#: — they are the ones pydantic-ai's own ``known_model_names()`` actually uses
+#: (``-``, ``.``, ``/`` in a provider; those plus further ``:`` in a model name,
+#: as in ``bedrock:us.anthropic.claude-...``), checked against all 602 of its
+#: colon-bearing names, none of which this rejects.
+#:
+#: What it deliberately does **not** do is decide whether the named provider
+#: exists or is installed. That is the models layer's knowledge, not
+#: configuration's (golden rule 4 confines provider SDKs to ``models/``, and the
+#: import contract forbids ``core`` from importing ``pydantic_ai`` at all), so
+#: this validates the *form* of a spec and nothing about the vendor behind it —
+#: see ADR-0062 §2.
+_MODEL_SPEC_PATTERN: Final = re.compile(
+    r"\A[A-Za-z0-9][A-Za-z0-9._\-/]*:[A-Za-z0-9][A-Za-z0-9._\-/:]*\Z"
+)
+
+#: What separates one fallback spec from the next in a single environment
+#: variable — ``ASSISTANT_FALLBACK_MODELS=openai:gpt-5,anthropic:claude-x``.
+_SPEC_SEPARATOR: Final = ","
+
+
+def _model_spec_is_well_formed(value: str) -> str:
+    """Reject a model spec that is not ``"provider:model"`` shaped.
+
+    A malformed spec is a configuration mistake, and this is the last moment it
+    can be reported as one: pydantic-ai resolves a spec **lazily, at the first
+    completion**, so an unvalidated typo surfaces as a ``ModelError`` on a user's
+    request rather than at load. That matters most for a *fallback*, which is only
+    ever reached once the primary has already failed — see ADR-0062 §2.
+
+    Args:
+        value: The spec as configured.
+
+    Returns:
+        The spec unchanged.
+
+    Raises:
+        ValueError: If the spec is not ``"provider:model"`` shaped.
+    """
+    if _MODEL_SPEC_PATTERN.match(value) is None:
+        msg = (
+            f"malformed model spec {value!r}; expected pydantic-ai's "
+            f"'provider:model' form, e.g. 'anthropic:claude-opus-4-8'"
+        )
+        raise ValueError(msg)
+    return value
+
+
+def _split_model_specs(value: object) -> object:
+    """Parse a comma-separated list of model specs from a single string.
+
+    pydantic-settings treats a list- or tuple-typed field as *complex* and parses
+    its environment value as **JSON**, which would make the fallback list read
+    ``ASSISTANT_FALLBACK_MODELS='["openai:gpt-5"]'`` — quoting, brackets, and a
+    parse error that names JSON rather than the mistake. ``NoDecode`` on the field
+    turns that decoding off so the raw string arrives here instead; this is
+    pydantic-settings' own documented hook for the case, so source precedence
+    (environment over ``.env`` over defaults) is untouched — the value is still
+    resolved by the ordinary source chain and only its *decoding* changes.
+
+    Whitespace around a spec is stripped and empty segments are dropped, so a
+    trailing comma or a space after one is not a malformed spec. An empty or
+    all-whitespace value therefore means "no fallbacks", the same as omitting the
+    variable.
+
+    Anything that is not a string — a tuple or list passed directly in Python, as
+    tests and ``Settings(...)`` callers do — falls through untouched.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        A tuple of specs if ``value`` was a string, otherwise ``value`` unchanged.
+    """
+    if isinstance(value, str):
+        return tuple(part.strip() for part in value.split(_SPEC_SEPARATOR) if part.strip())
+    return value
+
+
+#: A pydantic-ai ``"provider:model"`` spec, validated for form.
+_ModelSpec = Annotated[str, AfterValidator(_model_spec_is_well_formed)]
 
 
 class Settings(BaseSettings):
@@ -92,9 +185,28 @@ class Settings(BaseSettings):
     # The assistant is model-agnostic; this names the default model the
     # orchestration layer reaches for when a caller doesn't specify one.
     # Format follows pydantic-ai's "provider:model" convention.
-    default_model: str = Field(
+    default_model: _ModelSpec = Field(
         default="anthropic:claude-opus-4-8",
         description="Default model in pydantic-ai 'provider:model' form.",
+    )
+
+    # The rest of the router's preference order (ADR-0062, #353). The composition
+    # root routes over ``(default_model, *fallback_models)``, so an empty list —
+    # the default, and what an unset deployment gets — reproduces today's
+    # single-route behaviour exactly.
+    #
+    # Comma-separated in the environment, not JSON: see ``_split_model_specs``.
+    # A duplicate is refused rather than accepted (``_fallbacks_are_alternatives``);
+    # and a route's *model* override (ADR-0013 §2, one provider appearing as
+    # several routes) is deliberately not expressible here — ADR-0062 §4.
+    fallback_models: Annotated[
+        tuple[_ModelSpec, ...], NoDecode, BeforeValidator(_split_model_specs)
+    ] = Field(
+        default=(),
+        description=(
+            "Further models to route to when the default fails, most preferred "
+            "first, comma-separated (e.g. 'openai:gpt-5,anthropic:claude-x')."
+        ),
     )
 
     # Resilience knobs for the model layer. The deadline is per attempt, so the
@@ -219,6 +331,41 @@ class Settings(BaseSettings):
             msg = f"unknown timezone {value!r}"
             raise ValueError(msg) from exc
         return value
+
+    @model_validator(mode="after")
+    def _fallbacks_are_alternatives(self) -> Settings:
+        """Require every fallback to name a model the router does not already try.
+
+        A route that repeats an earlier one is never reached in a state where it
+        could succeed: routing moves on only after the earlier route failed
+        *routably*, and a routable failure — the provider is down, throttled, or
+        refusing our credentials (``ModelError.routable``) — is a property of the
+        provider, not of the individual request. So the duplicate re-sends the
+        same prompt to the same place, pays for it, and fails the same way.
+
+        Refusing it rather than silently collapsing it is the point: a duplicate
+        is a reliable sign the operator meant something else (a second vendor, or
+        a different model at the same one), and deduplicating it quietly would
+        leave them believing they had a fallback they do not have. This is the
+        same reasoning as refusing a malformed spec, applied to a spec that is
+        well-formed but useless — ADR-0062 §3.
+
+        Raises:
+            ValueError: If a fallback repeats ``default_model`` or an earlier
+                fallback.
+        """
+        seen = {self.default_model: "default_model"}
+        for position, spec in enumerate(self.fallback_models, start=1):
+            origin = seen.get(spec)
+            if origin is not None:
+                msg = (
+                    f"fallback_models[{position - 1}]={spec!r} repeats {origin}; "
+                    f"a repeated route is never tried in a state where it could "
+                    f"succeed, so name a different model or drop it"
+                )
+                raise ValueError(msg)
+            seen[spec] = f"fallback_models[{position - 1}]"
+        return self
 
     @model_validator(mode="after")
     def _backoff_bounds_are_ordered(self) -> Settings:

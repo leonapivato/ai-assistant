@@ -1,6 +1,6 @@
 # 61. Model-agnosticism is a tested property, not a design intention
 
-- Status: Accepted
+- Status: Accepted, §2's one-route caveat retired by ADR-0062
 - Date: 2026-07-24
 
 ## Context

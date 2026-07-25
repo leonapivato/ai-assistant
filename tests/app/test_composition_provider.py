@@ -121,22 +121,57 @@ async def test_the_routers_routes_retry_before_routing_gives_up_on_them(tmp_path
 
 def test_the_default_model_is_the_first_route() -> None:
     """Whatever else is configured, the operator's ``default_model`` is preferred first."""
-    settings = Settings(default_model="anthropic:claude-x")
+    settings = Settings(default_model="anthropic:claude-x", fallback_models=("openai:gpt-5",))
 
     assert _model_specs(settings)[0] == "anthropic:claude-x"
 
 
-def test_todays_configuration_expresses_exactly_one_route() -> None:
-    """One route today, and the test says so rather than leaving it implicit.
+def test_an_unconfigured_deployment_still_expresses_exactly_one_route() -> None:
+    """No fallbacks configured means one route, exactly as before ADR-0062.
 
-    ``Settings`` carries a single model spec, so the router it builds cannot fall
-    back — a fact worth asserting, because a reader who sees ``RoutingProvider``
-    at the composition root would otherwise reasonably assume it can. What is now
-    true is that the mechanism is *on the production path* and correct for as many
-    routes as it is given (below); what it still needs is a second spec for an
-    operator to name.
+    The fallback list is opt-in, so adding it must not change what an existing
+    deployment routes over. A reader who sees ``RoutingProvider`` at the
+    composition root should still not assume *this* configuration can fall back —
+    with one route it cannot.
     """
-    assert len(_model_specs(Settings())) == 1
+    settings = Settings()
+
+    assert _model_specs(settings) == (settings.default_model,)
+
+
+def test_configured_fallbacks_become_the_routes_behind_the_default() -> None:
+    """The whole of #353: configuration can now express more than one route.
+
+    Before this, ``_model_specs`` could only ever return one spec, so the router
+    ADR-0061 §2 put on the production path was structurally unable to fall back
+    *in production*, however it was configured. It no longer is.
+    """
+    settings = Settings(
+        default_model="anthropic:claude-x",
+        fallback_models=("openai:gpt-5", "openai:gpt-4o"),
+    )
+
+    assert _model_specs(settings) == ("anthropic:claude-x", "openai:gpt-5", "openai:gpt-4o")
+
+
+async def test_a_configured_fallback_reaches_the_router_build_engine_hands_over(
+    tmp_path: Path,
+) -> None:
+    """The specs are not merely returned — they become the built router's routes.
+
+    ``_model_specs`` and ``_build_model_provider`` are tested separately, so this
+    pins the join between them: what ``build_engine`` gives the planner has one
+    route per configured spec. Without it, a wiring change that dropped the
+    fallbacks in between would pass every other test in this file.
+    """
+    settings = Settings(default_model="anthropic:claude-x", fallback_models=("openai:gpt-5",))
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        model = _planner_model(engine)
+        assert isinstance(model, RoutingProvider)
+        assert len(model._routes) == 2
+    finally:
+        await engine.aclose()
 
 
 async def test_the_composed_router_falls_back_when_given_more_than_one_spec() -> None:
