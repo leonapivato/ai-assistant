@@ -1,6 +1,6 @@
 # 65. A call observes its inputs at one instant, before its first await
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-24
 - **This is a contract change.** It adds a second standing clause to
   `core/protocols.py`'s module docstring, binding on every Protocol in the file,
