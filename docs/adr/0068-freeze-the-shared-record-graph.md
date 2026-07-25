@@ -1,6 +1,6 @@
 # 68. Freeze the shared record graph: immutability is a property of the types
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-25
 - **This is a contract change.** It makes deep immutability a property of the
   boundary-crossing pydantic models in `core/types.py` — a `core` type change
