@@ -108,6 +108,14 @@ _RECORD_SCHEMA = (
 #: duplicates is refused at the open (ADR-0049 §1's posture) rather than carried.
 _INDEXES = ("CREATE UNIQUE INDEX IF NOT EXISTS executions_created_seq ON executions(created_seq)",)
 
+#: ``IF NOT EXISTS`` keys on the *name*, so a pre-existing index called this and
+#: shaped differently — non-unique, on another column, or partial — leaves the
+#: creation above a silent no-op and the backstop absent. The name is checked
+#: against the object it actually names (see
+#: :meth:`SqlitePlanStore._verify_the_ordinal_index`), the same reasoning issue
+#: #349 applied to a ``meta`` table this code did not shape.
+_ORDINAL_INDEX = "executions_created_seq"
+
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
@@ -248,6 +256,7 @@ class SqlitePlanStore:
                 counter, mark = self._verify_or_init_meta(conn)
                 for statement in (*_RECORD_SCHEMA, *_INDEXES):
                     conn.execute(statement)
+                self._verify_the_ordinal_index(conn)
                 # Reconciled *after* the schema above, in the same transaction, so
                 # the mark is only written for a file this open has actually brought
                 # to the current shape — and a failure rolls it back rather than
@@ -325,6 +334,51 @@ class SqlitePlanStore:
             self._refuse_a_rewound_counter(counter, stored_mark)
             return counter, stored_mark
         return counter, None
+
+    def _verify_the_ordinal_index(self, conn: sqlite3.Connection) -> None:
+        """Check that the ordinal index *is* the one this store means to rely on.
+
+        ``CREATE UNIQUE INDEX IF NOT EXISTS`` keys on the **name**, so a
+        pre-existing index called :data:`_ORDINAL_INDEX` and shaped differently —
+        non-unique, over another column, or partial — makes the creation a silent
+        no-op and leaves the ADR-0064 §4 backstop absent while every message in
+        this module claims it is there. That is the same fail-open issue #349 found
+        in a ``meta`` table this code did not shape: an object's name is not
+        evidence about the object.
+
+        So the index is read back from ``PRAGMA index_list``/``index_info`` and
+        required to be unique, total, and over exactly ``created_seq``. Nothing
+        here inspects the *rows*: if an index with those properties exists — this
+        open's or an earlier one's — duplicate ordinals cannot be present, and if
+        it had to be created just now, creating it over a table that already held
+        duplicates would have raised. Verifying the index is therefore the whole
+        check, not half of one.
+
+        Raises:
+            PlanningError: If no index of that name exists, or it is not a unique,
+                non-partial index over ``created_seq`` alone.
+        """
+        listed = [
+            row
+            for row in conn.execute("PRAGMA index_list('executions')")
+            if row[1] == _ORDINAL_INDEX
+        ]
+        columns = [row[2] for row in conn.execute("PRAGMA index_info('executions_created_seq')")]
+        # index_list rows are (seq, name, unique, origin, partial).
+        if len(listed) == 1 and listed[0][2] and not listed[0][4] and columns == ["created_seq"]:
+            return
+        found = (
+            "no such index"
+            if not listed
+            else f"unique={listed[0][2]}, partial={listed[0][4]}, over {columns}"
+        )
+        msg = (
+            f"the plan store at {self._path!r} has an {_ORDINAL_INDEX} that is not a unique "
+            f"index over executions(created_seq) ({found}); the ordinal uniqueness ADR-0049 §1's "
+            f"oldest-first ordering rests on is not enforced, and this store will not open "
+            f"claiming a backstop the database does not have"
+        )
+        raise PlanningError(msg)
 
     def _reconcile_high_water(
         self, conn: sqlite3.Connection, counter: int, mark: int | None
