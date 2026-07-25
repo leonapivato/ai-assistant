@@ -27,6 +27,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from pydantic.functional_serializers import PlainSerializer
 from pydantic.functional_validators import AfterValidator
 
+# --- preamble: shared values, and the helper that never raises ---------------
+# `_FULL_CONFIDENCE` belongs to `Provenance` below, `Embedding` to ADR-0006's
+# retrieval seam. `describe_untrusted` is module-wide, and `core/clock.py`
+# shares it because it owes the same never-raise promise (ADR-0026 §2).
+
+
 # A user-asserted memory is, by definition, fully trusted.
 _FULL_CONFIDENCE = 1.0
 
@@ -56,6 +62,12 @@ def describe_untrusted(value: object) -> str:
         return repr(value)
     except Exception:  # the value cannot describe itself; say so and move on
         return "<a value whose repr() failed>"
+
+
+# --- instants: one canonicaliser, one field type (ADR-0023, ADR-0030) --------
+# `core`'s only UTC canonicaliser, and the `UtcInstant` annotation every
+# `datetime` field in this module carries rather than validating per field.
+# A second implementation of this test is forbidden (ADR-0030 §4).
 
 
 #: What a value expressed in UTC must report as its offset.
@@ -251,6 +263,11 @@ follows. The exemption set that enumerated them is gone, and
 """
 
 
+# --- conversation: the provider-independent turn -----------------------------
+# `models/` maps these onto whatever an SDK wants; no SDK's own vocabulary
+# crosses into `core` (golden rule 4).
+
+
 class Role(StrEnum):
     """Who authored a message in a conversation."""
 
@@ -266,6 +283,12 @@ class Message(BaseModel):
     role: Role
     content: str
     name: str | None = Field(default=None, description="Optional author/tool name.")
+
+
+# --- memory: a record, where it came from, when it is believed (ADR-0005) ----
+# The four typed kinds and their discriminated union, plus the two axes every
+# record carries: `Provenance` (how it was learnt, and how much to trust it)
+# and `Validity` (the valid-time window it is the live belief in, ADR-0045 §2).
 
 
 class MemorySource(StrEnum):
@@ -462,6 +485,9 @@ MemoryRecord = Annotated[
 """A unit of long-term memory: one of the four typed kinds, tagged by ``kind``."""
 
 
+# --- memory: one write inside an atomic batch (ADR-0046 §2) ------------------
+
+
 class MemoryWriteMode(StrEnum):
     """How one write in an atomic batch treats a colliding id (ADR-0046 §2).
 
@@ -512,12 +538,24 @@ class MemoryWrite(BaseModel):
     mode: MemoryWriteMode = MemoryWriteMode.UPSERT
 
 
+# --- data sensitivity tiers (ADR-0004) ---------------------------------------
+# Sits inside the memory run, but is not memory's alone: `tools` and
+# `permissions` read it through `TierReach` further down, which is what a
+# tool's reads/writes/discloses ceilings are expressed in.
+
+
 class DataTier(StrEnum):
     """Sensitivity classification of stored data (see ADR-0004)."""
 
     SECRET = "secret"  # noqa: S105  # Tier 0 tier name, not a credential value.
     PERSONAL = "personal"  # Tier 1: PII, memories, user-model facts.
     OPERATIONAL = "operational"  # Tier 2: non-sensitive settings, caches.
+
+
+# --- memory: proposal -> policy ruling -> ingest result (ADR-0028) -----------
+# The write path the model never takes directly: it proposes, a deterministic
+# `MemoryPolicy` disposes. `REINFORCE` and `SUPERSEDE` name the *relation* to
+# the target record, never the write that relation causes (ADR-0040 §1).
 
 
 class MemoryUpdateProposal(BaseModel):
@@ -628,6 +666,10 @@ class MemoryIngestResult(BaseModel):
     )
 
 
+# --- situational context: the assembled "right now" (ADR-0008) ---------------
+# Advisory and assembled per request, never durable state.
+
+
 class TimeOfDay(StrEnum):
     """A coarse bucket of the local time of day."""
 
@@ -653,6 +695,10 @@ class CurrentContext(BaseModel):
     within_working_hours: bool = Field(
         description="Whether the local time falls in the configured working-hours window.",
     )
+
+
+# --- learning: explicit, memory-affecting feedback (ADR-0009) ----------------
+# `learning` turns one of these into a `MemoryUpdateProposal` above.
 
 
 class FeedbackKind(StrEnum):
@@ -691,6 +737,13 @@ class FeedbackEvent(BaseModel):
             msg = "feedback content must not be empty"
             raise ValueError(msg)
         return stripped
+
+
+# --- frozen JSON, and the identifier primitive (ADR-0014 §2) -----------------
+# Introduced for plan parameters and step outputs, but shared much wider: tool
+# schemas, action payloads and audit records all hold `FrozenJson`.
+# `Identifier` only refuses a blank — the stricter `VisibleIdentifier` and
+# `DurableIdentifier` are layered on it further down.
 
 
 type FrozenJson = str | int | float | bool | None | Sequence[FrozenJson] | Mapping[str, FrozenJson]
@@ -843,6 +896,11 @@ type Identifier = Annotated[str, AfterValidator(_non_blank)]
 """A non-blank, stripped identifier."""
 
 
+# --- planning: goals, and the frozen plan (ADR-0014 §§1-2) -------------------
+# A step names a capability rather than a tool, which is what keeps tool
+# selection a later stage of the pipeline than planning.
+
+
 class GoalStatus(StrEnum):
     """Where a goal stands (see ADR-0014 §1)."""
 
@@ -939,6 +997,12 @@ class ActionPlan(BaseModel):
         return value
 
 
+# --- planning: the step-status vocabulary (ADR-0014 §4) ----------------------
+# The statuses, and the sets drawn over them. Only the sets live here: the
+# transition *graph* is `planning`'s, because it is not intrinsic to the type
+# (module docstring, ADR-0016 §2).
+
+
 class StepStatus(StrEnum):
     """Where one step of an execution stands (see ADR-0014 §4)."""
 
@@ -988,6 +1052,13 @@ _FINISHED_STATUSES = frozenset({StepStatus.SUCCEEDED, StepStatus.FAILED, StepSta
 #: §4 makes durable *because* it must be resolved explicitly — was the one
 #: finished status left with no durable diagnostic.
 _FAILURE_STATUSES = frozenset({StepStatus.FAILED, StepStatus.INDETERMINATE})
+
+
+# --- tools: why an invocation did not succeed (ADR-0029 §3) ------------------
+# Declared here, mid-planning, on purpose: `StepFailure` and `StepExecution`
+# just below record the tool's own classification rather than a planning-owned
+# mirror of it (ADR-0039 §3, ADR-0031 §1). `ToolFailure`, at the end of the
+# module, is the seam-facing form the executor reads it from.
 
 
 class ToolFailureKind(StrEnum):
@@ -1061,6 +1132,11 @@ _RETRYABLE_BY_KIND: Mapping[ToolFailureKind, bool] = {
     ToolFailureKind.REFUSED: False,
     ToolFailureKind.INTERNAL: False,
 }
+
+
+# --- planning: what actually happened to a step (ADR-0014 §3, ADR-0039) ------
+# Kept apart from the plan so the audit record does not mutate as execution
+# proceeds, and so recovery is *loading* state rather than reconstructing it.
 
 
 class StepFailure(BaseModel):
@@ -1322,6 +1398,12 @@ class ExecutionState(BaseModel):
         return value
 
 
+# --- planning: the write path, deletion, export (ADR-0014 §5, ADR-0004 §6) ---
+# A transition is a command rather than a caller-built state, which is what
+# keeps the transition graph authoritative. `PlanExport` is the portable
+# snapshot ADR-0004 §6's data rights require.
+
+
 class StepTransition(BaseModel):
     """A request to move one step to a new status (see ADR-0014 §5).
 
@@ -1483,6 +1565,12 @@ class PlanExport(BaseModel):
         return self
 
 
+# --- severity scales: ordered by declaration, not by value (ADR-0016 §2) -----
+# `StrEnum` members *are* strings, so an un-overridden scale compares
+# lexicographically. `PermissionOutcome`, far below, is the fourth member of
+# this family and is one for exactly that reason.
+
+
 class _SeverityScale(StrEnum):
     """A ``StrEnum`` ordered by declaration, least severe first (ADR-0016 §2).
 
@@ -1579,6 +1667,12 @@ class CostBasis(StrEnum):
     UNKNOWN = "unknown"
 
 
+# --- text that renders, and text that encodes (ADR-0018 §1) ------------------
+# The shared predicates behind every "must contain visible text" validator in
+# this module — a tool's id and description, a ruling's reason, a step's and a
+# tool's failure message — plus the UTF-8 test the durable fields reuse.
+
+
 #: Unicode major categories that carry standalone visible content: letters,
 #: numbers, punctuation and symbols. Deliberately a **whitelist**. The first
 #: attempt enumerated the invisible categories instead and missed the combining
@@ -1659,6 +1753,13 @@ def _visible_identifier(value: str) -> str:
 
 type VisibleIdentifier = Annotated[str, AfterValidator(_visible_identifier)]
 """An identifier that renders as something — for ids a user is shown."""
+
+
+# --- tools: what a call costs, and what it may touch (ADR-0016 §4) -----------
+# Cost is structured so a spend policy can tell *free* from *unknown* and fail
+# closed on the second. `TierReach` orders `DataTier` by sensitivity, so two
+# registries serialise the same declaration identically.
+
 
 _CURRENCY_CODE_LENGTH = 3
 
@@ -1767,6 +1868,12 @@ def _ordered_tiers(value: tuple[DataTier, ...]) -> tuple[DataTier, ...]:
 
 type TierReach = Annotated[tuple[DataTier, ...], AfterValidator(_ordered_tiers)]
 """Data tiers a tool may touch: sorted most-sensitive-first, de-duplicated."""
+
+
+# --- tools: the declaration a permission decision rules on (ADR-0016 §1) -----
+# States facts and draws no conclusions — `permissions` does that (ADR-0016
+# §3). Every field a decision depends on is required, because a default is a
+# claim, and the natural default for a reach tuple is a false one.
 
 
 class ToolDefinition(BaseModel):
@@ -2030,6 +2137,9 @@ class ToolDefinition(BaseModel):
         return f"tool has no JSON encoding, so it could not be stored: {described}{detail}"
 
 
+# --- permissions: what a policy may rule (ADR-0021 §2) -----------------------
+
+
 class PermissionOutcome(_SeverityScale):
     """What a policy ruled about an action (ADR-0021 §2).
 
@@ -2048,6 +2158,11 @@ class PermissionOutcome(_SeverityScale):
     ALLOW = "allow"
     CONFIRM = "confirm"
     DENY = "deny"
+
+
+# --- durability: a recorded decision must reload (ADR-0021 §4) ---------------
+# Layered on `Identifier` rather than folded into it, because `planning` shares
+# that type; issue #62 holds the identifier-syntax question.
 
 
 def _durable_identifier(value: str) -> str:
@@ -2113,6 +2228,12 @@ def _sha256_hex(value: str) -> str:
 
 type Sha256Hex = Annotated[str, AfterValidator(_sha256_hex)]
 """A lowercase SHA-256 digest in hex — the form :func:`hashlib.sha256` emits."""
+
+
+# --- the binding: detachment, and the canonical digest (ADR-0021 §1) ---------
+# What makes "by value" true rather than nominal. `_canonical_json` is shared
+# by the validator and by the digest, so "accepted" and "digestible" are one
+# predicate by construction rather than two that can disagree.
 
 
 def _detached_tool(value: ToolDefinition) -> ToolDefinition:
@@ -2208,6 +2329,12 @@ def _digestible(parameters: Mapping[str, FrozenJson]) -> Mapping[str, FrozenJson
         msg = f"parameters have no canonical JSON encoding, so they cannot be digested: {exc}"
         raise ValueError(msg) from exc
     return parameters
+
+
+# --- permissions: the request, the ruling, their binding (ADR-0021) ----------
+# Three types rather than one (§3): a policy authors only the ruling, so it has
+# no field with which to name a tool it was not handed. `authorises` lives in
+# `core` because it compares; it does not decide (ADR-0016 §2).
 
 
 class ActionRequest(BaseModel):
@@ -2572,6 +2699,11 @@ class PermissionDecision(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+# --- the invocation seam: result, failure, authorised call (ADR-0029) --------
+# Failure is *returned* as data, never raised, because `INDETERMINATE` cannot
+# be an exception. An unauthorised `ToolCall` is unconstructable.
 
 
 class ToolOutcome(StrEnum):
