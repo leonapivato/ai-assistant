@@ -58,13 +58,13 @@ if TYPE_CHECKING:
 
 
 def ensure_vendor_available(spec: str) -> None:
-    """Fail now if ``spec``'s vendor cannot be resolved (ADR-0062 §2).
+    """Fail now if ``spec``'s vendor package is missing or unknown (ADR-0062 §2).
 
     ADR-0062 §1 and §3 moved three model-spec mistakes from a user's request to
-    startup; this closes the fourth and last, the one that ADR-0062 §2 decided in
+    startup; this closes the fourth, the one that ADR-0062 §2 decided in
     principle and deferred in mechanism because the mechanism lives here.
 
-    Why it is worth a check at all: an unresolvable spec fails at the first
+    Why it is worth a check at all: such a spec fails at the first
     completion as a bare, **non-routable** ``ModelError`` (:func:`_classify` has
     nothing better to say about an ``ImportError``, and deliberately keeps it
     that way — see :func:`_classify_unwrapped`). ``RoutingProvider`` re-raises a
@@ -84,8 +84,22 @@ def ensure_vendor_available(spec: str) -> None:
     demand live credentials of anything that merely wires the system together
     (ADR-0062 §2 verified this: ``UserError: Set the ANTHROPIC_API_KEY …``).
 
-    Only the **vendor** half of the spec is checked. Whether the vendor offers
-    the named model is the vendor's own answer, available only from a live call.
+    **What it does not promise.** It asks one question — is the package behind
+    the spec's provider half importable — and a "yes" is not a promise that a
+    completion will resolve. Three things stay late failures, all of them because
+    answering them needs a credential, which is the boundary ADR-0062 §2 drew
+    rather than an oversight:
+
+    * whether the vendor offers the *named model*, which only a live call knows;
+    * whether the deployment holds that vendor's API key;
+    * for a ``gateway/…`` spec, whether the Pydantic AI Gateway exposes that
+      upstream. Only six ``gateway/`` prefixes are in pydantic-ai's own
+      vocabulary, and this resolves every one of them correctly; but a
+      hand-written ``gateway/openrouter:…`` passes here — ``openrouter``'s
+      package really is importable — and then fails in ``gateway_provider``,
+      which refuses to answer anything at all before it has read
+      ``PYDANTIC_AI_GATEWAY_API_KEY``. No load-time check reaches past that, so
+      closing the corner would not make a gateway spec safe (issue #371).
 
     **It raises ``ConfigurationError``, never a ``ModelError``**, and the choice
     is load-bearing rather than cosmetic. A ``ModelError`` carries a routing

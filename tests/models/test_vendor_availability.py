@@ -186,6 +186,26 @@ def test_a_gateway_prefixed_provider_is_accepted() -> None:
     ensure_vendor_available("gateway/anthropic:claude-opus-4-8")
 
 
+def test_a_gateway_spec_is_checked_only_for_its_vendor_package() -> None:
+    """The limit of what a "yes" means, asserted rather than assumed (issue #371).
+
+    ``gateway/openrouter:…`` passes, and that is this check answering its own
+    question truthfully: ``openrouter``'s package really is importable, since it
+    rides the installed ``openai`` stack. It is a *different* question — whether
+    the Pydantic AI Gateway exposes that upstream — that still fails late, in
+    ``gateway_provider``.
+
+    Not closed here for a reason that survives inspection: ``gateway_provider``
+    reads ``PYDANTIC_AI_GATEWAY_API_KEY`` **before** it validates the upstream at
+    all, so even the fully supported ``gateway/anthropic:claude-x`` is
+    unverifiable at load without a credential — the boundary ADR-0062 §2 drew.
+    Closing the upstream corner would not make a gateway spec safe. Pinned so the
+    behaviour is a stated limit that a future reader can change deliberately,
+    rather than a gap someone rediscovers.
+    """
+    ensure_vendor_available("gateway/openrouter:some-model")
+
+
 def test_no_name_pydantic_ai_ships_is_reported_as_an_unknown_provider() -> None:
     """Refuse to over-reject, exhaustively — the shape ADR-0062's config test uses.
 
