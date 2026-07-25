@@ -185,10 +185,13 @@ seams where the rule has already been broken once.
 of those awaits does release a writer-level lock. It is excluded because
 releasing it there orphans nothing: the cancelled `ingest` coroutine is itself
 dead, so no work of its own is left using the lock, and the store beneath it
-keeps its own connection safe under ADR-0054. What a mid-sequence cancellation
-*does* leave is a **partially applied read-modify-write**, and that is an
-atomicity question — ADR-0046's territory — not a resource-orphaning one. Worth
-naming precisely, because "holds nothing" would have been false.
+keeps its own connection safe under ADR-0054. Nor does it tear: `_apply` reaches
+at most **one** durable call — an `add`, or a `write_atomic` batch that ADR-0046
+makes atomic — so a cancelled `ingest` leaves an effect that is either absent or
+complete, never half-written. What the caller cannot know is *which*, which is
+the third clause of the rule doing its job rather than a gap in it. Worth naming
+precisely, because "holds nothing" would have been false and "leaves a partial
+write" would have been false in the other direction.
 
 `FakeToolInvoker`'s `Task.cancelling()`-delta technique is the reference for how
 a fake models this without a real resource.
