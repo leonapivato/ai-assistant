@@ -43,16 +43,24 @@ from ai_assistant.core.types import (
     StepTransition,
     ToolFailureKind,
 )
-from ai_assistant.testing.cancellation import BLOCKED_SECONDS, settle
+from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import ExecutionState
-    from ai_assistant.testing.cancellation import SuspendedCall
+    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+#: What a failure of the cancellation case below means, in one place: every
+#: assertion in it is the same invariant seen from a different side.
+_RELEASED_EARLY = (
+    "the cancelled call released its resource while its own work was still "
+    "running, so a second caller reached it concurrently"
+)
 
 
 def _goal(goal_id: str = "g1") -> Goal:
@@ -883,7 +891,7 @@ class PlanStoreContract:
 
     def store_suspended_mid_write(
         self,
-    ) -> AbstractAsyncContextManager[tuple[PlanStore, SuspendedCall]]:
+    ) -> AbstractAsyncContextManager[tuple[PlanStore, SuspendedCall, ResourceLog]]:
         """Supply a store whose next ``save_goal`` stops *inside* the resource it took.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
@@ -897,6 +905,13 @@ class PlanStoreContract:
         thread parked mid-SQL, a fake's modelled resource — which is why this is a
         hook and not something the suite can build. Returned as a context manager
         so the subject is disposed of the way that implementation needs.
+
+        The :class:`ResourceLog` records each call's time *inside* the resource,
+        and the case reads it once the scenario is over. It is not redundant with
+        the blocked-caller check below: that one is decisive only where queueing
+        is loop-bound (a fake on an ``asyncio.Lock``), while a store whose work
+        runs on an executor can leave a second call pending for reasons that have
+        nothing to do with the resource. The log settles that case directly.
         """
         raise NotImplementedError
 
@@ -918,25 +933,37 @@ class PlanStoreContract:
         if self.acquires_no_shared_resource:
             pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
 
-        async with self.store_suspended_mid_write() as (store, suspended):
+        async with self.store_suspended_mid_write() as (store, suspended, log):
             first = asyncio.ensure_future(store.save_goal(_goal("cancel-1")))
+            second = None
             try:
                 await suspended.reached()
                 first.cancel()
                 await settle()
 
                 second = asyncio.ensure_future(store.save_goal(_goal("cancel-2")))
-                finished, _ = await asyncio.wait([second], timeout=BLOCKED_SECONDS)
-                assert not finished, (
-                    "the cancelled write released its resource while its own work was "
-                    "still running, so a second caller reached it concurrently"
-                )
+                await settle()
+                assert not second.done(), _RELEASED_EARLY
+
+                # Again, because deferring one cancellation is not the contract:
+                # a second delivered while the deferred wait runs must not escape
+                # and unwind out of the resource either (ADR-0054's helper loops
+                # on `while not done.is_set()` for exactly this).
+                first.cancel()
+                await settle()
+                assert not second.done(), _RELEASED_EARLY
             finally:
                 suspended.release()
 
             with pytest.raises(asyncio.CancelledError):
                 await first
+            assert second is not None
             assert await second == "cancel-2"
+
+            # Decisive where the blocked-caller check above is not: the two calls
+            # were never inside the resource at the same time.
+            assert not log.overlapped, _RELEASED_EARLY
+            assert log.visits == 2, "both calls should have reached the resource by now"
 
             # The resource survived both: the second write is durable, the first
             # is absent-or-whole, and reads still work.

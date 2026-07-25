@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, StepTransition
-    from ai_assistant.testing.cancellation import LoopSuspension
+    from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: Mirror of the ADR-0014 §4 graph; see the module docstring on duplication.
 _LEGAL_TRANSITIONS: dict[StepStatus, frozenset[StepStatus]] = {
@@ -188,6 +188,11 @@ class FakePlanStore:
             The handle to wait on and release.
         """
         return self._resource.suspend_next()
+
+    @property
+    def resource_log(self) -> ResourceLog:
+        """When each call was inside the modelled resource (ADR-0060's case reads it)."""
+        return self._resource.log
 
     def _now(self) -> datetime:
         """The guarded clock's reading, as the error the real store raises.

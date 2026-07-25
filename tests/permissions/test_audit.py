@@ -27,7 +27,7 @@ from permission_builders import AT, action, decision, ruling, tool
 from ai_assistant.core.errors import AuditError, DuplicateDecisionError
 from ai_assistant.core.types import DataTier, PermissionOutcome
 from ai_assistant.permissions import SqliteAuditTrail
-from ai_assistant.testing.cancellation import ThreadSuspension
+from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -56,7 +56,9 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
         return ephemeral
 
     @contextlib.asynccontextmanager
-    async def trail_suspended_mid_write(self) -> AsyncIterator[tuple[AuditTrail, SuspendedCall]]:
+    async def trail_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[tuple[AuditTrail, SuspendedCall, ResourceLog]]:
         """Park the first ``record``'s worker thread inside the connection's turn.
 
         The suspension goes in ``_record_sync``, i.e. inside ``async with
@@ -73,18 +75,20 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
         """
         trail = SqliteAuditTrail(path=":memory:")
         suspension = ThreadSuspension()
+        log = ResourceLog()
         original_record = trail._record_sync
         armed = threading.Event()
 
         def blocking_record(snapshot: PermissionDecision) -> None:
-            if not armed.is_set():  # the first worker only; later ones run free
-                armed.set()
-                suspension.hold()
-            original_record(snapshot)
+            with log.inside():  # the span the connection is genuinely in use for
+                if not armed.is_set():  # the first worker only; later ones run free
+                    armed.set()
+                    suspension.hold()
+                original_record(snapshot)
 
         trail._record_sync = blocking_record  # type: ignore[method-assign]
         try:
-            yield trail, suspension
+            yield trail, suspension, log
         finally:
             suspension.release()
             # An implementation that released the connection early leaves a

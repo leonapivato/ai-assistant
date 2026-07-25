@@ -38,7 +38,7 @@ from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from ai_assistant.core.types import ActionRequest
-    from ai_assistant.testing.cancellation import LoopSuspension
+    from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: Reported when a policy is asked to resolve something nobody was ever shown.
 _NOT_A_CONFIRMATION = "fake: the decision resolved was not a CONFIRM, so it authorises nothing"
@@ -177,6 +177,11 @@ class FakeAuditTrail:
             The handle to wait on and release.
         """
         return self._resource.suspend_next()
+
+    @property
+    def resource_log(self) -> ResourceLog:
+        """When each call was inside the modelled resource (ADR-0060's case reads it)."""
+        return self._resource.log
 
     async def record(self, decision: PermissionDecision) -> str:
         """Append ``decision`` and return its id.
