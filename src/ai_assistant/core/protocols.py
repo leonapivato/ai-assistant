@@ -141,6 +141,9 @@ class ModelProvider(Protocol):
     Concrete implementations (in `models`) wrap pydantic-ai so the rest of the
     system never imports a provider SDK directly. This is the seam that makes
     the assistant model-agnostic.
+
+    How :meth:`complete` observes the conversation it is handed is governed by
+    this module's input-observation clause (ADR-0065).
     """
 
     async def complete(

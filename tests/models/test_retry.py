@@ -32,8 +32,16 @@ from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from model_provider_contract import ConversationLog
 
     from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.testing.cancellation import SuspendedCall
+
+
+async def _no_sleep(_delay: float) -> None:
+    """Stand in for backoff, so the input-observation case never waits in real time."""
 
 
 class TestRetryingProviderContract(ModelProviderContract):
@@ -47,6 +55,17 @@ class TestRetryingProviderContract(ModelProviderContract):
     @pytest.fixture
     def provider(self) -> ModelProvider:
         return RetryingProvider(FakeModelProvider())
+
+    def provider_suspended_at_its_first_await(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[ModelProvider, SuspendedCall, ConversationLog]]:
+        # The retry loop re-passes the caller's `messages` to attempt 2 after
+        # attempt 1's await returned (ADR-0065). The suite-owned recorder suspends
+        # attempt 1 at its first await and fails it once, so the case mutates the
+        # caller's list before the loop re-reads it for the second attempt.
+        return self._suspended_through_a_recording_inner(
+            lambda primary, _secondary: RetryingProvider(primary, sleep=_no_sleep)
+        )
 
 
 class FakeProvider:

@@ -27,8 +27,9 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from model_provider_contract import ModelProviderContract
+from model_provider_contract import ConversationLog, FirstAwaitGate, ModelProviderContract
 from network_guard import network_denied
+from pydantic_transport import suspend_the_transport
 from vendor_stacks import (
     ANTHROPIC,
     OPENAI,
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from vendor_stacks import Handler
 
     from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 @pytest.fixture(autouse=True)
@@ -108,6 +110,21 @@ class _VendorContract(ModelProviderContract):
     async def provider(self) -> AsyncIterator[ModelProvider]:
         async with _provider(self.vendor, self.vendor.success) as built:
             yield built
+
+    @asynccontextmanager
+    async def provider_suspended_at_its_first_await(
+        self,
+    ) -> AsyncIterator[tuple[ModelProvider, SuspendedCall, ConversationLog]]:
+        # A vendor stack is a PydanticAIProvider binding, so it suspends on its
+        # transport exactly as `test_provider.py` does (ADR-0069 §3). Input
+        # observation happens before the wire and is vendor-independent, so the
+        # agent's `run` is stubbed to suspend at that first await; the subject is
+        # still a genuine vendor-backed provider.
+        log = ConversationLog()
+        gate = FirstAwaitGate()
+        async with _provider(self.vendor, self.vendor.success) as built:
+            suspend_the_transport(built, log, gate)
+            yield built, gate, log
 
 
 class TestAnthropicStackContract(_VendorContract):
