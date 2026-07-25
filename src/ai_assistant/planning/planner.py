@@ -160,6 +160,16 @@ class ModelBackedPlanner:
         and ``memories`` are rendered into the prompt — the memories are what make
         the plan personal (ADR-0014 §6) — and are never fetched here.
 
+        ``goal`` is observed **once**, on this coroutine's first executed line and
+        before the first ``await`` (ADR-0065). ``Goal`` is mutable, the model call
+        is the widest suspension window in the system, and a caller that mutated
+        its own instance mid-flight would otherwise get an ``ActionPlan`` whose
+        frozen, auditable ``goal_id`` names a goal the model was never shown. The
+        prompt, the plan's ``goal_id`` and the failure message all derive from
+        that one snapshot. ``context`` and ``memories`` need no snapshot: they are
+        read once, into the prompt, before the same first ``await`` and never
+        again — the other discharge the clause allows.
+
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
@@ -176,16 +186,19 @@ class ModelBackedPlanner:
                 actionable error and is not flattened into ``PlanningError``
                 (ADR-0047 §6).
         """
+        # Deep, so nothing nested stays shared with the caller's instance; a
+        # `model_copy(update=...)` here would be shallow and would not detach it.
+        snapshot = goal.model_copy(deep=True)
         conversation: list[Message] = [
             Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
-            Message(role=Role.USER, content=_render_request(goal, context, memories)),
+            Message(role=Role.USER, content=_render_request(snapshot, context, memories)),
         ]
 
         last_error: _ExtractionError | None = None
         for _ in range(self._max_attempts):
             reply = await self._model.complete(conversation)
             try:
-                return self._build_plan(reply.content, goal)
+                return self._build_plan(reply.content, snapshot)
             except _ExtractionError as exc:
                 last_error = exc
                 conversation.append(reply)
@@ -193,7 +206,7 @@ class ModelBackedPlanner:
                     Message(role=Role.USER, content=_repair_prompt(str(exc))),
                 )
 
-        msg = f"the model did not return a usable plan for goal {goal.id}: {last_error}"
+        msg = f"the model did not return a usable plan for goal {snapshot.id}: {last_error}"
         raise PlanningError(msg)
 
     def _build_plan(self, content: str, goal: Goal) -> ActionPlan:
