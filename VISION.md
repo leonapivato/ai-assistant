@@ -214,7 +214,8 @@ The system should use probabilistic intelligence without making critical state p
 ## Core System Capabilities
 
 These are the capabilities the system is being built to have. They describe the
-target, not what is implemented; what has shipped is recorded in `CHANGELOG.md`.
+target, not what is implemented; what has actually landed is recorded in
+`docs/adr/` and the commit log, not here.
 
 ### Persistent User Model
 
@@ -453,4 +454,5 @@ and changes rarely.
 - **How and in what order** we build it — `docs/roadmap.md`.
 - **Decisions that commit us** to specifics — `docs/adr/`. Where this vision and
   a ratified ADR disagree, the ADR wins.
-- **What has shipped** — `CHANGELOG.md`.
+- **What has actually landed** — `docs/adr/` for the decisions, the commit log
+  for the code. There is no changelog (ADR-0067).

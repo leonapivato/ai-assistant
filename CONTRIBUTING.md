@@ -557,4 +557,7 @@ deliberately no linter for it (ADR-0019 §5).
 - **SemVer.** Pre-1.0 (`0.x`): anything may change between minors.
 - The version lives once in `pyproject.toml`; `ai_assistant.__version__` reads it
   from installed metadata. Do not hardcode it elsewhere.
-- User-facing changes are noted in `CHANGELOG.md` (Keep a Changelog format).
+- **There is no changelog** (ADR-0067). What a change was and why is carried by
+  its commit message, by its ADR where it records a decision, and by its PR.
+  Release notes, when there is a release to write them for, are assembled from
+  that record rather than maintained continuously between releases.
