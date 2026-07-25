@@ -22,6 +22,7 @@ prompt *means* — and no other test in this repository would see it.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -48,7 +49,9 @@ from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIProvider
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import AsyncIterator, Iterator
+
+    from vendor_stacks import Handler
 
     from ai_assistant.core.protocols import ModelProvider
 
@@ -67,9 +70,23 @@ def _no_network() -> Iterator[None]:
         yield
 
 
-def _provider(vendor: VendorStack) -> PydanticAIProvider:
-    """A provider whose model is ``vendor``'s real SDK, answering successfully."""
-    return PydanticAIProvider(vendor.build(vendor.success))
+@asynccontextmanager
+async def _provider(vendor: VendorStack, handler: Handler) -> AsyncIterator[PydanticAIProvider]:
+    """A provider whose model is ``vendor``'s real SDK, answering via ``handler``.
+
+    A context manager rather than a plain call because the vendor client owns an
+    ``httpx.AsyncClient`` that has to be closed (#354); ``VendorStack.opened``
+    explains why that matters even though a mock transport leaks nothing.
+
+    Args:
+        vendor: The stack to build over.
+        handler: What stands in for the network.
+
+    Yields:
+        The provider, valid until the block exits.
+    """
+    async with vendor.opened(handler) as model:
+        yield PydanticAIProvider(model)
 
 
 class _VendorContract(ModelProviderContract):
@@ -84,8 +101,9 @@ class _VendorContract(ModelProviderContract):
     vendor: VendorStack
 
     @pytest.fixture
-    def provider(self) -> ModelProvider:
-        return _provider(self.vendor)
+    async def provider(self) -> AsyncIterator[ModelProvider]:
+        async with _provider(self.vendor, self.vendor.success) as built:
+            yield built
 
 
 class TestAnthropicStackContract(_VendorContract):
@@ -106,7 +124,8 @@ async def test_a_reply_comes_back_through_the_vendors_own_response_parsing(
 ) -> None:
     # Not just "an assistant message" (the shared suite covers that) but *this
     # vendor's* text, which only arrives if its SDK parsed its own response shape.
-    reply = await _provider(vendor).complete([Message(role=Role.USER, content="hi")])
+    async with _provider(vendor, vendor.success) as provider:
+        reply = await provider.complete([Message(role=Role.USER, content="hi")])
 
     assert reply.role is Role.ASSISTANT
     assert reply.content == vendor.reply
@@ -134,10 +153,9 @@ async def test_an_http_failure_classifies_identically_across_vendors(
     expected: type[ModelError],
     retryable: bool,
 ) -> None:
-    provider = PydanticAIProvider(vendor.build(failing_status(status_code)))
-
-    with pytest.raises(ModelError) as caught:
-        await provider.complete([Message(role=Role.USER, content="hi")])
+    async with _provider(vendor, failing_status(status_code)) as provider:
+        with pytest.raises(ModelError) as caught:
+            await provider.complete([Message(role=Role.USER, content="hi")])
 
     assert type(caught.value) is expected
     assert caught.value.retryable is retryable
@@ -148,10 +166,9 @@ async def test_a_malformed_request_is_not_retryable_on_either_vendor(vendor: Ven
     # A 4xx that is not auth, timeout or throttling is our bug, and retrying or
     # re-routing it would fail identically. Pinned per vendor because it is the
     # one status arm that falls through to the conservative default.
-    provider = PydanticAIProvider(vendor.build(failing_status(400)))
-
-    with pytest.raises(ModelError) as caught:
-        await provider.complete([Message(role=Role.USER, content="hi")])
+    async with _provider(vendor, failing_status(400)) as provider:
+        with pytest.raises(ModelError) as caught:
+            await provider.complete([Message(role=Role.USER, content="hi")])
 
     assert type(caught.value) is ModelError
     assert not caught.value.retryable
@@ -163,10 +180,9 @@ async def test_a_transport_failure_is_unavailable_on_either_vendor(vendor: Vendo
     # No status code was ever produced, so this exercises the `ModelAPIError`
     # arm rather than the status table — the arm a genuinely unreachable
     # provider lands on, and the one routing most needs classified right.
-    provider = PydanticAIProvider(vendor.build(connection_refused))
-
-    with pytest.raises(ModelError) as caught:
-        await provider.complete([Message(role=Role.USER, content="hi")])
+    async with _provider(vendor, connection_refused) as provider:
+        with pytest.raises(ModelError) as caught:
+            await provider.complete([Message(role=Role.USER, content="hi")])
 
     assert type(caught.value) is ModelUnavailableError
     assert caught.value.retryable
@@ -176,7 +192,8 @@ async def test_a_transport_failure_is_unavailable_on_either_vendor(vendor: Vendo
 async def _record(vendor: VendorStack, messages: list[Message]) -> dict[str, Any]:
     """Complete ``messages`` against ``vendor`` and return the body it put on the wire."""
     recorder = RequestRecorder(vendor.success)
-    await PydanticAIProvider(vendor.build(recorder)).complete(messages)
+    async with _provider(vendor, recorder) as provider:
+        await provider.complete(messages)
     return recorder.only
 
 
@@ -291,9 +308,9 @@ async def test_a_tool_role_message_is_refused_before_any_vendor_is_reached(
     # Pinned per vendor so the gap stays visible as a capability we owe, rather
     # than reading as one vendor's restriction.
     recorder = RequestRecorder(vendor.success)
-    provider = PydanticAIProvider(vendor.build(recorder))
 
-    with pytest.raises(ModelError, match="tool-role"):
-        await provider.complete([Message(role=Role.TOOL, content="result")])
+    async with _provider(vendor, recorder) as provider:
+        with pytest.raises(ModelError, match="tool-role"):
+            await provider.complete([Message(role=Role.TOOL, content="result")])
 
     assert recorder.bodies == [], "the request must not reach the vendor at all"
