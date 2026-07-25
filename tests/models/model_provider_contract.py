@@ -403,14 +403,15 @@ class ModelProviderContract:
             reply = await call
 
             assert log.observed, "the subject's collaborator was never reached"
-            # A subject MAY await before taking its single observation and still
-            # conform: ADR-0065's obligation is coherence, not the clause's headline
-            # "before its first await" — its second discharge ("do not read an
-            # argument again after suspending") permits one observation taken after a
-            # suspension, and its caller's-side paragraph permits observing "the
-            # wrong version" so long as the result is coherent. So the case forbids
-            # only a *two-version* tear (below), never a pre-observation await; a
-            # provider that awaited then observed once would still pass here, rightly.
+            # What the case forbids is a *two-version* result (the assertions
+            # below), which is ADR-0065's actual obligation: "everything one call
+            # derives ... comes from one observation" and "must never make one
+            # result describe two different versions". It does not additionally
+            # require that the one observation be taken at entry — ADR-0065 lists
+            # "do not read an argument again after suspending" as a discharge and
+            # says the caller is owed a coherent result, "not that it reflects any
+            # chosen version" — so a provider that took its single observation after
+            # a benign suspension is conforming and passes here.
             # The first observation was taken before the mutation, so the case
             # tests the re-read window rather than the initial read — a subject
             # that read only at entry would already have "hi" here regardless.
