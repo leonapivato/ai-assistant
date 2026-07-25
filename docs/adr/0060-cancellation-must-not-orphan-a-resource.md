@@ -328,15 +328,19 @@ nice-to-have — this rule is not fully enforced until it closes. Which lane clo
 it is a scoping call for whoever sequences the work, not a judgement this ADR
 makes.
 
-**This is the ADR's one unsettled question, and it is flagged rather than
-buried.** Both review lenses pressed on it independently and repeatedly: the
-four-Protocol enforcement scope is the scope this work was dispatched with, and
-a reasonable reader can argue it should be five (adding `Embedder`, whose
-`to_thread` worker is a verified live case). The argument above is why four is
-defensible; it is not why five would be wrong. Widening it changes what the
-implementation lane must build, so it is settled at ratification by whoever
-sequences these lanes, not unilaterally here. If the answer is five, the only
-edit this ADR needs is `Embedder`'s name in §3 and the closure of #347.
+**The scope is decided here: four, with `Embedder` a bounded follow-up.** The
+implementation lane builds cancellation coverage for `MemoryStore`,
+`AuditTrail`, `ContextProvider` and `PlanStore` — those four, and not `Embedder`
+or `ModelProvider`. Leaving this open would make the ADR unimplementable: two
+readers would build different suites against one accepted contract.
+
+Both review lenses argued for five, and it is a real argument — `Embedder` is a
+verified live case, not a hypothetical. It is recorded and rejected *for this
+change* on scope rather than on merit: #347 is an **accepted, bounded
+follow-up** with a named subject (`EmbedderContract` plus canonical-fake parity)
+and a standing reason to do it, and the gap it leaves is benign today for the
+reasons immediately below. Anyone who thinks five is right should carry it in a
+follow-up ADR rather than read it into this one.
 
 The deferral is a judgement about what a case would currently buy, and it is
 weakest for `Embedder`, so state its position exactly. `FastEmbedEmbedder.embed`
