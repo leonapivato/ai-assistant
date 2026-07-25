@@ -199,13 +199,28 @@ suite must establish:
   property.
 
   This one needs a note on how it is observed, because `assemble()` alone does
-  not expose it. The portable route is the event loop's own exception handler: a
-  straggler that is collected mid-flight, or whose late failure is never
-  retrieved, surfaces there, and a case can drive the source to completion after
-  the cancelled assembly and assert it did not. Where a backend genuinely cannot
-  be observed that way, the suite may require a narrow, documented hook — but
-  the obligation is the property, not the hook, and a suite that drops the
-  property because it is awkward to see has not enforced this rule.
+  not expose it, and the obvious cheap answer is unsound. **Absence of an
+  event-loop exception report is not proof of observation:** a straggler that is
+  dropped and then *succeeds* reports nothing at all, so a provider that
+  abandons its reference and re-raises promptly passes any "nothing was logged"
+  assertion. The case is therefore built from a positive signal and a hook:
+
+  1. **Drive the straggler to fail**, and require that the implementation
+     retrieved and recorded that late outcome. A failure is the one outcome that
+     leaves a trace when it goes unobserved, and recording it is exactly what
+     `_forget_abandoned` promises. This catches drop-and-forget.
+  2. **Require a documented hook for quiescence** — a way for the suite to await
+     the implementation's outstanding abandoned work — because retention against
+     mid-flight collection has no positive signal reachable through `assemble()`
+     at all. This is a real, if small, obligation on anything the suite is
+     handed, and naming it is better than pretending the property is free to
+     observe.
+
+  The hook is a requirement of the **conformance suite**, expressed through its
+  fixture; it does **not** go on the `ContextProvider` Protocol. A test-only
+  affordance on the production seam would buy observability by widening the
+  contract every consumer depends on, which is the trade this file exists to
+  refuse.
 
 Anything beyond that minimum — how the block is coordinated, what the fakes
 stand in for — is the implementation lane's.
