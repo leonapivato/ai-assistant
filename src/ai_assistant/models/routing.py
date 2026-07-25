@@ -236,15 +236,32 @@ class RoutingProvider:
                 logged rather than attached to the exception, which the router
                 does not own.
         """
+        # ADR-0065's input-observation clause, on the coroutine's first executed
+        # line. `messages` is the caller's own container and the loop below
+        # hands it to the next route *after* the previous route's await has
+        # failed, so without this a caller mutating it mid-flight makes the
+        # fallback answer a different request than the primary was asked — while
+        # the single Message returned is attributed to one `complete`. It bites
+        # harder here than under retry: the routes are different providers, so
+        # the two versions would be sent to two vendors and only one answer
+        # would come back.
+        #
+        # The elements are detached too, not just the container: `Message` is a
+        # non-frozen model, so a turn's `content` or `role` can be rewritten in
+        # place without touching the list. See the fuller note on the same line
+        # in `retry.py`, including why "the route's provider takes its own
+        # observation" does not discharge this.
+        conversation = [message.model_copy(deep=True) for message in messages]
+
         if model is not None:
             primary = self._routes[0]
-            return await primary.provider.complete(messages, model=model)
+            return await primary.provider.complete(conversation, model=model)
 
         failures: list[tuple[str, ModelError]] = []
 
         for position, route in enumerate(self._routes, start=1):
             try:
-                return await route.provider.complete(messages, model=route.model)
+                return await route.provider.complete(conversation, model=route.model)
             except ModelError as exc:
                 if not exc.routable:
                     # Deliberately not logged. The routable case is logged

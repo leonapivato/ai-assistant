@@ -1,7 +1,12 @@
 # 65. A call observes its inputs at one instant, before its first await
 
-- Status: Accepted
+- Status: Accepted, §4 amended 2026-07-25 (its `ModelProvider` row was false)
 - Date: 2026-07-24
+- Amended: 2026-07-25 (§4 — `ModelProvider` was listed as "bound and already
+  satisfied". It was bound and **violated**: the survey behind that row read
+  `PydanticAIProvider` and missed the two wrapper providers, both of which
+  re-read the caller's `Sequence` after suspending. See the amendment; §3's
+  enforcement scope is unchanged.)
 - **This is a contract change.** It adds a second standing clause to
   `core/protocols.py`'s module docstring, binding on every Protocol in the file,
   and it extends the shared conformance suites and canonical fakes of two of
@@ -487,3 +492,73 @@ axis").
   survive for the `Sequence` arguments but its scope would shrink sharply — or if
   a seam appears whose argument is genuinely too large to snapshot, where
   "read it once" and "copy it" stop being interchangeable in practice.
+
+## Amendment (2026-07-25): §4's `ModelProvider` row was false
+
+**What §4 claimed.** That "`MemoryPolicy`, `ModelProvider`, `FeedbackProcessor`
+and `Embedder` are bound and already satisfied, so they gain no cases and no
+issue", resting for `ModelProvider` on one sentence about one implementation:
+`PydanticAIProvider.complete` "converts the conversation with
+`_to_model_messages(messages)` before its first await and never reads `messages`
+again".
+
+**Why it was wrong.** That sentence is true and stays true —
+`src/ai_assistant/models/provider.py:386` renders the history and the first
+await is at `:389`, with no later read of `messages`. The error is the *scope* of
+the survey behind it: it took one implementation of the seam for the seam.
+`models/` holds three `ModelProvider`s, and the other two are wrappers that hand
+the caller's `Sequence` to a collaborator **after** a previous await has
+returned. Verified against the source, at the line numbers they carried when
+this amendment was written:
+
+- `RetryingProvider.complete` (`src/ai_assistant/models/retry.py:252-259`) loops
+  `while True` and passes the caller's `messages` to `self._call_inner` on every
+  attempt, i.e. after the previous attempt's `await` returned.
+- `RoutingProvider.complete` (`src/ai_assistant/models/routing.py:239-247`)
+  passes the caller's `messages` to each route's provider in turn, after the
+  previous route's `await` has failed.
+
+The Context table above had the seam right — `ModelProvider.complete` is listed
+there as taking a mutable `Sequence[Message]` — so the survey held the question
+and mis-answered it. The mechanism is the one §2's "Enumeration has already
+failed here once" warns about, one level down: an enumeration that stops at the
+first implementation it finds.
+
+**What is true instead.** `ModelProvider` was **bound and violated**, in two
+implementations, from the moment the clause landed — §4's `Planner`/`PlanStore`
+category, not its "already satisfied" one. A caller appending a `Message` while
+attempt 1 (or route 1) was suspended made the next attempt answer a different
+conversation, and the single `Message` returned was attributed to one
+`complete`. The other three rows survive re-checking: `DefaultMemoryPolicy.decide`
+and `LearningLoop.process` still contain no `await`, `FastEmbedEmbedder.embed`
+still opens with `list(texts)`, `HashingEmbedder.embed` has no `await`, and
+`FakeModelProvider.complete` — the only `ModelProvider` outside `models/` — has
+none either.
+
+**What changed as a result.** Issue #380 fixed both wrappers, each by
+snapshotting the conversation on `complete`'s first executed line — the
+container *and* its elements (`[m.model_copy(deep=True) for m in messages]`).
+Copying only the container is not enough, and the reason is worth recording
+because the first cut of the fix did exactly that: `Message` is a non-frozen
+model, so a turn's `content` or `role` can be rewritten in place without the
+list changing, and "the inner provider takes its own observation" does not
+discharge the wrapper — it only means each attempt observes a *different*
+version, which is the desync this ADR's Context already describes one level up
+from a store that snapshots correctly. `role` makes it concrete: flipped to
+`ASSISTANT` between two attempts it converts a retryable transient failure into
+a non-retryable malformed-argument `ModelError` (ADR-0066 §1) about a history
+that was well-formed when the call began — and under `RoutingProvider` that
+error is non-routable, so it truncates the remaining fallback order.
+
+Both fixes are pinned by mid-flight regression cases under `tests/models/`,
+parametrised over an appended turn and a rewritten one. The caller's
+conversation is mutated from inside the inner provider's suspension, not after
+the call returns, for the reason §"The suite already appears to cover this, and
+does not" gives.
+
+**§3 is unchanged.** Enforcement stays scoped to `MemoryStore` and
+`MemoryWriter`; `ModelProvider`'s new cases are `models`-local and the shared
+`ModelProvider` conformance suite gains nothing. Widening §3 to a third seam
+would be a change to what every implementation of that Protocol owes, and needs
+its own ADR rather than a paragraph here. What this amendment corrects is a
+false premise, not a scope.
