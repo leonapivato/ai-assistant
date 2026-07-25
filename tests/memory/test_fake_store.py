@@ -64,6 +64,23 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
         store = FakeMemoryStore(now=_fixed_now)
         yield store, store.suspend_next_write(), store.resource_log
 
+    @contextlib.asynccontextmanager
+    async def store_suspended_at_its_first_await(
+        self,
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+        """The same modelled resource, read for ADR-0065's position instead.
+
+        The fake takes its one observation of the record on its first executed
+        line and only then enters :class:`~ai_assistant.testing.cancellation.
+        SuspendableResource`, so the armed suspension *is* the write's first
+        ``await`` — the position ADR-0065 §3 fixes. One hook serves both clauses
+        here only because the fake's resource sits exactly at that boundary; the
+        ``sqlite3`` store needs two, since its resource is acquired after the
+        embedding await its input clause turns on.
+        """
+        store = FakeMemoryStore(now=_fixed_now)
+        yield store, store.suspend_next_write()
+
 
 # Behaviour specific to FakeMemoryStore, beyond the shared contract: the contract
 # only asserts that a match is found, so the fake's own ordering/scoring and its

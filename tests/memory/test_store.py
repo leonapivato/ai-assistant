@@ -246,6 +246,14 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     #: line has to be deleted deliberately.
     acquires_no_shared_resource = True
 
+    #: ``add`` and ``write_atomic`` contain no ``await`` at all, so there is no
+    #: window between reading the caller's record and committing it for a
+    #: mid-flight mutation to land in: ``core.protocols``' input clause (ADR-0065)
+    #: is discharged by "do not suspend", and its two cases reduce to the post-call
+    #: assertion. Declared separately from the line above on purpose — the two
+    #: clauses are different axes, and this store happens to be vacuous under both.
+    writes_without_suspending = True
+
     @pytest.fixture
     def store(self) -> MemoryStore:
         return InMemoryMemoryStore(now=_fixed_now)

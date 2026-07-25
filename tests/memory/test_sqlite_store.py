@@ -48,6 +48,9 @@ pytestmark = pytest.mark.integration
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
+#: How long ``_GatedEmbedder`` waits for a call to arrive before declaring the
+#: scenario broken. Generous — only reached when a case has already hung.
+_GATE_SECONDS = 5.0
 
 
 def _fixed_now() -> datetime:
@@ -1043,6 +1046,81 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
             # let the assertion above be the thing that speaks.
             await asyncio.sleep(0.05)
             store.close()
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_at_its_first_await(
+        self,
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+        """Park the first write inside the embedder — the write's first ``await``.
+
+        A different position from ``store_suspended_mid_write`` above, and
+        deliberately so. ADR-0060's hook goes *inside the connection*, which for
+        this store is after the embedding; ADR-0065's must be at the method's own
+        first suspension point, which is the embedding itself. That is exactly the
+        boundary the #286 tear straddled — the content read for the vector before
+        it, the id and the JSON read after — so a hook at the later position would
+        let the mutation land past every read, observe one coherent version, and
+        certify the bug.
+
+        The embedder is this store's only ``await`` before it commits, which is
+        what makes it the lever here — and also why the suite could not have
+        reached for it itself: no ``Embedder`` is on the ``MemoryStore`` seam, and
+        another backend suspends on something else entirely (ADR-0065 §3).
+
+        Its own store on its own connection, like the hook above, so a failure
+        leaves nothing parked on the ``store`` fixture's.
+        """
+        embedder = _GatedEmbedder(HashingEmbedder(dimensions=8))
+        store = SqliteMemoryStore(path=":memory:", embedder=embedder, now=_fixed_now)
+        try:
+            yield store, embedder
+        finally:
+            embedder.release()
+            store.close()
+
+
+class _GatedEmbedder:
+    """An ``Embedder`` that parks its *first* call until the suite releases it.
+
+    ``FakeEmbedder``/``HashingEmbedder`` cannot suspend, and the store's first
+    ``await`` is an embedding, so the input-observation case needs one that can.
+    Only the first call is gated: the case goes on to read the store back, and a
+    ``search`` embeds its query too.
+    """
+
+    def __init__(self, delegate: Embedder) -> None:
+        """Wrap ``delegate``, arming its next call to suspend."""
+        self._delegate = delegate
+        self._armed = True
+        self._entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    @property
+    def model_id(self) -> str:
+        """The wrapped embedder's identifier."""
+        return self._delegate.model_id
+
+    @property
+    def dimensions(self) -> int:
+        """The wrapped embedder's vector length."""
+        return self._delegate.dimensions
+
+    async def embed(self, texts: Sequence[str]) -> list[Embedding]:
+        """Suspend on the first call, then delegate."""
+        if self._armed:
+            self._armed = False
+            self._entered.set()
+            await self._released.wait()
+        return await self._delegate.embed(texts)
+
+    async def reached(self) -> None:
+        """Wait until the gated call has arrived."""
+        async with asyncio.timeout(_GATE_SECONDS):
+            await self._entered.wait()
+
+    def release(self) -> None:
+        """Let the gated call finish; idempotent."""
+        self._released.set()
 
 
 async def _spin(iterations: int = 50) -> None:

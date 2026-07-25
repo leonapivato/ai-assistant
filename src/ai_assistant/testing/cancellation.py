@@ -111,6 +111,12 @@ class SuspendedCall(Protocol):
     What a conformance suite needs to drive ADR-0060's case, and no more: wait
     until the call is *demonstrably* inside the resource, then let it out. How
     the call was made to stop there is the implementation's business.
+
+    ADR-0065's input-observation cases take the same two levers over a call held
+    at its **first await** rather than inside a resource. The positions differ,
+    and so do the clauses they serve, but "wait until it is there, then let it go"
+    is the whole of what either case needs — so they share this shape instead of
+    declaring a second copy of it.
     """
 
     async def reached(self) -> None:
