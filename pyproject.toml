@@ -35,7 +35,18 @@ dependencies = [
     "onnxruntime==1.27.0",
     "tokenizers==0.23.1",
     "pydantic>=2.13.4",
-    "pydantic-ai-slim[anthropic]>=2.11.0",
+    # Two vendor extras, not one (ADR-0061). `default_model` is a bare
+    # "provider:model" string, so a deployment can already *name* any vendor
+    # pydantic-ai supports — but the vendor SDK is importable only if its extra
+    # is installed, and pydantic-ai resolves the model lazily, at the **first
+    # completion**. With one extra installed, `ASSISTANT_DEFAULT_MODEL=openai:…`
+    # therefore fails at first use with a bare, non-retryable `ModelError`
+    # wrapping an `ImportError` — not at load, where a configuration mistake
+    # belongs. Shipping a second extra is what makes the model-agnostic claim
+    # true of an *installed artifact* rather than of the source, and is what
+    # lets the shared `ModelProvider` conformance suite run against two real
+    # vendor stacks (`tests/models/test_provider_vendors.py`).
+    "pydantic-ai-slim[anthropic,openai]>=2.11.0",
     "pydantic-settings>=2.14.2",
     "rich>=15.0.0",
     "sqlite-vec>=0.1.6",
@@ -261,6 +272,13 @@ forbidden_modules = [
     "pydantic_ai",
     "anthropic",
     "openai",
+    # `openai`'s own tokenizer, pulled in by the second vendor extra (ADR-0061 §1).
+    # Listed for the same reason `tokenizers` is: a vendor's tokenization is part
+    # of that vendor's stack, and the ban is on reaching any of it except through
+    # `models/`. `anthropic` and `openai` were already here before either extra
+    # was installed, so this list has always been a statement of intent rather
+    # than a reaction to what happens to be on the machine.
+    "tiktoken",
     "fastembed",
     "huggingface_hub",
     "onnxruntime",
