@@ -187,8 +187,25 @@ suite must establish:
   code.
 - For `ContextProvider`: with a source that *suppresses* its own cancellation,
   a caller's cancellation of `assemble()` must still surface within the drain
-  bound, rather than being deferred until that source finishes. A well-behaved
-  source cannot distinguish the two implementations either.
+  bound rather than being deferred until that source finishes — **and** the
+  straggler it leaves behind must stay observed until it completes. Promptness
+  alone is not enough: an implementation that cancels the source, waits out the
+  budget, drops its last reference and re-raises passes a promptness-only case
+  while orphaning exactly what the rule forbids, since `asyncio` holds only weak
+  references to running tasks and a dropped one can be collected mid-flight.
+  This is why `AssemblingContextProvider` keeps `_abandoned` as a strong
+  reference set and `_forget_abandoned` as a done-callback that consumes the
+  late outcome (ADR-0033 §3). A well-behaved source distinguishes neither
+  property.
+
+  This one needs a note on how it is observed, because `assemble()` alone does
+  not expose it. The portable route is the event loop's own exception handler: a
+  straggler that is collected mid-flight, or whose late failure is never
+  retrieved, surfaces there, and a case can drive the source to completion after
+  the cancelled assembly and assert it did not. Where a backend genuinely cannot
+  be observed that way, the suite may require a narrow, documented hook — but
+  the obligation is the property, not the hook, and a suite that drops the
+  property because it is awkward to see has not enforced this rule.
 
 Anything beyond that minimum — how the block is coordinated, what the fakes
 stand in for — is the implementation lane's.
@@ -254,11 +271,15 @@ The deferral is a judgement about what a case would currently buy, and it is
 weakest for `Embedder`, so state its position exactly. `FastEmbedEmbedder.embed`
 awaits `asyncio.to_thread(self._embed_sync, documents)`, so a cancelled `embed()`
 does abandon a running worker — the rule is live for it, not vacuous. What it
-does **not** have is the ADR-0054 failure: `_loaded()`'s `_load_lock` is a
-`threading.Lock` acquired and released *inside* the worker thread, so an
-unwinding `CancelledError` on the event loop cannot release it early, and a
-concurrent `embed` blocks on it correctly rather than reusing a resource still in
-use. The orphaned worker wastes CPU and finishes; it corrupts nothing. So the
+does **not** have is the ADR-0054 failure. `_load_lock` serialises the *lazy
+load* only — `_embed_sync` calls `_loaded()`, which returns the model and
+releases the lock, and the inference in `_collected` then runs **unlocked and
+concurrent**, resting on the backend's documented thread-safety rather than on
+mutual exclusion. So there is no event-loop-held lock to release early: the lock
+is a `threading.Lock` taken and dropped inside the worker, where an unwinding
+`CancelledError` on the event loop cannot reach it, and the resource a second
+caller shares is one the backend promises is safe to share. The orphaned worker
+wastes CPU and finishes; it corrupts nothing. So the
 gap is real but currently benign, which is a reason to file it rather than a
 reason to call it closed — and the moment an `Embedder` acquires something the
 event loop releases, it is the ADR-0054 bug again.
