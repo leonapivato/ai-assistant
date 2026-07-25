@@ -280,8 +280,20 @@ does.
    refusal specifically, and one pinning that it refuses *before* `Agent.run`
    (below).
 
-Test *design* is the lane's; four properties are not, because a suite missing
+Test *design* is the lane's; five properties are not, because a suite missing
 any of them certifies something this ADR decided against.
+
+**A refused call must be inert on every implementation** — it leaves no trace and
+consumes nothing. This is the general form of §1's "before any model is
+contacted", and the two implementations make it observable in different places.
+On the fake it is sharp: `complete` validates, *then* records the call, *then*
+evaluates `reply`, so a refusal placed after that point would append a
+`ModelCall` for a request that was rejected and pop a `FakeModelProvider.scripted`
+queue — leaving the next *valid* call to return the reply the refused one ate,
+and every `call_count` assertion above it off by one. Obligation 3's "mirrors …
+as it already mirrors the empty and tool-role rejections" fixes that position by
+implication only, so the fake's own module asserts it directly: a refused call
+adds no entry to `calls` and does not advance a scripted sequence.
 
 **The refusal must pin the failure's *disposition*, not merely its base class.**
 `pytest.raises(ModelError)` is satisfied by `ModelUnavailableError`, which is
