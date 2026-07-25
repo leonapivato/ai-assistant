@@ -52,7 +52,7 @@ between reading a record and storing it, so nothing tears today. That is true,
 and it is true only of `MemoryStore`. Surveying the whole contract file changes
 the answer.
 
-**Eight methods on six Protocols take an argument that is mutable all the way
+**Eight methods on seven Protocols take an argument that is mutable all the way
 down** — checked mechanically against `model_config["frozen"]`, transitively
 through every field:
 
@@ -233,7 +233,7 @@ this rule's own facts.
 
 **The scope the issue asks about is factually too narrow.** #348 asks whether
 this is a `MemoryStore`/`MemoryWriter` obligation. The survey in Context says
-no: six Protocols take a mutable argument, and the two *unfixed* instances are
+no: seven Protocols take a mutable argument, and the two *unfixed* instances are
 in `MemoryWriter` **and `Planner`**. A clause written on `MemoryStore` and
 `MemoryWriter` would leave `ModelBackedPlanner`'s post-await `goal.id` read
 outside the contract, and it would leave it outside on the strength of a scope
@@ -286,19 +286,53 @@ This is not a note about test style; it is the whole content of the enforcement,
 for the reason §"The suite already appears to cover this" documents: the existing
 post-call case passed on the torn code. The minimum each suite must establish:
 
-- For `MemoryStore`: with a collaborator the suite controls suspending the write
-  mid-flight — the injected `Embedder` is the natural lever, and `FakeEmbedder`
-  already exists — mutate the caller-held record from inside that suspension,
-  then assert every part of what the store committed agrees with **one** version
-  of the record: the returned id names the row that was written, and the stored
-  content is the content the vector was computed from. A store with no await
-  between reading and storing satisfies this trivially, which is correct — it has
-  no window to tear in.
+- For `MemoryStore`: with the write suspended mid-flight, mutate the caller-held
+  record from inside that suspension, then assert every part of what the store
+  committed agrees with **one** version of the record — the returned id names the
+  row that was written, and the stored content is the content the vector was
+  computed from.
+
+  **How the suite suspends an arbitrary backend needs deciding here, because the
+  obvious answer does not generalise.** `SqliteMemoryStore`'s lever is its
+  injected `Embedder`, but no `Embedder` is on the `MemoryStore` Protocol:
+  `InMemoryMemoryStore` has none, and a future async-driver backend would suspend
+  on something else entirely. A case written around `FakeEmbedder` would enforce
+  the rule for one backend and vacuously pass for every other — which is the
+  false-confidence failure this ADR exists to end, reintroduced one level down.
+
+  So the suite requires a **mid-write suspension hook, supplied through its
+  fixture**, exactly as it already requires `store_factory` for the case the
+  fixed `store` fixture cannot express. An implementation's test module overrides
+  it either with a handle that blocks the write and releases it, or with an
+  explicit declaration that this backend performs no `await` between reading a
+  record and committing it — in which case the case reduces to the post-call
+  assertion, correctly, because a store with no suspension window has no window
+  to tear in. `SqliteMemoryStore` supplies the handle through its embedder;
+  `InMemoryMemoryStore` and `FakeMemoryStore` declare the second.
+
+  The hook is a requirement of the **conformance suite**, expressed through its
+  fixture; it does **not** go on the `MemoryStore` Protocol. ADR-0060 §3 settled
+  this trade for its own quiescence hook and the reasoning is unchanged: a
+  test-only affordance on the production seam buys observability by widening the
+  contract every consumer depends on. It is a real, if small, obligation on
+  anything the suite is handed, and naming it is better than pretending the
+  property is free to observe.
 - For `MemoryWriter`: with the injected `MemoryPolicy` suspending inside
   `decide`, mutate the caller-held `proposal.proposed`, then assert the ruling,
   the conflict set it was derived from, and the record written all describe one
   version of the proposal. A writer that retires beliefs contradicting content it
   did not store fails this; today's `MemoryIngestor` does.
+
+  **This one needs no new hook**, and the asymmetry with `MemoryStore` above is
+  worth stating rather than leaving as an inconsistency. `MemoryWriter`'s suite
+  already builds its subject through `make_writer`, a factory the suite hands
+  *its own* store and policy to — a shape forced on it because a writer hides
+  both (ADR-0028 §4). So the suite can inject a `MemoryPolicy` that suspends
+  inside `decide` and every conforming writer must reach it; the existing
+  `test_conflicts_are_resolved_before_the_policy_is_asked` already depends on
+  that. The lever is general here because the collaborator is on the *suite's*
+  side of the seam, and it is not general for `MemoryStore` because no
+  collaborator is.
 
 The existing post-call case stays. It tests a real and different property —
 that the store does not alias the caller's object into its own state — and
