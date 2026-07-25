@@ -2,17 +2,23 @@
 
 - Status: Accepted
 - Date: 2026-07-25
-- **This is a contract-surface change.** It does not add or reword a Protocol,
-  a method, or an exchanged type; it widens ADR-0065 §3's *shared conformance
-  enforcement* of the module-level input-observation clause to a third seam,
-  `ModelProvider`. Because it changes what every implementation of that Protocol
-  owes to the shared suite, golden rule 5 / ADR-0015 §5 apply and it is reviewed
-  under both lenses (adversarial and architecture). It is **docs-only**: it
-  records the decision, appends the amendment it makes to ADR-0065 §3, and
-  touches no `core/protocols.py`, no conformance suite, and no implementation.
-  The `ModelProviderContract` case and the `MemoryIngestor`-shaped fixture it
-  needs are a separate follow-up lane, dispatched after this ADR merges
-  (`CONTRIBUTING.md`, "Contract ADRs land before their implementation").
+- **This is an enforcement-scope decision, not a Protocol-surface change.** It
+  adds and rewords no Protocol, method, or exchanged type; the input-observation
+  clause it enforces already binds every Protocol, `ModelProvider` included, since
+  ADR-0065. What it changes is ADR-0065 §3's *shared conformance enforcement* — it
+  widens the set of seams the shared suites must check to a third, `ModelProvider`.
+  Golden rule 5 / ADR-0015 §5's Protocol-change trigger therefore does **not**
+  apply: ADR-0065 §4 and ADR-0060 §5 both hold that "a contract is what is
+  written; a suite samples it," so widening enforcement is not a contract-surface
+  change. It is nonetheless handled *like* one — its own docs-only PR, ratified
+  ahead of the implementation lane, and reviewed under **both** lenses — because
+  it amends a ratified contract ADR's enforcement scope (the architecture
+  reviewer's rubric: contract discipline and ADR adherence) and the
+  `ModelProviderContract` case depends on this decision being ratified first
+  (`CONTRIBUTING.md`, "Contract ADRs land before their implementation"). It
+  touches no `core/protocols.py`, no conformance suite, and no implementation. The
+  `ModelProviderContract` case and its fixture-supplied suspension hook are a
+  separate follow-up lane, dispatched after this ADR merges.
 - Refs: ADR-0065 (the clause and its §3/§4, this ADR amends §3), ADR-0060 (the
   sibling clause and the observability asymmetry §2 rests on), ADR-0056 (the
   origin tear), ADR-0011 and ADR-0013 (ModelProvider composes by wrapping),
