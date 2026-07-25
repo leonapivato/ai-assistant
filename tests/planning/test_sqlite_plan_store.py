@@ -9,6 +9,7 @@ id space surviving the process that made them — say so via ``tmp_path``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import sqlite3
@@ -22,13 +23,15 @@ from plan_store_contract import PlanStoreContract, _goal, _plan
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import StepStatus, StepTransition
 from ai_assistant.planning import SqlitePlanStore
+from ai_assistant.testing.cancellation import ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import PlanStore
     from ai_assistant.core.types import Goal
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 def _fixed_now() -> datetime:
@@ -66,6 +69,45 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
         try:
             yield realised
         finally:
+            realised.close()
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(self) -> AsyncIterator[tuple[PlanStore, SuspendedCall]]:
+        """Park the first ``save_goal``'s worker thread inside the connection's turn.
+
+        The suspension goes in ``_save_goal_sync``, i.e. inside ``async with
+        self._lock`` and inside the ``to_thread`` the event loop cannot interrupt
+        — which is exactly where ADR-0054's bug lived. Blocking there is what
+        makes the case deterministic: left to run, a commit finishes in
+        microseconds and whether the second caller arrives while the worker still
+        holds the connection would be a race, so the invariant would be exercised
+        only sometimes.
+
+        Its own store on its own connection, not the ``store`` fixture's: the
+        suspended worker is parked for the length of the case, and sharing would
+        make an unrelated failure hang instead of fail.
+        """
+        realised = SqlitePlanStore(path=":memory:", now=_fixed_now)
+        suspension = ThreadSuspension()
+        original_save = realised._save_goal_sync
+        armed = threading.Event()
+
+        def blocking_save(goal: Goal) -> None:
+            if not armed.is_set():  # the first worker only; later ones run free
+                armed.set()
+                suspension.hold()
+            original_save(goal)
+
+        realised._save_goal_sync = blocking_save  # type: ignore[method-assign]
+        try:
+            yield realised, suspension
+        finally:
+            suspension.release()
+            # An implementation that released the connection early leaves a
+            # worker still using it; closing under that is a native crash rather
+            # than a reported failure, so give the worker a turn to unwind and
+            # let the assertion above be the thing that speaks.
+            await asyncio.sleep(0.05)
             realised.close()
 
 

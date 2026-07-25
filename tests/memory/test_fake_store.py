@@ -7,6 +7,7 @@ as a stand-in for a real store: it is held to the same contract as
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -17,9 +18,10 @@ from ai_assistant.core.types import MemorySource, Provenance, SemanticMemory
 from ai_assistant.testing import FakeMemoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.protocols import MemoryStore
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 def _fixed_now() -> datetime:
@@ -47,6 +49,20 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     @pytest.fixture
     def store_factory(self) -> Callable[[Callable[[], datetime]], MemoryStore]:
         return lambda now: FakeMemoryStore(now=now)
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+        """The fake models the resource it does not really own (ADR-0060 §3).
+
+        A dict needs no serialising, so without this the canonical fake could
+        only opt out — and the cancellation case would run solely against the
+        ``sqlite3`` store that already holds the invariant. Nothing to dispose of,
+        hence the bare yield.
+        """
+        store = FakeMemoryStore(now=_fixed_now)
+        yield store, store.suspend_next_write()
 
 
 # Behaviour specific to FakeMemoryStore, beyond the shared contract: the contract

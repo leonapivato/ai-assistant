@@ -13,6 +13,13 @@ It honours the full contract, including read-time retention: a record past its
 neither persistent nor semantic; for those, use ``SqliteMemoryStore``. Its
 retrieval rules are not part of the contract — only the behaviour asserted by the
 shared ``MemoryStore`` conformance suite is.
+
+Its writes go through a :class:`~ai_assistant.testing.cancellation.SuspendableResource`
+so it is a real subject for the cancellation clause ``core.protocols`` states
+(ADR-0060), rather than an implementation the obligation cannot reach. A dict
+needs no serialising, so this buys the fake nothing on its own — what it buys is
+that the shared suite's cancellation case runs against the canonical fake and not
+only against the ``sqlite3`` stores that already got the invariant right once.
 """
 
 from __future__ import annotations
@@ -23,12 +30,14 @@ from typing import TYPE_CHECKING
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.types import MemoryWriteMode
+from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryKind, MemoryRecord, MemoryWrite
+    from ai_assistant.testing.cancellation import LoopSuspension
 
 
 def _utcnow() -> datetime:
@@ -55,6 +64,20 @@ class FakeMemoryStore:
         """
         self._records: dict[str, MemoryRecord] = {}
         self._clock = checked_clock(now, owner="FakeMemoryStore")
+        self._resource = SuspendableResource()
+
+    def suspend_next_write(self) -> LoopSuspension:
+        """Hold the next :meth:`add` or :meth:`write_atomic` open inside the store.
+
+        The hook ``MemoryStoreContract``'s cancellation case takes (ADR-0060 §3).
+        Test-only, and not part of the ``MemoryStore`` contract: the Protocol
+        deliberately grows no affordance for this, so the suite asks the *subject*
+        it was handed rather than the seam every consumer depends on.
+
+        Returns:
+            The handle to wait on and release.
+        """
+        return self._resource.suspend_next()
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as the error the real store raises.
@@ -95,7 +118,8 @@ class FakeMemoryStore:
         reach into stored state — matching the isolation the persistent store gets
         for free by serialising to the database.
         """
-        self._records[record.id] = record.model_copy(deep=True)
+        async with self._resource.held():
+            self._records[record.id] = record.model_copy(deep=True)
         return record.id
 
     async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
@@ -118,14 +142,21 @@ class FakeMemoryStore:
         if len(set(ids)) != len(ids):
             msg = "an atomic batch may not write the same id twice"
             raise MemoryStoreError(msg)
-        staged: list[MemoryRecord] = []
-        for write in writes:
-            if write.mode is MemoryWriteMode.INSERT_IF_ABSENT and write.record.id in self._records:
-                msg = f"cannot insert {write.record.id!r}: a record with that id is already stored"
-                raise MemoryStoreConflictError(msg)
-            staged.append(write.record.model_copy(deep=True))
-        for record in staged:
-            self._records[record.id] = record
+        async with self._resource.held():
+            staged: list[MemoryRecord] = []
+            for write in writes:
+                if (
+                    write.mode is MemoryWriteMode.INSERT_IF_ABSENT
+                    and write.record.id in self._records
+                ):
+                    msg = (
+                        f"cannot insert {write.record.id!r}: "
+                        "a record with that id is already stored"
+                    )
+                    raise MemoryStoreConflictError(msg)
+                staged.append(write.record.model_copy(deep=True))
+            for record in staged:
+                self._records[record.id] = record
         return [record.id for record in staged]
 
     async def get(self, record_id: str) -> MemoryRecord | None:
@@ -177,12 +208,14 @@ class FakeMemoryStore:
 
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""
-        return self._records.pop(record_id, None) is not None
+        async with self._resource.held():
+            return self._records.pop(record_id, None) is not None
 
     async def clear(self) -> int:
         """Delete every record, returning the number removed."""
-        count = len(self._records)
-        self._records.clear()
+        async with self._resource.held():
+            count = len(self._records)
+            self._records.clear()
         return count
 
     async def export(self) -> list[MemoryRecord]:
@@ -201,7 +234,10 @@ class FakeMemoryStore:
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""
         now = self._now_utc()
-        expired = [rid for rid, record in self._records.items() if self._is_expired(record, now)]
-        for rid in expired:
-            del self._records[rid]
+        async with self._resource.held():
+            expired = [
+                rid for rid, record in self._records.items() if self._is_expired(record, now)
+            ]
+            for rid in expired:
+                del self._records[rid]
         return len(expired)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import time
 from collections.abc import Iterator, Mapping
@@ -10,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from context_provider_contract import ContextProviderContract
+from context_provider_contract import AbandonedStraggler, ContextProviderContract
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
 from ai_assistant.context import provider as provider_module
@@ -20,7 +21,7 @@ from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import CurrentContext, TimeOfDay
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from ai_assistant.core.protocols import ContextProvider
 
@@ -138,6 +139,43 @@ class TestAssemblingContextProviderContract(ContextProviderContract):
         scripted = iter(instants)
         provider = AssemblingContextProvider([ClockContextSource(now=lambda: next(scripted))])
         return provider, instants
+
+    @contextlib.asynccontextmanager
+    async def assembly_with_a_suppressing_source(self) -> AsyncIterator[AbandonedStraggler]:
+        """Wire the clock source beside one that swallows its cancellation and then fails.
+
+        The drain budget is left alone: the shared case bounds its waits
+        generously and asserts nothing about latency, which is ADR-0033 §1's own
+        parameter and pinned in this module's own tests.
+
+        ``quiesce`` is the hook ADR-0060 §3 requires. It reads
+        ``provider_module._abandoned`` — a module-level set, so the snapshot is
+        taken before awaiting, because the done-callbacks mutate it as they run.
+        Reaching into the implementation is exactly why this is the *provider's*
+        test module and not the shared suite.
+        """
+        stubborn = _RequiredStubbornFailingSource()
+        provider = AssemblingContextProvider([_clock(), stubborn], source_timeout=None)
+
+        async def quiesce() -> None:
+            outstanding = tuple(provider_module._abandoned)
+            if outstanding:
+                # `wait`, not `gather(return_exceptions=True)`: gather would
+                # retrieve the straggler's exception here, which is exactly the
+                # act the suite is checking the *provider* performed.
+                await asyncio.wait(outstanding)
+            await asyncio.sleep(0)  # one turn, so the done-callbacks drop their references
+
+        try:
+            yield AbandonedStraggler(
+                provider=provider,
+                started=stubborn.started.wait,
+                fail=stubborn.release.set,
+                finished=stubborn.failed.wait,
+                quiesce=quiesce,
+            )
+        finally:
+            stubborn.release.set()
 
 
 async def test_assembles_context_from_the_clock_source() -> None:

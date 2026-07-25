@@ -22,12 +22,33 @@ fastembed itself, whose ``embed`` downloads a model on first use, stays out of
 the gate. Patching ``TextEmbedding`` out was rejected as the alternative: it
 would assert properties of the patch rather than of the adapter.
 
+**On cancellation, this suite asserts less than the store suites do, and that is
+the honest reading of the rule rather than a gap.** ``core.protocols``' clause
+(ADR-0060) has two halves. The *resource* half — never release something while
+the work you started is still using it — has no ``Embedder`` implementation it
+can bite on: ``FastEmbedEmbedder.embed`` does hand a worker to
+``asyncio.to_thread``, so a cancelled ``embed()`` abandons a running thread, but
+that thread is the only user of what it holds and it self-releases when it
+finishes. Its one lock, ``_load_lock``, is a ``threading.Lock`` taken *and*
+released inside the worker, where an unwinding ``CancelledError`` on the event
+loop cannot reach it, and inference then runs unlocked on the backend's
+documented thread safety. There is no event-loop-held resource to hand over
+early, so the "a second caller must not reach it" case the store suites turn on
+would be theatre here: it would pass whatever the implementation did.
+
+What *is* live is the propagation half, plus the consequence a caller can
+actually observe — an embedder that survives a cancelled call is one that left
+nothing held with nobody to release it. That is what the case below pins. If an
+``Embedder`` ever acquires something the event loop releases, this is ADR-0054's
+bug again and the case needs the store suites' shape.
+
 Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 ``Test``-prefixed subclass, never the abstract base directly.
 """
 
 from __future__ import annotations
 
+import asyncio
 import math
 from typing import TYPE_CHECKING
 
@@ -37,6 +58,13 @@ from ai_assistant.core.protocols import Embedder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from ai_assistant.testing.cancellation import SuspendedCall
+
+#: Ceiling on the cancellation case's waits, so an embedder that never answers
+#: fails instead of hanging the suite. A liveness bound, not a latency assertion.
+_CANCELLATION_SECONDS = 5.0
 
 # Vectors are compared within tolerance, never bit-for-bit. The Protocol promises
 # shape, cardinality, and order — not exact reproducibility — and a real backend
@@ -163,3 +191,71 @@ class EmbedderContract:
 
         assert len(batched) == len(texts)
         assert all(_vectors_close(b, a) for b, a in zip(batched, alone, strict=True))
+
+    # --- cancellation (ADR-0060) -------------------------------------------
+
+    #: Whether this implementation reaches no ``await`` at all inside ``embed`` —
+    #: pure computation, nothing handed off, nothing to interrupt mid-flight.
+    #: ``core.protocols``' clause is then vacuously satisfied. Left ``False``, the
+    #: suite requires the implementation to prove it by overriding
+    #: :meth:`embedder_suspended_mid_embed`, so an embedder that grows a handoff
+    #: has to say something about what a cancellation does to it. Opting out is a
+    #: visible declaration in the subclass, exactly as
+    #: ``ContextProviderContract``'s ``serves_a_fixed_instant`` is.
+    holds_nothing_across_an_await: bool = False
+
+    def embedder_suspended_mid_embed(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[Embedder, SuspendedCall]]:
+        """Supply an embedder whose next ``embed`` stops at its worker handoff.
+
+        Override unless :attr:`holds_nothing_across_an_await` is set. The
+        suspension has to be arranged rather than raced for: a real batch resolves
+        inside a single event-loop turn, so a case that merely cancels a freshly
+        started task finds it already finished and asserts nothing.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.optional_obligation
+    async def test_a_cancelled_embed_is_not_absorbed_and_strands_nothing(self) -> None:
+        """``core.protocols``' cancellation clause, on the embedding path (ADR-0060).
+
+        Two properties, and the module docstring says why they are the whole of it
+        for this seam. The cancellation is delivered onward rather than turned
+        into a return value; and once the abandoned work is let go, nothing was
+        left held with nobody to release it — a later ``embed`` still answers.
+
+        Note what is deliberately **absent**: the store suites require that a
+        second caller *cannot* reach the resource while the cancelled call's work
+        runs. That is exactly wrong here. No ``Embedder`` owns an event-loop
+        resource to withhold, so a second ``embed`` overlapping an abandoned one
+        is correct behaviour, and requiring otherwise would forbid the very shape
+        ``asyncio.to_thread`` gives ``FastEmbedEmbedder``. What the clause still
+        forbids is the other direction — a call left holding something with
+        nothing running that will release it — which is what the second ``embed``
+        below detects, by completing at all.
+        """
+        if self.holds_nothing_across_an_await:
+            pytest.skip("embed reaches no await, so a cancellation cannot land inside it")
+
+        async with self.embedder_suspended_mid_embed() as (embedder, suspended):
+            embedding = asyncio.ensure_future(embedder.embed(["alpha beta"]))
+            try:
+                await suspended.reached()
+                embedding.cancel()
+
+                # Never absorbed into a return value, and not deferred until the
+                # abandoned work finishes — it is still suspended right here.
+                async with asyncio.timeout(_CANCELLATION_SECONDS):
+                    with pytest.raises(asyncio.CancelledError):
+                        await embedding
+            finally:
+                suspended.release()
+
+            # Nothing was stranded: the same embedder still serves the same text.
+            # An implementation that unwound out of a lock it never releases would
+            # hang here rather than answer, which the timeout turns into a failure.
+            async with asyncio.timeout(_CANCELLATION_SECONDS):
+                [vector] = await embedder.embed(["alpha beta"])
+            assert len(vector) == embedder.dimensions
+            assert all(math.isfinite(value) for value in vector)

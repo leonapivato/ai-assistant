@@ -10,6 +10,7 @@ two copies drifting apart.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -27,7 +28,10 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import FakePlanner, FakePlanStore
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from ai_assistant.core.protocols import Planner, PlanStore
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 
 def _fixed_now() -> datetime:
@@ -40,6 +44,18 @@ class TestFakePlanStoreContract(PlanStoreContract):
     @pytest.fixture
     def store(self) -> PlanStore:
         return FakePlanStore(now=_fixed_now)
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(self) -> AsyncIterator[tuple[PlanStore, SuspendedCall]]:
+        """The fake models the resource it does not really own (ADR-0060 §3).
+
+        Dicts need no serialising, so without this the canonical fake could only
+        opt out — and the cancellation case would run solely against the
+        ``sqlite3`` store that already holds the invariant. Nothing to dispose of,
+        hence the bare yield.
+        """
+        store = FakePlanStore(now=_fixed_now)
+        yield store, store.suspend_next_write()
 
 
 class TestFakePlannerContract(PlannerContract):

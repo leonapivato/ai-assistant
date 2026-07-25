@@ -13,6 +13,44 @@ Guidelines when evolving these contracts:
   * Keep methods ``async`` where they touch I/O (models, memory, tools) so the
     whole system composes on one event loop.
 
+Cancellation (ADR-0060), binding on **every** Protocol below:
+
+    **A method that acquires a resource must not orphan it under cancellation.**
+    If a method acquires anything whose safety outlives the coroutine — a
+    connection, a lock, a spawned task, a file handle, a transaction — then at
+    the moment ``CancelledError`` leaves that method, every such resource is
+    either released, or still held exclusively by work the method started and
+    can observe finishing. Never released while that work is still using it;
+    never left held with nothing running that will release it.
+
+    **A cancellation delivered from outside the call is delivered onward, never
+    absorbed.** A method may defer delivery while it makes its resources safe,
+    but it re-raises; it never converts such a cancellation into a return value,
+    and never lets a collaborator's suppressed cancellation stand in for its
+    own. Where delivery is deferred, the wait is on something the implementation
+    can observe completing, and the deferral is bounded or documented as
+    unbounded.
+
+    *From outside* is load-bearing. A cancellation a method **issues itself**,
+    to enforce a deadline it owns, is its own control flow and may be classified
+    into a return value — that is exactly what ``ToolInvoker.invoke`` does on
+    expiry (ADR-0029 §4), and what its ``Raises: CancelledError`` clause
+    distinguishes when it says the seam does not convert a task "cancelled from
+    outside". The resource clause above is unconditional and binds both cases;
+    only the propagation clause turns on provenance.
+
+    **A cancelled call's effect is indeterminate to the caller.** A cancelled
+    write may or may not have committed. The caller may assume neither, and in
+    particular may not assume the write did not land.
+
+    The rule is cooperative and is stated in the weaker, true form: no seam can
+    stop work that declines to be cancelled. What the rule buys is that the
+    *resource* is safe and the cancellation *arrives*, not that the work stops.
+
+Most Protocols here say nothing further about it, because no implementation of
+them holds anything across an ``await`` — silence marks where the rule has no
+bite today, never a seam it cannot reach (ADR-0060 §2).
+
 Each subsystem declared in the architecture map adds its Protocol here as it is
 designed, so this file grows to hold every seam that crosses a subsystem
 boundary. ``tests/core/test_protocol_triad.py`` is what keeps that growth
@@ -93,6 +131,9 @@ class Embedder(Protocol):
     An embedder is bound to a single model. Per-call model selection is
     intentionally omitted: vectors from different models are not comparable, so
     a store must embed everything with one model (ADR-0006 §4).
+
+    Cancelling :meth:`embed` is governed by this module's cancellation clause
+    (ADR-0060).
     """
 
     @property
@@ -137,6 +178,9 @@ class MemoryStore(Protocol):
     (ADR-0046). ``write_atomic`` is the primitive supersession rides: closing a
     belief's window and inserting its replacement are two writes that must land
     together, never leaving the first without the second (ADR-0045 §8).
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060).
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -313,6 +357,9 @@ class ContextProvider(Protocol):
 
     The pipeline's context step (ADR-0008). Implementations compose one or more
     internal sources; only this typed contract crosses a subsystem boundary.
+
+    Cancelling :meth:`assemble` is governed by this module's cancellation clause
+    (ADR-0060).
     """
 
     async def assemble(self) -> CurrentContext:
@@ -389,6 +436,9 @@ class PlanStore(Protocol):
 
     Writes to execution state go through :meth:`commit_transition`, never by
     handing back a whole state, so the transition graph cannot be bypassed.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060).
     """
 
     async def save_goal(self, goal: Goal) -> str:
@@ -819,6 +869,9 @@ class AuditTrail(Protocol):
     with it, and an affordance that removes one inconvenient record undoes the
     guarantee for all of them. So the user may burn the book; nobody may tear
     out a page.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060).
     """
 
     async def record(self, decision: PermissionDecision) -> str:
