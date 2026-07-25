@@ -1288,3 +1288,46 @@ async def test_cancelling_a_write_does_not_release_the_connection(tmp_path: Path
     finally:
         release.set()
         store.close()
+
+
+# --- one observation of the caller's goal (ADR-0065) -------------------------
+
+
+async def test_save_goal_returns_the_id_it_wrote_not_a_mid_write_mutation() -> None:
+    """The id handed back comes from the snapshot, not the caller's instance.
+
+    ``_revalidated_goal`` already detaches the record on the coroutine's first
+    line, so the *row* was never at risk here — the return value was. This blocks
+    the worker inside the write, which is the method's own suspension window,
+    mutates the ``Goal`` the caller still holds, and requires the returned id to
+    name the row that now exists. Mutating after ``save_goal`` returned would
+    prove nothing: the read being tested happens before that.
+    """
+    store = SqlitePlanStore(path=":memory:", now=_fixed_now)
+    entered = threading.Event()
+    release = threading.Event()
+    original_save = store._save_goal_sync
+
+    def blocking_save(goal: Goal) -> None:
+        entered.set()
+        if not release.wait(timeout=5):  # pragma: no cover - only on a hang
+            msg = "the blocked worker was never released"
+            raise AssertionError(msg)
+        original_save(goal)
+
+    store._save_goal_sync = blocking_save  # type: ignore[method-assign]
+    try:
+        goal = _goal("g1")
+        writing = asyncio.ensure_future(store.save_goal(goal))
+        assert await asyncio.to_thread(entered.wait, 5), "worker never entered"
+
+        goal.id = "g-tampered"  # the caller mutates while the write is in flight
+        release.set()
+        returned = await writing
+
+        assert returned == "g1"
+        assert await store.get_goal("g1") is not None
+        assert await store.get_goal("g-tampered") is None
+    finally:
+        release.set()
+        store.close()
