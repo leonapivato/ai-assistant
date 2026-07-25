@@ -252,12 +252,21 @@ does.
 3. **`src/ai_assistant/testing/models.py`** — `FakeModelProvider` mirrors the
    refusal, as it already mirrors the empty and tool-role rejections and for the
    same stated reason.
-4. **`tests/models/model_provider_contract.py`** — shared cases for both halves
-   of the precondition **and one for the boundary the rule deliberately does not
-   cross** (below), so every implementation is held to them; the standing NOTE
-   about empty input is retired, and the per-implementation empty tests that
-   describe themselves as "not a shared-contract requirement" are reconciled with
-   the suite rather than left contradicting it.
+4. **`tests/models/model_provider_contract.py`** — shared cases pinning the rule
+   **at its boundary, in both directions**: every shape §1 refuses is refused,
+   and every shape §1 still admits is admitted. That principle, not the list, is
+   the obligation; the list below is its floor, and an implementation that
+   satisfies the principle by other cases satisfies this ADR.
+
+   Refused: the empty history; a history ending on `Role.ASSISTANT`; and that
+   history reduced to a **single** assistant message, which §1 refuses on the
+   same words and the Context verifies echoes on its own — a plausible
+   `len(messages) > 1 and …` guard passes the two-message case and leaves this
+   one live. Admitted: a history ending on `Role.SYSTEM`.
+
+   The standing NOTE about empty input is retired, and the per-implementation
+   empty tests that describe themselves as "not a shared-contract requirement"
+   are reconciled with the suite rather than left contradicting it.
 5. **`tests/models/test_provider.py`** — a case pinning `PydanticAIProvider`'s
    refusal specifically, and one pinning that it refuses *before* `Agent.run`
    (below).
