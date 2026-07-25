@@ -933,12 +933,19 @@ async def test_the_mark_is_not_stamped_when_the_open_fails(tmp_path: Path) -> No
     assert "goals" not in _tables(path)  # the half-built schema rolled back with it
 
 
-async def test_a_mark_below_the_counter_is_not_refused(tmp_path: Path) -> None:
-    """The check is one-sided, and deliberately: only a rewound *counter* reissues.
+async def test_a_mark_below_the_counter_is_promoted_at_open_not_refused(tmp_path: Path) -> None:
+    """A lagging mark is levelled up, not refused — and levelled *at the open*.
 
-    A mark that lags — what an older build advancing the counter without the
-    witness would leave — means no ordinal has been handed out twice, so there is
-    nothing to refuse. The next allocation simply carries the mark forward.
+    A mark below the counter — what an older build advancing the counter without
+    the witness would leave — means no ordinal has been handed out twice, so there
+    is nothing to refuse. Promoting it is not a repair either: the counter is the
+    highest ordinal issued, so that is what the high water is.
+
+    Doing it eagerly is what makes the allocation-time test sound for the rest of
+    the session. Left lagging, the two would agree again as soon as an outside
+    writer rewound the counter down to meet the stale mark, and the allocation
+    would pass a rewind straight through — so the second half of this test rewinds
+    mid-session and requires the refusal.
     """
     path = tmp_path / "plans.db"
     seeded = SqlitePlanStore(path=path, now=_fixed_now)
@@ -949,10 +956,46 @@ async def test_a_mark_below_the_counter_is_not_refused(tmp_path: Path) -> None:
 
     store = SqlitePlanStore(path=path, now=_fixed_now)
     try:
+        assert _meta(path, "exec_high_water") == "9"  # levelled by the open itself
         assert (await store.start_execution("p1")).id.endswith("-10")
         assert _meta(path, "exec_high_water") == "10"
+
+        _write_meta(path, "exec_counter", "5")
+        with pytest.raises(PlanningError, match="has been rewound outside this store"):
+            await store.start_execution("p1")
     finally:
         store.close()
+
+
+async def test_a_rewind_down_to_a_lagging_mark_is_refused_by_the_records(
+    tmp_path: Path,
+) -> None:
+    """A stale mark cannot vouch for a counter rewound down to meet it.
+
+    Adversarial review, round 2. The ``counter >= mark`` test passes trivially when
+    both are 1 — but the file still holds executions at ``created_seq`` 2 and 3, so
+    the next allocation re-issues ordinal 2. Reproduced against the previous commit,
+    which opened the store happily and left::
+
+        created_seq: [("…-A-1", 1), ("…-A-2", 2), ("…-B-2", 2), ("…-A-3", 3)]
+
+    Two rows at 2, so ``active_executions``/``export`` stopped being an order. The
+    records are what close it: ``MAX(created_seq) <= exec_counter`` holds for every
+    file this store wrote.
+    """
+    path = tmp_path / "plans.db"
+    first = SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "A")
+    await first.save_goal(_goal())
+    await first.save_plan(_plan())
+    for _ in range(3):
+        await first.start_execution("p1")
+    first.close()
+
+    _write_meta(path, "exec_high_water", "1")  # an older build left the mark behind
+    _write_meta(path, "exec_counter", "1")  # then an outside writer rewound to it
+
+    with pytest.raises(PlanningError, match="still holds an execution allocated at created_seq=3"):
+        SqlitePlanStore(path=path, now=_fixed_now, incarnation_factory=lambda: "B")
 
 
 async def test_a_lost_high_water_mark_is_refused_at_allocation(tmp_path: Path) -> None:

@@ -121,54 +121,73 @@ an ambiguous counter. The rewind that actually reissues an id happens
 mid-session, after the open has validated, so an open-time check alone would not
 have caught the reproduction above.
 
-### 3. The check is one-sided
+### 3. A lagging mark is levelled up, not refused
 
-Only `counter < mark` is refused. A mark that lags the counter is harmless: no
-ordinal has been issued twice, so the next allocation simply carries the mark
-forward. This is also what a mixed-version deployment looks like — an older build
-advancing the counter without the witness — and it must not refuse.
+Only `counter < mark` is refused. A mark *below* the counter is not a rewind: no
+ordinal has been issued twice. This is what a mixed-version deployment looks like
+— an older build advancing the counter without the witness — and it must not
+refuse. It is levelled up instead, and promoting it is not a repair: the counter
+is the highest ordinal issued, so that is what the high water is.
 
-### 4. A database predating the mark is backfilled, not refused
+**The levelling happens at the open, eagerly, and that is load-bearing.** Left to
+the next allocation, a lagging mark is a standing hole: an outside writer that
+rewinds the counter *down to meet the stale mark* leaves the two agreeing, so
+`counter >= mark` passes a rewind straight through. Bringing them level at the
+open means that for the rest of the session any rewind falls below the mark — so
+§2's allocation-time test stays sound without re-scanning the records at every
+allocation.
 
-Every plan store written before this change has a counter and no mark. They are
-stamped, not refused: making a durable record unopenable by the code that wrote
-it is a far worse failure than the one the mark prevents, and it is the same call
-`SqliteAuditTrail` made for its marker-less databases (#346). The stamp is sound
-rather than merely lenient — the pre-existing counter *is* the highest ordinal
-that file has issued, because that is exactly what the earlier code maintained —
-so it records what is already true rather than assuming anything.
+### 4. The records corroborate the counter, and a pre-mark database is backfilled
 
-Following #346's ordering, the stamp is written **after** the record schema is
-created, inside the same setup transaction. A create that fails therefore rolls
-the mark back with it, leaving an unlabelled database the next open will stamp
-correctly, rather than one falsely labelled by an open that never completed.
-
-**The backfill is corroborated against the records, so it is not a way around the
-invariant.** A *deleted* mark is indistinguishable from one that was never
-written, so on its own this branch would launder a two-row tamper — drop the
-mark, lower the counter — into a fresh, agreeing pair at the next open. The
-executions the file still holds close that: each records in `created_seq` the
-ordinal it was allocated with, written in the same transaction that advanced the
-counter, and `clear`/`delete_goal` only ever *remove* rows. So
+**The two markers alone cannot catch every rewind, so the open also checks the
+counter against the records.** Every execution stores in `created_seq` the ordinal
+it was allocated with, written by the same transaction that advanced the counter,
+and `clear`/`delete_goal` only ever *remove* rows. So
 `MAX(created_seq) <= exec_counter` holds for every file this store wrote, and a
-violation is corruption whatever the mark says. A backfill below it is refused.
+violation is corruption whatever the mark says. Two cases need it, both reproduced
+before the check existed:
 
-That corroboration is deliberately confined to this path and is exactly as strong
-as the harm. Rewinding past a retained execution is what makes two rows share a
-`created_seq` and stops `active_executions`/`export` being the oldest-first order
-the contract promises; where no execution survives there is nothing to
-corroborate *and* nothing to corrupt. The records are **not** a substitute for the
-mark and cannot raise it — they are precisely what `clear`/`delete_goal` erase,
-which is why ADR-0049 §3 keeps the ordinal in `meta` at all. They can only refuse.
-A store whose mark is intact never reaches the check, so it costs one aggregate
-read once in a database's life.
+- **A deleted mark**, which is indistinguishable from one that was never written,
+  so the backfill below would otherwise launder a two-row tamper — drop the mark,
+  lower the counter — into a fresh, agreeing pair.
+- **A lagging mark met by a rewound counter** (§3), where the two agree at a value
+  the file has long since passed.
+
+Both end the same way: a second execution allocated a `created_seq` an existing
+one already holds, so `active_executions`/`export` silently stop being the
+oldest-first order the contract requires. Note what is *not* at stake — neither
+case reuses an execution **id**, because a reopened store mints a fresh nonce
+(ADR-0049 §3). The durable ordering is the casualty, and it is enough.
+
+The records are **not** a substitute for the mark and never *raise* the counter:
+they are precisely what `clear`/`delete_goal` erase, which is why ADR-0049 §3
+keeps the ordinal in `meta` at all. They can only refuse — and where no execution
+survives there is nothing to corroborate *and* nothing to corrupt (§5). The cost
+is one aggregate read per open, never per allocation.
+
+**A database predating the mark is stamped, not refused.** Every plan store
+written before this change has a counter and no mark. Making a durable record
+unopenable by the code that wrote it is a far worse failure than the one the mark
+prevents, and it is the same call `SqliteAuditTrail` made for its marker-less
+databases (#346). The stamp is sound rather than merely lenient — the pre-existing
+counter *is* the highest ordinal that file has issued, because that is exactly
+what the earlier code maintained — so it records what is already true, and the
+corroboration above is what stops that trust being exploitable.
+
+Following #346's ordering, the corroboration and the stamp both run **after** the
+record schema is created, inside the same setup transaction. That is what puts
+`executions` in scope at all, and it means a create that fails rolls the mark back
+with it, leaving an unlabelled database the next open will stamp correctly rather
+than one falsely labelled by an open that never completed. The `counter >= mark`
+refusal stays *ahead* of the record tables, where §2 puts it.
 
 The alternative considered and rejected was durable provenance — bumping
 `schema_version` to 2 so a missing mark is refusable on a file expected to carry
 one. It works, but it makes an older build refuse the file outright, and an older
 build opening a post-ADR-0064 file is *harmless*: it advances the counter without
-the witness, which §3's one-sided test already accepts. Paying a downgrade
-refusal to detect a case the records already detect is the worse trade.
+the witness, which §3 levels up on the next open. Paying a downgrade refusal to
+detect a case the records already detect is the worse trade — and it would not
+have caught the lagging-mark case at all.
 
 ### 5. What this does not defend against, and why that is the right line
 
@@ -202,15 +221,16 @@ named seam.
 - **A refusal that no earlier version produced.** A well-formed database with a
   rewound counter now fails to open, and a mid-session rewind fails the next
   `start_execution`, both with `PlanningError`. This is a deliberate behaviour
-  change; §1's placement of the mark is what bounds it to files whose two markers
-  actually disagree.
+  change; §1's placement of the mark is what bounds it to files whose markers, or
+  whose markers and records, actually disagree.
 - **Ordinary operation is unaffected**, and the paths that could plausibly have
   regressed are enumerated and tested: whole-file backup/restore, `clear()` and
   `delete_goal()` (which never touch `meta`), a `:memory:` store, two processes
   allocating on one file (serialised by the same write lock the counter already
   relies on), and a store predating the mark.
 - **One extra `UPDATE` per allocation**, inside a transaction already open and
-  already writing the counter. No new lock, no new round trip.
+  already writing the counter, plus one `MAX(created_seq)` aggregate per *open*.
+  No new lock, no new round trip, and nothing added to the allocation's read path.
 - **ADR-0049 §3's ordinal claim is now enforced rather than assumed.** Its text
   stands unchanged; this is the mechanism behind it.
 - **Revisit when** a second on-disk schema version arrives — the mark is a `meta`
