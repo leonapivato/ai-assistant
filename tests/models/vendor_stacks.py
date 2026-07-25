@@ -125,6 +125,42 @@ def failing_status(status_code: int) -> Handler:
     return handler
 
 
+#: What an intermediary substitutes for the model's answer when it fails: its own
+#: error page, in HTML.
+_GATEWAY_ERROR_PAGE: Final = "<html><head><title>502 Bad Gateway</title></head><body></body></html>"
+
+
+def non_json_body(request: httpx.Request) -> httpx.Response:
+    """Answer ``200`` with a body that is not JSON, under a JSON content type.
+
+    The failure a load balancer, proxy or captive portal produces: the request
+    reached *something*, which answered with its own error page instead of
+    forwarding to the model. The content type is deliberately the JSON one the
+    vendor SDK expects, so the SDK commits to decoding the body and fails —
+    which is the shape ``#352`` reproduced on both vendors.
+    """
+    return httpx.Response(
+        200,
+        text=_GATEWAY_ERROR_PAGE,
+        headers={"content-type": "application/json"},
+    )
+
+
+def truncated_json_body(request: httpx.Request) -> httpx.Response:
+    """Answer ``200`` with a JSON body cut off mid-object.
+
+    The same decode failure arrived at by the other common route — a connection
+    dropped or a response truncated partway — rather than by an intermediary
+    substituting a whole page. Pinned separately so the classification is known
+    to follow from *the body not decoding*, not from it starting with ``<``.
+    """
+    return httpx.Response(
+        200,
+        text='{"id": "msg_test", "type": "mess',
+        headers={"content-type": "application/json"},
+    )
+
+
 def connection_refused(request: httpx.Request) -> httpx.Response:
     """Fail at the transport, the way an unreachable provider does.
 
