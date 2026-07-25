@@ -32,6 +32,11 @@ if TYPE_CHECKING:
 PROMPT = [Message(role=Role.USER, content="hi")]
 
 
+async def _no_sleep(delay: float) -> None:
+    """Stand in for backoff, so a composition test never waits in real time."""
+    del delay
+
+
 def _planner_model(engine: Engine) -> ModelProvider:
     """The provider the composed engine's planner will actually call.
 
@@ -141,20 +146,25 @@ async def test_the_composed_router_falls_back_when_given_more_than_one_spec() ->
     constructed: the router the production path builds is exercised end to end,
     with the routes' inner providers swapped for doubles so no model is called.
     """
-    # Backoff shrunk to the smallest the settings accept: the routing decision is
-    # what is on test, and a real 0.5s-and-doubling wait would make this a
-    # multi-second test of `asyncio.sleep`.
-    settings = Settings(model_backoff_base_seconds=0.001, model_backoff_max_seconds=0.001)
+    settings = Settings()
     provider = _build_model_provider(settings, ("anthropic:a", "openai:b"))
     down = _FailingProvider(ModelUnavailableError("primary is down"))
     up = _AnsweringProvider("from the fallback")
-    # Replace each route's *inner* provider, keeping the real RetryingProvider
-    # and the real RoutingProvider — the composed structure is the thing on test.
     doubles: tuple[ModelProvider, ...] = (down, up)
     for route, inner in zip(provider._routes, doubles, strict=True):
         retrying = route.provider
         assert isinstance(retrying, RetryingProvider)
+        # Replace each route's *inner* provider, keeping the real
+        # RetryingProvider and the real RoutingProvider — the composed structure
+        # is the thing on test, and the production `RetryPolicy` with it.
         retrying._inner = inner
+        # Backoff is the one part that must not be real: `RetryingProvider`
+        # takes `sleep` and `jitter` precisely so a test need not wait on
+        # `asyncio.sleep` or depend on `random.random`. Injecting both keeps
+        # this deterministic and instant while leaving the *policy* — how many
+        # attempts, in what order — exactly as the composition root built it.
+        retrying._sleep = _no_sleep
+        retrying._jitter = lambda: 0.0
 
     reply = await provider.complete(PROMPT)
 
