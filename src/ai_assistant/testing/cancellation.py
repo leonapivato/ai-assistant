@@ -40,21 +40,12 @@ import threading
 from typing import TYPE_CHECKING, Protocol, final
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
 #: How long either side waits for the other before declaring the scenario broken.
 #: Generous — it is only ever reached when a test has hung, and a hung suite that
 #: fails with a message beats one that fails with a timeout somewhere upstream.
 _WAIT_SECONDS = 5.0
-
-
-#: How long a conformance case waits before concluding that a second caller is
-#: genuinely blocked on the resource rather than merely slow to be handed its
-#: result. Real time, deliberately: what it must not be confused with is an
-#: executor round-trip, and no number of event-loop turns is guaranteed to cover
-#: one — a case built on turns alone reports "still blocked" for an
-#: implementation that released the resource and simply had not been told yet.
-BLOCKED_SECONDS = 0.1
 
 
 async def settle(turns: int = 50) -> None:
@@ -67,6 +58,51 @@ async def settle(turns: int = 50) -> None:
     """
     for _ in range(turns):
         await asyncio.sleep(0)
+
+
+@final
+class ResourceLog:
+    """When each call was inside the resource, recorded as it enters and leaves.
+
+    The conformance cases cannot settle "was the second caller blocked?" with a
+    wall-clock wait. A timeout cannot tell a caller queued on the resource from
+    one that got *in* and was merely slow to finish — a busy executor is enough
+    to make the second look like the first — so a timing-based case can pass the
+    exact bug it exists to catch. This answers the question directly instead: two
+    calls were inside at once, or they were not. It is read after the scenario
+    has finished, so nothing races the reading.
+
+    Appends only, from whichever thread is inside the resource; ``list.append``
+    is atomic, and every read happens after the scenario is over.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty log."""
+        self._events: list[int] = []
+
+    @contextlib.contextmanager
+    def inside(self) -> Iterator[None]:
+        """Record one call's time inside the resource."""
+        self._events.append(1)
+        try:
+            yield
+        finally:
+            self._events.append(-1)
+
+    @property
+    def overlapped(self) -> bool:
+        """Whether any call entered the resource while another was still inside."""
+        depth = 0
+        for event in self._events:
+            depth += event
+            if depth > 1:
+                return True
+        return False
+
+    @property
+    def visits(self) -> int:
+        """How many calls have entered the resource so far."""
+        return self._events.count(1)
 
 
 class SuspendedCall(Protocol):
@@ -198,22 +234,30 @@ class LoopSuspension:
         is then re-raised — deferred, never absorbed, which is the module
         clause's second paragraph.
 
-        Cooperative, exactly as the contract is: a *second* cancellation while
-        the deferred wait is running does propagate and does abandon the work.
-        No seam can do better, and pretending otherwise here would make the fake
-        stronger than the rule.
+        The wait is a **loop**, not one `shield`-and-re-await, and that matters:
+        a second cancellation arriving while the deferred wait runs would
+        otherwise escape and unwind out of the lock with the work still pending
+        — the exact bug the clause forbids, reintroduced by the fake. ADR-0054's
+        helper loops for this reason (``while not done.is_set()``); a fake that
+        did not would certify a weaker seam than the one it stands in for.
 
         Raises:
-            CancelledError: Re-raised once the work has finished, if a
-                cancellation arrived while it was running.
+            CancelledError: Re-raised once the work has finished, if any
+                cancellation arrived while it was running. The *first* one, so
+                a caller cancelled twice still sees the cancellation it asked
+                for rather than a later duplicate.
         """
         self._entered.set()
         work = asyncio.ensure_future(self._released.wait())
-        try:
-            await asyncio.shield(work)
-        except asyncio.CancelledError:
-            await work
-            raise
+        cancellation: asyncio.CancelledError | None = None
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+        if cancellation is not None:
+            raise cancellation
 
     async def reached(self) -> None:
         """Wait until the suspended call is inside the resource."""
@@ -245,6 +289,12 @@ class SuspendableResource:
         """Create a free resource with nothing armed."""
         self._lock = asyncio.Lock()
         self._armed: LoopSuspension | None = None
+        self._log = ResourceLog()
+
+    @property
+    def log(self) -> ResourceLog:
+        """When each call was inside this resource (ADR-0060's case reads it)."""
+        return self._log
 
     def suspend_next(self) -> LoopSuspension:
         """Arm the next entry to :meth:`held` to suspend inside the resource.
@@ -274,6 +324,7 @@ class SuspendableResource:
         """
         async with self._lock:
             armed, self._armed = self._armed, None
-            if armed is not None:
-                await armed.hold()
-            yield
+            with self._log.inside():
+                if armed is not None:
+                    await armed.hold()
+                yield

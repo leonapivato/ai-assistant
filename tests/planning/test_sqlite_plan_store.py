@@ -23,7 +23,7 @@ from plan_store_contract import PlanStoreContract, _goal, _plan
 from ai_assistant.core.errors import PlanningError
 from ai_assistant.core.types import StepStatus, StepTransition
 from ai_assistant.planning import SqlitePlanStore
-from ai_assistant.testing.cancellation import ThreadSuspension
+from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Sequence
@@ -72,7 +72,9 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
             realised.close()
 
     @contextlib.asynccontextmanager
-    async def store_suspended_mid_write(self) -> AsyncIterator[tuple[PlanStore, SuspendedCall]]:
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[tuple[PlanStore, SuspendedCall, ResourceLog]]:
         """Park the first ``save_goal``'s worker thread inside the connection's turn.
 
         The suspension goes in ``_save_goal_sync``, i.e. inside ``async with
@@ -89,18 +91,20 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
         """
         realised = SqlitePlanStore(path=":memory:", now=_fixed_now)
         suspension = ThreadSuspension()
+        log = ResourceLog()
         original_save = realised._save_goal_sync
         armed = threading.Event()
 
         def blocking_save(goal: Goal) -> None:
-            if not armed.is_set():  # the first worker only; later ones run free
-                armed.set()
-                suspension.hold()
-            original_save(goal)
+            with log.inside():  # the span the connection is genuinely in use for
+                if not armed.is_set():  # the first worker only; later ones run free
+                    armed.set()
+                    suspension.hold()
+                original_save(goal)
 
         realised._save_goal_sync = blocking_save  # type: ignore[method-assign]
         try:
-            yield realised, suspension
+            yield realised, suspension, log
         finally:
             suspension.release()
             # An implementation that released the connection early leaves a

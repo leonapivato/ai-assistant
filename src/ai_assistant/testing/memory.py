@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import MemoryKind, MemoryRecord, MemoryWrite
-    from ai_assistant.testing.cancellation import LoopSuspension
+    from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 
 def _utcnow() -> datetime:
@@ -78,6 +78,11 @@ class FakeMemoryStore:
             The handle to wait on and release.
         """
         return self._resource.suspend_next()
+
+    @property
+    def resource_log(self) -> ResourceLog:
+        """When each call was inside the modelled resource (ADR-0060's case reads it)."""
+        return self._resource.log
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as the error the real store raises.

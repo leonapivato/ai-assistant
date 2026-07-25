@@ -35,7 +35,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
-from ai_assistant.testing.cancellation import ThreadSuspension
+from ai_assistant.testing.cancellation import ResourceLog, ThreadSuspension
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -1004,7 +1004,7 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall, ResourceLog]]:
         """Park the first ``add``'s worker thread inside the connection's turn.
 
         The suspension goes in ``_add_sync``, i.e. inside ``async with
@@ -1021,18 +1021,20 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
         """
         store = SqliteMemoryStore(path=":memory:", embedder=HashingEmbedder(dimensions=8))
         suspension = ThreadSuspension()
+        log = ResourceLog()
         original_add = store._add_sync
         armed = threading.Event()
 
         def blocking_add(record: MemoryRecord, vector: Embedding) -> None:
-            if not armed.is_set():  # the first worker only; later ones run free
-                armed.set()
-                suspension.hold()
-            original_add(record, vector)
+            with log.inside():  # the span the connection is genuinely in use for
+                if not armed.is_set():  # the first worker only; later ones run free
+                    armed.set()
+                    suspension.hold()
+                original_add(record, vector)
 
         store._add_sync = blocking_add  # type: ignore[method-assign]
         try:
-            yield store, suspension
+            yield store, suspension, log
         finally:
             suspension.release()
             # An implementation that released the connection early leaves a

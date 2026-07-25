@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.testing.cancellation import SuspendedCall
+    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 def _fixed_now() -> datetime:
@@ -53,7 +53,7 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_mid_write(
         self,
-    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall, ResourceLog]]:
         """The fake models the resource it does not really own (ADR-0060 §3).
 
         A dict needs no serialising, so without this the canonical fake could
@@ -62,7 +62,7 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
         hence the bare yield.
         """
         store = FakeMemoryStore(now=_fixed_now)
-        yield store, store.suspend_next_write()
+        yield store, store.suspend_next_write(), store.resource_log
 
 
 # Behaviour specific to FakeMemoryStore, beyond the shared contract: the contract

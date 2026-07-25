@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import AuditTrail
-    from ai_assistant.testing.cancellation import SuspendedCall
+    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 class TestFakeAuditTrailContract(AuditTrailContract):
@@ -33,7 +33,9 @@ class TestFakeAuditTrailContract(AuditTrailContract):
         return FakeAuditTrail()
 
     @contextlib.asynccontextmanager
-    async def trail_suspended_mid_write(self) -> AsyncIterator[tuple[AuditTrail, SuspendedCall]]:
+    async def trail_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[tuple[AuditTrail, SuspendedCall, ResourceLog]]:
         """The fake models the resource it does not really own (ADR-0060 §3).
 
         A dict needs no serialising, so without this the canonical fake could
@@ -42,7 +44,7 @@ class TestFakeAuditTrailContract(AuditTrailContract):
         hence the bare yield.
         """
         trail = FakeAuditTrail()
-        yield trail, trail.suspend_next_write()
+        yield trail, trail.suspend_next_write(), trail.resource_log
 
 
 async def test_a_refused_write_leaves_the_trail_untouched() -> None:

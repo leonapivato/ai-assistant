@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ai_assistant.core.protocols import Planner, PlanStore
-    from ai_assistant.testing.cancellation import SuspendedCall
+    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 def _fixed_now() -> datetime:
@@ -46,7 +46,9 @@ class TestFakePlanStoreContract(PlanStoreContract):
         return FakePlanStore(now=_fixed_now)
 
     @contextlib.asynccontextmanager
-    async def store_suspended_mid_write(self) -> AsyncIterator[tuple[PlanStore, SuspendedCall]]:
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[tuple[PlanStore, SuspendedCall, ResourceLog]]:
         """The fake models the resource it does not really own (ADR-0060 §3).
 
         Dicts need no serialising, so without this the canonical fake could only
@@ -55,7 +57,7 @@ class TestFakePlanStoreContract(PlanStoreContract):
         hence the bare yield.
         """
         store = FakePlanStore(now=_fixed_now)
-        yield store, store.suspend_next_write()
+        yield store, store.suspend_next_write(), store.resource_log
 
 
 class TestFakePlannerContract(PlannerContract):
