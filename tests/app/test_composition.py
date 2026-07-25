@@ -18,9 +18,11 @@ from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import Reversibility, RiskLevel
+from ai_assistant.memory import MemoryIngestor, SqliteMemoryStore
 from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
+from ai_assistant.tools import InMemoryToolRegistry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,6 +61,48 @@ async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
         assert engine._runner._executor._plans is plans
         # The façade and the runner read the very same audit trail.
         assert engine._trail is engine._runner._trail
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_wires_one_memory_store_into_both_the_loop_and_the_writer(
+    tmp_path: Path,
+) -> None:
+    """The store the loop retrieves from is the store the writer persists to (ADR-0028 §4).
+
+    ``MemoryWriter``'s Protocol states this obligation in prose and says outright
+    that it is "unenforceable here precisely because no store is on this seam" —
+    so the composition root is the only place it can be checked, and identity is
+    the only way to check it. Split the two and the learning loop is silently
+    open: what the assistant learns is written somewhere nothing ever reads.
+    """
+    engine = build_engine(Settings(), data_dir=tmp_path)
+    try:
+        memory = engine._loop._memory
+        assert isinstance(memory, SqliteMemoryStore)
+        writer = engine._loop._writer
+        assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
+        assert writer._store is memory
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_wires_one_registry_object_as_both_registry_and_invoker(
+    tmp_path: Path,
+) -> None:
+    """Selection and execution act on one tool object, everywhere (ADR-0029 §8).
+
+    The second prose-only wiring obligation: ``ToolRegistry`` and ``ToolInvoker``
+    are separate seams that "no Protocol can close" onto one instance. If the
+    runner selected from one registry while the executor invoked against another,
+    a gated step could execute a tool the permission check never saw.
+    """
+    engine = build_engine(Settings(), data_dir=tmp_path)
+    try:
+        tools = engine._runner._registry
+        assert isinstance(tools, InMemoryToolRegistry)
+        assert engine._runner._executor._registry is tools
+        assert engine._runner._executor._invoker is tools
     finally:
         await engine.aclose()
 
