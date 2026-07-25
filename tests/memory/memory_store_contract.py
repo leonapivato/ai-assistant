@@ -134,36 +134,51 @@ async def _held_at_its_first_await(
             gate.release()
 
 
+async def _score_for(store: MemoryStore, query: str, record_id: str) -> float:
+    """How relevant ``store`` finds ``record_id`` to ``query``; ``0.0`` if unmatched."""
+    for record in await store.search(query):
+        if record.id == record_id:
+            return record.score or 0.0
+    return 0.0
+
+
 async def _assert_indexed_from_the_content_it_carries(
-    store: MemoryStore, record_id: str, *, echo_id: str
+    store: MemoryStore, record_id: str, *, rejected_content: str
 ) -> None:
     """Assert the stored record's retrieval entry was built from its own content.
 
-    The half of ADR-0065's ``add`` obligation the record itself cannot show. A
-    torn write persists one version of the content and indexes another — the
-    ADR-0056 tear (#286), where the row's JSON and the vector beside it described
-    two different records — and a store that returns the row for *any* query hides
-    that completely.
+    The half of ADR-0065's obligation the record itself cannot show. A torn write
+    persists one version of the content and indexes another — the ADR-0056 tear
+    (#286), where the row's JSON and the vector beside it described two different
+    records — and asking whether the row comes *back* hides that completely: a
+    vector store applies no similarity floor, so it returns its rows for any
+    query at all.
 
-    So this asks the store a question only the index can answer: a second record
-    carrying **identical** content is written, and the two are searched for that
-    content. Relevance is a function of content, so a store that indexed what it
-    persisted ranks them together; one that embedded a version it did not keep is
-    out-scored by its own echo. Nothing about *how* the store scores is assumed —
-    only that two records saying the same thing are equally relevant to it, which
-    holds for a lexical fake and a vector backend alike.
+    So this asks the only question the index answers: is the record more relevant
+    to the content it carries than to ``rejected_content`` — the version of that
+    content the store did **not** keep? A store that indexed what it persisted
+    says yes. One that embedded the version it discarded says no, because the
+    vector it is holding is the rejected text's.
+
+    Deliberately **one record against two queries**, never two records against
+    one. Comparing the subject with an identically-worded second record would
+    assume the store scores equal strings equally — which a store weighting
+    recency, or an embedder that is not bit-deterministic, may conformingly not
+    do, and neither :meth:`~ai_assistant.core.protocols.MemoryStore.search` nor
+    any ADR promises it. Holding the record fixed cancels every per-record signal
+    of that kind and leaves only the thing under test. The one premise left is
+    that a record is more relevant to its own words than to words it does not
+    carry, which the suite already relies on in
+    ``test_search_finds_a_matching_record``.
     """
     stored = await store.get(record_id)
     assert stored is not None
-    await store.add(_semantic(echo_id, stored.content))
-    scored = {record.id: (record.score or 0.0) for record in await store.search(stored.content)}
-    assert record_id in scored, (
-        f"{record_id!r} carries {stored.content!r} but is not retrieved by it — its "
-        f"retrieval entry was built from something else. {_TORN_INPUT}"
-    )
-    assert scored[record_id] >= scored[echo_id], (
-        f"{record_id!r} is less relevant to its own content than an identical echo "
-        f"of it ({scored[record_id]} < {scored[echo_id]}) — it was indexed from a "
+    assert stored.content != rejected_content, "the two versions must be distinguishable"
+    carried = await _score_for(store, stored.content, record_id)
+    rejected = await _score_for(store, rejected_content, record_id)
+    assert carried >= rejected, (
+        f"{record_id!r} carries {stored.content!r} but the store finds it more relevant "
+        f"to {rejected_content!r} ({rejected} > {carried}) — it was indexed from the "
         f"version of the record it did not store. {_TORN_INPUT}"
     )
 
@@ -823,8 +838,9 @@ class MemoryStoreContract:
             assert stored in (before, after), _TORN_INPUT
             # One record was written, at one id — not the old id and the new one.
             assert {r.id for r in await subject.export()} == {returned}, _TORN_INPUT
+            rejected = after.content if stored.content == before.content else before.content
             await _assert_indexed_from_the_content_it_carries(
-                subject, returned, echo_id="obs-add-echo"
+                subject, returned, rejected_content=rejected
             )
 
     async def test_write_atomic_derives_everything_from_one_observation_of_its_batch(
@@ -874,7 +890,17 @@ class MemoryStoreContract:
             )
             assert set(returned) == set(committed), _TORN_INPUT
             assert committed in ({r.id: r for r in before}, {r.id: r for r in after}), _TORN_INPUT
-            for index, record_id in enumerate(returned):
-                await _assert_indexed_from_the_content_it_carries(
-                    subject, record_id, echo_id=f"obs-batch-echo-{index}"
-                )
+            # The second element is the one whose *content* moved (its id did not),
+            # so it is where a batch that persisted one version and indexed the
+            # other shows up.
+            surviving = committed.get(before[1].id)
+            assert surviving is not None, _TORN_INPUT
+            await _assert_indexed_from_the_content_it_carries(
+                subject,
+                surviving.id,
+                rejected_content=(
+                    after[1].content
+                    if surviving.content == before[1].content
+                    else before[1].content
+                ),
+            )
