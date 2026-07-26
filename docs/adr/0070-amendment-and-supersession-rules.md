@@ -84,12 +84,20 @@ is an amendment.
 
 **A permitted amendment is append-only in mechanism, too.** It is recorded as an
 **appended, dated note** (or dated sub-section); ratified decision text is never
-rewritten. Only two in-place edits to existing lines are allowed, and both are
-additive rather than destructive: updating the **Status** line when a
-supersession lands (ADR-0001 already requires this), and adding a **dated header
-note**. Append-only means an amendment *adds*; it does not overwrite. This is
-exactly how ADR-0017 §7 operated: notes appended, no accepted text rewritten,
-one status line edited.
+rewritten. In-place edits to existing lines are confined to three, none of which
+rewrites a ratified decision:
+
+- **ratifying** an ADR — `Proposed` → `Accepted`, which finalises the current
+  decision rather than changing a past one;
+- **recording a supersession that has landed** on the Status line (ADR-0001
+  already requires this). This presupposes the superseding ADR *exists*: flipping
+  a live decision to `Superseded` with no such ADR is not a status change but an
+  unrecorded decision change, and is not permitted;
+- adding a **dated header note**.
+
+Append-only means an amendment *adds*; it does not overwrite. This is exactly how
+ADR-0017 §7 operated: notes appended, no accepted text rewritten, one status line
+edited.
 
 This resolves #65. ADR-0001 is authoritative on the rule; `CONTRIBUTING.md` is
 corrected to state the same test (§5), not a looser one.

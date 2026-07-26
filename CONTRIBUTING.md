@@ -225,10 +225,14 @@ merge that PR, then build against it. This is advisory like all review: the
 author still owns ratification; the reviewer only surfaces blind spots (a missed
 alternative, inconsistency with a prior ADR, a seam that will not extend).
 
-**Trivial ADR edits** — an in-place amendment, a status change, or marking an
-ADR superseded — skip both the separate PR and the review, not worth the
-round-trip. That is a statement about *review cost*, and nothing else: such
-changes are cheap to review, not licence to rewrite a ratified decision in place.
+**Trivial ADR edits** — an in-place amendment, ratifying a `Proposed` ADR to
+`Accepted`, or recording on an ADR's status that a superseding ADR has landed —
+skip both the separate PR and the review, not worth the round-trip. That is a
+statement about *review cost*, and nothing else: such changes are cheap to
+review, not licence to rewrite a ratified decision in place. Recording a
+supersession presupposes the superseding ADR exists; flipping a live decision to
+`Superseded` without one is not a status change but an unrecorded decision
+change, and is not permitted.
 ADR-0070 fixes the line: **amend in place only when the change alters no
 decision** — reconciling an ADR with its own text or with a fact that postdates
 it — always as an appended dated note that never overwrites ratified text.
