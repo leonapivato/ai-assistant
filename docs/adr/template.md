@@ -1,7 +1,14 @@
 # NNNN. <short title of the decision>
 
-- Status: Proposed | Accepted | Superseded by ADR-XXXX
+- Status: Proposed | Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)
 - Date: YYYY-MM-DD
+
+<!-- Use "Partially superseded by ADR-XXXX (<scope>)" when a later ADR replaces
+only part of this one: the supersession leads and "Accepted" is dropped (so a
+prefix match on "Accepted" cannot misread the replaced part as live), and the
+parenthesis names exactly what was replaced. The remainder stays accepted. See
+ADR-0070 for the amend-vs-supersede test and ADR-0001 for the append-only rule. -->
+
 
 ## Context
 

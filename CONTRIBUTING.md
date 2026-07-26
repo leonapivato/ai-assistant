@@ -225,13 +225,18 @@ merge that PR, then build against it. This is advisory like all review: the
 author still owns ratification; the reviewer only surfaces blind spots (a missed
 alternative, inconsistency with a prior ADR, a seam that will not extend).
 
-**Trivial ADRs** (amendments, status changes, supersedes) skip both the separate
-PR and the review — not worth the round-trip. That is a statement about *review
-cost*, and nothing else: it says such changes are cheap to review, not that a
-ratified decision may be rewritten in place. ADR-0001 puts it plainly: ADRs are
-append-only, and to change a past decision you write a new ADR that supersedes
-the old one and update the old one's status. Being small, or cheap to review,
-does not bear on that.
+**Trivial ADR edits** — an in-place amendment, a status change, or marking an
+ADR superseded — skip both the separate PR and the review, not worth the
+round-trip. That is a statement about *review cost*, and nothing else: such
+changes are cheap to review, not licence to rewrite a ratified decision in place.
+ADR-0070 fixes the line: **amend in place only when the change alters no
+decision** — reconciling an ADR with its own text or with a fact that postdates
+it — always as an appended dated note that never overwrites ratified text.
+**Any change to what was decided needs a new ADR that supersedes the old one:**
+wholly, or **partially** with a scoped, supersession-leading status
+(`docs/adr/template.md`). ADR-0001 holds the append-only rule; ADR-0070 holds
+the amend-vs-supersede test and the partial-supersession form. Being small, or
+cheap to review, does not bear on which side of that line a change is.
 
 **Spike first if you need to.** A contract ratified with no implementation
 contact is how a seam that does not survive first use gets blessed. Run a

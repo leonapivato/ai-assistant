@@ -11,6 +11,12 @@
   line above is this ADR's only status field. Everything else here stands: §1,
   §§3–7, and §2's residency and telemetry clauses. See the note at the end
   of §2.
+- Note (2026-07-26): §2's configured-set amendment (2026-07-19, an in-place
+  amendment) predates ADR-0070's amend-vs-supersede test and is left as-is — it
+  is **not precedent** for in-place decision changes, which ADR-0070 §1 now
+  governs. Retrofitting it would itself violate append-only (ADR-0070
+  Consequences; issue #71). Appended note, not a status change.
+
 ## Context
 
 The assistant's value comes from knowing its user deeply: goals, routines,
