@@ -165,11 +165,11 @@ scope of this ADR; the remainder of this ADR stays accepted.
 
 Two properties are load-bearing, both from ADR-0017 §7:
 
-- **The supersession leads; `Accepted` is dropped.** A consumer that
-  prefix-matches `Accepted` to collect live ADRs must **not** match a
-  partially-superseded one, or it treats the dead clause as current — the exact
-  failure #87 names. "Partially" already carries that the remainder is live, so
-  no leading `Accepted` is needed or wanted.
+- **The supersession leads; `Accepted` is dropped.** So a filter that
+  prefix-matches `Accepted` cannot silently read a partially-superseded ADR as
+  fully current — the exact failure #87 names. "Partially" already carries that
+  the remainder is live, so no leading `Accepted` is needed; the record is its own
+  scope-bearing state, not plain `Accepted` (the consumer rule below).
 - **The scope names exactly what was replaced.** The parenthesis is the reader's
   and the tool's only signal of which part is dead, so it is required and it is
   specific (a section, a clause), not a gesture.
@@ -187,31 +187,39 @@ leading-token form is a forward-only convention, not a licence to rewrite settle
 records — the same reasoning as #71 (§Consequences). New partial supersessions
 use the leading-token form; the existing ones stand.
 
-**A status consumer keys on the canonical tokens and the whole line, never a
-leading `Accepted`.** The canonical vocabulary is exactly §4's — `Proposed |
-Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)`.
-A supersession token, whole or partial, is what marks all or the named part of an
-ADR no longer live; `Accepted` alone means fully live. Under §1 an amendment is an
-appended dated note that changes no decision, so it is **not** a status token and
-never bears on a status-based liveness read. Two things make a naive read unsafe,
-both handled by reading the whole line rather than prefix-matching `Accepted`:
+**Partial supersession is a distinct, scope-bearing state; a consumer must not
+collapse it.** The canonical vocabulary is §4's — `Proposed | Accepted |
+Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)`.
+`Partially superseded` is neither `Accepted` (which would hide the replaced
+scope — #87's failure) nor whole `Superseded` (which would hide the live
+remainder): the named scope is replaced by ADR-XXXX and everything else stays
+accepted. A consumer that classifies liveness must therefore represent **both**
+parts — defer the named scope to ADR-XXXX, keep the remainder live — rather than
+force the record into a binary live/dead bucket or drop it from a live-ADR
+collection (which would lose rules like ADR-0001's sequential numbering and
+append-only history). Under §1 an amendment is an appended dated note that changes
+no decision, so it is not a status token and never bears on this read. Two
+concrete collapses the whole-line read rules out:
 
-- The leading-token form only guarantees a *new* partial supersession is excluded
-  by a `status.startswith("Accepted")` filter. The grandfathered
-  `Accepted, partially superseded …` forms carry the token *after* `Accepted`, so
-  a consumer must scan the whole line for the supersession token, not its prefix.
-- Some legacy lines carry **non-canonical** qualifiers naming a later ADR —
-  `amended by ADR-XXXX`, `narrowed`, `discharged by ADR-XXXX` — adopted before
-  this ADR fixed the vocabulary, and the word is not a reliable liveness signal.
-  ADR-0040's `§§3/5a/5b amended by ADR-0045`, for one, records clauses ADR-0045
-  actually replaced. A consumer must **resolve any non-canonical qualifier
-  against the ADR it names**, never infer liveness from the term.
+- **Prefix-matching `Accepted`.** The leading-token form keeps a
+  `status.startswith("Accepted")` filter from reading a partial supersession as
+  fully current; the grandfathered `Accepted, partially superseded …` forms carry
+  the token *after* `Accepted`, so a consumer scans the whole line. Recognising
+  the partial state is the goal — not dropping the record, which would lose its
+  live remainder.
+- **Trusting a legacy qualifier's word.** Some pre-ADR-0070 lines carry
+  `amended by ADR-XXXX`, `narrowed`, or `discharged by ADR-XXXX`; the term is not
+  a reliable liveness signal — ADR-0040's `§§3/5a/5b amended by ADR-0045` records
+  clauses ADR-0045 replaced — so a consumer **resolves each non-canonical
+  qualifier against the ADR it names**, rather than inferring liveness from the
+  word.
 
 That is why the legacy lines need no retrofit: a consumer that reads the whole
-line and resolves non-canonical qualifiers reaches the right answer on both
-shapes. Today the sole status consumer, `scripts/project_status.py`, renders the
-full status line verbatim and classifies nothing, so no record is misread now;
-this rule binds any liveness-classifying consumer added later.
+line, treats a partial supersession as its own scope-bearing state, and resolves
+non-canonical qualifiers reaches the right answer on every shape. Today the sole
+status consumer, `scripts/project_status.py`, renders the full status line
+verbatim and classifies nothing, so no record is misread now; this rule binds any
+liveness-classifying consumer added later.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
