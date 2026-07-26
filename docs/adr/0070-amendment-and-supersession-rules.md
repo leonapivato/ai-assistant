@@ -172,8 +172,12 @@ a fixed pattern a tool extracts to learn the ADR is partially superseded and whi
 ADRs to defer extent to. The `(<scope>)` text and the `and` joining are a
 **human-reading convention, not a parsing grammar**: no consumer segments scope
 text or binds a scope to an ADR by delimiter (a tool does not parse scopes,
-below), so no escaping or restricted alphabet is needed — a scope may read
-naturally, `ADR-NNNN` mentions and all.
+below). One authoring constraint keeps target extraction unambiguous — **a scope
+names a clause, not another ADR**: it carries no `ADR-NNNN` token, so every
+`ADR-NNNN` after the leading `Partially superseded by` is a target. No escaping or
+restricted alphabet is needed beyond that, and the existing scopes (`§2's egress
+clause`, `build-backend clause`, `the change-a-decision mechanism`) already
+satisfy it.
 
 `Partially superseded by ADR-XXXX (<scope>)` means: ADR-XXXX replaces the named
 scope of this ADR; the remainder of this ADR stays accepted.
