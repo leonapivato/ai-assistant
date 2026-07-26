@@ -60,12 +60,21 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       recommends and that nothing in `models/` can enforce, since enforcing it
       would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`).
 
+    **Configuration is validated before any resource is opened (#372).** The
+    resource-free construction — the model seam (which checks every configured
+    spec's vendor, ADR-0062 §2) and the context provider (which reads only
+    settings) — runs *above* the data directory and the stores, so a bad
+    configuration fails without ever touching disk: no directory is created and no
+    database file is written for a build that was never going to succeed. Only the
+    steps that genuinely need an open store stay below that line.
+
     **It owns the resources it opens.** The three connection-owning stores are
-    opened first; if any *later* construction fails, the ones already opened are
-    closed before the error propagates, so no half-built engine leaks a connection
-    (ADR-0042 §2). On success, their ``close`` methods are handed to the façade as
-    its ordered shutdown path — the façade's ``aclose`` drains in-flight work, then
-    closes them (ADR-0042 §2); the caller (an adapter) owns calling ``aclose``.
+    opened first among the resources; if any *later* construction fails, the ones
+    already opened are closed before the error propagates, so no half-built engine
+    leaks a connection (ADR-0042 §2). On success, their ``close`` methods are handed
+    to the façade as its ordered shutdown path — the façade's ``aclose`` drains
+    in-flight work, then closes them (ADR-0042 §2); the caller (an adapter) owns
+    calling ``aclose``.
 
     The tool registry is populated with the first **local, no-egress** tools
     (ADR-0048): ``current_time`` and ``recall_memory``. So a planned step naming
@@ -97,6 +106,23 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             spec names a vendor pydantic-ai does not know or whose optional package
             is not installed (ADR-0062 §2, see :func:`_build_model_provider`).
     """
+    # Validate everything that needs no resource before opening a store, so a bad
+    # configuration fails before build_engine touches disk (#372). The model seam
+    # checks every spec's vendor (ADR-0062 §2) and the context provider reads only
+    # settings; neither opens a connection-owning store, so both are built here,
+    # above the data directory. Every step that needs an open store stays below,
+    # inside the cleanup block that closes what it opened on a later failure.
+    model = _build_model_provider(settings, _model_specs(settings))
+    context = AssemblingContextProvider(
+        [
+            ClockContextSource(
+                timezone=settings.timezone,
+                working_hours_start=settings.working_hours_start,
+                working_hours_end=settings.working_hours_end,
+            )
+        ]
+    )
+
     directory = data_dir if data_dir is not None else _default_data_dir()
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -116,22 +142,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         plans = SqlitePlanStore(path=directory / "plans.db")
         opened.append(plans.close)
 
-        model = _build_model_provider(settings, _model_specs(settings))
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
         # memory-backed `recall_memory` reads the *same* store the loop retrieves
         # from, so a recall sees what the user's memory holds.
         tools = build_default_registry(memory=memory)
 
-        context = AssemblingContextProvider(
-            [
-                ClockContextSource(
-                    timezone=settings.timezone,
-                    working_hours_start=settings.working_hours_start,
-                    working_hours_end=settings.working_hours_end,
-                )
-            ]
-        )
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4).
         writer = MemoryIngestor(store=memory, policy=DefaultMemoryPolicy())
         loop = LearningLoop(

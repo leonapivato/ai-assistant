@@ -16,7 +16,7 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.errors import AssistantError, ConfigurationError
 from ai_assistant.core.types import Reversibility, RiskLevel
 from ai_assistant.memory import MemoryIngestor, SqliteMemoryStore
 from ai_assistant.orchestration import Engine
@@ -260,3 +260,32 @@ async def test_build_engine_converts_a_data_dir_failure_to_an_assistant_error(
     blocker.write_text("not a directory")
     with pytest.raises(AssistantError, match="data directory"):
         build_engine(Settings(), data_dir=blocker / "sub")
+
+
+def test_build_engine_touches_no_disk_when_config_validation_fails(tmp_path: Path) -> None:
+    """A pure-config failure leaves the filesystem untouched — no dir, no files (#372).
+
+    The resource-free validation (the model seam's vendor check, ADR-0062 §2) runs
+    before ``build_engine`` opens a store, so a bad configuration fails before any
+    disk is touched: the data directory is never created and none of the three
+    SQLite files (``memory.db``, ``audit.db``, ``plans.db``) is written for a build
+    that was never going to return an engine. Before #372 the stores were opened
+    first, so this exact failure left the directory and three empty-schema files
+    behind.
+
+    The failure is forced through the config path, not by a package being absent:
+    ``nosuchvendor`` is a vendor pydantic-ai cannot know however the environment is
+    provisioned, so ``ensure_vendor_available`` raises ``ConfigurationError``
+    deterministically. The spec is well-formed (``provider:model``), so it reaches
+    that check rather than being rejected earlier by ``Settings``.
+    """
+    absent = tmp_path / "state"
+    assert not absent.exists()
+
+    settings = Settings(default_model="nosuchvendor:whatever")
+    with pytest.raises(ConfigurationError, match="nosuchvendor"):
+        build_engine(settings, data_dir=absent)
+
+    # The build failed before touching disk: no data directory, and therefore none
+    # of the connection-owning stores' files.
+    assert not absent.exists()
