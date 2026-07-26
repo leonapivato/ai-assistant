@@ -168,14 +168,17 @@ use the leading-token form; the existing ones stand.
 The leading-token form's guarantee is narrow: it ensures a *new* partial
 supersession is excluded by a naive `status.startswith("Accepted")` filter. It
 does nothing for the grandfathered forms above, which carry their qualifier
-*after* `Accepted`. So the binding rule for any consumer that classifies an ADR
-as fully live is to read the entire status line — a qualifier anywhere on it
-(`superseded`, `partially superseded`, `amended`, `discharged`, `narrowed`) means
-part of the ADR is not live — and never to prefix-match `Accepted` alone. That
-rule covers both shapes, which is why the legacy lines need no retrofit. Today
-the sole status consumer, `scripts/project_status.py`, renders the full status
-line verbatim and classifies nothing, so no record is misread now; this rule
-binds any liveness-classifying consumer added later.
+*after* `Accepted`. So a consumer that classifies an ADR as fully live must read
+the entire status line, never prefix-match `Accepted` alone, and key on the
+**supersession** family — `superseded by`, `partially superseded by`, or a legacy
+marker that replaces or narrows a clause — because that is what removes liveness.
+An `amended` marker does **not** remove it: by §1 an amendment alters no decision,
+so an amended ADR stays fully live and is not excluded. That is §1's
+amend-vs-supersede line read at the status level, and it is why the legacy lines
+need no retrofit — the rule covers both shapes. Today the sole status consumer,
+`scripts/project_status.py`, renders the full status line verbatim and classifies
+nothing, so no record is misread now; this rule binds any liveness-classifying
+consumer added later.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
