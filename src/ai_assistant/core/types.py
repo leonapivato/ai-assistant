@@ -841,7 +841,7 @@ class FrozenDict(Mapping[str, "FrozenJson"]):
         return (FrozenDict, (dict(self._items),))
 
 
-def _freeze_json(value: FrozenJson) -> FrozenJson:
+def _deep_freeze(value: FrozenJson) -> FrozenJson:
     """Convert a JSON value into an immutable one, recursively.
 
     Mappings become :class:`FrozenDict` and lists become tuples, so the
@@ -852,19 +852,64 @@ def _freeze_json(value: FrozenJson) -> FrozenJson:
         ValueError: If a non-finite float is encountered. ``NaN`` and the
             infinities satisfy ``float`` but have no JSON representation, so
             they would silently change value on the way through the store or an
-            export — exactly the unportable-value problem this type exists to
-            prevent, just further down.
+            export. This one is refused here structurally rather than by the
+            encoding check in :func:`_freeze_json`, because ``json.dumps``
+            renders it to a non-JSON token (``NaN``/``Infinity``) instead of
+            raising — so running the encoder would let it through.
     """
     if isinstance(value, Mapping):
-        return FrozenDict({key: _freeze_json(item) for key, item in value.items()})
+        return FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
     if isinstance(value, str):
         return value
     if isinstance(value, Sequence):
-        return tuple(_freeze_json(item) for item in value)
+        return tuple(_deep_freeze(item) for item in value)
     if isinstance(value, float) and not isfinite(value):
         msg = f"{value!r} has no JSON representation, so it cannot be stored or exported"
         raise ValueError(msg)
     return value
+
+
+def _freeze_json(value: FrozenJson) -> FrozenJson:
+    """Freeze a JSON value, refusing any value that has no JSON encoding.
+
+    Two refusals ride on this one validator, for a single reason: a value that
+    satisfies its Python type but has no portable JSON form would validate here
+    and then fail far away — on the way through a digest, the store, or an
+    export, the "accepted, then unusable" shape ADR-0014 §2 exists to close:
+
+    - a **non-finite float**, refused structurally in :func:`_deep_freeze`
+      (``json.dumps`` renders it rather than raising, so the encoder cannot
+      catch it);
+    - **anything the encoder itself rejects** — a lone surrogate ``str`` with no
+      UTF-8 encoding, or an integer past CPython's integer-string conversion
+      limit — caught by *running the real encoder* (``json.dumps(...,
+      ensure_ascii=False)`` then UTF-8, ADR-0021 §1's pinned form) rather than
+      by enumerating the value types that can fail. The surrogate and
+      big-integer cases are exactly what an enumeration misses (issues #121,
+      #127), and running the encoding encodes keys too, so a surrogate at any
+      depth in a key or a value is caught rather than only one in a top-level
+      value.
+
+    Every :data:`FrozenJson` holder — plan parameters, step outputs, a tool's
+    ``parameters_schema`` — inherits this without a per-holder validator: the
+    property protected ("this value can be written down") is intrinsic to the
+    value, not to who holds it (ADR-0016 §2). Running the encoder rather than
+    enumerating is also what keeps "accepted" and "storable" the same predicate
+    as a holder grows fields.
+
+    Raises:
+        ValueError: If a non-finite float is present, or the frozen value has no
+            JSON encoding.
+    """
+    frozen = _deep_freeze(value)
+    try:
+        json.dumps(_thaw_json(frozen), ensure_ascii=False).encode("utf-8")
+    except ValueError as exc:
+        # UnicodeError is a ValueError, so this one clause covers the lone
+        # surrogate and the oversized integer both.
+        msg = f"this value has no JSON encoding, so it cannot be stored or exported: {exc}"
+        raise ValueError(msg) from exc
+    return frozen
 
 
 def _thaw_json(value: Any) -> Any:
@@ -2066,7 +2111,7 @@ class ToolDefinition(BaseModel):
         permissions boundary drop its own copy of this check.
 
         Every way the render can fail is caught, not only the surrogate that
-        prompted the issue, and that is the same clause :func:`_digestible`
+        prompted the issue, and that is the same clause :func:`_freeze_json`
         writes for the same reason: a surrogate is one of *two* values reachable
         here that satisfy their Python type and have no JSON rendering, and the
         other is a very large integer, which ``json.dumps`` renders through
@@ -2310,43 +2355,6 @@ def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
     return text.encode("utf-8")
 
 
-def _digestible(parameters: Mapping[str, FrozenJson]) -> Mapping[str, FrozenJson]:
-    """Reject a payload the canonical encoding cannot render.
-
-    The same rule, for the same reason, as :func:`_freeze_json`'s refusal of
-    non-finite floats (ADR-0014 §2): a value that satisfies its Python type but
-    has no transportable representation would fail on the way through a digest,
-    a store, or an export. Two such values are reachable here and neither is
-    exotic —
-
-    - a **lone surrogate**, which satisfies ``str`` and has no UTF-8 encoding;
-    - a **very large integer**, which ``json.dumps`` renders through ``str()``
-      and CPython refuses past its integer-string conversion limit.
-
-    Checked by *attempting the encoding* rather than by enumerating the value
-    types that can fail. An enumeration is a list someone has to keep complete,
-    and the two cases above are what a first attempt at one missed; running the
-    real operation cannot be incomplete. It also means the rule automatically
-    tracks the encoding if the ADR ever pins a different one.
-
-    Applied to :attr:`ActionRequest.parameters` rather than inside
-    ``_freeze_json``, which would tighten ADR-0014's plan parameters and step
-    outputs at the same time. Those have the identical latent hole, filed as its
-    own issue rather than folded into this change, because that type is another
-    lane's contract.
-
-    Raises:
-        ValueError: If the payload has no canonical encoding. ``UnicodeError``
-            is a ``ValueError``, so one clause covers both causes.
-    """
-    try:
-        _canonical_json(parameters)
-    except ValueError as exc:
-        msg = f"parameters have no canonical JSON encoding, so they cannot be digested: {exc}"
-        raise ValueError(msg) from exc
-    return parameters
-
-
 # --- permissions: the request, the ruling, their binding (ADR-0021) ----------
 # Three types rather than one (§3): a policy authors only the ruling, so it has
 # no field with which to name a tool it was not handed. `authorises` lives in
@@ -2377,7 +2385,7 @@ class ActionRequest(BaseModel):
     tool: Annotated[ToolDefinition, AfterValidator(_detached_tool)] = Field(
         description="The declaration being ruled on, by value."
     )
-    parameters: Annotated[FrozenJsonMapping, AfterValidator(_digestible)] = Field(
+    parameters: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
         description="The arguments the call proposes; bound by digest, never stored.",
     )
@@ -2406,9 +2414,13 @@ class ActionRequest(BaseModel):
         trail must answer, and a digest answers it exactly.
 
         **Total on every payload the model accepts**, which is a property of how
-        the two are wired rather than a claim. :func:`_digestible` validates by
-        running :func:`_canonical_json` — the same function this hashes — so
-        "accepted" and "digestible" cannot come apart. The ADR justified
+        the two are wired rather than a claim. :data:`FrozenJsonMapping`
+        validates the payload by running the real JSON encoding in
+        :func:`_freeze_json`, and this hashes :func:`_canonical_json`; both pin
+        ADR-0021 §1's ``ensure_ascii=False`` UTF-8 form and differ only in the
+        key ordering a digest needs, which cannot change whether a value
+        encodes — so "accepted" and "digestible" cannot come apart. The ADR
+        justified
         well-definedness by pointing at ``FrozenJson`` rejecting non-finite
         floats (ADR-0014 §2); that was necessary and not sufficient, and a
         digest raising on a payload the model had already accepted would make

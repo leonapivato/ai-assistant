@@ -147,11 +147,12 @@ def test_a_payload_with_no_utf8_encoding_is_refused(parameters: dict[str, Any]) 
     """A lone surrogate is a ``str`` with no transportable form.
 
     The same rule ADR-0014 §2 applies to non-finite floats, one character-set
-    down. Without it the payload validates and then ``parameters_digest`` raises
-    ``UnicodeEncodeError``, so every decision about the request becomes
-    unconstructable — a crash rather than a refusal, at the gate.
+    down. It is now inherited from :data:`FrozenJsonMapping` (issue #121), so the
+    payload is refused at validation rather than validating and then raising
+    ``UnicodeEncodeError`` from ``parameters_digest`` — a crash rather than a
+    refusal, at the gate.
     """
-    with pytest.raises(ValidationError, match="canonical JSON encoding"):
+    with pytest.raises(ValidationError, match="no JSON encoding"):
         ActionRequest(tool=tool(), parameters=parameters)
 
 
@@ -168,11 +169,11 @@ def test_a_payload_with_an_unrenderable_integer_is_refused(
     ``json.dumps`` renders an ``int`` through ``str()``, and CPython refuses
     that past its integer-string conversion limit — so a payload the model
     accepted would raise ``ValueError`` at digest time. Caught because
-    validation runs the real encoder rather than enumerating the types that can
-    fail; an enumeration is a list someone has to keep complete, and this is the
-    case a first attempt at one missed.
+    :func:`_freeze_json` runs the real encoder rather than enumerating the types
+    that can fail; an enumeration is a list someone has to keep complete, and
+    this is the case a first attempt at one missed.
     """
-    with pytest.raises(ValidationError, match="canonical JSON encoding"):
+    with pytest.raises(ValidationError, match="no JSON encoding"):
         ActionRequest(tool=tool(), parameters=parameters)
 
 
