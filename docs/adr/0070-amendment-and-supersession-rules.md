@@ -163,6 +163,13 @@ an earlier one, decided once here rather than re-argued per case.
 `Partially superseded by ADR-XXXX (<scope>)` means: ADR-XXXX replaces the named
 scope of this ADR; the remainder of this ADR stays accepted.
 
+**A canonical status is one physical line** — a single leading token plus, for a
+partial supersession, the `(<scope>)` parenthesis — so the value is read whole
+without reconstructing wrapped continuations. That single-line rule is a going
+-forward requirement; the multi-line status fields several ADRs already carry
+(ADR-0003, ADR-0029, ADR-0038, ADR-0040, ADR-0065) are the exception the consumer
+rule and issue #404 handle, not a licence to write new ones.
+
 Two properties are load-bearing, both from ADR-0017 §7:
 
 - **The supersession leads; `Accepted` is dropped.** So a filter that
@@ -219,14 +226,19 @@ concrete collapses the whole-line read rules out:
   ADR stays fully live and there is nothing to resolve.
 
 That is why the legacy lines need no retrofit: a consumer that reads the whole
-line, treats a partial supersession as its own scope-bearing state, resolves a
-qualifier that names a later ADR against it, and takes one that names none as a
-no-decision self-amendment reaches the right answer on every shape in the corpus.
+Status **field** — all its physical lines, since a legacy value may wrap — treats
+a partial supersession as its own scope-bearing state, resolves a qualifier that
+names a later ADR against it, and takes one that names none as a no-decision
+self-amendment reaches the right answer on every shape in the corpus. New records
+carry a one-line status (above), so only the enumerated legacy fields wrap, and
+folding those is issue #404's — a reader that stops at the first physical line
+misses a continuation qualifier.
+
 Today nothing classifies ADR liveness from status: the sole status consumer,
-`scripts/project_status.py`, only *displays* it. That display even truncates a
-status wrapped across physical lines to its first line (a pre-existing
-limitation, issue #404) — but since it classifies nothing, no liveness decision
-is wrong today. This rule binds any liveness-classifying consumer added later.
+`scripts/project_status.py`, only *displays* it, and even that display stops at
+the first physical line (issue #404). Because it classifies nothing, no liveness
+decision is wrong today; this rule binds any liveness-classifying consumer added
+later, which must read the whole field.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
