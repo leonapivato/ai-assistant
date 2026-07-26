@@ -217,6 +217,34 @@ async def test_non_positive_limit_matches_nothing(
     assert await store.search("coffee", limit=-3) == []
 
 
+@pytest.mark.parametrize(
+    "limit",
+    [
+        # Just over the real ceiling: limit * _RESULT_OVERFETCH (8) = 8000 > 4096,
+        # the sqlite-vec KNN ``k`` cap. A plausible misconfiguration, not absurd.
+        1_000,
+        # The value the issue theorised the crash against (signed 64-bit bind
+        # range); the same clamp covers it.
+        1_152_921_504_606_846_975,
+    ],
+)
+async def test_over_large_limit_serves_instead_of_overflowing_knn(
+    make_store: Callable[..., SqliteMemoryStore],
+    limit: int,
+) -> None:
+    # Unclamped, ``limit * _RESULT_OVERFETCH`` exceeds sqlite-vec's KNN ``k`` cap
+    # of 4096 and the query raises an opaque ``sqlite3.OperationalError`` on the
+    # binding rather than returning (issue #115). The clamp turns it into a clean
+    # result — no allocation the size of the limit, and no crash.
+    store = make_store()
+    await store.add(_semantic("c1", "coffee tea"))
+    await store.add(_semantic("c2", "coffee milk"))
+
+    results = await store.search("coffee", limit=limit)
+
+    assert {record.id for record in results} == {"c1", "c2"}
+
+
 async def test_failed_write_leaves_store_unchanged(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:

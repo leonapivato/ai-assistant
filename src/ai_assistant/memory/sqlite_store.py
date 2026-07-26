@@ -40,8 +40,20 @@ _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # cannot cleanly pre-filter joined columns within a KNN), so it over-fetches
 # candidates to leave room for filtered-out rows. A tracked limitation: a caller
 # can still be under-served if more than this multiple of ``limit`` nearer
-# neighbours are all filtered out.
+# neighbours are all filtered out — and for a ``limit`` past ``_VEC_KNN_MAX_K /
+# _RESULT_OVERFETCH`` the effective multiple shrinks below this, since the fetch
+# is then clamped to the KNN ceiling (see ``_VEC_KNN_MAX_K``).
 _RESULT_OVERFETCH = 8
+# The KNN ``k`` in ``search``'s query is capped by sqlite-vec itself: a ``k`` above
+# this raises ``sqlite3.OperationalError("k value in knn query too large ... the
+# limit is 4096")`` instead of running (observed on sqlite-vec 0.1.9). So the
+# over-fetch ``limit * _RESULT_OVERFETCH`` is clamped to it, turning an opaque
+# crash into a served result. The clamp is semantically safe: a KNN can return no
+# more rows than exist, so requesting more candidates than the cap only forgoes
+# over-fetch headroom the store already documents it may run short of (issue #115).
+# This subsumes the wider signed-64-bit bind range the crash was first theorised
+# against — 4096 is the lower, operative ceiling, reached at ``limit > 512``.
+_VEC_KNN_MAX_K = 4096
 _OWNER_ONLY = 0o600
 
 
@@ -601,8 +613,10 @@ class SqliteMemoryStore:
         now: int,
     ) -> list[tuple[str, float]]:
         wanted = {str(kind) for kind in kinds} if kinds is not None else None
-        # Over-fetch to leave room for kind-, expiry-, and window-filtered rows.
-        fetch_k = limit * _RESULT_OVERFETCH
+        # Over-fetch to leave room for kind-, expiry-, and window-filtered rows,
+        # clamped to sqlite-vec's KNN ``k`` ceiling so an over-large ``limit``
+        # serves a (possibly short) result instead of raising (see _VEC_KNN_MAX_K).
+        fetch_k = min(limit * _RESULT_OVERFETCH, _VEC_KNN_MAX_K)
         blob = sqlite_vec.serialize_float32(list(vector))
         rows = self._conn.execute(
             "SELECT r.data, r.kind, r.expires_at, r.valid_until, v.distance FROM vec_records v "
