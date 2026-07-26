@@ -95,6 +95,12 @@ rewrites a ratified decision:
   unrecorded decision change, and is not permitted;
 - adding a **dated header note**.
 
+These bound the append-only *form* of an edit, not the review a decision needs.
+A substantive contract ADR is still reviewed while `Proposed` and ratified only
+after (ADR-0015 §5; `CONTRIBUTING.md`, "Contract ADRs land before their
+implementation"); the ratifying edit records that review's outcome, it does not
+replace it.
+
 Append-only means an amendment *adds*; it does not overwrite. This is exactly how
 ADR-0017 §7 operated: notes appended, no accepted text rewritten, one status line
 edited.
