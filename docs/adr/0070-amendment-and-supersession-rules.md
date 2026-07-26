@@ -222,9 +222,11 @@ That is why the legacy lines need no retrofit: a consumer that reads the whole
 line, treats a partial supersession as its own scope-bearing state, resolves a
 qualifier that names a later ADR against it, and takes one that names none as a
 no-decision self-amendment reaches the right answer on every shape in the corpus.
-Today the sole status consumer, `scripts/project_status.py`, renders the full
-status line verbatim and classifies nothing, so no record is misread now; this
-rule binds any liveness-classifying consumer added later.
+Today nothing classifies ADR liveness from status: the sole status consumer,
+`scripts/project_status.py`, only *displays* it. That display even truncates a
+status wrapped across physical lines to its first line (a pre-existing
+limitation, issue #404) — but since it classifies nothing, no liveness decision
+is wrong today. This rule binds any liveness-classifying consumer added later.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
