@@ -177,9 +177,16 @@ Two properties are load-bearing, both from ADR-0017 §7:
   fully current — the exact failure #87 names. "Partially" already carries that
   the remainder is live, so no leading `Accepted` is needed; the record is its own
   scope-bearing state, not plain `Accepted` (the consumer rule below).
-- **The scope names exactly what was replaced.** The parenthesis is the reader's
-  and the tool's only signal of which part is dead, so it is required and it is
-  specific (a section, a clause), not a gesture.
+- **The scope names exactly what was replaced.** It is a specific, human-legible
+  clause reference — a section number where the ADR is sectioned (ADR-0004's
+  `§2's egress clause`), else a named clause (ADR-0001's `the change-a-decision
+  mechanism`) — required and specific, not a gesture. It is a **pointer, not a
+  machine-resolvable anchor**: the authoritative extent of what was replaced is
+  stated by the superseding ADR itself (ADR-0017 §7 stated ADR-0004's; ADR-0070
+  §2 and ADR-0001's own header note state ADR-0001's), and that is what a consumer
+  defers the scope to. No stable-identifier scheme is imposed — the corpus's
+  free-form clause labels are sufficient signal, and imposing anchors
+  retroactively on unsectioned ADRs like ADR-0001 is neither possible nor needed.
 
 ADR-0001 is where supersession rules live, so it states the partial form
 alongside the total one (via this ADR's §2 pointer and its own header note); the
