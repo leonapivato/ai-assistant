@@ -207,19 +207,24 @@ concrete collapses the whole-line read rules out:
   the token *after* `Accepted`, so a consumer scans the whole line. Recognising
   the partial state is the goal — not dropping the record, which would lose its
   live remainder.
-- **Trusting a legacy qualifier's word.** Some pre-ADR-0070 lines carry
-  `amended by ADR-XXXX`, `narrowed`, or `discharged by ADR-XXXX`; the term is not
-  a reliable liveness signal — ADR-0040's `§§3/5a/5b amended by ADR-0045` records
-  clauses ADR-0045 replaced — so a consumer **resolves each non-canonical
-  qualifier against the ADR it names**, rather than inferring liveness from the
-  word.
+- **Trusting a legacy qualifier's word.** A pre-ADR-0070 line may carry a
+  qualifier after `Accepted`, and it falls into one of two cases. **If it names a
+  later ADR** — `amended by`, `narrowed by`, `discharged by`, `retired by
+  ADR-XXXX` — the change came from another decision and the word is not a
+  reliable liveness signal (ADR-0040's `§§3/5a/5b amended by ADR-0045` names
+  clauses ADR-0045 replaced), so a consumer **resolves it against the ADR it
+  names**. **If it names no ADR** — a self-correction such as ADR-0065's `§4
+  amended 2026-07-25 (its ModelProvider row was false)` — it is an amendment in
+  §1's sense: it reconciles the ADR with a fact and changes no decision, so the
+  ADR stays fully live and there is nothing to resolve.
 
 That is why the legacy lines need no retrofit: a consumer that reads the whole
-line, treats a partial supersession as its own scope-bearing state, and resolves
-non-canonical qualifiers reaches the right answer on every shape. Today the sole
-status consumer, `scripts/project_status.py`, renders the full status line
-verbatim and classifies nothing, so no record is misread now; this rule binds any
-liveness-classifying consumer added later.
+line, treats a partial supersession as its own scope-bearing state, resolves a
+qualifier that names a later ADR against it, and takes one that names none as a
+no-decision self-amendment reaches the right answer on every shape in the corpus.
+Today the sole status consumer, `scripts/project_status.py`, renders the full
+status line verbatim and classifies nothing, so no record is misread now; this
+rule binds any liveness-classifying consumer added later.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
