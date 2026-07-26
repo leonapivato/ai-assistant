@@ -167,6 +167,14 @@ an earlier one, decided once here rather than re-argued per case.
 
 The partial form is one or more `ADR-XXXX (<scope>)` pairs, led by `Partially
 superseded by` and joined by `and` (the accumulation and precedence rules below).
+The **machine-legible** part is the leading token and the `ADR-NNNN` references —
+a fixed pattern a tool extracts to learn the ADR is partially superseded and which
+ADRs to defer extent to. The `(<scope>)` text and the `and` joining are a
+**human-reading convention, not a parsing grammar**: no consumer segments scope
+text or binds a scope to an ADR by delimiter (a tool does not parse scopes,
+below), so no escaping or restricted alphabet is needed — a scope may read
+naturally, `ADR-NNNN` mentions and all.
+
 `Partially superseded by ADR-XXXX (<scope>)` means: ADR-XXXX replaces the named
 scope of this ADR; the remainder of this ADR stays accepted.
 
