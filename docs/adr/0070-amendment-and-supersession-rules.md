@@ -232,6 +232,14 @@ concrete collapses the whole-line read rules out:
   §1's sense: it reconciles the ADR with a fact and changes no decision, so the
   ADR stays fully live and there is nothing to resolve.
 
+**Supersession resolves transitively to the terminal live rule.** A consumer that
+defers a scope to ADR-B follows ADR-B's own status onward — if ADR-B is itself
+superseded by ADR-C, the live rule is ADR-C's. The walk terminates and cannot
+cycle: an ADR is only ever superseded by a *later*, higher-numbered ADR (ADR-0001,
+sequential numbering), so each hop strictly increases the number. A pointer to a
+nonexistent ADR is a broken cross-reference, corrigible as an amendment (§1), not
+a liveness state.
+
 That is why the legacy lines need no retrofit: a consumer that reads the whole
 Status **field** — all its physical lines, since a legacy value may wrap — treats
 a partial supersession as its own scope-bearing state, resolves a qualifier that
