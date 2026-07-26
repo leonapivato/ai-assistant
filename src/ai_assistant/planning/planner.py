@@ -46,6 +46,17 @@ if TYPE_CHECKING:
 #: which is a different bound.
 DEFAULT_PLAN_ATTEMPTS = 2
 
+#: The most decode **misses** :func:`_extract_object` tolerates in one reply before
+#: giving up. A failed ``raw_decode`` costs work proportional to how far into the
+#: reply it reached (``JSONDecodeError`` computes a line and column), so attempting
+#: it at every brace of a brace-dense malformed reply is quadratic and blocks the
+#: event loop; bounding the misses keeps the scan linear. A *decoded* object never
+#: counts, so any number of valid JSON fragments may precede the envelope — only
+#: unparseable braces are limited. Generous, so a conforming or lightly-wrapped
+#: reply is never lost to it; only a reply burying the envelope behind more than
+#: this many unparseable braces degrades to bounded repair.
+_MAX_EXTRACTION_MISSES = 256
+
 _SYSTEM_PROMPT = """\
 You are the planning stage of an AI assistant. Decompose the user's goal into an \
 ordered sequence of steps that would accomplish it.
@@ -327,39 +338,98 @@ def _repair_prompt(reason: str) -> str:
 
 
 def _extract_object(content: str) -> dict[str, object]:
-    """Parse the first ``{`` … last ``}`` span of ``content`` as a JSON object.
+    """Decode the JSON envelope embedded in ``content``.
 
-    Deterministically tolerates a model that wraps the object in prose or a
-    Markdown code fence (ADR-0047 §4).
+    Scans each ``{`` in ``content`` left to right and attempts to decode an object
+    starting there with :meth:`json.JSONDecoder.raw_decode`, which stops at the end
+    of the object and ignores any trailing text (ADR-0071). This tolerates a model
+    that wraps the object in prose or a Markdown code fence — the goal ADR-0047 §4
+    states — including prose that itself contains a brace, which the ADR-0047 §4
+    step 1 first-``{``-to-last-``}`` slice ADR-0071 supersedes misreads by spanning
+    the prose brace and the envelope's closer at once (#293).
+
+    Where more than one object decodes, the **envelope** is preferred: the first
+    whose ``steps`` is a non-empty list — the shape ADR-0047 §4 step 2 requires and
+    :func:`_require_steps` accepts — rather than the leftmost object outright, so a
+    decoy object in the prose ahead of the envelope is stepped over instead of
+    planned from, including one that carries a ``steps`` key of the wrong type or an
+    empty list (which would otherwise shadow a valid envelope behind it). Where no
+    decoded object is a well-formed envelope, the first decoded object stands in, so
+    a single malformed one still reaches :func:`_require_steps` and its precise
+    verdict rather than a generic miss. Two genuine envelopes cannot be told apart
+    locally and the earlier wins; the outcome stays bounded and is never a corrupt
+    plan.
+
+    **A decoded object is advanced *past*, never re-entered:** the scan resumes at
+    the object's end, so a nested object is treated as part of its parent, not as a
+    separate candidate. An outer envelope whose ``steps`` is empty is therefore
+    rejected as an empty plan (§4) rather than being overridden by a non-empty
+    ``steps`` nested inside it. Only a brace that does *not* open a decodable object
+    — a brace in the surrounding prose, or a fragment — is stepped over one
+    character at a time to the next brace.
+
+    A candidate that raises for a bounded reason that is *not* a syntax miss is a
+    miss like any other: the digit-limit ``ValueError`` CPython raises for an
+    over-limit integer literal and the ``RecursionError`` a pathologically nested
+    payload raises are caught here, so no unhandled error escapes and the scan
+    carries on to the next brace. A well-formed envelope elsewhere in the reply is
+    still found; only where the whole reply yields no envelope does it fall to
+    bounded repair.
+
+    At most :data:`_MAX_EXTRACTION_MISSES` decode **misses** are tolerated before
+    extraction gives up, which keeps the scan linear. A failed ``raw_decode`` is
+    cheap to parse but costs work proportional to how far into the reply it reached
+    (``JSONDecodeError`` computes a line and column), so attempting it at *every*
+    brace of a brace-dense malformed reply is quadratic and would block the event
+    loop this runs synchronously on; bounding the misses bounds that. A decoded
+    object does not count as a miss and does not consume the budget, so any number
+    of valid JSON fragments may precede the envelope — only unparseable braces are
+    limited. The bound is generous, so a conforming reply (whose envelope is the
+    first decodable object) is unaffected; a reply that buries the envelope behind
+    more than :data:`_MAX_EXTRACTION_MISSES` unparseable braces degrades to bounded
+    repair rather than to a stall.
 
     Raises:
-        _ExtractionError: If there is no ``{`` … ``}`` span, or ``json.loads``
-            fails, or the result is not a JSON object. **Every** ``json.loads``
-            failure is translated (ADR-0047 §4): a ``JSONDecodeError`` for bad
-            syntax, but also the plain ``ValueError`` an over-limit integer raises
-            and the ``RecursionError`` a pathologically nested payload raises — so
-            an oversized reply enters the bounded repair path rather than escaping
-            as an unhandled error. The ``try`` wraps only the parse, so nothing
-            but a parse failure is caught here.
+        _ExtractionError: If no decodable object is found within the miss budget.
     """
-    start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end <= start:
-        msg = "no JSON object found in the model reply"
-        raise _ExtractionError(msg)
+    decoder = json.JSONDecoder()
+    first: dict[str, object] | None = None
+    misses = 0
+    index = 0
+    length = len(content)
+    while index < length:
+        if content[index] != "{":
+            index += 1
+            continue
+        try:
+            # raw_decode from the brace: ValueError covers JSONDecodeError (a
+            # subclass) *and* the digit-limit ValueError; RecursionError a
+            # pathologically nested payload.
+            candidate, end = decoder.raw_decode(content, index)
+        except ValueError, RecursionError:
+            misses += 1
+            # `> budget`, not `>=`: exactly `_MAX_EXTRACTION_MISSES` misses are
+            # tolerated (the docstring's "up to"); only the miss *beyond* the budget
+            # gives up. Still bounds the worst-case scan to linear time.
+            if misses > _MAX_EXTRACTION_MISSES:
+                break
+            index += 1  # this brace opened nothing usable; try the next one
+            continue
+        if isinstance(candidate, dict):
+            steps = candidate.get("steps")
+            if isinstance(steps, list) and steps:
+                # A well-formed envelope (a non-empty `steps` list, exactly what
+                # `_require_steps` accepts). Preferred over an earlier decoy that
+                # only looks envelope-shaped — a `steps` of the wrong type or empty.
+                return candidate
+            if first is None:
+                first = candidate
+        index = end  # resume past the decoded object; never re-enter its interior
 
-    try:
-        parsed: object = json.loads(content[start : end + 1])
-    except (ValueError, RecursionError) as exc:
-        # ValueError covers JSONDecodeError (a subclass) *and* the digit-limit
-        # ValueError CPython raises for an oversized integer literal.
-        msg = f"the model reply could not be parsed as JSON: {exc}"
-        raise _ExtractionError(msg) from exc
-
-    if not isinstance(parsed, dict):
-        msg = "the model reply was not a JSON object"
-        raise _ExtractionError(msg)
-    return parsed
+    if first is not None:
+        return first
+    msg = "no JSON object found in the model reply"
+    raise _ExtractionError(msg)
 
 
 def _require_steps(envelope: dict[str, object]) -> list[object]:

@@ -32,6 +32,11 @@ from ai_assistant.core.types import (
     TimeOfDay,
 )
 from ai_assistant.planning import ModelBackedPlanner
+from ai_assistant.planning.planner import (
+    _MAX_EXTRACTION_MISSES,
+    _extract_object,
+    _ExtractionError,
+)
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
@@ -133,6 +138,152 @@ async def test_ids_are_minted_from_the_factory_not_the_model() -> None:
 async def test_tolerates_prose_and_code_fence_around_the_object() -> None:
     wrapped = f"Sure! Here is the plan:\n```json\n{_VALID_REPLY}\n```\nHope that helps."
     plan = await _planner(wrapped).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(_VALID_REPLY, id="bare-object"),
+        pytest.param(f"```json\n{_VALID_REPLY}\n```", id="code-fenced-object"),
+        pytest.param(f"Here is {{the requested plan}}:\n{_VALID_REPLY}", id="brace-in-prose"),
+    ],
+)
+async def test_the_envelope_decodes_through_a_brace_bearing_wrapper(reply: str) -> None:
+    """The envelope is decoded past prose that itself contains a brace (#293).
+
+    A first-``{``-to-last-``}`` slice spans the prose brace in ``Here is {...}:``
+    and the envelope's closing brace at once, so ``json.loads`` receives both
+    fragments and fails on a reply that *did* carry a valid object. Scanning each
+    ``{`` with ``raw_decode`` skips the prose brace and accepts the envelope. The
+    bare and code-fenced forms, which already worked, must keep working.
+    """
+    plan = await _planner(reply).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+async def test_a_decoy_object_ahead_of_the_envelope_is_stepped_over() -> None:
+    """Scanning prefers the envelope (a non-empty ``steps`` list), not the leftmost.
+
+    A brace-bearing prose fragment can itself be a *valid* JSON object — ``Note:
+    {"tip": "be concise"}`` — that decodes before the real envelope. Accepting the
+    leftmost decodable object outright would plan from the decoy; preferring the
+    first well-formed envelope steps over it and reaches the plan.
+    """
+    reply = f'Note: {{"tip": "be concise"}}\n{_VALID_REPLY}'
+    plan = await _planner(reply).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+@pytest.mark.parametrize(
+    "decoy",
+    [
+        pytest.param('{"steps": "not a list"}', id="steps-wrong-type"),
+        pytest.param('{"steps": []}', id="steps-empty-list"),
+    ],
+)
+async def test_a_malformed_steps_decoy_does_not_shadow_the_envelope(decoy: str) -> None:
+    """Preferring merely a ``steps`` *key* would let a malformed decoy shadow the plan.
+
+    A decoy whose ``steps`` is the wrong type or an empty list carries the key but
+    is not the envelope shape §4 step 2 accepts. Selecting it would fail extraction
+    on the decoy and exhaust bounded repair while a valid envelope sits behind it,
+    so the predicate is a **non-empty ``steps`` list**, not the key's presence.
+    """
+    reply = f"Here is the plan: {decoy}\n{_VALID_REPLY}"
+    plan = await _planner(reply).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+async def test_a_nested_decoy_does_not_override_an_empty_plan() -> None:
+    """A plan-shaped object nested in the envelope's metadata cannot rescue it (#405).
+
+    The top-level envelope has an empty ``steps`` — an empty plan, which §4 rejects.
+    Because the scan resumes *past* a decoded object rather than re-entering it, the
+    non-empty ``steps`` nested in ``metadata`` is never a separate candidate, so the
+    empty top-level plan stands and is refused (a bounded ``PlanningError``) instead
+    of a malformed decision becoming a valid audit record.
+    """
+    reply = '{"steps": [], "metadata": {"steps": [{"intent": "x", "capability": "do_x"}]}}'
+    with pytest.raises(PlanningError):
+        await _planner(reply).plan(_goal(), context=_context())
+
+
+async def test_prose_with_many_unparseable_braces_before_the_envelope_decodes() -> None:
+    """The miss budget counts *unparseable* braces, and is generous (#405).
+
+    Prose peppered with brace fragments ahead of the envelope — well within
+    ``_MAX_EXTRACTION_MISSES`` — is stepped over and the envelope is still found.
+    """
+    reply = ("{x} " * (_MAX_EXTRACTION_MISSES // 4)) + _VALID_REPLY
+    plan = await _planner(reply).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+async def test_the_envelope_at_exactly_the_miss_budget_still_decodes() -> None:
+    """Exactly ``_MAX_EXTRACTION_MISSES`` misses are *tolerated* — the on-boundary case.
+
+    The bound is "up to N misses" (ADR-0071), so an envelope behind exactly N
+    unparseable braces is still found; only the miss *beyond* N gives up. This pins
+    the off-by-one: a `>=` break would reject this reply.
+    """
+    reply = ("{x} " * _MAX_EXTRACTION_MISSES) + _VALID_REPLY
+    plan = await _planner(reply).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+async def test_the_envelope_is_given_up_past_the_miss_budget() -> None:
+    """Past the miss budget extraction gives up — the documented tolerance boundary.
+
+    Burying the envelope behind more than ``_MAX_EXTRACTION_MISSES`` unparseable
+    braces degrades to bounded repair (a clean ``PlanningError``), the deliberate
+    price of bounding the scan against adversarial brace-dense input (ADR-0071).
+    """
+    reply = ("{x} " * (_MAX_EXTRACTION_MISSES + 1)) + _VALID_REPLY
+    with pytest.raises(PlanningError):
+        await _planner(reply).plan(_goal(), context=_context())
+
+
+async def test_a_deep_nesting_miss_does_not_discard_a_later_envelope() -> None:
+    """A ``RecursionError`` fragment is a miss; the scan continues to the envelope (#405).
+
+    A pathologically nested payload raises ``RecursionError`` — not a
+    ``JSONDecodeError``. ADR-0071 treats it as a miss and keeps scanning, so a valid
+    envelope *after* it is still returned rather than the failure discarding it. (The
+    deep-nesting error test only covers a wholly bad reply, which would pass even if
+    this terminated the scan.)
+    """
+    depth = sys.getrecursionlimit() + 100
+    fragment = '{"a": ' + "[" * depth + "]" * depth + "}"
+    reply = f"{fragment}\n{_VALID_REPLY}"
+    plan = await _planner(reply).plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
+
+
+async def test_an_over_limit_integer_miss_does_not_discard_a_later_envelope() -> None:
+    """An over-limit-integer ``ValueError`` fragment is a miss; the scan continues (#405).
+
+    An over-limit integer literal raises a plain ``ValueError``, not a
+    ``JSONDecodeError``, and ADR-0071 treats it as a miss and keeps scanning. The
+    digit limit is pinned to a known, *enabled* value for the test — it can be
+    disabled (``sys.get_int_max_str_digits() == 0``) in some configurations, under
+    which a fixed-length literal would parse and the ``ValueError`` path would go
+    silently unexercised — and restored afterwards.
+    """
+    original = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(640)  # the minimum enabled limit; 1000 digits is over it
+    try:
+        reply = f'{{"n": {"1" * 1000}}}\n{_VALID_REPLY}'
+        plan = await _planner(reply).plan(_goal(), context=_context())
+    finally:
+        sys.set_int_max_str_digits(original)
 
     assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
 
@@ -287,6 +438,34 @@ async def test_oversized_integer_becomes_planning_error() -> None:
     with pytest.raises(PlanningError):
         await planner.plan(_goal(), context=_context())
     assert model.call_count == 2
+
+
+def test_the_scan_stops_at_the_miss_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scan is bounded: it makes exactly ``_MAX_EXTRACTION_MISSES + 1`` attempts (#405).
+
+    A failed ``raw_decode`` costs work proportional to how far into the reply it
+    reached (``JSONDecodeError`` computes a line and column), so attempting it at
+    every brace of a brace-dense reply is quadratic and, before the miss budget, hung
+    the scan on the event loop. Counting the ``raw_decode`` calls on
+    ``'{"x":"' * 100_000`` — where every brace is a miss — pins the bound
+    *deterministically*: the scan stops one miss past the budget, then gives up.
+    Merely asserting ``PlanningError`` would not — the superseded first-``{``/last-
+    ``}`` slice raised it too, so that assertion passes even if the bound regresses.
+    """
+    calls = 0
+    real = json.JSONDecoder.raw_decode
+
+    def counting(self: json.JSONDecoder, s: str, idx: int = 0) -> tuple[object, int]:
+        nonlocal calls
+        calls += 1
+        return real(self, s, idx)
+
+    monkeypatch.setattr(json.JSONDecoder, "raw_decode", counting)
+
+    with pytest.raises(_ExtractionError):
+        _extract_object('{"x":"' * 100_000)
+
+    assert calls == _MAX_EXTRACTION_MISSES + 1
 
 
 async def test_model_error_propagates_unwrapped() -> None:
