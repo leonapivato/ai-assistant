@@ -1,7 +1,16 @@
 # 47. The model-backed planner: prompt, output envelope, and text→`ActionPlan` extraction
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0071 (§4 step 1's extraction mechanism)
 - Date: 2026-07-23
+- Note (2026-07-26): **§4 step 1's extraction *mechanism* is superseded by
+  ADR-0071.** The "first `{` to last `}`" slice this ADR specified failed step 1's
+  own stated prose-tolerance goal when the surrounding prose contained a brace
+  (#293); ADR-0071 replaces it with a `json.JSONDecoder.raw_decode` scan. This is a
+  partial supersession under ADR-0070 §3: only step 1's mechanism is replaced —
+  §4's goal, its steps 2–4 (shape, per-step validation, construction), the
+  never-a-corrupt-plan property, and §6's bounded repair all stand. §4's body is
+  left as ratified (append-only, ADR-0001); ADR-0071 states the replacement and its
+  extent.
 
 ## Context
 
