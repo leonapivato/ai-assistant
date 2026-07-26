@@ -116,6 +116,74 @@ _INDEXES = ("CREATE UNIQUE INDEX IF NOT EXISTS executions_created_seq ON executi
 #: #349 applied to a ``meta`` table this code did not shape.
 _ORDINAL_INDEX = "executions_created_seq"
 
+#: Each record column's ``(affinity, required NOT NULL)``. ``CREATE TABLE IF NOT
+#: EXISTS`` is a no-op against a pre-existing table of a different shape (#373),
+#: exactly as it is for the ``meta`` table (#349) and the ordinal index (#364), so
+#: a hand-built ``executions`` whose ``created_seq`` is ``TEXT`` makes ``ORDER BY
+#: created_seq``/``MAX(created_seq)`` lexical — the ADR-0049 §1 oldest-first order
+#: silently lost — a ``version`` without integer affinity breaks the CAS compare, a
+#: non-integer ``active`` breaks ``WHERE active = 1``, a ``data`` that is not text
+#: changes what ``model_validate_json`` is handed, and a nullable ``data`` can store
+#: a ``NULL`` no decode accepts, all while every other check passes. Each record
+#: table is read back with ``PRAGMA table_info`` and required to carry these columns
+#: at these affinities (see :meth:`SqlitePlanStore._verify_record_tables`). NOT NULL
+#: is only *required* where the schema declares it, never forbidden: ``id`` is a
+#: ``TEXT PRIMARY KEY``, which SQLite does not make implicitly ``NOT NULL``, so a
+#: file that hardens it is compatible and must not be refused.
+_RECORD_COLUMNS: dict[str, dict[str, tuple[str, bool]]] = {
+    "goals": {"id": ("TEXT", False), "data": ("TEXT", True)},
+    "plans": {
+        "id": ("TEXT", False),
+        "goal_id": ("TEXT", True),
+        "data": ("TEXT", True),
+    },
+    "executions": {
+        "id": ("TEXT", False),
+        "plan_id": ("TEXT", True),
+        "version": ("INTEGER", True),
+        "active": ("INTEGER", True),
+        "created_seq": ("INTEGER", True),
+        "data": ("TEXT", True),
+    },
+}
+
+#: The single column every record table's ``PRIMARY KEY`` is, checked against
+#: ``PRAGMA table_info``'s ``pk`` flag. A pre-existing table without it opens a
+#: store whose ``save_goal`` ``ON CONFLICT(id)`` upsert and per-id uniqueness are
+#: silently absent, so the key is required, not assumed (#373).
+_RECORD_PRIMARY_KEY = "id"
+
+#: The foreign keys ADR-0049 §1's referential-integrity backstop rests on, absent
+#: on a pre-existing table this code did not create. ``table -> (child column,
+#: parent table, parent column)``; read back with ``PRAGMA foreign_key_list``. The
+#: parent column is checked too, so a key that resolves to the wrong column — a
+#: ``REFERENCES goals(data)`` in place of ``goals(id)`` — is refused, not accepted
+#: on the table name alone (see :meth:`SqlitePlanStore._verify_foreign_key`).
+_RECORD_FOREIGN_KEYS: dict[str, tuple[str, str, str]] = {
+    "plans": ("goal_id", "goals", "id"),
+    "executions": ("plan_id", "plans", "id"),
+}
+
+
+def _affinity(declared_type: str) -> str:
+    """Return SQLite's type affinity for a column's declared type.
+
+    ``PRAGMA table_info`` reports the *declared* type, not the affinity SQLite
+    derives from it, so the store's ``INTEGER``/``TEXT`` guarantees are compared on
+    affinity rather than on the exact spelling — applying SQLite's documented rules
+    (§3.1 of "Datatypes In SQLite") in order.
+    """
+    upper = declared_type.upper()
+    if "INT" in upper:
+        return "INTEGER"
+    if "CHAR" in upper or "CLOB" in upper or "TEXT" in upper:
+        return "TEXT"
+    if not upper or "BLOB" in upper:
+        return "BLOB"
+    if "REAL" in upper or "FLOA" in upper or "DOUB" in upper:
+        return "REAL"
+    return "NUMERIC"
+
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
@@ -256,6 +324,7 @@ class SqlitePlanStore:
                 counter, mark = self._verify_or_init_meta(conn)
                 for statement in (*_RECORD_SCHEMA, *_INDEXES):
                     conn.execute(statement)
+                self._verify_record_tables(conn)
                 self._verify_the_ordinal_index(conn)
                 # Reconciled *after* the schema above, in the same transaction, so
                 # the mark is only written for a file this open has actually brought
@@ -358,12 +427,19 @@ class SqlitePlanStore:
             PlanningError: If no index of that name exists, or it is not a unique,
                 non-partial index over ``created_seq`` alone.
         """
+        # Names are lower-cased before comparison: SQLite identifiers are
+        # case-insensitive, so an `EXECUTIONS_CREATED_SEQ` over `CREATED_SEQ` is the
+        # same index over the same column, and a case-variant but compatible schema
+        # must not be refused for casing (matches `_verify_record_tables`).
         listed = [
             row
             for row in conn.execute("PRAGMA index_list('executions')")
-            if row[1] == _ORDINAL_INDEX
+            if str(row[1]).lower() == _ORDINAL_INDEX
         ]
-        columns = [row[2] for row in conn.execute("PRAGMA index_info('executions_created_seq')")]
+        columns = [
+            str(row[2]).lower()
+            for row in conn.execute("PRAGMA index_info('executions_created_seq')")
+        ]
         # index_list rows are (seq, name, unique, origin, partial).
         if len(listed) == 1 and listed[0][2] and not listed[0][4] and columns == ["created_seq"]:
             return
@@ -379,6 +455,270 @@ class SqlitePlanStore:
             f"claiming a backstop the database does not have"
         )
         raise PlanningError(msg)
+
+    def _verify_record_tables(self, conn: sqlite3.Connection) -> None:
+        """Check each record table *is* the shape this store's guarantees rest on.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op against a pre-existing
+        ``goals``/``plans``/``executions`` of a different shape, and nothing
+        validated the columns afterwards, so every guarantee built on those columns
+        could be silently absent on a hand-built, third-party-migrated or corrupt
+        file (issue #373). This is the same fail-open #349 closed for ``meta`` and
+        #364 for the ordinal index, extended from the index to the record columns
+        themselves: an object's name is not evidence about the object.
+
+        So each table is read back with ``PRAGMA table_info`` and required to carry
+        its :data:`_RECORD_COLUMNS` at the expected **affinity** — affinity, not the
+        exact declared type, because that is what SQLite's ordering, comparison and
+        storage actually key on (a ``TEXT`` ``created_seq`` orders lexically; a
+        non-integer ``version`` breaks the compare-and-swap) — and ``NOT NULL``
+        where the schema declares it. Its ``PRIMARY KEY`` is verified too, because
+        ``save_goal``'s ``ON CONFLICT(id)`` upsert and per-id uniqueness rest on it,
+        and so is each ``REFERENCES`` clause ADR-0049 §1's referential integrity
+        rests on, down to the parent column. Extra columns are tolerated: the store
+        names every column it reads and writes, so a superset cannot mislead it,
+        while a *missing*, wrong-affinity, wrongly-nullable, unkeyed or mis-targeted
+        one can.
+
+        Runs at open, before any record is read or written, on ADR-0049 §1's
+        posture: refuse a store whose guarantees cannot hold rather than open it and
+        fail — or silently misbehave — at the first query.
+
+        **Scope of this cluster (deliberate, not exhaustive).** ``_verify_columns``,
+        ``_verify_primary_key``, ``_verify_foreign_key``, ``_verify_no_triggers`` and
+        ``_verify_the_ordinal_index`` defend against a shape mismatch that **silently
+        subverts a store guarantee** — a check passes yet the store misbehaves
+        invisibly: a lexical ``created_seq``, a case-folded id, a mutating trigger, a
+        broken foreign key. They do **not** attempt exhaustive validation against a
+        *hostile* hand-built schema. A construction that makes an operation fail
+        **loudly** — a ``CHECK`` constraint, a generated column, an extra ``UNIQUE``
+        index, ``WITHOUT ROWID``, an extra or composite foreign key, a ``DEFAULT``
+        expression — surfaces a clear ``PlanningError`` at the write rather than
+        silent corruption, and is out of scope: the plan database lives on the user's
+        local disk (ADR-0004 §2), so anyone who can rewrite its schema already owns
+        the data and the schema is not a security boundary against them. See the
+        parked follow-up issue for the enumerated fail-loud cases; do not reopen this
+        loop to chase them.
+
+        Raises:
+            PlanningError: If a record table lacks an expected column, carries one at
+                the wrong affinity or nullability, is not keyed on ``id``, is missing
+                (or mis-targets) a declared foreign key, or any table the store writes
+                carries a trigger.
+        """
+        self._verify_no_triggers(conn)
+        for table, expected in _RECORD_COLUMNS.items():
+            # table_info rows are (cid, name, type, notnull, dflt_value, pk). Column
+            # names are lower-cased: SQLite identifiers are case-insensitive, so a
+            # `DATA` column is the `data` column and a case-variant but otherwise
+            # compatible schema must be accepted, not refused (the names in
+            # `_RECORD_COLUMNS` are the lower-case form).
+            actual = {
+                str(row[1]).lower(): (_affinity(str(row[2])), bool(row[3]))
+                for row in conn.execute(f"PRAGMA table_info('{table}')")
+            }
+            self._verify_columns(table, expected, actual)
+            self._verify_primary_key(conn, table)
+            self._verify_foreign_key(conn, table)
+
+    def _verify_no_triggers(self, conn: sqlite3.Connection) -> None:
+        """Refuse a trigger on any table this store writes — ``meta`` included.
+
+        The column/PK/FK checks describe a table's *shape*, but a pre-existing table
+        of the exact shape can still carry an ``AFTER INSERT``/``UPDATE`` trigger that
+        silently subverts a write. On a record table it rewrites ``NEW.id`` or
+        corrupts ``data``, so ``save_goal`` returns a caller's id while the row was
+        moved underneath it (ADR-0049 §1/§2). On ``meta`` it is worse: a trigger that
+        resets ``exec_counter``/``exec_high_water`` on update defeats the
+        ordinal-monotonicity ADR-0064 rests on, so a later ``start_execution``
+        re-issues an execution id already handed out — and a reused id lets a stale
+        parked confirmation resolve a freshly-created execution (ADR-0049 §3). Both
+        are *silent*: every other check passes. This store creates no triggers, so
+        any trigger on a table it writes is foreign and there is no shape reading that
+        makes a mutating one safe — refuse it at open.
+
+        Raises:
+            PlanningError: If any trigger is defined on ``goals``, ``plans``,
+                ``executions`` or ``meta``.
+        """
+        # Every table the store writes, `meta` included (the ordinal lives there).
+        written_tables = {*_RECORD_COLUMNS, "meta"}
+        triggers = sorted(
+            str(name)
+            for name, table in conn.execute(
+                "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
+            )
+            # tbl_name is lower-cased: SQLite identifiers are case-insensitive, so a
+            # trigger on `GOALS` binds the same table as one on `goals`.
+            if str(table).lower() in written_tables
+        )
+        if not triggers:
+            return
+        msg = (
+            f"the plan store at {self._path!r} has triggers on the tables it writes "
+            f"({', '.join(triggers)}); this store creates none, and a trigger can silently "
+            f"rewrite or corrupt a row — or reset the durable ordinal (ADR-0064) — under a write "
+            f"it reported as stored, so it will not open a database that can subvert its writes"
+        )
+        raise PlanningError(msg)
+
+    def _verify_columns(
+        self,
+        table: str,
+        expected: dict[str, tuple[str, bool]],
+        actual: dict[str, tuple[str, bool]],
+    ) -> None:
+        """Require each expected column at its affinity and, where declared, NOT NULL."""
+        for column, (affinity, not_null) in expected.items():
+            found = actual.get(column)
+            if found is None:
+                problem = "is absent"
+            elif found[0] != affinity:
+                problem = f"has {found[0]} affinity, not the {affinity} affinity"
+            elif not_null and not found[1]:
+                problem = "is nullable, not the NOT NULL"
+            else:
+                continue
+            msg = (
+                f"the plan store at {self._path!r} has a {table} table whose {column} "
+                f"column {problem} this store's guarantees rest on (ADR-0049 §1); refusing "
+                f"to open a table it did not shape rather than read or write records against "
+                f"columns that will silently misbehave"
+            )
+            raise PlanningError(msg)
+
+    def _verify_primary_key(self, conn: sqlite3.Connection, table: str) -> None:
+        """Require ``table``'s primary key to be exactly ``id``, BINARY-collated.
+
+        ``save_goal``'s ``ON CONFLICT(id) DO UPDATE`` upsert and the per-id
+        uniqueness every record read assumes need ``id`` to be the primary key; a
+        pre-existing table without it, or keyed on something else, opens a store
+        whose guarantee is silently absent (#373). The **collation** is load-bearing
+        too: a ``COLLATE NOCASE`` key folds ``"A"`` and ``"a"`` into one row, so an
+        upsert of a case-variant id overwrites a different record's blob and
+        ``get_goal`` hands back an id the caller never stored — ``Identifier`` is
+        case-sensitive, and ADR-0049 §1's schema is the default ``BINARY``.
+
+        Read from the primary key's own index (``PRAGMA index_list`` origin ``pk``,
+        then ``index_xinfo`` for its key columns and their collations), so both the
+        column set and the collation are checked against the object rather than the
+        column names alone — the same posture :meth:`_verify_the_ordinal_index`
+        takes for the ordinal index.
+
+        Raises:
+            PlanningError: If the primary key is absent, over the wrong columns, or
+                not BINARY-collated.
+        """
+        pk_indexes = [
+            str(row[1])
+            for row in conn.execute(f"PRAGMA index_list('{table}')")
+            if row[3] == "pk"  # index_list rows are (seq, name, unique, origin, partial)
+        ]
+        # index_xinfo rows are (seqno, cid, name, desc, coll, key); key == 1 marks a
+        # key column (vs an appended rowid), so a single-column pk yields one entry.
+        # Names are lower-cased and the collation upper-cased: SQLite identifier and
+        # collation names are both case-insensitive, so `ID`/`id` and `binary`/
+        # `BINARY` are the same and a case-variant schema is not refused for casing.
+        key_columns = (
+            [
+                (str(row[2]).lower(), str(row[4]).upper())
+                for row in conn.execute(f"PRAGMA index_xinfo('{pk_indexes[0]}')")
+                if row[5]
+            ]
+            if len(pk_indexes) == 1
+            else []
+        )
+        if key_columns == [(_RECORD_PRIMARY_KEY, "BINARY")]:
+            return
+        if not key_columns:
+            detail = "no PRIMARY KEY"
+        elif [column for column, _coll in key_columns] != [_RECORD_PRIMARY_KEY]:
+            detail = f"a PRIMARY KEY over {', '.join(column for column, _coll in key_columns)}"
+        else:
+            detail = f"a {key_columns[0][1]}-collated {_RECORD_PRIMARY_KEY} PRIMARY KEY"
+        msg = (
+            f"the plan store at {self._path!r} has a {table} table with {detail}, not the "
+            f"exact BINARY {_RECORD_PRIMARY_KEY} PRIMARY KEY (ADR-0049 §1) its upsert and "
+            f"per-id uniqueness rest on; refusing to open a table it did not shape"
+        )
+        raise PlanningError(msg)
+
+    def _verify_foreign_key(self, conn: sqlite3.Connection, table: str) -> None:
+        """Require ``table``'s foreign keys to be *exactly* the declared one (or none).
+
+        A pre-existing table declared without its ``REFERENCES`` clause carries no
+        foreign key, so the ADR-0049 §1 backstop beneath ``save_plan``'s app-level
+        orphan check is gone — an orphaned plan or execution can be committed. The
+        keys are read back from ``PRAGMA foreign_key_list`` and required to be
+        precisely the expected **single-column** key binding the expected child
+        column to the expected parent *column* — no more, no fewer:
+
+        - a key to another column of the right table (``goals(data)`` for
+          ``goals(id)``) does not enforce the binding this store relies on;
+        - a *composite* key (``FOREIGN KEY(goal_id, data) REFERENCES goals(id,
+          data)``) whose first pair reads ``goal_id → goals(id)`` is not it either —
+          its parent key is not ``goals(id)``, so SQLite raises ``foreign key
+          mismatch`` at the first write;
+        - an *extra* key the store never declares (``FOREIGN KEY(data) REFERENCES
+          goals(id)`` beside the real one) makes ``goals``-id-shaped ``data`` a write
+          precondition SQLite enforces, so every otherwise-valid plan write fails.
+
+        Each of these opens a table this store cannot correctly write, so — on
+        ADR-0049 §1's refuse-before-writing posture — the foreign keys present must
+        equal the declared set exactly, not merely contain it. A key that omits the
+        parent column (``REFERENCES goals``) resolves to the parent's primary key,
+        which this same pass requires to be ``id``, so it is accepted.
+
+        Raises:
+            PlanningError: If the expected foreign key is absent or mis-targeted, or
+                any other foreign key (composite or extra) is present.
+        """
+        expected = _RECORD_FOREIGN_KEYS.get(table)
+        # foreign_key_list rows are (id, seq, table, from, to, ...); one constraint
+        # spans multiple rows (one per column pair), sharing an id, so group by it.
+        constraints: dict[int, list[Any]] = {}
+        for row in conn.execute(f"PRAGMA foreign_key_list('{table}')"):
+            constraints.setdefault(int(row[0]), []).append(row)
+
+        expected_seen = False
+        unexpected = False
+        for rows in constraints.values():
+            row = rows[0]
+            # Names are lower-cased: SQLite identifiers are case-insensitive, so a
+            # `REFERENCES GOALS(ID)` key binds the same columns as `goals(id)`. `to`
+            # is NULL when the clause omits the parent column, meaning its PK.
+            is_the_expected_key = (
+                expected is not None
+                and len(rows) == 1  # single-column; a composite one is not the binding
+                and str(row[3]).lower() == expected[0]
+                and str(row[2]).lower() == expected[1]
+                and (row[4] is None or str(row[4]).lower() == expected[2])
+            )
+            if is_the_expected_key and not expected_seen:
+                expected_seen = True
+            else:
+                unexpected = True
+
+        # A missing/mistargeted key (also the composite-only case: the expected
+        # single-column key is not present) is reported first and specifically.
+        if expected is not None and not expected_seen:
+            column, parent, target = expected
+            msg = (
+                f"the plan store at {self._path!r} has a {table} table with no single-column "
+                f"foreign key from {column} to {parent}({target}); the referential integrity "
+                f"ADR-0049 §1 requires is not enforced, and this store will not open claiming a "
+                f"backstop the database does not have"
+            )
+            raise PlanningError(msg)
+        # The expected key is present, but so is another the store never declares.
+        if unexpected:
+            msg = (
+                f"the plan store at {self._path!r} has a {table} table with an unexpected foreign "
+                f"key this store does not declare; an extra or composite key SQLite enforces on a "
+                f"write is a constraint this code did not shape, so it will not open a database "
+                f"that can reject its own valid writes (ADR-0049 §1)"
+            )
+            raise PlanningError(msg)
 
     def _reconcile_high_water(
         self, conn: sqlite3.Connection, counter: int, mark: int | None
