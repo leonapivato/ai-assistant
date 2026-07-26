@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import pickle
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -548,6 +549,65 @@ def test_non_finite_output_is_rejected() -> None:
 
 def test_ordinary_floats_still_round_trip() -> None:
     step = PlanStep(id="s1", intent="i", capability="c", parameters={"x": 1.5})
+    assert TypeAdapter(PlanStep).validate_json(step.model_dump_json()) == step
+
+
+# --- Values with no JSON encoding (issue #121) --------------------------
+# Plan parameters and step outputs are ``FrozenJson`` holders, so they inherit
+# ``_freeze_json``'s refusal of a value that satisfies its Python type but has no
+# portable encoding — a lone surrogate ``str`` or an integer past CPython's
+# integer-string conversion limit. Checked by running the real encoder, so a key
+# and a deeply nested value are refused too, not only a top-level value.
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        pytest.param({"body": "\ud800"}, id="a value"),
+        pytest.param({"\ud800": "body"}, id="a key"),
+        pytest.param({"nested": {"body": "\udfff"}}, id="nested in a mapping"),
+        pytest.param({"items": ["fine", "\ud800"]}, id="inside a sequence"),
+    ],
+)
+def test_step_parameters_with_a_lone_surrogate_are_rejected(
+    parameters: dict[str, Any],
+) -> None:
+    """A lone surrogate is a ``str`` with no UTF-8 encoding (ADR-0021 §1)."""
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        PlanStep(id="s1", intent="i", capability="c", parameters=parameters)
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        pytest.param({"n": 10**5000}, id="a value"),
+        pytest.param({"nested": {"n": -(10**5000)}}, id="nested in a mapping"),
+        pytest.param({"items": [10**5000]}, id="inside a sequence"),
+    ],
+)
+def test_step_parameters_with_an_unrenderable_integer_are_rejected(
+    parameters: dict[str, Any],
+) -> None:
+    """``json.dumps`` renders an int through ``str()``; CPython refuses one past
+    its integer-string conversion limit, so the value has no JSON encoding."""
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        PlanStep(id="s1", intent="i", capability="c", parameters=parameters)
+
+
+def test_a_step_output_with_a_lone_surrogate_is_rejected() -> None:
+    """The other ``FrozenJson`` holder inherits the same refusal (issue #121)."""
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        _claimed(StepStatus.SUCCEEDED, output={"body": "\ud800"})
+
+
+def test_a_large_but_renderable_value_still_round_trips() -> None:
+    """The bound is "can it be encoded", not "is it big" or "is it astral"."""
+    step = PlanStep(
+        id="s1",
+        intent="i",
+        capability="c",
+        parameters={"n": 10**100, "emoji": "\U0001f389 done"},
+    )
     assert TypeAdapter(PlanStep).validate_json(step.model_dump_json()) == step
 
 

@@ -555,9 +555,9 @@ def test_a_definition_with_an_unrenderable_integer_is_refused(schema: dict[str, 
     """The other value that satisfies its type and has no JSON rendering.
 
     ``json.dumps`` renders an integer through ``str()``, and CPython refuses
-    that past its integer-string conversion limit. ``_digestible`` already
-    covers this class for a request's parameters; a declaration reaches it
-    through ``parameters_schema`` in exactly the same way, and must fail with
+    that past its integer-string conversion limit. :data:`FrozenJsonMapping`
+    already covers this class for a request's parameters; a declaration reaches
+    it through ``parameters_schema`` in exactly the same way, and must fail with
     the same diagnostic rather than with a runtime-specific one.
     """
     with pytest.raises(ValidationError, match="JSON encoding"):
