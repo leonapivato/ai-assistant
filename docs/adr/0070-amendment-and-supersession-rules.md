@@ -162,9 +162,11 @@ an earlier one, decided once here rather than re-argued per case.
 `docs/adr/template.md` gains the partial form:
 
 ```
-- Status: Proposed | Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)
+- Status: Proposed | Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-AAAA (<scope>) [and ADR-BBBB (<scope>)]…
 ```
 
+The partial form is one or more `ADR-XXXX (<scope>)` pairs, led by `Partially
+superseded by` and joined by `and` (the accumulation and precedence rules below).
 `Partially superseded by ADR-XXXX (<scope>)` means: ADR-XXXX replaces the named
 scope of this ADR; the remainder of this ADR stays accepted.
 
@@ -226,8 +228,9 @@ records — the same reasoning as #71 (§Consequences). New partial supersession
 use the leading-token form; the existing ones stand.
 
 **Partial supersession is a distinct, scope-bearing state; a consumer must not
-collapse it.** The canonical vocabulary is §4's — `Proposed | Accepted |
-Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)`.
+collapse it.** The canonical vocabulary is §4's four forms, `Partially
+superseded` carrying one or more `ADR-XXXX (<scope>)` pairs (its accumulation and
+precedence rules below).
 `Partially superseded` is neither `Accepted` (which would hide the replaced
 scope — #87's failure) nor whole `Superseded` (which would hide the live
 remainder): the named scope is replaced by ADR-XXXX and everything else stays
