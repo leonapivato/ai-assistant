@@ -185,6 +185,13 @@ value would lose the earlier dead scope. This is why §3 needs no pre-split — 
 decision with separately-superseded parts is representable in place, one line, one
 leading token.
 
+Where two pairs' scopes overlap — a later ADR replaces a subset of an
+already-superseded clause — the **later, higher-numbered ADR governs the
+overlap**. It is the more recent decision, the same monotonic rule as the
+transitive walk above, so no disjointness constraint is needed: a consumer
+selecting the live rule for a clause takes the highest-numbered pair whose scope
+covers it.
+
 Two properties are load-bearing, both from ADR-0017 §7:
 
 - **The supersession leads; `Accepted` is dropped.** So a filter that
