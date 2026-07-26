@@ -246,11 +246,13 @@ class RoutingProvider:
         # the two versions would be sent to two vendors and only one answer
         # would come back.
         #
-        # The elements are detached too, not just the container: `Message` is a
-        # non-frozen model, so a turn's `content` or `role` can be rewritten in
-        # place without touching the list. See the fuller note on the same line
-        # in `retry.py`, including why "the route's provider takes its own
-        # observation" does not discharge this.
+        # Copying the elements as well as the container is now belt-and-suspenders:
+        # ADR-0068 froze `Message` (`ConfigDict(frozen=True)`), so a turn's
+        # `content` or `role` can no longer be rewritten in place — the
+        # element-rewrite vector this line once guarded is closed. What still
+        # requires the snapshot is the caller's own mutable `Sequence` container
+        # above, which ADR-0065's clause survives the freeze to govern. See the
+        # fuller note on the same line in `retry.py`.
         conversation = [message.model_copy(deep=True) for message in messages]
 
         if model is not None:

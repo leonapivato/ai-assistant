@@ -254,9 +254,9 @@ class LearningLoop:
         Process, then delegate: the feedback becomes proposals, and each is
         handed to the injected :class:`~ai_assistant.core.protocols.MemoryWriter`
         (ADR-0028 §4). Conflicts, the policy's ruling and the write itself all
-        happen behind that seam — including a ``MERGE``, which is *applied* by
-        `memory`'s own fold rather than reported and dropped. The model never
-        writes memory directly (VISION §7).
+        happen behind that seam — including a ``REINFORCE`` or ``SUPERSEDE``,
+        which is *applied* by `memory`'s own fold rather than reported and
+        dropped. The model never writes memory directly (VISION §7).
 
         Proposals are applied in order and independently; there is no
         transaction, because ``MemoryStore`` offers none. Two consequences, both
@@ -281,7 +281,8 @@ class LearningLoop:
 
         Raises:
             MemoryStoreError: If the writer failed to read conflicts or write a
-                record, or a ``MERGE`` named a target that is not among them.
+                record, or a ``REINFORCE`` or ``SUPERSEDE`` named a ``target_id``
+                that is not among them.
         """
         proposals = await self._feedback.process(event)
         return tuple([await self._writer.ingest(proposal) for proposal in proposals])
