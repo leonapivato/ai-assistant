@@ -1173,10 +1173,13 @@ async def test_an_index_that_only_shares_the_name_is_refused(
     path = tmp_path / "plans.db"
     raw = sqlite3.connect(path)
     try:
+        # Otherwise the shape this store expects (#373), so the index check — not
+        # the record-table check that runs before it — is what refuses this file.
         raw.execute(
             "CREATE TABLE executions("
-            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, version INTEGER NOT NULL, "
-            "active INTEGER NOT NULL, created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
+            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
+            "version INTEGER NOT NULL, active INTEGER NOT NULL, "
+            "created_seq INTEGER NOT NULL, data TEXT NOT NULL)"
         )
         raw.execute(collision)
         raw.commit()
@@ -1184,6 +1187,257 @@ async def test_an_index_that_only_shares_the_name_is_refused(
         raw.close()
 
     with pytest.raises(PlanningError, match="not a unique index over executions"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+# --- a record table this store did not shape (issue #373) -------------------
+
+
+def _hand_built_table(path: Path, table: str, body: str) -> None:
+    """Seed a database whose ``table`` this store did not create.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against it, so this is the table the
+    store actually opens; every other record table it creates fresh and correctly.
+    """
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute(f"CREATE TABLE {table}({body})")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+async def test_a_preexisting_executions_with_a_text_created_seq_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The headline #373 defect: a lexical ``created_seq``, reproduced and refused.
+
+    A pre-existing ``executions`` whose ``created_seq`` is ``TEXT`` — but which is
+    otherwise the shape this store expects, so #364's index check and every other
+    check pass — makes ``ORDER BY created_seq``/``MAX(created_seq)`` lexical, so
+    ``active_executions``/``export`` silently stop returning oldest-first (``['1',
+    '10', '2']``), the order ADR-0049 §1 requires. ``CREATE TABLE IF NOT EXISTS``
+    is a no-op against it and nothing validated the affinity, so the store opened
+    with the guarantee silently absent. It is now read back and refused at open.
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_table(
+        path,
+        "executions",
+        "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
+        "version INTEGER NOT NULL, active INTEGER NOT NULL, "
+        "created_seq TEXT NOT NULL, data TEXT NOT NULL",
+    )
+
+    with pytest.raises(PlanningError, match="created_seq column has TEXT affinity"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+@pytest.mark.parametrize(
+    ("table", "body", "match"),
+    [
+        pytest.param(
+            "executions",
+            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
+            "version TEXT NOT NULL, active INTEGER NOT NULL, "
+            "created_seq INTEGER NOT NULL, data TEXT NOT NULL",
+            "version column has TEXT affinity",
+            id="version-not-integer-breaks-the-cas-compare",
+        ),
+        pytest.param(
+            "executions",
+            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
+            "version INTEGER NOT NULL, active TEXT NOT NULL, "
+            "created_seq INTEGER NOT NULL, data TEXT NOT NULL",
+            "active column has TEXT affinity",
+            id="active-not-integer-breaks-the-active-filter",
+        ),
+        pytest.param(
+            "executions",
+            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(id), "
+            "version INTEGER NOT NULL, active INTEGER NOT NULL, "
+            "created_seq INTEGER NOT NULL, data BLOB NOT NULL",
+            "data column has BLOB affinity",
+            id="data-not-text-changes-what-model_validate_json-is-handed",
+        ),
+        pytest.param(
+            "goals",
+            "id TEXT PRIMARY KEY, data BLOB NOT NULL",
+            "data column has BLOB affinity",
+            id="goals-data-not-text",
+        ),
+        pytest.param(
+            "goals",
+            "id TEXT PRIMARY KEY",
+            "data column is absent",
+            id="goals-missing-a-column",
+        ),
+        pytest.param(
+            "plans",
+            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, data TEXT NOT NULL",
+            "foreign key from goal_id to goals",
+            id="plans-without-its-goal-reference",
+        ),
+        pytest.param(
+            "executions",
+            "id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, "
+            "version INTEGER NOT NULL, active INTEGER NOT NULL, "
+            "created_seq INTEGER NOT NULL, data TEXT NOT NULL",
+            "foreign key from plan_id to plans",
+            id="executions-without-its-plan-reference",
+        ),
+        pytest.param(
+            "plans",
+            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(data), data TEXT NOT NULL",
+            "foreign key from goal_id to goals",
+            id="plans-foreign-key-to-the-wrong-column",
+        ),
+        pytest.param(
+            "plans",
+            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, data TEXT NOT NULL, "
+            "FOREIGN KEY(goal_id, data) REFERENCES goals(id, data)",
+            "no single-column foreign key from goal_id to goals",
+            id="plans-composite-foreign-key-is-not-the-required-binding",
+        ),
+        pytest.param(
+            "plans",
+            "id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(id), "
+            "data TEXT NOT NULL, FOREIGN KEY(data) REFERENCES goals(id)",
+            "unexpected foreign key",
+            id="plans-with-an-extra-foreign-key-would-reject-valid-writes",
+        ),
+        pytest.param(
+            "goals",
+            "id TEXT, data TEXT NOT NULL",
+            "no PRIMARY KEY",
+            id="goals-without-a-primary-key-breaks-on-conflict",
+        ),
+        pytest.param(
+            "goals",
+            "id TEXT PRIMARY KEY COLLATE NOCASE, data TEXT NOT NULL",
+            "NOCASE-collated id PRIMARY KEY",
+            id="goals-case-insensitive-primary-key-folds-distinct-ids",
+        ),
+        pytest.param(
+            "goals",
+            "id TEXT PRIMARY KEY, data TEXT",
+            "data column is nullable",
+            id="goals-nullable-data-can-store-a-null-no-decode-accepts",
+        ),
+    ],
+)
+async def test_a_record_table_of_the_wrong_shape_is_refused(
+    tmp_path: Path, table: str, body: str, match: str
+) -> None:
+    """It is not only ``created_seq`` (#373): every load-bearing shape property.
+
+    A hand-built table breaks them all the same way ``CREATE TABLE IF NOT EXISTS``
+    lets ``created_seq`` through — the compare-and-swap ``version``, the
+    ``WHERE active = 1`` filter, the ``data`` blob ``model_validate_json`` reads, a
+    nullable ``data`` that can store a ``NULL`` no decode accepts, the ``id`` primary
+    key ``save_goal``'s upsert needs (absent, or folded case-insensitively by a
+    ``COLLATE NOCASE`` that collides distinct ids), and the ADR-0049 §1
+    referential-integrity backstop (absent, mis-targeted, or only present inside a
+    composite key SQLite would reject at the first write).
+    """
+    path = tmp_path / "plans.db"
+    _hand_built_table(path, table, body)
+
+    with pytest.raises(PlanningError, match=match):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+async def test_a_case_variant_but_compatible_schema_is_accepted(tmp_path: Path) -> None:
+    """SQLite identifiers are case-insensitive, so a case-variant schema is *the* shape.
+
+    A hand-built all-uppercase schema — tables, columns, the foreign keys and the
+    ordinal index — differs only in identifier casing, which every query this store
+    issues resolves case-insensitively, so it is the shape this store understands and
+    refusing it for casing alone would be a false refusal. Every shape check
+    (columns, primary key and its collation, foreign keys, and the ordinal index)
+    lower-cases identifier names before comparing, so the store opens and a full
+    goal/plan/execution round-trip — including the ``ORDER BY created_seq`` in
+    ``active_executions`` — works against ``CREATED_SEQ``.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE TABLE GOALS(ID TEXT PRIMARY KEY, DATA TEXT NOT NULL)")
+        raw.execute(
+            "CREATE TABLE PLANS(ID TEXT PRIMARY KEY, "
+            "GOAL_ID TEXT NOT NULL REFERENCES GOALS(ID), DATA TEXT NOT NULL)"
+        )
+        raw.execute(
+            "CREATE TABLE EXECUTIONS(ID TEXT PRIMARY KEY, "
+            "PLAN_ID TEXT NOT NULL REFERENCES PLANS(ID), VERSION INTEGER NOT NULL, "
+            "ACTIVE INTEGER NOT NULL, CREATED_SEQ INTEGER NOT NULL, DATA TEXT NOT NULL)"
+        )
+        raw.execute("CREATE UNIQUE INDEX EXECUTIONS_CREATED_SEQ ON EXECUTIONS(CREATED_SEQ)")
+        raw.commit()
+    finally:
+        raw.close()
+
+    store = SqlitePlanStore(path=path, now=_fixed_now)  # opens rather than refusing
+    try:
+        await store.save_goal(_goal())
+        await store.save_plan(_plan())
+        state = await store.start_execution("p1")
+        assert [execution.id for execution in await store.active_executions()] == [state.id]
+    finally:
+        store.close()
+
+
+async def test_a_trigger_on_a_record_table_is_refused(tmp_path: Path) -> None:
+    """A mutating trigger subverts a *successful* write, so a table carrying one is refused.
+
+    The columns/PK/FK can be exactly right while an ``AFTER INSERT`` trigger rewrites
+    ``NEW.id`` underneath the write: ``save_goal`` would return the caller's id while
+    the row was moved, and ``get_goal`` would then find nothing. The store creates no
+    triggers, so any trigger on a record table is foreign and there is no shape that
+    makes a mutating one safe; it is refused at open (ADR-0049 §1's fail-closed
+    posture), the same reasoning as a wrong column or a missing key.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE TABLE goals(id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        raw.execute(
+            "CREATE TRIGGER goals_tamper AFTER INSERT ON goals "
+            "BEGIN UPDATE goals SET id = id || '-moved' WHERE id = NEW.id; END"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="triggers on the tables it writes"):
+        SqlitePlanStore(path=path, now=_fixed_now)
+
+
+async def test_a_trigger_on_meta_is_refused(tmp_path: Path) -> None:
+    """A `meta` trigger can reset the durable ordinal, so it too is refused (#373, #405).
+
+    ``meta`` holds ``exec_counter``/``exec_high_water`` (ADR-0064). A trigger that
+    resets them on update defeats the ordinal-monotonicity execution-id non-reuse
+    rests on: a later ``start_execution`` re-issues an id already handed out, and a
+    reused id lets a stale parked confirmation resolve a freshly-created execution
+    (ADR-0049 §3). This is a *silent* break — every other check passes — so the
+    trigger class is closed over every table the store writes, ``meta`` included.
+    """
+    path = tmp_path / "plans.db"
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute(
+            "CREATE TRIGGER meta_rewind AFTER UPDATE ON meta "
+            "WHEN NEW.key = 'exec_high_water' "
+            "BEGIN UPDATE meta SET value = '0' "
+            "WHERE key IN ('exec_counter', 'exec_high_water'); END"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    with pytest.raises(PlanningError, match="triggers on the tables it writes"):
         SqlitePlanStore(path=path, now=_fixed_now)
 
 
