@@ -1,6 +1,6 @@
 # 70. Amendment and supersession rules for ADRs
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-26
 - Partially supersedes: ADR-0001 — its change-a-decision clause ("to change a
   past decision, write a new ADR that supersedes the old one and update the old
@@ -155,12 +155,27 @@ ADR-0001 is where supersession rules live, so it states the partial form
 alongside the total one (via this ADR's §2 pointer and its own header note); the
 template carries the vocabulary itself.
 
-**Existing status lines are not retrofitted.** ADR-0003, ADR-0004 and ADR-0016
-already carry the older `Accepted, partially superseded …` shape adopted before
-this ADR. Reformatting a ratified status line to the new leading-token form is a
-forward-only convention, not a licence to rewrite settled records — the same
-reasoning as #71 (§Consequences). New partial supersessions use the leading-token
-form; the existing ones stand.
+**Existing status lines are not retrofitted.** Several accepted ADRs already
+carry the older `Accepted, <qualifier> …` shape adopted before this ADR —
+`Accepted, partially superseded …` (ADR-0002, ADR-0003, ADR-0004, ADR-0014,
+ADR-0015, ADR-0016) and `Accepted, § … amended/discharged/narrowed …`
+(ADR-0038, ADR-0040). Reformatting a ratified status line to the new
+leading-token form is a forward-only convention, not a licence to rewrite settled
+records — the same reasoning as #71 (§Consequences). New partial supersessions
+use the leading-token form; the existing ones stand.
+
+**A status consumer keys on the whole status line, never a leading `Accepted`.**
+The leading-token form's guarantee is narrow: it ensures a *new* partial
+supersession is excluded by a naive `status.startswith("Accepted")` filter. It
+does nothing for the grandfathered forms above, which carry their qualifier
+*after* `Accepted`. So the binding rule for any consumer that classifies an ADR
+as fully live is to read the entire status line — a qualifier anywhere on it
+(`superseded`, `partially superseded`, `amended`, `discharged`, `narrowed`) means
+part of the ADR is not live — and never to prefix-match `Accepted` alone. That
+rule covers both shapes, which is why the legacy lines need no retrofit. Today
+the sole status consumer, `scripts/project_status.py`, renders the full status
+line verbatim and classifies nothing, so no record is misread now; this rule
+binds any liveness-classifying consumer added later.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
