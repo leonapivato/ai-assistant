@@ -168,12 +168,22 @@ an earlier one, decided once here rather than re-argued per case.
 `Partially superseded by ADR-XXXX (<scope>)` means: ADR-XXXX replaces the named
 scope of this ADR; the remainder of this ADR stays accepted.
 
-**A canonical status is one physical line** — a single leading token plus, for a
-partial supersession, the `(<scope>)` parenthesis — so the value is read whole
+**A canonical status is one physical line** — a leading token plus, for a partial
+supersession, one or more `ADR-XXXX (<scope>)` pairs — so the value is read whole
 without reconstructing wrapped continuations. That single-line rule is a going
 -forward requirement; the multi-line status fields several ADRs already carry
 (ADR-0003, ADR-0029, ADR-0038, ADR-0040, ADR-0065) are the exception the consumer
 rule and issue #404 handle, not a licence to write new ones.
+
+**Independent partial supersessions accumulate on the one line.** When a later
+ADR replaces a *different* scope of the same ADR, its `ADR-XXXX (<scope>)` pair is
+added — `Partially superseded by ADR-B (<scope-a>) and ADR-C (<scope-b>)` — each
+pair naming exactly what that ADR replaced (ADR-0015 already carries two, by
+ADR-0020 and ADR-0025). Adding the second pair is a §1 Status edit (recording a
+supersession that landed) and it does **not** drop the first: replacing the whole
+value would lose the earlier dead scope. This is why §3 needs no pre-split — a
+decision with separately-superseded parts is representable in place, one line, one
+leading token.
 
 Two properties are load-bearing, both from ADR-0017 §7:
 
