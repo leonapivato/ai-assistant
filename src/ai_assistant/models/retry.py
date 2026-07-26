@@ -256,17 +256,20 @@ class RetryingProvider:
         # attempt 1 was making — while the single Message returned is attributed
         # to one `complete`.
         #
-        # The elements are detached too, not just the container. `Message` is a
-        # non-frozen model, so a caller can rewrite a turn's `content` or `role`
-        # in place without touching the list, and the clause is explicit that a
-        # snapshot must be deep enough to cover everything the call goes on to
-        # read. "The inner provider takes its own observation" does not discharge
-        # it: each attempt's observation would then be a *different* one, which
-        # is the desync ADR-0065 identifies one level up from a store that
-        # snapshots correctly. `role` makes the cost concrete — flipped to
-        # ASSISTANT between attempts, it turns a retryable transient failure into
-        # a non-retryable malformed-argument ModelError (ADR-0066 §1) about a
-        # history that was well-formed when the call began.
+        # Copying the elements as well as the container is now belt-and-suspenders.
+        # ADR-0068 froze `Message` (`core/types.py`, `ConfigDict(frozen=True)`), so
+        # a caller can no longer rewrite a turn's `content` or `role` in place —
+        # the element-rewrite vector this line once guarded is closed. That vector
+        # was concrete: a `role` flipped to ASSISTANT between attempts turned a
+        # retryable transient failure into a non-retryable malformed-argument
+        # ModelError (ADR-0066 §1) about a history that was well-formed when the
+        # call began. What still requires the snapshot is the container above:
+        # `messages` is the caller's own mutable `Sequence`, which a caller may
+        # append to or replace across the suspension, and ADR-0065's clause
+        # survives the freeze for exactly that `Sequence` argument (its "Revisit
+        # if core's exchanged types are deep-frozen" note). The per-element
+        # `model_copy(deep=True)` stays as cheap defence-in-depth over frozen
+        # elements that `list(messages)` would already detach.
         conversation = [message.model_copy(deep=True) for message in messages]
         attempt = 0
         while True:
