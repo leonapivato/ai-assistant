@@ -12,18 +12,27 @@
 
 ## Context
 
-The ADR process runs on a rule with a live contradiction in it, surfaced by
-three issues.
+The ADR process runs on a rule with an undecided edge, surfaced by three issues.
 
-**#65 — may an ADR be amended in place at all?** ADR-0001 says ADRs are
+**#65 — may an ADR be amended in place, and when?** ADR-0001 says ADRs are
 append-only: "to change a past decision, write a new ADR that supersedes the old
 one and update the old one's status." It names no amendment mechanism and no
 exception. `CONTRIBUTING.md` says "Trivial ADRs (amendments, status changes,
 supersedes) skip both the separate PR and the review," naming amendments as a
-first-class category. Practice follows `CONTRIBUTING.md` — ADR-0004 §2 carries
-in-place amendments. The two documents disagree on whether in-place amendment is
-even permitted, and neither states where the line between an amendment and a
-supersession falls.
+first-class category. Practice ran ahead of both — ADR-0004 §2 carries an
+in-place amendment (2026-07-19) made before any mechanism was ratified, which
+ADR-0017 §5 later found retroactively irregular (#71).
+
+ADR-0017 §5 already reconciled the two documents on **authority**:
+`CONTRIBUTING.md`'s line "is about review cost … not authority to change a
+decision in place," it "never claimed the power ADR-0001 reserves, so there is no
+conflict between the documents." This ADR does not reopen that finding. What
+ADR-0017 §5 left open — and what #65 turns on — is the **mechanism** itself:
+neither document defines a *permitted* in-place amendment for a change that
+decides nothing, nor states where the line between an amendment and a
+supersession falls. ADR-0070 extends the rule to supply both, and aligns the two
+documents' wording to it, rather than resolving a contradiction ADR-0017 §5
+already showed does not exist.
 
 **#87 — the status vocabulary has no partial form.** `docs/adr/template.md`
 defines `Proposed | Accepted | Superseded by ADR-XXXX`; all three assume
@@ -192,10 +201,13 @@ same rule as §1 — not a looser one — so the two documents agree.
 
 ## Consequences
 
-- **The ADR-0001 / `CONTRIBUTING.md` contradiction is resolved.** ADR-0001 is
-  authoritative on append-only and the change-a-decision mechanism (as amended by
-  this ADR); `CONTRIBUTING.md` states the same test and points here. In-place
-  amendment is permitted, bounded by §1's test, and append-only in form.
+- **The ADR-0001 / `CONTRIBUTING.md` edge is closed.** ADR-0017 §5 already
+  reconciled the two on authority (no conflict; the trivial-ADR line is review
+  cost only); this ADR supplies the in-place amendment mechanism neither
+  previously defined, bounded by §1's test and append-only in form, and aligns
+  both documents' wording to it. ADR-0001 stays authoritative on append-only and
+  the change-a-decision mechanism (as partially superseded by this ADR);
+  `CONTRIBUTING.md` states the same test and points here.
 - **A citable line now exists for a recurring judgement.** "Does this change what
   was decided?" decides amend vs supersede at each case, without a size or
   review-cost heuristic to game.
