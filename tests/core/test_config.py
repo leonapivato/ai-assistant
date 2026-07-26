@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +12,10 @@ from pydantic_ai.models import known_model_names
 from ai_assistant.core.config import _MODEL_SPEC_PATTERN, Settings, load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import Reversibility, RiskLevel
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from typing import SupportsIndex
 
 
 def test_defaults_are_valid() -> None:
@@ -255,6 +260,81 @@ def test_a_tuple_passed_directly_is_not_run_through_the_string_splitter() -> Non
     # in Python (a test, a harness) is not forced through the environment's
     # encoding — and a spec that happens to contain a comma is not re-split.
     assert Settings(fallback_models=("openai:gpt-5",)).fallback_models == ("openai:gpt-5",)
+
+
+def test_a_list_passed_directly_keeps_its_order() -> None:
+    # A list is ordered, so it is an acceptable statement of preference. mypy sees
+    # only the declared ``tuple[str, ...]`` and rejects a list statically; the
+    # runtime accepts and coerces it, which is what this pins.
+    assert Settings(fallback_models=["openai:a", "openai:b"]).fallback_models == (  # type: ignore[arg-type]
+        "openai:a",
+        "openai:b",
+    )
+
+
+@pytest.mark.parametrize(
+    "collection",
+    [
+        pytest.param({"openai:gpt-5", "anthropic:claude-x"}, id="set"),
+        pytest.param(frozenset({"openai:gpt-5", "anthropic:claude-x"}), id="frozenset"),
+    ],
+)
+def test_an_unordered_fallback_collection_is_rejected(collection: object) -> None:
+    # ADR-0062 §1 makes the written order the operator's preference, so pydantic's
+    # lax coercion of a set to a tuple in hash order would silently discard it and
+    # let the router's primary fallback differ between processes (issue #359). The
+    # message names *order* as the reason, so the fix is discoverable.
+    with pytest.raises(ValidationError, match="ordered sequence"):
+        Settings(fallback_models=collection)  # type: ignore[arg-type]  # the wrong type is the subject
+
+
+def test_a_one_shot_iterator_of_fallbacks_is_rejected() -> None:
+    # A generator's order is defined only by a traversal that also consumes it, so
+    # it cannot be trusted to carry a preference; refused rather than coerced.
+    def specs() -> Iterator[str]:
+        yield "openai:gpt-5"
+        yield "anthropic:claude-x"
+
+    with pytest.raises(ValidationError, match="one-shot iterator"):
+        Settings(fallback_models=specs())  # type: ignore[arg-type]  # the wrong type is the subject
+
+
+def test_a_custom_unordered_iterable_is_rejected() -> None:
+    # An allowlist, not a denylist of set/iterator: an object that is neither an
+    # AbstractSet nor an Iterator but iterates a set in hash order would sail past
+    # a denylist and be coerced to a tuple in an unstable order. Only str/list/
+    # tuple are accepted, so this is refused with the rest.
+    class OrderlessIterable:
+        def __iter__(self) -> Iterator[str]:
+            return iter({"openai:gpt-5", "anthropic:claude-x"})
+
+    with pytest.raises(ValidationError, match="ordered sequence"):
+        Settings(fallback_models=OrderlessIterable())  # type: ignore[arg-type]  # the wrong type is the subject
+
+
+def test_a_list_subclass_that_lies_about_its_order_is_rejected() -> None:
+    # The allowlist is by *exact* type, not isinstance: a list subclass can
+    # override __iter__ to yield a set's order, which would readmit the very
+    # nondeterminism the guard refuses. Only the built-in list/tuple, whose
+    # iteration is the uninterceptable C one, is accepted.
+    class SetBackedList(list[str]):
+        def __iter__(self) -> Iterator[str]:
+            return iter({"openai:gpt-5", "anthropic:claude-x"})
+
+    with pytest.raises(ValidationError, match="ordered sequence"):
+        Settings(fallback_models=SetBackedList())  # type: ignore[arg-type]  # the wrong type is the subject
+
+
+def test_a_str_subclass_that_lies_about_split_is_rejected() -> None:
+    # The str branch is exact-typed for the same reason as list/tuple: a str
+    # subclass can override split() to return set-ordered parts, which the guard
+    # must not trust. Only the built-in str, whose split is the C one, is parsed.
+    class SetBackedStr(str):
+        def split(self, sep: str | None = None, maxsplit: SupportsIndex = -1) -> list[str]:
+            return list({"openai:gpt-5", "anthropic:claude-x"})
+
+    with pytest.raises(ValidationError, match="ordered sequence"):
+        Settings(fallback_models=SetBackedStr("openai:gpt-5,anthropic:claude-x"))  # type: ignore[arg-type]  # the wrong type is the subject
 
 
 @pytest.mark.parametrize(

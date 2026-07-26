@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
+from collections.abc import Set as AbstractSet
 from datetime import timedelta
 from typing import Annotated, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -128,18 +130,59 @@ def _split_model_specs(value: object) -> object:
     all-whitespace value therefore means "no fallbacks", the same as omitting the
     variable.
 
-    Anything that is not a string — a tuple or list passed directly in Python, as
-    tests and ``Settings(...)`` callers do — falls through untouched.
+    Only an **exact** built-in ``str``, ``list``, or ``tuple`` is accepted — a
+    ``str`` is parsed as above; a ``list`` or ``tuple`` falls through untouched,
+    as tests and ``Settings(...)`` callers pass. **Anything else is refused**,
+    not silently coerced. This is an allowlist rather than a denylist of the
+    unordered types on purpose: pydantic's lax mode would turn any iterable into
+    a tuple in traversal order, and ADR-0062 §1 makes the *written* order the
+    operator's statement of preference, so an input whose order is not a
+    statement — a ``set``/``frozenset``, a one-shot iterator, or any other
+    iterable that merely happens to iterate in some order — would let the
+    router's primary fallback differ between processes for one configuration
+    (issue #359). Naming only the ordered forms that are accepted closes that
+    class completely, where a denylist would miss a custom unordered iterable
+    that is neither a set nor an iterator.
+
+    **Exact** type, not ``isinstance``, and that is load-bearing: a *subclass*
+    can override the very method the order rests on — a ``list``/``tuple``
+    subclass its ``__iter__``, a ``str`` subclass its ``split`` — to yield its
+    contents in an order of its choosing (a set's, say), so ``isinstance`` would
+    readmit exactly the nondeterminism this refuses. Requiring the built-in makes
+    that step the uninterceptable C one, so the stored order is the order — the
+    same reason, and the same defence, as :func:`canonical_utc` accepting only an
+    exact ``datetime``. The operator-facing path is unaffected: an environment
+    variable and a ``.env`` entry both arrive as an exact ``str``, so this only
+    ever constrains untyped code constructing :class:`Settings` directly.
 
     Args:
         value: The raw configured value.
 
     Returns:
-        A tuple of specs if ``value`` was a string, otherwise ``value`` unchanged.
+        A tuple of specs if ``value`` was an exact ``str``; an exact ``list`` or
+        ``tuple`` unchanged.
+
+    Raises:
+        ValueError: If ``value`` is anything else, whose order cannot be trusted
+            to carry the operator's preference.
     """
-    if isinstance(value, str):
+    if type(value) is str:
         return tuple(part.strip() for part in value.split(_SPEC_SEPARATOR) if part.strip())
-    return value
+    if type(value) is list or type(value) is tuple:
+        return value
+    if isinstance(value, AbstractSet):
+        unordered = "an unordered set"
+    elif isinstance(value, Iterator):
+        unordered = "a one-shot iterator"
+    else:
+        unordered = f"a {type(value).__name__}"
+    msg = (
+        f"fallback_models must be an ordered sequence (a comma-separated string, a list, or "
+        f"a tuple), not {unordered}: ADR-0062 §1 makes the written order the router's "
+        f"preference, so an order-free value would let the primary fallback vary between "
+        f"processes for one configuration"
+    )
+    raise ValueError(msg)
 
 
 #: A pydantic-ai ``"provider:model"`` spec, validated for form.
