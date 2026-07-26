@@ -1,6 +1,6 @@
 # NNNN. <short title of the decision>
 
-- Status: Proposed | Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)
+- Status: Proposed | Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-AAAA (<scope>) [and ADR-BBBB (<scope>)]…
 - Date: YYYY-MM-DD
 
 <!-- Use "Partially superseded by ADR-XXXX (<scope>)" when a later ADR replaces
