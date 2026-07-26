@@ -187,21 +187,31 @@ leading-token form is a forward-only convention, not a licence to rewrite settle
 records — the same reasoning as #71 (§Consequences). New partial supersessions
 use the leading-token form; the existing ones stand.
 
-**A status consumer keys on the whole status line, never a leading `Accepted`.**
-The leading-token form's guarantee is narrow: it ensures a *new* partial
-supersession is excluded by a naive `status.startswith("Accepted")` filter. It
-does nothing for the grandfathered forms above, which carry their qualifier
-*after* `Accepted`. So a consumer that classifies an ADR as fully live must read
-the entire status line, never prefix-match `Accepted` alone, and key on the
-**supersession** family — `superseded by`, `partially superseded by`, or a legacy
-marker that replaces or narrows a clause — because that is what removes liveness.
-An `amended` marker does **not** remove it: by §1 an amendment alters no decision,
-so an amended ADR stays fully live and is not excluded. That is §1's
-amend-vs-supersede line read at the status level, and it is why the legacy lines
-need no retrofit — the rule covers both shapes. Today the sole status consumer,
-`scripts/project_status.py`, renders the full status line verbatim and classifies
-nothing, so no record is misread now; this rule binds any liveness-classifying
-consumer added later.
+**A status consumer keys on the canonical tokens and the whole line, never a
+leading `Accepted`.** The canonical vocabulary is exactly §4's — `Proposed |
+Accepted | Superseded by ADR-XXXX | Partially superseded by ADR-XXXX (<scope>)`.
+A supersession token, whole or partial, is what marks all or the named part of an
+ADR no longer live; `Accepted` alone means fully live. Under §1 an amendment is an
+appended dated note that changes no decision, so it is **not** a status token and
+never bears on a status-based liveness read. Two things make a naive read unsafe,
+both handled by reading the whole line rather than prefix-matching `Accepted`:
+
+- The leading-token form only guarantees a *new* partial supersession is excluded
+  by a `status.startswith("Accepted")` filter. The grandfathered
+  `Accepted, partially superseded …` forms carry the token *after* `Accepted`, so
+  a consumer must scan the whole line for the supersession token, not its prefix.
+- Some legacy lines carry **non-canonical** qualifiers naming a later ADR —
+  `amended by ADR-XXXX`, `narrowed`, `discharged by ADR-XXXX` — adopted before
+  this ADR fixed the vocabulary, and the word is not a reliable liveness signal.
+  ADR-0040's `§§3/5a/5b amended by ADR-0045`, for one, records clauses ADR-0045
+  actually replaced. A consumer must **resolve any non-canonical qualifier
+  against the ADR it names**, never infer liveness from the term.
+
+That is why the legacy lines need no retrofit: a consumer that reads the whole
+line and resolves non-canonical qualifiers reaches the right answer on both
+shapes. Today the sole status consumer, `scripts/project_status.py`, renders the
+full status line verbatim and classifies nothing, so no record is misread now;
+this rule binds any liveness-classifying consumer added later.
 
 ### 5. Reconciling `CONTRIBUTING.md`
 
