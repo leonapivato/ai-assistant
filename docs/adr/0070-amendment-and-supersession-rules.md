@@ -187,10 +187,12 @@ leading token.
 
 Where two pairs' scopes overlap — a later ADR replaces a subset of an
 already-superseded clause — the **later, higher-numbered ADR governs the
-overlap**. It is the more recent decision, the same monotonic rule as the
-transitive walk above, so no disjointness constraint is needed: a consumer
-selecting the live rule for a clause takes the highest-numbered pair whose scope
-covers it.
+overlap**, the same monotonic rule as the transitive walk above, so no
+disjointness constraint is needed. This is an *interpretive reading rule*, not a
+coverage computation: scopes are free-form pointers (above), so a tool does not
+decide containment — it surfaces the pairs and defers each to its ADR, and the
+later ADR, narrowing an already-superseded clause, says so in its own text. The
+precedence rule tells a *reader* which pair wins when both name the same clause.
 
 Two properties are load-bearing, both from ADR-0017 §7:
 
