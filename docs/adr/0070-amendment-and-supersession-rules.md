@@ -83,9 +83,10 @@ supersession; a paragraph that only restates the existing decision more clearly
 is an amendment.
 
 **A permitted amendment is append-only in mechanism, too.** It is recorded as an
-**appended, dated note** (or dated sub-section); ratified decision text is never
-rewritten. In-place edits to existing lines are confined to three, none of which
-rewrites a ratified decision:
+**appended, dated note** (or dated sub-section); ratified decision text — the
+Context, Decision and Consequences — is never rewritten. In-place edits to the
+header lines are permitted only where they change no decision (§1's test applied
+to the Status field and header themselves):
 
 - **ratifying** an ADR — `Proposed` → `Accepted`, which finalises the current
   decision rather than changing a past one;
@@ -93,6 +94,10 @@ rewrites a ratified decision:
   already requires this). This presupposes the superseding ADR *exists*: flipping
   a live decision to `Superseded` with no such ADR is not a status change but an
   unrecorded decision change, and is not permitted;
+- **correcting a Status line to match what actually landed** — repointing a
+  broken or mistyped supersession reference to the ADR that in fact superseded the
+  clause, or restoring `Accepted` where a marked supersession never landed. This
+  changes no decision; it makes the Status field accurate;
 - adding a **dated header note**.
 
 These bound the append-only *form* of an edit, not the review a decision needs.
@@ -237,8 +242,9 @@ defers a scope to ADR-B follows ADR-B's own status onward — if ADR-B is itself
 superseded by ADR-C, the live rule is ADR-C's. The walk terminates and cannot
 cycle: an ADR is only ever superseded by a *later*, higher-numbered ADR (ADR-0001,
 sequential numbering), so each hop strictly increases the number. A pointer to a
-nonexistent ADR is a broken cross-reference, corrigible as an amendment (§1), not
-a liveness state.
+nonexistent ADR is a broken cross-reference: it is corrected in place to the ADR
+that actually superseded the clause, or to `Accepted` if none did (a §1 Status
+correction — it changes no decision), never treated as a liveness state.
 
 That is why the legacy lines need no retrofit: a consumer that reads the whole
 Status **field** — all its physical lines, since a legacy value may wrap — treats
