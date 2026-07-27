@@ -19,7 +19,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_STATUS_RE = re.compile(r"^\s*-\s*Status:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+# The Status field may wrap across indented continuation lines. Capture the
+# first physical line plus any following lines that are indented and non-blank;
+# a following ``- <field>:`` bullet (at any indentation, e.g. ``- Date:``) or a
+# blank line ends the field, so an adjacent field is never absorbed. The
+# captured value is folded into one line by :func:`_fold_status` before use.
+_STATUS_RE = re.compile(
+    r"^[ \t]*-[ \t]*Status:[ \t]*(.+(?:\n[ \t]+(?!-[ \t])\S.*)*)",
+    re.IGNORECASE | re.MULTILINE,
+)
 _HEADING_RE = re.compile(r"^#\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
 _ADR_FILE_RE = re.compile(r"^(\d+)-.*\.md$")
 
@@ -141,6 +149,23 @@ def protocol_names(protocols_path: Path) -> list[str]:
     ]
 
 
+def _fold_status(value: str) -> str:
+    """Collapse a wrapped Status field into a single line.
+
+    Indented continuation lines captured by :data:`_STATUS_RE` still carry their
+    newlines and indentation; fold each whitespace run (including line breaks)
+    to a single space so the full field renders on one row. A single-line status
+    is returned trimmed and otherwise unchanged.
+
+    Args:
+        value: The raw captured Status value, possibly spanning several lines.
+
+    Returns:
+        The Status text on one line.
+    """
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def adr_entries(adr_dir: Path) -> list[Adr]:
     """Return the ADRs in ``adr_dir`` (excluding the template), sorted by number.
 
@@ -161,7 +186,7 @@ def adr_entries(adr_dir: Path) -> list[Adr]:
         entries.append(
             Adr(
                 number=int(match.group(1)),
-                status=status.group(1) if status else "?",
+                status=_fold_status(status.group(1)) if status else "?",
                 title=heading.group(2) if heading else path.stem,
                 heading_number=int(heading.group(1)) if heading else None,
             )
