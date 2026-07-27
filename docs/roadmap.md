@@ -1,4 +1,4 @@
-# Roadmap — orchestration artifacts and build sequence
+# Roadmap — accumulation first: the user model, observation, and the hub
 
 **Status: working guidance, not a ratified decision.** This document is the
 tactical companion to [`VISION.md`](../VISION.md): the *why* and *what* live
@@ -8,218 +8,218 @@ change) is ratified in its own ADR **before** it is implemented — see
 `docs/adr/` and the rules in `CLAUDE.md`. If this roadmap and an ADR disagree,
 the ADR wins.
 
-The guiding architectural principle — *the LLM proposes; deterministic services
-dispose* (VISION §7) — is realized as **proposal artifacts** a policy rules on
-(`MemoryUpdateProposal`, `NotificationCandidate`, `ActionPlan` with approval
-points). It is implemented today in the memory write path (`MemoryUpdateProposal`
-→ `MemoryPolicy`) and in the execution path (`ActionPlan` → `ActionPolicy`, whose
-`CONFIRM` parks the step for the user). It never got the single ratifying ADR
-this line once anticipated; the principle is instead carried by ADR-0005,
-ADR-0021 and ADR-0037 severally. `NotificationCandidate` is the one proposal
-artifact still unbuilt.
+## Why this revision exists
 
-## Domain artifacts by subsystem
+The previous revision of this document tracked the first vertical — seven core
+artifacts and one closed learning loop — to completion. That record lives in
+this file's git history and, authoritatively, in the ADR ledger and the commit
+log; it is not repeated here (ADR-0019, ADR-0067).
 
-The catalogue below maps candidate artifacts onto the architecture. It is a
-menu, not a commitment — each lands as a small slice behind an ADR when we build
-it.
+What that arc produced is lopsided in a specific way. The trust and state
+machinery — permissions, durable confirmation, audit, cancellation and
+atomicity guarantees, model-agnosticism as a tested property — is deep
+(ADR-0021/0036/0044/0059 and the hardening decisions around them, ADR-0061/0062).
+The thing VISION.md names as the moat — **an accumulated, user-controlled model
+of one person** — has vocabulary but no engine: `MemorySource` has carried
+`OBSERVED` and `INFERRED` provenance since ADR-0005, supersession law for how
+inferred beliefs lose to user assertions is ratified (ADR-0038/0040/0050), yet
+no code path produces an observed or inferred record, no interaction is ever
+recorded, and the user has no way to see what the assistant believes. The loop
+that exists learns only what the user explicitly dictates (ADR-0009), which is
+the "repeatedly explain preferences" failure VISION.md opens by condemning.
 
-| Subsystem | Candidate artifacts | Key ideas to preserve |
-| --- | --- | --- |
-| `memory` | typed memory — `EpisodicMemory`, `SemanticMemory`, `PreferenceMemory`, `ProceduralMemory`; profile-vs-model by provenance; `MemoryUpdateProposal` | Typed memory, **not** one vector blob. Every inference carries `confidence`, `evidence`, `source`, `last_updated`. The model never writes permanent memory directly — it proposes. |
-| `context` | `CurrentContext` (time, location, device, activity, calendar state, attention, urgency) | Context governs response length, notification timing, tool selection, and **whether to act at all**. |
-| `planning` | `Goal`, `Project`, `ActionPlan`, `ExecutionState`, `Commitment` ledger | Separate the static plan from durable, resumable execution state. Promises/obligations are first-class rows, not recovered by fuzzy search. |
-| `tools` | `ToolDefinition` with `risk_level`, `reversibility`, `cost`, `latency` | Rich metadata lets the planner and permission layer *reason* about tools instead of hard-coding integrations. |
-| `permissions` | `ActionPolicy` (confirmation, spend limits, approved recipients, time windows, reversibility requirement); `DecisionRecord` | Trust is an explicit artifact, not vague instructions. Record *why* consequential actions were taken, for explanation and debugging. |
-| `learning` | `FeedbackEvent` (explicit vs. implicit), preference updates | Every correction/behaviour becomes a structured learning signal that feeds `MemoryUpdateProposal`s. |
-| `orchestration` | `NotificationCandidate` + interruption policy; `EvaluationTrace` | Proactivity is *scored* before it interrupts: `value = usefulness × urgency × confidence − interruption_cost`. Trace runs end-to-end (Tier-2 operational data, no egress per ADR-0004) to evaluate the whole system, not just answer quality. |
+This revision reorients the build around **accumulation**: the assistant builds
+its model of the user primarily by observing, and the user steers it by
+inspecting and correcting. Everything else — including capability breadth — is
+sequenced behind that.
 
-## The first vertical
+## Design stances
 
-Do **not** materialise all of the above before anything runs. The first goal is a
-minimal but *complete* set of artifacts plus one closed loop:
+These are premises this roadmap sets, not measurements (ADR-0019 §3). Each
+becomes binding only when an ADR ratifies the slice that implements it; the
+first leg includes amending `VISION.md`, which today gestures at
+interaction-implicit signals but does not own passive observation, the
+sensor/actuator split, or the hub-and-spokes shape.
 
-Seven artifacts to start with:
+1. **Passive accumulation is the primary mechanism; explicit correction is the
+   steering wheel.** The assistant observes interactions (and, later, ingested
+   sources) and *proposes* beliefs with `OBSERVED`/`INFERRED` provenance,
+   sub-1.0 confidence, and evidence; deterministic policy disposes; the user
+   inspects, corrects, and thereby supersedes. This is the existing
+   propose/dispose chassis (ADR-0005/0021/0037) given its most important
+   producer — not a new architecture.
+2. **Sensors before actuators.** Read-only ingestion (calendar-shaped sources
+   that feed observation and context) comes early: it carries no
+   irreversibility and forces the networked-egress decision (ADR-0017 §3) at
+   its lowest-stakes end. Tools that *act* on the world arrive later and in
+   bulk (MCP-shaped), behind the contract decisions they force — ranking
+   (#241), parameter-schema enforcement (ADR-0029 §7), and the rest of the
+   egress conditions.
+3. **Hub and spokes, with one spoke for now.** One resident service — the hub —
+   owns all state and intelligence; every interface is a stateless client of
+   its API. Conversations, memory, and identity live server-side and are
+   device-agnostic. **The only spoke for the time being is the CLI on the hub's
+   own machine, over a loopback transport.** All large network constraints —
+   transport security, device identity and enrolment, push delivery, backup —
+   are deliberately deferred until a second physical device matters (see the
+   later arc). Slices landing before the hub exists must not bake in
+   single-shot or single-client assumptions.
+4. **Deepen before broaden.** VISION.md's answer to its own scope risk still
+   governs: narrow, complete loops over shallow breadth.
 
-1. `UserProfile` — **not built.** The only one of the seven with no type in
-   `core/types.py` and no line in the build sequence below, so nothing has been
-   flagging its absence. `core/types.py` distinguishes the profile from the
-   inferred user model in prose, and VISION §"Persistent User Model" makes it
-   central, but there is no artifact. See "What is still missing" below.
-2. `Memory` (typed) — `EpisodicMemory`/`SemanticMemory`/`PreferenceMemory`/
-   `ProceduralMemory` over a shared `MemoryBase`.
-3. `CurrentContext`
-4. `Goal`
-5. `ToolDefinition`
-6. `ActionPlan`
-7. `FeedbackEvent`
+## The accumulation loop
 
-Six of the seven exist. The closed loop below is proven end to end by an
-integration test, and runs in the application for a turn the user drives —
-except that the correction step has no route in through the CLI (see the
-`interfaces`/`app` entry in the build sequence).
-
-One closed learning loop that exercises `context` + `memory` + `learning` +
-`orchestration` together:
+The first vertical proved the *explicit* loop (correction → proposal → policy →
+memory → reuse; ADR-0022). This arc's goal is the *ambient* one:
 
 ```text
-conversation
-  → retrieve relevant user context
-  → generate a response or plan
-  → observe the user's correction
-  → propose a preference update (policy accepts it)
-  → use that preference successfully next time
+interaction (or ingested source)
+  → recorded as episodes
+  → observer proposes beliefs (OBSERVED/INFERRED, evidence = episode ids)
+  → policy disposes (ADR-0005), supersession law applies (ADR-0038/0040/0050)
+  → user inspects the model, corrects what is wrong
+  → correction supersedes; retrieval is better next turn
 ```
 
-Getting this one loop working end to end is worth more than wiring twenty
-services that never close a feedback loop.
+Proving this loop end to end — a belief the user never dictated, formed from
+observation, visible to them, correctable by them, and improving a later turn —
+is worth more than any breadth this roadmap defers.
 
-## Build sequence and status
+## The legs, in order
 
-Contracts-first, one subsystem per slice (per `CLAUDE.md`). Rough order:
+Each leg decomposes into ADR-backed slices when it is dispatched, contract
+first (`CLAUDE.md`). An exit test is stated in product terms, honouring the
+previous revision's rule: **a gap closes when a user can exercise the
+capability, not when a test can.** Legs 1–4 run inside the existing in-process
+application; the hub (leg 5) is decided early enough that they are written for
+it, and built before anything ambient or polling.
 
-- [x] **`models` — `ModelProvider`.** `PydanticAIProvider` over pydantic-ai
-      (ADR-0002).
-- [x] **`models` — `Embedder`.** On-device `FastEmbedEmbedder` plus a
-      deterministic `HashingEmbedder` for tests (ADR-0006). **The application
-      does not use it:** `app/composition.py` builds the store with
-      `HashingEmbedder`, and `Settings` has no embedder knob, so semantic recall
-      in the running system is not semantic. ADR-0006's "on-device default" is a
-      decision the composition root has never honoured.
-- [x] **`memory` — typed records + provenance** (ADR-0005 slice 1).
-- [x] **`memory` — propose/dispose policy** (`MemoryUpdateProposal`,
-      `MemoryPolicy`, `DefaultMemoryPolicy`; ADR-0005 slice 2).
-- [x] **`memory` — persistent store + write loop.** SQLite + `sqlite-vec`
-      semantic store (0600 perms, model/dim tagging) and a `MemoryIngestor`
-      closing conflict-detect → policy → persist (ADR-0006 slices 2–3).
-- [x] **`memory` — retention & data rights.** `expires_at` enforced at read time
-      (`get`/`search` hide expired) plus `purge_expired`; `delete`/`clear`/
-      `export` added to the `MemoryStore` contract (ADR-0007, satisfying ADR-0004
-      §6). Deferred: size caps, import, cross-tier keyring purge.
-- [x] **`context` — `CurrentContext` assembly.** Temporal `CurrentContext` +
-      `ContextProvider`, assembled from an internal `ContextSource` seam
-      (`ClockContextSource`), with graceful degradation (ADR-0008). Facets
-      (calendar, tasks, ...) added as optional fields when their sources land.
-- [x] **`planning` — `Goal`/`ActionPlan`/`ExecutionState`.** Capability-level
-      `ActionPlan` (frozen) separated from durable `ExecutionState`, written only
-      through compare-and-swap `StepTransition`s that a deterministic
-      `PlanExecution` validates; `InMemoryPlanStore` carries the ADR-0004 data
-      rights (ADR-0014). Since landed: a model-backed planner (`ModelBackedPlanner`,
-      ADR-0047) and a durable SQLite `PlanStore` (ADR-0049), so a parked step
-      survives a restart. Still deferred: step dependencies (`PlanStep` has no
-      `depends_on`; a plan is an ordered list), and exactly-once execution —
-      discharged by ADR-0029 as far as it honestly can be, and irreducible for an
-      `Idempotency.NONE` side-effecting tool, where a crash mid-effect still
-      yields an `INDETERMINATE` step for explicit resolution.
-- [x] **`tools` — `ToolDefinition` registry** with risk/reversibility metadata.
-      A frozen `ToolDefinition` where no safety field has a default, carrying
-      severity-ordered `RiskLevel`/`Reversibility`, ADR-0004 tier reach
-      (`reads`/`writes`/`discloses`, a ceiling rather than a per-call measure),
-      structured `ToolCost`, and an `Idempotency` guarantee; queried through a
-      query-only `ToolRegistry` that returns candidates without ranking them
-      (ADR-0016). Settles ADR-0014's capability vocabulary as an open,
-      registry-authoritative set. Since landed: invocation — the `ToolInvoker`
-      seam (ADR-0029), which inherits the egress rule unchanged from ADR-0017
-      (that ADR, not ADR-0004 §2, governs egress since it superseded §2's
-      clause) and does **not** designate the `tools/` egress seam: ADR-0017 §3's
-      conditions are unmet, so a networked tool is not yet permitted — and the
-      first local tools behind a default-registry factory (ADR-0048). Still
-      deferred:
-      **parameter-schema enforcement** — ADR-0029 §7 carries it forward for want
-      of a JSON Schema validator, so `parameters_schema` is declarative and the
-      invoker forwards parameters to the callable unchecked; the local tools
-      validate their own arguments, which is not the same guarantee. Also
-      **ranking** — the registry returns capable candidates ordered by tool id
-      (ADR-0016 §5), which is determinism, not preference, and there is no rule
-      for choosing among several
-      (#241); ADR-0053's selection-time alias layer resolves a *synonym* onto an
-      advertised capability, which is not ranking. Also deferred: registry
-      persistence (only `InMemoryToolRegistry` exists) and per-call data reach.
-- [x] **`permissions` — `ActionPolicy` + audit trail** (ADR-0004). A monotone
-      rule table (`ThresholdActionPolicy`) whose user thresholds cannot configure
-      it below the contract's floors, and a durable `SqliteAuditTrail` recording
-      every decision (ADR-0021, ADR-0036). A `CONFIRM` binds durably to its
-      execution and is recoverable after a restart (ADR-0044), with resolution
-      recovery and — where `confirmation_ttl` is configured, which it is not by
-      default — a lifetime deadline after which a stale answer is refused
-      (ADR-0059). Deferred from ADR-0004's
-      catalogue: spend limits, approved recipients, and time windows — the policy
-      rules today on risk and reversibility only.
-- [x] **`learning` — `FeedbackEvent` capture.** `FeedbackEvent` +
-      `FeedbackProcessor`; a deterministic processor turns explicit
-      correction/preference feedback into `USER_ASSERTED` memory proposals
-      (ADR-0009). The first closed loop (feedback → proposal → ingest → retrieve)
-      is proven by an integration test, and `LearningLoop.learn` automates the
-      wiring — though nothing calls it outside tests (see the façade entry).
-      Deferred: `RATING`/implicit signals, a model-backed processor.
-- [x] **`orchestration` — the closed learning loop.** `LearningLoop` wires
-      `ContextProvider`, `MemoryStore`, `MemoryPolicy`, `Planner` and
-      `FeedbackProcessor` by injection, seen only through their Protocols:
-      `respond()` runs intent → context → retrieval → planning, `learn()` runs
-      feedback → proposal → policy → memory, and a test proves a preference
-      learned from a correction is reused on the next turn (ADR-0022). Since
-      landed: the memory write path as a contract (`MemoryWriter`, ADR-0028), so
-      a ruling is applied behind that seam — with reinforcement and supersession
-      separated (ADR-0040) over the full contradiction set (ADR-0050).
-- [x] **`orchestration` — selection, permission and execution.** The stage that
-      ADR-0016 §7 said could not be written honestly until `Tool.invoke` existed:
-      capability → candidate tools → `ActionPolicy` ruling → invocation, joined
-      in one contract (ADR-0037), with the result the seam returns revalidated
-      before it is trusted (ADR-0051).
-- [x] **`orchestration`/`interfaces` — the façade and a runnable application.**
-      An `Engine` façade over the pipeline with opaque continuation tokens
-      (ADR-0042), which parks a `CONFIRM` and resumes it durably across a restart
-      (ADR-0052); a composition root in `app/` wiring the SQLite memory, plan and
-      audit stores; and a thin Typer CLI (`ask`, `resume`). **Not yet reachable
-      from any interface: `learn()`.** The façade exposes no way to submit a
-      `FeedbackEvent`, and the CLI has no feedback command, so the correction leg
-      of the first vertical's closed loop runs only in tests.
-- [ ] Later: `NotificationCandidate`/proactivity + interruption policy,
-      `EvaluationTrace`/eval harness, `Commitment` ledger, a derived user-model
-      projection ADR. None of these has a type in `core/types.py`; each still
-      needs decomposing into ADR-backed slices before it is dispatchable.
-      `DecisionRecord` is **delivered under another name** — `PermissionDecision`
-      plus the `AuditTrail` contract (ADR-0021) is the artifact this line meant.
+1. **The user model, visible.** The `UserProfile` ADR — what is asserted and
+   user-owned versus inferred and revisable, and which the retrieval path
+   reads — designed together with the observer (leg 3), since the inferred side
+   is otherwise an empty ledger. The `VISION.md` amendment ratifying the design
+   stances above. An inspection surface in the CLI: list, show, correct, and
+   forget what the assistant believes, with provenance and confidence visible —
+   the `MemoryStore` contract already carries `delete`/`export` (ADR-0007) but
+   no interface reaches them. *Exit: the user can read the assistant's beliefs
+   about them, see why each is held, and kill any of them.*
+2. **Conversation and episodic capture.** A conversation becomes a first-class,
+   server-side entity — device-agnostic, resumable from any future spoke — and
+   every turn is durably recorded as `EpisodicMemory`. This is the substrate
+   observation reads; `Provenance.evidence` was designed to cite episode ids
+   (ADR-0005). Needs its own ADR: conversation identity and retention are new
+   `core` surface. *Exit: the user can continue yesterday's conversation, and
+   episodes exist that an observer could cite.*
+3. **The observer.** A model-backed producer that reads episodes and proposes
+   `OBSERVED`/`INFERRED` memories through the existing `MemoryPolicy` gate. Its
+   ADR must decide, explicitly: the scope of observation and what justifies
+   retention (VISION.md's selective-memory principle and ADR-0004's posture are
+   the constraints, and the propose/dispose gate plus provenance-visible
+   inspection is the mechanism that makes watching trustworthy); and **which
+   model reads the raw episodes** — the episodic stream is the most sensitive
+   data the system holds, the on-device embedder (ADR-0006/0024) is the
+   precedent, and the router seam (ADR-0013) makes a local/small-model route a
+   named option rather than an accident of configuration. *Exit: the assistant
+   holds a correct belief the user never told it, and the user can see where it
+   came from.*
+4. **Epistemic soundness.** Observation mass-produces exactly the
+   low-confidence, conflicting beliefs the current write path mishandles at the
+   edges: a memory `ASK_USER` ruling has no resolution path and the conflict is
+   silently dropped (#423); a correction contradicting more inferences than
+   `conflict_limit` leaves the surplus live (#313/#314); bounded validity
+   windows have no ratified retirement semantics (#306, needs an ADR). These
+   land before the observer runs at volume. *Exit: a conflicting or
+   many-conflict correction leaves the store consistent, and a deferred
+   question reaches the user instead of vanishing.*
+5. **The hub.** The resident service, as two decisions. The **service ADR**:
+   process model and lifecycle (graceful drain of in-flight steps, supervision,
+   upgrade-with-state discipline — of which the embedder-change migration,
+   #425, is the first instance), and an internal scheduler that finally gives a
+   caller to `purge_expired` (ADR-0007), confirmation deadlines (ADR-0059,
+   whose wall-clock fragility #277 a resident process makes urgent), and later
+   consolidation. The **local API ADR**: the Engine façade (ADR-0042) behind a
+   loopback transport with the CLI as its first client — the spoke — with DTO
+   and versioning choices made as if remote spokes exist, because they will.
+   Hardening tail attached: the execution-id nonce under multi-process reality
+   (#305), and the stores' concurrent-access posture. *Exit: the assistant is
+   running before the user arrives and after they leave, and the CLI is merely
+   a client of it.*
+6. **Sensors.** The first read-only ingestion source or two, feeding both
+   context facets (ADR-0008 anticipated calendar/tasks as optional fields) and
+   the observer's episode stream. This is where ADR-0017 §3's conditions for a
+   networked seam are finally met or consciously revised — at read-only stakes.
+   MCP-shaped clients are welcome here, but as sensors only; actuators stay in
+   the later arc. *Exit: the assistant knows something true about the user's
+   day it was never told, from a source the user granted.*
+7. **Memory at volume.** Consolidation (many episodes distilled into few
+   durable beliefs, run by the hub's scheduler), confidence decay and salience
+   so unreinforced beliefs age instead of accumulating, the size caps ADR-0007
+   deferred, retrieval ranking under load, and the re-embedding migration
+   (#425). *Exit: months of use make retrieval better, not slower and noisier.*
+8. **Minimal evaluation.** The `EvaluationTrace` slice — Tier-2 operational
+   data, no egress (ADR-0004) — plus a first few of VISION.md's success
+   measures: memory precision, correction rate, repeated-explanation rate. This
+   is also the hub's operational telemetry; a process that runs for weeks
+   cannot be debugged by rerunning it. *Exit: "is the user model getting more
+   accurate?" is answered by data, not opinion.*
 
-## What is still missing
+## The later arc, in order
 
-The build sequence above tracks what each *slice* deferred. This section tracks
-what the **product** lacks, which is a different list — every item here is
-machinery that exists but that a real user cannot reach, or an artifact the
-first vertical named and never got. Keep it honest: an entry leaves this list
-when a user can exercise it, not when a test can.
+Named so near-term slices leave room for them; none is scheduled, and each
+still needs decomposing into ADR-backed slices.
 
-- **`UserProfile` does not exist.** Artifact #1 of the seven. Needs an ADR
-  deciding what the profile is (asserted, user-owned) versus what the inferred
-  user model is (derived from memory, revisable), and which one the retrieval
-  path reads. Plausibly subsumes the "derived user-model projection ADR" above.
-- **The correction leg of the loop has no interface.** `LearningLoop.learn`
-  works; `Engine` does not expose it and the CLI cannot reach it. The product's
-  central claim — it learns from your corrections — is currently test-only.
-- **Production memory retrieval is not semantic.** The composition root wires
-  the deterministic test embedder (see the `Embedder` entry).
-- **No consequential tool.** The permission path itself *is* exercised in
-  practice — `current_time` is `LOW` risk and runs straight through, while
-  `recall_memory` is `MEDIUM` and so parks for confirmation under the default
-  `confirm_at_risk`, driving the durable park/resume machinery
-  (ADR-0044/0052/0059) for real. What no local tool exercises is the rest of the
-  scale: both are read-only and `REVERSIBLE`, so nothing writes, nothing is
-  irreversible, nothing discloses, and the `confirm_at_reversibility` threshold
-  and the contract's disclosure floor have no live case.
-- **No ranking among capable tools** (#241). Selection is not arbitrary when two
-  tools match — `StepRunner` returns `AMBIGUOUS_CAPABILITY` and leaves the step
-  `PENDING`, deliberately writing nothing (ADR-0037 §1). The consequence is that
-  a second tool advertising a capability *stalls* the step instead of resolving
-  it; ranking is the missing mechanism.
-- **Context has one facet.** `ClockContextSource` only — no calendar, tasks,
-  location, device, or attention source, so "whether to act at all" is decided
-  on time of day alone.
+- **Remote spokes.** The bridge deferred by stance 3, crossed when a second
+  physical device matters: network transport and its security posture (an
+  overlay network keeping the API off the public internet is the leading
+  candidate), device identity and enrolment/revocation — which then feeds three
+  existing subsystems: a context facet (device is a VISION §Principle-4 input),
+  a permission input (which devices may approve consequential actions —
+  ADR-0004's deferred catalogue gains a sibling), and the audit trail's
+  "approved from where" — a server-push delivery seam, and encrypted
+  backup/restore, which is also the honest test of VISION.md's portable
+  context-graph claim. ADR-0042's opaque continuation tokens already support
+  cross-device park/resume unchanged.
+- **Actuators, in bulk.** MCP-shaped tool breadth, behind the decisions it
+  forces: ranking among capable tools (#241 — today a second capable tool
+  stalls the step by design, ADR-0037 §1), parameter-schema enforcement
+  (ADR-0029 §7), and the full egress conditions (ADR-0017). This is also where
+  the permission machinery finally earns its depth: nothing registered today is
+  irreversible, disclosing, or consequential.
+- **Proactivity.** `NotificationCandidate` and the interruption policy — the
+  one proposal artifact of the propose/dispose principle still unbuilt. It
+  structurally requires the hub (something must be awake to notice) and a
+  delivery channel (remote spokes' push seam).
+- **An engagement surface.** The accumulation flywheel needs daily use, and
+  nothing on this roadmap yet makes the assistant compelling daily. This entry
+  is deliberately undesigned; it is named so its absence is a known debt of the
+  plan rather than an oversight.
+- **Commitment ledger, full evaluation harness, portable context graph.**
 
-## Deliberately deferred
+## Parked
 
-- **All 15 artifacts at once.** Start with the seven and one loop.
-- **A single mega-commit to `core/types.py`.** Each cross-boundary type is a
-  Protocol-adjacent decision and lands as its own ADR-backed slice.
-- **Proactivity, evaluation harness, commitment ledger.** Valuable, but they
-  follow the first working loop rather than precede it. (Decision records are no
-  longer on this list — they landed as `PermissionDecision`/`AuditTrail`.)
+- **The design-debt plans** (record mutability #41, enforcement scope, ADR
+  governance): queued before this reorientation, explicitly parked behind the
+  accumulation legs now. Revisit after leg 3 lands.
+- **The test-hardening issue backlog** stays in the tracker and is worked
+  opportunistically; none of it is scheduled here. The tracker, not this
+  document, owns that list (ADR-0015/0019).
+- **Ranking, parameter schemas, networked actuators** — parked *with intent*
+  behind the MCP milestone above, not forgotten: they are contract decisions
+  that become due the moment actuators do.
+
+## Gap register
+
+Where each VISION.md promise stands against this plan — stated as pointers to
+the legs that close them, so the claim decays into the tracker and the ADR
+ledger rather than into this document.
+
+| VISION promise | What closes the gap |
+| --- | --- |
+| Understood — a persistent user model | Legs 1–3 (profile ADR, capture, observer) |
+| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract) |
+| More Capable Over Time | Delivered for explicit correction (ADR-0009/0022); legs 3–4 and 7 extend it to observation |
+| Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on remote spokes |
+| Supported — acts across tools | Later arc (actuators); deliberately last |
+| Proactivity that earns its place | Later arc; requires the hub |
+| Free to choose models | Delivered (ADR-0002/0011/0013/0061/0062) |
+| Observability and evaluation | Leg 8, then the full harness |
