@@ -289,3 +289,52 @@ def test_build_engine_touches_no_disk_when_config_validation_fails(tmp_path: Pat
     # The build failed before touching disk: no data directory, and therefore none
     # of the connection-owning stores' files.
     assert not absent.exists()
+
+
+@pytest.mark.parametrize(
+    ("bad_settings", "match"),
+    [
+        pytest.param(
+            Settings.model_construct(timezone="Definitely/Not_A_Zone"),
+            "unknown timezone",
+            id="unknown-timezone",
+        ),
+        pytest.param(
+            Settings.model_construct(working_hours_start=20, working_hours_end=8),
+            "invalid working-hours window",
+            id="invalid-working-hours",
+        ),
+    ],
+)
+def test_a_context_config_failure_touches_no_disk_either(
+    tmp_path: Path, bad_settings: Settings, match: str
+) -> None:
+    """The *other* resource-free step — the context provider — also fails before disk (#403).
+
+    #372 hoisted two pure-config steps above the data directory: the model seam's
+    vendor check and the context provider's construction. The sibling test above
+    covers the model-seam half; this covers the context half. Building the
+    ``AssemblingContextProvider`` constructs a ``ClockContextSource``, which
+    validates its locale at construction and raises ``ConfigurationError`` on an
+    unknown timezone or an empty working-hours window
+    (``ai_assistant.context.sources``). Because that step runs above the
+    ``mkdir``/store-opening block, such a failure must leave the filesystem
+    untouched — no data directory and none of the three SQLite files.
+
+    ``Settings`` validates both fields at load, so a well-formed instance can never
+    carry a bad one into ``build_engine`` — unlike the vendor check, there is no
+    natural "load-valid but build-invalid" spec to exploit. ``model_construct``
+    (pydantic's validation-bypassing constructor) hands ``build_engine`` the exact
+    out-of-contract configuration that only its hoisted context step would catch,
+    with every other field left at its default so the model seam ahead of it
+    passes and the context step is genuinely the one that fails.
+    """
+    absent = tmp_path / "state"
+    assert not absent.exists()
+
+    with pytest.raises(ConfigurationError, match=match):
+        build_engine(bad_settings, data_dir=absent)
+
+    # The build failed at the context step, before touching disk: no data
+    # directory, and therefore none of the connection-owning stores' files.
+    assert not absent.exists()
