@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
@@ -277,6 +278,41 @@ def test_a_failed_result_round_trips_through_json() -> None:
     result = ToolResult(
         outcome=ToolOutcome.INDETERMINATE,
         failure=ToolFailure(kind=ToolFailureKind.TIMED_OUT, message="no answer in time"),
+    )
+
+    assert ToolResult.model_validate(result.model_dump(mode="json")) == result
+
+
+# --- ToolResult.output with no JSON encoding (issue #121, #409) -------------
+# output is a FrozenJsonValue holder, matching StepExecution.output exactly, so
+# it inherits _freeze_json's refusal of a value that satisfies its Python type
+# but has no portable encoding. #401 pinned that for PlanStep.parameters and
+# StepExecution.output; this carrier carries the same guarantee and had no
+# field-specific regression until #409.
+
+
+def test_a_successful_result_output_with_a_lone_surrogate_is_rejected() -> None:
+    """A lone surrogate is a ``str`` with no UTF-8 encoding (ADR-0021 §1)."""
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"body": "\ud800"})
+
+
+def test_a_successful_result_output_with_an_unrenderable_integer_is_rejected() -> None:
+    """``json.dumps`` renders an int through ``str()``; CPython refuses one past
+    its integer-string conversion limit, so the value has no JSON encoding.
+
+    ``pinned_int_str_digits`` holds the limit at the default so ``10**5000``
+    stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
+    (#406)."""
+    with pinned_int_str_digits(), pytest.raises(ValidationError, match="no JSON encoding"):
+        ToolResult(outcome=ToolOutcome.SUCCEEDED, output={"n": 10**5000})
+
+
+def test_an_ordinary_result_output_still_round_trips() -> None:
+    """The bound is "can it be encoded", not "is it big" or "is it astral"."""
+    result = ToolResult(
+        outcome=ToolOutcome.SUCCEEDED,
+        output={"n": 10**100, "emoji": "\U0001f389 done"},
     )
 
     assert ToolResult.model_validate(result.model_dump(mode="json")) == result

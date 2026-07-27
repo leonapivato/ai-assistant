@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
@@ -589,8 +590,12 @@ def test_step_parameters_with_an_unrenderable_integer_are_rejected(
     parameters: dict[str, Any],
 ) -> None:
     """``json.dumps`` renders an int through ``str()``; CPython refuses one past
-    its integer-string conversion limit, so the value has no JSON encoding."""
-    with pytest.raises(ValidationError, match="no JSON encoding"):
+    its integer-string conversion limit, so the value has no JSON encoding.
+
+    ``pinned_int_str_digits`` holds the limit at the default so ``10**5000``
+    stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
+    (#406)."""
+    with pinned_int_str_digits(), pytest.raises(ValidationError, match="no JSON encoding"):
         PlanStep(id="s1", intent="i", capability="c", parameters=parameters)
 
 
@@ -687,6 +692,39 @@ def test_transition_carries_no_approval_ref_requirement_of_its_own() -> None:
     Legality against the *current* status is the tracker's job, not the type's.
     """
     assert _transition(StepStatus.RUNNING).approval_ref is None
+
+
+# --- StepTransition output with no JSON encoding (issue #121, #409) ------
+# StepTransition.output is a FrozenJsonValue holder, exactly like
+# StepExecution.output, so it inherits _freeze_json's refusal of a value that
+# satisfies its Python type but has no portable encoding. #401 pinned that for
+# PlanStep.parameters and StepExecution.output; this carrier carries the same
+# guarantee and had no field-specific regression until #409.
+
+
+def test_a_transition_output_with_a_lone_surrogate_is_rejected() -> None:
+    """A lone surrogate is a ``str`` with no UTF-8 encoding (ADR-0021 §1)."""
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        _transition(StepStatus.SUCCEEDED, output={"body": "\ud800"})
+
+
+def test_a_transition_output_with_an_unrenderable_integer_is_rejected() -> None:
+    """``json.dumps`` renders an int through ``str()``; CPython refuses one past
+    its integer-string conversion limit, so the value has no JSON encoding.
+
+    ``pinned_int_str_digits`` holds the limit at the default so ``10**5000``
+    stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
+    (#406)."""
+    with pinned_int_str_digits(), pytest.raises(ValidationError, match="no JSON encoding"):
+        _transition(StepStatus.SUCCEEDED, output={"n": 10**5000})
+
+
+def test_an_ordinary_transition_output_still_round_trips() -> None:
+    """The bound is "can it be encoded", not "is it big" or "is it astral"."""
+    transition = _transition(
+        StepStatus.SUCCEEDED, output={"n": 10**100, "emoji": "\U0001f389 done"}
+    )
+    assert TypeAdapter(StepTransition).validate_json(transition.model_dump_json()) == transition
 
 
 # --- GoalDeletion -------------------------------------------------------

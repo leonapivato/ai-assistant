@@ -14,6 +14,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 from pydantic import ConfigDict, ValidationError
 
 from ai_assistant.core.types import (
@@ -161,9 +162,7 @@ def test_a_payload_with_no_utf8_encoding_is_refused(parameters: dict[str, Any]) 
     [{"n": 10**5000}, {"nested": {"n": -(10**5000)}}, {"items": [10**5000]}],
     ids=["a value", "nested in a mapping", "inside a sequence"],
 )
-def test_a_payload_with_an_unrenderable_integer_is_refused(
-    parameters: dict[str, Any],
-) -> None:
+def test_a_payload_with_an_unrenderable_integer_is_refused(parameters: dict[str, Any]) -> None:
     """The same class as the surrogate, reached through a different type.
 
     ``json.dumps`` renders an ``int`` through ``str()``, and CPython refuses
@@ -172,8 +171,12 @@ def test_a_payload_with_an_unrenderable_integer_is_refused(
     :func:`_freeze_json` runs the real encoder rather than enumerating the types
     that can fail; an enumeration is a list someone has to keep complete, and
     this is the case a first attempt at one missed.
+
+    ``pinned_int_str_digits`` holds the limit at the default so ``10**5000``
+    stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
+    (#406).
     """
-    with pytest.raises(ValidationError, match="no JSON encoding"):
+    with pinned_int_str_digits(), pytest.raises(ValidationError, match="no JSON encoding"):
         ActionRequest(tool=tool(), parameters=parameters)
 
 
