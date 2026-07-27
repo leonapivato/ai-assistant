@@ -109,6 +109,19 @@ The system should develop a structured, evolving model of the user's:
 
 Every inference should have evidence, confidence, scope, and a way to be corrected.
 
+That model should be built chiefly by **observation**, not by interrogation. An
+assistant that learns only what it is explicitly told reproduces the failure this
+project exists to remove: the user explaining themselves over and over. So the
+system should form beliefs from what it sees — the interactions it takes part in,
+and, where the user grants them, read-only sources it may ingest. Observation
+matters most at the beginning, when nothing has been asserted yet and the
+assistant would otherwise have nothing to work from.
+
+Explicit correction is the steering wheel rather than the engine. What the user
+states outranks what the assistant inferred, and stating something is how the
+user takes a belief back. Observation supplies the volume; correction supplies
+the direction.
+
 ### 2. Memory Must Be Typed and Intentional
 
 Memory should not be one undifferentiated vector database.
@@ -123,6 +136,15 @@ Long-term memory is organized into typed kinds:
 Stable profile information is not a separate store but a matter of provenance: facts the user asserted directly, held with full confidence, versus beliefs the assistant inferred with lower confidence. Some state often mistaken for memory lives in adjacent subsystems instead — active projects and commitments in planning, and temporary situational context in the context engine.
 
 The assistant should remember selectively, detect conflicts, update stale information, and avoid preserving sensitive or incidental details without justification.
+
+Observing broadly and retaining broadly are different things, and the distance
+between them is where this principle does its work. What the assistant observes
+is *proposed*; a deterministic policy decides what is kept; and what is kept
+carries its provenance, its confidence, and the evidence behind it. The user can
+read the resulting beliefs, see why each is held, correct any of them, and delete
+any of them. Watching is trustworthy only on those terms — a system that observes
+with no gate in front of memory and no inspection surface behind it is
+surveillance, not personalization.
 
 ### 3. Trust Must Be Built Into the Architecture
 
@@ -140,6 +162,14 @@ The orchestration layer should explicitly define:
 - clear recovery from mistakes.
 
 Low-risk, reversible actions may become more automatic. High-impact actions should remain inspectable and permissioned.
+
+Reading the world and acting on it are governed separately. A **sensor** — a
+read-only source the user has connected, feeding situational context and
+observation — is granted, scoped, and revocable, but it changes nothing outside
+the assistant. An **actuator** — a tool that sends, buys, schedules, or modifies —
+carries consequences that may be irreversible, and answers to the approval,
+limit, and audit machinery above. Collapsing the two into one notion of
+"integration" would either over-restrict reading or under-restrict acting.
 
 ### 4. Context Determines Usefulness
 
@@ -209,6 +239,22 @@ Language models may propose plans, interpret information, and generate language,
 
 The system should use probabilistic intelligence without making critical state probabilistic.
 
+### 8. The Assistant Is a Resident Service, Not an Application
+
+The assistant should exist between interactions, not only during them.
+
+One resident service — the hub — should own the state and the intelligence:
+memory, the user model, conversations, plans, permissions, and the work that
+happens while nobody is watching. Every interface should be a **stateless
+client** of that service. A conversation begun in one place should be resumable
+in another, because the conversation lives in the hub rather than in whatever
+displayed it.
+
+Several of the promises above depend on this shape. Proactivity needs something
+awake to notice. Continuity needs identity and context to belong to the user
+rather than to a device. And keeping critical state deterministic (Principle 7)
+is far easier when exactly one process owns it.
+
 ---
 
 ## Core System Capabilities
@@ -239,7 +285,7 @@ The ability to decompose requests into steps, choose tools, request approval whe
 
 ### Tool and Integration Layer
 
-A consistent interface to services such as email, calendar, notes, messaging, files, task systems, smart devices, health platforms, vehicles, and future integrations.
+A consistent interface to services such as email, calendar, notes, messaging, files, task systems, smart devices, health platforms, vehicles, and future integrations. Read-only sources, which feed context and observation, are governed separately from tools that act on the world (Principle 3), even where both reach the same service.
 
 ### Permission and Autonomy System
 
@@ -247,7 +293,7 @@ Explicit policies governing what the assistant may read, suggest, draft, modify,
 
 ### Feedback and Learning Loop
 
-A system for converting corrections, edits, ignored suggestions, repeated choices, and explicit ratings into carefully scoped improvements.
+A system for converting corrections, edits, ignored suggestions, repeated choices, and explicit ratings into carefully scoped improvements. Its primary input is observation — the interactions the assistant takes part in, and the read-only sources the user has connected — with explicit correction as the signal that outranks everything else.
 
 ### Proactive Assistance
 
@@ -366,6 +412,12 @@ At least initially, the project is not intended to:
 - maximize engagement through excessive notifications;
 - automate tasks merely because automation is technically possible;
 - lock the user's data to one model vendor.
+
+The limit on inference and retention bounds the observation principle
+(Principle 1) rather than contradicting it. The assistant should watch in order
+to learn; what it keeps is what passes the memory gate, carries its evidence, and
+can be inspected, corrected, and deleted. Broad observation is not a licence for
+broad retention.
 
 The objective is dependable assistance, not artificial omniscience.
 
