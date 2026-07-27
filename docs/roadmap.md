@@ -15,24 +15,24 @@ artifacts and one closed learning loop. That arc's record lives in this file's
 git history and, authoritatively, in the ADR ledger and the commit log; it is
 not repeated here (ADR-0019, ADR-0067).
 
-The reorientation rests on an argument about that ledger, read end to end. Its
-decisions cluster around trust and state machinery — permissions, durable
-confirmation, audit, cancellation and atomicity guarantees, model-agnosticism
-as a tested property (ADR-0021/0036/0044/0059 and the hardening decisions
-around them, ADR-0061/0062). The thing VISION.md names as the moat — **an
-accumulated, user-controlled model of one person** — has vocabulary in the
-ledger but no engine: ADR-0005 ratified `OBSERVED` and `INFERRED` provenance
-and ADR-0038/0040/0050 the supersession law for how inferred beliefs lose to
-user assertions, yet the only belief *producer* any ADR has ratified is
-explicit feedback (ADR-0009), no decision records interactions as episodes,
-and no ratified interface lets the user read what the assistant believes. A
-system that learns only what the user explicitly dictates is the "repeatedly
-explain preferences" failure VISION.md opens by condemning.
+The reorientation is a priority decision, not a status report. The first arc
+invested in trust and state machinery — permissions, durable confirmation,
+audit, cancellation and atomicity guarantees, model-agnosticism as a tested
+property (ADR-0021/0036/0044/0059 and the hardening decisions around them,
+ADR-0061/0062). VISION.md names the moat elsewhere: **an accumulated,
+user-controlled model of one person**. ADR-0005 gave that model its vocabulary
+(`OBSERVED`/`INFERRED` provenance), ADR-0038/0040/0050 its supersession law
+(inferred beliefs lose to user assertions), and ADR-0009 its first belief
+producer — explicit feedback, the user dictating facts about themselves.
 
-This revision reorients the build around **accumulation**: the assistant builds
-its model of the user primarily by observing, and the user steers it by
-inspecting and correcting. Everything else — including capability breadth — is
-sequenced behind that.
+This revision's premise is that the decisions worth making next are the ones
+that put accumulated beliefs behind that vocabulary *without* dictation — an
+episode record for observation to read, an observation producer behind the
+propose/dispose gate, and an inspection surface that keeps the result the
+user's to steer — because a system that learns only by dictation is the
+"repeatedly explain preferences" failure VISION.md opens by condemning.
+Everything else, including capability breadth, is sequenced behind
+**accumulation**.
 
 ## Design stances
 
