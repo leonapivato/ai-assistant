@@ -11,22 +11,23 @@ the ADR wins.
 ## Why this revision exists
 
 The previous revision of this document tracked the first vertical — seven core
-artifacts and one closed learning loop — to completion. That record lives in
-this file's git history and, authoritatively, in the ADR ledger and the commit
-log; it is not repeated here (ADR-0019, ADR-0067).
+artifacts and one closed learning loop. That arc's record lives in this file's
+git history and, authoritatively, in the ADR ledger and the commit log; it is
+not repeated here (ADR-0019, ADR-0067).
 
-What that arc produced is lopsided in a specific way. The trust and state
-machinery — permissions, durable confirmation, audit, cancellation and
-atomicity guarantees, model-agnosticism as a tested property — is deep
-(ADR-0021/0036/0044/0059 and the hardening decisions around them, ADR-0061/0062).
-The thing VISION.md names as the moat — **an accumulated, user-controlled model
-of one person** — has vocabulary but no engine: `MemorySource` has carried
-`OBSERVED` and `INFERRED` provenance since ADR-0005, supersession law for how
-inferred beliefs lose to user assertions is ratified (ADR-0038/0040/0050), yet
-no code path produces an observed or inferred record, no interaction is ever
-recorded, and the user has no way to see what the assistant believes. The loop
-that exists learns only what the user explicitly dictates (ADR-0009), which is
-the "repeatedly explain preferences" failure VISION.md opens by condemning.
+The reorientation rests on an argument about that ledger, read end to end. Its
+decisions cluster around trust and state machinery — permissions, durable
+confirmation, audit, cancellation and atomicity guarantees, model-agnosticism
+as a tested property (ADR-0021/0036/0044/0059 and the hardening decisions
+around them, ADR-0061/0062). The thing VISION.md names as the moat — **an
+accumulated, user-controlled model of one person** — has vocabulary in the
+ledger but no engine: ADR-0005 ratified `OBSERVED` and `INFERRED` provenance
+and ADR-0038/0040/0050 the supersession law for how inferred beliefs lose to
+user assertions, yet the only belief *producer* any ADR has ratified is
+explicit feedback (ADR-0009), no decision records interactions as episodes,
+and no ratified interface lets the user read what the assistant believes. A
+system that learns only what the user explicitly dictates is the "repeatedly
+explain preferences" failure VISION.md opens by condemning.
 
 This revision reorients the build around **accumulation**: the assistant builds
 its model of the user primarily by observing, and the user steers it by
@@ -37,9 +38,9 @@ sequenced behind that.
 
 These are premises this roadmap sets, not measurements (ADR-0019 §3). Each
 becomes binding only when an ADR ratifies the slice that implements it; the
-first leg includes amending `VISION.md`, which today gestures at
-interaction-implicit signals but does not own passive observation, the
-sensor/actuator split, or the hub-and-spokes shape.
+first leg includes amending `VISION.md` so that it owns passive observation,
+the sensor/actuator split, and the hub-and-spokes shape, none of which its
+interaction-implicit learning language covers.
 
 1. **Passive accumulation is the primary mechanism; explicit correction is the
    steering wheel.** The assistant observes interactions (and, later, ingested
@@ -69,8 +70,8 @@ sensor/actuator split, or the hub-and-spokes shape.
 
 ## The accumulation loop
 
-The first vertical proved the *explicit* loop (correction → proposal → policy →
-memory → reuse; ADR-0022). This arc's goal is the *ambient* one:
+ADR-0022 ratified the *explicit* loop (correction → proposal → policy →
+memory → reuse). This arc's goal is the *ambient* one:
 
 ```text
 interaction (or ingested source)
@@ -100,8 +101,8 @@ it, and built before anything ambient or polling.
    is otherwise an empty ledger. The `VISION.md` amendment ratifying the design
    stances above. An inspection surface in the CLI: list, show, correct, and
    forget what the assistant believes, with provenance and confidence visible —
-   the `MemoryStore` contract already carries `delete`/`export` (ADR-0007) but
-   no interface reaches them. *Exit: the user can read the assistant's beliefs
+   this is where the `delete`/`export` obligations ADR-0007 put on the
+   `MemoryStore` contract first meet an interface. *Exit: the user can read the assistant's beliefs
    about them, see why each is held, and kill any of them.*
 2. **Conversation and episodic capture.** A conversation becomes a first-class,
    server-side entity — device-agnostic, resumable from any future spoke — and
@@ -126,16 +127,18 @@ it, and built before anything ambient or polling.
    low-confidence, conflicting beliefs the current write path mishandles at the
    edges: a memory `ASK_USER` ruling has no resolution path and the conflict is
    silently dropped (#423); a correction contradicting more inferences than
-   `conflict_limit` leaves the surplus live (#313/#314); bounded validity
-   windows have no ratified retirement semantics (#306, needs an ADR). These
+   `conflict_limit` leaves the surplus live (#313/#314); and, while ADR-0045 §4
+   ratifies retirement itself (supersession closes the prior record's window),
+   the semantics for retiring a *producer-set bounded* window — clamp, refuse,
+   or never-lived — are undecided and need their own ADR (#306). These
    land before the observer runs at volume. *Exit: a conflicting or
    many-conflict correction leaves the store consistent, and a deferred
    question reaches the user instead of vanishing.*
 5. **The hub.** The resident service, as two decisions. The **service ADR**:
    process model and lifecycle (graceful drain of in-flight steps, supervision,
    upgrade-with-state discipline — of which the embedder-change migration,
-   #425, is the first instance), and an internal scheduler that finally gives a
-   caller to `purge_expired` (ADR-0007), confirmation deadlines (ADR-0059,
+   #425, is the first instance), and an internal scheduler — the home for
+   `purge_expired` (ADR-0007), confirmation deadlines (ADR-0059,
    whose wall-clock fragility #277 a resident process makes urgent), and later
    consolidation. The **local API ADR**: the Engine façade (ADR-0042) behind a
    loopback transport with the CLI as its first client — the spoke — with DTO
@@ -180,11 +183,12 @@ still needs decomposing into ADR-backed slices.
   context-graph claim. ADR-0042's opaque continuation tokens already support
   cross-device park/resume unchanged.
 - **Actuators, in bulk.** MCP-shaped tool breadth, behind the decisions it
-  forces: ranking among capable tools (#241 — today a second capable tool
-  stalls the step by design, ADR-0037 §1), parameter-schema enforcement
-  (ADR-0029 §7), and the full egress conditions (ADR-0017). This is also where
-  the permission machinery finally earns its depth: nothing registered today is
-  irreversible, disclosing, or consequential.
+  forces: ranking among capable tools (#241 — a second capable tool stalls the
+  step by design, ADR-0037 §1), parameter-schema enforcement (ADR-0029 §7),
+  and the full egress conditions (ADR-0017). This is also where the permission
+  machinery finally earns its depth: ADR-0048's first local tools are read-only
+  and reversible, so the irreversibility and disclosure floors have had no live
+  case.
 - **Proactivity.** `NotificationCandidate` and the interruption policy — the
   one proposal artifact of the propose/dispose principle still unbuilt. It
   structurally requires the hub (something must be awake to notice) and a
@@ -217,9 +221,9 @@ ledger rather than into this document.
 | --- | --- |
 | Understood — a persistent user model | Legs 1–3 (profile ADR, capture, observer) |
 | In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract) |
-| More Capable Over Time | Delivered for explicit correction (ADR-0009/0022); legs 3–4 and 7 extend it to observation |
+| More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation |
 | Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on remote spokes |
 | Supported — acts across tools | Later arc (actuators); deliberately last |
 | Proactivity that earns its place | Later arc; requires the hub |
-| Free to choose models | Delivered (ADR-0002/0011/0013/0061/0062) |
+| Free to choose models | ADR-0002/0011/0013/0061/0062; no leg needed |
 | Observability and evaluation | Leg 8, then the full harness |
