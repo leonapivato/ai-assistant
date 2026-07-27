@@ -316,3 +316,13 @@ def test_an_ordinary_result_output_still_round_trips() -> None:
     )
 
     assert ToolResult.model_validate(result.model_dump(mode="json")) == result
+
+
+def test_a_scalar_result_output_is_accepted() -> None:
+    """output is a single ``FrozenJsonValue``, not a mapping: a bare scalar is a
+    valid output, so a regression narrowing the field to a mapping is caught.
+    """
+    result = ToolResult(outcome=ToolOutcome.SUCCEEDED, output="m-1")
+
+    assert result.output == "m-1"
+    assert ToolResult.model_validate(result.model_dump(mode="json")) == result
