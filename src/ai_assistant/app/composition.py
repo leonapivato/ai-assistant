@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
-from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.core.config import EmbedderKind
+from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import DefaultMemoryPolicy, MemoryIngestor, SqliteMemoryStore
 from ai_assistant.models import (
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.config import Settings
+    from ai_assistant.core.protocols import Embedder
 
 #: Where the connection-owning SQLite stores live by default. A per-user directory
 #: rather than a value read from the environment (``core.config.Settings`` owns
@@ -62,11 +64,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
 
     **Configuration is validated before any resource is opened (#372).** The
     resource-free construction — the model seam (which checks every configured
-    spec's vendor, ADR-0062 §2) and the context provider (which reads only
-    settings) — runs *above* the data directory and the stores, so a bad
-    configuration fails without ever touching disk: no directory is created and no
-    database file is written for a build that was never going to succeed. Only the
-    steps that genuinely need an open store stay below that line.
+    spec's vendor, ADR-0062 §2), the context provider (which reads only settings),
+    and the embedder (whose on-device default checks the vendored model artifact,
+    ADR-0006 §2, ADR-0024) — runs *above* the data directory and the stores, so a
+    bad configuration fails without ever touching disk: no directory is created and
+    no database file is written for a build that was never going to succeed. Only
+    the steps that genuinely need an open store stay below that line.
 
     **It owns the resources it opens.** The three connection-owning stores are
     opened first among the resources; if any *later* construction fails, the ones
@@ -104,7 +107,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             ``OSError`` so an adapter's ``AssistantError`` boundary surfaces it
             rather than letting it escape as a traceback. Or if a configured model
             spec names a vendor pydantic-ai does not know or whose optional package
-            is not installed (ADR-0062 §2, see :func:`_build_model_provider`).
+            is not installed (ADR-0062 §2, see :func:`_build_model_provider`). Or if
+            the on-device embedder cannot be constructed because its vendored model
+            artifact is missing or incomplete (ADR-0006 §2, ADR-0024, see
+            :func:`_build_embedder`).
     """
     # Validate everything that needs no resource before opening a store, so a bad
     # configuration fails before build_engine touches disk (#372). The model seam
@@ -122,6 +128,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             )
         ]
     )
+    # Construct the embedder here too — above the data directory — so a missing or
+    # unbuildable model fails as a ConfigurationError before any disk is touched
+    # (ADR-0006 §2 default, #372's above-disk contract; see :func:`_build_embedder`).
+    embedder = _build_embedder(settings)
 
     directory = data_dir if data_dir is not None else _default_data_dir()
     try:
@@ -133,7 +143,7 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     opened: list[Callable[[], None]] = []
     try:
         # The connection-owning stores first, tracked for build-failure cleanup.
-        memory = SqliteMemoryStore(path=directory / "memory.db", embedder=HashingEmbedder())
+        memory = SqliteMemoryStore(path=directory / "memory.db", embedder=embedder)
         opened.append(memory.close)
         trail = SqliteAuditTrail(path=directory / "audit.db")
         opened.append(trail.close)
@@ -265,6 +275,73 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
     return RoutingProvider(
         [Route(RetryingProvider(PydanticAIProvider(spec), policy=policy)) for spec in specs]
     )
+
+
+def _build_embedder(settings: Settings) -> Embedder:
+    """Construct the configured :class:`Embedder`, before any resource is opened.
+
+    ADR-0006 §2's firm decision is that **on-device embedding is the default**:
+    memory content is Tier-1 personal data (ADR-0004) and must not leave the device
+    merely to be indexed. So ``settings.embedder`` defaults to the vendored
+    on-device model (:class:`FastEmbedEmbedder`, ADR-0024), and this is where that
+    ratified default is finally honoured by the running app — the composition root
+    had wired the non-semantic :class:`HashingEmbedder` unconditionally, leaving
+    production "semantic" recall not actually semantic (roadmap leg 2).
+
+    The two realizable modes are the only ones ADR-0024 admits — one vendored model,
+    no arbitrary-model path — so this is a mode switch, not a model resolver:
+
+    * :attr:`EmbedderKind.ON_DEVICE` → the vendored :class:`FastEmbedEmbedder`.
+    * :attr:`EmbedderKind.HASHING` → the deterministic :class:`HashingEmbedder`,
+      for tests, offline use, and CI (its similarity is not semantic).
+
+    ``FastEmbedEmbedder`` is imported **here, lazily, not at module scope**, because
+    ``ai_assistant.models.fastembed_embedder`` pulls in ``fastembed`` and the ONNX
+    runtime (its own docstring says to import it directly and only when wiring the
+    real store). Building against the hashing embedder — the whole test gate and any
+    offline run — must not pay that import, and the module is deliberately not
+    re-exported from ``ai_assistant.models`` for the same reason.
+
+    Constructing the on-device embedder stays **offline and cheap**: it resolves
+    :attr:`~FastEmbedEmbedder.dimensions` and its embedding-space identity from the
+    packaged artifact's metadata and digests, and defers loading the ONNX model
+    itself to the first ``embed`` — which ``build_engine`` never triggers. It is run
+    above the data directory (like :func:`_build_model_provider`) so an incomplete
+    install fails before ``build_engine`` touches disk (#372).
+
+    Args:
+        settings: Loaded application settings — ``embedder`` selects the mode.
+
+    Returns:
+        The embedder the memory store embeds and retrieves with.
+
+    Raises:
+        ConfigurationError: If the on-device embedder cannot be constructed — the
+            vendored model artifact is missing or incomplete (it is a build input,
+            ADR-0024, never downloaded at runtime), or its metadata is malformed.
+            ``FastEmbedEmbedder`` signals this with a ``ModelError``; it is
+            re-raised as a ``ConfigurationError`` because an incomplete install is
+            an operator-facing configuration fault, the same class the model seam's
+            vendor check raises (:func:`_build_model_provider`), so an adapter's
+            error boundary surfaces it as such rather than as a model-call failure.
+    """
+    if settings.embedder is EmbedderKind.HASHING:
+        return HashingEmbedder()
+    # EmbedderKind.ON_DEVICE — the default (ADR-0006 §2). Lazy import: see docstring.
+    from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — deferred so the hashing path never imports fastembed/ONNX
+        FastEmbedEmbedder,
+    )
+
+    try:
+        return FastEmbedEmbedder()
+    except ModelError as exc:
+        msg = (
+            f"could not construct the on-device embedder: {exc}; the embedding model is a "
+            f"build input (ADR-0024) and is never downloaded at runtime, so this installation "
+            f"is incomplete. Set ASSISTANT_EMBEDDER=hashing to run without it (retrieval is "
+            f"then non-semantic)"
+        )
+        raise ConfigurationError(msg) from exc
 
 
 def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:

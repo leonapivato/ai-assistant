@@ -12,6 +12,7 @@ import re
 from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
 from datetime import timedelta
+from enum import StrEnum
 from typing import Annotated, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -189,6 +190,32 @@ def _split_model_specs(value: object) -> object:
 _ModelSpec = Annotated[str, AfterValidator(_model_spec_is_well_formed)]
 
 
+class EmbedderKind(StrEnum):
+    """Which :class:`~ai_assistant.core.protocols.Embedder` the app wires (ADR-0006 §2).
+
+    A **mode selector**, not a free-form model spec: ADR-0024 vendors exactly one
+    on-device model (there is no arbitrary-model path), so the only choice this
+    exposes is *which of the two realizable embedders* the composition root wires
+    into the memory store. It is deliberately not the ``"provider:model"`` shape
+    :data:`_ModelSpec` carries — that names one of a family of chat models, whereas
+    here there is a single vendored embedder and its deterministic test stand-in.
+
+    Values:
+        ON_DEVICE: The vendored, on-device model (``FastEmbedEmbedder``, ADR-0024).
+            The default, because "on-device embedding is the default" is ADR-0006
+            §2's firm decision: memory content is Tier-1 personal data (ADR-0004)
+            and must not leave the device merely to be indexed.
+        HASHING: The deterministic, dependency-free ``HashingEmbedder``. Its
+            similarity is **not** semantic (a hashed bag-of-words); it exists for
+            tests, offline use, and CI, where loading the real ONNX model is
+            undesirable. Selecting it makes retrieval non-semantic, so it is never
+            the default.
+    """
+
+    ON_DEVICE = "on-device"
+    HASHING = "hashing"
+
+
 class Settings(BaseSettings):
     """Typed application settings.
 
@@ -277,6 +304,26 @@ class Settings(BaseSettings):
         gt=0,
         allow_inf_nan=False,
         description="Upper bound on the backoff ceiling, in seconds.",
+    )
+
+    # --- Memory ----------------------------------------------------------
+    # Which embedder the composition root wires into the persistent memory store
+    # (ADR-0006 §2). The default is the on-device model, because "on-device
+    # embedding is the default" is ADR-0006 §2's firm privacy decision (ADR-0004):
+    # memory content is embedded to be indexed, and that content must not leave the
+    # device merely to build an index. A mode selector rather than a model spec —
+    # ADR-0024 vendors exactly one embedding model, so the only realizable choices
+    # are that model and the deterministic ``HashingEmbedder`` for tests/offline/CI
+    # (which makes retrieval non-semantic, hence never the default). Parsed from its
+    # member value in the environment (``ASSISTANT_EMBEDDER=hashing``); anything off
+    # the two members is refused at load as a ConfigurationError.
+    embedder: EmbedderKind = Field(
+        default=EmbedderKind.ON_DEVICE,
+        description=(
+            "Which embedder backs semantic memory retrieval: 'on-device' (the "
+            "default, ADR-0006 §2) or 'hashing' (deterministic, non-semantic; "
+            "tests/offline/CI)."
+        ),
     )
 
     # --- Context ---------------------------------------------------------

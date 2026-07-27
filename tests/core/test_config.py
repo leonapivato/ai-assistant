@@ -9,7 +9,12 @@ import pytest
 from pydantic import ValidationError
 from pydantic_ai.models import known_model_names
 
-from ai_assistant.core.config import _MODEL_SPEC_PATTERN, Settings, load_settings
+from ai_assistant.core.config import (
+    _MODEL_SPEC_PATTERN,
+    EmbedderKind,
+    Settings,
+    load_settings,
+)
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import Reversibility, RiskLevel
 
@@ -59,6 +64,50 @@ def test_unknown_log_level_is_rejected(value: str) -> None:
 @pytest.mark.parametrize("value", ["debug", "Warning", "critical"])
 def test_log_level_is_normalised_to_upper_case(value: str) -> None:
     assert Settings(log_level=value).log_level == value.upper()
+
+
+def test_embedder_defaults_to_on_device() -> None:
+    # ADR-0006 §2's firm decision: on-device embedding is the default, so an unset
+    # deployment gets semantic (and privacy-preserving) recall, not the non-semantic
+    # hashing stand-in (roadmap leg 2).
+    assert Settings().embedder is EmbedderKind.ON_DEVICE
+
+
+def test_embedder_accepts_the_hashing_mode() -> None:
+    assert Settings(embedder=EmbedderKind.HASHING).embedder is EmbedderKind.HASHING
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("on-device", EmbedderKind.ON_DEVICE),
+        ("hashing", EmbedderKind.HASHING),
+    ],
+)
+def test_embedder_round_trips_from_the_environment(
+    value: str, expected: EmbedderKind, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The operator-facing channel: the ASSISTANT_-prefixed variable is parsed from
+    # the enum's member value, so a deployment can drop to the hashing embedder
+    # (offline/CI) without touching code.
+    monkeypatch.setenv("ASSISTANT_EMBEDDER", value)
+    assert load_settings().embedder is expected
+
+
+@pytest.mark.parametrize("value", ["fastembed", "ON-DEVICE", "cloud", ""])
+def test_off_mode_embedder_is_rejected(value: str) -> None:
+    # A mode selector, not a free-form spec (ADR-0024 vendors one model): anything
+    # off the two members — including a wrong-case member — fails at load.
+    with pytest.raises(ValidationError):
+        Settings(embedder=value)  # type: ignore[arg-type]  # invalid input under test
+
+
+def test_load_settings_rejects_an_off_mode_embedder_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_EMBEDDER", "cloud")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
 
 
 def test_confirmation_ttl_defaults_to_none() -> None:
