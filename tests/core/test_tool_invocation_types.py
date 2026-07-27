@@ -326,3 +326,12 @@ def test_a_scalar_result_output_is_accepted() -> None:
 
     assert result.output == "m-1"
     assert ToolResult.model_validate(result.model_dump(mode="json")) == result
+
+
+def test_a_scalar_result_output_with_a_lone_surrogate_is_rejected() -> None:
+    """A bare scalar runs through ``_freeze_json`` too, so an unencodable scalar
+    is refused — not only an unencodable value nested inside a mapping. Guards a
+    regression that checks mapping values but admits a bare unencodable string.
+    """
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        ToolResult(outcome=ToolOutcome.SUCCEEDED, output="\ud800")
