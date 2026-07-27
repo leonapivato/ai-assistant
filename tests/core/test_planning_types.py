@@ -727,6 +727,15 @@ def test_an_ordinary_transition_output_still_round_trips() -> None:
     assert TypeAdapter(StepTransition).validate_json(transition.model_dump_json()) == transition
 
 
+def test_a_scalar_transition_output_is_accepted() -> None:
+    """output is a single ``FrozenJsonValue``, not a mapping: a bare scalar is a
+    valid output, so a regression narrowing the field to a mapping is caught.
+    """
+    transition = _transition(StepStatus.SUCCEEDED, output="done")
+    assert transition.output == "done"
+    assert TypeAdapter(StepTransition).validate_json(transition.model_dump_json()) == transition
+
+
 # --- GoalDeletion -------------------------------------------------------
 
 
