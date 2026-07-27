@@ -22,7 +22,13 @@ from ai_assistant.core.types import (
     ActionPlan,
     CostBasis,
     DataTier,
+    FeedbackEvent,
+    FeedbackKind,
     Idempotency,
+    MemoryDecision,
+    MemoryDecisionKind,
+    MemoryIngestResult,
+    MemoryKind,
     PlanStep,
     Reversibility,
     RiskLevel,
@@ -34,6 +40,9 @@ from ai_assistant.orchestration import (
     ContinuationToken,
     Disposition,
     Engine,
+    IngestSummary,
+    LearnDecision,
+    LearnOutcome,
     StepExecutor,
     StepRunner,
     TurnOutcome,
@@ -54,7 +63,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryKind, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, MemoryUpdateProposal
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
@@ -152,6 +161,7 @@ class Harness:
         memory: FakeMemoryStore | None = None,
         closers: Sequence[object] = (),
         loop_id_factory: Callable[[], str] | None = None,
+        feedback: object | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -161,14 +171,17 @@ class Harness:
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.handles = iter(f"tok-{n}" for n in range(1, 100))
+        # Kept on the harness so a learn test can read what reached the loop.
+        self.feedback = feedback if feedback is not None else FakeFeedbackProcessor()
+        self.policy_for_writer = FakeMemoryPolicy()
 
-        writer = FakeMemoryWriter(store=self.memory, policy=FakeMemoryPolicy(), now=lambda: AT)
+        writer = FakeMemoryWriter(store=self.memory, policy=self.policy_for_writer, now=lambda: AT)
         loop = LearningLoop(
             context=FakeContextProvider(),
             memory=self.memory,
             writer=writer,
             planner=planner if planner is not None else OneStepPlanner(),  # type: ignore[arg-type]
-            feedback=FakeFeedbackProcessor(),
+            feedback=self.feedback,  # type: ignore[arg-type]
             now=lambda: AT,
             id_factory=loop_id_factory if loop_id_factory is not None else lambda: "g-1",
         )
@@ -1217,3 +1230,147 @@ async def test_aclose_sweeps_remaining_closers_when_one_is_cancelled() -> None:
     with pytest.raises(asyncio.CancelledError):
         await harness.engine.aclose()
     assert closed == ["a", "b"]  # b released despite a's cancellation
+
+
+# --- learn: the correction leg (ADR-0042 §3; roadmap leg 1) --------------
+
+
+def feedback(
+    *,
+    kind: FeedbackKind = FeedbackKind.CORRECTION,
+    memory_kind: MemoryKind = MemoryKind.SEMANTIC,
+    content: str = "the office is in Boston",
+    subject: str | None = None,
+) -> FeedbackEvent:
+    """A ``FeedbackEvent`` the fakes fold into memory."""
+    return FeedbackEvent(
+        kind=kind,
+        memory_kind=memory_kind,
+        content=content,
+        subject=subject,
+        created_at=AT,
+    )
+
+
+async def test_learn_delegates_to_the_loop_and_summarises_the_result() -> None:
+    """``learn`` hands the event to the loop and returns an orchestration summary (§3)."""
+    harness = Harness()
+    event = feedback()
+
+    outcome = await harness.engine.learn(event)
+
+    assert isinstance(outcome, LearnOutcome)
+    # The event reached the loop's feedback processor unchanged.
+    assert harness.feedback.events == [event]  # type: ignore[attr-defined]
+    # The default fake policy accepts, storing one new record.
+    assert len(outcome.results) == 1
+    summary = outcome.results[0]
+    assert isinstance(summary, IngestSummary)
+    assert summary.decision is LearnDecision.STORED
+    assert summary.stored is True
+    assert summary.record_id is not None
+    assert outcome.stored == 1
+
+
+async def test_learn_summary_carries_the_policy_reason() -> None:
+    """The summary surfaces the policy's own justification, per result (§1)."""
+    harness = Harness()
+    outcome = await harness.engine.learn(feedback())
+    # FakeMemoryPolicy stamps a reason on every decision; the summary carries it
+    # verbatim, the transparency a confirmation's reason gives (ADR-0042 §4).
+    assert harness.policy_for_writer.call_count == 1
+    assert outcome.results[0].reason == "fake: configured decision"
+
+
+async def test_learn_with_no_proposals_returns_an_empty_summary() -> None:
+    """Feedback that proposes no update yields an empty, non-error outcome (§3)."""
+    harness = Harness(feedback=FakeFeedbackProcessor([]))
+    outcome = await harness.engine.learn(feedback())
+    assert outcome.results == ()
+    assert outcome.stored == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (MemoryDecisionKind.ACCEPT, LearnDecision.STORED),
+        (MemoryDecisionKind.REJECT, LearnDecision.REJECTED),
+        (MemoryDecisionKind.REINFORCE, LearnDecision.REINFORCED),
+        (MemoryDecisionKind.SUPERSEDE, LearnDecision.SUPERSEDED),
+        (MemoryDecisionKind.ASK_USER, LearnDecision.DEFERRED),
+        (MemoryDecisionKind.STORE_TEMPORARY, LearnDecision.STORED_TEMPORARILY),
+    ],
+)
+def test_from_results_maps_every_decision_kind(
+    kind: MemoryDecisionKind, expected: LearnDecision
+) -> None:
+    """Every ``core`` ruling has a faithful orchestration echo (§1, exhaustive)."""
+    decision = _decision(kind)
+    stored = None if kind in {MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER} else "rec-1"
+    outcome = LearnOutcome.from_results((MemoryIngestResult(decision=decision, record_id=stored),))
+    summary = outcome.results[0]
+    assert summary.decision is expected
+    assert summary.record_id == stored
+    assert summary.stored is (stored is not None)
+    assert summary.reason == decision.reason
+
+
+def test_from_results_preserves_order_across_multiple_results() -> None:
+    """One summary per result, in the order the loop applied them (§1)."""
+    results = (
+        MemoryIngestResult(decision=_decision(MemoryDecisionKind.ACCEPT), record_id="rec-1"),
+        MemoryIngestResult(decision=_decision(MemoryDecisionKind.REJECT), record_id=None),
+    )
+    outcome = LearnOutcome.from_results(results)
+    assert [s.decision for s in outcome.results] == [LearnDecision.STORED, LearnDecision.REJECTED]
+    assert outcome.stored == 1
+
+
+def _decision(kind: MemoryDecisionKind) -> MemoryDecision:
+    """A valid ``MemoryDecision`` of ``kind`` (target/ttl supplied where required)."""
+    if kind in {MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE}:
+        return MemoryDecision(kind=kind, reason=f"{kind.value} reason", target_id="target-1")
+    if kind is MemoryDecisionKind.STORE_TEMPORARY:
+        return MemoryDecision(kind=kind, reason="temporary", ttl=timedelta(hours=1))
+    return MemoryDecision(kind=kind, reason=f"{kind.value} reason")
+
+
+async def test_learn_is_refused_once_shutdown_has_begun() -> None:
+    """After aclose, learn accepts no new work (§2 stops accepting)."""
+    harness = Harness()
+    await harness.engine.aclose()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await harness.engine.learn(feedback())
+
+
+async def test_learn_is_drained_before_shutdown_closes_resources() -> None:
+    """The write path touches the store, so aclose waits for it before closing (§2)."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+    closed_while_inflight = False
+
+    class GatedFeedbackProcessor(FakeFeedbackProcessor):
+        async def process(self, event: FeedbackEvent) -> Sequence[MemoryUpdateProposal]:
+            entered.set()
+            await release.wait()
+            return await super().process(event)
+
+    async def close() -> None:
+        nonlocal closed_while_inflight
+        closed_while_inflight = not release.is_set()
+        closed.set()
+
+    harness = Harness(feedback=GatedFeedbackProcessor(), closers=(close,))
+    call = asyncio.ensure_future(harness.engine.learn(feedback()))
+    await entered.wait()
+
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.sleep(0)  # let aclose reach its drain
+    assert not closed.is_set()  # the resource is not closed while the write is in flight
+
+    release.set()
+    await call
+    await closing
+    assert closed.is_set()
+    assert closed_while_inflight is False

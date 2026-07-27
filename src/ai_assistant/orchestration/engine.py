@@ -41,12 +41,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import structlog
 
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import StepStatus
+from ai_assistant.core.types import MemoryDecisionKind, StepStatus
 from ai_assistant.orchestration.runner import Disposition
 
 if TYPE_CHECKING:
@@ -54,7 +55,13 @@ if TYPE_CHECKING:
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AuditTrail, PlanStore
-    from ai_assistant.core.types import ExecutionState, FrozenJsonMapping, PermissionDecision
+    from ai_assistant.core.types import (
+        ExecutionState,
+        FeedbackEvent,
+        FrozenJsonMapping,
+        MemoryIngestResult,
+        PermissionDecision,
+    )
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 
@@ -175,6 +182,137 @@ class TurnOutcome:
 
     turn: TurnResult | None
     step: StepOutcome | None = None
+
+
+class LearnDecision(StrEnum):
+    """How memory folded one piece of feedback — the orchestration-level echo of a ruling.
+
+    The façade translates each raw :class:`~ai_assistant.core.types.MemoryIngestResult`
+    the loop returns into an :class:`IngestSummary` carrying one of these, so an
+    adapter can render what became of the feedback **without importing** ``core``'s
+    :class:`~ai_assistant.core.types.MemoryDecisionKind` — the same reason the
+    façade returns its own result DTOs rather than raw stage types (ADR-0042 §1).
+    One member per ``MemoryDecisionKind`` (:meth:`LearnOutcome.from_results`), named
+    for the effect on memory rather than the relation the policy names.
+    """
+
+    STORED = "stored"
+    """A new memory was written (``ACCEPT``)."""
+
+    REJECTED = "rejected"
+    """The proposal was refused; nothing was written (``REJECT``)."""
+
+    REINFORCED = "reinforced"
+    """An existing memory was strengthened by folding the proposal into it
+    (``REINFORCE``)."""
+
+    SUPERSEDED = "superseded"
+    """A prior belief was retired and the correction written in its place
+    (``SUPERSEDE``)."""
+
+    DEFERRED = "deferred"
+    """The policy wants a human answer before acting; nothing was written yet
+    (``ASK_USER``)."""
+
+    STORED_TEMPORARILY = "stored_temporarily"
+    """A memory was written with a retention window (``STORE_TEMPORARY``)."""
+
+
+@dataclass(frozen=True, slots=True)
+class IngestSummary:
+    """What became of one proposal folded from a piece of feedback (ADR-0042 §1).
+
+    The orchestration-level echo of a single
+    :class:`~ai_assistant.core.types.MemoryIngestResult`, carrying only what an
+    adapter needs to render a one-line confirmation and none of the raw ``core``
+    type it was translated from.
+
+    Attributes:
+        decision: How memory folded the proposal.
+        record_id: The id of the record left live by the write, or ``None`` when
+            nothing was stored (a rejection, or a deferral). Carried as opaque data
+            an adapter may echo, never interpret.
+        reason: The policy's own human-readable justification for the ruling,
+            surfaced for transparency — as a confirmation carries its ruling's
+            ``reason`` (ADR-0042 §4).
+    """
+
+    decision: LearnDecision
+    record_id: str | None
+    reason: str
+
+    @property
+    def stored(self) -> bool:
+        """Whether the write left a record live in memory."""
+        return self.record_id is not None
+
+
+@dataclass(frozen=True, slots=True)
+class LearnOutcome:
+    """What one piece of feedback did to memory (ADR-0042 §1, §3).
+
+    The façade's result for :meth:`Engine.learn`, mirroring :class:`TurnOutcome`: a
+    frozen ``orchestration`` dataclass that crosses no *subsystem* boundary, only
+    `interfaces`, which already depends on this package. It **translates** the
+    ``tuple[MemoryIngestResult, ...]`` the
+    :class:`~ai_assistant.orchestration.loop.LearningLoop` returns into a summary an
+    adapter renders without touching a raw ``core`` type (:meth:`from_results`),
+    the same boundary the other result DTOs hold.
+
+    Attributes:
+        results: One :class:`IngestSummary` per proposal the feedback produced, in
+            the order they were applied — empty when the feedback proposed no update
+            at all.
+    """
+
+    results: tuple[IngestSummary, ...]
+
+    @property
+    def stored(self) -> int:
+        """How many proposals left a record live in memory."""
+        return sum(1 for summary in self.results if summary.stored)
+
+    @classmethod
+    def from_results(cls, results: tuple[MemoryIngestResult, ...]) -> LearnOutcome:
+        """Translate the loop's raw ingest results into an orchestration summary.
+
+        The one place a ``core``
+        :class:`~ai_assistant.core.types.MemoryIngestResult` is read on the learn
+        path; everything an adapter sees downstream is ``orchestration``-level
+        (ADR-0042 §1).
+        """
+        return cls(
+            results=tuple(
+                IngestSummary(
+                    decision=_learn_decision(result.decision.kind),
+                    record_id=result.record_id,
+                    reason=result.decision.reason,
+                )
+                for result in results
+            )
+        )
+
+
+def _learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
+    """Map a ``core`` memory ruling to its orchestration-level echo (ADR-0042 §1).
+
+    Total by construction: every :class:`~ai_assistant.core.types.MemoryDecisionKind`
+    is handled, so a new ruling added to ``core`` fails type-checking here until it
+    is given an echo, rather than silently losing its rendering.
+    """
+    match kind:
+        case MemoryDecisionKind.ACCEPT:
+            return LearnDecision.STORED
+        case MemoryDecisionKind.REJECT:
+            return LearnDecision.REJECTED
+        case MemoryDecisionKind.REINFORCE:
+            return LearnDecision.REINFORCED
+        case MemoryDecisionKind.SUPERSEDE:
+            return LearnDecision.SUPERSEDED
+        case MemoryDecisionKind.ASK_USER:
+            return LearnDecision.DEFERRED
+        case MemoryDecisionKind.STORE_TEMPORARY:
+            return LearnDecision.STORED_TEMPORARILY
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +523,38 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._resume(token, approved=approved, timeout=timeout))
+
+    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
+        """Fold one piece of feedback back into memory (ADR-0042 §3; the correction leg).
+
+        The adapter hands the engine the correction or stated preference the user
+        gave, and receives an ``orchestration``-level summary of what memory did
+        with it. Delegates to the
+        :class:`~ai_assistant.orchestration.loop.LearningLoop`, whose ``learn``
+        processes the event into proposals and ingests each through the injected
+        ``MemoryWriter`` (ADR-0028 §4) — conflict resolution, the policy's ruling
+        and the write all happen behind that seam.
+
+        Tracked like :meth:`converse`/:meth:`resume`: the write path touches the
+        connection-owning memory store, so shutdown must drain it before closing
+        that connection (ADR-0042 §2).
+
+        Args:
+            event: The correction or stated preference the user gave.
+
+        Returns:
+            A :class:`LearnOutcome` summarising, per proposal, how memory folded it
+            — translated from the loop's raw ingest results so no ``core`` type
+            reaches the adapter (ADR-0042 §1).
+
+        Raises:
+            RuntimeError: If the engine is shutting down (:meth:`aclose` has been
+                entered), so no new work is accepted.
+            MemoryStoreError: If the writer failed to read conflicts or write a
+                record, as the loop raises.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._learn(event))
 
     async def pending_confirmations(self) -> list[Confirmation]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
@@ -805,6 +975,11 @@ class Engine:
             self._parked.pop(token.handle, None)
             return TurnOutcome(turn=parked.turn, step=step)
 
+    async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
+        """Delegate to the loop and translate its ingest results (ADR-0042 §1)."""
+        results = await self._loop.learn(event)
+        return LearnOutcome.from_results(results)
+
     def _step_outcome(
         self, turn: TurnResult | None, disposition: StepDisposition, *, handle: str | None
     ) -> StepOutcome:
@@ -927,6 +1102,9 @@ __all__ = [
     "Confirmation",
     "ContinuationToken",
     "Engine",
+    "IngestSummary",
+    "LearnDecision",
+    "LearnOutcome",
     "StepOutcome",
     "TurnOutcome",
 ]
