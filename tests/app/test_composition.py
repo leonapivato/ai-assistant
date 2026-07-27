@@ -133,27 +133,57 @@ async def test_build_engine_wires_the_hashing_embedder_when_selected(tmp_path: P
         await engine.aclose()
 
 
-def test_build_engine_reports_an_unbuildable_on_device_embedder_as_config_error(
+def test_build_engine_reports_a_missing_on_device_artifact_as_config_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A missing/incomplete vendored model is a ConfigurationError, above disk (#403).
+    """A genuinely missing vendored model is a ConfigurationError, above disk (#372/#403).
 
-    ``FastEmbedEmbedder`` raises ``ModelError`` at construction when its vendored
-    artifact — a build input never fetched at runtime (ADR-0024) — is absent or
-    incomplete. ``build_engine`` builds the embedder in the same above-disk block as
-    the model seam and the context provider (#372), so that failure must surface as a
-    ``ConfigurationError`` (an incomplete install is an operator-facing config fault)
-    and leave the filesystem untouched: no data directory, no SQLite files. Mirrors
-    the no-disk assertions #372/#403 added for the other two pure-config steps.
+    This is the *real* missing-artifact path, not a stubbed exception:
+    ``packaged_artifact_dir`` is redirected to an absent directory, so the presence
+    check in ``_build_embedder`` sees the manifest files missing. That check exists
+    precisely because ``FastEmbedEmbedder`` construction would **not** notice — it
+    reads only offline metadata and defers the artifact to its backend's first
+    ``embed`` — so without it a missing model would surface far below disk as a
+    ``MemoryStoreError`` after the stores were opened. ``build_engine`` runs the
+    check in the same above-disk block as the model seam and the context provider,
+    so it must fail as a ``ConfigurationError`` and leave the filesystem untouched:
+    no data directory, no SQLite files. Mirrors the no-disk assertions #372/#403
+    added for the other two pure-config steps.
 
-    The failure is forced by stubbing the embedder's construction rather than by
-    removing the artifact, so the test neither depends on the vendored files nor
-    loads the ONNX model.
+    Redirecting to an absent directory means the check short-circuits before
+    ``fastembed`` is even imported, so this stays offline and never loads ONNX.
+    """
+    from ai_assistant.models import embedding_artifact  # noqa: PLC0415
+
+    monkeypatch.setattr(embedding_artifact, "packaged_artifact_dir", lambda: tmp_path / "no-model")
+
+    absent = tmp_path / "state"
+    assert not absent.exists()
+
+    # Default settings select the on-device embedder (ADR-0006 §2).
+    with pytest.raises(ConfigurationError, match="vendored model artifact is missing"):
+        build_engine(Settings(), data_dir=absent)
+
+    # The build failed above disk, before the data directory was ever created.
+    assert not absent.exists()
+
+
+def test_build_engine_reports_a_malformed_on_device_embedder_as_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present-but-unbuildable model (malformed metadata) is also a ConfigurationError (#372).
+
+    The second on-device failure branch: the artifact is present (the presence check
+    passes), but ``FastEmbedEmbedder`` construction raises ``ModelError`` because its
+    metadata cannot be resolved. ``_build_embedder`` re-raises that as a
+    ``ConfigurationError`` — the same operator-facing install fault — above disk, so
+    the filesystem is again left untouched. Forced by stubbing the constructor so the
+    test neither depends on corrupting the vendored files nor loads the ONNX model.
     """
     from ai_assistant.models import fastembed_embedder  # noqa: PLC0415
 
     def _explode(*_args: object, **_kwargs: object) -> object:
-        msg = "the packaged embedding model artifact is missing"
+        msg = "fastembed reported a non-integer dimension"
         raise ModelError(msg)
 
     monkeypatch.setattr(fastembed_embedder, "FastEmbedEmbedder", _explode)
@@ -161,12 +191,9 @@ def test_build_engine_reports_an_unbuildable_on_device_embedder_as_config_error(
     absent = tmp_path / "state"
     assert not absent.exists()
 
-    # Default settings select the on-device embedder (ADR-0006 §2), so this exercises
-    # the branch that constructs the vendored model.
-    with pytest.raises(ConfigurationError, match="on-device embedder"):
+    with pytest.raises(ConfigurationError, match="could not construct the on-device embedder"):
         build_engine(Settings(), data_dir=absent)
 
-    # The build failed above disk, before the data directory was ever created.
     assert not absent.exists()
 
 

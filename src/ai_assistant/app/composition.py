@@ -316,18 +316,48 @@ def _build_embedder(settings: Settings) -> Embedder:
         The embedder the memory store embeds and retrieves with.
 
     Raises:
-        ConfigurationError: If the on-device embedder cannot be constructed — the
-            vendored model artifact is missing or incomplete (it is a build input,
-            ADR-0024, never downloaded at runtime), or its metadata is malformed.
-            ``FastEmbedEmbedder`` signals this with a ``ModelError``; it is
-            re-raised as a ``ConfigurationError`` because an incomplete install is
-            an operator-facing configuration fault, the same class the model seam's
-            vendor check raises (:func:`_build_model_provider`), so an adapter's
-            error boundary surfaces it as such rather than as a model-call failure.
+        ConfigurationError: If the on-device embedder cannot be prepared — its
+            vendored model artifact is missing or incomplete (caught by an explicit
+            presence check here, above disk), or the artifact is present but its
+            metadata is malformed (``FastEmbedEmbedder`` signals that with a
+            ``ModelError``, re-raised here). Both are operator-facing install faults
+            — a build input never downloaded at runtime (ADR-0024) — so they surface
+            as the same class the model seam's vendor check raises
+            (:func:`_build_model_provider`), letting an adapter's error boundary
+            report a configuration problem rather than a model-call failure.
     """
     if settings.embedder is EmbedderKind.HASHING:
         return HashingEmbedder()
-    # EmbedderKind.ON_DEVICE — the default (ADR-0006 §2). Lazy import: see docstring.
+
+    # EmbedderKind.ON_DEVICE — the default (ADR-0006 §2). Everything below is
+    # imported lazily so the hashing path never pays fastembed's ONNX import.
+    from ai_assistant.models.embedding_artifact import (  # noqa: PLC0415 — deferred with the on-device branch; see docstring
+        missing_files,
+        packaged_artifact_dir,
+    )
+
+    # Check the vendored artifact is present *here*, above the data directory, so an
+    # incomplete install fails before build_engine touches disk. This check cannot be
+    # left to FastEmbedEmbedder's construction: that reads only offline metadata (the
+    # manifest-constant digest for its id, fastembed's supported-model table for its
+    # dimensions) and defers the artifact to _FastEmbedBackend.load on the first
+    # embed. So a genuinely missing model would otherwise not surface until the first
+    # memory add/search — below the data directory, as a MemoryStoreError, after the
+    # stores were already opened on disk — which is exactly the pre-disk contract
+    # #372 established for the other resource-free steps. The presence check mirrors
+    # the backend's own (ADR-0024 §5: presence, not integrity; integrity is a
+    # build-time concern), so it stays cheap — no file is read or hashed.
+    directory = packaged_artifact_dir()
+    absent = missing_files(directory)
+    if absent:
+        msg = (
+            f"the on-device embedder's vendored model artifact is missing from {directory} "
+            f"({', '.join(absent)}); it is a build input (ADR-0024) and is never downloaded at "
+            f"runtime, so this installation is incomplete. Set ASSISTANT_EMBEDDER=hashing to run "
+            f"without it (retrieval is then non-semantic)"
+        )
+        raise ConfigurationError(msg)
+
     from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — deferred so the hashing path never imports fastembed/ONNX
         FastEmbedEmbedder,
     )
@@ -335,12 +365,11 @@ def _build_embedder(settings: Settings) -> Embedder:
     try:
         return FastEmbedEmbedder()
     except ModelError as exc:
-        msg = (
-            f"could not construct the on-device embedder: {exc}; the embedding model is a "
-            f"build input (ADR-0024) and is never downloaded at runtime, so this installation "
-            f"is incomplete. Set ASSISTANT_EMBEDDER=hashing to run without it (retrieval is "
-            f"then non-semantic)"
-        )
+        # The artifact was present above but its metadata (its embedding-space id or
+        # reported dimension) is malformed — still a config-time install fault, so it
+        # joins the missing-artifact case as a ConfigurationError rather than escaping
+        # as a model-call failure.
+        msg = f"could not construct the on-device embedder: {exc}"
         raise ConfigurationError(msg) from exc
 
 
