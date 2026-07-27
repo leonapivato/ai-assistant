@@ -55,6 +55,20 @@
   are unchanged, every transition into RUNNING still carries an approval_ref,
   and AWAITING_APPROVAL keeps its durability — now meaning only that a human is
   being asked.
+- Note (2026-07-26): §2's serialisable/exportable invariant — an accepted
+  `parameters`/`output` value can always be stored, digested and exported — is
+  evaluated by *running the real encoder* (`_freeze_json`, `core/types.py`), so
+  for an integer it is gated by CPython's process-global `sys.int_max_str_digits`
+  (default 4300, the CVE-2020-10735 mitigation, mutable per process). The
+  invariant therefore holds *within a fixed limit setting*: a value accepted in a
+  process that raised the limit (e.g. `sys.set_int_max_str_digits(0)`) can fail to
+  load, digest or export in a default-limit process, and a deployment that raises
+  the limit owns that cross-process portability risk. This is a deliberate
+  consequence of validating by running the encoder rather than enumerating an
+  application-owned integer bound — the `_freeze_json` reasoning kept, not
+  reversed — and the default limit (4300 digits, ~10^4300) is already far beyond
+  any legitimate application datum. Clarification only; it changes no decision
+  (#408).
 
 ## Context
 
