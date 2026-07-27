@@ -100,6 +100,63 @@ def test_reports_adrs_with_status_and_excludes_template(tmp_path: Path) -> None:
     assert "Template" not in out  # template.md is not a numbered ADR
 
 
+def test_folds_a_status_that_wraps_across_lines(tmp_path: Path) -> None:
+    # A Status wrapped onto indented continuation lines (as ADRs 0003/0065 do)
+    # must render in full on one row, not truncated at the first physical line.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-wrapped.md",
+                "# 1. Wrapped decision\n\n"
+                "- Status: Accepted, §4 amended by ADR-0069\n"
+                "  (enforcement widened to `ModelProvider`)\n"
+                "- Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Wrapped decision")
+    # Both the first line and the folded continuation appear on the same row.
+    assert "Accepted, §4 amended by ADR-0069" in row
+    assert "(enforcement widened to `ModelProvider`)" in row
+    # The continuation is folded in, not left dangling as its own output line.
+    dangling = [line for line in out.splitlines() if line.strip().startswith("(enforcement")]
+    assert dangling == []
+
+
+def test_does_not_absorb_an_indented_following_field(tmp_path: Path) -> None:
+    # Continuation folding must stop at the next ``- <field>:`` bullet even when
+    # that bullet is itself indented, so a neighbouring field is never absorbed
+    # into the Status value.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-indented.md",
+                "# 1. Indented decision\n\n  - Status: Accepted\n  - Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Indented decision")
+    assert "Accepted" in row
+    assert "Date" not in row  # the indented `- Date:` bullet is not folded in
+
+
+def test_single_line_status_is_unchanged(tmp_path: Path) -> None:
+    # The wrap-folding must not disturb an ordinary one-line Status.
+    _make_repo(tmp_path)
+    out = _run(tmp_path)
+
+    first = _line_with(out, "First decision")
+    assert "Accepted" in first
+    third = _line_with(out, "Third decision")
+    assert "Proposed" in third
+
+
 def test_flags_gaps_in_the_adr_numbering(tmp_path: Path) -> None:
     _make_repo(tmp_path)
     out = _run(tmp_path)
