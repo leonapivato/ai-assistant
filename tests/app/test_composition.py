@@ -197,6 +197,35 @@ def test_build_engine_reports_a_malformed_on_device_embedder_as_config_error(
     assert not absent.exists()
 
 
+def test_build_engine_reports_an_unimportable_on_device_runtime_as_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing/unloadable fastembed/ONNX runtime is a ConfigurationError, above disk.
+
+    The third on-device failure branch: the artifact is present, but importing the
+    ``fastembed`` runtime fails — a dependency-pruned install (``ImportError``) or an
+    unloadable ONNX native library (``OSError``). ``_build_embedder`` wraps that as a
+    ``ConfigurationError`` so it does not escape the composition root as a raw import
+    error outside the ``AssistantError`` hierarchy, and — being above disk — leaves
+    the filesystem untouched.
+
+    Simulated by removing the ``FastEmbedEmbedder`` name from its module so the lazy
+    ``from ... import FastEmbedEmbedder`` raises ``ImportError`` (cannot import name),
+    which needs neither uninstalling fastembed nor loading ONNX.
+    """
+    from ai_assistant.models import fastembed_embedder  # noqa: PLC0415
+
+    monkeypatch.delattr(fastembed_embedder, "FastEmbedEmbedder")
+
+    absent = tmp_path / "state"
+    assert not absent.exists()
+
+    with pytest.raises(ConfigurationError, match="on-device embedding runtime"):
+        build_engine(Settings(), data_dir=absent)
+
+    assert not absent.exists()
+
+
 async def test_build_engine_wires_one_registry_object_as_both_registry_and_invoker(
     tmp_path: Path,
 ) -> None:

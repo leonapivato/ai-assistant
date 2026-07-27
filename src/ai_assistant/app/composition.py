@@ -318,13 +318,15 @@ def _build_embedder(settings: Settings) -> Embedder:
     Raises:
         ConfigurationError: If the on-device embedder cannot be prepared — its
             vendored model artifact is missing or incomplete (caught by an explicit
-            presence check here, above disk), or the artifact is present but its
-            metadata is malformed (``FastEmbedEmbedder`` signals that with a
-            ``ModelError``, re-raised here). Both are operator-facing install faults
-            — a build input never downloaded at runtime (ADR-0024) — so they surface
-            as the same class the model seam's vendor check raises
-            (:func:`_build_model_provider`), letting an adapter's error boundary
-            report a configuration problem rather than a model-call failure.
+            presence check here, above disk); the ``fastembed``/ONNX runtime cannot
+            be imported (a pruned install or an unloadable native library); or the
+            artifact is present but its metadata is malformed (``FastEmbedEmbedder``
+            signals that with a ``ModelError``, re-raised here). All are
+            operator-facing install faults — a build input never downloaded at
+            runtime (ADR-0024) — so they surface as the same class the model seam's
+            vendor check raises (:func:`_build_model_provider`), letting an adapter's
+            error boundary report a configuration problem rather than a raw import
+            error or a model-call failure.
     """
     if settings.embedder is EmbedderKind.HASHING:
         return HashingEmbedder()
@@ -358,9 +360,23 @@ def _build_embedder(settings: Settings) -> Embedder:
         )
         raise ConfigurationError(msg)
 
-    from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — deferred so the hashing path never imports fastembed/ONNX
-        FastEmbedEmbedder,
-    )
+    # The import itself can fail — `fastembed` (a required, pinned dependency) absent
+    # from a dependency-pruned install, or its ONNX native library unloadable on this
+    # platform (an `OSError`). That is still an operator-facing install fault, above
+    # disk, so it joins the other on-device failures as a `ConfigurationError` rather
+    # than escaping the composition root as a raw `ImportError`/`OSError` outside the
+    # `AssistantError` hierarchy an adapter's boundary catches.
+    try:
+        from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — deferred so the hashing path never imports fastembed/ONNX
+            FastEmbedEmbedder,
+        )
+    except (ImportError, OSError) as exc:
+        msg = (
+            f"could not load the on-device embedding runtime (fastembed/ONNX): {exc}. It is a "
+            f"required dependency of this installation; reinstall it, or set "
+            f"ASSISTANT_EMBEDDER=hashing to run without it (retrieval is then non-semantic)"
+        )
+        raise ConfigurationError(msg) from exc
 
     try:
         return FastEmbedEmbedder()
