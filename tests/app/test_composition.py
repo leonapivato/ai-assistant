@@ -15,10 +15,11 @@ import pytest
 
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
-from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import AssistantError, ConfigurationError
+from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.errors import AssistantError, ConfigurationError, ModelError
 from ai_assistant.core.types import Reversibility, RiskLevel
 from ai_assistant.memory import MemoryIngestor, SqliteMemoryStore
+from ai_assistant.models import HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
 
 async def test_build_engine_returns_a_ready_engine(tmp_path: Path) -> None:
     """The builder assembles a real ``Engine`` and opens its stores."""
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         assert isinstance(engine, Engine)
         # The connection-owning stores were opened on disk.
@@ -53,7 +54,7 @@ async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
     the façade drives and resumes the execution the runner started. The audit trail
     is likewise the one instance the façade and the runner share (ADR-0052 §1).
     """
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         plans = engine._plans
         assert isinstance(plans, SqlitePlanStore)
@@ -76,7 +77,7 @@ async def test_build_engine_wires_one_memory_store_into_both_the_loop_and_the_wr
     the only way to check it. Split the two and the learning loop is silently
     open: what the assistant learns is written somewhere nothing ever reads.
     """
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         memory = engine._loop._memory
         assert isinstance(memory, SqliteMemoryStore)
@@ -85,6 +86,88 @@ async def test_build_engine_wires_one_memory_store_into_both_the_loop_and_the_wr
         assert writer._store is memory
     finally:
         await engine.aclose()
+
+
+async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Path) -> None:
+    """The default settings wire the vendored on-device embedder (ADR-0006 §2, roadmap leg 2).
+
+    ADR-0006 §2's firm decision is that on-device embedding is the *default* — so an
+    unconfigured deployment must get semantic recall, not the non-semantic
+    ``HashingEmbedder`` the composition root wired unconditionally before this. The
+    store the loop retrieves from must therefore carry a :class:`FastEmbedEmbedder`
+    at its 384-dim embedding space (ADR-0024).
+
+    Constructing that embedder is offline and cheap — it resolves its dimensions and
+    embedding-space identity from the packaged artifact's metadata and defers loading
+    the ONNX model to the first ``embed``, which ``build_engine`` never triggers — so
+    this asserts the wired *type* and dimension without ever running the model. The
+    vendored artifact is a build input present wherever the gate runs (ADR-0024), the
+    same assumption the model-layer embedder tests already make.
+    """
+    from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — local so only this test imports fastembed
+        FastEmbedEmbedder,
+    )
+
+    engine = build_engine(Settings(), data_dir=tmp_path)
+    try:
+        memory = engine._loop._memory
+        assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
+        assert isinstance(memory._embedder, FastEmbedEmbedder)
+        assert memory._embedder.dimensions == 384  # BAAI/bge-small-en-v1.5, ADR-0024
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_wires_the_hashing_embedder_when_selected(tmp_path: Path) -> None:
+    """The ``hashing`` knob wires the deterministic ``HashingEmbedder`` instead (ADR-0006 §2).
+
+    The escape hatch for tests, offline use, and CI: selecting it avoids the vendored
+    model (and its ONNX runtime) entirely, at the cost of non-semantic retrieval.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        memory = engine._loop._memory
+        assert isinstance(memory, SqliteMemoryStore)  # narrows the Protocol-typed seam
+        assert isinstance(memory._embedder, HashingEmbedder)
+    finally:
+        await engine.aclose()
+
+
+def test_build_engine_reports_an_unbuildable_on_device_embedder_as_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing/incomplete vendored model is a ConfigurationError, above disk (#403).
+
+    ``FastEmbedEmbedder`` raises ``ModelError`` at construction when its vendored
+    artifact — a build input never fetched at runtime (ADR-0024) — is absent or
+    incomplete. ``build_engine`` builds the embedder in the same above-disk block as
+    the model seam and the context provider (#372), so that failure must surface as a
+    ``ConfigurationError`` (an incomplete install is an operator-facing config fault)
+    and leave the filesystem untouched: no data directory, no SQLite files. Mirrors
+    the no-disk assertions #372/#403 added for the other two pure-config steps.
+
+    The failure is forced by stubbing the embedder's construction rather than by
+    removing the artifact, so the test neither depends on the vendored files nor
+    loads the ONNX model.
+    """
+    from ai_assistant.models import fastembed_embedder  # noqa: PLC0415
+
+    def _explode(*_args: object, **_kwargs: object) -> object:
+        msg = "the packaged embedding model artifact is missing"
+        raise ModelError(msg)
+
+    monkeypatch.setattr(fastembed_embedder, "FastEmbedEmbedder", _explode)
+
+    absent = tmp_path / "state"
+    assert not absent.exists()
+
+    # Default settings select the on-device embedder (ADR-0006 §2), so this exercises
+    # the branch that constructs the vendored model.
+    with pytest.raises(ConfigurationError, match="on-device embedder"):
+        build_engine(Settings(), data_dir=absent)
+
+    # The build failed above disk, before the data directory was ever created.
+    assert not absent.exists()
 
 
 async def test_build_engine_wires_one_registry_object_as_both_registry_and_invoker(
@@ -97,7 +180,7 @@ async def test_build_engine_wires_one_registry_object_as_both_registry_and_invok
     runner selected from one registry while the executor invoked against another,
     a gated step could execute a tool the permission check never saw.
     """
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         tools = engine._runner._registry
         assert isinstance(tools, InMemoryToolRegistry)
@@ -112,7 +195,9 @@ async def test_build_engine_passes_the_configured_confirmation_ttl_to_the_runner
 ) -> None:
     """A configured lifetime reaches the runner that enforces it end to end (#310)."""
     ttl = timedelta(hours=1)
-    engine = build_engine(Settings(confirmation_ttl=ttl), data_dir=tmp_path)
+    engine = build_engine(
+        Settings(confirmation_ttl=ttl, embedder=EmbedderKind.HASHING), data_dir=tmp_path
+    )
     try:
         assert engine._runner._confirmation_ttl == ttl
     finally:
@@ -123,7 +208,7 @@ async def test_build_engine_defaults_the_runner_to_no_confirmation_lifetime(
     tmp_path: Path,
 ) -> None:
     """With no ``confirmation_ttl`` set, the runner keeps the pre-#243 default of None (#310)."""
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         assert engine._runner._confirmation_ttl is None
     finally:
@@ -160,6 +245,7 @@ async def test_build_engine_passes_the_configured_thresholds_to_the_policy(
         confirm_at_reversibility=Reversibility.RECOVERABLE,
         deny_at_risk=RiskLevel.CRITICAL,
         deny_at_reversibility=Reversibility.IRREVERSIBLE,
+        embedder=EmbedderKind.HASHING,
     )
     engine = build_engine(settings, data_dir=tmp_path)
     try:
@@ -180,7 +266,7 @@ async def test_build_engine_defaults_the_policy_to_todays_gate(
 ) -> None:
     """With nothing configured, the policy is built with the pre-#239 defaults (#239)."""
     calls = _spy_on_policy(monkeypatch)
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         assert calls == [
             {
@@ -196,7 +282,7 @@ async def test_build_engine_defaults_the_policy_to_todays_gate(
 
 async def test_the_engine_closes_its_owned_resources(tmp_path: Path) -> None:
     """``aclose`` releases the connections the builder handed the façade (§2)."""
-    engine = build_engine(Settings(), data_dir=tmp_path)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     await engine.aclose()
     # Idempotent: a second close does nothing and does not raise.
     await engine.aclose()
@@ -206,7 +292,7 @@ async def test_build_engine_creates_a_missing_data_dir(tmp_path: Path) -> None:
     """A data directory that does not exist yet is created (§2 owns its resources)."""
     nested = tmp_path / "state" / "assistant"
     assert not nested.exists()
-    engine = build_engine(Settings(), data_dir=nested)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=nested)
     try:
         assert nested.is_dir()
     finally:
@@ -245,7 +331,7 @@ async def test_build_engine_closes_opened_stores_when_a_later_step_fails(
     monkeypatch.setattr(composition_module, "ModelBackedPlanner", _boom)
 
     with pytest.raises(RuntimeError, match="planner construction failed"):
-        build_engine(Settings(), data_dir=tmp_path)
+        build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
 
     assert _SpyStore.instances, "both stores should have been opened before the failure"
     assert all(store.closed for store in _SpyStore.instances)  # every opened store was closed
@@ -259,7 +345,7 @@ async def test_build_engine_converts_a_data_dir_failure_to_an_assistant_error(
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     with pytest.raises(AssistantError, match="data directory"):
-        build_engine(Settings(), data_dir=blocker / "sub")
+        build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=blocker / "sub")
 
 
 def test_build_engine_touches_no_disk_when_config_validation_fails(tmp_path: Path) -> None:
