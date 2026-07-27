@@ -521,6 +521,19 @@ def test_learn_requires_a_kind() -> None:
     assert result.exit_code == 2
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_learn_rejects_blank_content(blank: str) -> None:
+    """Whitespace-only content is a usage error, not an uncaught ValidationError (§7).
+
+    ``FeedbackEvent.content`` rejects blank text, and that ``ValidationError`` is not
+    an ``AssistantError``; the parse-time callback turns it into a clean usage error
+    (exit 2) before any event is constructed, rather than a dumped traceback.
+    """
+    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", blank])
+    assert result.exit_code == 2  # Typer's usage-error code
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_learn_surfaces_a_write_failure_with_a_nonzero_exit(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -554,6 +567,23 @@ def test_render_learn_reports_when_nothing_was_proposed(output: StringIO) -> Non
     """Feedback that folds into no update is reported, not shown as a silent success."""
     cli._render_learn(LearnOutcome(results=()))
     assert "nothing" in output.getvalue().lower()
+
+
+def test_render_learn_marks_a_deferred_ruling_as_not_stored(output: StringIO) -> None:
+    """An ASK_USER ruling wrote nothing and has no confirmation flow — say so honestly.
+
+    The CLI must not imply a follow-up that does not exist (memory decisions are not
+    what ``assistant resume`` recovers; #422 review): the line names it as not stored
+    and does not promise it can be confirmed.
+    """
+    outcome = LearnOutcome(
+        results=(IngestSummary(LearnDecision.DEFERRED, None, "conflicts with a prior assertion"),)
+    )
+    cli._render_learn(outcome)
+    rendered = output.getvalue()
+    assert "Not stored" in rendered
+    assert "0 stored" in rendered  # the header count excludes it
+    assert "conflicts with a prior" in rendered  # the reason is surfaced (Rich may wrap it)
 
 
 def test_render_learn_neutralises_a_reason_for_the_terminal(output: StringIO) -> None:
