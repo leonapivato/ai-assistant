@@ -22,7 +22,10 @@ from ai_assistant.core.types import (
     ActionPlan,
     CostBasis,
     DataTier,
+    FeedbackEvent,
+    FeedbackKind,
     Idempotency,
+    MemoryKind,
     PlanStep,
     Reversibility,
     RiskLevel,
@@ -35,7 +38,10 @@ from ai_assistant.orchestration import (
     ContinuationToken,
     Disposition,
     Engine,
+    IngestSummary,
+    LearnDecision,
     LearningLoop,
+    LearnOutcome,
     StepExecutor,
     StepRunner,
 )
@@ -397,3 +403,180 @@ async def test_a_shutdown_failure_after_a_good_turn_still_exits_nonzero(
     rendered = output.getvalue()
     assert "Done" in rendered  # the turn's success was still reported
     assert "Error" in rendered  # and so was the shutdown failure
+
+
+# --- learn: the correction leg (roadmap leg 1; ADR-0042 §3, §6) ---------
+
+
+class _RecordingEngine:
+    """A stand-in engine that records the feedback it is handed (ADR-0042 §6).
+
+    The adapter cannot tell it from the façade for the one call ``learn`` makes; it
+    lets a test assert the exact :class:`~ai_assistant.core.types.FeedbackEvent` the
+    command built without folding anything into a real memory store.
+    """
+
+    def __init__(self, outcome: LearnOutcome) -> None:
+        self._outcome = outcome
+        self.events: list[FeedbackEvent] = []
+
+    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
+        self.events.append(event)
+        return self._outcome
+
+    async def aclose(self) -> None:
+        """Nothing to release: this stand-in owns no resource."""
+
+
+class _FailingLearnEngine:
+    """An engine whose ``learn`` fails, as a broken write path would."""
+
+    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
+        msg = "the memory store would not write"
+        raise MemoryStoreError(msg)
+
+    async def aclose(self) -> None:
+        """Nothing to release."""
+
+
+def _stored_outcome() -> LearnOutcome:
+    """One stored proposal, the ordinary success shape."""
+    return LearnOutcome(
+        results=(IngestSummary(decision=LearnDecision.STORED, record_id="rec-1", reason="new"),)
+    )
+
+
+def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
+    """Point the ``learn`` command's startup at ``engine`` with valid settings."""
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
+    monkeypatch.setattr(cli, "build_engine", lambda _settings: engine)
+    monkeypatch.setattr(cli, "_utcnow", lambda: AT)
+
+
+def test_learn_builds_a_correction_event_and_defaults_the_memory_kind(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--kind correction becomes a CORRECTION event defaulting to a semantic fact."""
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "correction", "the office is in Boston"]
+    )
+    assert result.exit_code == 0
+    assert len(engine.events) == 1
+    event = engine.events[0]
+    assert event.kind is FeedbackKind.CORRECTION
+    assert event.memory_kind is MemoryKind.SEMANTIC  # defaulted from --kind
+    assert event.content == "the office is in Boston"
+    assert event.subject is None
+    assert event.created_at == AT  # stamped from the injected clock, not hand-rolled
+    assert "Learned" in output.getvalue()
+
+
+def test_learn_builds_a_preference_event_with_a_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--kind preference with --about becomes a PREFERENCE event scoped by subject."""
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["learn", "--kind", "preference", "I prefer metric units", "--about", "units"]
+    )
+    assert result.exit_code == 0
+    event = engine.events[0]
+    assert event.kind is FeedbackKind.PREFERENCE
+    assert event.memory_kind is MemoryKind.PREFERENCE  # defaulted from --kind
+    assert event.subject == "units"
+
+
+def test_learn_memory_kind_flag_overrides_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit --memory-kind overrides the default derived from --kind."""
+    engine = _RecordingEngine(_stored_outcome())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["learn", "--kind", "preference", "call me Al", "--memory-kind", "semantic"],
+    )
+    assert result.exit_code == 0
+    event = engine.events[0]
+    assert event.kind is FeedbackKind.PREFERENCE
+    assert event.memory_kind is MemoryKind.SEMANTIC  # overridden, not the preference default
+
+
+def test_learn_rejects_an_unknown_kind() -> None:
+    """An unrecognised --kind is a usage error, before any engine is built."""
+    result = CliRunner().invoke(cli.app, ["learn", "--kind", "bogus", "hello"])
+    assert result.exit_code == 2  # Typer's usage-error code
+
+
+def test_learn_requires_a_kind() -> None:
+    """--kind is required; omitting it is a usage error."""
+    result = CliRunner().invoke(cli.app, ["learn", "hello"])
+    assert result.exit_code == 2
+
+
+def test_learn_surfaces_a_write_failure_with_a_nonzero_exit(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A MemoryStoreError from the write path is rendered, not dumped, exit 1 (§7)."""
+    _wire(monkeypatch, _FailingLearnEngine())
+    result = CliRunner().invoke(cli.app, ["learn", "--kind", "correction", "x"])
+    assert result.exit_code == 1
+    rendered = output.getvalue()
+    assert "Error" in rendered
+    assert "would not write" in rendered
+
+
+def test_render_learn_lists_each_ruling_with_its_reason(output: StringIO) -> None:
+    """Each proposal renders a one-line confirmation naming the ruling and its reason."""
+    outcome = LearnOutcome(
+        results=(
+            IngestSummary(LearnDecision.REINFORCED, "r1", "matches an existing memory"),
+            IngestSummary(LearnDecision.SUPERSEDED, "r2", "overturns a prior belief"),
+        )
+    )
+    cli._render_learn(outcome)
+    rendered = output.getvalue()
+    assert "Reinforced" in rendered
+    assert "matches an existing memory" in rendered
+    assert "Replaced" in rendered
+    assert "overturns a prior belief" in rendered
+    assert "2 update(s)" in rendered
+
+
+def test_render_learn_reports_when_nothing_was_proposed(output: StringIO) -> None:
+    """Feedback that folds into no update is reported, not shown as a silent success."""
+    cli._render_learn(LearnOutcome(results=()))
+    assert "nothing" in output.getvalue().lower()
+
+
+def test_render_learn_neutralises_a_reason_for_the_terminal(output: StringIO) -> None:
+    """A reason carrying control bytes or markup is neutralised on render (§4)."""
+    outcome = LearnOutcome(
+        results=(IngestSummary(LearnDecision.STORED, "r1", "wipe\x1b[2J and [red]shout[/red]"),)
+    )
+    cli._render_learn(outcome)
+    rendered = output.getvalue()
+    assert "\x1b" not in rendered  # the control sequence was neutralised
+    assert "[red]" in rendered  # markup shown literally, not interpreted
+
+
+async def test_drive_learn_folds_real_feedback_into_memory(output: StringIO) -> None:
+    """Against a real engine over fakes, the correction is folded and reported (§3)."""
+    engine = _engine()
+    event = FeedbackEvent(
+        kind=FeedbackKind.CORRECTION,
+        memory_kind=MemoryKind.SEMANTIC,
+        content="the office is in Boston",
+        created_at=AT,
+    )
+    code = await cli._drive_learn(engine, event)
+    assert code == 0
+    assert "Learned" in output.getvalue()
+    await engine.aclose()

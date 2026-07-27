@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import typer
@@ -28,12 +28,13 @@ from ai_assistant.app import build_engine
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.logging import configure_logging
-from ai_assistant.orchestration import Disposition
+from ai_assistant.core.types import FeedbackEvent, FeedbackKind, MemoryKind
+from ai_assistant.orchestration import Disposition, LearnDecision
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.orchestration import Confirmation, Engine, TurnOutcome
+    from ai_assistant.orchestration import Confirmation, Engine, LearnOutcome, TurnOutcome
 
 app = typer.Typer(
     name="assistant",
@@ -46,6 +47,56 @@ console = Console()
 #: Exit codes (ADR-0042 §7: "setting a meaningful exit code").
 _EXIT_OK = 0
 _EXIT_ERROR = 1
+
+#: How ``--memory-kind`` defaults from ``--kind`` when the user does not give one.
+#: Follows ``FeedbackEvent``'s own guidance — "a fact becomes a ``SemanticMemory``,
+#: not a preference" — so a correction lands as a semantic fact and a stated
+#: preference as a preference. Exhaustive over ``FeedbackKind``.
+_DEFAULT_MEMORY_KIND = {
+    FeedbackKind.CORRECTION: MemoryKind.SEMANTIC,
+    FeedbackKind.PREFERENCE: MemoryKind.PREFERENCE,
+}
+
+#: One human-readable line per :class:`~ai_assistant.orchestration.LearnDecision`,
+#: rendered under a ``learn`` result. Exhaustive: every member has a message, so a
+#: new decision surfaces at type-check time rather than as a missing line.
+_LEARN_MESSAGES = {
+    LearnDecision.STORED: "Stored a new memory.",
+    LearnDecision.REINFORCED: "Reinforced an existing memory.",
+    LearnDecision.SUPERSEDED: "Replaced a prior memory.",
+    LearnDecision.REJECTED: "Rejected — nothing was stored.",
+    LearnDecision.DEFERRED: "Held for your confirmation — nothing stored yet.",
+    LearnDecision.STORED_TEMPORARILY: "Stored temporarily.",
+}
+
+
+#: The ``learn`` command's enum-typed options, defined once at module scope. Typer
+#: options for an ``Enum`` parameter are hoisted here rather than called inline in
+#: the signature, the module-level-singleton form ruff's B008 requires (a plain
+#: ``str``/``bool`` option is exempt, an enum-annotated one is not).
+_LEARN_KIND_OPTION = typer.Option(
+    ..., "--kind", help="Whether this corrects a fact ('correction') or states a preference."
+)
+_LEARN_MEMORY_KIND_OPTION = typer.Option(
+    None,
+    "--memory-kind",
+    help=(
+        "Which typed memory to establish. Defaults from --kind "
+        "(correction -> semantic, preference -> preference); set it to override."
+    ),
+)
+
+
+def _utcnow() -> datetime:
+    """The wall-clock 'now' the ``learn`` command stamps on a ``FeedbackEvent``.
+
+    The same module-level clock convention every subsystem uses
+    (``datetime.now(UTC)``); ``FeedbackEvent.created_at`` is a
+    :data:`~ai_assistant.core.types.UtcInstant`, so the reading is validated as
+    timezone-aware UTC at construction. Named so a test can substitute it for a
+    deterministic timestamp.
+    """
+    return datetime.now(UTC)
 
 
 @app.callback()
@@ -140,6 +191,29 @@ def resume(
     raise typer.Exit(code)
 
 
+@app.command()
+def learn(
+    content: str = typer.Argument(..., help="The correction or preference, in your own words."),
+    kind: FeedbackKind = _LEARN_KIND_OPTION,
+    about: str | None = typer.Option(
+        None, "--about", "-a", help="Optional scope this feedback is about, e.g. 'units'."
+    ),
+    memory_kind: MemoryKind | None = _LEARN_MEMORY_KIND_OPTION,
+) -> None:
+    """Teach the assistant from a correction or a stated preference.
+
+    Turns what you say into a ``FeedbackEvent`` and hands it to the engine, which
+    folds it into long-term memory. ``--memory-kind`` defaults from ``--kind`` and
+    can be overridden. The result is a short summary of what memory did with it —
+    stored, reinforced, or superseded.
+    """
+    resolved_memory_kind = memory_kind if memory_kind is not None else _DEFAULT_MEMORY_KIND[kind]
+    code = asyncio.run(
+        _learn_feedback(content, kind=kind, memory_kind=resolved_memory_kind, subject=about)
+    )
+    raise typer.Exit(code)
+
+
 async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> int:
     """Load settings, build the engine, drive one turn, and close it (ADR-0042 §2, §7).
 
@@ -197,6 +271,42 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
 
     try:
         code = await _drive_resume(engine, timeout=timeout, approver=approver)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _learn_feedback(
+    content: str, *, kind: FeedbackKind, memory_kind: MemoryKind, subject: str | None
+) -> int:
+    """Load settings, build the engine, submit the feedback, and close it (ADR-0042 §2, §7).
+
+    The correction-leg counterpart to :func:`_ask`. It builds the
+    :class:`~ai_assistant.core.types.FeedbackEvent` from the parsed flags — parsing
+    input into the engine's request type is the adapter's own job (ADR-0042 §6) —
+    then one error boundary spans every stage that can fail: loading settings,
+    configuring logging, constructing the engine, the learn call, and shutdown, so
+    an :class:`AssistantError` is rendered and mapped to a non-zero exit code rather
+    than escaping (§7). The composition root builds the façade; this adapter closes
+    it. Returns the process exit code.
+    """
+    event = FeedbackEvent(
+        kind=kind,
+        memory_kind=memory_kind,
+        content=content,
+        subject=subject,
+        created_at=_utcnow(),
+    )
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        engine = build_engine(settings)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_learn(engine, event)
     finally:
         shutdown_code = await _close(engine)
     return max(code, shutdown_code)
@@ -282,6 +392,24 @@ async def _drive_turn(
     return _EXIT_OK
 
 
+async def _drive_learn(engine: Engine, event: FeedbackEvent) -> int:
+    """Submit one feedback event and render what memory did with it (ADR-0042 §3, §6).
+
+    The correction leg of the pipeline: the adapter conveys the feedback and renders
+    the engine's :class:`~ai_assistant.orchestration.LearnOutcome` summary; it
+    authors no memory write and reaches no subsystem (ADR-0042 §6). An
+    :class:`AssistantError` from any stage is rendered and mapped to a non-zero exit
+    code — the adapter surfaces the failure, it does not swallow it.
+    """
+    try:
+        outcome = await engine.learn(event)
+        _render_learn(outcome)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    return _EXIT_OK
+
+
 # --- rendering (ADR-0042 §4, §6: escaping is the adapter's, per target) --
 
 
@@ -340,6 +468,26 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
     message = messages.get(disposition)
     if message is not None:
         console.print(message)
+
+
+def _render_learn(outcome: LearnOutcome) -> None:
+    """Render what one piece of feedback did to memory (ADR-0042 §6).
+
+    A short human-readable confirmation: a header counting the updates memory made,
+    then one line per proposal naming the ruling and its reason. The reason is
+    engine-supplied data, so it is neutralised for this terminal like any other
+    (``_safe``, ADR-0042 §4). Feedback that proposed no update at all is reported as
+    such rather than as a silent success.
+    """
+    if not outcome.results:
+        console.print("[dim]Noted — nothing in that needed a memory update.[/]")
+        return
+    console.print(
+        f"[green]Learned.[/] Folded {len(outcome.results)} update(s) into memory "
+        f"({outcome.stored} stored)."
+    )
+    for summary in outcome.results:
+        console.print(f"  - {_LEARN_MESSAGES[summary.decision]} [dim]({_safe(summary.reason)})[/]")
 
 
 def _render_confirmation(confirmation: Confirmation) -> None:
