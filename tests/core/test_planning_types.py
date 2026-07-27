@@ -736,6 +736,15 @@ def test_a_scalar_transition_output_is_accepted() -> None:
     assert TypeAdapter(StepTransition).validate_json(transition.model_dump_json()) == transition
 
 
+def test_a_scalar_transition_output_with_a_lone_surrogate_is_rejected() -> None:
+    """A bare scalar runs through ``_freeze_json`` too, so an unencodable scalar
+    is refused — not only an unencodable value nested inside a mapping. Guards a
+    regression that checks mapping values but admits a bare unencodable string.
+    """
+    with pytest.raises(ValidationError, match="no JSON encoding"):
+        _transition(StepStatus.SUCCEEDED, output="\ud800")
+
+
 # --- GoalDeletion -------------------------------------------------------
 
 
