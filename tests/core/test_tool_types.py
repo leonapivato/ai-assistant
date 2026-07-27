@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
+from _int_str_digits import pinned_int_str_digits
 from pydantic import BaseModel, ValidationError
 
 from ai_assistant.core.types import (
@@ -559,8 +560,12 @@ def test_a_definition_with_an_unrenderable_integer_is_refused(schema: dict[str, 
     already covers this class for a request's parameters; a declaration reaches
     it through ``parameters_schema`` in exactly the same way, and must fail with
     the same diagnostic rather than with a runtime-specific one.
+
+    ``pinned_int_str_digits`` holds the limit at the default so ``10**5000``
+    stays unrenderable under a raised or disabled ``PYTHONINTMAXSTRDIGITS``
+    (#406).
     """
-    with pytest.raises(ValidationError, match="JSON encoding"):
+    with pinned_int_str_digits(), pytest.raises(ValidationError, match="JSON encoding"):
         _definition(parameters_schema=schema)
 
 
