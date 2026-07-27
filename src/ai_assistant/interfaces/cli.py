@@ -65,7 +65,12 @@ _LEARN_MESSAGES = {
     LearnDecision.REINFORCED: "Reinforced an existing memory.",
     LearnDecision.SUPERSEDED: "Replaced a prior memory.",
     LearnDecision.REJECTED: "Rejected — nothing was stored.",
-    LearnDecision.DEFERRED: "Held for your confirmation — nothing stored yet.",
+    # ASK_USER writes nothing, and there is no memory-confirmation flow yet (memory
+    # decisions are not what `assistant resume` recovers — that is permission action
+    # confirmations, ADR-0052). So say plainly it was not stored and cannot be
+    # confirmed from here, rather than implying a follow-up that does not exist (#422
+    # review).
+    LearnDecision.DEFERRED: "Not stored — this needs review, which cannot be done from here yet.",
     LearnDecision.STORED_TEMPORARILY: "Stored temporarily.",
 }
 
@@ -144,6 +149,23 @@ def _positive_finite_seconds(value: float) -> float:
     return value
 
 
+def _present_content(value: str) -> str:
+    """Reject blank ``learn`` content during Typer's parameter parsing.
+
+    ``FeedbackEvent.content`` rejects whitespace-only text with a ``ValidationError``
+    (``core/types.py``), which is **not** an :class:`AssistantError`, so constructing
+    the event on blank input would escape both of :func:`_learn_feedback`'s error
+    boundaries as an uncaught traceback with no controlled exit code — the failure
+    ADR-0042 §7 forbids. Catching it here instead makes it a normal usage error
+    (exit code 2), before any engine is built, mirroring :func:`_positive_finite_seconds`.
+    The value is returned untouched; the event's own validator trims it.
+    """
+    if not value.strip():
+        msg = "must not be blank"
+        raise typer.BadParameter(msg)
+    return value
+
+
 @app.command()
 def ask(
     utterance: str = typer.Argument(..., help="What you want the assistant to do."),
@@ -193,7 +215,9 @@ def resume(
 
 @app.command()
 def learn(
-    content: str = typer.Argument(..., help="The correction or preference, in your own words."),
+    content: str = typer.Argument(
+        ..., help="The correction or preference, in your own words.", callback=_present_content
+    ),
     kind: FeedbackKind = _LEARN_KIND_OPTION,
     about: str | None = typer.Option(
         None, "--about", "-a", help="Optional scope this feedback is about, e.g. 'units'."
