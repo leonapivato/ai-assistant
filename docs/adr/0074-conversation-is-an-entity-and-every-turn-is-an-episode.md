@@ -1230,7 +1230,14 @@ different questions:
    a suite built only from conversations that have turns never reaches, and the one
    that catches a store sorting on `last_turn_at`), the bounded defaults, an unknown id refused rather than
    created (§1), an unresolvable episode id skipped rather than raised (§5),
-   detachment, and input observation. A suite that only exercises small explicit values will not reach
+   **a duplicate `ParkedBinding` refused atomically — no ordinal consumed, no row
+   left behind** (§9.1), detachment, and input observation.
+
+   That last one belongs *here* rather than in the capture-stage list below,
+   because it is wholly local to `append`: a SQLite store that accepted duplicate
+   bindings while the canonical fake refused them would pass every orchestration
+   test and hand a recovered resume two candidate conversations again — which is
+   the divergence a shared suite exists to catch. A suite that only exercises small explicit values will not reach
    the ordinal invariant or the defaults; the argument ADR-0073 §8 makes about
    `offset` and about the default `limit` applies here unchanged.
 
@@ -1279,10 +1286,6 @@ different questions:
      **every** episode is destroyed, not just the last page, and that the record is
      dropped only after the traversal is exhausted (§9). A fixture with one page of
      turns passes a single-page implementation and proves nothing.
-   - **A duplicate `ParkedBinding`** — a second append carrying a binding the
-     index already holds is refused, and the refusal is atomic: no ordinal is
-     consumed and no row is left behind (§9). Without the case, an implementation
-     that stores both rows passes every recovery test that only ever creates one.
    - **A recovered park's resumption** — park in a conversation, discard the
      in-memory state, recover the confirmation from durable state, resume: the
      resolution's episode lands in the **original** conversation, and no new
