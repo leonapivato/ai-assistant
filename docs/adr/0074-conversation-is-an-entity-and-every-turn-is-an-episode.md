@@ -416,10 +416,24 @@ so capture needs no contract change to get it.
 
 With a derived id the mode is a **guard rather than a routine path**, and it is
 kept for what a conflict would then mean: an id derived from a unique conversation
-and a store-proved ordinal collides only if an invariant has already broken, or if
-capture is re-running a turn that was recorded. So a `MemoryStoreConflictError`
-**fails the capture loudly** — degrading the turn, not the answer (§9) — and no
-retry is attempted. That is ADR-0046's own posture where it already uses this
+and a store-proved ordinal collides only if the ordinal invariant has broken, or if
+a foreign producer took an id in the reserved namespace (above). Both are faults,
+neither is a race, and a retry answers neither. So a `MemoryStoreConflictError`
+**fails the capture loudly** — degrading the turn, not the answer (§9) — and
+nothing is retried.
+
+**Capture is attempted once per outcome, and it is deliberately not
+idempotent-by-replay.** A second attempt would take a second `append`, which
+allocates a second ordinal and therefore a second id, so it would record the same
+exchange twice rather than converge on one record. Making a replay collapse onto
+the first turn would need a durable idempotency key on the capture itself — a
+`TurnOutcome` identity that survives a restart, which nothing in the engine has
+(a `ContinuationToken` is explicitly process-scoped). That is surface bought for a
+retry this ADR does not perform: a failed capture is **reported, not re-attempted**
+(§9), because the turn's answer is already delivered and a second write of an
+exchange is a worse error than a missing record of one. A future capture that does
+want to retry inherits the requirement rather than the freedom — it owes the key
+first. That is ADR-0046's own posture where it already uses this
 mode: the applier's insert-if-absent failure fails the whole batch, and nothing
 retries under a different id. Two things follow: the episode id capture reports is
 always the one its turn determines, so §8's compensation can never destroy a
