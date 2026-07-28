@@ -20,6 +20,7 @@ from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     ActionPlan,
+    BeliefBand,
     CostBasis,
     DataTier,
     FeedbackEvent,
@@ -34,6 +35,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
+    Belief,
     Confirmation,
     ContinuationToken,
     Disposition,
@@ -157,7 +159,9 @@ def _engine(
         now=lambda: AT,
         id_factory=lambda: next(ids),
     )
-    return Engine(loop=loop, runner=runner, plans=plans, trail=trail, closers=closers)
+    return Engine(
+        loop=loop, runner=runner, plans=plans, trail=trail, memory=memory, closers=closers
+    )
 
 
 # --- rendering: escaping is the adapter's, per target (ADR-0042 §4) ------
@@ -610,3 +614,389 @@ async def test_drive_learn_folds_real_feedback_into_memory(output: StringIO) -> 
     assert code == 0
     assert "Learned" in output.getvalue()
     await engine.aclose()
+
+
+# --- beliefs / forget: the inspection surface (ADR-0073 §4, §5, §7) -----
+
+
+def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is the point
+    band: BeliefBand = BeliefBand.ASSERTED,
+    *,
+    belief_id: str = "rec-1",
+    content: str = "the office is in Boston",
+    confidence: float = 1.0,
+    evidence_count: int = 0,
+    valid_until: datetime | None = None,
+) -> Belief:
+    """One projected belief, as the façade hands it to the adapter."""
+    return Belief(
+        id=belief_id,
+        band=band,
+        kind=MemoryKind.SEMANTIC,
+        content=content,
+        confidence=confidence,
+        evidence_count=evidence_count,
+        last_updated=AT,
+        valid_until=valid_until,
+    )
+
+
+def _flat(rendered: str) -> str:
+    """Collapse Rich's line wrapping, so an assertion is about words and not width."""
+    return " ".join(rendered.split())
+
+
+class _RecordingBeliefEngine:
+    """A stand-in façade recording the inspection calls the commands make."""
+
+    def __init__(self, page: tuple[Belief, ...] = (), *, one: Belief | None = None) -> None:
+        self._page = page
+        self._one = one
+        self.listed: list[tuple[object, object, int, int]] = []
+        self.forgotten: list[str] = []
+
+    async def beliefs(
+        self,
+        *,
+        bands: object = None,
+        kinds: object = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[Belief, ...]:
+        self.listed.append((bands, kinds, limit, offset))
+        return self._page
+
+    async def belief(self, record_id: str) -> Belief | None:
+        return self._one
+
+    async def forget(self, record_id: str) -> bool:
+        self.forgotten.append(record_id)
+        return True
+
+    async def aclose(self) -> None:
+        """Nothing to release: this stand-in owns no resource."""
+
+
+def test_render_belief_conveys_everything_the_surface_owes(output: StringIO) -> None:
+    """Band, kind, confidence, content, why, revision time and id are all shown (§4)."""
+    cli._render_belief(_belief())
+    rendered = output.getvalue()
+    assert "asserted" in rendered  # the band, stated and not implied by position
+    assert "semantic" in rendered
+    assert "1.00" in rendered
+    assert "the office is in Boston" in rendered
+    assert "you told me" in rendered  # why it is held
+    assert "2026-07-24 09:00 UTC" in rendered  # when it was last revised
+    assert "rec-1" in rendered  # the id ``forget`` takes
+
+
+def test_render_belief_shows_a_window_end_only_when_one_is_set(output: StringIO) -> None:
+    """An open window carries no information; a set end does ("believed until…")."""
+    cli._render_belief(_belief())
+    assert "Believed until" not in output.getvalue()
+
+    cli._render_belief(_belief(valid_until=datetime(2026, 8, 1, tzinfo=UTC)))
+    assert "Believed until" in output.getvalue()
+    assert "2026-08-01 00:00 UTC" in output.getvalue()
+
+
+def test_render_belief_neutralises_engine_supplied_text(output: StringIO) -> None:
+    """Content and id carrying control bytes or markup are neutralised (ADR-0042 §4)."""
+    cli._render_belief(_belief(content="wipe\x1b[2J and [red]shout[/red]"))
+    rendered = output.getvalue()
+    assert "\x1b" not in rendered
+    assert "[red]" in rendered  # shown literally, not interpreted as colour
+
+
+def test_why_reports_derived_evidence_as_a_count_and_says_it_cannot_be_shown(
+    output: StringIO,
+) -> None:
+    """ADR-0073 §4's derived floor: the citations are counted, and named as unshowable.
+
+    A citation this surface cannot render as evidence is never rendered *as*
+    evidence and never silently dropped. The count says the warrant exists; the
+    wording says it cannot be displayed yet.
+    """
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.62, evidence_count=3))
+    rendered = _flat(output.getvalue())
+    assert "3 piece(s) of evidence" in rendered
+    assert "which I cannot show you yet" in rendered
+
+
+def test_why_does_not_claim_evidence_a_derived_belief_does_not_have(output: StringIO) -> None:
+    """A derived belief with no recorded citation says so rather than implying one."""
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.4, evidence_count=0))
+    rendered = _flat(output.getvalue())
+    assert "no supporting evidence was recorded" in rendered
+    assert "piece(s) of evidence" not in rendered
+
+
+def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: StringIO) -> None:
+    """ADR-0073 §4's attested floor: neither the user's word nor our inference.
+
+    And our revision time is not offered as the source's — the line says outright
+    that ``Last revised`` is when *we* changed our mind.
+    """
+    cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9))
+    rendered = _flat(output.getvalue())
+    assert "a source you connected reported it" in rendered
+    assert "neither your word nor my inference" in rendered
+    assert "not when the source spoke" in rendered
+
+
+def test_render_beliefs_reports_an_empty_page_plainly(output: StringIO) -> None:
+    """Nothing matching is said, not shown as an empty success."""
+    cli._render_beliefs((), limit=50, offset=0)
+    assert "No live belief matches" in output.getvalue()
+
+
+def test_render_beliefs_offers_the_next_page_without_claiming_a_total(
+    output: StringIO,
+) -> None:
+    """A full page names the offset that would fetch the next; no count is shown (§7)."""
+    cli._render_beliefs((_belief(belief_id="a"), _belief(belief_id="b")), limit=2, offset=4)
+    rendered = _flat(output.getvalue())
+    assert "--offset 6" in rendered
+    assert "there may be more" in rendered
+
+
+def test_render_beliefs_does_not_offer_a_next_page_for_a_short_one(output: StringIO) -> None:
+    """A page shorter than the limit is the end of the enumeration."""
+    cli._render_beliefs((_belief(),), limit=50, offset=0)
+    assert "--offset" not in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("band", "expected"),
+    [
+        (BeliefBand.ASSERTED, "permanent"),
+        (BeliefBand.DERIVED, "may reach it again"),
+        (BeliefBand.ATTESTED, "may bring it back"),
+    ],
+)
+def test_forget_prompt_warns_by_band_because_the_consequence_differs(
+    band: BeliefBand, expected: str, output: StringIO
+) -> None:
+    """A deletion is represented as neither more final than it is nor less (§5)."""
+    confidence = 1.0 if band is BeliefBand.ASSERTED else 0.5
+    cli._render_forget_prompt(_belief(band, confidence=confidence))
+    assert expected in _flat(output.getvalue())
+
+
+def test_forget_prompt_shows_the_belief_and_scopes_the_consent(output: StringIO) -> None:
+    """It renders what is about to go, and says what agreeing actually covers (§5, §6)."""
+    cli._render_forget_prompt(_belief())
+    rendered = _flat(output.getvalue())
+    assert "the office is in Boston" in rendered  # shown before it can be destroyed
+    assert "rec-1" in rendered
+    assert "not even in an export" in rendered  # destroyed, not retired (§6)
+    assert "learn --kind correction" in rendered  # the route that keeps it instead
+    assert "when you answer" in rendered  # consent is to the id, not to these bytes
+
+
+async def test_drive_beliefs_lists_what_the_engine_holds(output: StringIO) -> None:
+    """Against a real engine over fakes, a stored belief is listed with its band."""
+    engine = _engine()
+    await engine.learn(
+        FeedbackEvent(
+            kind=FeedbackKind.CORRECTION,
+            memory_kind=MemoryKind.SEMANTIC,
+            content="the office is in Boston",
+            created_at=AT,
+        )
+    )
+    code = await cli._drive_beliefs(engine, bands=None, kinds=None, limit=50, offset=0)
+    assert code == 0
+    rendered = output.getvalue()
+    assert "the office is in Boston" in rendered
+    assert "asserted" in rendered  # what the user said lands in their own band
+    await engine.aclose()
+
+
+async def test_drive_beliefs_surfaces_a_read_failure_with_a_nonzero_exit(
+    output: StringIO,
+) -> None:
+    """A MemoryStoreError from the read is rendered, not dumped, exit 1 (ADR-0042 §7)."""
+
+    class _FailingEngine:
+        async def beliefs(self, **_kwargs: object) -> tuple[Belief, ...]:
+            msg = "the memory store would not read"
+            raise MemoryStoreError(msg)
+
+    code = await cli._drive_beliefs(
+        _FailingEngine(),  # type: ignore[arg-type]  # the adapter needs only this call
+        bands=None,
+        kinds=None,
+        limit=50,
+        offset=0,
+    )
+    assert code == 1
+    assert "would not read" in output.getvalue()
+
+
+async def test_drive_forget_shows_the_belief_before_it_asks(output: StringIO) -> None:
+    """Show, then confirm: the approver never runs before the render (§5)."""
+    engine = _RecordingBeliefEngine(one=_belief())
+    shown_before_asking = False
+
+    def approve(_belief_shown: Belief) -> bool:
+        nonlocal shown_before_asking
+        shown_before_asking = "the office is in Boston" in output.getvalue()
+        return True
+
+    code = await cli._drive_forget(engine, "rec-1", confirm=approve)  # type: ignore[arg-type]
+    assert code == 0
+    assert shown_before_asking
+    assert engine.forgotten == ["rec-1"]
+    assert "Forgotten" in output.getvalue()
+
+
+async def test_drive_forget_destroys_nothing_when_the_answer_is_no(output: StringIO) -> None:
+    """A refusal is a valid outcome: nothing is deleted and the exit code is 0."""
+    engine = _RecordingBeliefEngine(one=_belief())
+    code = await cli._drive_forget(engine, "rec-1", confirm=lambda _b: False)  # type: ignore[arg-type]
+    assert code == 0
+    assert engine.forgotten == []
+    assert "Left alone" in output.getvalue()
+
+
+async def test_drive_forget_declines_an_id_naming_no_live_belief(output: StringIO) -> None:
+    """A retired or unknown id is declined rather than deleted blind, exit 1 (§5)."""
+    engine = _RecordingBeliefEngine(one=None)
+    asked = False
+
+    def approve(_belief_shown: Belief) -> bool:
+        nonlocal asked
+        asked = True
+        return True
+
+    code = await cli._drive_forget(engine, "gone", confirm=approve)  # type: ignore[arg-type]
+    assert code == 1
+    assert asked is False  # nothing was shown, so nothing could be consented to
+    assert engine.forgotten == []
+    assert "No live belief has the id" in _flat(output.getvalue())
+
+
+async def test_drive_forget_reports_a_belief_that_vanished_before_the_delete(
+    output: StringIO,
+) -> None:
+    """``forget`` returning False is rendered and mapped to a non-zero exit (§7)."""
+
+    class _VanishingEngine(_RecordingBeliefEngine):
+        async def forget(self, record_id: str) -> bool:
+            self.forgotten.append(record_id)
+            return False
+
+    engine = _VanishingEngine(one=_belief())
+    code = await cli._drive_forget(engine, "rec-1", confirm=lambda _b: True)  # type: ignore[arg-type]
+    assert code == 1
+    assert "already gone" in output.getvalue()
+
+
+async def test_drive_forget_end_to_end_against_a_real_engine(output: StringIO) -> None:
+    """A belief the engine holds is shown, agreed to, and gone from the listing (§5)."""
+    engine = _engine()
+    await engine.learn(
+        FeedbackEvent(
+            kind=FeedbackKind.CORRECTION,
+            memory_kind=MemoryKind.SEMANTIC,
+            content="the office is in Boston",
+            created_at=AT,
+        )
+    )
+    page = await engine.beliefs()
+    assert len(page) == 1
+
+    code = await cli._drive_forget(engine, page[0].id, confirm=lambda _b: True)
+    assert code == 0
+    assert "Forgotten" in output.getvalue()
+    assert await engine.beliefs() == ()
+    await engine.aclose()
+
+
+def test_beliefs_command_relays_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeated --band/--kind reach the façade; --limit/--offset are relayed as given."""
+    engine = _RecordingBeliefEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "beliefs",
+            "--band",
+            "derived",
+            "--band",
+            "attested",
+            "--kind",
+            "semantic",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ],
+    )
+    assert result.exit_code == 0
+    assert engine.listed == [
+        ([BeliefBand.DERIVED, BeliefBand.ATTESTED], [MemoryKind.SEMANTIC], 5, 10)
+    ]
+
+
+def test_beliefs_command_asks_for_every_band_when_no_filter_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent repeatable flag means "every", not the empty filter that selects none."""
+    engine = _RecordingBeliefEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["beliefs"])
+    assert result.exit_code == 0
+    assert engine.listed == [(None, None, 50, 0)]
+
+
+@pytest.mark.parametrize("bad", ["-1", str(2**63)])
+def test_beliefs_command_rejects_a_page_the_store_would_refuse(bad: str) -> None:
+    """An out-of-range --limit is a usage error, not an uncaught ValueError (§2, §7).
+
+    ``list_beliefs`` raises ``ValueError`` outside ``[0, 2**63)``, and a ``ValueError``
+    is not an ``AssistantError``, so it would escape the command's error boundary as
+    a traceback. The parse-time check turns it into exit code 2 before any engine is
+    built.
+    """
+    for flag in ("--limit", "--offset"):
+        result = CliRunner().invoke(cli.app, ["beliefs", flag, bad])
+        assert result.exit_code == 2
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_beliefs_command_rejects_an_unknown_band() -> None:
+    """A band outside the ratified vocabulary is a usage error, before any engine."""
+    result = CliRunner().invoke(cli.app, ["beliefs", "--band", "guessed"])
+    assert result.exit_code == 2
+
+
+def test_forget_command_renders_before_acting_under_yes(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--yes`` skips the question, not the rendering (ADR-0073 §5, ADR-0052 §4)."""
+    engine = _RecordingBeliefEngine(one=_belief())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["forget", "rec-1", "--yes"])
+    assert result.exit_code == 0
+    assert engine.forgotten == ["rec-1"]
+    rendered = _flat(output.getvalue())
+    assert "the office is in Boston" in rendered  # the belief was still displayed
+    assert "About to forget" in rendered
+
+
+def test_forget_command_defaults_to_keeping_the_belief(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare Enter at the prompt does not destroy anything: the default is no."""
+    engine = _RecordingBeliefEngine(one=_belief())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["forget", "rec-1"], input="\n")
+    assert result.exit_code == 0
+    assert engine.forgotten == []
+    assert "Left alone" in output.getvalue()
