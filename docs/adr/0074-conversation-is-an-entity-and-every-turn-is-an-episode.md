@@ -982,7 +982,7 @@ reading would be the reclaim-versus-continuation race reintroduced one layer up.
 
 **What that re-check does and does not promise.** It defeats a reclaim whose
 eligibility is evaluated while the activity mark is *within* the horizon — the race
-§9.3's boundary rule decides. It does **not** keep a conversation alive for an
+§9.4's boundary rule decides. It does **not** keep a conversation alive for an
 arbitrarily long turn: once the mark itself has aged past the horizon the
 conversation is eligible again, and §7's ratified mid-turn outcome applies. The two
 clauses describe different instants and neither weakens the other, stated because
@@ -1061,7 +1061,7 @@ transaction, and is revisited with it (§11).
   **`ParkedBinding`** — the `execution_id`/`step_id` pair recovery already keys on
   (§3, ADR-0044), frozen, so the parked-turn association is one value rather than
   two positional strings that can be swapped; and **`ConversationExport`** — the
-  conversations and their turns, each ordered as §9.2 orders its read, following
+  conversations and their turns, each ordered as §9.3 orders its read, following
   `PlanExport`'s precedent that a store's export gets its own `core` type
   (ADR-0014 §5) rather than an anonymous tuple.
 - **`core/errors.py`** gains a `ConversationStoreError` in the `AssistantError`
@@ -1096,13 +1096,13 @@ deletion coordinator has to reach *every* episode a conversation indexed before 
 record is dropped — and a conversation longer than the default page would otherwise
 keep its oldest episodes forever. Its semantics:
 
-- Results are ordered by **ordinal ascending**, matching §9.2.
+- Results are ordered by **ordinal ascending**, matching §9.3.
 - **`before_ordinal` is an exclusive upper bound.** With it, the read returns the
   last `limit` turns whose ordinal is strictly below it; without it, the tail.
 - **Walking back is therefore terminating and total**: call with no bound, then
   repeatedly with `before_ordinal` set to the lowest ordinal just returned, until
   an empty page. Ordinals are dense and start from the conversation's first turn
-  (§9.1), so the walk visits every turn exactly once.
+  (§9.2), so the walk visits every turn exactly once.
 - **The deletion and reclaim sweeps must exhaust it** before the conditional drop.
   Destroying one page and dropping the record is the failure this clause exists to
   forbid.
@@ -1126,7 +1126,17 @@ obligation set and the semantics above; the exact spelling ships with the triad,
 where a real caller can hold it. Three semantics are ratified rather than deferred,
 because they are where two implementations silently differ:
 
-1. **The ordinal only moves forward, and the store proves it.** Per conversation,
+1. **A parked binding is unique across the index, and the store proves that too.**
+   `turn_of_binding` returns *the* turn a parked confirmation belongs to (§3), and
+   that is only a well-defined question if no two turns claim the same
+   `(execution_id, step_id)`. A step parks once, so a second turn carrying the same
+   binding is a fault — a duplicated capture, or a replay — and `append` **refuses
+   it atomically** rather than storing a row that makes recovery pick between two
+   conversations. Without this the resolution of a recovered park could attach to
+   whichever row an implementation happened to return, which is the one outcome the
+   binding exists to prevent. Turns that parked nothing carry no binding and are
+   unconstrained.
+2. **The ordinal only moves forward, and the store proves it.** Per conversation,
    ordinals are dense, unique, and monotonic — a store-enforced invariant, not a
    convention a caller keeps, which is ADR-0064's ruling applied to a second log.
 
@@ -1141,7 +1151,7 @@ because they are where two implementations silently differ:
    with the same consumer (§11). The ordinal is what makes such an argument
    expressible later — there is a value to compare against — which is the sense in
    which this decision does not foreclose it.
-2. **Every read is bounded by default and totally ordered** (ADR-0021 §4, ADR-0073
+3. **Every read is bounded by default and totally ordered** (ADR-0021 §4, ADR-0073
    §2): turns by ordinal ascending, conversations by last activity descending with
    the id as tie-break (§2).
 
@@ -1154,7 +1164,7 @@ because they are where two implementations silently differ:
    is finite, it is the same value every caller gets by saying nothing, and the
    suite asserts it. Out-of-range arguments are refused as ADR-0073 §2 refuses
    them; this ADR adds no new posture, it inherits one.
-3. **A conversation's mutations are mutually exclusive at the store, all of them**
+4. **A conversation's mutations are mutually exclusive at the store, all of them**
    (§8): an append, an activity mark (§2), a deletion stamp and a **reclaim** of one
    conversation never interleave. An append to a stamped conversation is refused,
    and a stamped conversation is absent from every read that presents it — `get`,
@@ -1175,7 +1185,7 @@ because they are where two implementations silently differ:
    This is an obligation on the *seam* precisely because a caller-held lock does
    not survive a second caller — the engine's own code already contemplates
    "another engine over the same durable stores".
-4. **The standing module clauses bind it** like every other Protocol: input
+5. **The standing module clauses bind it** like every other Protocol: input
    observation before the first await (ADR-0065), cancellation that does not orphan
    a resource (ADR-0060), and detached snapshots on every read.
 
@@ -1269,6 +1279,10 @@ different questions:
      **every** episode is destroyed, not just the last page, and that the record is
      dropped only after the traversal is exhausted (§9). A fixture with one page of
      turns passes a single-page implementation and proves nothing.
+   - **A duplicate `ParkedBinding`** — a second append carrying a binding the
+     index already holds is refused, and the refusal is atomic: no ordinal is
+     consumed and no row is left behind (§9). Without the case, an implementation
+     that stores both rows passes every recovery test that only ever creates one.
    - **A recovered park's resumption** — park in a conversation, discard the
      in-memory state, recover the confirmation from durable state, resume: the
      resolution's episode lands in the **original** conversation, and no new
@@ -1305,7 +1319,7 @@ different questions:
      ships unbounded retention while passing every other clause.
    - **A reclaim racing a continuation** — a conversation eligible for reclaim
      (no live turns, idle past the horizon) that is continued at the same moment:
-     asserting the boundary §9.3 ratifies in both directions, since a reclaim whose
+     asserting the boundary §9.4 ratifies in both directions, since a reclaim whose
      eligibility is decided outside the exclusion passes a single-threaded test and
      destroys a conversation the user just returned to.
    - **A capture and a deletion of the same conversation issued concurrently** —
