@@ -114,9 +114,14 @@ materialised as a second collection.
   word. It is not re-derivable, and losing one is unrecoverable (ADR-0038 §2).
 - **The inferred user model** is the set of beliefs the assistant derived:
   `OBSERVED` or `INFERRED` provenance, sub-1.0 confidence, each citing the
-  evidence that produced it. It is provisional by construction and re-derivable:
-  if a derived belief is wrongly retired, the observations that produced it will
-  propose it again.
+  evidence that produced it. It is provisional by construction and re-derivable
+  **while the observations behind it are still retained**: if a derived belief is
+  wrongly retired, the observations that produced it propose it again. That
+  condition is not decorative — the cited episodes can be deleted by the user or
+  purged past a retention deadline, after which the belief is neither re-derivable
+  nor explicable (§3). Re-derivability is the property that makes ADR-0038 §2's
+  error asymmetry safe, and it decays with the evidence rather than holding
+  unconditionally.
 
 There is **no `UserProfile` type, no `UserProfileStore` Protocol, and no second
 collection of user facts.** The roadmap's expectation of a `UserProfile` artifact
