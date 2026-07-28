@@ -1101,9 +1101,8 @@ class ConversationStore(Protocol):
     async def turns(
         self, conversation_id: str, *, limit: int = ..., before_ordinal: int | None = None
     ) -> list[ConversationTurn]: ...  # refuses a stamped conversation
-    async def episodes_to_purge(
-        self, conversation_id: str, *, limit: int = ..., after_ordinal: int | None = None
-    ) -> list[str]: ...  # episode ids only, for the sweeps
+    async def episodes_to_purge(self, conversation_id: str, *, limit: int = ...) -> list[str]: ...
+    async def discard_turns(self, conversation_id: str, episode_ids: Sequence[str]) -> int: ...
     async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]: ...
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None: ...
     async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None: ...
@@ -1125,15 +1124,27 @@ opposite reasons:
   strictly below it; without it, the tail — which is what a continuation wants
   (§5). Walk by calling again with `before_ordinal` set to the lowest ordinal just
   returned, until a page comes back empty.
-- **`episodes_to_purge` pages forwards, for the sweeps.** `after_ordinal` is an
-  **exclusive lower bound**; without it the walk starts at the conversation's first
-  turn. Walk by calling again with the last ordinal covered, until empty. It
-  returns **ids only** — the ordinal is an argument, never a field of the result.
-- **Both walks terminate and visit every turn exactly once**, because ordinals are
-  dense and start from the conversation's first turn (§9.2).
-- **The deletion and reclaim sweeps must exhaust `episodes_to_purge`** before the
-  conditional drop. Destroying one page and dropping the record is the failure this
-  clause exists to forbid.
+- **`episodes_to_purge` is drained, not paged.** It takes no cursor: it returns the
+  first `limit` episode ids whose turns the index still holds. The coordinator
+  destroys those episodes, then calls **`discard_turns`** with the ids it destroyed,
+  which removes exactly those index rows — so the next call returns the next batch
+  and the walk ends when it returns empty.
+
+  A cursor was the wrong shape here and the reason is worth keeping: the result is
+  **ids only**, and the id encoding is the store's private business (§3), so a
+  caller has nothing it could legitimately pass back as a position. Draining puts
+  the progress where it is already durable — in the index — instead of in a token
+  the caller has to hold across a crash.
+- **The drain is crash-safe and idempotent.** A sweep that dies mid-way has already
+  removed the rows it finished, so a re-run resumes from what remains rather than
+  restarting or skipping. `discard_turns` names the ids it removes, so it can be
+  repeated harmlessly.
+- **Both walks visit every turn exactly once and terminate** — `turns` because
+  ordinals are dense and start at the conversation's first turn (§9.2), the drain
+  because every batch it returns is removed before the next.
+- **The deletion and reclaim sweeps must drain `episodes_to_purge` to empty** before
+  the conditional drop. Destroying one batch and dropping the record is the failure
+  this clause exists to forbid.
 
 **The stamp hides a conversation from every read — `get`, `recent`, `export`,
 `turns`, and the two reverse lookups — leaving the sweeps only the episode ids they
@@ -1340,10 +1351,12 @@ different questions:
      while `episodes_to_purge` still yields its episode ids** (§9) — the pair that
      keeps a tombstone from being a readable record of a deleted conversation while
      the sweep can still finish.
-   - **A conversation longer than the default page, deleted** — asserting that
-     **every** episode is destroyed, not just the last page, and that the record is
-     dropped only after the traversal is exhausted (§9). A fixture with one page of
-     turns passes a single-page implementation and proves nothing.
+   - **A conversation longer than one purge batch, deleted** — asserting that
+     **every** episode is destroyed, not just the first batch, and that the record
+     is dropped only once the drain returns empty (§9). A fixture with one batch of
+     turns passes a single-batch implementation and proves nothing. **And the same
+     deletion interrupted between two batches**, asserting the re-run finishes from
+     what remains — the property draining buys over a caller-held cursor.
    - **A recovered park's resumption** — park in a conversation, discard the
      in-memory state, recover the confirmation from durable state, resume: the
      resolution's episode lands in the **original** conversation, and no new
