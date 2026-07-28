@@ -17,12 +17,15 @@
   `INSERT_IF_ABSENT` mode ADR-0046 §2 already ratified, continuation uses `get`
   and `search`, and the conversation's turns reach the model through
   `Planner.plan`'s existing `memories` parameter.
-- **Amends and supersedes nothing — and §3 shows its working on the one clause
-  where that is arguable.** Applying ADR-0070 §1's test: no clause of a prior ADR
-  is replaced. The contestable case is ADR-0005's proposal → policy write path,
-  which capture does not use; §3 sets out why the rule's subject is a belief rather
-  than the evidence a belief cites, and states what the remedy would be if a reader
-  disagrees. ADR-0005's taxonomy is used as written (§3); ADR-0072
+- **Amends and supersedes nothing — because ADR-0075 carries the one supersession
+  this decision needs.** Applying ADR-0070 §1's test: no clause of a prior ADR is
+  replaced *here*. The contestable case was ADR-0005's proposal → policy write
+  path, which capture does not use; §3 sets out why the rule's subject is a belief
+  rather than the evidence a belief cites. That argument was adjudicated
+  insufficient to avoid a supersession (#442), so **ADR-0075 partially supersedes
+  ADR-0005 in exactly that scope and merged first** — this ADR is built on the
+  amended rule rather than against the original one. ADR-0005's taxonomy is used as
+  written (§3); ADR-0072
   §3's two obligations on the derived band are read against their own stated scope
   and enforcement point rather than narrowed (§4); ADR-0073's store contract,
   order, and ceremony are untouched, and the one thing this ADR settles about that
@@ -50,7 +53,10 @@
   upserted), §3 ("absent" is physical presence), §5 (the deferred compare-and-swap,
   #248); ADR-0064 (an ordinal only moves forward, and the store proves it);
   ADR-0066 §1 (what `complete` will accept as a history); ADR-0014 §5 and ADR-0049
-  (the precedent that state with its own lifecycle gets its own store); #441 (the
+  (the precedent that state with its own lifecycle gets its own store); **ADR-0075
+  §1 and §2** (the partial supersession of ADR-0005's write path that §3's capture
+  rests on, and how narrow it is), ADR-0070 §1 (the test that made it a
+  supersession rather than a reinterpretation); #441 (the
   unratified vision direction whose leg-2 constraints §3 carries and §11 files).
 
 ## Context
@@ -379,12 +385,17 @@ reinterpretation. Three things answer it, and the third is the one that decides:
   resolve conflicts is the wrong path for records that never have any.
 
 So this ADR treats ADR-0005 §3 as governing the belief write path, which is what
-its own vocabulary and its own conflict machinery are built for, and does not read
-its Consequences sentence as reaching a producer it did not contemplate. **If that
-reading is rejected, the remedy is a partial supersession of ADR-0005 §3 — a new
-ADR editing ADR-0005's status line — which this ADR does not perform and which its
-author's lane is fenced out of.** It is flagged here rather than settled quietly,
-because "amends and supersedes nothing" is a claim a reader must be able to check.
+its own vocabulary and its own conflict machinery are built for.
+
+**That reading was rejected as a reading, and ratified as a decision.** ADR-0070
+§1's test asks whether a reader would act differently, and a reader of ADR-0005's
+Consequences would have routed an episodic write through the policy path — so the
+gap was owed a supersession however good the argument for it was (#442). **ADR-0075
+settles it**: it partially supersedes ADR-0005's proposal → policy write path for
+the deterministic capture of an episode recording a turn, one producer wide, and it
+merged before this ADR. The three arguments above are its Context and §4's evidence
+is its §4. What remains here is a description of the path capture takes, resting on
+a rule that now says so.
 
 **What bounds capture instead is that it writes one record per outcome, judges
 nothing (§4), inserts rather than upserts (above), and retains under a finite
@@ -1084,16 +1095,14 @@ different questions:
   observer. That is stated rather than discovered, and it is why §4 answers
   ADR-0072 §3's two obligations explicitly instead of leaving the next lane to
   infer that a transcript is a belief.
-- **The propose/dispose gate keeps its scope — and the reading is contested.**
-  Capture writing directly is offered as a reading of ADR-0005 §3, not an exception
-  to it: the gate governs what the *model* proposes about the user, and recording
-  that an exchange happened proposes nothing. Both Codex personas read ADR-0005's
-  "every write goes through a reviewable proposal → policy path" as reaching
-  capture and called for a partial supersession instead. That remedy edits
-  ADR-0005's status line, which this lane is fenced out of, so the disagreement is
-  **filed as #442** with the evidence on both sides — including that the shipped
-  ingestor would fold two topically similar turns into one record (§3). It is
-  decided before the implementation lane ships, by whoever owns ADR governance.
+- **The propose/dispose gate keeps its scope, and the exemption is ratified rather
+  than assumed.** Capture writing directly was first offered as a *reading* of
+  ADR-0005 §3; both Codex personas rejected it and #442 was adjudicated against it,
+  so the exemption is now an explicit partial supersession (ADR-0075) that merged
+  ahead of this ADR. The gate is unchanged for every other producer — every belief
+  write in every band, and leg 3's observer above all — which is what ADR-0075 §2
+  pins. The episode-folding evidence that decided it (§3) survives as the reason
+  the gate was wrong for this class rather than merely skipped.
 - **Two shipped surfaces are deliberately narrowed** (§6) on the day capture lands,
   and the narrowing is invisible today because nothing writes an episode. Had it
   not been decided here, the first capture lane would have changed what every turn
