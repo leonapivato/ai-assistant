@@ -51,12 +51,18 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, assert_never
 
 import structlog
 
-from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import MemoryDecisionKind, MemoryKind, StepStatus, band_of
+from ai_assistant.core.errors import ConversationStoreError, PlanningError
+from ai_assistant.core.types import (
+    MemoryDecisionKind,
+    MemoryKind,
+    ParkedBinding,
+    StepStatus,
+    band_of,
+)
 from ai_assistant.orchestration.runner import Disposition
 
 if TYPE_CHECKING:
@@ -66,12 +72,17 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AuditTrail, MemoryStore, PlanStore
     from ai_assistant.core.types import (
         BeliefBand,
+        Conversation,
         ExecutionState,
         FeedbackEvent,
         FrozenJsonMapping,
         MemoryIngestResult,
         MemoryRecord,
         PermissionDecision,
+    )
+    from ai_assistant.orchestration.conversations import (
+        ConversationDigest,
+        ConversationLifecycle,
     )
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
@@ -91,6 +102,13 @@ _DEFAULT_MAX_OUTSTANDING = 1024
 #: ``AuditTrail.recent``). It is relayed explicitly on every call, so a store whose
 #: default drifted could not silently change what this surface returns.
 _DEFAULT_BELIEF_PAGE = 50
+
+#: Default page size for :meth:`Engine.recent_conversations`, restated here for the
+#: reason :data:`_DEFAULT_BELIEF_PAGE` is: the façade's signature should say what a
+#: caller gets by saying nothing, and it is relayed explicitly on every call so a
+#: store whose default drifted could not silently change this surface (ADR-0074
+#: §9.3's named default, 50, matching ``AuditTrail.recent``).
+_DEFAULT_CONVERSATION_PAGE = 50
 
 
 def _uuid() -> str:
@@ -196,10 +214,25 @@ class TurnOutcome:
             always present.
         step: The disposition of the step the engine drove, or ``None`` when the
             plan had no step to drive. On a resumption this is the resolved step.
+        conversation_id: The conversation this turn ran under (ADR-0074 §2), which
+            a client keeps and presents to continue. ``None`` only on a resumption
+            whose parked binding no longer resolves to a turn — a park predating
+            capture, or one whose conversation the user deleted — which §3 ratifies
+            as "not captured at all, and no conversation invented".
+        capture_degraded: Whether the exchange went **unrecorded** (ADR-0074 §9
+            item 6). The answer is still the answer: capture failure degrades a
+            turn rather than failing it, because failing would throw away an answer
+            the user already has because the record of it could not be written. But
+            it is reported beside
+            :attr:`~ai_assistant.orchestration.loop.TurnResult.memory_degraded` and
+            not swallowed, because a user whose turns are silently not being
+            recorded will not find out until they try to continue.
     """
 
     turn: TurnResult | None
     step: StepOutcome | None = None
+    conversation_id: str | None = None
+    capture_degraded: bool = False
 
 
 class LearnDecision(StrEnum):
@@ -422,6 +455,95 @@ class Belief:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationSummary:
+    """One conversation, as a person choosing which to continue reads it (ADR-0074 §2).
+
+    A frozen ``orchestration`` dataclass beside :class:`Belief` and for its reason:
+    it crosses no *subsystem* boundary, only `interfaces`, which already depends on
+    this package (ADR-0042 §1). It is deliberately not a raw
+    :class:`~ai_assistant.core.types.Conversation` — ``deleted_at`` has no meaning
+    on this surface, because a stamped conversation never reaches it.
+
+    Attributes:
+        id: The opaque id ``assistant ask --conversation`` takes. Server-minted,
+            encoding nothing; a client holds this and nothing else.
+        started_at: When the conversation record was created.
+        last_active_at: When someone was last here — set at creation and refreshed
+            whenever a turn begins. **This is the listing's sort key**, and never
+            ``last_turn_at``: ordering by "has a turn landed" would sink a
+            conversation the user opened a minute ago below one they abandoned last
+            week.
+        last_turn_at: When a turn was last *recorded*, or ``None`` if none has
+            been. A different fact from activity, and the one that tells an empty
+            conversation from one whose first turn landed instantly.
+    """
+
+    id: str
+    started_at: datetime
+    last_active_at: datetime
+    last_turn_at: datetime | None = None
+
+    @classmethod
+    def from_record(cls, conversation: Conversation) -> ConversationSummary:
+        """Project one stored conversation into the summary a person reads."""
+        return cls(
+            id=conversation.id,
+            started_at=conversation.started_at,
+            last_active_at=conversation.last_active_at,
+            last_turn_at=conversation.last_turn_at,
+        )
+
+
+def _outcome_of(step: StepOutcome | None) -> str:
+    """How the exchange turned out, as the captured episode's ``outcome`` (ADR-0074 §4).
+
+    Total over :class:`~ai_assistant.orchestration.runner.Disposition` and
+    mechanically so — the wildcard does nothing but ``assert_never`` — so a
+    disposition added without a phrase here fails the gate rather than recording an
+    exchange whose outcome reads as empty. This is deterministic recording, not a
+    judgement: it says what the engine did, and infers nothing about the user.
+    """
+    if step is None:
+        return "no action was needed"
+    match step.disposition:
+        case Disposition.EXECUTED:
+            return "the selected tool ran"
+        case Disposition.DENIED:
+            return "the action was refused by the permission policy"
+        case Disposition.AWAITING_CONFIRMATION:
+            return "the action was parked for the user to confirm"
+        case Disposition.NO_CAPABLE_TOOL:
+            return "no tool advertised the capability the step needed"
+        case Disposition.AMBIGUOUS_CAPABILITY:
+            return "several tools advertised the capability, so none was chosen"
+        case _:  # pragma: no cover - exhaustive
+            assert_never(step.disposition)
+
+
+def _exchange_of(turn: TurnResult | None, step: StepOutcome | None, *, resumed: bool) -> str:
+    """The canonical text rendering of one exchange (ADR-0005 §1, ADR-0074 §4).
+
+    What was asked and how it turned out, in the store's own ``content`` field —
+    which is what makes the episode citable and retrievable without a second,
+    verbatim transcript store holding the same Tier 1 text under a second retention
+    rule (ADR-0074 §3).
+
+    ``turn`` is ``None`` only on a resumption recovered from durable state, where
+    ``resumed`` is necessarily ``True``, so the rendering is never empty.
+    """
+    lines: list[str] = []
+    if turn is not None:
+        lines.append(f"The user asked: {turn.goal.statement}")
+        if turn.plan.rationale:
+            lines.append(f"The assistant's plan: {turn.plan.rationale}")
+    if resumed:
+        lines.append("The user answered the confirmation this action was parked on.")
+    if step is not None and step.tool_id is not None:
+        lines.append(f"The action selected the tool {step.tool_id}.")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
 class _Parked:
     """The private state one continuation token names (never seen by an adapter).
 
@@ -456,6 +578,7 @@ class Engine:
         plans: PlanStore,
         trail: AuditTrail,
         memory: MemoryStore,
+        conversations: ConversationLifecycle,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -504,6 +627,15 @@ class Engine:
                 make the stage the seam for a question it has no part in. Wired to a
                 *second* store, a listing would show beliefs the assistant does not
                 use and ``forget`` would destroy nothing the user was shown.
+            conversations: The capture/lifecycle stage (ADR-0074 §9) — the one
+                layer that holds both durable stores, and therefore the owner of
+                every sequence spanning them. It must be wired to the *same*
+                ``MemoryStore`` passed above, another composition-root obligation
+                of the same shape: a stage over a second store would write episodes
+                no retrieval could see and destroy nothing the user was shown.
+                Required rather than optional, deliberately — an engine that could
+                be built without it is an engine that can silently record nothing,
+                which is the one failure ADR-0074 §9 item 6 asks to be *reported*.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -559,6 +691,7 @@ class Engine:
         self._plans = plans
         self._trail = trail
         self._memory = memory
+        self._conversations = conversations
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -569,14 +702,63 @@ class Engine:
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
 
-    async def converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — the caller's budget, threaded to the seam which owns the deadline (ADR-0029 §4)
-        """Run one turn and drive the step it produces (ADR-0042 §3).
+    async def start(self) -> None:
+        """Finish the sweeps a previous run left behind (ADR-0074 §7, §8; ADR-0076).
+
+        ADR-0074 §8 says the reclaim runs "by the deleting call, **at engine
+        start**, and later by the hub's scheduler" — this is that middle case, and
+        it is the reason ADR-0076 exists at all: until a stamped conversation could
+        be *enumerated*, a process that died mid-deletion left episodes no later
+        run could find and an index that outlived its grace indefinitely.
+
+        Two sweeps, in the order that matters. The **deletion** sweep first,
+        because it carries out something the user already asked for; then the
+        **retention reclaim**, which asks for nothing and destroys nothing.
+
+        Idempotent, and safe to call more than once: both sweeps are re-runnable by
+        construction, and every drop is re-checked under the store's own
+        per-conversation exclusion.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConversationStoreError: If the conversation index cannot be read or
+                written. A sweep that swallowed a store fault to keep running would
+                report success over work it never did, so it aborts loudly — an id
+                that is merely *gone* is a no-op and does not abort it.
+            MemoryStoreError: If an episode a deletion must destroy could not be.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._start())
+
+    async def _start(self) -> None:
+        """Finish pending deletions, then reclaim what retention has emptied."""
+        await self._conversations.sweep_deletions()
+        await self._conversations.reclaim()
+
+    async def converse(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam which owns the deadline (ADR-0029 §4)
+        conversation_id: str | None = None,
+    ) -> TurnOutcome:
+        """Run one turn and drive the step it produces (ADR-0042 §3, ADR-0074 §2).
 
         The adapter passes the user's raw utterance — unrewritten; intent is the
         engine's, not the adapter's (ADR-0042 §3). The turn is planned, then its
         **first** step is driven through :class:`StepRunner`; a multi-step plan
         has only that step driven today, the rest awaiting the plan-driving stage
         (module docstring).
+
+        **Every turn runs under a conversation, and the outcome reports which**
+        (ADR-0074 §2). Passing no id starts one; passing one continues it. The
+        conversation is resolved **before** the turn's work, so its id exists
+        independently of whether the turn succeeds and so a continuation is not
+        racing the reclaim that would drop an idle conversation. A turn that fails
+        outright therefore leaves an empty conversation, which is harmless and
+        reclaimable. The conversation's recent turns are then handed to the planner
+        ahead of the relevance-retrieved beliefs (§5), and the exchange is captured
+        as one ``EpisodicMemory`` once the outcome exists (§3).
 
         Args:
             utterance: What the user said, passed through untouched.
@@ -586,15 +768,24 @@ class Engine:
                 driven step makes. It is *not* an overall wall-clock deadline for a
                 multi-step request; that is a follow-on decided with the
                 plan-driving stage (ADR-0042 §3).
+            conversation_id: The conversation to continue, or ``None`` to start a
+                fresh one. Untrusted input from an adapter: an id the store does
+                not know is **refused, not silently started**, because silently
+                starting one turns a typo or a stale copy-paste into "my
+                conversation vanished" and lands the user's continuation somewhere
+                they cannot find (ADR-0074 §1).
 
         Returns:
             The turn's result and the disposition of the step it drove — including
-            a parked confirmation to render and relay (ADR-0042 §4). ``step`` is
+            a parked confirmation to render and relay (ADR-0042 §4) — plus the
+            conversation it ran under and whether recording it degraded. ``step`` is
             ``None`` when the plan had no step.
 
         Raises:
             RuntimeError: If the engine is shutting down (:meth:`aclose` has been
                 entered), so no new work is accepted.
+            UnknownConversationError: If ``conversation_id`` names no conversation
+                this store holds, or names one the user deleted.
             PlanningError: If the utterance is blank, a transition is rejected, or
                 a clock reading is non-conforming — as the stages raise.
             ContextError: If context assembly failed outright.
@@ -602,7 +793,9 @@ class Engine:
             ToolBindingError: If an authorised call fails its own revalidation.
         """
         self._reject_if_closing()
-        return await self._tracked(self._converse(utterance, timeout=timeout))
+        return await self._tracked(
+            self._converse(utterance, timeout=timeout, conversation_id=conversation_id)
+        )
 
     async def resume(
         self,
@@ -619,6 +812,22 @@ class Engine:
         an ``ALLOW`` or ``DENY``, and only ``approved=False → DENY`` is guaranteed:
         ``approved=True`` may still be refused by the policy (ADR-0042 §4). The
         adapter conveys consent; the policy rules; the engine records and executes.
+
+        **This takes no conversation id, and that is a decision** (ADR-0074 §9 item
+        5). It recovers the parked turn's conversation from the binding the parking
+        turn durably recorded, because a resume that *accepted* an id could be
+        handed the wrong one, and one that defaulted to starting a conversation
+        would file every recovered resolution under a brand-new conversation,
+        orphaned from the exchange that asked the question. The resume path cannot
+        be told which conversation it is in: the adapter relays an opaque token and
+        nothing else, and after a restart that token is reconstructed from durable
+        state with no live turn behind it.
+
+        A resumption is captured as **its own episode** in the conversation that
+        parked — a park is an answer, and the unit is what the user saw. If nothing
+        resolves, the resumption is simply not captured and the degradation is
+        reported: recording it under a conversation invented for the purpose would
+        assert a conversation the user never had.
 
         Args:
             token: The opaque continuation the parking :meth:`converse` returned.
@@ -814,6 +1023,105 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._memory.delete(record_id))
+
+    async def recent_conversations(
+        self, *, limit: int = _DEFAULT_CONVERSATION_PAGE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
+        """List conversations by last activity, most recent first (ADR-0074 §2).
+
+        The read that lets the hub answer "which conversation?" — because a
+        stateless client cannot. Without it, "continue yesterday's conversation"
+        would require the *interface* to have kept the id, which is precisely the
+        state VISION §Principle 8 forbids an interface to own.
+
+        A conversation the user deleted is absent, by the store's own contract and
+        not by anything re-filtered here: the stamp hides it from every read that
+        presents a conversation. Nothing on this surface can show one.
+
+        Args:
+            limit: Page size, bounded by default at 50 — the figure
+                ``AuditTrail.recent`` set and ADR-0073 §2 reused. ``0`` returns an
+                empty page.
+            offset: How many ordered rows to skip before the page begins. Offset
+                paging over a store being written to may skip or repeat a row,
+                which ADR-0073 §2 names and accepts: a listing a user re-runs is
+                not a transaction.
+
+        Returns:
+            The page, activity descending with ``id`` breaking ties.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` or ``offset`` falls outside ``[0, 2**63)``, as
+                the store refuses rather than clamps. Not an ``AssistantError``, so
+                an adapter letting a user supply either must refuse an out-of-range
+                value at its own parse boundary.
+            ConversationStoreError: If the index cannot be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._recent_conversations(limit=limit, offset=offset))
+
+    async def _recent_conversations(
+        self, *, limit: int, offset: int
+    ) -> tuple[ConversationSummary, ...]:
+        """Relay the listing to the stage and project each record."""
+        listed = await self._conversations.recent(limit=limit, offset=offset)
+        return tuple(ConversationSummary.from_record(one) for one in listed)
+
+    async def conversation(self, conversation_id: str) -> ConversationDigest | None:
+        """Read the count and span a deletion is about to destroy (ADR-0074 §8).
+
+        The single-conversation read the deletion ceremony needs: a person cannot
+        consent to destroying something they were not shown, and for a conversation
+        what a human can judge is its count and span rather than every turn
+        (ADR-0073 §5's show-then-confirm, at the unit the user thinks in).
+
+        ``None`` when the id names nothing **or** names a conversation already
+        stamped deleted — the surface declines what it cannot display rather than
+        taking consent for it.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConversationStoreError: If the index cannot be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._conversations.digest(conversation_id))
+
+    async def forget_conversation(self, conversation_id: str) -> bool:
+        """Destroy a conversation and every episode it recorded (ADR-0074 §8).
+
+        ADR-0004 §6's right at the unit the user thinks in. Unconditional, like
+        every other deletion on this façade: the store deletes what it is told to
+        delete, and no kind- or band-conditional refusal is added, because a store
+        that can refuse a data-rights operation is one where that right is
+        conditional on its own classification.
+
+        Three ordered steps, and the ordering is a **protocol rather than a
+        preference** (§8): stamp the conversation, which is durable and refuses
+        every later append; destroy every episode the index names, including one
+        whose write is still in flight; then drop the index and the record, once
+        nothing is left that resolves and the grace has passed. If this process
+        dies part-way the tombstone survives, still naming every episode involved,
+        and :meth:`start` finishes it on the next run.
+
+        Args:
+            conversation_id: The conversation the user named, taken as opaque.
+
+        Returns:
+            ``True`` if this call stamped it; ``False`` if it was already stamped
+            or the id names nothing — which the adapter renders and maps to an exit
+            code, exactly as :meth:`forget` does for a belief. The sweep behind the
+            stamp is run either way, because §8's protocol is re-runnable.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConversationStoreError: If the index cannot be read or written.
+            MemoryStoreError: If an episode could not be destroyed. The tombstone
+                stands and the next sweep finishes the job; reporting success over
+                content the user asked to be gone would be the worse failure.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._conversations.delete(conversation_id))
 
     async def pending_confirmations(self) -> list[Confirmation]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
@@ -1133,9 +1441,22 @@ class Engine:
         self._reserved.add(handle)
         return handle
 
-    async def _converse(self, utterance: str, *, timeout: timedelta) -> TurnOutcome:  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
-        """Plan the turn, then persist and drive its first step if it has one."""
-        turn = await self._loop.respond(utterance)
+    async def _converse(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+        conversation_id: str | None,
+    ) -> TurnOutcome:
+        """Resolve the conversation, plan the turn, drive its step, record it."""
+        # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
+        # does and a continuation marks the conversation active before a reclaim
+        # could judge it idle.
+        conversation = await self._conversations.begin(conversation_id)
+        history = await self._conversations.history(conversation.id)
+        turn = await self._loop.respond(
+            utterance, history=history.records, history_degraded=history.degraded
+        )
         self._check_plan_is_for_goal(turn)
         if not turn.plan.steps:
             # A no-action decision is still a decision, and drives nothing that
@@ -1143,7 +1464,7 @@ class Engine:
             # persisted as an auditable record (ADR-0014 §2).
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
-            return TurnOutcome(turn=turn)
+            return await self._capture(conversation.id, turn=turn, step=None, resumed=False)
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
         # (no await), so a backpressure refusal at the ceiling writes no durable
@@ -1159,12 +1480,23 @@ class Engine:
             state = await self._plans.start_execution(turn.plan.id)
             disposition = await self._runner.run(state, first.id, timeout=timeout)
             step = self._step_outcome(turn, disposition, handle=handle)
-            return TurnOutcome(turn=turn, step=step)
         finally:
             # The reservation held the slot across the awaits. It is now either in
             # the parked table (the step parked, which counts it) or unused (it did
             # not); either way the in-flight reservation is released.
             self._reserved.discard(handle)
+        # A turn that parked records the binding it parked on, which is the *only*
+        # thing a later resumption — possibly in another process, with no live turn
+        # behind its token — has to find its way back to this conversation
+        # (ADR-0074 §3).
+        parked = (
+            ParkedBinding(execution_id=step.state.id, step_id=first.id)
+            if step.confirmation is not None
+            else None
+        )
+        return await self._capture(
+            conversation.id, turn=turn, step=step, resumed=False, parked=parked
+        )
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
         """Refuse a plan that was not built for this turn's goal (ADR-0037 §2 in spirit).
@@ -1232,7 +1564,65 @@ class Engine:
             # single-resolution index anyway; evicting keeps the table bounded and
             # turns a replay into a clean "unknown token" (ADR-0042 §4).
             self._parked.pop(token.handle, None)
-            return TurnOutcome(turn=parked.turn, step=step)
+            return await self._capture_resumption(parked, step)
+
+    async def _capture_resumption(self, parked: _Parked, step: StepOutcome) -> TurnOutcome:
+        """Record the resolution in the conversation that parked, or say it was not.
+
+        The association is **durable and recovered rather than passed** (ADR-0074
+        §3): the parking turn wrote its ``(execution_id, step_id)`` binding into the
+        index, and this resolves it back. Nothing resolving is the ratified case,
+        not a fault — a park predating capture, or one whose conversation the user
+        deleted — and the answer is that the resumption is not captured and no
+        conversation is invented for it.
+
+        A resumption is not an activity mark: ``mark_active`` belongs to a turn that
+        *begins* against a named conversation (§2), and a resume is handed a token
+        rather than an id. The parked turn's own episode is still live, so a reclaim
+        cannot drop the conversation underneath it.
+        """
+        binding = ParkedBinding(execution_id=parked.execution_id, step_id=parked.step_id)
+        try:
+            origin = await self._conversations.conversation_of_binding(binding)
+        except ConversationStoreError:
+            _log.warning("conversation_binding_unresolved", exc_info=True)
+            origin = None
+        if origin is None:
+            return TurnOutcome(turn=parked.turn, step=step, capture_degraded=True)
+        return await self._capture(
+            origin.conversation_id, turn=parked.turn, step=step, resumed=True
+        )
+
+    async def _capture(
+        self,
+        conversation_id: str,
+        *,
+        turn: TurnResult | None,
+        step: StepOutcome | None,
+        resumed: bool,
+        parked: ParkedBinding | None = None,
+    ) -> TurnOutcome:
+        """Record the exchange and fold what became of it into the outcome (§3, §9).
+
+        The capture point is where a ``TurnOutcome`` is produced, which is both
+        ``converse`` and ``resume`` (ADR-0042 §3's "one result out"). So a turn that
+        parks for confirmation is captured **when it parks** — the alternative,
+        holding the episode open until the park resolves, would make the record of
+        an exchange depend on a confirmation the user may never answer, so an
+        abandoned park would erase the question they actually asked.
+        """
+        report = await self._conversations.capture(
+            conversation_id,
+            content=_exchange_of(turn, step, resumed=resumed),
+            outcome=_outcome_of(step),
+            parked=parked,
+        )
+        return TurnOutcome(
+            turn=turn,
+            step=step,
+            conversation_id=report.conversation_id,
+            capture_degraded=report.degraded,
+        )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Delegate to the loop and translate its ingest results (ADR-0042 §1)."""
@@ -1385,6 +1775,7 @@ __all__ = [
     "Belief",
     "Confirmation",
     "ContinuationToken",
+    "ConversationSummary",
     "Engine",
     "IngestSummary",
     "LearnDecision",

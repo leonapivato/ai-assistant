@@ -16,6 +16,7 @@ from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.learning import RuleBasedFeedbackProcessor
 from ai_assistant.memory import DefaultMemoryPolicy, MemoryIngestor, SqliteMemoryStore
+from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.models import (
     HashingEmbedder,
     PydanticAIProvider,
@@ -25,7 +26,13 @@ from ai_assistant.models import (
     ensure_vendor_available,
 )
 from ai_assistant.models.retry import RetryPolicy
-from ai_assistant.orchestration import Engine, LearningLoop, StepExecutor, StepRunner
+from ai_assistant.orchestration import (
+    ConversationLifecycle,
+    Engine,
+    LearningLoop,
+    StepExecutor,
+    StepRunner,
+)
 from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.tools import build_default_registry
@@ -58,6 +65,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       the façade, and one :class:`SqliteAuditTrail` by the runner and the façade
       — the façade reads the trail (query-only) to recover a durably-parked
       confirmation after a restart (ADR-0052 §1);
+    * the :class:`ConversationLifecycle` capture stage is given that *same*
+      memory store and the one retention horizon settings names, so a captured
+      episode and the conversation index that names it expire against one clock
+      rather than two (ADR-0074 §7, §9);
     * the model seam is composed **retry inside routing**, the order ADR-0013 §3
       recommends and that nothing in `models/` can enforce, since enforcing it
       would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`).
@@ -151,6 +162,18 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         # a restart and can be recovered through the façade (ADR-0049, ADR-0052; #318).
         plans = SqlitePlanStore(path=directory / "plans.db")
         opened.append(plans.close)
+        # The conversation index (ADR-0074 §9). Both durations come from settings and
+        # are the *user's* configuration, not the contract's: ``episode_retention``
+        # defaults to a finite horizon (§7 is emphatic that an unbounded default would
+        # ship an ever-growing Tier 1 log of everything the user has ever typed), and
+        # ``conversation_tombstone_grace`` is positive and finite with no ``None``
+        # spelling (§8), both refused at load rather than per sweep.
+        conversations = SqliteConversationStore(
+            path=directory / "conversations.db",
+            retention=settings.episode_retention,
+            tombstone_grace=settings.conversation_tombstone_grace,
+        )
+        opened.append(conversations.close)
 
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
@@ -194,7 +217,23 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # the inspection surface lists the beliefs the assistant actually uses
             # and ``forget`` destroys what the user was shown (ADR-0073 §7).
             memory=memory,
-            closers=[_as_async(memory.close), _as_async(trail.close), _as_async(plans.close)],
+            # The capture/lifecycle stage, holding *both* durable stores — the same
+            # `memory` again, so a captured turn is retrievable and destroyable
+            # through the surfaces the user already has (ADR-0074 §9). Its
+            # ``retention`` is the very value the conversation store was built with,
+            # so an episode's stamped `expires_at` and the reclaim of the index that
+            # names it are judged against one horizon and not two (§7).
+            conversations=ConversationLifecycle(
+                conversations=conversations,
+                memory=memory,
+                retention=settings.episode_retention,
+            ),
+            closers=[
+                _as_async(memory.close),
+                _as_async(trail.close),
+                _as_async(plans.close),
+                _as_async(conversations.close),
+            ],
         )
     except BaseException:
         # Close anything already opened before re-raising, so a failed build

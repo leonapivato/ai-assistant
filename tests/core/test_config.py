@@ -148,6 +148,91 @@ def test_load_settings_rejects_a_non_positive_confirmation_ttl(
         load_settings()
 
 
+# --- conversations: the two ADR-0074 durations (#449) --------------------
+
+
+def test_episode_retention_defaults_to_a_finite_horizon() -> None:
+    # ADR-0074 §7's load-bearing default, and the one an implementation copying
+    # `confirmation_ttl`'s shape gets wrong: `None` there means "a parked
+    # confirmation never goes stale" and here would mean unbounded episodic
+    # retention — an ever-growing Tier 1 log of everything the user has ever
+    # typed, which is exactly what §7 rejects.
+    horizon = Settings().episode_retention
+    assert horizon is not None
+    assert horizon > timedelta(0)
+
+
+def test_episode_retention_accepts_an_explicit_none_as_keep_forever() -> None:
+    # The pair with the case above. `None` is the user's deliberate choice, and it
+    # also switches conversation reclaim off entirely (ADR-0074 §7).
+    assert Settings(episode_retention=None).episode_retention is None
+
+
+def test_episode_retention_is_disabled_from_the_environment_by_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The default is finite, so omitting the variable can never reach `None` and
+    # no duration literal spells it: without the sentinel "keep forever" would be
+    # unreachable from a deployment, which §7 says it must not be.
+    monkeypatch.setenv("ASSISTANT_EPISODE_RETENTION", "none")
+    assert load_settings().episode_retention is None
+
+
+def test_episode_retention_parses_an_iso_duration_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_EPISODE_RETENTION", "P7D")
+    assert load_settings().episode_retention == timedelta(days=7)
+
+
+@pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1)])
+def test_a_non_positive_episode_retention_is_rejected(value: timedelta) -> None:
+    # Zero is not a spelling for "keep forever"; `None` is.
+    with pytest.raises(ValidationError):
+        Settings(episode_retention=value)
+
+
+def test_conversation_tombstone_grace_defaults_to_something_positive_and_finite() -> None:
+    # ADR-0074 §8: the two values that break the deletion protocol do so in
+    # opposite directions — a zero grace drops the index immediately, orphaning
+    # the late write the tombstone exists to catch, and an unbounded one keeps
+    # every deleted conversation's index forever.
+    grace = Settings().conversation_tombstone_grace
+    assert grace > timedelta(0)
+
+
+@pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1)])
+def test_a_non_positive_conversation_tombstone_grace_is_rejected(value: timedelta) -> None:
+    with pytest.raises(ValidationError):
+        Settings(conversation_tombstone_grace=value)
+
+
+def test_the_tombstone_grace_has_no_none_spelling() -> None:
+    # §8 declines to offer one at all, because "no grace" and "infinite grace" are
+    # precisely the two values that break the protocol and a nullable field spells
+    # one of them.
+    with pytest.raises(ValidationError):
+        Settings(conversation_tombstone_grace=None)  # type: ignore[arg-type]  # the point
+
+
+def test_the_tombstone_grace_is_not_disabled_by_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The sentinel is per-field and this field does not opt in, so "none" is judged
+    # as a duration and refused rather than quietly becoming an unbounded grace.
+    monkeypatch.setenv("ASSISTANT_CONVERSATION_TOMBSTONE_GRACE", "none")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
+
+
+def test_load_settings_rejects_a_non_positive_tombstone_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_CONVERSATION_TOMBSTONE_GRACE", "PT0S")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
+
+
 def test_permission_threshold_defaults_reproduce_the_policy_defaults() -> None:
     # Unset, the four thresholds must match ThresholdActionPolicy's own
     # constructor defaults so a deployment that configures nothing keeps today's

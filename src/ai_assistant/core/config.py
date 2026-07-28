@@ -29,40 +29,46 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import Reversibility, RiskLevel
 
-#: The string an operator sets a permission threshold to in the environment to
-#: **disable** that gate entirely — "never gate on this field alone", i.e. the
-#: field's ``None`` value. Environment variables arrive as strings, so a
-#: non-None-default gate (``confirm_at_risk``, ``confirm_at_reversibility``)
+#: The string an operator sets a setting to in the environment to select its
+#: ``None`` value — "disable this entirely". Environment variables arrive as
+#: strings, so any nullable setting whose *default* is not ``None``
+#: (``confirm_at_risk``, ``confirm_at_reversibility``, ``episode_retention``)
 #: would otherwise be un-disable-able from the environment: omitting the variable
-#: restores the default, and no scale member spells ``None``. Case-insensitive,
-#: and distinct from every ``RiskLevel``/``Reversibility`` member value, so it
-#: cannot collide with a real threshold.
-_THRESHOLD_DISABLE_SENTINEL = "none"
+#: restores the default, and neither a scale member nor a duration literal spells
+#: ``None``. Case-insensitive, and distinct from every ``RiskLevel`` and
+#: ``Reversibility`` member value and from every duration form, so it cannot
+#: collide with a real value on any field that opts into it.
+_DISABLE_SENTINEL = "none"
 
 
-def _disable_threshold(value: object) -> object:
-    """Map the disable sentinel to ``None`` before a threshold's scale validation.
+def _disabled_if_sentinel(value: object) -> object:
+    """Map the disable sentinel to ``None`` before the field's own validation.
 
     A per-field :class:`BeforeValidator` rather than the model-wide
     ``env_parse_none_str``: that switch would turn a literal ``"none"`` into
     ``None`` on *every* setting, so no other field could ever take ``"none"`` as
     a value in its own right — it would arrive as ``None`` and be judged against
-    that field's own type instead. Restricting the sentinel to the four threshold
-    fields keeps the disable path where it belongs, and leaves every other field
+    that field's own type instead. Restricting the sentinel to the fields that
+    opt in keeps the disable path where it belongs, and leaves every other field
     free to say for itself what ``"none"`` means. Any other value — a scale member, an
-    enum instance passed directly, an already-``None`` — falls through unchanged,
-    so off-scale input is still refused by the scale validation that follows.
+    enum instance passed directly, a duration, an already-``None`` — falls through
+    unchanged, so bad input is still refused by the validation that follows.
     """
-    if isinstance(value, str) and value.strip().lower() == _THRESHOLD_DISABLE_SENTINEL:
+    if isinstance(value, str) and value.strip().lower() == _DISABLE_SENTINEL:
         return None
     return value
 
 
 #: A permission threshold on the risk / reversibility scale, or ``None`` to
 #: disable that gate. The :class:`BeforeValidator` accepts the environment
-#: disable sentinel (:data:`_THRESHOLD_DISABLE_SENTINEL`) as ``None``.
-_RiskThreshold = Annotated[RiskLevel | None, BeforeValidator(_disable_threshold)]
-_ReversibilityThreshold = Annotated[Reversibility | None, BeforeValidator(_disable_threshold)]
+#: disable sentinel (:data:`_DISABLE_SENTINEL`) as ``None``.
+_RiskThreshold = Annotated[RiskLevel | None, BeforeValidator(_disabled_if_sentinel)]
+_ReversibilityThreshold = Annotated[Reversibility | None, BeforeValidator(_disabled_if_sentinel)]
+
+#: A retention horizon, or ``None`` for "keep forever" — reachable from the
+#: environment only through the same sentinel, since the default is finite
+#: (ADR-0074 §7).
+_OptionalDuration = Annotated[timedelta | None, BeforeValidator(_disabled_if_sentinel)]
 
 
 #: The shape of a pydantic-ai model spec: a non-empty ``provider`` and a non-empty
@@ -358,6 +364,50 @@ class Settings(BaseSettings):
         description="Lifetime of a parked confirmation before its answer is refused as stale.",
     )
 
+    # --- Conversations (ADR-0074) ----------------------------------------
+    # How long a captured episode is retained, and how long a deleted
+    # conversation's tombstone outlives the deletion that stamped it. Both are
+    # parsed from an ISO-8601 duration or ``HH:MM:SS`` string in the environment
+    # (``ASSISTANT_EPISODE_RETENTION=P7D``, ``ASSISTANT_CONVERSATION_TOMBSTONE_GRACE=PT1H``).
+    #
+    # ``episode_retention`` **defaults to a finite duration, and that is the whole
+    # decision** (ADR-0074 §7). It is the right *shape* to copy from
+    # ``confirmation_ttl`` above and exactly the wrong default to inherit: that
+    # field defaults to ``None``, which there means "a parked confirmation never
+    # goes stale" and here would mean **unbounded episodic retention** — an
+    # ever-growing Tier 1 log of everything the user has ever typed, with no cap
+    # decision behind it (ADR-0007 §5 deferred size caps), which is precisely what
+    # §7 rejects. An implementation that copied the default along with the type
+    # would ship the opposite of the ADR while looking like it followed it. So
+    # ``None`` here means "keep forever", it is the user's deliberate choice, and it
+    # is reachable only by setting the variable to the disable sentinel — which is
+    # also what switches conversation reclaim off entirely (§7).
+    #
+    # ``conversation_tombstone_grace`` is **positive and finite with no ``None``
+    # spelling** (§8), because "no grace" and "infinite grace" are the two values
+    # that break the deletion protocol — the first drops the index immediately,
+    # orphaning the late write the tombstone exists to catch; the second keeps every
+    # deleted conversation's index forever — and a nullable field spells one of
+    # them. ``gt=timedelta(0)`` refuses the first at load, as ``confirmation_ttl``
+    # refuses its own non-positive values.
+    episode_retention: _OptionalDuration = Field(
+        default=timedelta(days=30),
+        gt=timedelta(0),
+        description=(
+            "How long a captured conversation turn's episode is retained. Finite by "
+            "default (ADR-0074 §7); set it to 'none' to keep episodes forever, which "
+            "also stops idle conversations being reclaimed."
+        ),
+    )
+    conversation_tombstone_grace: timedelta = Field(
+        default=timedelta(hours=1),
+        gt=timedelta(0),
+        description=(
+            "How long a deleted conversation's tombstone survives the deletion, so a "
+            "capture that commits late is still swept (ADR-0074 §8). Positive and finite."
+        ),
+    )
+
     # --- Permissions -----------------------------------------------------
     # The four thresholds ThresholdActionPolicy gates on (ADR-0036 §1). These are
     # the *user's* configuration, not the contract's — ADR-0021 §5 records that
@@ -375,7 +425,7 @@ class Settings(BaseSettings):
     # "never confirm/deny on this field alone", the field's ``None`` — set the
     # variable to ``none`` (case-insensitive), the sentinel a per-field
     # BeforeValidator maps to ``None`` before scale validation
-    # (:data:`_THRESHOLD_DISABLE_SENTINEL`); this matters most for the two confirm
+    # (:data:`_DISABLE_SENTINEL`); this matters most for the two confirm
     # gates, whose non-None defaults omission cannot reach.
     #
     # No cross-field ordering is imposed: the policy accepts a deny threshold below

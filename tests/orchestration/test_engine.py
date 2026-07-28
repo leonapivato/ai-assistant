@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import MemoryStoreError, PlanningError
+from ai_assistant.core.errors import (
+    MemoryStoreError,
+    PlanningError,
+    UnknownConversationError,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     BeliefBand,
@@ -44,6 +48,7 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration import (
     Belief,
     ContinuationToken,
+    ConversationLifecycle,
     Disposition,
     Engine,
     IngestSummary,
@@ -58,6 +63,7 @@ from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
     FakeContextProvider,
+    FakeConversationStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -69,12 +75,21 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, MemoryUpdateProposal
+    from ai_assistant.core.types import (
+        CurrentContext,
+        Goal,
+        MemoryRecord,
+        MemoryUpdateProposal,
+        MemoryWrite,
+    )
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 
 #: Long enough that the fakes' instant tools finish inside it anywhere.
 PATIENT = timedelta(seconds=30)
+
+#: The episodic horizon the harness's capture stage stamps with (ADR-0074 §7).
+RETENTION = timedelta(days=30)
 
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
@@ -201,6 +216,17 @@ class Harness:
         self.invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools])
         self.policy = policy if policy is not None else FakeActionPolicy()
         self.memory = memory if memory is not None else FakeMemoryStore(now=lambda: AT)
+        # The capture/lifecycle stage over the *same* memory store, as the
+        # composition root wires it (ADR-0074 §9). Kept on the harness so a test can
+        # read what capture actually recorded, and so a second façade over the same
+        # durable state shares one stage.
+        self.conversation_store = FakeConversationStore(now=lambda: AT)
+        self.conversations = ConversationLifecycle(
+            conversations=self.conversation_store,
+            memory=self.memory,
+            retention=RETENTION,
+            now=lambda: AT,
+        )
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.handles = iter(f"tok-{n}" for n in range(1, 100))
         # Kept on the harness so a learn test can read what reached the loop.
@@ -234,6 +260,7 @@ class Harness:
             plans=self.plans,
             trail=self.trail,
             memory=self.memory,
+            conversations=self.conversations,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
         )
@@ -420,6 +447,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
     )
 
@@ -527,6 +555,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -579,6 +608,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -623,6 +653,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
     )
     first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
@@ -754,6 +785,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
     )
     facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
@@ -1133,6 +1165,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
     )
@@ -1193,6 +1226,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         plans=harness.plans,
         trail=harness.trail,
         memory=harness.memory,
+        conversations=harness.conversations,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
     )
@@ -1219,6 +1253,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             plans=harness.plans,
             trail=harness.trail,
             memory=harness.memory,
+            conversations=harness.conversations,
             max_outstanding_confirmations=0,
         )
 
@@ -1234,6 +1269,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             plans=harness.plans,
             trail=harness.trail,
             memory=harness.memory,
+            conversations=harness.conversations,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
         )
 
@@ -1678,3 +1714,284 @@ async def test_forget_is_drained_before_shutdown_closes_resources() -> None:
     await closing
     assert closed.is_set()
     assert closed_while_inflight is False
+
+
+# --- conversations: capture, continuity and the façade (ADR-0074 §2, §3, §5) --
+
+
+class RecordingPlanner(OneStepPlanner):
+    """A planner that keeps the ``memories`` it was handed, in order.
+
+    §5 widens what that parameter means — the conversation's recent turns first,
+    then the relevance-retrieved beliefs — and the widening is only observable at
+    the seam that receives it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[MemoryRecord, ...]] = []
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+    ) -> ActionPlan:
+        self.seen.append(tuple(memories))
+        return await super().plan(goal, context=context, memories=memories)
+
+
+class RecordingSearchStore(FakeMemoryStore):
+    """A store that records the ``kinds`` filter each ``search`` reached it with."""
+
+    def __init__(self) -> None:
+        super().__init__(now=lambda: AT)
+        self.kinds: list[Sequence[MemoryKind] | None] = []
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+    ) -> list[MemoryRecord]:
+        self.kinds.append(kinds)
+        return await super().search(query, limit=limit, kinds=kinds)
+
+
+async def test_converse_runs_under_a_conversation_and_reports_the_one_it_ran_under() -> None:
+    """§2: no id starts one, and the outcome names it so a client can continue.
+
+    The id is what a stateless client holds; without it on the outcome, continuing
+    would require the *interface* to have kept state VISION §Principle 8 forbids it
+    to own.
+    """
+    harness = Harness(planner=NoStepPlanner())
+
+    outcome = await harness.engine.converse("hello", timeout=PATIENT)
+
+    assert outcome.conversation_id is not None
+    assert outcome.capture_degraded is False
+    assert await harness.conversation_store.get(outcome.conversation_id) is not None
+    # One episode per outcome (§3), recorded in the conversation's index.
+    turns = await harness.conversation_store.turns(outcome.conversation_id)
+    assert [turn.ordinal for turn in turns] == [1]
+    assert await harness.memory.get(turns[0].episode_id) is not None
+
+
+async def test_converse_continues_the_conversation_it_is_given() -> None:
+    """§2: a turn carrying an id appends to that conversation; there is no "open"."""
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = Harness(planner=NoStepPlanner(), loop_id_factory=lambda: next(goals))
+    first = await harness.engine.converse("hello", timeout=PATIENT)
+    assert first.conversation_id is not None
+
+    second = await harness.engine.converse(
+        "and again", timeout=PATIENT, conversation_id=first.conversation_id
+    )
+
+    assert second.conversation_id == first.conversation_id
+    turns = await harness.conversation_store.turns(first.conversation_id)
+    assert [turn.ordinal for turn in turns] == [1, 2]
+
+
+async def test_converse_refuses_an_id_the_store_does_not_know() -> None:
+    """§1: silently starting one turns a typo into "my conversation vanished"."""
+    harness = Harness(planner=NoStepPlanner())
+
+    with pytest.raises(UnknownConversationError):
+        await harness.engine.converse("hello", timeout=PATIENT, conversation_id="nobody")
+
+    assert await harness.conversation_store.recent() == [], "no conversation was created"
+
+
+async def test_the_conversation_tail_reaches_the_planner_ahead_of_the_retrieved_beliefs() -> None:
+    """§5: continuity reaches the model through the seam it already has.
+
+    ``memories`` carries the conversation's recent turns **first**, then the
+    relevance-retrieved records. The order is the whole of the widening: a planner
+    may rely on the grouping and must not read a global ranking into it.
+    """
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    planner = RecordingPlanner()
+    harness = Harness(planner=planner, tools=(tool(),), loop_id_factory=lambda: next(goals))
+    await harness.memory.add(
+        SemanticMemory(
+            id="belief-1",
+            content="the user prefers metric units",
+            fact="metric units",
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=AT),
+        )
+    )
+    first = await harness.engine.converse("send it", timeout=PATIENT)
+    assert first.conversation_id is not None
+
+    await harness.engine.converse("send it", timeout=PATIENT, conversation_id=first.conversation_id)
+
+    handed = planner.seen[-1]
+    assert handed, "the second turn should have been handed something"
+    assert handed[0].kind == MemoryKind.EPISODIC.value, "the conversation tail comes first"
+    assert all(record.kind != MemoryKind.EPISODIC.value for record in handed[1:]), (
+        "the relevance-retrieved half is beliefs, because retrieval excludes episodes"
+    )
+
+
+async def test_relevance_retrieval_asks_for_the_belief_kinds_and_never_episodes() -> None:
+    """§6: a captured turn must not compete with beliefs for the retrieval budget.
+
+    ``MemoryStore.search`` itself stays band-neutral and kind-filtered only by its
+    caller's argument; this asserts the *caller's* argument.
+    """
+    memory = RecordingSearchStore()
+    harness = Harness(planner=NoStepPlanner(), memory=memory)
+
+    await harness.engine.converse("hello", timeout=PATIENT)
+
+    assert memory.kinds, "retrieval ran"
+    for asked in memory.kinds:
+        assert asked is not None
+        assert MemoryKind.EPISODIC not in asked
+
+
+async def test_a_resumption_is_captured_into_the_conversation_that_parked() -> None:
+    """§3: recovered through the binding, never passed — and no conversation invented.
+
+    Two records, both true: the park is an answer the user saw, and so is the
+    resolution. The resumption must land in the conversation that parked, which is
+    the whole reason the parking turn writes its ``(execution_id, step_id)`` down.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    assert parked.conversation_id is not None
+    assert parked.capture_degraded is False
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.conversation_id == parked.conversation_id
+    assert resumed.capture_degraded is False
+    turns = await harness.conversation_store.turns(parked.conversation_id)
+    assert [turn.ordinal for turn in turns] == [1, 2], "the resolution is its own episode"
+    assert turns[0].parked is not None, "the parking turn recorded its binding"
+    assert turns[1].parked is None
+    assert len(await harness.conversation_store.recent()) == 1, "no conversation was invented"
+
+
+async def test_a_resumption_whose_park_no_longer_resolves_is_not_captured() -> None:
+    """§3: a park whose conversation the user deleted — nothing is recorded, and said so.
+
+    Recording it under a conversation invented for the purpose would be worse than
+    not recording it: it would assert a conversation the user never had.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    assert parked.conversation_id is not None
+    await harness.conversation_store.stamp_deleted(parked.conversation_id)
+
+    resumed = await harness.engine.resume(
+        parked.step.confirmation.token, approved=True, timeout=PATIENT
+    )
+
+    assert resumed.step is not None
+    assert resumed.step.disposition is Disposition.EXECUTED, "the answer is still the answer"
+    assert resumed.conversation_id is None
+    assert resumed.capture_degraded is True
+
+
+async def test_a_capture_failure_degrades_the_turn_and_is_reported_on_the_outcome() -> None:
+    """§9 item 6: the answer is still the answer, and the user is told it went unrecorded.
+
+    Beside ``memory_degraded``, because a user whose turns are silently not being
+    recorded will not find out until they try to continue.
+    """
+
+    class Faulting(FakeMemoryStore):
+        async def write_atomic(self, writes: Sequence[MemoryWrite]) -> Sequence[str]:
+            msg = "the embedder is down"
+            raise MemoryStoreError(msg)
+
+    harness = Harness(planner=NoStepPlanner(), memory=Faulting(now=lambda: AT))
+
+    outcome = await harness.engine.converse("hello", timeout=PATIENT)
+
+    assert outcome.turn is not None, "the turn still produced its answer"
+    assert outcome.capture_degraded is True
+    assert outcome.conversation_id is not None
+
+
+async def test_engine_start_consumes_the_stamped_enumeration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0076 §3: every conformance clause can pass against a method **nothing calls**.
+
+    So this asserts the wiring rather than the store: engine start-up reaches the
+    enumeration ADR-0076 added, which is the only way a deletion a previous run left
+    unfinished is ever rediscovered.
+    """
+    harness = Harness(planner=NoStepPlanner())
+    calls: list[str | None] = []
+    original = harness.conversation_store.stamped_conversation_ids
+
+    async def _spy(*, limit: int | None = None, after_id: str | None = None) -> list[str]:
+        calls.append(after_id)
+        return await original(limit=limit, after_id=after_id)
+
+    monkeypatch.setattr(harness.conversation_store, "stamped_conversation_ids", _spy)
+
+    await harness.engine.start()
+
+    assert calls == [None], "start-up walked the tombstones exactly once, from the beginning"
+
+
+async def test_engine_start_finishes_a_deletion_a_previous_run_left_unfinished() -> None:
+    """ADR-0074 §8: the reclaim runs "by the deleting call, **at engine start**"."""
+    harness = Harness(planner=NoStepPlanner())
+    outcome = await harness.engine.converse("hello", timeout=PATIENT)
+    assert outcome.conversation_id is not None
+    turns = await harness.conversation_store.turns(outcome.conversation_id)
+    # An interrupted §8 sequence: the stamp landed, nothing else did.
+    assert await harness.conversation_store.stamp_deleted(outcome.conversation_id) is True
+    assert await harness.memory.get(turns[0].episode_id) is not None
+
+    await harness.engine.start()
+
+    assert await harness.memory.get(turns[0].episode_id) is None, "the leak was swept"
+
+
+async def test_recent_conversations_projects_what_a_person_chooses_from() -> None:
+    """§2: activity descending, and never ``last_turn_at`` as the key."""
+    harness = Harness(planner=NoStepPlanner())
+    first = await harness.engine.converse("hello", timeout=PATIENT)
+    assert first.conversation_id is not None
+
+    listed = await harness.engine.recent_conversations()
+
+    assert [one.id for one in listed] == [first.conversation_id]
+    assert listed[0].last_turn_at is not None
+    assert listed[0].last_active_at == listed[0].started_at
+
+
+async def test_forget_conversation_shows_the_span_then_destroys_everything() -> None:
+    """§8: show-then-confirm at the unit the user thinks in, then the ordered deletion."""
+    goals = iter(f"g-{n}" for n in range(1, 10))
+    harness = Harness(planner=NoStepPlanner(), loop_id_factory=lambda: next(goals))
+    first = await harness.engine.converse("hello", timeout=PATIENT)
+    assert first.conversation_id is not None
+    await harness.engine.converse("again", timeout=PATIENT, conversation_id=first.conversation_id)
+
+    digest = await harness.engine.conversation(first.conversation_id)
+    assert digest is not None
+    assert digest.recorded_turns == 2
+    assert digest.last_turn_at is not None
+
+    assert await harness.engine.forget_conversation(first.conversation_id) is True
+
+    assert await harness.engine.conversation(first.conversation_id) is None
+    assert await harness.engine.recent_conversations() == ()
+    assert await harness.memory.export() == [], "every episode it recorded is gone"
