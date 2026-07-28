@@ -313,7 +313,27 @@ conversational episode, which is the only source that exists to decide for.
 **The capture point is where a `TurnOutcome` is produced**, which is both
 `Engine.converse` and `Engine.resume` (ADR-0042 §3's "one result out"). So a turn
 that parks for confirmation is captured when it parks, and its resumption
-(ADR-0052) is captured as its own episode. Two records, both true: the unit is
+(ADR-0052) is captured as its own episode.
+
+**A resumption is captured into the conversation that parked, and a resume never
+starts one.** This needs saying because the resume path cannot be told which
+conversation it is in: the adapter relays an opaque token and nothing else
+(ADR-0042 §4), and after a restart that token is *reconstructed* from durable
+state, where `TurnOutcome.turn` is `None` because "a confirmation reconstructed
+from durable state after a restart has no live turn" (`orchestration/engine.py`,
+ADR-0052 §3). A rule that started a conversation whenever none was named — §2's
+rule for a fresh turn — would therefore file every recovered resolution under a
+brand-new conversation, orphaned from the exchange that asked the question.
+
+So the association is **durable and recovered rather than passed**: the turn that
+parks records the binding it parked on — the execution and step ids recovery
+already keys on (`_recovered_confirmation`, ADR-0044) — and the conversation store
+resolves that binding back to its turn, and so to its conversation (§9). If
+nothing resolves — a park predating capture, or one whose conversation the user
+deleted — the resumption is **not captured at all**, and the failure is reported
+like any other capture failure. Recording it under a conversation invented for the
+purpose would be worse than not recording it: it would assert a conversation the
+user never had. Two records, both true: the unit is
 what the user saw, and a park *is* an answer. The alternative — hold the episode
 open until the park resolves — makes the record of an exchange depend on a
 confirmation the user may never answer (ADR-0059's lifetime deadline), so an
@@ -771,9 +791,16 @@ only a per-attempt budget (ADR-0029 §4, ADR-0042 §3), so nothing in this syste
 licenses "long enough". What the grace does is keep the tombstone — and with it
 the only record naming a pending intent — alive past the deletion, so a capture
 that commits and *then* dies is still swept when the reclaim next runs. The
-tombstone's lifetime is its own configured `timedelta`, finite by default for the
-reason §7 gives about inheriting `confirmation_ttl`'s `None`, and the reclaim
-re-runs against it.
+tombstone's lifetime is its own `Settings` field —
+`conversation_tombstone_grace: timedelta` — and it is **positive and finite, with
+no `None` spelling**, validated at construction like every other duration there
+(`confirmation_ttl` carries `gt=timedelta(0)`). Each half of that is a failure
+this protocol has already been shown to have: an unbounded grace keeps every
+deleted conversation's index forever, which is the content-free-but-real residue
+§8 bounds; a zero or negative one drops the index immediately, which is the
+orphaned late write the tombstone exists to catch. `None` is not offered at all,
+because "no grace" and "infinite grace" are the two values that break it and a
+nullable field spells one of them. The reclaim re-runs against it.
 
 **What is left is one window, and it is accepted rather than claimed away.** It is
 now the conjunction of two failures rather than a duration: a capture must commit
@@ -826,7 +853,9 @@ count and span rather than every turn.
   listing and the reclaim read — `last_turn_at`, **optional and unset until a turn
   lands**, and `deleted_at`, the tombstone stamp of §8, likewise optional; §2) and
   `ConversationTurn` (the conversation it belongs to, its ordinal, the id of the
-  episode that records it, and when it occurred).
+  episode that records it, when it occurred, and — where the turn parked — the
+  execution and step ids of the binding it parked on, so a recovered resume finds
+  its conversation, §3).
   Both frozen pydantic models (ADR-0068), both timezone-aware at every instant
   (ADR-0023, ADR-0030).
 - **`core/protocols.py`** gains **one** Protocol, `ConversationStore`, owing:
@@ -837,7 +866,8 @@ count and span rather than every turn.
   bounded and ordered by `last_active_at` (§2); mark a conversation active (§2);
   resolve an episode id back to the
   turn that cites it (§10 declines duplicating that relation onto the record, so
-  the store owes both directions); stamp a conversation deleted (§8); export; and
+  the store owes both directions); resolve a parked binding back to its turn, and
+  so to its conversation (§3); stamp a conversation deleted (§8); export; and
   reclaim — the sweep that finishes a stamped deletion and drops a conversation
   that has no live turns *and* has been idle past the horizon (§7, §8).
 - **`core/errors.py`** gains a `ConversationStoreError` in the `AssistantError`
@@ -974,6 +1004,16 @@ different questions:
    - **An interruption between the two writes**, in each order, asserting the
      residue each case is ratified to leave (§8): an orphan episode after a
      capture, a re-runnable deletion after a deletion.
+   - **A recovered park's resumption** — park in a conversation, discard the
+     in-memory state, recover the confirmation from durable state, resume: the
+     resolution's episode lands in the **original** conversation, and no new
+     conversation is created (§3). Also the unresolvable case — a park whose
+     conversation was deleted — asserting that nothing is captured rather than a
+     conversation being invented.
+   - **An unset `conversation_tombstone_grace`, and a zero or negative one**
+     (§8) — the first stamps a positive finite grace, the latter two are refused at
+     construction. Both are the values that break the deletion protocol in opposite
+     directions.
    - **An unset `episode_retention` and an explicit `None`** (§7) — the first
      stamps a finite `expires_at`, the second stamps none. The pair is what catches
      an implementation that inherited `confirmation_ttl`'s `None` default and so
@@ -1002,8 +1042,12 @@ different questions:
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
 4. **A production implementation**, SQLite-backed beside the existing stores, with
    ADR-0004 §4's file permissions.
-5. **The capture stage and the façade** (§3, §5): `Engine.converse`/`Engine.resume`
-   take an optional conversation id and report the one they ran under. The façade
+5. **The capture stage and the façade** (§3, §5): `Engine.converse` takes an
+   optional conversation id and reports the one it ran under. **`Engine.resume`
+   takes none** — it recovers the parked turn's conversation from the binding
+   (§3), because a resume that accepted an id could be handed the wrong one, and
+   one that defaulted to starting a conversation would orphan every recovered
+   resolution. The façade
    is concrete and not a contract (ADR-0042 §1), so those names are shape, not
    spelling (ADR-0073 §7).
 6. **The CLI** (§10): continuation is an option on `ask`, plus a listing of recent
