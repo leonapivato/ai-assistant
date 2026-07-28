@@ -986,8 +986,31 @@ class ConversationStore(Protocol):
     async def export(self) -> ConversationExport: ...
 ```
 
+**`turns` is a complete, walkable traversal, not only a tail**, because the
+deletion coordinator has to reach *every* episode a conversation indexed before the
+record is dropped — and a conversation longer than the default page would otherwise
+keep its oldest episodes forever. Its semantics:
+
+- Results are ordered by **ordinal ascending**, matching §9.2.
+- **`before_ordinal` is an exclusive upper bound.** With it, the read returns the
+  last `limit` turns whose ordinal is strictly below it; without it, the tail.
+- **Walking back is therefore terminating and total**: call with no bound, then
+  repeatedly with `before_ordinal` set to the lowest ordinal just returned, until
+  an empty page. Ordinals are dense and start from the conversation's first turn
+  (§9.1), so the walk visits every turn exactly once.
+- **The deletion and reclaim sweeps must exhaust it** before the conditional drop.
+  Destroying one page and dropping the record is the failure this clause exists to
+  forbid.
+
+**The stamp hides a conversation from the reads that *present* it — `get`,
+`recent`, `export` — and not from the sweeps that finish it.** The sweep reads a
+stamped conversation's index precisely *because* it is stamped; that is what the
+tombstone is for (§8). Stating the exclusion as "absent from every read" without
+this distinction would forbid the machinery that carries the deletion out.
+
 Every method raises `ConversationStoreError` for a store fault, and refuses an
-unknown or stamped conversation as §1 and §8 require rather than creating one. The
+unknown conversation as §1 requires rather than creating one; an append to a
+stamped one is refused as §8 requires. The
 paging arguments carry ADR-0073 §2's range posture unchanged — out of range is a
 `ValueError`, not a clamp — because two stores that disagree about a bad argument
 is the failure that rule exists to stop, and this ADR inherits it rather than
@@ -1029,7 +1052,9 @@ because they are where two implementations silently differ:
 3. **A conversation's mutations are mutually exclusive at the store, all of them**
    (§8): an append, an activity mark (§2), a deletion stamp and a **reclaim** of one
    conversation never interleave. An append to a stamped conversation is refused,
-   and a stamped conversation is absent from every read.
+   and a stamped conversation is absent from every read that presents it — `get`,
+   `recent` and `export` — while the sweeps that finish the deletion still traverse
+   its index (above).
 
    **The reclaim is inside that set, not beside it**, and it re-checks eligibility
    while holding the exclusion — because eligibility is a claim about state that an
@@ -1135,6 +1160,10 @@ different questions:
    - **An interruption between the two writes**, in each order, asserting the
      residue each case is ratified to leave (§8): an orphan episode after a
      capture, a re-runnable deletion after a deletion.
+   - **A conversation longer than the default page, deleted** — asserting that
+     **every** episode is destroyed, not just the last page, and that the record is
+     dropped only after the traversal is exhausted (§9). A fixture with one page of
+     turns passes a single-page implementation and proves nothing.
    - **A recovered park's resumption** — park in a conversation, discard the
      in-memory state, recover the confirmation from durable state, resume: the
      resolution's episode lands in the **original** conversation, and no new
