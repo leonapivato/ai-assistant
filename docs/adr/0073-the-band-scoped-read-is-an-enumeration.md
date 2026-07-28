@@ -224,8 +224,13 @@ properties, not mechanisms; how a backend achieves them is its own business.
 - **The default `limit` is bounded.** An unbounded read of a Tier 1 store by
   default is a shape worth not offering (ADR-0021 §4). 50 is the figure, matching
   `AuditTrail.recent`.
-- **`score` stays `None`.** This is not a retrieval, so no relevance was
-  computed, and the field says so rather than carrying a stale or invented number.
+- **`score` is `None` on every returned record — cleared, not merely unset.**
+  This is not a retrieval, so no relevance was computed and the field must say so.
+  It is stated as a clearing rather than a default because a stored record can
+  *already* carry one: `add` takes any `MemoryRecord`, including one `search`
+  returned with its score populated, so an enumerator that hands back stored
+  copies unchanged would surface a relevance figure from some earlier query
+  against some other text.
 - **Records are detached snapshots**, like every other `MemoryStore` read
   (`MemoryStoreContract.test_stored_records_cannot_be_mutated_by_the_caller`), and
   the module's standing cancellation (ADR-0060) and input-observation (ADR-0065)
@@ -296,9 +301,15 @@ optional: it is the whole point of the screen. Per belief, the surface conveys:
 - **When it was last revised** — `provenance.last_updated`, the transaction stamp
   (ADR-0045 §3), which is also the sort key (§2). This is what "since when have
   you believed this" means today.
-- **Its window, where an end is set.** Every listed belief is live by
-  construction, so an unbounded window carries no information; a `valid_until` in
-  the future does ("believed until…") and is conveyed.
+- **Its `validity` window, where an end is set.** Every listed belief is live by
+  construction, so an unbounded window carries no information; a
+  `validity.valid_until` in the future does ("believed until…") and is conveyed.
+  **`SemanticMemory.valid_until` is a different field and is not conveyed** — it
+  is a content-declared fact expiry ("no longer assumed true after"), not the
+  operational live-belief window ADR-0045 §2 defines, and rendering it as the
+  window would misstate when the assistant stops believing something. It is
+  omitted under the same rule as `strength` and `participants` above, and it is
+  named rather than left implicit precisely because the two fields share a name.
 - **Its id**, opaque, so the user can name it to §5's deletion.
 
 ### 5. Killing a belief: one contract, show-then-confirm, a band-appropriate warning
@@ -470,7 +481,19 @@ the next lane:
    of the window, the total order including the `id` tie-break, the out-of-range
    refusals at **both** ends (negative, and beyond the 64-bit bound), `limit=0`,
    `None` versus empty versus non-empty for `bands` **and** for `kinds`, the two
-   composing by conjunction, detachment, and `score is None`.
+   composing by conjunction, and detachment.
+
+   Two of those clauses have a shape that decides whether they test anything.
+   **`score`** must be seeded non-`None` — a record re-added after a `search`
+   populated it — so the case fails an enumerator returning stored copies
+   unchanged; asserting `None` over default-constructed records passes without
+   touching the obligation. **The input-observation clause** (ADR-0065) has to be
+   exercised on the two `Sequence` filters through the suite's existing
+   suspension hook: mutate `bands` (and `kinds`) while the call is suspended and
+   require one coherent observation. The harm is milder than the torn write that
+   clause was written for — an incoherent read returns nothing and persists
+   nothing — but §2 claims the clause binds this method, and a claimed obligation
+   with no case is the gap this list exists to close.
 
    The full-page rule needs **two** cases, not one, and the second is the one a
    suite naturally omits: a page full under band/kind filtering, *and* a page full
