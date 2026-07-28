@@ -138,6 +138,9 @@ it — which is also why this ADR ratifies no container type (§8).
 `core/types.py` gains, beside `MemorySource`:
 
 ```python
+from typing import assert_never  # added to core/types.py's existing typing import
+
+
 class BeliefBand(StrEnum):
     """The standing a belief is held with — how far it is from the user's word."""
 
@@ -172,9 +175,14 @@ re-derivable by observing harder). ADR-0005 §2 assigned it to neither set, whic
 was correct and incomplete; this ADR completes it without changing what ADR-0005
 placed.
 
-**The mapping is total and its totality is mechanically enforced.** The `match`
-has no default arm and ends in `assert_never`, so adding a `MemorySource` without
-choosing its band fails `mypy` in the gate. This is deliberately the same shape as
+**The mapping is total and its totality is mechanically enforced.** Every arm
+names a member and the wildcard does nothing but `assert_never`, so under `mypy
+--strict` an unhandled `MemorySource` narrows to a non-`Never` type there and
+fails the gate: adding a member without choosing its band cannot merge.
+`assert_never` is not currently imported by `core/types.py` (which imports
+`Annotated`, `Any`, and `Literal` from `typing`), so the implementing lane adds it
+— stated because a snippet that omits it fails the type gate on an undefined name
+and would degrade the runtime arm to a `NameError`. This is deliberately the same shape as
 ADR-0038 §2a's allow-list argument — "a `MemorySource` added later is not silently
 enrolled in a destructive rule by omission" — applied to classification instead of
 to supersession, and it is a fact a check owns (ADR-0019 §2) rather than a prose
@@ -191,14 +199,32 @@ does — including `Goal`, whose docstring already makes the same distinction ("
 goal the system *inferred* must never be indistinguishable from one the user
 *stated*"). The *profile* and the *inferred user model* specifically name the band
 partition of the `MemoryStore`'s records; the bands themselves are general.
+**Classification generalising does not carry §3's obligations with it** — those are
+scoped to memory proposals for want of an enforcement point elsewhere, which §3
+states and §10 files.
 
 Nothing here disturbs ADR-0068: `BeliefBand` is a `StrEnum` and `band_of` is a
 pure function of an immutable value.
 
-### 3. What a derived belief means
+### 3. What a derived belief means — for a memory proposal
 
 These are properties of the model, fixed here so leg 3's observer ADR inherits
 them rather than deciding them.
+
+**They are scoped to beliefs proposed into the `MemoryStore`, deliberately.** §2's
+classification applies wherever `Provenance` does, but the two obligations below
+do not follow it there, because they need an enforcement point and only the memory
+write path has one: a proposal is judged by a `MemoryPolicy` before it is stored
+(ADR-0005 §3). `Goal` also carries `Provenance` and reaches no such gate — it is
+constructed and handed to `PlanStore` directly — so a future producer of *inferred*
+goals could write one at confidence 1.0 with no evidence and breach both rules
+unenforced. No such producer exists (`orchestration` stamps every goal
+`USER_ASSERTED`/1.0 from the user's own utterance), so this is a gap that opens
+with the first inferred-goal producer, not one that is open now. Extending these
+obligations to goals needs an enforcement seam on the goal write path — a
+validator, or a policy gate of its own — which is a decision for the lane that
+proposes inferred goals, filed in §10. Stating the scope now is what stops that
+lane from reading these clauses as already binding and already enforced.
 
 **Confidence is the producer's belief strength, and 1.0 is reserved.** It is not a
 relevance score, not a quality score, and not a priority. A derived belief carries
@@ -429,6 +455,10 @@ distinguishes from a measurement someone took.
   the rule; it would be source-conditional, since `EXTERNAL` may carry 1.0.
 - **The `MemoryPolicy` rule enforcing derived-beliefs-cite-evidence** (§3). Same
   lane, same reason.
+- **Whether §3's obligations extend to `Goal`, and what would enforce them there**
+  (§3). `Goal` carries `Provenance` and reaches no propose/dispose gate, so a
+  producer of inferred goals would need an enforcement seam of its own. No such
+  producer exists; the decision belongs to the lane that adds one.
 - **The band-scoped read's signature** (§7), and whether the inspection surface
   reads live-only or live-plus-retired.
 - **Whether a correction may retire an `ATTESTED` record in the shipped policy**
