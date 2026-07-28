@@ -1684,6 +1684,201 @@ class PlanExport(BaseModel):
         return self
 
 
+# --- conversations: the durable thread, and the turns indexed under it -------
+# ADR-0074's four values. A conversation is durable, server-side state with an
+# identity of its own; a turn is the *index entry* that names the episode
+# recording it, never the episode itself. All frozen (ADR-0068), every instant a
+# `UtcInstant` (ADR-0023, ADR-0030).
+
+
+#: The ordinal of a conversation's first turn. Ordinals are dense, unique and
+#: monotonic per conversation (ADR-0074 §9.2), so "dense from here" is the whole
+#: of the numbering rule and both traversals terminate because of it. Public
+#: because every ``ConversationStore`` implementation and its conformance suite
+#: need the same starting point; a constant one of them re-derived is a numbering
+#: two stores could disagree about.
+FIRST_TURN_ORDINAL = 1
+
+
+class Conversation(BaseModel):
+    """A durable, device-agnostic conversation (ADR-0074 §1).
+
+    Not a session, not a process, and not a terminal: the record lives in the
+    hub, and a client holds nothing but the ``id`` it was given. The id is
+    **opaque** — minted server-side by the store's injected id factory, encoding
+    no device, path or timestamp — so nothing a future spoke would have to forge
+    is baked into it, and no consumer can start relying on it as an ordering.
+
+    **``last_active_at`` and ``last_turn_at`` are two different facts** (§2).
+    Activity is "someone was here": set at creation and refreshed whenever a turn
+    *begins*, so it is always present and is the key every listing and the
+    retention reclaim read. ``last_turn_at`` is "a turn was **recorded**", set by
+    the append that writes a turn into the index and unset until one lands — which
+    is what tells an empty conversation from one whose first turn landed at once.
+
+    ``deleted_at`` is §8's tombstone stamp rather than a status: a stamped
+    conversation is absent from every read that presents it, refuses every later
+    append, and survives only so the deletion sweep can still name the episodes it
+    must destroy.
+
+    No cross-field ordering is validated. ``started_at``, ``last_active_at`` and
+    ``last_turn_at`` all come from an injected clock, which this project never
+    promises is monotonic (``core/clock.py``), so a rule like
+    ``last_active_at >= started_at`` would make a legitimate clock adjustment
+    unrepresentable rather than catching a bug.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="Opaque, random, server-minted (ADR-0074 §1).")
+    started_at: UtcInstant = Field(description="When the conversation record was created.")
+    last_active_at: UtcInstant = Field(
+        description="When someone was last here; set at creation, refreshed as a turn begins."
+    )
+    last_turn_at: UtcInstant | None = Field(
+        default=None,
+        description="When a turn was last recorded; unset until one is (ADR-0074 §2).",
+    )
+    deleted_at: UtcInstant | None = Field(
+        default=None,
+        description="Tombstone stamp: when the user's deletion was recorded (ADR-0074 §8).",
+    )
+
+
+class ParkedBinding(BaseModel):
+    """The ``(execution_id, step_id)`` a parked confirmation is recovered by.
+
+    One value rather than two positional strings, so the pair a recovered resume
+    is keyed on (ADR-0044 §3) cannot be swapped in transit. A turn that parked
+    records the binding it parked on, and the conversation store resolves that
+    binding back to the turn — and so to the conversation the resumption belongs
+    in (ADR-0074 §3).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    execution_id: Identifier
+    step_id: Identifier
+
+
+class ConversationTurn(BaseModel):
+    """One turn's entry in a conversation's index (ADR-0074 §3).
+
+    **The index entry, not the content.** The turn's content is exactly one
+    ``EpisodicMemory`` in the ``MemoryStore``, named here by ``episode_id`` and
+    written immediately *after* this row lands — which is what makes the index an
+    intent log: no episode can exist for a conversation without its id having been
+    recorded here first (§8). An ``episode_id`` that no longer resolves is
+    therefore an ordinary state, not a fault: the episode may have expired, been
+    deleted, or never been written at all, and every reader renders that as a gap.
+
+    ``ordinal`` is allocated by the store, dense from :data:`FIRST_TURN_ORDINAL`
+    and monotonic within its conversation; ``episode_id`` is *derived* by the same
+    store from the conversation and that ordinal, so two captured episodes cannot
+    collide by construction rather than by probability.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: Identifier
+    ordinal: int = Field(
+        ge=FIRST_TURN_ORDINAL,
+        description="Position in the conversation; dense, unique and store-allocated.",
+    )
+    episode_id: Identifier = Field(
+        description="Id of the episode recording this turn; derived, and may not resolve."
+    )
+    occurred_at: UtcInstant = Field(description="When the exchange this turn records happened.")
+    parked: ParkedBinding | None = Field(
+        default=None,
+        description="The binding this turn parked on, where it parked (ADR-0074 §3).",
+    )
+
+
+class ConversationExport(BaseModel):
+    """A portable snapshot of conversation state (ADR-0074 §9, ADR-0004 §6).
+
+    Flat, like :class:`PlanExport` and for the same reason: a turn names its
+    conversation by id, so the two collections travel side by side rather than
+    nested. It carries **no episode content** — episodes are ``MemoryStore``
+    records and that store's own export carries them, so repeating them here would
+    put the same Tier 1 text in two exports under two retention rules.
+
+    **This is the store's raw snapshot.** A conversation stamped deleted is absent
+    from it (that is what the validator below enforces), but a turn whose episode
+    no longer resolves is *present*: the store has no way to ask whether an episode
+    is live and no business asking (golden rule 1). The user-facing export is
+    composed in `orchestration`, which drops those turns and with them any
+    conversation left with nothing to show.
+
+    Order is part of the contract and is the order each read uses (ADR-0074 §9.3):
+    ``conversations`` by ``last_active_at`` descending with ``id`` ascending as the
+    tie-break, ``turns`` by ``conversation_id`` then ``ordinal`` ascending. It is
+    asserted by the conformance suite rather than validated here, so that filtering
+    an export down — which preserves order — stays a total operation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = Field(
+        default=1,
+        description=(
+            "Shape of this export, pinned to exactly 1 (ADR-0039 §10, ADR-0014 §5): an "
+            "export outlives the code that wrote it, so the label must be a fact about "
+            "the document rather than a producer's unchecked claim."
+        ),
+    )
+    exported_at: UtcInstant
+    conversations: tuple[Conversation, ...] = ()
+    turns: tuple[ConversationTurn, ...] = ()
+
+    @model_validator(mode="after")
+    def _the_index_is_internally_consistent(self) -> ConversationExport:
+        """Enforce what this export documents rather than assuming it.
+
+        An export is the artifact a user takes elsewhere, so a turn whose
+        conversation is missing is a fragment of a thread with nothing to place it
+        in. The uniqueness rules are the store's own invariants seen from the
+        outside — a repeated ordinal or episode id would make the same turn
+        addressable two ways — and the deleted-conversation rule is §9's "a
+        conversation stamped deleted but not yet reclaimed is **not** exported",
+        made unrepresentable rather than left to each producer.
+        """
+        stamped = sorted(one.id for one in self.conversations if one.deleted_at is not None)
+        if stamped:
+            msg = f"export must not carry conversations stamped deleted: {', '.join(stamped)}"
+            raise ValueError(msg)
+
+        known = {one.id for one in self.conversations}
+        if len(known) != len(self.conversations):
+            msg = "export contains duplicate conversation ids"
+            raise ValueError(msg)
+
+        dangling = sorted(
+            {turn.conversation_id for turn in self.turns if turn.conversation_id not in known}
+        )
+        if dangling:
+            msg = f"export has turns whose conversation is missing: {', '.join(dangling)}"
+            raise ValueError(msg)
+
+        positions = {(turn.conversation_id, turn.ordinal) for turn in self.turns}
+        if len(positions) != len(self.turns):
+            msg = "export contains two turns at one position in a conversation"
+            raise ValueError(msg)
+
+        episodes = {turn.episode_id for turn in self.turns}
+        if len(episodes) != len(self.turns):
+            msg = "export contains duplicate episode ids"
+            raise ValueError(msg)
+
+        bindings = [turn.parked for turn in self.turns if turn.parked is not None]
+        if len(set(bindings)) != len(bindings):
+            msg = "export contains two turns claiming one parked binding"
+            raise ValueError(msg)
+
+        return self
+
+
 # --- severity scales: ordered by declaration, not by value (ADR-0016 §2) -----
 # `StrEnum` members *are* strings, so an un-overridden scale compares
 # lexicographically. `PermissionOutcome`, far below, is the fourth member of

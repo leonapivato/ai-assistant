@@ -13,6 +13,7 @@ only; production code must not import it (enforced by ``lint-imports``).
 from __future__ import annotations
 
 from ai_assistant.testing.context import FakeContextProvider
+from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker, succeeds
 from ai_assistant.testing.learning import FakeFeedbackProcessor
@@ -28,6 +29,7 @@ __all__ = [
     "FakeActionPolicy",
     "FakeAuditTrail",
     "FakeContextProvider",
+    "FakeConversationStore",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
     "FakeMemoryPolicy",
