@@ -381,10 +381,15 @@ class ConversationLifecycle:
             degrades a turn rather than failing it, because failing would throw
             away an answer the user already has.
         """
-        occurred_at = self._now()
         try:
+            # The clock reading is **inside** the boundary, not above it. A
+            # non-conforming reading is a capture failure like any other, and by
+            # this point the turn's answer already exists — raising here would
+            # throw it away because the record of it could not be written, which
+            # is the outcome §3 explicitly rejects. Nothing has been written when
+            # it fails, so it degrades exactly as a refused append does.
             turn = await self._conversations.append(
-                conversation_id, occurred_at=occurred_at, parked=parked
+                conversation_id, occurred_at=self._now(), parked=parked
             )
         except ConversationStoreError:
             # A refused append needs no compensation, because nothing was written:
@@ -394,7 +399,10 @@ class ConversationLifecycle:
             _log.warning("conversation_capture_degraded", stage="append", exc_info=True)
             return CaptureReport(conversation_id=conversation_id, degraded=True)
 
-        episode = self._episode(turn, content=content, outcome=outcome, now=occurred_at)
+        # The turn and the episode recording it carry **one** instant: the reading
+        # rides back on the turn rather than being taken twice, so no clock
+        # adjustment between the two writes can make them disagree.
+        episode = self._episode(turn, content=content, outcome=outcome, now=turn.occurred_at)
         try:
             await self._memory.write_atomic(
                 [MemoryWrite(record=episode, mode=MemoryWriteMode.INSERT_IF_ABSENT)]

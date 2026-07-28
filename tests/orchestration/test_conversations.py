@@ -1063,3 +1063,32 @@ async def test_a_capture_landing_inside_the_grace_is_swept_and_one_after_it_is_t
     late = await wiring.stage.capture(conversation_id, content="far too late")
     assert late.degraded is True
     assert late.episode_id is None
+
+
+async def test_a_non_conforming_clock_degrades_the_capture_rather_than_failing_the_turn() -> None:
+    """§3, §9 item 6: by capture time the answer already exists, so nothing may raise.
+
+    The clock is the one input capture reads before it touches either store, and a
+    non-conforming reading is a capture failure like any other — not a reason to
+    turn a delivered answer into a failed turn. Nothing has been written when it
+    fails, so it degrades exactly as a refused append does: no index entry, no
+    episode, and nothing to compensate.
+
+    Only the *stage's* clock is broken. Both stores keep a conforming one, so the
+    assertions below read real state rather than tripping over the same fault.
+    """
+    wiring = Wiring()
+    conversation = await wiring.stage.begin(None)
+    unreadable = ConversationLifecycle(
+        conversations=wiring.conversations,
+        memory=wiring.memory,
+        retention=RETENTION,
+        now=lambda: datetime(2026, 7, 28, 9, 0),  # noqa: DTZ001 — naive, which is the fault
+    )
+
+    report = await unreadable.capture(conversation.id, content="answered, then unrecordable")
+
+    assert report.degraded is True
+    assert report.episode_id is None
+    assert await wiring.memory.export() == [], "nothing reached the memory store"
+    assert await wiring.conversations.turns(conversation.id) == [], "and nothing reached the index"
