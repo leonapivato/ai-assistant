@@ -151,11 +151,15 @@ over `MemorySource`'s members; a `sources_of(band)` helper in `core/types.py` is
 declined for want of a second caller, and because a second, hand-written mapping
 is a mapping that can drift from the one whose totality the gate enforces.
 
-**`bands=None` means every band; `bands=()` selects nothing.** This is the
-`kinds` convention on `search` read literally — "if given, restrict results to
-these" — and it is what all three implementations already do with `kinds`
-(`wanted = {...} if kinds is not None else None`). Stating it keeps two filters on
-one Protocol from disagreeing about the empty sequence.
+**`None` means every value; an empty sequence selects nothing — for `bands` and
+for `kinds` alike.** This is the `kinds` convention on `search` read literally
+("if given, restrict results to these") and it is what all three implementations
+already do there (`wanted = {...} if kinds is not None else None`). Both
+parameters are stated, not just the new one: leaving `kinds` to be inferred from
+`search` is how one implementation comes to read `kinds=()` as "no filter" — the
+opposite outcome, every record instead of none — on a method whose suite never
+asked. The two filters compose by conjunction: a record is listed when its band
+is selected **and** its kind is.
 
 ### 2. What the enumeration guarantees: order, paging, and the two read-time axes
 
@@ -175,20 +179,34 @@ properties, not mechanisms; how a backend achieves them is its own business.
   (`Provenance` requires it), and supersession moves it, so a corrected topic
   surfaces where the user will look for it.
 - **A page is full whenever enough matching records exist.** A request for
-  `limit` records returns exactly `limit` when the filtered set has at least
-  `offset + limit` members. This forbids the short-page failure a naive
-  post-filter produces — filtering after the limit is applied — which is the one
-  way paging silently loses records. `search`'s over-fetch-and-post-filter caveat
-  (ADR-0007 §Consequences) is a *ranking* concession and is not licence here.
-- **`limit` and `offset` must be non-negative; a negative value raises
-  `ValueError`.** `limit=0` returns an empty page — asking for nothing is a
-  question with an answer. The refusal of negatives is `AuditTrail.recent`'s
-  argument and it applies with more force here: this is the first `MemoryStore`
-  read that will reach a backend as a literal `LIMIT ?`/`OFFSET ?`, where SQLite
-  reads `LIMIT -1` as *no limit at all*, turning the bounded read into the
-  unbounded one it exists to avoid. This deliberately differs from `search`, whose
-  suite pins a non-positive limit to matching nothing: `search`'s limit is a
-  ranking cut applied after a KNN, and nothing there can invert into unboundedness.
+  `limit` records returns exactly `limit` when the filtered set — after **both**
+  filters and both read-time axes — has at least `offset + limit` members. This
+  forbids the short-page failure a naive post-filter produces (filtering after the
+  limit is applied), which is the one way paging silently loses records.
+  `search`'s over-fetch-and-post-filter caveat (ADR-0007 §Consequences) is a
+  *ranking* concession and is not licence here.
+- **`limit` and `offset` are bounded on both ends, and a value outside the range
+  raises `ValueError`.** The range is `0 <= value < 2**63` — non-negative, and
+  representable as a signed 64-bit integer. `limit=0` returns an empty page:
+  asking for nothing is a question with an answer.
+
+  Both ends are named because both are places two backends silently disagree.
+  *Negative* is `AuditTrail.recent`'s argument and it applies with more force
+  here: this is the first `MemoryStore` read that reaches a backend as a literal
+  `LIMIT ?`/`OFFSET ?`, where SQLite reads `LIMIT -1` as *no limit at all*,
+  turning the bounded read into the unbounded one it exists to avoid. *Too large*
+  is the same failure from the other side: Python's `int` is unbounded and
+  SQLite's parameter binding is not, so `offset=2**63` raises an `OverflowError`
+  out of the driver — a non-`AssistantError` escaping a seam whose contract says
+  nothing about it — while an in-memory store answers the same call with an empty
+  page. Refusing the argument is the only outcome both can implement, and it is
+  the treatment `recent` already chose over clamping: a caller that asked for
+  something meaningless should learn that, not be served something it did not ask
+  for.
+
+  This deliberately differs from `search`, whose suite pins a non-positive limit
+  to matching nothing: `search`'s limit is a ranking cut applied after a KNN, and
+  nothing there can invert into unboundedness or reach a bind parameter.
 - **Offset paging over a mutating store may skip or repeat a record.** A record
   revised between two pages moves in the order, and a record deleted between them
   shifts every later one. This is accepted and named rather than closed: a cursor
@@ -313,6 +331,38 @@ message.**
   *surface* for retiring history, which belongs with the history view §3 defers
   and is filed (§10).
 
+**The show and the delete are two calls, and the window between them is named
+rather than closed.** The render reads at one instant and the delete acts at
+another, so a write landing between them is deleted without having been shown.
+This ADR does **not** add a conditional delete keyed on a revision, and the
+reasons are three:
+
+- **What the window can actually admit is bounded by id semantics.** `add` is an
+  upsert whose "`id` is the caller's idempotency key" — an id names one belief,
+  and nothing in this system mints an existing id for an unrelated one. Of the two
+  rulings that write over a conflict, `SUPERSEDE` mints a *fresh* id (ADR-0045 §4)
+  and so cannot occupy the rendered one, and `REINFORCE` inherits the target's id
+  (ADR-0045 §5b) and folds the *same* belief. So the reachable case is that the
+  user is shown belief X and deletes a strengthened X — not that they are shown
+  one belief and destroy another.
+- **The residue is a stale rendering, and the user's intent survives it.** The
+  user names a belief and asks for it to be gone; a fold that landed a second
+  earlier changes what the belief's text says, not which belief it is.
+- **The mechanism would be a concurrency primitive ratified ahead of its
+  consumer.** A compare-and-delete needs a revision on the record and a
+  compare-and-swap seam — exactly what ADR-0046 §5 deferred "for want of a
+  consumer that runs two writers on one store", and what #248 tracks. A deletion
+  surface is not that consumer: it is one reader with a confirmation prompt.
+  Building the primitive here would bless a seam with no implementation contact
+  (`CONTRIBUTING.md`, "Spike first if you need to").
+
+What follows is an obligation on the *adapter*, not a new contract clause: the
+render is taken as late as it can be, immediately before the prompt, so the window
+is the human's answering time and nothing longer. Revisit when a second concurrent
+writer genuinely exists — the hub (leg 5) is where that becomes real — at which
+point this is one case of #248's compare-and-swap question and not a private one
+(§10).
+
 ### 6. Correcting is `learn`; inspection adds no second correction path
 
 The roadmap's leg 1 names "list, show, correct, and forget". **Correction already
@@ -393,9 +443,13 @@ the next lane:
 2. **The shared conformance suite** — `tests/memory/memory_store_contract.py`
    gains a clause for **each** obligation in §2: both read-time axes on both ends
    of the window, the total order including the `id` tie-break, a full page under
-   filtering (the short-page failure), the negative-argument refusals, `limit=0`,
-   `bands=None` versus `bands=()`, detachment, and `score is None`. An obligation
-   with no clause is an obligation nobody meets.
+   *both* filters (the short-page failure), the out-of-range refusals at **both**
+   ends (negative, and beyond the 64-bit bound), `limit=0`, `None` versus empty
+   versus non-empty for `bands` **and** for `kinds`, the two composing by
+   conjunction, detachment, and `score is None`. An obligation with no clause is
+   an obligation nobody meets — and the two that would otherwise be inferred from
+   `search` rather than tested (`kinds=()`, the argument range) are exactly where
+   two backends diverge in silence.
 3. **The canonical fake** — `FakeMemoryStore` in `ai_assistant.testing`
    implements it and passes the extended suite through `tests/memory/test_fake_store.py`.
 4. **Both production stores** — `InMemoryMemoryStore` and `SqliteMemoryStore`.
@@ -422,6 +476,9 @@ half must not land without its suite.
 - **A total match count.** §7.
 - **A standalone `show` command.** §7.
 - **Cursor-based paging.** §2 — offset paging's known race is named and accepted.
+- **A conditional (compare-and-)delete keyed on a record revision.** §5. It is
+  ADR-0046 §5's deferred compare-and-swap wearing a different hat, and a
+  confirmation prompt is not the second writer that would justify it.
 
 ### 10. What this ADR does not decide
 
@@ -435,6 +492,10 @@ half must not land without its suite.
 - **Resolving an evidence citation into readable evidence**, and what a citation
   that no longer resolves renders (§4). The open half of #431, due with the first
   producer of derived beliefs.
+- **Whether a `MemoryStore` write ever becomes conditional on a revision** (§5),
+  which would close the show-then-confirm window and several others. That is
+  ADR-0046 §5's deferral and #248's question, due when a second concurrent writer
+  exists; this ADR neither closes it nor pretends the window is absent.
 - **An `export` CLI command.** ADR-0007's other data right needs no contract
   change — `MemoryStore.export` has existed since ADR-0007 — so it is an
   implementation question, not a contract one, and it is deliberately not bundled
@@ -470,6 +531,11 @@ half must not land without its suite.
 - **Paging is honest and slightly weaker than a transaction.** A record revised
   between two pages can be skipped or repeated (§2). Accepted, named, and cheap to
   strengthen if a listing ever has enough rows for it to matter.
+- **A confirmed deletion can destroy a record written after it was rendered**
+  (§5). Accepted and bounded rather than closed: an id is an idempotency key, so
+  the reachable case is a fold of the belief the user named, and the mechanism
+  that would close it is ADR-0046 §5's deferred compare-and-swap. It gets better
+  when a second concurrent writer forces that decision, not before.
 - **The deletion ceremony constrains a lane not yet written**, like ADR-0072 §6's
   presentation rule: a surface that renders "deleted" for a derived belief that
   can be re-proposed teaches the user a false model of their own control, and it
@@ -518,6 +584,14 @@ half must not land without its suite.
   afterwards.** Rejected implicitly by §5's ordering: the render must happen
   *before* the destruction, or the confirmation is a receipt rather than a
   question. It would also widen a contract that does not need widening.
+- **A conditional delete — `delete(record_id, *, expected_revision=…)` — so the
+  confirmation cannot destroy a record written after the render.** Rejected in §5.
+  It closes a real window, but the window's reachable content is a fold of the
+  same belief (id is an idempotency key; `SUPERSEDE` mints a fresh id), and the
+  mechanism is the compare-and-swap ADR-0046 §5 deferred for want of a second
+  writer. Ratifying it here would put a concurrency primitive on the contract with
+  a confirmation prompt as its only justification, then hand every store a
+  revision field to maintain.
 - **Returning `MemoryRecord`s from the façade and letting the CLI classify them.**
   Rejected in §7. Applying `band_of` in the adapter puts ADR-0072 §1's projection
   in `interfaces/`, and hands every future adapter the same four-member union to
