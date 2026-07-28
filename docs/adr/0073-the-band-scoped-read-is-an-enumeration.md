@@ -1,6 +1,6 @@
 # 73. The band-scoped read is an enumeration; inspection shows live beliefs
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-27
 - **This is a contract change.** §1 adds one method — `list_beliefs` — to the
   `MemoryStore` Protocol in `core/protocols.py`. Golden rule 5 therefore applies:
