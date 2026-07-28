@@ -1,6 +1,6 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This is a contract change.** §9 adds one Protocol — `ConversationStore` — to
   `core/protocols.py`, four types to `core/types.py`, and one error class to
