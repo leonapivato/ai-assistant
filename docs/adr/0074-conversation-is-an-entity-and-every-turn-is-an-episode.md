@@ -988,6 +988,22 @@ records and `MemoryStore.export` already exports them, so repeating them here
 would put the same Tier 1 text in two exports under two retention rules. A
 conversation stamped deleted but not yet reclaimed is **not** exported — it is
 deleted as far as every read is concerned (§8).
+
+**Export omits a turn whose episode no longer resolves**, and this clause is what
+keeps §7 true. A `ConversationTurn` outlives its episode: the row survives expiry
+and deletion, carrying an ordinal, an occurrence time, a derived episode id and
+possibly the binding it parked on. Exporting those rows would say *that* an
+exchange happened and *when* — for an episode §7 has already removed from
+retrieval and export, or one the user destroyed under §8. So export applies the
+rule §5 applies to replay: a turn whose episode does not resolve is skipped. It
+follows that a conversation whose episodes have all expired exports as **nothing
+at all**, rather than as an empty shell with a timeline.
+
+This is the one place the internal traversal and the user-facing read genuinely
+differ, and both are needed: the deletion sweep must see *every* row, including
+those whose episodes are already gone, or it cannot finish (above); export must
+see none of them. Naming the difference is what stops an implementation reusing
+one for the other.
 - **`core/types.py` also gains the two small values the surface exchanges**, named
   here rather than left to the lane because both cross the Protocol boundary
   (`CLAUDE.md`: public data crossing a boundary is a `core` pydantic model):
@@ -1207,6 +1223,10 @@ different questions:
      conversation is created (§3). Also the unresolvable case — a park whose
      conversation was deleted — asserting that nothing is captured rather than a
      conversation being invented.
+   - **Export after the episodes expire** — the conversation exports as nothing,
+     not as a turn timeline with no content (§9). An implementation that dumps the
+     index rows passes every other export assertion while leaking when the user was
+     talking and how often.
    - **`episode_retention = None` with an empty conversation** — reclaim does not
      drop it, however long it has been idle (§7). The pair with the stamping case
      is what stops an implementation reading `None` as "no horizon, so everything
