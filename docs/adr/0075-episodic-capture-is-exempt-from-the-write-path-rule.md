@@ -102,7 +102,14 @@ and stands as written: capture writes no model output as fact.
 
 It covers **only** the capture path ADR-0074 §3 ratifies: a deterministic,
 non-inferring recording of a turn the engine has already answered, written by
-`orchestration`, one record per outcome.
+`orchestration`, at **at most one insert attempt per outcome**.
+
+"At most one" is exact, and the exemption is not a licence to make it more. A
+store failure leaves the turn recorded with **no** episode, reported on the
+outcome and not retried (ADR-0074 §3): the guarantee there is a durable turn and a
+best-effort episode, and nothing in this ADR asks an implementer to reach a
+cardinality of exactly one — which they could only do by retrying, recording the
+exchange twice, or swallowing the failure.
 
 It does **not** cover, and this list is exhaustive rather than illustrative:
 
@@ -144,9 +151,10 @@ ratified by ADR-0074 and cited here rather than restated:
   episodes rather than a fallback for weak evidence (§4).
 - **Deletion is unconditional.** ADR-0004 §6's right reaches every episode
   individually and by conversation, with the protocol ADR-0074 §8 ratifies.
-- **The write is bounded in volume by construction**: exactly one record per turn
-  the engine answered, which is the "unbounded, unreviewable side effect" ADR-0005
-  §Context feared, closed by arithmetic rather than by review.
+- **The write is bounded in volume by construction**: one insert attempt per turn
+  the engine answered, and none for anything else, which is the "unbounded,
+  unreviewable side effect" ADR-0005 §Context feared, closed by arithmetic rather
+  than by review.
 
 ### 4. The gate is not merely unnecessary here — it is destructive
 
