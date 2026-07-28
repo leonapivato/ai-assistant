@@ -17,8 +17,12 @@
   `INSERT_IF_ABSENT` mode ADR-0046 §2 already ratified, continuation uses `get`
   and `search`, and the conversation's turns reach the model through
   `Planner.plan`'s existing `memories` parameter.
-- **Amends and supersedes nothing.** Applying ADR-0070 §1's test: no clause of a
-  prior ADR is replaced. ADR-0005's taxonomy is used as written (§3); ADR-0072
+- **Amends and supersedes nothing — and §3 shows its working on the one clause
+  where that is arguable.** Applying ADR-0070 §1's test: no clause of a prior ADR
+  is replaced. The contestable case is ADR-0005's proposal → policy write path,
+  which capture does not use; §3 sets out why the rule's subject is a belief rather
+  than the evidence a belief cites, and states what the remedy would be if a reader
+  disagrees. ADR-0005's taxonomy is used as written (§3); ADR-0072
   §3's two obligations on the derived band are read against their own stated scope
   and enforcement point rather than narrowed (§4); ADR-0073's store contract,
   order, and ceremony are untouched, and the one thing this ADR settles about that
@@ -289,9 +293,48 @@ policy may reject the fact that an exchange occurred, ask the user whether they
 would like their own question remembered, or detect a conflict between two things
 that both happened.
 
-**What bounds it instead is that capture writes one record per outcome, judges
-nothing (§4), and retains under a finite default horizon (§7).** Unmediated is not
-unbounded.
+**The strongest objection to this is that ADR-0005's Consequences say "every write
+goes through a reviewable proposal → policy path", and its §3 hands `learning`
+"feedback/observations" to turn into proposals.** Read at maximum breadth, capture
+is an observation and this ADR is changing that decision rather than working within
+it — which under ADR-0070 §1 would need a partial supersession, not a
+reinterpretation. Three things answer it, and the third is the one that decides:
+
+- **The rule's subject is a belief, and an episode is not one.** ADR-0072 §3 drew
+  the line this ADR relies on, in its own words: "an observation is *evidence for*
+  a belief and never the belief itself". What `learning` turns into a proposal is
+  the belief it read *off* an observation; the observation is what the belief will
+  cite. ADR-0005 §2 says so in the same breath, describing `evidence` as
+  "references (e.g. episode ids)" — episodes were already, in ADR-0005's own
+  design, the thing pointed *at* by the records that go through the gate.
+- **The property the gate protects is untouched.** ADR-0005's stated worry is a
+  model writing "arbitrary statements straight into permanent memory" (§Context,
+  third problem) and its rule is that "memory is never written directly by the
+  model" (§3). Capture asserts nothing about the user, infers nothing, and writes
+  no model output as fact: it records that an exchange occurred and what was said
+  in it.
+- **Routing capture through the gate would destroy data, today, with the shipped
+  policy.** This is not a preference. `MemoryIngestor._detect_conflicts` searches
+  the store with `kinds=[record.kind]`, so an episode's "conflicts" are *other
+  episodes* — and two turns about one subject are exactly what a similarity search
+  returns. A `REINFORCE` ruling then merges them into one record at the target's
+  id, and a `SUPERSEDE` closes the earlier turn's validity window and retires it.
+  Either outcome erases part of a transcript, on machinery built for beliefs that
+  contradict each other, applied to facts that cannot. Two things that both
+  happened are never in conflict, and a write path whose whole purpose is to
+  resolve conflicts is the wrong path for records that never have any.
+
+So this ADR treats ADR-0005 §3 as governing the belief write path, which is what
+its own vocabulary and its own conflict machinery are built for, and does not read
+its Consequences sentence as reaching a producer it did not contemplate. **If that
+reading is rejected, the remedy is a partial supersession of ADR-0005 §3 — a new
+ADR editing ADR-0005's status line — which this ADR does not perform and which its
+author's lane is fenced out of.** It is flagged here rather than settled quietly,
+because "amends and supersedes nothing" is a claim a reader must be able to check.
+
+**What bounds capture instead is that it writes one record per outcome, judges
+nothing (§4), inserts rather than upserts (above), and retains under a finite
+default horizon (§7).** Unmediated is not unbounded.
 
 **The write is an insert, not an upsert, and that is a contract-level choice
 already available.** Capture writes the episode as a one-element `write_atomic`
@@ -959,11 +1002,17 @@ different questions:
   requires a mutable record in a frozen graph (ADR-0068), and a citation to a whole
   conversation is not evidence.
 - **Capture through `MemoryWriter.ingest`, so every write passes the policy.**
-  Rejected in §3. `MemoryPolicy`'s rulings are meaningless applied to a record of
-  what happened, conflict detection has nothing to detect, and a `REJECT` would
-  silently discard an interaction the user had. The property the gate protects —
-  the model not writing about the user unreviewed — is untouched, because capture
-  infers nothing.
+  Rejected in §3, and it is the alternative with the strongest claim on this
+  decision — it is the ratified path, and taking it would need no argument about
+  ADR-0005's scope at all. It loses on evidence rather than on principle: the
+  shipped ingestor detects conflicts within the proposal's own kind, so episodes
+  conflict with episodes, and the fold rulings that follow (`REINFORCE` merges at
+  the target's id, `SUPERSEDE` closes the target's window) would silently destroy
+  or retire turns that happened. A `REJECT` would discard an interaction the user
+  had, and every capture would pay for a similarity search whose answer is
+  meaningless. Revisit if a policy is ever written that refuses to fold an
+  `EPISODIC` record — which is a decision for the lane that owns the policy, and is
+  the constraint §4 already places on it.
 - **Episodes at confidence 1.0, on the grounds that the exchange certainly
   happened.** Rejected in §4. Confidence is standing, not certainty about the
   recording, and 1.0 is the standing only the user's own word carries (ADR-0072 §3).
