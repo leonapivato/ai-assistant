@@ -183,8 +183,17 @@ properties, not mechanisms; how a backend achieves them is its own business.
   filters and both read-time axes — has at least `offset + limit` members. This
   forbids the short-page failure a naive post-filter produces (filtering after the
   limit is applied), which is the one way paging silently loses records.
-  `search`'s over-fetch-and-post-filter caveat (ADR-0007 §Consequences) is a
-  *ranking* concession and is not licence here.
+
+  **This binds the window as strictly as it binds the filters, and that is
+  stronger than what `search` carries.** ADR-0045 §6 ratified filtering
+  `valid_from` "like `kinds` already are — in the post-filter step, not the SQL
+  pre-filter", and ADR-0007 §Consequences records the same over-fetch caveat for
+  expiry. Those are *ranking* concessions on a method with no offset: dropping a
+  row after the cut costs `search` a result it was never obliged to return. On a
+  paged enumeration the same shape drops a row the caller must be able to reach by
+  paging, and no later page returns it. So an implementation that pre-filters band
+  and kind in SQL and then discards not-yet-live or expired rows after `LIMIT` is
+  **not** conforming here, however faithfully it mirrors `search`.
 - **`limit` and `offset` are bounded on both ends, and a value outside the range
   raises `ValueError`.** The range is `0 <= value < 2**63` — non-negative, and
   representable as a signed 64-bit integer. `limit=0` returns an empty page:
@@ -337,17 +346,23 @@ another, so a write landing between them is deleted without having been shown.
 This ADR does **not** add a conditional delete keyed on a revision, and the
 reasons are three:
 
-- **What the window can actually admit is bounded by id semantics.** `add` is an
-  upsert whose "`id` is the caller's idempotency key" — an id names one belief,
-  and nothing in this system mints an existing id for an unrelated one. Of the two
+- **What the window admits is bounded by every producer this system has — not by
+  the contract.** The distinction is worth being exact about, because the
+  contract is weaker than the practice. `add` "overwrites the previous one (an
+  upsert), so `id` is the caller's idempotency key": that names an intended
+  discipline, and it does **not** forbid a caller from writing an unrelated record
+  at a known id. What bounds the window is that no producer does. Of the two
   rulings that write over a conflict, `SUPERSEDE` mints a *fresh* id (ADR-0045 §4)
   and so cannot occupy the rendered one, and `REINFORCE` inherits the target's id
-  (ADR-0045 §5b) and folds the *same* belief. So the reachable case is that the
-  user is shown belief X and deletes a strengthened X — not that they are shown
-  one belief and destroy another.
-- **The residue is a stale rendering, and the user's intent survives it.** The
-  user names a belief and asks for it to be gone; a fold that landed a second
-  earlier changes what the belief's text says, not which belief it is.
+  (ADR-0045 §5b) and folds the *same* belief. So the reachable case today is that
+  the user is shown belief X and deletes a strengthened X. A future producer that
+  broke the idempotency-key discipline would widen this, and it would be breaking
+  something else first.
+- **The residue is a stale rendering, so the consent is stated for what it
+  covers.** The confirmation is consent to **forget the belief that id names** —
+  not a guarantee that the bytes destroyed are the bytes rendered. The surface
+  must not claim otherwise, in its wording or its receipt, and that is the narrow
+  form the ceremony is ratified in.
 - **The mechanism would be a concurrency primitive ratified ahead of its
   consumer.** A compare-and-delete needs a revision on the record and a
   compare-and-swap seam — exactly what ADR-0046 §5 deferred "for want of a
@@ -367,22 +382,32 @@ point this is one case of #248's compare-and-swap question and not a private one
 
 The roadmap's leg 1 names "list, show, correct, and forget". **Correction already
 exists**: `assistant learn --kind correction` runs the ratified loop — feedback →
-proposal → `MemoryPolicy` → `SUPERSEDE` → the window closes and the correction is
-written (ADR-0022, ADR-0038, ADR-0040, ADR-0045 §4). This ADR adds no second
+proposal → conflict resolution → `MemoryPolicy` → the writer applies the ruling
+(ADR-0022, ADR-0028, ADR-0038, ADR-0040, ADR-0045). This ADR adds no second
 route, and no edit-in-place: a belief is never rewritten to look like another
 (ADR-0072 §4), which an "edit" affordance would quietly do.
 
-The composition is the point, and the two verbs are **not** interchangeable:
+**Correction is policy-mediated, and the user states their version rather than
+commanding an outcome.** That is the whole point of propose/dispose (ADR-0005 §3),
+and it is why the two verbs are **not** interchangeable:
 
-- **Correct** (`learn`) — the belief is *retired*, the user's version is written
-  in its place, and the retired record stays on disk and in `export`. The system
-  keeps a record of having been wrong.
-- **Forget** (`delete`) — the record is *destroyed*. Nothing remains, in `export`
-  or anywhere else.
+- **Correct** (`learn`) — the user's version is *proposed*, and what happens to
+  the prior belief is the policy's ruling: a supersedable inference is retired and
+  the correction written in its place (`SUPERSEDE`), a contradicted prior
+  *assertion* is escalated rather than overwritten (`ASK_USER` — two things the
+  user said cannot both stay live), and a proposal with nothing to displace is
+  simply stored (`ACCEPT`). Every one of those outcomes is already reported by
+  `learn` (`LearnDecision`), so the surface owes no new rendering. What is common
+  to all of them is that **nothing is destroyed**: where a record is retired, it
+  stays on disk and in `export`, and the system keeps a record of having been
+  wrong.
+- **Forget** (`delete`) — the record is *destroyed*, unconditionally and with no
+  policy in the path. Nothing remains, in `export` or anywhere else.
 
-The surface must not present one as the other. A user who wants their belief
-fixed should correct it; a user who wants it gone should forget it, and losing the
-history is what they asked for.
+So the contrast the surface must convey is not "supersede versus delete" but
+**kept versus destroyed**, which holds whatever the policy rules. A user who wants
+their belief fixed should correct it and let the policy rule; a user who wants it
+gone should forget it, and losing the history is what they asked for.
 
 ### 7. Where the surface lives: façade methods and CLI commands
 
@@ -442,19 +467,31 @@ the next lane:
    with §1's signature and §2's semantics in its docstring.
 2. **The shared conformance suite** — `tests/memory/memory_store_contract.py`
    gains a clause for **each** obligation in §2: both read-time axes on both ends
-   of the window, the total order including the `id` tie-break, a full page under
-   *both* filters (the short-page failure), the out-of-range refusals at **both**
-   ends (negative, and beyond the 64-bit bound), `limit=0`, `None` versus empty
-   versus non-empty for `bands` **and** for `kinds`, the two composing by
-   conjunction, detachment, and `score is None`. An obligation with no clause is
-   an obligation nobody meets — and the two that would otherwise be inferred from
-   `search` rather than tested (`kinds=()`, the argument range) are exactly where
-   two backends diverge in silence.
+   of the window, the total order including the `id` tie-break, the out-of-range
+   refusals at **both** ends (negative, and beyond the 64-bit bound), `limit=0`,
+   `None` versus empty versus non-empty for `bands` **and** for `kinds`, the two
+   composing by conjunction, detachment, and `score is None`.
+
+   The full-page rule needs **two** cases, not one, and the second is the one a
+   suite naturally omits: a page full under band/kind filtering, *and* a page full
+   under the **window and expiry axes** — a fixture where records that sort ahead
+   of the cut are not-yet-live or expired and enough live matches follow, so an
+   implementation that applies those axes after `LIMIT` returns a short page and
+   fails. Without it, an implementation that mirrors `search`'s ratified
+   post-filter (ADR-0045 §6) passes every other clause on this list while silently
+   losing rows no later page returns.
+
+   An obligation with no clause is an obligation nobody meets — and the three that
+   would otherwise be inferred from `search` rather than tested (`kinds=()`, the
+   argument range, and the axes-before-pagination case) are exactly where two
+   backends diverge in silence.
 3. **The canonical fake** — `FakeMemoryStore` in `ai_assistant.testing`
    implements it and passes the extended suite through `tests/memory/test_fake_store.py`.
 4. **Both production stores** — `InMemoryMemoryStore` and `SqliteMemoryStore`.
-   The SQL one is where §2's full-page rule bites: a band/kind filter applied
-   after `LIMIT` returns short pages, so the filter belongs in the query.
+   The SQL one is where §2's full-page rule bites: **anything** applied after
+   `LIMIT` returns short pages, so every predicate this read applies — the two
+   filters and both read-time axes — belongs before the cut, which is a departure
+   from the post-filter shape `search` is permitted (§2).
 5. **The façade and the CLI** (§7), which need no contract change.
 
 Whether all of that is one lane or two is the dispatcher's call; the contract
