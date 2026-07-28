@@ -1043,9 +1043,13 @@ memory half already taken.
   the memory half with no turn indexing it. That reads as an un-indexed episode —
   content the user *has*, exactly the shape §8 already contemplates — never as a
   turn pointing at content the user cannot see.
-- **A deletion racing the export loses the episode from both halves or from
-  neither**, since a turn is kept only when its episode is present in the same
-  artifact.
+- **A deletion racing the export leaves the same one-way residue, from the
+  opposite cause.** If `MemoryStore.export` captures episode `E` and the user then
+  deletes `E`, or the conversation holding it, before the conversation snapshot is
+  taken, the artifact carries `E` with no turn indexing it. So episode-only residue
+  arises from **both** races — a capture landing mid-export and a deletion landing
+  mid-export — and this ADR permits it in both. What cannot happen in either is a
+  turn whose episode the artifact does not carry.
 
 So the export is a faithful account of data the user holds, taken over an interval
 rather than an instant, and it never claims an exchange whose content it cannot
