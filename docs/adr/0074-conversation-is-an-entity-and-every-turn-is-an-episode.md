@@ -12,11 +12,16 @@
   the full triad — Protocol, shared conformance suite, canonical fake —
   in one change (`CONTRIBUTING.md`, "Adding a Protocol"), and stage 1 is this ADR
   merging (§9).
-- **Changes no existing Protocol.** `MemoryStore`, `MemoryWriter`, `MemoryPolicy`
-  and `Planner` are untouched (§3, §5, §9). Capture uses `write_atomic` in the
-  `INSERT_IF_ABSENT` mode ADR-0046 §2 already ratified, continuation uses `get`
-  and `search`, and the conversation's turns reach the model through
-  `Planner.plan`'s existing `memories` parameter.
+- **Changes no existing Protocol's *shape*, and widens one's documented
+  semantics.** `MemoryStore`, `MemoryWriter` and `MemoryPolicy` are untouched:
+  capture uses `write_atomic` in the `INSERT_IF_ABSENT` mode ADR-0046 §2 already
+  ratified, and continuation uses `get` and `search`. **`Planner.plan`'s
+  `memories` parameter is different**: no signature changes, but §5 puts the
+  conversation's recent turns in it, and today its docstring says "records
+  retrieved as relevant to the goal, best first" — which a chronological tail is
+  not when the user changes the subject. Golden rule 5 says to flag that rather
+  than let it pass as a no-op, so §5 states the widened contract and §9 puts the
+  docstring in the implementing lane's hands.
 - **Amends and supersedes nothing — because ADR-0075 carries the one supersession
   this decision needs.** Applying ADR-0070 §1's test: no clause of a prior ADR is
   replaced *here*. The contestable case was ADR-0005's proposal → policy write
@@ -559,10 +564,26 @@ the `Sequence[MemoryRecord]` parameter `Planner.plan` already takes. **No Protoc
 changes**, and in particular `Planner` does not grow a `history` parameter.
 
 The retrieval stage's output becomes: the conversation's recent episodes, **first**,
-followed by the relevance-retrieved beliefs. The parameter is documented "records
-retrieved as relevant to the goal, best first", and placing the tail first is
-faithful to that reading rather than a strain on it — for a continued conversation
-the immediately preceding turns *are* the most relevant records the store holds.
+followed by the relevance-retrieved beliefs.
+
+**This widens what `memories` means, and the ADR says so rather than reading the
+existing wording generously.** The parameter is documented "records retrieved as
+relevant to the goal, best first". A conversation tail is *usually* the most
+relevant thing the store holds for a continued exchange — but not always, and the
+counterexample is ordinary: a user who changes the subject mid-conversation is
+handed prior turns that are not relevant to the new goal at all. Calling that
+"best first" would be a strain, so the contract is restated instead: **`memories`
+carries the records the pipeline has assembled for this turn — the conversation's
+recent turns in order, then records retrieved as relevant, best first within that
+group.** The signature does not change; the docstring does (§9), and that is a
+change to an existing Protocol's meaning, flagged under golden rule 5.
+
+Two reasons this beats a separate `history` parameter, which §10 declines. Both
+groups are `MemoryRecord`s the planner already renders, so a second channel would
+split one prompt input into two for a distinction the planner does not act on; and
+the ordering rule above is exactly what an assembler applying ADR-0072 §5's band
+precedence will need anyway — a sequence whose grouping is meaningful, rather than
+one flat relevance cut.
 Both halves are already `MemoryRecord`s, and the planner already renders records
 into its prompt (`planning/planner.py`), so this is the existing mechanism carrying
 one more thing.
@@ -724,7 +745,8 @@ already renders as a gap — the same thing a deleted turn looks like, and a gre
 deal better than the reverse, which is content no conversation admits to.
 
 **Deletion is a tombstone, then a sweep, and the tombstone is the conversation
-record itself.** Deleting conversation C:
+record itself.** It is performed by the `orchestration` stage that holds both
+stores (§9), not by either store alone. Deleting conversation C:
 
 1. **stamps C deleted** (a `deleted_at` on the record, §9), which is durable and
    refuses every later append to C;
@@ -881,14 +903,73 @@ count and span rather than every turn.
   resolve an episode id back to the
   turn that cites it (§10 declines duplicating that relation onto the record, so
   the store owes both directions); resolve a parked binding back to its turn, and
-  so to its conversation (§3); stamp a conversation deleted (§8); export; and
-  reclaim — the sweep that finishes a stamped deletion and drops a conversation
-  that has no live turns *and* has been idle past the horizon (§7, §8).
+  so to its conversation (§3); stamp a conversation deleted (§8); export (below);
+  and **drop a conversation, conditionally** — refusing if it has been reactivated
+  since, or is still inside its grace (§7, §8).
+
+**The two-store sequence belongs to a coordinator, not to either store.** This is
+the correction the seam most needed. Whether a conversation has "no live turns" is
+a `MemoryStore` fact — expiry and deletion are enforced there (ADR-0007 §2,
+ADR-0045 §6) — while the conversation index holds only ids. A `ConversationStore`
+asked to reclaim would have to reach into memory to answer its own precondition,
+and neither store may hold the other (golden rule 1). So the **capture/lifecycle
+stage in `orchestration`** owns every cross-store sequence — §8's deletion and the
+reclaim sweep — because `orchestration` is the one place that legitimately holds
+both handles by injection.
+
+The split is then clean, and each half is testable where it lives:
+
+- **The stage** enumerates the index, destroys the episodes through `MemoryStore`,
+  and only then asks the conversation store to drop. It *knows* no live turn
+  remains, because it just removed them; nothing has to infer it.
+- **The store** owns what it can see and what must be atomic with its own
+  mutations: the stamp, the exclusion, and a **conditional drop** that re-checks —
+  under that exclusion — that the conversation has not been reactivated since and
+  that its grace has elapsed (§8). A drop that merely trusted its caller's earlier
+  reading would be the reclaim-versus-continuation race reintroduced one layer up.
+
+**`export` returns the conversations and their turn index**, as the two frozen
+types, which the caller serialises with `model_dump(mode="json")` — ADR-0007 §3's
+rule and its reason applied to a second store ("the store does not invent a
+bespoke format"). It carries **no episode content**: episodes are `MemoryStore`
+records and `MemoryStore.export` already exports them, so repeating them here
+would put the same Tier 1 text in two exports under two retention rules. A
+conversation stamped deleted but not yet reclaimed is **not** exported — it is
+deleted as far as every read is concerned (§8).
 - **`core/errors.py`** gains a `ConversationStoreError` in the `AssistantError`
   hierarchy, because every seam raises from it (`CONTRIBUTING.md`) and no existing
   class fits — a conversation is not memory, planning, context, or audit.
 
-**Signatures are deliberately not written here.** What is ratified is the
+**An illustrative signature, in ADR-0073 §1's form — the semantics above and below
+are the contract, the spelling is the lane's:**
+
+```python
+class ConversationStore(Protocol):
+    async def start(self) -> Conversation: ...
+    async def get(self, conversation_id: str) -> Conversation | None: ...
+    async def mark_active(self, conversation_id: str) -> Conversation: ...
+    async def append(
+        self, conversation_id: str, *, occurred_at: datetime, parked: Binding | None = None
+    ) -> ConversationTurn: ...
+    async def turns(
+        self, conversation_id: str, *, limit: int = ..., before_ordinal: int | None = None
+    ) -> list[ConversationTurn]: ...
+    async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]: ...
+    async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None: ...
+    async def turn_of_binding(self, binding: Binding) -> ConversationTurn | None: ...
+    async def stamp_deleted(self, conversation_id: str) -> bool: ...
+    async def drop_if_eligible(self, conversation_id: str) -> bool: ...
+    async def export(self) -> ConversationExport: ...
+```
+
+Every method raises `ConversationStoreError` for a store fault, and refuses an
+unknown or stamped conversation as §1 and §8 require rather than creating one. The
+paging arguments carry ADR-0073 §2's range posture unchanged — out of range is a
+`ValueError`, not a clamp — because two stores that disagree about a bad argument
+is the failure that rule exists to stop, and this ADR inherits it rather than
+restating it.
+
+**Beyond that, signatures are deliberately not fixed here.** What is ratified is the
 obligation set and the semantics above; the exact spelling ships with the triad,
 where a real caller can hold it. Three semantics are ratified rather than deferred,
 because they are where two implementations silently differ:
@@ -973,7 +1054,13 @@ different questions:
 
 **What the implementing lane owes** (stage 2; stage 1 is this ADR merging):
 
-1. The Protocol, the two types, and the error class.
+1. The Protocol, the two types (plus the small `Binding` and `ConversationExport`
+   values the signature above names), and the error class. **Plus one edit to an
+   existing Protocol's docstring**: `Planner.plan`'s `memories`, restated as §5
+   rules it. No signature changes, so no triad is owed for `Planner` — but the
+   conformance suite's expectations about that parameter move with the wording,
+   which is the review concern `CONTRIBUTING.md` names when a Protocol's meaning
+   changes without its shape.
 2. **The shared conformance suite**, with a clause per obligation above — the
    ordinal invariant under repeated appends, the two orders including tie-breaks,
    **a conversation with no turns ordered beside one that has them** (§2 — the case
@@ -1093,8 +1180,11 @@ different questions:
 - **A `messages: tuple[Message, ...]` payload on `EpisodicMemory`.** §5. Continuity
   reaches the model as records, so the structured message list has no reader — and
   `Role.TOOL` turns are not representable at the model seam anyway (ADR-0066 §1).
-- **A `history` parameter on `Planner.plan`.** §5. A Protocol change bought where
-  the existing `memories` parameter already carries what the planner renders.
+- **A `history` parameter on `Planner.plan`.** §5. It splits one prompt input into
+  two for a distinction the planner does not act on, and it is a signature change
+  where restating a docstring suffices. The cost is honest and stated: `memories`
+  means something wider than it did (§5), flagged under golden rule 5 rather than
+  smuggled.
 - **A conversation axis on `MemoryStore.search` or `list_beliefs`.** §9. One flag,
   two questions — the widening ADR-0073 §1 and §3 refused.
 - **A batch `get_many` on `MemoryStore`.** §5. Deferred to the hub, where a resume
