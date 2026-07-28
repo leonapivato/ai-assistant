@@ -483,7 +483,15 @@ the next lane:
    `None` versus empty versus non-empty for `bands` **and** for `kinds`, the two
    composing by conjunction, and detachment.
 
-   Two of those clauses have a shape that decides whether they test anything.
+   **One page is judged against one clock reading**, the clause
+   `MemoryStoreContract.test_search_judges_every_record_against_one_clock_reading`
+   already carries for `search`: §2 says this read honours the axes exactly as
+   `get`/`search` do, so an enumeration that re-reads an advancing clock while
+   scanning — hiding records that were live when the page began — fails it. It
+   matters more here than on `search`: an incoherent page is also a *paging* fault,
+   since the rows dropped mid-scan shift every subsequent offset.
+
+   Two of these clauses have a shape that decides whether they test anything.
    **`score`** must be seeded non-`None` — a record re-added after a `search`
    populated it — so the case fails an enumerator returning stored copies
    unchanged; asserting `None` over default-constructed records passes without
