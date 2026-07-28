@@ -47,9 +47,10 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
 )
+from ai_assistant.orchestration.conversations import BELIEF_KINDS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -127,10 +128,14 @@ class TurnResult:
         goal: The objective this turn was planned against, minted from the
             utterance.
         context: The situational context assembled for the turn.
-        memories: The records retrieved as relevant, best first — empty on the
-            first turn, and empty when retrieval degraded.
+        memories: What the pipeline assembled for this turn, in the order the
+            planner is handed it (ADR-0074 §5): the conversation's recent turns
+            **first**, in order, then the records retrieved as relevant, best
+            first within that group. Empty on the first turn of a fresh
+            conversation, and empty for whichever half degraded.
         plan: What the planner decided to do.
-        memory_degraded: Whether retrieval failed, making ``plan`` a *generic*
+        memory_degraded: Whether assembling those records failed — retrieval, or
+            the conversation's history, or both — making ``plan`` a *generic*
             answer rather than a personal one. Reported rather than swallowed:
             an unpersonalised answer is the one failure a user of this system
             most deserves to be told about.
@@ -208,7 +213,13 @@ class LearningLoop:
         self._clock = checked_clock(now, owner="LearningLoop")
         self._id_factory = id_factory
 
-    async def respond(self, utterance: str) -> TurnResult:
+    async def respond(
+        self,
+        utterance: str,
+        *,
+        history: Sequence[MemoryRecord] = (),
+        history_degraded: bool = False,
+    ) -> TurnResult:
         """Run one turn: intent, context, memory retrieval, planning.
 
         The stage order mirrors the pipeline in ``CLAUDE.md``, and each stage
@@ -217,14 +228,35 @@ class LearningLoop:
         precisely because a planner that fetched them itself would import two
         subsystems it has no business importing (``Planner``, ADR-0014 §6).
 
+        **Continuity reaches the model through the seam it already has**
+        (ADR-0074 §5). The conversation's recent turns arrive as ``history`` and
+        go into ``memories`` **first**, followed by the relevance-retrieved
+        beliefs; ``Planner`` grows no ``history`` parameter, because both groups
+        are ``MemoryRecord``s the planner already renders and a second channel
+        would split one prompt input in two for a distinction it does not act on.
+        Reading the history is the capture stage's job, not this one's: it spans
+        both durable stores, and only that stage holds both.
+
+        **Retrieval selects the belief kinds** and never ``EPISODIC``
+        (:data:`~ai_assistant.orchestration.conversations.BELIEF_KINDS`,
+        ADR-0074 §6), so a captured turn does not compete with beliefs for the
+        retrieval budget.
+
         Args:
             utterance: What the user said. It becomes the goal's statement
                 unrewritten — trimmed of surrounding whitespace, and otherwise
                 untouched. No intent inference happens here, because inferring
                 one needs a model and no contract offers that yet.
+            history: The conversation's recent turns, oldest first, already
+                resolved to records. Empty for a fresh conversation.
+            history_degraded: Whether reading that history failed. Folded into
+                :attr:`TurnResult.memory_degraded` rather than reported
+                separately: from the user's side both are "this answer is less
+                informed than it should have been", and a second flag would ask an
+                adapter to explain a distinction it cannot act on.
 
         Returns:
-            The turn's goal, context, retrieved memories and plan.
+            The turn's goal, context, assembled memories and plan.
 
         Raises:
             PlanningError: If ``utterance`` is blank, the injected clock's
@@ -236,16 +268,20 @@ class LearningLoop:
                 situation the planner would then treat as fact — is worse than
                 stopping.
         """
+        # Observed before the first await, so a caller mutating the sequence it
+        # passed cannot change what the planner is shown (ADR-0065).
+        recent = tuple(history)
         goal = self._goal_from(utterance)
         context = await self._context.assemble()
-        memories, degraded = await self._retrieve(goal.statement)
+        retrieved, degraded = await self._retrieve(goal.statement)
+        memories = recent + retrieved
         plan = await self._planner.plan(goal, context=context, memories=memories)
         return TurnResult(
             goal=goal,
             context=context,
             memories=memories,
             plan=plan,
-            memory_degraded=degraded,
+            memory_degraded=degraded or history_degraded,
         )
 
     async def learn(self, event: FeedbackEvent) -> tuple[MemoryIngestResult, ...]:
@@ -323,15 +359,24 @@ class LearningLoop:
         )
 
     async def _retrieve(self, query: str) -> tuple[tuple[MemoryRecord, ...], bool]:
-        """Retrieve memories relevant to ``query``, degrading rather than failing.
+        """Retrieve *beliefs* relevant to ``query``, degrading rather than failing.
 
         Returns the records and whether retrieval degraded. Losing memory costs
         the answer its personalisation, not its usefulness, so the turn
         continues — but it continues *saying so*, via
         :attr:`TurnResult.memory_degraded`.
+
+        The ``kinds`` filter is ADR-0074 §6: ``MemoryStore.search`` itself stays
+        band-neutral and kind-filtered only by its caller's argument, and this
+        caller asks for beliefs. Cross-conversation episodic recall — "what did we
+        discuss last Tuesday?" — is a real capability deferred with its ranking
+        question, because mixing raw turns with distilled beliefs in one relevance
+        cut is the ordering problem leg 7 is for.
         """
         try:
-            memories = await self._memory.search(query, limit=self._retrieval_limit)
+            memories = await self._memory.search(
+                query, limit=self._retrieval_limit, kinds=BELIEF_KINDS
+            )
         except MemoryStoreError:
             _log.warning("memory_retrieval_degraded", stage="retrieve", exc_info=True)
             return (), True

@@ -38,6 +38,7 @@ from ai_assistant.orchestration import (
     Belief,
     Confirmation,
     ContinuationToken,
+    ConversationLifecycle,
     Disposition,
     Engine,
     IngestSummary,
@@ -46,11 +47,13 @@ from ai_assistant.orchestration import (
     LearnOutcome,
     StepExecutor,
     StepRunner,
+    TurnOutcome,
 )
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
     FakeContextProvider,
+    FakeConversationStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -160,7 +163,18 @@ def _engine(
         id_factory=lambda: next(ids),
     )
     return Engine(
-        loop=loop, runner=runner, plans=plans, trail=trail, memory=memory, closers=closers
+        loop=loop,
+        runner=runner,
+        plans=plans,
+        trail=trail,
+        memory=memory,
+        conversations=ConversationLifecycle(
+            conversations=FakeConversationStore(now=lambda: AT),
+            memory=memory,
+            retention=timedelta(days=30),
+            now=lambda: AT,
+        ),
+        closers=closers,
     )
 
 
@@ -428,6 +442,9 @@ class _RecordingEngine:
         self.events.append(event)
         return self._outcome
 
+    async def start(self) -> None:
+        """The start-up sweeps, which this stand-in has no stores to sweep."""
+
     async def aclose(self) -> None:
         """Nothing to release: this stand-in owns no resource."""
 
@@ -438,6 +455,9 @@ class _FailingLearnEngine:
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         msg = "the memory store would not write"
         raise MemoryStoreError(msg)
+
+    async def start(self) -> None:
+        """The start-up sweeps, which this stand-in has no stores to sweep."""
 
     async def aclose(self) -> None:
         """Nothing to release."""
@@ -672,6 +692,9 @@ class _RecordingBeliefEngine:
     async def forget(self, record_id: str) -> bool:
         self.forgotten.append(record_id)
         return True
+
+    async def start(self) -> None:
+        """The start-up sweeps, which this stand-in has no stores to sweep."""
 
     async def aclose(self) -> None:
         """Nothing to release: this stand-in owns no resource."""
@@ -941,16 +964,38 @@ def test_beliefs_command_relays_its_filters(monkeypatch: pytest.MonkeyPatch) -> 
     ]
 
 
-def test_beliefs_command_asks_for_every_band_when_no_filter_is_given(
+def test_beliefs_command_asks_for_every_band_but_excludes_episodes_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An absent repeatable flag means "every", not the empty filter that selects none."""
+    """An absent ``--band`` means "every"; an absent ``--kind`` means "every belief".
+
+    Two different defaults, on purpose. ``--band`` absent is "every band", because
+    an empty filter would select nothing (ADR-0073 §1). ``--kind`` absent is every
+    kind **except** ``EPISODIC`` (ADR-0074 §6): this command answers "what do you
+    believe about me", and an episode is the evidence a belief is made of rather
+    than a belief — so left kind-blind it would print a transcript through the
+    surface leg 1 built to be readable, the moment capture started writing turns.
+    """
     engine = _RecordingBeliefEngine()
     _wire(monkeypatch, engine)
 
     result = CliRunner().invoke(cli.app, ["beliefs"])
     assert result.exit_code == 0
-    assert engine.listed == [(None, None, 50, 0)]
+    assert engine.listed == [
+        (None, [MemoryKind.SEMANTIC, MemoryKind.PREFERENCE, MemoryKind.PROCEDURAL], 50, 0)
+    ]
+
+
+def test_beliefs_command_still_lists_episodes_when_they_are_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0074 §6: the default narrows the listing; it does not remove the surface."""
+    engine = _RecordingBeliefEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["beliefs", "--kind", "episodic"])
+    assert result.exit_code == 0
+    assert engine.listed == [(None, [MemoryKind.EPISODIC], 50, 0)]
 
 
 @pytest.mark.parametrize("bad", ["-1", str(2**63)])
@@ -1000,3 +1045,240 @@ def test_forget_command_defaults_to_keeping_the_belief(
     assert result.exit_code == 0
     assert engine.forgotten == []
     assert "Left alone" in output.getvalue()
+
+
+# --- conversations: continuity, the listing, and the deletion (ADR-0074) ---
+
+
+def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
+    """A real ``Engine`` over canonical fakes, plus the conversation index behind it.
+
+    The store is handed back so a case can assert what capture actually recorded,
+    rather than inferring it from what the terminal printed.
+    """
+    plans = FakePlanStore(now=lambda: AT)
+    trail = FakeAuditTrail()
+    invoker = FakeToolInvoker([])
+    memory = FakeMemoryStore(now=lambda: AT)
+    writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
+    goals = iter(f"g-{n}" for n in range(1, 20))
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        writer=writer,
+        planner=_NoStepPlanner(),
+        feedback=FakeFeedbackProcessor(),
+        now=lambda: AT,
+        id_factory=lambda: next(goals),
+    )
+    runner = StepRunner(
+        plans=plans,
+        registry=invoker,
+        policy=FakeActionPolicy(),
+        trail=trail,
+        executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
+        now=lambda: AT,
+        id_factory=lambda: "d-1",
+    )
+    conversations = FakeConversationStore(now=lambda: AT)
+    engine = Engine(
+        loop=loop,
+        runner=runner,
+        plans=plans,
+        trail=trail,
+        memory=memory,
+        conversations=ConversationLifecycle(
+            conversations=conversations,
+            memory=memory,
+            retention=timedelta(days=30),
+            now=lambda: AT,
+        ),
+    )
+    return engine, conversations
+
+
+class _NoStepPlanner:
+    """A planner that ends a turn at an empty plan, so no tool is needed."""
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+    ) -> ActionPlan:
+        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+
+
+async def test_ask_names_the_conversation_it_ran_under(output: StringIO) -> None:
+    """§2: the id is what a stateless client keeps, so the surface has to print it."""
+    engine, conversations = _conversation_engine()
+
+    code = await cli._drive_turn(
+        engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True
+    )
+
+    assert code == 0
+    listed = await conversations.recent()
+    assert len(listed) == 1
+    rendered = output.getvalue()
+    assert "Conversation:" in rendered
+    assert listed[0].id in rendered
+    assert "--conversation" in rendered, "the surface says how to continue it"
+
+
+async def test_ask_continues_the_conversation_it_is_given(output: StringIO) -> None:
+    """§10: continuation is an option on ``ask``, never a second meaning for ``resume``."""
+    engine, conversations = _conversation_engine()
+    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    existing = (await conversations.recent())[0].id
+
+    code = await cli._drive_turn(
+        engine,
+        "again",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        conversation_id=existing,
+    )
+
+    assert code == 0
+    assert len(await conversations.recent()) == 1, "no second conversation was started"
+    assert [turn.ordinal for turn in await conversations.turns(existing)] == [1, 2]
+    assert existing in output.getvalue()
+
+
+async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
+    output: StringIO,
+) -> None:
+    """§1: a typo must not quietly land the continuation somewhere unfindable."""
+    engine, conversations = _conversation_engine()
+
+    code = await cli._drive_turn(
+        engine,
+        "hello",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        conversation_id="nobody",
+    )
+
+    assert code == cli._EXIT_ERROR
+    assert "Error" in output.getvalue()
+    assert await conversations.recent() == []
+
+
+def test_a_degraded_capture_is_reported_beside_the_degraded_memory_note(
+    output: StringIO,
+) -> None:
+    """§9 item 6: the answer is the answer, and the user is told it went unrecorded."""
+    cli._render_turn(
+        TurnOutcome(turn=None, step=None, conversation_id="c-1", capture_degraded=True)
+    )
+
+    rendered = output.getvalue()
+    assert "not recorded" in rendered
+    assert "history" in rendered
+
+
+def test_the_conversation_footer_is_silent_when_nothing_resolved(output: StringIO) -> None:
+    """A recovered resumption whose park predates capture has no id to offer (§3)."""
+    cli._render_conversation_footer(TurnOutcome(turn=None, step=None, conversation_id=None))
+
+    assert output.getvalue() == ""
+
+
+async def test_the_conversations_listing_shows_what_a_person_chooses_from(
+    output: StringIO,
+) -> None:
+    """§2: the id, when it started, and when it was last active."""
+    engine, conversations = _conversation_engine()
+    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    started = (await conversations.recent())[0]
+
+    code = await cli._drive_conversations(engine, limit=50, offset=0)
+
+    assert code == 0
+    rendered = output.getvalue()
+    assert started.id in rendered
+    assert "Last active" in rendered
+
+
+async def test_the_conversations_listing_says_so_when_there_are_none(output: StringIO) -> None:
+    """An empty listing is an answer, not a blank screen."""
+    engine, _ = _conversation_engine()
+
+    assert await cli._drive_conversations(engine, limit=50, offset=0) == 0
+    assert "No conversations yet" in output.getvalue()
+
+
+async def test_the_conversations_listing_never_shows_a_deleted_conversation(
+    output: StringIO,
+) -> None:
+    """§8: not because this surface filters, but because the stamp hides it."""
+    engine, conversations = _conversation_engine()
+    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    stamped = (await conversations.recent())[0].id
+    assert await conversations.stamp_deleted(stamped) is True
+    output.truncate(0)
+    output.seek(0)
+
+    await cli._drive_conversations(engine, limit=50, offset=0)
+
+    assert stamped not in output.getvalue()
+    assert "No conversations yet" in output.getvalue()
+
+
+async def test_forget_conversation_shows_the_count_and_span_before_destroying(
+    output: StringIO,
+) -> None:
+    """§8: the ceremony is the count and span, not every turn — what a person can judge."""
+    engine, conversations = _conversation_engine()
+    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    existing = (await conversations.recent())[0].id
+    await cli._drive_turn(
+        engine,
+        "again",
+        timeout=timedelta(seconds=5),
+        approver=lambda _c: True,
+        conversation_id=existing,
+    )
+    output.truncate(0)
+    output.seek(0)
+
+    code = await cli._drive_forget_conversation(engine, existing, confirm=lambda _digest: True)
+
+    assert code == 0
+    rendered = output.getvalue()
+    assert "About to forget this conversation" in rendered
+    assert "Turns recorded:" in rendered
+    assert "2" in rendered
+    assert "Forgotten." in rendered
+    assert await conversations.get(existing) is None
+
+
+async def test_forget_conversation_leaves_it_alone_when_the_answer_is_no(
+    output: StringIO,
+) -> None:
+    """A refusal is a valid outcome, and it exits 0 — nothing went wrong."""
+    engine, conversations = _conversation_engine()
+    await cli._drive_turn(engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True)
+    existing = (await conversations.recent())[0].id
+
+    code = await cli._drive_forget_conversation(engine, existing, confirm=lambda _digest: False)
+
+    assert code == 0
+    assert "Left alone" in output.getvalue()
+    assert await conversations.get(existing) is not None
+
+
+async def test_forget_conversation_declines_an_id_it_cannot_show(output: StringIO) -> None:
+    """Unknown, deleted, or reclaimed all look the same here, on purpose.
+
+    A surface that distinguished them would report on conversations it is meant to
+    have forgotten.
+    """
+    engine, _ = _conversation_engine()
+
+    code = await cli._drive_forget_conversation(engine, "nobody", confirm=lambda _digest: True)
+
+    assert code == cli._EXIT_ERROR
+    assert "No conversation has the id" in output.getvalue()

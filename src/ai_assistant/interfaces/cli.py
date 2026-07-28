@@ -15,6 +15,15 @@ render what the engine already computed and destroy what the user names. The
 is projected in the engine so ADR-0072 §1's classification never lands here — and
 this module reads no clock for them and re-filters nothing.
 
+``conversations`` and ``forget-conversation`` are the conversation surface
+(ADR-0074 §2, §8, §10), and ``ask --conversation`` is how a turn continues one.
+Continuation is deliberately **an option on ``ask`` and never a second meaning for
+``resume``**, which transports consent for a parked confirmation: overloading that
+verb would put two unrelated flows behind one word in the surface where the
+distinction matters most. A conversation the user deleted reaches none of these —
+not because anything here filters it, but because the store hides a stamped
+conversation from every read that presents one.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -43,6 +52,8 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration import (
         Belief,
         Confirmation,
+        ConversationDigest,
+        ConversationSummary,
         Engine,
         LearnOutcome,
         TurnOutcome,
@@ -122,7 +133,24 @@ _BELIEFS_BAND_OPTION = typer.Option(
 _BELIEFS_KIND_OPTION = typer.Option(
     None,
     "--kind",
-    help="Only show beliefs of this memory kind (repeatable). Default: every kind.",
+    help=(
+        "Only show beliefs of this memory kind (repeatable). Default: every kind "
+        "except 'episodic' — pass --kind episodic to see captured conversation turns."
+    ),
+)
+
+#: What ``assistant beliefs`` selects when the user names no ``--kind`` (ADR-0074
+#: §6). Every kind **except** ``EPISODIC``: the command answers "what do you
+#: believe about me", and an episode is not a belief — it is the evidence a belief
+#: is made of, so a kind-blind listing would print a transcript through the surface
+#: leg 1 built to be readable. ``--kind episodic`` still lists them, and the store
+#: contract is untouched: ADR-0073 §1's "``None`` means every value" is a *store*
+#: semantic, and ADR-0073 never pinned this command's default.
+#:
+#: Derived rather than spelled out, so a fifth ``MemoryKind`` is listed by default
+#: rather than silently omitted by a list nobody updated.
+_DEFAULT_BELIEF_KINDS: tuple[MemoryKind, ...] = tuple(
+    kind for kind in MemoryKind if kind is not MemoryKind.EPISODIC
 )
 
 
@@ -228,6 +256,15 @@ def ask(
         callback=_positive_finite_seconds,
         help="Per-attempt deadline for the engine's work, in seconds (positive).",
     ),
+    conversation: str | None = typer.Option(
+        None,
+        "--conversation",
+        "-c",
+        help=(
+            "Continue this conversation (see 'assistant conversations'). "
+            "Omit it to start a new one; the id is printed either way."
+        ),
+    ),
     *,
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Approve any confirmation without prompting."
@@ -235,10 +272,70 @@ def ask(
 ) -> None:
     """Run one turn: plan it, drive its step, and render what happened.
 
+    Every turn runs under a conversation, and the id it ran under is printed so you
+    can continue it with ``--conversation``. Passing an id the assistant does not
+    know is an error rather than a fresh start — a typo must not quietly land your
+    continuation somewhere you cannot find it.
+
     If the engine parks a step for confirmation, the prompt shows the action and
     the policy's reason; answering relays the opaque token back to the engine.
     """
-    code = asyncio.run(_ask(utterance, timeout_seconds=timeout_seconds, assume_yes=yes))
+    code = asyncio.run(
+        _ask(
+            utterance,
+            timeout_seconds=timeout_seconds,
+            assume_yes=yes,
+            conversation_id=conversation,
+        )
+    )
+    raise typer.Exit(code)
+
+
+@app.command()
+def conversations(
+    limit: int = typer.Option(
+        50, "--limit", callback=_page_argument, help="How many conversations to show at most."
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        callback=_page_argument,
+        help="How many conversations to skip before the page begins.",
+    ),
+) -> None:
+    """List your recent conversations, most recently active first.
+
+    Each row shows the id ``assistant ask --conversation`` takes, when the
+    conversation started, and when it was last active. A conversation you deleted is
+    not listed, and neither is one whose record retention has already reclaimed.
+
+    There is no total count — ask for the next page to find out whether there is
+    more.
+    """
+    code = asyncio.run(_list_conversations(limit=limit, offset=offset))
+    raise typer.Exit(code)
+
+
+@app.command("forget-conversation")
+def forget_conversation(
+    conversation_id: str = typer.Argument(..., help="The id of the conversation to destroy."),
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. The conversation is still shown first."
+    ),
+) -> None:
+    """Destroy one conversation and everything it recorded, after showing you what.
+
+    You are shown how many turns it holds and when it ran — the count and span
+    rather than every turn, which is what a person can actually judge at a prompt —
+    and it is destroyed only once you agree. ``--yes`` skips the question, not the
+    rendering.
+
+    This destroys: the conversation's episodes are gone from memory, from
+    ``assistant beliefs`` and from any export. Turns already deleted or expired stay
+    gone; nothing is restored.
+    """
+    code = asyncio.run(_forget_conversation(conversation_id, assume_yes=yes))
     raise typer.Exit(code)
 
 
@@ -321,9 +418,17 @@ def beliefs(
     # An absent repeatable flag arrives as an empty list, which the façade would read
     # as "select nothing" — the deliberate meaning of an *explicitly* empty filter
     # (ADR-0073 §1). A CLI has no way to say that and no reason to, so absent and
-    # empty both become None, "every band"/"every kind".
+    # empty both become "every band" for --band. For --kind they become every kind
+    # *except* episodic (ADR-0074 §6): this command answers "what do you believe
+    # about me", and a kind-blind listing would print a transcript once capture is
+    # writing turns. `--kind episodic` still lists them.
     code = asyncio.run(
-        _list_beliefs(bands=band or None, kinds=kind or None, limit=limit, offset=offset)
+        _list_beliefs(
+            bands=band or None,
+            kinds=list(kind) if kind else list(_DEFAULT_BELIEF_KINDS),
+            limit=limit,
+            offset=offset,
+        )
     )
     raise typer.Exit(code)
 
@@ -350,7 +455,41 @@ def forget(
     raise typer.Exit(code)
 
 
-async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> int:
+async def _open_engine() -> Engine:
+    """Load settings, build the façade, and run its start-up sweeps (ADR-0074 §8).
+
+    The one place a command obtains an engine. ``Engine.start`` runs here rather
+    than being left to each command, because ADR-0074 §8 puts the reclaim at
+    **engine start** — "the deleting call, at engine start, and later by the hub's
+    scheduler" — and a start-up sweep that some commands ran and others did not
+    would be a rule about which subcommand the user happened to type. It is cheap
+    when there is nothing to do (one bounded enumeration, usually empty) and it is
+    what finishes a deletion a previous run died part-way through.
+
+    A start-up failure closes what was already opened before propagating, so a
+    command that never got its engine still leaks no connection (ADR-0042 §2).
+
+    Raises:
+        AssistantError: As any stage raises; the caller's boundary renders it.
+    """
+    settings = load_settings()
+    configure_logging(settings)
+    engine = build_engine(settings)
+    try:
+        await engine.start()
+    except AssistantError:
+        await _close(engine)
+        raise
+    return engine
+
+
+async def _ask(
+    utterance: str,
+    *,
+    timeout_seconds: float,
+    assume_yes: bool,
+    conversation_id: str | None = None,
+) -> int:
     """Load settings, build the engine, drive one turn, and close it (ADR-0042 §2, §7).
 
     One error boundary spans **every** stage that can fail — loading settings,
@@ -358,25 +497,74 @@ async def _ask(utterance: str, *, timeout_seconds: float, assume_yes: bool) -> i
     down — so any :class:`AssistantError` is rendered and mapped to a non-zero exit
     code rather than escaping as a traceback (§7). Returns the process exit code.
     The composition root owns constructing the façade; this adapter owns closing it.
+
+    ``conversation_id`` is relayed untouched: whether it names a conversation is the
+    engine's question, and an unknown one comes back as an ``AssistantError`` this
+    boundary renders rather than as a silently fresh conversation (ADR-0074 §1).
     """
     timeout = timedelta(seconds=timeout_seconds)  # already validated positive + finite
     approver: Callable[[Confirmation], bool] = (
         (lambda _confirmation: True) if assume_yes else _prompt_for_approval
     )
     try:
-        settings = load_settings()
-        configure_logging(settings)
-        engine = build_engine(settings)
+        engine = await _open_engine()
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
     try:
-        code = await _drive_turn(engine, utterance, timeout=timeout, approver=approver)
+        code = await _drive_turn(
+            engine, utterance, timeout=timeout, approver=approver, conversation_id=conversation_id
+        )
     finally:
         shutdown_code = await _close(engine)
     # A failure closing an owned resource is itself a failure to report (§7): the
     # turn may have succeeded, but the process did not shut down cleanly.
+    return max(code, shutdown_code)
+
+
+async def _list_conversations(*, limit: int, offset: int) -> int:
+    """Load settings, build the engine, list conversations, and close it (ADR-0074 §2).
+
+    The continuity counterpart to :func:`_ask`, with the same single error boundary
+    (ADR-0042 §7). The paging arguments were already checked against the store's
+    accepted range at parse time (:func:`_page_argument`), so the one failure that
+    is not an ``AssistantError`` cannot reach here.
+    """
+    try:
+        engine = await _open_engine()
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_conversations(engine, limit=limit, offset=offset)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int:
+    """Load settings, build the engine, run the deletion ceremony, and close it.
+
+    The conversation-scoped counterpart to :func:`_forget_belief`, with the same
+    single error boundary (ADR-0042 §7) and the same rule about ``--yes``: it
+    supplies the answer and never the rendering, because a non-interactive approval
+    must not destroy what the user never saw (ADR-0073 §5, ADR-0052 §4).
+    """
+    confirm: Callable[[ConversationDigest], bool] = (
+        (lambda _digest: True) if assume_yes else _confirm_forget_conversation
+    )
+    try:
+        engine = await _open_engine()
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_forget_conversation(engine, conversation_id, confirm=confirm)
+    finally:
+        shutdown_code = await _close(engine)
     return max(code, shutdown_code)
 
 
@@ -398,9 +586,7 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
         (lambda _confirmation: True) if assume_yes else _confirm
     )
     try:
-        settings = load_settings()
-        configure_logging(settings)
-        engine = build_engine(settings)
+        engine = await _open_engine()
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -434,9 +620,7 @@ async def _learn_feedback(
         created_at=_utcnow(),
     )
     try:
-        settings = load_settings()
-        configure_logging(settings)
-        engine = build_engine(settings)
+        engine = await _open_engine()
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -466,9 +650,7 @@ async def _list_beliefs(
     cannot reach here.
     """
     try:
-        settings = load_settings()
-        configure_logging(settings)
-        engine = build_engine(settings)
+        engine = await _open_engine()
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -491,9 +673,7 @@ async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """
     confirm: Callable[[Belief], bool] = (lambda _belief: True) if assume_yes else _confirm_forget
     try:
-        settings = load_settings()
-        configure_logging(settings)
-        engine = build_engine(settings)
+        engine = await _open_engine()
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -591,6 +771,7 @@ async def _drive_resume(
             approved = approver(confirmation)
             resumed = await engine.resume(confirmation.token, approved=approved, timeout=timeout)
             _render_turn(resumed)
+            _render_conversation_footer(resumed)
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -621,6 +802,7 @@ async def _drive_turn(
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
     approver: Callable[[Confirmation], bool],
+    conversation_id: str | None = None,
 ) -> int:
     """Converse, render, and relay a confirmation if the engine parks one.
 
@@ -628,20 +810,70 @@ async def _drive_turn(
     confirmation can arise; ``resume`` resolves it to ``EXECUTED`` or ``DENIED``.
     An :class:`AssistantError` from any stage is rendered and mapped to a non-zero
     exit code — the adapter surfaces the failure, it does not swallow it.
+
+    The conversation footer is printed **once**, from the last outcome produced: a
+    parked turn and the resolution that answers it are two episodes in one
+    conversation, and printing the same id twice would read as two.
     """
     try:
-        outcome = await engine.converse(utterance, timeout=timeout)
+        outcome = await engine.converse(utterance, timeout=timeout, conversation_id=conversation_id)
         _render_turn(outcome)
         step = outcome.step
         if step is not None and step.confirmation is not None:
             approved = approver(step.confirmation)
-            resumed = await engine.resume(
+            outcome = await engine.resume(
                 step.confirmation.token, approved=approved, timeout=timeout
             )
-            _render_turn(resumed)
+            _render_turn(outcome)
     except AssistantError as exc:
         _render_error(exc)
         return _EXIT_ERROR
+    _render_conversation_footer(outcome)
+    return _EXIT_OK
+
+
+async def _drive_conversations(engine: Engine, *, limit: int, offset: int) -> int:
+    """Ask the façade for one page of conversations and render it (ADR-0074 §2).
+
+    The adapter relays the page and renders what comes back; it re-orders nothing,
+    reads no clock, and cannot show a deleted conversation — the store's stamp is
+    what keeps one out, not a filter here.
+    """
+    try:
+        page = await engine.recent_conversations(limit=limit, offset=offset)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_conversations(page, limit=limit, offset=offset)
+    return _EXIT_OK
+
+
+async def _drive_forget_conversation(
+    engine: Engine, conversation_id: str, *, confirm: Callable[[ConversationDigest], bool]
+) -> int:
+    """Show the conversation's count and span, take the answer, then destroy it.
+
+    Show-then-confirm at the unit the user thinks in (ADR-0074 §8, ADR-0073 §5).
+    A refusal is a valid outcome and exits 0. An id naming no conversation this
+    surface can show — unknown, or already deleted — is reported and exits non-zero.
+    """
+    try:
+        digest = await engine.conversation(conversation_id)
+        if digest is None:
+            _render_no_such_conversation(conversation_id)
+            return _EXIT_ERROR
+        _render_forget_conversation_prompt(digest)
+        if not confirm(digest):
+            console.print("[dim]Left alone. Nothing was forgotten.[/]")
+            return _EXIT_OK
+        destroyed = await engine.forget_conversation(digest.id)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not destroyed:
+        console.print("[yellow]Nothing to forget:[/] that conversation was already gone.")
+        return _EXIT_ERROR
+    console.print("[green]Forgotten.[/] That conversation and everything it recorded are gone.")
     return _EXIT_OK
 
 
@@ -689,6 +921,14 @@ def _render_turn(outcome: TurnOutcome) -> None:
     answered.
     """
     turn = outcome.turn
+    if outcome.capture_degraded:
+        # ADR-0074 §9 item 6: capture failure degrades the turn rather than failing
+        # it — the answer is still the answer — but a user whose turns are silently
+        # not being recorded would not find out until they tried to continue.
+        console.print(
+            "[yellow]Note:[/] this turn was not recorded, so it will not be part of "
+            "this conversation's history."
+        )
     if turn is not None:
         if turn.memory_degraded:
             console.print(
@@ -707,6 +947,104 @@ def _render_turn(outcome: TurnOutcome) -> None:
     step = outcome.step
     if step is not None and step.confirmation is None:
         _render_disposition(step.disposition, step.tool_id)
+
+
+def _render_conversation_footer(outcome: TurnOutcome) -> None:
+    """Name the conversation this turn ran under, so the user can continue it.
+
+    The id is opaque and carries no user content, so showing it discloses nothing;
+    it is neutralised for this terminal like any other engine-supplied string
+    (``_safe``, ADR-0042 §4). ``None`` only where nothing could be resolved — a
+    recovered resumption whose park predates capture, or whose conversation was
+    deleted — and there is then no id to offer.
+    """
+    if outcome.conversation_id is None:
+        return
+    console.print(
+        f"\n[dim]Conversation:[/] {_safe(outcome.conversation_id)}  "
+        f"[dim](continue with: assistant ask --conversation "
+        f"{_safe(outcome.conversation_id)} ...)[/]"
+    )
+
+
+def _render_conversations(
+    page: tuple[ConversationSummary, ...], *, limit: int, offset: int
+) -> None:
+    """Render one page of conversations (ADR-0074 §2).
+
+    Ordered by last activity, which is the store's contract and not re-sorted here.
+    **No total is shown**, and none is available to show: "is there more" is
+    answered by asking for the next page, exactly as the belief listing answers it.
+    """
+    if not page:
+        console.print("[dim]No conversations yet — 'assistant ask' starts one.[/]")
+        return
+    console.print(f"[bold]{len(page)} conversation(s)[/], most recently active first.")
+    for conversation in page:
+        console.print(f"\n  [bold cyan]{_safe(conversation.id)}[/]")
+        console.print(f"  [dim]Started:[/] {_when(conversation.started_at)}")
+        console.print(f"  [dim]Last active:[/] {_when(conversation.last_active_at)}")
+        if conversation.last_turn_at is None:
+            console.print("  [dim]No turn has been recorded in it yet.[/]")
+        else:
+            console.print(f"  [dim]Last recorded turn:[/] {_when(conversation.last_turn_at)}")
+    if limit and len(page) == limit:
+        console.print(
+            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
+        )
+
+
+def _render_forget_conversation_prompt(digest: ConversationDigest) -> None:
+    """Show what a conversation deletion will destroy (ADR-0074 §8, ADR-0073 §5).
+
+    **The count and span, not every turn.** A transcript at a prompt is not
+    something a person can judge, and showing nothing would be taking consent for
+    something unseen. The count is of turns *recorded*: one whose episode has since
+    expired or been deleted still happened, and saying otherwise would understate
+    what is being destroyed.
+    """
+    console.print("\n[bold yellow]About to forget this conversation[/]")
+    console.print(f"  [bold cyan]{_safe(digest.id)}[/]")
+    console.print(f"  [dim]Started:[/] {_when(digest.started_at)}")
+    if digest.last_turn_at is None:
+        console.print("  [dim]Turns recorded:[/] none")
+    else:
+        console.print(
+            f"  [dim]Turns recorded:[/] {digest.recorded_turns}, "
+            f"the last at {_when(digest.last_turn_at)}"
+        )
+    console.print(
+        "\n  [yellow]This destroys the conversation and every episode it recorded: "
+        "they leave memory, this listing, and any export.[/]"
+    )
+    console.print(
+        "  [dim]Turns already deleted or past their retention window stay gone; "
+        "nothing is restored.[/]"
+    )
+
+
+def _render_no_such_conversation(conversation_id: str) -> None:
+    """Report an id that names no conversation this surface can show (ADR-0074 §1, §8).
+
+    Unknown, already deleted, or reclaimed after its retention horizon passed — all
+    three look the same from here on purpose, because a surface that distinguished
+    them would report on conversations it is meant to have forgotten.
+    """
+    console.print(
+        f"[yellow]No conversation has the id[/] {_safe(conversation_id)}. "
+        "It may never have existed, or you may have deleted it already — "
+        "'assistant conversations' lists the ones that are still here."
+    )
+
+
+def _confirm_forget_conversation(_digest: ConversationDigest) -> bool:
+    """Read the human's yes/no *without* rendering — the caller already displayed it.
+
+    The conversation-scoped sibling of :func:`_confirm_forget` (I/O; ADR-0042 §6).
+    Defaults to **no**, for its reason: the question is about destroying something
+    irreversibly, and more of it.
+    """
+    return typer.confirm("Forget it?", default=False)
 
 
 def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:

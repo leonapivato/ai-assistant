@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.orchestration import (
+    ConversationLifecycle,
     Disposition,
     Engine,
     StepExecutor,
@@ -44,6 +45,7 @@ from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeContextProvider,
+    FakeConversationStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -107,8 +109,16 @@ def _aclose(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
     return _run
 
 
-def _make_engine(plans: SqlitePlanStore, trail: SqliteAuditTrail) -> Engine:
-    """Wire a façade over the given *real* durable stores (fake loop, real runner)."""
+def _make_engine(
+    plans: SqlitePlanStore, trail: SqliteAuditTrail, conversations: FakeConversationStore
+) -> Engine:
+    """Wire a façade over the given *real* durable stores (fake loop, real runner).
+
+    ``conversations`` is passed in rather than built here, because these cases stand
+    in for a *restart* over the same durable state: a resumption recovers its
+    conversation from the binding the parking turn recorded (ADR-0074 §3), so the
+    second process has to be looking at the index the first one wrote.
+    """
     memory = FakeMemoryStore(now=lambda: AT)
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     loop = LearningLoop(
@@ -139,6 +149,12 @@ def _make_engine(plans: SqlitePlanStore, trail: SqliteAuditTrail) -> Engine:
         plans=plans,
         trail=trail,
         memory=memory,
+        conversations=ConversationLifecycle(
+            conversations=conversations,
+            memory=memory,
+            retention=timedelta(days=30),
+            now=lambda: AT,
+        ),
         closers=[_aclose(plans.close), _aclose(trail.close)],
     )
 
@@ -149,9 +165,15 @@ async def test_a_parked_confirmation_survives_a_restart_and_resolves_durably(
     """ask → park → exit → restart → resume → executed, all against the same files."""
     plans_path = tmp_path / "plans.db"
     audit_path = tmp_path / "audit.db"
+    # One conversation index across both "processes": the resumption finds its
+    # conversation through the binding the parking turn wrote there (ADR-0074 §3),
+    # so a second engine that could not see it would capture nothing.
+    conversations = FakeConversationStore(now=lambda: AT)
 
     # --- first process: park a confirmation, then "exit" (close the connections) ---
-    engine1 = _make_engine(SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path))
+    engine1 = _make_engine(
+        SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path), conversations
+    )
     parked = await engine1.converse("send it", timeout=PATIENT)
     assert parked.step is not None
     assert parked.step.disposition is Disposition.AWAITING_CONFIRMATION
@@ -159,7 +181,9 @@ async def test_a_parked_confirmation_survives_a_restart_and_resolves_durably(
     await engine1.aclose()  # closes both sqlite connections — the process is gone
 
     # --- restart: a brand-new engine over the same database files ---
-    engine2 = _make_engine(SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path))
+    engine2 = _make_engine(
+        SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path), conversations
+    )
     try:
         assert engine2._parked == {}  # nothing carried over in memory
         pending = await engine2.pending_confirmations()
@@ -192,14 +216,22 @@ async def test_a_recovered_confirmation_can_be_denied_across_a_restart(tmp_path:
     """The restart path resolves a refusal too, durably (ADR-0052 §3)."""
     plans_path = tmp_path / "plans.db"
     audit_path = tmp_path / "audit.db"
+    # One conversation index across both "processes": the resumption finds its
+    # conversation through the binding the parking turn wrote there (ADR-0074 §3),
+    # so a second engine that could not see it would capture nothing.
+    conversations = FakeConversationStore(now=lambda: AT)
 
-    engine1 = _make_engine(SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path))
+    engine1 = _make_engine(
+        SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path), conversations
+    )
     parked = await engine1.converse("send it", timeout=PATIENT)
     assert parked.step is not None
     execution_id = parked.step.state.id
     await engine1.aclose()
 
-    engine2 = _make_engine(SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path))
+    engine2 = _make_engine(
+        SqlitePlanStore(path=plans_path), SqliteAuditTrail(path=audit_path), conversations
+    )
     try:
         pending = await engine2.pending_confirmations()
         assert len(pending) == 1
