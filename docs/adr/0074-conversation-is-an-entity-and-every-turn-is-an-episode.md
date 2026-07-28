@@ -177,15 +177,25 @@ holds nothing but the id can continue a conversation begun anywhere, which is wh
 "device-agnostic, resumable from any future spoke" has to mean when the only spoke
 is the CLI on the hub's own machine.
 
-**Beginning a turn is activity, and it is recorded before the turn's work.** A
-continuation marks the conversation active at the moment it is resolved, not only
-when its turn is captured. Two things need that. A turn against a conversation
-sitting at its retention horizon would otherwise be racing the reclaim that drops
-it (§7) — the user is *using* the conversation, and nothing in the record would say
-so until the turn ended. And a turn that never completes still says the user was
-here, which is the honest input to "which conversation?" (§2's recent read). The
-mark is a conversation-store mutation like any other, so it takes the same
-per-conversation exclusion as an append, a deletion and a reclaim (§9).
+**Beginning a turn is activity, and it is recorded before the turn's work — in a
+field of its own.** A continuation marks the conversation active at the moment it
+is resolved, not only when its turn is captured. Two things need that. A turn
+against a conversation sitting at its retention horizon would otherwise be racing
+the reclaim that drops it (§7) — the user is *using* the conversation, and nothing
+in the record would say so until the turn ended. And a turn that never completes
+still says the user was here, which is the honest input to "which conversation?"
+below.
+
+**`last_active_at` and `last_turn_at` are two different facts and are two
+fields.** Activity is "someone was here", set when the conversation is created and
+again whenever a turn begins; `last_turn_at` is "a turn landed", set only by
+capture and unset until one does (§9). Writing an attempted continuation into
+`last_turn_at` would claim a turn that may never complete, and the distinction is
+not cosmetic: `last_turn_at` unset is what tells the empty conversation from the
+one whose first turn landed instantly, which §7's reclaim and any future idleness
+reading both depend on. The mark is a conversation-store mutation like any other,
+so it takes the same per-conversation exclusion as an append, a deletion and a
+reclaim (§9).
 
 **The hub can answer "which conversation?", because a stateless client cannot.**
 The store offers a bounded read of recent conversations, ordered by **last
@@ -193,16 +203,13 @@ activity** descending with the id as tie-break — the shape ADR-0073 §2 argues
 and `AuditTrail.recent` set (ADR-0021 §4), for the same reason: some total order
 must be named or two implementations answer the same page differently.
 
-**Last activity is `last_turn_at` where a turn has landed, and `started_at`
-otherwise**, and the two are different fields rather than one initialised to a
-lie. `last_turn_at` is **optional and unset on a conversation with no turns**: a
-record whose only turn-stamp was fabricated at creation cannot be distinguished
-from one whose first turn landed instantly, and §7's reclaim of empty
-conversations and any future idleness reading (§2) both need to tell those apart.
-Defining the sort key over both fields is what keeps the order total without
-inventing a turn — the alternative, leaving an empty conversation's key
-undefined, is exactly where two conforming stores answer the same page
-differently. Without this
+**Last activity is `last_active_at`**, which is set at creation and refreshed by
+every turn that begins (above), so the sort key is always present and the order is
+total with no fallback rule to get wrong — the alternative, a key defined only for
+conversations that have turns, is exactly where two conforming stores answer the
+same page differently. `last_turn_at` is *not* the sort key: ordering a listing by
+"has a turn landed" would sink a conversation the user opened a minute ago below
+one they abandoned last week. Without this
 read, "continue yesterday's conversation" would require the *client* to have kept
 the id, which is precisely the state VISION §Principle 8 forbids an interface to
 own.
@@ -364,7 +371,20 @@ default horizon (§7).** Unmediated is not unbounded.
 of the conversation's id and the turn's ordinal — the two values the store has
 already proved unique (§9's ordinal invariant, §1's insert-if-absent identity) —
 so **two captured episodes cannot collide, by construction rather than by
-probability**. This is what lets §8's intent log work: the index entry names the
+probability**.
+
+**Uniqueness among turns is not uniqueness in the store, so the encoding is a
+reserved namespace.** `MemoryRecord.id` is an unconstrained string and the store
+is shared: a sensor (leg 6) or a future capture source (#441) writes episodes of
+its own, and nothing structural stops one from choosing a string this scheme would
+also produce. So the derived form is **structurally recognisable and reserved to
+captured conversation turns — no other producer mints into it**, which is a rule
+about the id space rather than a contract change, and it is the kind of rule that
+costs nothing while there is one producer and is unenforceable to retrofit once
+there are three. Reserving it is also what keeps the *meaning* of a conflict
+sharp (below): inside a reserved namespace whose leading component is a UUID4 this
+hub minted, a collision is not bad luck, it is a producer breaking the rule or an
+invariant already broken. This is what lets §8's intent log work: the index entry names the
 episode id before the episode exists, and there is no minting step in between that
 could have to be redone. A minted id would need a retry on collision, a retry
 would need a *second* id in an index entry already written, and the contract would
@@ -570,8 +590,10 @@ whose citations have expired renders, which is the same lane ADR-0073 §4 alread
 gates on. The question is not made easier by having capture guess at it now.
 
 **The conversation record outlives its turns, and is reclaimed on the same
-horizon.** A conversation is reclaimable when it has **no live turns *and* its own
-last activity is past the horizon** — both conditions, not the first alone. The
+horizon.** A conversation is reclaimable when it has **no live turns *and* its
+`last_active_at` is past the horizon** — both conditions, not the first alone.
+Eligibility reads *activity*, not `last_turn_at`, so a continuation that is
+underway protects the conversation even before its turn lands (§2). The
 second is what keeps expiry from becoming the implicit end §2 refuses: with only
 the first, a conversation whose single turn expired would be dropped while its
 owner still held a working id, and the id would stop resolving as a side effect of
@@ -722,8 +744,9 @@ count and span rather than every turn.
 **New surface in `core` — a breaking change (golden rule 5):**
 
 - **`core/types.py`** gains `Conversation` (the identity, `started_at`,
-  `last_turn_at` — **optional and unset until a turn lands**, §2 — and
-  `deleted_at`, the tombstone stamp of §8, likewise optional) and
+  `last_active_at` — always set, refreshed when a turn begins, and the key every
+  listing and the reclaim read — `last_turn_at`, **optional and unset until a turn
+  lands**, and `deleted_at`, the tombstone stamp of §8, likewise optional; §2) and
   `ConversationTurn` (the conversation it belongs to, its ordinal, the id of the
   episode that records it, and when it occurred).
   Both frozen pydantic models (ADR-0068), both timezone-aware at every instant
@@ -732,7 +755,8 @@ count and span rather than every turn.
   start a conversation, inserting only if the minted id is absent and retrying on
   collision (§1); read one by id; append a turn, allocating its ordinal;
   read a conversation's turn tail, bounded and ordered; read recent conversations,
-  bounded and ordered by last activity (§2); resolve an episode id back to the
+  bounded and ordered by `last_active_at` (§2); mark a conversation active (§2);
+  resolve an episode id back to the
   turn that cites it (§10 declines duplicating that relation onto the record, so
   the store owes both directions); stamp a conversation deleted (§8); export; and
   reclaim — the sweep that finishes a stamped deletion and drops a conversation
@@ -819,9 +843,9 @@ different questions:
 1. The Protocol, the two types, and the error class.
 2. **The shared conformance suite**, with a clause per obligation above — the
    ordinal invariant under repeated appends, the two orders including tie-breaks,
-   **a conversation with no turns ordered by `started_at` beside one ordered by
-   `last_turn_at`** (§2 — the case a suite built only from conversations that have
-   turns never reaches), the bounded defaults, an unknown id refused rather than
+   **a conversation with no turns ordered beside one that has them** (§2 — the case
+   a suite built only from conversations that have turns never reaches, and the one
+   that catches a store sorting on `last_turn_at`), the bounded defaults, an unknown id refused rather than
    created (§1), an unresolvable episode id skipped rather than raised (§5),
    detachment, and input observation. A suite that only exercises small explicit values will not reach
    the ordinal invariant or the defaults; the argument ADR-0073 §8 makes about
@@ -836,7 +860,9 @@ different questions:
    none of them is reachable from a suite that only writes successfully:
 
    - **An episode id that is already stored** — capture fails loudly and
-     overwrites nothing (§3). With a derived id this is a broken invariant rather
+     overwrites nothing (§3), including when the occupant is a *foreign* record
+     that took a reserved-namespace id, which is the case the reservation rule
+     forbids and the guard exists to catch. With a derived id this is a broken invariant rather
      than a routine collision, which is exactly why the test asserts a refusal and
      not a retry. **A colliding conversation id** is the live case on the other
      store and belongs in the conformance suite (§1): a repeating injected factory
