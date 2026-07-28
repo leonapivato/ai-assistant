@@ -253,8 +253,9 @@ because they behave differently on the way there:
 
 ### 3. Every turn is an episode: capture writes one `EpisodicMemory` per outcome
 
-**Every turn the engine hands back is durably recorded, as exactly one
-`EpisodicMemory` in the one `MemoryStore`** (ADR-0072 §1). The turn *is* the
+**Every turn the engine hands back is durably recorded, and its content is exactly
+one `EpisodicMemory` in the one `MemoryStore`** (ADR-0072 §1; the two halves are
+separated below, because only the first is atomic with the turn). The turn *is* the
 episode; episodes are not distilled from some other, more primitive turn entity.
 Three reasons, in the order they bind:
 
@@ -1062,11 +1063,15 @@ different questions:
 
 ## Consequences
 
-- **Leg 2's exit test is met by what ships**: a conversation has a durable,
-  device-agnostic identity that any client can continue by id, and every turn
-  leaves an `EpisodicMemory` an observer can cite by id. The observer does not
-  exist yet, and the substrate is correct without it — the same shape leg 1 landed
-  in (a correct surface over an empty band).
+- **Leg 2's exit test is met by what ships**, with its guarantee stated where it
+  holds: a conversation has a durable, device-agnostic identity that any client can
+  continue by id, and every turn is durably recorded and leaves an `EpisodicMemory`
+  an observer can cite by id — **durable index, best-effort episode** (§3). A
+  memory-store failure leaves that turn a gap with nothing to cite, reported on the
+  outcome; the exit test is "episodes exist that an observer could cite", not "no
+  turn is ever missing one", and no two-store design can promise the stronger form.
+  The observer does not exist yet, and the substrate is correct without it — the
+  same shape leg 1 landed in (a correct surface over an empty band).
 - **The contract owed is one Protocol, two types, and one error class.** No
   existing Protocol changes, which is the smallest surface this leg could have
   needed and is only possible because ADR-0005 already typed episodic memory and
