@@ -1101,9 +1101,9 @@ class ConversationStore(Protocol):
     async def turns(
         self, conversation_id: str, *, limit: int = ..., before_ordinal: int | None = None
     ) -> list[ConversationTurn]: ...  # refuses a stamped conversation
-    async def sweep_turns(
-        self, conversation_id: str, *, limit: int = ..., before_ordinal: int | None = None
-    ) -> list[ConversationTurn]: ...  # the sweeps' traversal; sees a stamped one
+    async def episodes_to_purge(
+        self, conversation_id: str, *, limit: int = ..., after_ordinal: int | None = None
+    ) -> list[str]: ...  # episode ids only, for the sweeps
     async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]: ...
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None: ...
     async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None: ...
@@ -1116,37 +1116,56 @@ class ConversationStore(Protocol):
 **Both traversals are complete and walkable, not only tails**, because the deletion
 coordinator has to reach *every* episode a conversation indexed before the record is
 dropped — and a conversation longer than the default page would otherwise keep its
-oldest episodes forever. `turns` and `sweep_turns` share these semantics exactly,
-differing only in whether a stamped conversation is visible (below):
+oldest episodes forever. Both walk the conversation's ordinals, in ordinal order
+(§9.3), and both are total — they differ in direction, because they are read for
+opposite reasons:
 
-- Results are ordered by **ordinal ascending**, matching §9.3.
-- **`before_ordinal` is an exclusive upper bound.** With it, the read returns the
-  last `limit` turns whose ordinal is strictly below it; without it, the tail.
-- **Walking back is therefore terminating and total**: call with no bound, then
-  repeatedly with `before_ordinal` set to the lowest ordinal just returned, until
-  an empty page. Ordinals are dense and start from the conversation's first turn
-  (§9.2), so the walk visits every turn exactly once.
-- **The deletion and reclaim sweeps must exhaust it** before the conditional drop.
-  Destroying one page and dropping the record is the failure this clause exists to
-  forbid.
+- **`turns` pages backwards, for replay.** `before_ordinal` is an **exclusive upper
+  bound**: with it, the read returns the last `limit` turns whose ordinal is
+  strictly below it; without it, the tail — which is what a continuation wants
+  (§5). Walk by calling again with `before_ordinal` set to the lowest ordinal just
+  returned, until a page comes back empty.
+- **`episodes_to_purge` pages forwards, for the sweeps.** `after_ordinal` is an
+  **exclusive lower bound**; without it the walk starts at the conversation's first
+  turn. Walk by calling again with the last ordinal covered, until empty. It
+  returns **ids only** — the ordinal is an argument, never a field of the result.
+- **Both walks terminate and visit every turn exactly once**, because ordinals are
+  dense and start from the conversation's first turn (§9.2).
+- **The deletion and reclaim sweeps must exhaust `episodes_to_purge`** before the
+  conditional drop. Destroying one page and dropping the record is the failure this
+  clause exists to forbid.
 
-**The stamp hides a conversation from every read that *presents* it — `get`,
-`recent`, `export`, and `turns` — and not from the sweeps that finish it.** The
+**The stamp hides a conversation from every read — `get`, `recent`, `export`,
+`turns`, and the two reverse lookups — leaving the sweeps only the episode ids they
+must destroy.** The
 sweep reads a stamped conversation's index precisely *because* it is stamped; that
 is what the tombstone is for (§8). Stating the exclusion as "absent from every
 read" without this distinction would forbid the machinery that carries the deletion
 out.
 
-**So the traversal is two methods, not one with two meanings.** `turns` is the
-ordinary read — replay, and anything a caller does with a live conversation — and
-it **refuses a stamped conversation** like every other presenting read.
-`sweep_turns` is the deletion and reclaim traversal, and it is the only operation
-that sees a stamped conversation's rows. One method serving both would mean any
-caller holding a just-deleted id could still enumerate its ordinals, timestamps,
-episode ids and parked bindings for the whole grace — metadata, and no content, but
-metadata about a conversation the user was told was gone, from a contract that
-claims it is absent from every read. The contract cannot tell a sweep from any
-other caller, so the *method* has to.
+**So no read returns a stamped conversation's rows at all — not even the sweep's.**
+`turns` is the ordinary traversal and **refuses a stamped conversation** like every
+other presenting read. The sweeps get `episodes_to_purge`, which returns **episode
+ids and nothing else**: no ordinals, no timestamps, no bindings, no
+`ConversationTurn` at all.
+
+That is the shape the boundary actually requires. A `core` Protocol is a
+cross-subsystem contract, so a method exists for *every* injected consumer — naming
+one `sweep_turns` documents an intent the contract cannot enforce, and any caller
+holding a just-deleted id could still have enumerated the whole index for the
+length of the grace. Returning only what the work needs removes the exposure
+instead of labelling it: the coordinator's job is to destroy those episodes, it
+must be handed their ids to do it, and an id it is about to delete is the one thing
+it cannot be denied. Everything else about a deleted conversation stays inside the
+store until the record is dropped.
+
+**The reverse lookups are covered by the same rule.** `turn_of_episode` and
+`turn_of_binding` return nothing for a turn whose conversation is stamped. They are
+otherwise a way around the front door — a caller holding an episode id or a parked
+binding from before the deletion would receive exactly the ordinal, timestamp and
+binding metadata the rule above withholds. A recovered resume that finds nothing
+because its conversation was deleted is the case §3 already ratifies: nothing is
+captured, and no conversation is invented.
 
 Every method raises `ConversationStoreError` for a store fault, and refuses an
 unknown conversation as §1 requires rather than creating one; an append to a
@@ -1203,8 +1222,8 @@ because they are where two implementations silently differ:
    (§8): an append, an activity mark (§2), a deletion stamp and a **reclaim** of one
    conversation never interleave. An append to a stamped conversation is refused,
    and a stamped conversation is absent from every read that presents it — `get`,
-   `recent`, `export` and `turns` — while `sweep_turns` still traverses its index
-   for the sweeps that finish the deletion (above).
+   `recent`, `export`, `turns` and both reverse lookups — while
+   `episodes_to_purge` still yields the ids the sweeps must destroy (above).
 
    **The reclaim is inside that set, not beside it**, and it re-checks eligibility
    while holding the exclusion — because eligibility is a claim about state that an
@@ -1317,9 +1336,10 @@ different questions:
    - **An interruption between the two writes**, in each order, asserting the
      residue each case is ratified to leave (§8): an orphan episode after a
      capture, a re-runnable deletion after a deletion.
-   - **`turns` on a stamped conversation is refused, while `sweep_turns` still
-     enumerates it** (§9) — the pair that keeps the tombstone from becoming a
-     readable record of a deleted conversation.
+   - **`turns` and both reverse lookups yield nothing for a stamped conversation,
+     while `episodes_to_purge` still yields its episode ids** (§9) — the pair that
+     keeps a tombstone from being a readable record of a deleted conversation while
+     the sweep can still finish.
    - **A conversation longer than the default page, deleted** — asserting that
      **every** episode is destroyed, not just the last page, and that the record is
      dropped only after the traversal is exhausted (§9). A fixture with one page of
