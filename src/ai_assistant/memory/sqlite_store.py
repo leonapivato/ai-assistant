@@ -26,14 +26,14 @@ from pydantic import TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
-from ai_assistant.core.types import MemoryRecord, MemoryWriteMode
+from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, band_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
-    from ai_assistant.core.types import Embedding, MemoryKind, MemoryWrite
+    from ai_assistant.core.types import BeliefBand, Embedding, MemoryKind, MemoryWrite
 
 _ADAPTER: TypeAdapter[MemoryRecord] = TypeAdapter(MemoryRecord)
 # ``search`` applies the kind and expiry filters *after* the vector KNN (sqlite-vec
@@ -55,6 +55,9 @@ _RESULT_OVERFETCH = 8
 # against — 4096 is the lower, operative ceiling, reached at ``limit > 512``.
 _VEC_KNN_MAX_K = 4096
 _OWNER_ONLY = 0o600
+#: One past the largest value ``list_beliefs`` accepts for ``limit``/``offset``:
+#: the signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
+_PAGE_BOUND = 2**63
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -110,6 +113,37 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _check_page_bounds(limit: int, offset: int) -> None:
+    """Refuse a paging argument outside ``[0, 2**63)`` (ADR-0073 §2).
+
+    The check this backend most needs and the reason the contract states it: a
+    negative bound would reach SQLite, which reads ``LIMIT -1`` as *no limit at
+    all*, and an over-wide one raises ``OverflowError`` out of the driver — neither
+    a ``MemoryStoreError`` nor anything the seam documents.
+
+    Duplicated in :mod:`ai_assistant.memory.store` and the canonical fake rather
+    than shared, exactly as ``AuditTrail.recent``'s check is: ``ai_assistant.testing``
+    may not import a subsystem (golden rule 1), and ADR-0073 adds nothing to ``core``.
+
+    Raises:
+        ValueError: If either value is negative or beyond the signed 64-bit range.
+    """
+    for name, value in (("limit", limit), ("offset", offset)):
+        if not 0 <= value < _PAGE_BOUND:
+            msg = f"{name} must be in [0, 2**63), got {value}"
+            raise ValueError(msg)
+
+
+def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    """ADR-0073 §2's total order: ``last_updated`` descending, ``id`` ascending.
+
+    Two passes over a stable sort rather than one composite key, because the two
+    halves run in opposite directions and ``datetime`` has no negation.
+    """
+    by_id = sorted(records, key=lambda record: record.id)
+    return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -643,6 +677,110 @@ class SqliteMemoryStore:
             if len(results) >= limit:
                 break
         return results
+
+    async def list_beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        """Enumerate live beliefs, newest revision first (ADR-0073 §1).
+
+        **Nothing is applied after the cut.** ADR-0073 §2 binds this read more
+        strictly than ``search``: there, a row dropped after the ranking cut costs a
+        result the method never owed, but on a paged enumeration it drops a row no
+        later page returns. So both filters and both read-time axes are applied to
+        the whole candidate set, the set is ordered, and only then is
+        ``[offset : offset + limit]`` taken.
+
+        **Where each predicate runs, and why it is not all SQL.** The two lifecycle
+        columns are exact integer microsecond epochs, so ``expires_at`` and
+        ``valid_until`` are pre-filtered in SQL, as is ``kind`` from its own column.
+        The band, the ``valid_from`` end of the window, and the sort key live only
+        inside each record's JSON blob, and their stored form is **ISO text of
+        variable precision** — pydantic emits ``...T00:00:00Z`` for a whole second
+        and ``...T00:00:00.123456Z`` otherwise, and ``'.' < 'Z'``, so a SQL
+        ``ORDER BY json_extract(...)`` or a text comparison would order a
+        sub-second-precision instant *before* a whole-second one at the same second.
+        Those three are therefore decided on the decoded record, where the instants
+        are real ``datetime``s — still before the cut, which is what the contract
+        requires. Pushing them into SQL soundly would mean new indexed columns and a
+        migration, which this read does not need at a personal store's scale
+        (tracked as a follow-up).
+
+        The clock is read **inside** the lock and that one reading drives both the
+        SQL pre-filter and every ``live_at`` check, so one page is judged against
+        one instant — a reading taken before the lock could go stale while this call
+        queued behind another (matching :meth:`get`).
+
+        Both ``Sequence`` filters are materialised on the coroutine's **first
+        executed line**, before the lock await, and only the copies are read
+        thereafter: ADR-0065 §3's second discharge, required of this method by
+        ADR-0073 §8. Deliberately unlike :meth:`_search_sync`, which materialises
+        ``kinds`` only after two suspension points (#436).
+
+        Args:
+            bands: Belief bands to include; ``None`` is every band, ``()`` none.
+            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            limit: Page size; ``0`` returns an empty page.
+            offset: How many ordered, filtered records to skip.
+
+        Returns:
+            The page, each record a detached snapshot with ``score`` cleared.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            MemoryStoreError: If the store cannot be read, a stored record is
+                corrupt, or the injected clock's reading is not conforming.
+        """
+        wanted_bands = None if bands is None else frozenset(bands)
+        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        _check_page_bounds(limit, offset)
+        selects_nothing = (wanted_bands is not None and not wanted_bands) or (
+            wanted_kinds is not None and not wanted_kinds
+        )
+        if limit == 0 or selects_nothing:
+            return []
+
+        async with self._lock:
+            now = self._now()
+            rows = await _run_to_completion(self._list_beliefs_sync, wanted_kinds, _to_micros(now))
+        matched = [
+            record
+            for record in (self._decode(data) for data in rows)
+            if record.validity.live_at(now)
+            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+        ]
+        page = _newest_revision_first(matched)[offset : offset + limit]
+        # Cleared, not merely absent: a record re-added after a search carries that
+        # query's relevance, and nothing was ranked here (ADR-0073 §2).
+        return [record.model_copy(update={"score": None}) for record in page]
+
+    def _list_beliefs_sync(self, kinds: frozenset[str] | None, now: int) -> list[str]:
+        """Read every candidate row for one page: the column predicates, unpaged.
+
+        ``kinds`` is non-empty when it is not ``None`` — the caller short-circuits an
+        empty filter — so the ``IN`` list always has at least one placeholder. Only
+        the *placeholders* are interpolated; every value is bound, so the assembled
+        text carries no caller data.
+        """
+        sql = (
+            "SELECT data FROM records "
+            "WHERE (expires_at IS NULL OR expires_at > ?) "
+            "AND (valid_until IS NULL OR valid_until > ?)"
+        )
+        params: list[object] = [now, now]
+        if kinds is not None:
+            sql += f" AND kind IN ({', '.join('?' * len(kinds))})"
+            params.extend(sorted(kinds))
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            msg = f"failed to list beliefs: {exc}"
+            raise MemoryStoreError(msg) from exc
+        return [row[0] for row in rows]
 
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""

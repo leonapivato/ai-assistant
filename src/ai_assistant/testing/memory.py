@@ -29,19 +29,49 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
-from ai_assistant.core.types import MemoryWriteMode
+from ai_assistant.core.types import MemoryWriteMode, band_of
 from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.types import MemoryKind, MemoryRecord, MemoryWrite
+    from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryRecord, MemoryWrite
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
+
+#: One past the largest value ``list_beliefs`` accepts for ``limit``/``offset``
+#: (ADR-0073 §2). The fake enforces the real stores' range: a fake looser than the
+#: contract would certify consumers a real store rejects (ADR-0026 §7).
+_PAGE_BOUND = 2**63
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _check_page_bounds(limit: int, offset: int) -> None:
+    """Refuse a paging argument outside ``[0, 2**63)`` (ADR-0073 §2).
+
+    Duplicated from the two stores rather than shared: ``ai_assistant.testing`` may
+    not import a subsystem (golden rule 1), and ADR-0073 adds nothing to ``core``.
+
+    Raises:
+        ValueError: If either value is negative or beyond the signed 64-bit range.
+    """
+    for name, value in (("limit", limit), ("offset", offset)):
+        if not 0 <= value < _PAGE_BOUND:
+            msg = f"{name} must be in [0, 2**63), got {value}"
+            raise ValueError(msg)
+
+
+def _newest_revision_first(records: list[MemoryRecord]) -> list[MemoryRecord]:
+    """ADR-0073 §2's total order: ``last_updated`` descending, ``id`` ascending.
+
+    Two passes over a stable sort rather than one composite key, because the two
+    halves run in opposite directions and ``datetime`` has no negation.
+    """
+    by_id = sorted(records, key=lambda record: record.id)
+    return sorted(by_id, key=lambda record: record.provenance.last_updated, reverse=True)
 
 
 class FakeMemoryStore:
@@ -222,6 +252,70 @@ class FakeMemoryStore:
                 )
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
         return scored[:limit]
+
+    async def list_beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        """Enumerate live beliefs, newest revision first (ADR-0073 §1).
+
+        Filters, orders, then pages — in that order, so a page is full whenever
+        enough matching records exist. Both read-time axes go through the same
+        ``_is_readable`` predicate ``get``/``search`` use, against one clock reading
+        for the whole page (ADR-0073 §2).
+
+        Deliberately **not** routed through the modelled
+        :class:`~ai_assistant.testing.cancellation.SuspendableResource`, unlike the
+        fake's writes: the shared suite's cancellation case (ADR-0060 §3) is
+        write-scoped, and the locked *read* paths are a separate axis tracked in
+        #397. Adding a read to the modelled resource here would arm a hook the
+        suite does not drive on either real store.
+
+        Both ``Sequence`` filters are materialised on the coroutine's **first
+        executed line** and only the copies are read thereafter — ADR-0065 §3's
+        second discharge, and the shape ADR-0073 §8 requires of every
+        implementation. This method never suspends, so the clause is vacuous here;
+        the snapshot keeps the fake the same shape as ``SqliteMemoryStore``, which
+        does suspend and for which the discharge is real.
+
+        Args:
+            bands: Belief bands to include; ``None`` is every band, ``()`` none.
+            kinds: Memory kinds to include; ``None`` is every kind, ``()`` none.
+            limit: Page size; ``0`` returns an empty page.
+            offset: How many ordered, filtered records to skip.
+
+        Returns:
+            The page, each record a detached snapshot with ``score`` cleared.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            MemoryStoreError: If the injected clock's reading is not conforming.
+        """
+        wanted_bands = None if bands is None else frozenset(bands)
+        wanted_kinds = None if kinds is None else frozenset(str(kind) for kind in kinds)
+        _check_page_bounds(limit, offset)
+        selects_nothing = (wanted_bands is not None and not wanted_bands) or (
+            wanted_kinds is not None and not wanted_kinds
+        )
+        if limit == 0 or selects_nothing:
+            return []
+
+        now = self._now_utc()  # one reading for the whole page
+        matched = [
+            record
+            for record in self._records.values()
+            if self._is_readable(record, now)
+            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+            and (wanted_kinds is None or record.kind in wanted_kinds)
+        ]
+        page = _newest_revision_first(matched)[offset : offset + limit]
+        # Cleared, not merely absent: a record re-added after a search carries that
+        # query's relevance, and nothing was ranked here (ADR-0073 §2).
+        return [record.model_copy(update={"score": None}, deep=True) for record in page]
 
     async def delete(self, record_id: str) -> bool:
         """Delete one record, returning whether it existed."""
