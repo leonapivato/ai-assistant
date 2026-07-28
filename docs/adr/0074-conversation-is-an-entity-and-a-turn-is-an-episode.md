@@ -113,7 +113,8 @@ either device-agnostic by construction or a migration later.
 
 A **conversation** is durable, server-side state with an identity of its own: a
 `Conversation` record (§9) carrying an opaque id, when it started, and when its
-last turn landed. It is not a session, not a process, and not a terminal.
+last turn landed — the latter **unset until a turn actually lands** (§2). It is
+not a session, not a process, and not a terminal.
 
 **The id is opaque, random, and device-agnostic.** A UUID4 minted through an
 injected factory, exactly as `orchestration/runner.py` and `planning/planner.py`
@@ -157,10 +158,21 @@ holds nothing but the id can continue a conversation begun anywhere, which is wh
 is the CLI on the hub's own machine.
 
 **The hub can answer "which conversation?", because a stateless client cannot.**
-The store offers a bounded read of recent conversations, ordered by `last_turn_at`
-descending with the id as tie-break — the shape ADR-0073 §2 argues for and
-`AuditTrail.recent` set (ADR-0021 §4), for the same reason: some total order must
-be named or two implementations answer the same page differently. Without this
+The store offers a bounded read of recent conversations, ordered by **last
+activity** descending with the id as tie-break — the shape ADR-0073 §2 argues for
+and `AuditTrail.recent` set (ADR-0021 §4), for the same reason: some total order
+must be named or two implementations answer the same page differently.
+
+**Last activity is `last_turn_at` where a turn has landed, and `started_at`
+otherwise**, and the two are different fields rather than one initialised to a
+lie. `last_turn_at` is **optional and unset on a conversation with no turns**: a
+record whose only turn-stamp was fabricated at creation cannot be distinguished
+from one whose first turn landed instantly, and §7's reclaim of empty
+conversations and any future idleness reading (§2) both need to tell those apart.
+Defining the sort key over both fields is what keeps the order total without
+inventing a turn — the alternative, leaving an empty conversation's key
+undefined, is exactly where two conforming stores answer the same page
+differently. Without this
 read, "continue yesterday's conversation" would require the *client* to have kept
 the id, which is precisely the state VISION §Principle 8 forbids an interface to
 own.
@@ -451,6 +463,33 @@ ratified rather than left to the implementer:
   reverse would list a turn whose content never existed.
 - **The operation is idempotent**, so re-running it finishes a partial one.
 
+**Capture compensates when the conversation it was writing into is gone.** The
+ordering above is a rule about a *failed* deletion, and on its own it does not
+cover a capture that interleaves with a successful one: a turn that wrote its
+episode before the deletion enumerated the conversation's episodes, and appends
+its index entry after, would leave a captured turn alive under a conversation the
+user was told was destroyed. So the rule is stated in the one place that can
+close it: **an index append refused because the conversation no longer exists
+obliges capture to delete the episode it just wrote.** The refusal already
+exists — §1 refuses an unknown conversation id, and a deleted conversation is
+unknown — so what is added is the compensation, not a new failure mode. It is
+narrow deliberately: an append refused for any *other* reason leaves the episode
+in place, because an orphan episode is a true record of an exchange and deleting
+it would destroy data on a transient store error.
+
+**What that leaves is a crash window, not a hole in the right.** A process that
+dies between the episode write and the refusal leaves an orphan episode, which
+the user reaches through the belief surface and `export` like any other record
+(ADR-0073 §5). Closing it properly needs the two writes to be one transaction
+across two stores, which is machinery with no consumer at this scale — and the
+serialised alternative, a lock that refuses appends for the duration of a
+deletion, is a concurrency primitive ratified ahead of the second writer that
+would justify it (ADR-0046 §5, #248). Today the reachable case is narrower still:
+one process, one client, one command at a time (roadmap stance 3), so a capture
+and a deletion do not overlap. This is the shape ADR-0073 §5 already accepted for
+its own show-then-confirm window — name the window, bound it, and revisit it with
+the second writer (§11) rather than build the primitive now.
+
 **Deleting one episode is deleting one record**, through the surface leg 1 already
 shipped (ADR-0073 §5's show-then-confirm, with its window named and accepted). The
 conversation-scoped form obeys the same ceremony: what will be destroyed is shown
@@ -461,9 +500,10 @@ count and span rather than every turn.
 
 **New surface in `core` — a breaking change (golden rule 5):**
 
-- **`core/types.py`** gains `Conversation` (the identity and its two stamps:
-  `started_at`, `last_turn_at`) and `ConversationTurn` (the conversation it belongs
-  to, its ordinal, the id of the episode that records it, and when it occurred).
+- **`core/types.py`** gains `Conversation` (the identity, `started_at`, and
+  `last_turn_at`, which is **optional and unset until a turn lands**, §2) and
+  `ConversationTurn` (the conversation it belongs to, its ordinal, the id of the
+  episode that records it, and when it occurred).
   Both frozen pydantic models (ADR-0068), both timezone-aware at every instant
   (ADR-0023, ADR-0030).
 - **`core/protocols.py`** gains **one** Protocol, `ConversationStore`, owing:
@@ -485,11 +525,21 @@ because they are where two implementations silently differ:
 1. **The ordinal only moves forward, and the store proves it.** Per conversation,
    ordinals are dense, unique, and monotonic — a store-enforced invariant, not a
    convention a caller keeps, which is ADR-0064's ruling applied to a second log.
-   It is what makes a second concurrent appender (§11) a conflict the store can
-   detect rather than a silent interleave.
+
+   **What that buys, stated exactly, because the overclaim is tempting:** two
+   appends land in one unambiguous order that every reader agrees on, and neither
+   can silently take the other's position. It does **not** detect that an appender
+   planned against a tail that has since moved — two clients that both read
+   through ordinal 7 and then append are serialised as 8 and 9, and the store has
+   been told nothing that would let it refuse the second. Detecting *that* needs an
+   expected-tail argument on append and a conflict error to go with it, which is
+   ADR-0046 §5's deferred compare-and-swap wearing this ADR's hat and is deferred
+   with the same consumer (§11). The ordinal is what makes such an argument
+   expressible later — there is a value to compare against — which is the sense in
+   which this decision does not foreclose it.
 2. **Every read is bounded by default and totally ordered** (ADR-0021 §4, ADR-0073
-   §2): turns by ordinal, conversations by `last_turn_at` descending with the id as
-   tie-break.
+   §2): turns by ordinal ascending, conversations by last activity descending with
+   the id as tie-break (§2).
 3. **The standing module clauses bind it** like every other Protocol: input
    observation before the first await (ADR-0065), cancellation that does not orphan
    a resource (ADR-0060), and detached snapshots on every read.
@@ -526,9 +576,11 @@ different questions:
 1. The Protocol, the two types, and the error class.
 2. **The shared conformance suite**, with a clause per obligation above — the
    ordinal invariant under repeated appends, the two orders including tie-breaks,
-   the bounded defaults, an unknown id refused rather than created (§1), an
-   unresolvable episode id skipped rather than raised (§5), detachment, and input
-   observation. A suite that only exercises small explicit values will not reach
+   **a conversation with no turns ordered by `started_at` beside one ordered by
+   `last_turn_at`** (§2 — the case a suite built only from conversations that have
+   turns never reaches), the bounded defaults, an unknown id refused rather than
+   created (§1), an unresolvable episode id skipped rather than raised (§5),
+   detachment, and input observation. A suite that only exercises small explicit values will not reach
    the ordinal invariant or the defaults; the argument ADR-0073 §8 makes about
    `offset` and about the default `limit` applies here unchanged.
 3. **The canonical fake** in `ai_assistant.testing`, plus the concrete
@@ -578,12 +630,15 @@ different questions:
 
 ### 11. What this ADR does not decide
 
-- **Multi-spoke concurrency.** Two clients appending to one conversation at once.
-  Not foreclosed: §9's ordinal is allocated and proved by the store, so a second
-  appender is a detectable conflict rather than a silent interleave — what is
-  deferred is the *policy* (refuse, re-order, or branch), which needs a second
-  spoke to be a real question. It is also where ADR-0046 §5's deferred
-  compare-and-swap (#248) stops being hypothetical.
+- **Multi-spoke concurrency.** Two clients appending to one conversation at once,
+  and a capture that interleaves with a deletion (§8). Not foreclosed: §9's
+  ordinal is allocated and proved by the store, so concurrent appends land in one
+  agreed order rather than an ambiguous one. What is deferred is everything that
+  needs a *conflict* to be detectable — an expected-tail argument on append, the
+  policy for refusing a stale appender (reject, re-order, or branch), and a
+  serialisation between capture and deletion. All three are ADR-0046 §5's deferred
+  compare-and-swap (#248) in different clothes, and all three become real questions
+  with the second spoke, not before.
 - **Push delivery and sync.** Not foreclosed: a client holds nothing but an id it
   was given (§1, §2), so "conversation X has a new turn" is deliverable to it
   without any state migration on either side.
@@ -641,7 +696,10 @@ different questions:
   a "restore my history" instinct would break.
 - **Deletion across two stores is ordered rather than atomic** (§8). The residue of
   a partial failure is always *more* deleted than the operation completed, which is
-  the only asymmetry a data right can tolerate.
+  the only asymmetry a data right can tolerate, and a capture racing a deletion
+  compensates by destroying the episode it just wrote. What survives that is a
+  crash window, named and bounded rather than closed with a cross-store
+  transaction nothing else needs yet.
 - **The hub inherits a conversation model it does not have to change** (§11): ids
   it minted, clients that hold nothing, an ordinal it can arbitrate on, and no
   transport assumptions.
