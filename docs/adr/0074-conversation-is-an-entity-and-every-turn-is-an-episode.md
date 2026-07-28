@@ -1380,6 +1380,14 @@ different questions:
      turn whose episode it does not also carry (§9), which is the property the
      filter-against-the-same-artifact rule buys and which a test filtering against
      a live store would not catch.
+   - **Retention reclaim over more than one batch, with a live episode beyond the
+     first** — asserting the conversation is **not** dropped (§7). Reclaim's
+     precondition is that *no* turn still resolves, so an implementation that
+     inspects only the first batch would drop the index and orphan every live
+     episode behind it. The single-batch fixture cannot catch that, and the
+     deletion multi-batch test does not either — it is checking a different
+     predicate, since deletion destroys what it finds rather than asking whether
+     anything survives.
    - **A finite-to-finite change of `episode_retention`, in both directions** —
      an emptied conversation is reclaimed against the horizon in force when
      reclaim runs, not one stamped at creation (§7).
