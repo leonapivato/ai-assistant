@@ -177,6 +177,16 @@ holds nothing but the id can continue a conversation begun anywhere, which is wh
 "device-agnostic, resumable from any future spoke" has to mean when the only spoke
 is the CLI on the hub's own machine.
 
+**Beginning a turn is activity, and it is recorded before the turn's work.** A
+continuation marks the conversation active at the moment it is resolved, not only
+when its turn is captured. Two things need that. A turn against a conversation
+sitting at its retention horizon would otherwise be racing the reclaim that drops
+it (§7) — the user is *using* the conversation, and nothing in the record would say
+so until the turn ended. And a turn that never completes still says the user was
+here, which is the honest input to "which conversation?" (§2's recent read). The
+mark is a conversation-store mutation like any other, so it takes the same
+per-conversation exclusion as an append, a deletion and a reclaim (§9).
+
 **The hub can answer "which conversation?", because a stateless client cannot.**
 The store offers a bounded read of recent conversations, ordered by **last
 activity** descending with the id as tie-break — the shape ADR-0073 §2 argues for
@@ -350,26 +360,39 @@ because "amends and supersedes nothing" is a claim a reader must be able to chec
 nothing (§4), inserts rather than upserts (above), and retains under a finite
 default horizon (§7).** Unmediated is not unbounded.
 
-**The write is an insert, not an upsert, and that is a contract-level choice
-already available.** Capture writes the episode as a one-element `write_atomic`
-batch in `INSERT_IF_ABSENT` mode — **not** `add`. `add` is a documented upsert
-keyed on the caller's id, which is right for a caller whose id means "this record
-again" and wrong for a producer minting a fresh one: a colliding id would silently
-replace an unrelated record with an episode. ADR-0046 §2 already ruled exactly
-this case for exactly this reason — `INSERT_IF_ABSENT` is what "a minted id that
-must not clobber an existing record" gets (ADR-0045 §4) — and it is explicit that
-"a batch of one is legal and degenerates to a single atomic write". So capture
-needs no contract change to get it, and the improbability of a UUID4 collision is
-not the argument: an id factory is *injected* (§1), and a test double, a seeded
-factory, or a future non-random scheme makes the collision reachable in ways
-probability says nothing about.
+**A captured episode's id is derived from the turn, not minted.** It is a function
+of the conversation's id and the turn's ordinal — the two values the store has
+already proved unique (§9's ordinal invariant, §1's insert-if-absent identity) —
+so **two captured episodes cannot collide, by construction rather than by
+probability**. This is what lets §8's intent log work: the index entry names the
+episode id before the episode exists, and there is no minting step in between that
+could have to be redone. A minted id would need a retry on collision, a retry
+would need a *second* id in an index entry already written, and the contract would
+owe an operation to re-point or abandon a turn — surface bought entirely to
+survive an id scheme that did not have to be random. Nothing about a turn's
+identity is a secret the id is protecting: the record is Tier 1 and reachable only
+through the store that holds it.
 
-On `MemoryStoreConflictError` capture retries once with a fresh id and then fails
-the capture, degrading the turn rather than the answer (§9). Two things follow that
-matter later: the episode id capture reports is always one it created, so §8's
-compensation can never destroy a record capture did not write; and "absent" is
-physical presence (ADR-0046 §3), so an id colliding with an expired-but-unpurged
-row is refused rather than resurrected.
+**The write is still an insert, not an upsert.** Capture writes the episode as a
+one-element `write_atomic` batch in `INSERT_IF_ABSENT` mode — **not** `add`, which
+is a documented upsert keyed on the caller's id and would let a colliding id
+silently replace an unrelated record. ADR-0046 §2 ruled this case for this reason
+("a minted id that must not clobber an existing record", ADR-0045 §4) and is
+explicit that "a batch of one is legal and degenerates to a single atomic write",
+so capture needs no contract change to get it.
+
+With a derived id the mode is a **guard rather than a routine path**, and it is
+kept for what a conflict would then mean: an id derived from a unique conversation
+and a store-proved ordinal collides only if an invariant has already broken, or if
+capture is re-running a turn that was recorded. So a `MemoryStoreConflictError`
+**fails the capture loudly** — degrading the turn, not the answer (§9) — and no
+retry is attempted. That is ADR-0046's own posture where it already uses this
+mode: the applier's insert-if-absent failure fails the whole batch, and nothing
+retries under a different id. Two things follow: the episode id capture reports is
+always the one its turn determines, so §8's compensation can never destroy a
+record capture did not write; and "absent" is physical presence (ADR-0046 §3), so
+an id colliding with an expired-but-unpurged row is refused rather than
+resurrected.
 
 ### 4. What capture stamps — and the two obligations on the derived band
 
@@ -627,9 +650,9 @@ conversation is stamped obliges capture to delete the episode it just wrote, so
 the common case leaves nothing for the sweep to find. It is narrow deliberately: an
 append refused for any *other* reason leaves the episode in place, because an
 orphan episode is a true record of an exchange and deleting it would destroy data
-on a transient store error. And because capture's episode id is always one it
-minted and inserted (§3), a compensation can never destroy a record capture did not
-write.
+on a transient store error. And because a captured episode's id is determined by
+its own conversation and ordinal (§3), a compensation can never destroy a record
+capture did not write.
 
 **Capture verifies after its write, and that — not the clock — is the fence.** An
 append that succeeded before the stamp is not evidence that the conversation still
@@ -741,11 +764,24 @@ because they are where two implementations silently differ:
 2. **Every read is bounded by default and totally ordered** (ADR-0021 §4, ADR-0073
    §2): turns by ordinal ascending, conversations by last activity descending with
    the id as tie-break (§2).
-3. **A conversation's mutations are mutually exclusive at the store** (§8): an
-   append and a deletion of the same conversation never interleave, an append to a
-   stamped conversation is refused, and a stamped conversation is absent from every
-   read. This is an obligation on the *seam* precisely because a caller-held lock
-   does not survive a second caller — the engine's own code already contemplates
+3. **A conversation's mutations are mutually exclusive at the store, all of them**
+   (§8): an append, an activity mark (§2), a deletion stamp and a **reclaim** of one
+   conversation never interleave. An append to a stamped conversation is refused,
+   and a stamped conversation is absent from every read.
+
+   **The reclaim is inside that set, not beside it**, and it re-checks eligibility
+   while holding the exclusion — because eligibility is a claim about state that an
+   append or an activity mark changes. Deciding "no live turns, idle past the
+   horizon" and then dropping the record in a separate step is how a reclaim
+   destroys a conversation a user has just come back to. The boundary is therefore
+   decided rather than left to whoever wins: an activity mark that lands first
+   makes the conversation ineligible and the reclaim skips it; a reclaim that lands
+   first drops the record, and the continuation behind it is refused at the *start*
+   of its turn (§1) — before any work, before any answer, which is the loud refusal
+   §1 already specifies rather than an answer the user loses.
+
+   This is an obligation on the *seam* precisely because a caller-held lock does
+   not survive a second caller — the engine's own code already contemplates
    "another engine over the same durable stores".
 4. **The standing module clauses bind it** like every other Protocol: input
    observation before the first await (ADR-0065), cancellation that does not orphan
@@ -799,13 +835,13 @@ different questions:
    following is a case where the guarantee is either kept or silently lost, and
    none of them is reachable from a suite that only writes successfully:
 
-   - **A colliding episode id** — an injected id factory returning a stored id
-     must produce a retry with a fresh id, and must never overwrite the stored
-     record (§3). The factory is injected precisely so this is deterministic. **A
-     colliding conversation id** is the same case on the other store and belongs in
-     the conformance suite (§1): a repeating factory must not overwrite a
-     conversation, must not hand back someone else's, and must raise
-     `ConversationStoreError` when the retry budget is exhausted.
+   - **An episode id that is already stored** — capture fails loudly and
+     overwrites nothing (§3). With a derived id this is a broken invariant rather
+     than a routine collision, which is exactly why the test asserts a refusal and
+     not a retry. **A colliding conversation id** is the live case on the other
+     store and belongs in the conformance suite (§1): a repeating injected factory
+     must not overwrite a conversation, must not hand back someone else's, and must
+     raise `ConversationStoreError` when the retry budget is exhausted.
    - **An append refused because the conversation is gone** — the compensating
      delete runs, and it deletes the episode capture just wrote and nothing else.
    - **A deletion that lands while the episode write is in flight**, so the append
@@ -818,6 +854,11 @@ different questions:
    - **An interruption between the two writes**, in each order, asserting the
      residue each case is ratified to leave (§8): an orphan episode after a
      capture, a re-runnable deletion after a deletion.
+   - **A reclaim racing a continuation** — a conversation eligible for reclaim
+     (no live turns, idle past the horizon) that is continued at the same moment:
+     asserting the boundary §9.3 ratifies in both directions, since a reclaim whose
+     eligibility is decided outside the exclusion passes a single-threaded test and
+     destroys a conversation the user just returned to.
    - **A capture and a deletion of the same conversation issued concurrently** —
      asserting they serialise (§8) rather than interleave. **Through two `Engine`
      instances sharing one pair of stores**, not one: a lock held by a single
