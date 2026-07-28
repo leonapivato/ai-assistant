@@ -552,17 +552,29 @@ the next lane:
    matters more here than on `search`: an incoherent page is also a *paging* fault,
    since the rows dropped mid-scan shift every subsequent offset.
 
-   Two of these clauses have a shape that decides whether they test anything.
-   **`score`** must be seeded non-`None` — a record re-added after a `search`
-   populated it — so the case fails an enumerator returning stored copies
-   unchanged; asserting `None` over default-constructed records passes without
-   touching the obligation. **The input-observation clause** (ADR-0065) has to be
-   exercised on the two `Sequence` filters through the suite's existing
-   suspension hook: mutate `bands` (and `kinds`) while the call is suspended and
-   require one coherent observation. The harm is milder than the torn write that
-   clause was written for — an incoherent read returns nothing and persists
-   nothing — but §2 claims the clause binds this method, and a claimed obligation
-   with no case is the gap this list exists to close.
+   One of them has a shape that decides whether it tests anything: **`score`**
+   must be seeded non-`None` — a record re-added after a `search` populated it —
+   so the case fails an enumerator returning stored copies unchanged. Asserting
+   `None` over default-constructed records passes without touching the obligation.
+
+   **The input-observation clause** (ADR-0065) binds the two
+   `Sequence` filters, and the lane discharges it the way ADR-0065 §3 allows
+   rather than by proving it with a suspension: the filters are materialised
+   before the first `await` and only the materialised copy is read — which is
+   exactly what all three implementations already do with `search`'s `kinds`
+   (`wanted = {...} if kinds is not None else None`).
+
+   **It is not proved by the suite's existing hook, and this ADR does not pretend
+   it is.** `store_suspended_at_its_first_await` suspends the next `add` or
+   `write_atomic` and nothing else; proving a *read's* observation by suspension
+   would mean widening that hook and implementing the widening in the fake and
+   both stores. That is not required here, for a reason that is about
+   proportionality rather than convenience: the clause was written for the #286
+   torn *write*, where two observations commit a mix of two versions, and an
+   incoherent read persists nothing and returns a result the caller discards. It
+   is also not this method's gap alone — `search` takes the same shape of argument
+   and carries the same unproven obligation today — so closing it belongs to a
+   change that closes both, filed rather than bolted onto the new method.
 
    The full-page rule needs **two** cases, not one, and the second is the one a
    suite naturally omits: a page full under band/kind filtering, *and* a page full
