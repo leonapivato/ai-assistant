@@ -9,6 +9,7 @@ import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.types import (
+    BeliefBand,
     CurrentContext,
     DataTier,
     EpisodicMemory,
@@ -31,6 +32,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     TimeOfDay,
     Validity,
+    band_of,
 )
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -96,6 +98,48 @@ def test_inferred_provenance_may_be_uncertain() -> None:
 def test_confidence_is_bounded() -> None:
     with pytest.raises(ValidationError):
         Provenance(source=MemorySource.INFERRED, confidence=1.5, last_updated=_WHEN)
+
+
+# --- bands: the standing a source places a belief in (ADR-0072 §2) -----------
+
+# The ratified partition, written out member by member so that adding a
+# `MemorySource` without choosing its band fails the suite as well as mypy.
+_EXPECTED_BANDS = {
+    MemorySource.USER_ASSERTED: BeliefBand.ASSERTED,
+    MemorySource.OBSERVED: BeliefBand.DERIVED,
+    MemorySource.INFERRED: BeliefBand.DERIVED,
+    MemorySource.EXTERNAL: BeliefBand.ATTESTED,
+}
+
+
+@pytest.mark.parametrize("source", list(MemorySource))
+def test_band_of_classifies_every_memory_source(source: MemorySource) -> None:
+    """The mapping is total: every source has a band, and it is the ratified one."""
+    assert source in _EXPECTED_BANDS, f"{source} has no ratified band (ADR-0072 §2)"
+    assert band_of(source) is _EXPECTED_BANDS[source]
+
+
+def test_the_expected_partition_covers_the_whole_source_enum() -> None:
+    """A new `MemorySource` must be classified here, not silently left out."""
+    assert set(_EXPECTED_BANDS) == set(MemorySource)
+
+
+def test_every_band_is_reachable_from_some_source() -> None:
+    """Three bands, all of them populated — none is decorative (ADR-0072 §2)."""
+    assert {band_of(source) for source in MemorySource} == set(BeliefBand)
+
+
+def test_external_is_neither_asserted_nor_derived() -> None:
+    """`EXTERNAL` gets its own band; folding it either way was rejected (ADR-0072 §2)."""
+    assert band_of(MemorySource.EXTERNAL) is BeliefBand.ATTESTED
+    assert band_of(MemorySource.EXTERNAL) not in {BeliefBand.ASSERTED, BeliefBand.DERIVED}
+
+
+def test_band_values_are_stable_strings() -> None:
+    """The wire values are part of the contract — a `StrEnum` that compares as `str`."""
+    assert [band.value for band in BeliefBand] == ["asserted", "derived", "attested"]
+    assert isinstance(BeliefBand.DERIVED, str)
+    assert str(BeliefBand.ASSERTED) == "asserted"
 
 
 def test_naive_expires_at_is_refused() -> None:

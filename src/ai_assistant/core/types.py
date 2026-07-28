@@ -21,7 +21,7 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic.functional_serializers import PlainSerializer
@@ -300,6 +300,64 @@ class MemorySource(StrEnum):
     OBSERVED = "observed"
     INFERRED = "inferred"
     EXTERNAL = "external"
+
+
+class BeliefBand(StrEnum):
+    """The standing a belief is held with — how far it is from the user's word.
+
+    The three bands partition :class:`MemorySource` (ADR-0072 §2). They name what
+    ADR-0005 §2 expressed only as source membership: the *user profile* is the
+    ``ASSERTED`` band of the one store, the *inferred user model* is its
+    ``DERIVED`` band, and there is no second store and no materialised profile
+    (ADR-0072 §1). The word "model" is deliberately absent — in this codebase it
+    means the language model (``ModelProvider``, ``models/``).
+
+    Attributes:
+        ASSERTED: The user told us; their own word, confidence 1.0. Not
+            re-derivable, and losing one is unrecoverable (ADR-0038 §2).
+        DERIVED: We worked it out from evidence; provisional, sub-1.0 confidence,
+            and re-derivable while the observations behind it are retained.
+        ATTESTED: A source the user connected reported it. Neither the user's
+            word nor our inference, so it is neither entitled to the standing the
+            supersession law protects nor re-derivable by observing harder.
+    """
+
+    ASSERTED = "asserted"
+    DERIVED = "derived"
+    ATTESTED = "attested"
+
+
+def band_of(source: MemorySource) -> BeliefBand:
+    """The band a provenance source places a belief in (ADR-0072 §2).
+
+    The mapping is **total**, and its totality is mechanically enforced: every
+    arm names a member and the wildcard does nothing but ``assert_never``, so a
+    :class:`MemorySource` added without choosing its band narrows to a
+    non-``Never`` type under ``mypy --strict`` and fails the gate rather than
+    being silently classified (ADR-0072 §2, the shape of ADR-0038 §2a's
+    allow-list argument applied to classification).
+
+    Classification is keyed on ``source`` and never on ``confidence``, so no
+    producer can promote a belief into the asserted band by claiming certainty
+    (ADR-0072 §4). It applies wherever :class:`Provenance` does — including
+    :class:`Goal` — but ADR-0072 §3's obligations on derived beliefs do **not**
+    generalise with it; they are scoped to memory proposals.
+
+    Args:
+        source: The provenance source of the belief being classified.
+
+    Returns:
+        The band that source places the belief in.
+    """
+    match source:
+        case MemorySource.USER_ASSERTED:
+            return BeliefBand.ASSERTED
+        case MemorySource.OBSERVED | MemorySource.INFERRED:
+            return BeliefBand.DERIVED
+        case MemorySource.EXTERNAL:
+            return BeliefBand.ATTESTED
+        case _:  # pragma: no cover - exhaustive
+            assert_never(source)
 
 
 class MemoryKind(StrEnum):
