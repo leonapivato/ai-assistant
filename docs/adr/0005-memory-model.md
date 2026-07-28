@@ -1,7 +1,15 @@
 # 5. Memory model: typed memory, provenance, and update proposals
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0075 (the proposal → policy write path, for the deterministic capture of an episode recording a turn)
 - Date: 2026-07-16
+- Note (2026-07-28): **§3's write path, and its Consequences clause "Every write
+  goes through a reviewable proposal → policy path", no longer reach deterministic
+  episodic capture.** ADR-0075 §1 names the exact scope replaced and §2 how narrow
+  it is. Everything else here stands: §1's typed kinds, §2's provenance model,
+  §3's `MemoryPolicy` seam and its five outcomes, §4's contract surface, and the
+  write path for every other producer — including leg 3's observer, which proposes
+  through the gate as this ADR requires. Appended note per ADR-0070 §1; no text
+  below it is rewritten.
 
 ## Context
 
