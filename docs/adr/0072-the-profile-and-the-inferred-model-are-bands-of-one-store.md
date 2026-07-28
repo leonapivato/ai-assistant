@@ -1,6 +1,6 @@
 # 72. The profile and the inferred user model are bands of one store
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-27
 - **This is a contract change.** §2 adds a `BeliefBand` enum and a total
   `band_of(MemorySource) -> BeliefBand` mapping to `core/types.py` — a `core`
@@ -29,7 +29,7 @@
 
 ## Context
 
-The roadmap was reoriented on 2026-07-24 around **accumulation**: the premise
+The roadmap was reoriented on 2026-07-27 around **accumulation**: the premise
 that the decisions worth making next are the ones that put accumulated beliefs
 behind the vocabulary ADR-0005 built, without the user having to dictate them.
 This ADR is the first slice of that arc's first leg, and its Context is where
