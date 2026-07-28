@@ -1,6 +1,6 @@
 # 76. A stamped conversation is enumerable, so a crashed deletion can be finished
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This ADR partially supersedes ADR-0074**, in the scope named in §1: §9's
   `ConversationStore` obligation set, and the reach of its stamped-conversation
