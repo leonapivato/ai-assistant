@@ -316,8 +316,21 @@ optional: it is the whole point of the screen. Per belief, the surface conveys:
     unresolvable citation renders is the open half of #431 — a question the
     observer's lane will hold the evidence to answer and this one does not.
 
+  For an `ATTESTED` belief the complete answer names **what reported it, and
+  when** — "your calendar said so on Tuesday". No field carries the first half:
+  `Provenance` records that the source was `EXTERNAL` and never *which* connected
+  system it was. So the same pair applies, and the floor is what stops the gap
+  being papered over: the surface conveys the band and must not present an
+  attested belief as the user's word or as our inference, which is the standing
+  ADR-0072 §2 gave the band its own name to protect. The gate is on leg 6's first
+  `EXTERNAL` producer: naming the reporting source is a precondition of it
+  shipping, and whether that needs `Provenance` to carry a source identity is a
+  `core` decision for that lane — with a producer in hand — not one to guess here.
+
   So leg 1's exit test is met by what ships (every belief asserted, every "why"
-  complete), and the day it would stop being met is the day the gate fires.
+  complete), and the days it would stop being met are the days those two gates
+  fire. Neither band has a producer, and neither producer may land without the
+  explanation its band owes.
 - **When it was last revised** — `provenance.last_updated`, the transaction stamp
   (ADR-0045 §3), which is also the sort key (§2). This is what "since when have
   you believed this" means today.
@@ -582,6 +595,10 @@ half must not land without its suite.
   gate, not open-endedly**: it is a precondition of the first producer of derived
   beliefs shipping, so the surface can say why before there is anything to say it
   about.
+- **How an `ATTESTED` belief names what reported it** (§4), and whether
+  `Provenance` must carry a source identity for it to. Gated the same way, on
+  leg 6's first `EXTERNAL` producer; a `core` change decided with that producer in
+  hand, not here.
 - **Whether a `MemoryStore` write ever becomes conditional on a revision** (§5),
   which would close the show-then-confirm window and several others. That is
   ADR-0046 §5's deferral and #248's question, due when a second concurrent writer
@@ -618,11 +635,13 @@ half must not land without its suite.
   (§5). What it shows on the day it ships is a store of assertions, because the
   derived band has no producer — and for an assertion "why" is complete without a
   citation to resolve (ADR-0038 §1a). The surface is correct and the band is empty.
-- **The observer inherits a precondition, not a debt** (§4). It may not populate
-  the derived band behind an inspection surface that can only show citation ids,
-  so the day the exit test would weaken is the day that gate fires. Stating it as
-  a gate rather than a deferral is the difference between a decision and a
-  postponement.
+- **The two bands with no producer inherit a precondition, not a debt** (§4).
+  Leg 3's observer may not populate the derived band behind a surface that can
+  only show citation ids, and leg 6's first sensor may not populate the attested
+  band behind one that cannot name what reported it. Stating those as gates rather
+  than deferrals is the difference between a decision and a postponement — and the
+  attested one is the more useful, because it surfaces now that `Provenance` names
+  no connected source, while there is still no code depending on its absence.
 - **Paging is honest and slightly weaker than a transaction.** A record revised
   between two pages can be skipped or repeated (§2). Accepted, named, and cheap to
   strengthen if a listing ever has enough rows for it to matter.
