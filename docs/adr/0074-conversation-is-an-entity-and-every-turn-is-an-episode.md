@@ -129,6 +129,18 @@ assumption becomes a migration; and an id that sorts by mint time is an ordering
 consumers start relying on before anyone decided it was one (§2's `last_turn_at`
 is the ordering key, and it is a field).
 
+**Starting a conversation is an insert, never an overwrite.** `start` writes the
+record only if its id names nothing — the same rule and the same reason as §3's
+episode insert, and it matters for the same reason: the factory is *injected*, so
+a repeating test double, a seeded factory, or a future non-random scheme makes a
+collision reachable in a way probability does not answer. On collision `start`
+retries with a freshly minted id, and exhausting a small retry budget raises
+`ConversationStoreError` (§9) rather than returning a conversation whose id names
+someone else's. A `start` that overwrote would destroy a conversation; one that
+silently returned the existing record would graft a stranger's turns onto this
+client's — the same failure §1 refuses when a *client* names an id, arriving from
+the other direction.
+
 **The hub mints; a client presents an id it was given.** A client never invents a
 conversation id. If it could, two clients could collide on one, and a client could
 name an id that already exists and graft its turns onto a conversation it was
@@ -514,7 +526,10 @@ record itself.** Deleting conversation C:
 2. **deletes every episode the index names**, including any whose write is still in
    flight — an id not yet present is a no-op, and the stamp is what stops it
    arriving unnoticed;
-3. **drops the index and the record**, once step 2 has nothing left that resolves.
+3. **drops the index and the record**, once step 2 has nothing left that resolves
+   **and a bounded grace period has passed since the stamp** — the two conditions
+   together, because "nothing resolves" is also true of an intent whose episode
+   write has not landed yet.
 
 A deleted conversation is gone from every read — `recent` never lists a stamped
 record, and a continuation naming one is refused exactly as an unknown id is (§1).
@@ -549,13 +564,48 @@ on a transient store error. And because capture's episode id is always one it
 minted and inserted (§3), a compensation can never destroy a record capture did not
 write.
 
-**What is left is a bounded residue, and it is named rather than claimed away.**
-Between the stamp and the reclaim, a deleted conversation's record and index
-survive: **ordinals, timestamps, and episode ids — no content**. That is a real
-residue of a deletion the user was told succeeded, and it is bounded by the reclaim
-running in the deleting call and again at start-up, so it persists only across a
-crash. Shrinking it further would mean holding the index in memory rather than on
-disk, which is the durability that makes the sweep possible in the first place.
+**The grace period is what makes the tombstone a fence rather than a race.** An
+intent recorded before the stamp can still be holding an unwritten episode when
+step 2 runs; sweeping only what resolves *now* and then dropping the index would
+discard the one record that could ever name it. So the tombstone outlives the
+deletion by a configured grace (the `confirmation_ttl` shape again — a
+`timedelta`), and the reclaim re-runs after it. A capture that lands its episode
+inside the grace is swept; the grace is generous relative to a turn, which is
+bounded by the caller's own per-attempt budget (ADR-0029 §4).
+
+**What is left is one bounded window, and it is accepted rather than claimed
+away.** A capture that was paused mid-write when the deletion ran, and whose
+episode lands *after* the grace, leaves an episode the sweep no longer has a record
+to find. Three things are true about it, and all three are why this ADR accepts it:
+
+- **No protocol over two stores closes it.** Every ordering, tombstone or handshake
+  moves the window; only a transaction spanning both stores removes it, and there
+  is no seam that spans them. Adding one — or collapsing the conversation index
+  into `MemoryStore` to get its transaction — is a change to the memory contract
+  made for a failure mode with no reachable instance.
+- **The reachable version is already gone.** A capture and a deletion of one
+  conversation cannot overlap through anything shipped: one process, one client,
+  one command at a time (roadmap stance 3). Where they *can* overlap — two engines
+  over shared stores — §9's store-level exclusion serialises the append against the
+  deletion, so what remains is the narrower case of an episode write paused across
+  a whole grace period.
+- **The residue is visible and destroyable, not invisible.** The episode is a
+  record like any other: it appears in `assistant beliefs --kind episodic`, in
+  `export`, and `forget` destroys it. What is lost is the automatic sweep, not the
+  user's reach.
+
+This is the disposition ADR-0073 §5 already took for its own two-call window —
+name it, bound it, say what would close it, and decline to ratify the primitive
+that would. **What closes it is named**: a transactional posture across the local
+stores, which is leg 5's "stores' concurrent-access posture" hardening tail, due
+with the process model that makes two writers real (§11).
+
+**Between the stamp and the reclaim, the tombstone itself is a residue**:
+ordinals, timestamps and episode ids — **no content** — surviving a deletion the
+user was told succeeded. It is bounded by the grace and by the reclaim running in
+the deleting call, at start-up, and later on the hub's schedule. Holding the index
+in memory instead would remove it and take the crash-safety with it, which is the
+worse trade.
 
 **Deleting one episode is deleting one record**, through the surface leg 1 already
 shipped (ADR-0073 §5's show-then-confirm, with its window named and accepted). The
@@ -575,7 +625,8 @@ count and span rather than every turn.
   Both frozen pydantic models (ADR-0068), both timezone-aware at every instant
   (ADR-0023, ADR-0030).
 - **`core/protocols.py`** gains **one** Protocol, `ConversationStore`, owing:
-  start a conversation; read one by id; append a turn, allocating its ordinal;
+  start a conversation, inserting only if the minted id is absent and retrying on
+  collision (§1); read one by id; append a turn, allocating its ordinal;
   read a conversation's turn tail, bounded and ordered; read recent conversations,
   bounded and ordered by last activity (§2); resolve an episode id back to the
   turn that cites it (§10 declines duplicating that relation onto the record, so
@@ -669,7 +720,11 @@ different questions:
 
    - **A colliding episode id** — an injected id factory returning a stored id
      must produce a retry with a fresh id, and must never overwrite the stored
-     record (§3). The factory is injected precisely so this is deterministic.
+     record (§3). The factory is injected precisely so this is deterministic. **A
+     colliding conversation id** is the same case on the other store and belongs in
+     the conformance suite (§1): a repeating factory must not overwrite a
+     conversation, must not hand back someone else's, and must raise
+     `ConversationStoreError` when the retry budget is exhausted.
    - **An append refused because the conversation is gone** — the compensating
      delete runs, and it deletes the episode capture just wrote and nothing else.
    - **A compensating delete that itself fails** — the turn still returns its
@@ -684,10 +739,13 @@ different questions:
      engine already supports, which is the fault this clause exists to catch. The
      store-level obligation belongs in the conformance suite too, so every
      implementation is held to it rather than only the wiring.
-   - **A racing capture that lands its episode after a completed deletion** —
-     asserting the reclaim finds and destroys it, because the stamped record and
-     its index are still there naming it (§8). And **a reclaim run twice**, to pin
-     idempotence.
+   - **A racing capture that lands its episode after a completed deletion, inside
+     the grace** — asserting the reclaim finds and destroys it, because the stamped
+     record and its index are still there naming it (§8). **And the same landing
+     after the grace**, asserting the accepted residue rather than a guarantee the
+     protocol does not provide: the test pins what this ADR decided, so a later
+     reader finds the window in the suite rather than rediscovering it. And **a
+     reclaim run twice**, to pin idempotence.
 3. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
@@ -749,6 +807,12 @@ different questions:
   expected-tail argument on append, and the policy for refusing one (reject,
   re-order, or branch). That is ADR-0046 §5's deferred compare-and-swap (#248) in
   this ADR's clothes, and it becomes a real question with the second spoke.
+- **A transactional posture across the two local stores**, which is what would
+  close §8's last window — an episode landing after its conversation's tombstone
+  was reclaimed. Deferred to leg 5, whose hardening tail is named as "the stores'
+  concurrent-access posture" and whose process model decides what a second writer
+  even is. Not foreclosed: §8's protocol is a sequence of ordinary store calls, so
+  a transaction spanning them would subsume it rather than replace it.
 - **Push delivery and sync.** Not foreclosed: a client holds nothing but an id it
   was given (§1, §2), so "conversation X has a new turn" is deliverable to it
   without any state migration on either side.
@@ -832,6 +896,13 @@ different questions:
   content a completed deletion could no longer find, and a data right that depends
   on a best-effort cleanup completing is not a right. The residue is bounded and
   content-free: ids, ordinals and timestamps, until the sweep runs.
+- **One window is accepted rather than closed** (§8): an episode whose write was
+  paused across the whole grace period lands with nothing left to sweep it. No
+  two-store protocol closes that, only a transaction spanning both, and the
+  reachable instance of it is already excluded by the store-level serialisation and
+  by there being one client. It is stated, tested as the residue it is, and handed
+  to leg 5 with the concurrent-access posture it belongs to — the disposition
+  ADR-0073 §5 took for its own window.
 - **The obligation landed on the seam rather than on the engine**, which is the
   correction that mattered most in review. A lock inside one `Engine` would have
   looked correct and served nothing: the engine already contemplates another engine
