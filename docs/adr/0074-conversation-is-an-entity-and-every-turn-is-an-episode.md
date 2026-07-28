@@ -983,6 +983,18 @@ different questions:
 - **A conversation that ends after an idle period.** Rejected in §2. It is a
   presentation judgement with no consumer, and getting it wrong splits, in the
   record, what the user experienced as one thread.
+- **A permanent registry of every conversation id ever issued, so a reclaimed id
+  can never be minted again.** Rejected, and the reason is the one this ADR spent
+  its deletion protocol on: a durable record of every id the user has *deleted*,
+  retained forever, is precisely the residue §8 exists to reclaim. It would buy
+  protection against one thing — an id factory that repeats — which is not a
+  property of the ratified scheme (UUID4, §1) and is not guarded against anywhere
+  else in this system: goal, plan, step, execution and decision ids are all minted
+  by the same injected factory with no registry behind any of them. `start`'s
+  insert-if-absent (§1) covers the case that matters, a collision with a
+  conversation that *exists*; a collision with one that was destroyed at the user's
+  request is a broken factory, and the answer to a broken factory is not to keep
+  the user's deleted data as an index of what not to reuse.
 - **Serialising capture against deletion with a lock inside the `Engine`.**
   Rejected in §8, and it is worth recording because it was this ADR's first
   answer. It reads as sufficient — one process, one loop — and it is not: the
