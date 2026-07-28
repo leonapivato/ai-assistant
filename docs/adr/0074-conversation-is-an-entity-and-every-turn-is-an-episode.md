@@ -721,9 +721,28 @@ retention on the *content*. With both, a continuation re-activates a conversatio
 before it can be reclaimed, and a conversation is dropped only when nothing has
 happened in it for the whole horizon and nothing of it is left to read.
 
-The horizon is the same one the turns use (no second clock to disagree with the
-first), read from the same setting, and the reclaim is the same sweep §8's
-tombstone uses.
+The horizon is read from the same setting the turns use — no second clock to
+disagree with the first — and the reclaim is the same sweep §8's tombstone uses.
+
+**Across a change to that setting the two can diverge, and the conversation record
+follows the setting in force rather than a deadline of its own.** An episode
+carries the `expires_at` stamped when it was captured; a conversation is judged
+against the horizon at the moment reclaim runs. So a store moved from a 7-day
+horizon to a 30-day one keeps an emptied conversation's index until day 30 though
+its episodes left on day 7 — and moved the other way, drops it sooner than they
+did. This is accepted, not overlooked:
+
+- **What lingers is metadata, not content**: ordinals, timestamps and ids. The
+  episodes are already gone from every read, and the user-facing export drops a
+  turn whose episode does not resolve (§9), so the divergence is invisible in the
+  artifact the deletion right hands over.
+- **Persisting a per-conversation deadline would buy little and cost a field** that
+  every implementation must maintain, to align two retention clocks over a
+  content-free index — where the alternative, "the current setting governs", is
+  the behaviour a user changing the setting would predict.
+
+Both directions belong in the tests (§9), because an implementation that stamped a
+deadline at creation would pass a fixed-setting suite and diverge here.
 
 **`episode_retention = None` disables conversation reclaim entirely.** "Keep the
 episodes forever" is not a setting under which conversations should quietly
@@ -1303,6 +1322,9 @@ different questions:
      turn whose episode it does not also carry (§9), which is the property the
      filter-against-the-same-artifact rule buys and which a test filtering against
      a live store would not catch.
+   - **A finite-to-finite change of `episode_retention`, in both directions** —
+     an emptied conversation is reclaimed against the horizon in force when
+     reclaim runs, not one stamped at creation (§7).
    - **`episode_retention = None` with an empty conversation** — reclaim does not
      drop it, however long it has been idle (§7). The pair with the stamping case
      is what stops an implementation reading `None` as "no horizon, so everything
