@@ -606,11 +606,24 @@ the conversation-scoped form.
 ### 7. Retention: episodes are substrate with their own horizon
 
 **Captured episodes carry a finite `expires_at` by default**, stamped at capture
-from the injected clock and a retention window read from `core.config.Settings`
-(the `confirmation_ttl: timedelta | None` field is the shape: a duration, with
-`None` available to mean "no deadline"). Expiry is enforced at read time and
-reclaimed by `purge_expired` (ADR-0007 §2), so the guarantee does not wait on a
-scheduler that does not exist yet (leg 5).
+from the injected clock and a **dedicated** retention window on
+`core.config.Settings` — `episode_retention: timedelta | None`, **defaulting to a
+finite duration**, with `None` meaning "keep forever" and available only by the
+user setting it. Expiry is enforced at read time and reclaimed by `purge_expired`
+(ADR-0007 §2), so the guarantee does not wait on a scheduler that does not exist
+yet (leg 5).
+
+**Its own field, with its own default, and the distinction is load-bearing.**
+`confirmation_ttl: timedelta | None` is the right *shape* to copy and the wrong
+default to inherit: it defaults to `None`, which for that setting means a parked
+confirmation never goes stale and for this one would mean **unbounded episodic
+retention — precisely what this section rejects**. An implementation that reused
+that field, or copied its default along with its type, would ship the opposite of
+this decision while looking like it followed the ADR. So the setting is named
+here, its default is required to be finite, and the implementing lane owes tests
+for **both** an unset configuration (finite horizon stamped) and an explicit
+`None` (no `expires_at`, the user's deliberate choice). The exact default duration
+is the lane's; only its finiteness is ratified.
 
 This is the reconciliation VISION §Principle 2 demands, and it is a real one:
 
@@ -727,14 +740,18 @@ across processes. Putting the obligation on the seam rather than on the caller i
 the same reasoning ADR-0064 uses for the ordinal — an invariant a caller is
 *asked* to maintain is an invariant that holds until a second caller exists.
 
-**Compensation stays, as the fast path.** An append refused because the
-conversation is stamped obliges capture to delete the episode it just wrote, so
-the common case leaves nothing for the sweep to find. It is narrow deliberately: an
-append refused for any *other* reason leaves the episode in place, because an
-orphan episode is a true record of an exchange and deleting it would destroy data
-on a transient store error. And because a captured episode's id is determined by
-its own conversation and ordinal (§3), a compensation can never destroy a record
-capture did not write.
+**A refused append needs no compensation, because nothing was written.** The
+intent comes first and the store mints the episode id inside it (§3), so a capture
+whose append is refused — the conversation is stamped, or gone — never received an
+id and never reached the memory store. There is nothing to clean up, and the turn
+is simply not recorded. This is the ordering paying for itself: under the reverse
+order the same refusal would strand an episode that had already been written.
+
+**Compensation therefore has exactly one trigger**, the one the ordering cannot
+rule out: an append that *succeeded* before the conversation was stamped, whose
+episode write lands after. That is the case below, and because a captured
+episode's id is determined by its own conversation and ordinal (§3), the delete it
+performs can never destroy a record capture did not write.
 
 **Capture verifies after its write, and that — not the clock — is the fence.** An
 append that succeeded before the stamp is not evidence that the conversation still
@@ -754,8 +771,9 @@ only a per-attempt budget (ADR-0029 §4, ADR-0042 §3), so nothing in this syste
 licenses "long enough". What the grace does is keep the tombstone — and with it
 the only record naming a pending intent — alive past the deletion, so a capture
 that commits and *then* dies is still swept when the reclaim next runs. The
-tombstone's lifetime is a configured `timedelta` (the `confirmation_ttl` shape),
-and the reclaim re-runs against it.
+tombstone's lifetime is its own configured `timedelta`, finite by default for the
+reason §7 gives about inheriting `confirmation_ttl`'s `None`, and the reclaim
+re-runs against it.
 
 **What is left is one window, and it is accepted rather than claimed away.** It is
 now the conjunction of two failures rather than a duration: a capture must commit
@@ -849,6 +867,16 @@ because they are where two implementations silently differ:
 2. **Every read is bounded by default and totally ordered** (ADR-0021 §4, ADR-0073
    §2): turns by ordinal ascending, conversations by last activity descending with
    the id as tie-break (§2).
+
+   **The defaults are named, not left to the implementation.** A "bounded default"
+   with no figure is two conforming stores handing the same continuation different
+   history, and a conformance suite with nothing to assert. Recent conversations
+   default to **50**, the figure `AuditTrail.recent` set and ADR-0073 §2 reused, for
+   its argument. The turn tail's default is the replay window §5 configures rather
+   than a constant, because that bound sizes a prompt rather than a listing — but it
+   is finite, it is the same value every caller gets by saying nothing, and the
+   suite asserts it. Out-of-range arguments are refused as ADR-0073 §2 refuses
+   them; this ADR adds no new posture, it inherits one.
 3. **A conversation's mutations are mutually exclusive at the store, all of them**
    (§8): an append, an activity mark (§2), a deletion stamp and a **reclaim** of one
    conversation never interleave. An append to a stamped conversation is refused,
@@ -933,18 +961,23 @@ different questions:
      store and belongs in the conformance suite (§1): a repeating injected factory
      must not overwrite a conversation, must not hand back someone else's, and must
      raise `ConversationStoreError` when the retry budget is exhausted.
-   - **An append refused because the conversation is gone** — the compensating
-     delete runs, and it deletes the episode capture just wrote and nothing else.
+   - **An append refused because the conversation is gone** — the turn is not
+     recorded, **no episode is written**, and nothing is compensated (§8). The
+     assertion worth making is the negative one: no record reached the memory
+     store, which is what the intent-first ordering buys.
    - **A deletion that lands while the episode write is in flight**, so the append
      succeeded and the conversation is stamped by the time the write commits — the
      post-write verification destroys the episode (§8). This is the case elapsed
-     time cannot decide, so a test that only exercises the refused-append edge
-     leaves the fence untested.
+     time cannot decide, and it is the *only* trigger compensation has.
    - **A compensating delete that itself fails** — the turn still returns its
      answer, and the failure is reported rather than swallowed (§9.6).
    - **An interruption between the two writes**, in each order, asserting the
      residue each case is ratified to leave (§8): an orphan episode after a
      capture, a re-runnable deletion after a deletion.
+   - **An unset `episode_retention` and an explicit `None`** (§7) — the first
+     stamps a finite `expires_at`, the second stamps none. The pair is what catches
+     an implementation that inherited `confirmation_ttl`'s `None` default and so
+     ships unbounded retention while passing every other clause.
    - **A reclaim racing a continuation** — a conversation eligible for reclaim
      (no live turns, idle past the horizon) that is continued at the same moment:
      asserting the boundary §9.3 ratifies in both directions, since a reclaim whose
