@@ -373,6 +373,19 @@ already proved unique (§9's ordinal invariant, §1's insert-if-absent identity)
 so **two captured episodes cannot collide, by construction rather than by
 probability**.
 
+**The store allocates the ordinal and derives the id, in the append, and hands
+back the turn.** Capture does not compute the id and does not predict the ordinal:
+the ordinal is the store's to allocate (§9's invariant), so anything derived from
+it is the store's to derive. A caller that guessed the next ordinal in order to
+build the id would be re-deriving the invariant outside the seam that owns it, and
+two engines guessing at once would build the *same* id for what the store then
+makes two distinct turns — the collision the derivation exists to prevent,
+reintroduced by the caller. So `ConversationStore.append` does the whole thing in
+one operation — allocate, derive, write the intent — and returns the
+`ConversationTurn` carrying the id capture must then write. The encoding is
+therefore the store's, defined once behind the contract rather than agreed between
+callers.
+
 **Uniqueness among turns is not uniqueness in the store, so the encoding is a
 reserved namespace.** `MemoryRecord.id` is an unconstrained string and the store
 is shared: a sensor (leg 6) or a future capture source (#441) writes episodes of
@@ -620,9 +633,8 @@ ratified rather than left to the implementer — and it is ratified as a protoco
 rather than as an ordering, because an ordering alone cannot make it hold.
 
 **The index entry is written first, and it names the episode before the episode
-exists.** Capture appends the turn — ordinal, `occurred_at`, and the id it has
-minted for the episode — and *then* writes the episode (§3). This is an intent
-log, and it buys the one property the deletion needs: **no episode can exist for a
+exists.** Capture appends the turn and *then* writes the episode (§3). This is an
+intent log, and it buys the one property the deletion needs: **no episode can exist for a
 conversation without its id having been recorded in that conversation's index
 first.** So an enumeration of the index names every episode that conversation will
 ever have, including one whose write has not landed yet. The cost is that a crash
@@ -753,7 +765,8 @@ count and span rather than every turn.
   (ADR-0023, ADR-0030).
 - **`core/protocols.py`** gains **one** Protocol, `ConversationStore`, owing:
   start a conversation, inserting only if the minted id is absent and retrying on
-  collision (§1); read one by id; append a turn, allocating its ordinal;
+  collision (§1); read one by id; append a turn — allocating its ordinal, deriving
+  its episode id, and returning the `ConversationTurn` that names both (§3);
   read a conversation's turn tail, bounded and ordered; read recent conversations,
   bounded and ordered by `last_active_at` (§2); mark a conversation active (§2);
   resolve an episode id back to the
@@ -859,6 +872,10 @@ different questions:
    following is a case where the guarantee is either kept or silently lost, and
    none of them is reachable from a suite that only writes successfully:
 
+   - **Two appends to one conversation deriving distinct episode ids**, asserted
+     on the returned `ConversationTurn`s — the clause that catches an
+     implementation deriving the id from anything it does not allocate under the
+     same exclusion (§3).
    - **An episode id that is already stored** — capture fails loudly and
      overwrites nothing (§3), including when the occupant is a *foreign* record
      that took a reserved-namespace id, which is the case the reservation rule
