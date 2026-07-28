@@ -197,18 +197,32 @@ read, "continue yesterday's conversation" would require the *client* to have kep
 the id, which is precisely the state VISION §Principle 8 forbids an interface to
 own.
 
-**No implicit end, and no explicit close in this ADR.** A conversation does not
-expire into a terminal state, and no idle timeout closes one. An idleness rule is a
-presentation judgement — "is this the same conversation?" — invented ahead of any
-consumer, and a wrong one is not cleanly recoverable: it splits, in the record,
-something the user experienced as one thread. `last_turn_at` is a field, so any
-consumer that wants an idleness reading takes its own without the hub imposing one.
-An explicit close is **deferred with its consumer** (§11), and it is additive: a
-status field on a record that has none forecloses nothing.
+**No implicit end, and no explicit close in this ADR.** No idle timeout closes a
+conversation. An idleness rule is a presentation judgement — "is this the same
+conversation?" — invented ahead of any consumer, and a wrong one is not cleanly
+recoverable: it splits, in the record, something the user experienced as one
+thread. `last_turn_at` is a field, so any consumer that wants an idleness reading
+takes its own without the hub imposing one. An explicit close is **deferred with
+its consumer** (§11), and it is additive: a status field on a record that has none
+forecloses nothing.
 
-**Deletion is the only terminal state** (§8). That is deliberate: the one way a
-conversation ends is the user ending it, which is ADR-0004 §6's right rather than a
-lifecycle this system invented.
+**A conversation ends in exactly two ways, and neither is a judgement about
+whether it is "over": the user deletes it (§8), or retention expires it (§7).**
+The first is ADR-0004 §6's right. The second is data minimisation reaching the
+whole record rather than a lifecycle rule — the same horizon that governs the
+turns, applied to what indexes them — and it is worth separating from the first
+because they behave differently on the way there:
+
+- **While the record stands, an emptied conversation is still appendable.** Turns
+  expire before the record does (§7), so a conversation whose turns are gone can
+  still be continued by id; it simply continues with no history, exactly as a
+  turn deleted from the middle leaves a gap (§5). Expiring the *content* does not
+  retire the *identity*.
+- **Once the record itself is reclaimed, its id is unknown**, and a continuation
+  naming it is refused as §1 refuses any unknown id — loudly, rather than by
+  silently starting a fresh conversation under a new one. That is the one way a
+  valid id stops working through the passage of time, and it is stated here rather
+  than discovered by a client that held one too long.
 
 ### 3. Every turn is an episode: capture writes one `EpisodicMemory` per outcome
 
@@ -520,9 +534,10 @@ ever-growing Tier-1 log of everything the user has ever typed, with no cap decis
 behind it (ADR-0007 §5 deferred size caps), and the roadmap names the episodic
 stream the most sensitive data the system holds (leg 3). Keeping forever is a
 decision a user can make; it is not one the system should make on their behalf by
-default. The accepted cost is stated plainly: **a conversation older than the
-horizon cannot be continued in full**, and its turns are gone from retrieval and
-export.
+default. The accepted cost is stated plainly and in two stages: **a conversation
+whose turns have passed the horizon continues with no history**, its turns gone
+from retrieval and export; and once the record itself is reclaimed, its id stops
+resolving (§2).
 
 **A belief may outlive its evidence, and this ADR does not close that.** ADR-0072
 §3 already named it — "a retention deadline can end that" — and filed it. Capture
@@ -531,10 +546,19 @@ the answer: leg 3 may not populate the derived band without deciding what a beli
 whose citations have expired renders, which is the same lane ADR-0073 §4 already
 gates on. The question is not made easier by having capture guess at it now.
 
-**The conversation record's retention follows its turns.** A conversation whose
-turns have all expired or been deleted holds nothing but a timestamp, and is
-reclaimable by the same purge (§9's obligation). No separate deadline is put on the
-conversation record, because two clocks over one thing is two clocks to disagree.
+**The conversation record outlives its turns, and is reclaimed on the same
+horizon.** A conversation is reclaimable when it has **no live turns *and* its own
+last activity is past the horizon** — both conditions, not the first alone. The
+second is what keeps expiry from becoming the implicit end §2 refuses: with only
+the first, a conversation whose single turn expired would be dropped while its
+owner still held a working id, and the id would stop resolving as a side effect of
+retention on the *content*. With both, a continuation re-activates a conversation
+before it can be reclaimed, and a conversation is dropped only when nothing has
+happened in it for the whole horizon and nothing of it is left to read.
+
+The horizon is the same one the turns use (no second clock to disagree with the
+first), read from the same setting, and the reclaim is the same sweep §8's
+tombstone uses.
 
 ### 8. Deletion: unconditional, conversation-scoped, and ordered
 
@@ -688,8 +712,8 @@ count and span rather than every turn.
   bounded and ordered by last activity (§2); resolve an episode id back to the
   turn that cites it (§10 declines duplicating that relation onto the record, so
   the store owes both directions); stamp a conversation deleted (§8); export; and
-  reclaim — the sweep that finishes a stamped deletion and drops conversations left
-  empty by expiry (§7, §8).
+  reclaim — the sweep that finishes a stamped deletion and drops a conversation
+  that has no live turns *and* has been idle past the horizon (§7, §8).
 - **`core/errors.py`** gains a `ConversationStoreError` in the `AssistantError`
   hierarchy, because every seam raises from it (`CONTRIBUTING.md`) and no existing
   class fits — a conversation is not memory, planning, context, or audit.
@@ -935,19 +959,25 @@ different questions:
   observer. That is stated rather than discovered, and it is why §4 answers
   ADR-0072 §3's two obligations explicitly instead of leaving the next lane to
   infer that a transcript is a belief.
-- **The propose/dispose gate keeps its scope.** Capture writing directly is a
-  reading of ADR-0005 §3, not an exception to it: the gate governs what the *model*
-  proposes about the user, and recording that an exchange happened proposes nothing.
-  A later producer that wants to write beliefs still goes through the gate, and
-  §4's constraint on leg 3's policy rule keeps the two from colliding.
+- **The propose/dispose gate keeps its scope — and the reading is contested.**
+  Capture writing directly is offered as a reading of ADR-0005 §3, not an exception
+  to it: the gate governs what the *model* proposes about the user, and recording
+  that an exchange happened proposes nothing. Both Codex personas read ADR-0005's
+  "every write goes through a reviewable proposal → policy path" as reaching
+  capture and called for a partial supersession instead. That remedy edits
+  ADR-0005's status line, which this lane is fenced out of, so the disagreement is
+  **filed as #442** with the evidence on both sides — including that the shipped
+  ingestor would fold two topically similar turns into one record (§3). It is
+  decided before the implementation lane ships, by whoever owns ADR governance.
 - **Two shipped surfaces are deliberately narrowed** (§6) on the day capture lands,
   and the narrowing is invisible today because nothing writes an episode. Had it
   not been decided here, the first capture lane would have changed what every turn
   retrieves and what `assistant beliefs` prints, as a side effect nobody ratified.
 - **Selective memory survives contact with a transcript** — because episodes are
   given a shorter life than the beliefs distilled from them, not because capture is
-  made stingy. The cost is real and named: a conversation older than the retention
-  horizon cannot be continued in full.
+  made stingy. The cost is real and named, in two stages: a conversation whose
+  turns have passed the horizon continues with no history, and one that has been
+  idle for the whole horizon is reclaimed and its id stops resolving (§2, §7).
 - **A resumed conversation can show gaps**, from a deleted turn or an expired one
   (§5, §7, §8). That is the deletion right working, and it is the one behaviour
   a "restore my history" instinct would break.
