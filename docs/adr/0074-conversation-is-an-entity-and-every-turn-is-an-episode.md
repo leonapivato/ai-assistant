@@ -725,6 +725,38 @@ The horizon is the same one the turns use (no second clock to disagree with the
 first), read from the same setting, and the reclaim is the same sweep §8's
 tombstone uses.
 
+**`episode_retention = None` disables conversation reclaim entirely.** "Keep the
+episodes forever" is not a setting under which conversations should quietly
+disappear, and with no duration there is no horizon to compare `last_active_at`
+against — so the comparison is not guessed at, it is switched off. Under `None`,
+deletion (§8) is the only thing that removes a conversation, which is what a user
+who asked to keep everything meant. Left unstated, one implementation would keep an
+emptied conversation forever and another would reclaim it at once, and a retained
+id would behave differently on each.
+
+**The activity mark is a fact, not a lease, and a turn slower than the whole
+horizon can outlive its own conversation.** The mark is written when the turn
+begins (§2); reclaim reads it. If a conversation has been idle for the entire
+horizon and the continuation that revives it then takes *longer than that horizon
+to produce an answer*, reclaim can fire mid-turn: the record is dropped and the
+capture append behind it is refused, so the user gets their answer and no turn is
+recorded — reported, never silent (§9). This is accepted rather than closed:
+
+- **Closing it means a lease** — durable in-flight liveness with renewal and
+  crash-safe expiry — which is exactly the machinery this ADR declines everywhere
+  else it has no consumer, and it would have to survive the process death that
+  makes a stale lease indistinguishable from a live one.
+- **The conjunction is remote at any sane horizon**: the setting is a retention
+  window measured in days or weeks, and the case needs one turn to outlast it.
+  A deployment that sets a horizon of minutes has made a different trade, and this
+  is one of its consequences.
+- **The failure mode is the mild one**: an answer delivered and not recorded, which
+  §3 already ratifies as capture's degraded outcome and which the user is told
+  about.
+
+Revisit with leg 5, where a resident process and its scheduler make in-flight state
+representable (§11).
+
 ### 8. Deletion: unconditional, conversation-scoped, and ordered
 
 ADR-0004 §6's right applies unchanged, and ADR-0073 §5's ruling extends to
@@ -1175,6 +1207,15 @@ different questions:
      conversation is created (§3). Also the unresolvable case — a park whose
      conversation was deleted — asserting that nothing is captured rather than a
      conversation being invented.
+   - **`episode_retention = None` with an empty conversation** — reclaim does not
+     drop it, however long it has been idle (§7). The pair with the stamping case
+     is what stops an implementation reading `None` as "no horizon, so everything
+     is past it".
+   - **A turn held past the horizon while reclaim runs** — asserting the ratified
+     outcome rather than a guarantee the design does not give (§7): the answer is
+     returned, the turn is not recorded, and the degradation is reported. Pinning
+     it stops a later reader mistaking the window for a bug and a later
+     implementer from inventing a lease to close it.
    - **An unset `conversation_tombstone_grace`, and a zero or negative one**
      (§8) — the first stamps a positive finite grace, the latter two are refused at
      construction. Both are the values that break the deletion protocol in opposite
@@ -1270,6 +1311,10 @@ different questions:
   expected-tail argument on append, and the policy for refusing one (reject,
   re-order, or branch). That is ADR-0046 §5's deferred compare-and-swap (#248) in
   this ADR's clothes, and it becomes a real question with the second spoke.
+- **A durable in-flight lease** that would keep a slow turn's conversation alive
+  through a reclaim (§7). Deferred to leg 5 for the reason its siblings are: it
+  needs renewal and crash-safe expiry, and a resident process is what makes
+  in-flight state representable at all.
 - **A transactional posture across the two local stores**, which is what would
   close §8's last window — an episode landing after its conversation's tombstone
   was reclaimed. Deferred to leg 5, whose hardening tail is named as "the stores'
