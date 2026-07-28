@@ -557,24 +557,26 @@ the next lane:
    so the case fails an enumerator returning stored copies unchanged. Asserting
    `None` over default-constructed records passes without touching the obligation.
 
-   **The input-observation clause** (ADR-0065) binds the two
-   `Sequence` filters, and the lane discharges it the way ADR-0065 §3 allows
-   rather than by proving it with a suspension: the filters are materialised
-   before the first `await` and only the materialised copy is read — which is
-   exactly what all three implementations already do with `search`'s `kinds`
-   (`wanted = {...} if kinds is not None else None`).
+   **The input-observation clause** (ADR-0065) binds the two `Sequence` filters
+   — it binds every Protocol here and this ADR cannot exempt a method from it —
+   and the lane discharges it by materialising both filters **before the first
+   `await`** and reading only the copy, which is ADR-0065 §3's second option.
+   That is stated as an obligation on the implementation rather than as a
+   description of existing practice, because the existing practice does not
+   supply it: `SqliteMemoryStore.search` awaits its embedder and its lock and only
+   *then* materialises `kinds` inside `_search_sync`, so the sibling method this
+   read is modelled on reads its filter argument after two suspension points.
 
-   **It is not proved by the suite's existing hook, and this ADR does not pretend
-   it is.** `store_suspended_at_its_first_await` suspends the next `add` or
-   `write_atomic` and nothing else; proving a *read's* observation by suspension
-   would mean widening that hook and implementing the widening in the fake and
-   both stores. That is not required here, for a reason that is about
-   proportionality rather than convenience: the clause was written for the #286
-   torn *write*, where two observations commit a mix of two versions, and an
-   incoherent read persists nothing and returns a result the caller discards. It
-   is also not this method's gap alone — `search` takes the same shape of argument
-   and carries the same unproven obligation today — so closing it belongs to a
-   change that closes both, filed rather than bolted onto the new method.
+   **The suite will not catch a regression, and this ADR says so rather than
+   implying coverage.** `store_suspended_at_its_first_await` suspends the next
+   `add` or `write_atomic` and nothing else, so proving a *read's* observation by
+   suspension means widening that hook and implementing the widening in the fake
+   and both stores. Not required here, on proportionality: the clause was written
+   for the #286 torn *write*, where two observations commit a mix of two versions,
+   whereas an incoherent read persists nothing and returns a result the caller
+   discards. And the gap is not this method's — `search` has it today, in shipped
+   code — so it is closed for both reads at once or not at all. Filed as #436;
+   what this ADR owes the next lane is the pattern in writing, which it now has.
 
    The full-page rule needs **two** cases, not one, and the second is the one a
    suite naturally omits: a page full under band/kind filtering, *and* a page full
