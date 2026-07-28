@@ -825,6 +825,20 @@ three are why this ADR accepts it:
   `export`, and `forget` destroys it. What is lost is the automatic sweep, not the
   user's reach.
 
+**What this does and does not claim about the deletion right.** ADR-0004 §6 grants
+the user the right to delete their data, and ADR-0073 §5 rules that a `forget` of a
+record destroys it — both hold here, unconditionally and unchanged: no deletion is
+ever refused, and no destroyed record survives. What no ADR in this repo has ever
+guaranteed, and what this one does not either, is that a deletion racing a
+concurrent write is **atomic across two stores under a process death**. That is a
+failure-mode window, not a limit on the right, and calling it either would be the
+error. The honest way to hold the two together is the one §8 takes: bound the
+window to a conjunction of failures, keep the residue reachable through the
+surfaces the user already has, and name the mechanism that closes it (leg 5's
+transactional posture, §11) rather than deferring the conversation-scoped deletion
+that gives the right its usable form — which would leave a user wanting a
+conversation gone with no way to ask for it but one turn at a time.
+
 This is the disposition ADR-0073 §5 already took for its own two-call window —
 name it, bound it, say what would close it, and decline to ratify the primitive
 that would. **What closes it is named**: a transactional posture across the local
@@ -999,6 +1013,13 @@ different questions:
      succeeded and the conversation is stamped by the time the write commits — the
      post-write verification destroys the episode (§8). This is the case elapsed
      time cannot decide, and it is the *only* trigger compensation has.
+   - **A plain `MemoryStoreError` from `write_atomic`** — not a conflict: an
+     embedder or database fault after a successful append. The turn keeps its
+     index entry, **no** episode exists, the already-produced answer is still
+     returned, and the degradation is reported (§3). This is the case that defines
+     the best-effort half of the guarantee, and an implementation that propagated
+     the error — turning a delivered answer into a failed turn — or that rolled the
+     index entry back would pass every other failure case on this list.
    - **A compensating delete that itself fails** — the turn still returns its
      answer, and the failure is reported rather than swallowed (§9.6).
    - **An interruption between the two writes**, in each order, asserting the
