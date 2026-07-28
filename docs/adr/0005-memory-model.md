@@ -8,8 +8,10 @@
   it is. Everything else here stands: §1's typed kinds, §2's provenance model,
   §3's `MemoryPolicy` seam and its five outcomes, §4's contract surface, and the
   write path for every other producer — including leg 3's observer, which proposes
-  through the gate as this ADR requires. Appended note per ADR-0070 §1; no text
-  below it is rewritten.
+  through the gate as this ADR requires. ADR-0075 lands **in the same change as
+  this note**, so this Status line never names an ADR that does not exist — the
+  hazard ADR-0070 §1 guards against — and if that change does not land, neither
+  does this. Appended note per ADR-0070 §1; no text below it is rewritten.
 
 ## Context
 

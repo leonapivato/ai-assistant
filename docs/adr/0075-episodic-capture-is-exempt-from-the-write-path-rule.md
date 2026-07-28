@@ -9,7 +9,14 @@
   profile-versus-model reading, the `MemoryPolicy` seam, and the write path for
   **every other** write — stays accepted and is untouched. ADR-0005's Status line
   records the supersession per ADR-0070 §4; **no ratified body text of ADR-0005 is
-  rewritten** (ADR-0070 §1).
+  rewritten** (ADR-0070 §1). **Both files land in one change**, so ADR-0005's
+  Status never points at an ADR that is absent — ADR-0070 §1's condition on
+  recording a supersession is that the superseding ADR *exists*, and the failure it
+  forbids ("with no such ADR") is unreachable when the pair is atomic. The
+  `Proposed` → `Accepted` flip is the ratifying edit at merge (ADR-0015 §5;
+  `CONTRIBUTING.md`, "Trivial ADR edits"), and ADR-0070 §1 keeps the repair path
+  open besides: a marked supersession that never landed is restored by correcting
+  the Status line, which changes no decision.
 - **Changes no contract.** No Protocol, no `core` type, no code. It removes an
   obligation from one producer rather than adding surface, so there is no triad
   and nothing to implement against it beyond what ADR-0074 already ruled.
