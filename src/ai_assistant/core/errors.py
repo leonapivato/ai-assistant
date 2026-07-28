@@ -140,6 +140,21 @@ class MemoryStoreConflictError(MemoryStoreError):
     """
 
 
+class ConversationStoreError(AssistantError):
+    """Reading from or writing to the conversation index failed (ADR-0074 §9).
+
+    Its own class in the :class:`AssistantError` hierarchy because a conversation
+    is none of the things the existing errors name: not memory, not planning, not
+    context, not audit. It covers a store fault, an id the store does not know —
+    refused rather than silently created (ADR-0074 §1) — an append to a
+    conversation stamped deleted (§8), a duplicate parked binding (§9.1), and a
+    ``start`` whose id factory kept colliding until the retry budget ran out.
+
+    A malformed *argument* is not this error: a paging value out of range is a
+    ``ValueError``, inherited unchanged from ADR-0073 §2 rather than restated.
+    """
+
+
 class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 
