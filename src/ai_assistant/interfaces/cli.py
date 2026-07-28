@@ -9,6 +9,12 @@ tool, and touches no subsystem directly — all of that is the engine's, reached
 only through the façade (ADR-0042 §6). Registered as the ``assistant`` console
 script in ``pyproject.toml``.
 
+``beliefs`` and ``forget`` are the belief-inspection surface (ADR-0073 §7): they
+render what the engine already computed and destroy what the user names. The
+*band* on each row arrives on the DTO — :meth:`~ai_assistant.orchestration.Belief`
+is projected in the engine so ADR-0072 §1's classification never lands here — and
+this module reads no clock for them and re-filters nothing.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -17,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 import typer
 from rich.console import Console
@@ -28,13 +34,19 @@ from ai_assistant.app import build_engine
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.logging import configure_logging
-from ai_assistant.core.types import FeedbackEvent, FeedbackKind, MemoryKind
+from ai_assistant.core.types import BeliefBand, FeedbackEvent, FeedbackKind, MemoryKind
 from ai_assistant.orchestration import Disposition, LearnDecision
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.orchestration import Confirmation, Engine, LearnOutcome, TurnOutcome
+    from ai_assistant.orchestration import (
+        Belief,
+        Confirmation,
+        Engine,
+        LearnOutcome,
+        TurnOutcome,
+    )
 
 app = typer.Typer(
     name="assistant",
@@ -75,6 +87,13 @@ _LEARN_MESSAGES = {
 }
 
 
+#: One past the largest value ``--limit``/``--offset`` may take, mirroring the range
+#: ``MemoryStore.list_beliefs`` refuses outside of (ADR-0073 §2). Checked here at
+#: parse time because that refusal is a ``ValueError``, not an ``AssistantError``,
+#: so it would escape the command's error boundary as a traceback (see
+#: :func:`_page_argument`).
+_PAGE_BOUND = 2**63
+
 #: The ``learn`` command's enum-typed options, defined once at module scope. Typer
 #: options for an ``Enum`` parameter are hoisted here rather than called inline in
 #: the signature, the module-level-singleton form ruff's B008 requires (a plain
@@ -89,6 +108,21 @@ _LEARN_MEMORY_KIND_OPTION = typer.Option(
         "Which typed memory to establish. Defaults from --kind "
         "(correction -> semantic, preference -> preference); set it to override."
     ),
+)
+
+#: The ``beliefs`` command's enum-typed filters, hoisted to module scope for the
+#: same reason the ``learn`` ones are. Each may be repeated; the values within one
+#: flag are a union and the two flags compose by conjunction, which is the façade's
+#: own rule relayed unchanged (ADR-0073 §1).
+_BELIEFS_BAND_OPTION = typer.Option(
+    None,
+    "--band",
+    help="Only show beliefs in this band (repeatable). Default: every band.",
+)
+_BELIEFS_KIND_OPTION = typer.Option(
+    None,
+    "--kind",
+    help="Only show beliefs of this memory kind (repeatable). Default: every kind.",
 )
 
 
@@ -166,6 +200,25 @@ def _present_content(value: str) -> str:
     return value
 
 
+def _page_argument(value: int) -> int:
+    """Reject a ``--limit``/``--offset`` the store would refuse (ADR-0073 §2).
+
+    ``MemoryStore.list_beliefs`` raises ``ValueError`` for a paging argument outside
+    ``[0, 2**63)`` — refused rather than clamped, because a negative one reaches
+    SQLite as ``LIMIT -1`` (no limit at all) and an over-wide one raises
+    ``OverflowError`` out of the driver. A ``ValueError`` is **not** an
+    :class:`AssistantError`, so it would escape :func:`_list_beliefs`'s error
+    boundary as an uncaught traceback with no controlled exit code — the failure
+    ADR-0042 §7 forbids. Catching it during Typer's parameter parsing makes it a
+    normal usage error (exit code 2) before any engine is built, exactly as
+    :func:`_present_content` does for blank ``learn`` content.
+    """
+    if not 0 <= value < _PAGE_BOUND:
+        msg = f"must be between 0 and {_PAGE_BOUND - 1}"
+        raise typer.BadParameter(msg)
+    return value
+
+
 @app.command()
 def ask(
     utterance: str = typer.Argument(..., help="What you want the assistant to do."),
@@ -235,6 +288,65 @@ def learn(
     code = asyncio.run(
         _learn_feedback(content, kind=kind, memory_kind=resolved_memory_kind, subject=about)
     )
+    raise typer.Exit(code)
+
+
+@app.command()
+def beliefs(
+    band: list[BeliefBand] | None = _BELIEFS_BAND_OPTION,
+    kind: list[MemoryKind] | None = _BELIEFS_KIND_OPTION,
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        callback=_page_argument,
+        help="How many beliefs to show at most.",
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        callback=_page_argument,
+        help="How many beliefs to skip before the page begins.",
+    ),
+) -> None:
+    """List what the assistant currently believes about you, newest revision first.
+
+    Each belief is shown with the band it is held in, how strongly, why it is held,
+    and the id ``assistant forget`` takes. Only *live* beliefs are listed: one the
+    assistant has since revised is history, not a belief it holds, and it is
+    reachable through a data export rather than here.
+
+    There is no total count — ask for the next page to find out whether there is
+    more.
+    """
+    # An absent repeatable flag arrives as an empty list, which the façade would read
+    # as "select nothing" — the deliberate meaning of an *explicitly* empty filter
+    # (ADR-0073 §1). A CLI has no way to say that and no reason to, so absent and
+    # empty both become None, "every band"/"every kind".
+    code = asyncio.run(
+        _list_beliefs(bands=band or None, kinds=kind or None, limit=limit, offset=offset)
+    )
+    raise typer.Exit(code)
+
+
+@app.command()
+def forget(
+    belief_id: str = typer.Argument(..., help="The id of the belief to destroy."),
+    *,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Skip the prompt. The belief is still shown first."
+    ),
+) -> None:
+    """Destroy one belief, after showing you what it is.
+
+    The belief is rendered — with what forgetting it costs, which differs by band —
+    and destroyed only once you agree. ``--yes`` skips the question, not the
+    rendering.
+
+    Forgetting **destroys**: nothing is kept, not even in an export. To fix a belief
+    rather than lose it, use ``assistant learn --kind correction``, which retires the
+    old belief and keeps it on the record.
+    """
+    code = asyncio.run(_forget_belief(belief_id, assume_yes=yes))
     raise typer.Exit(code)
 
 
@@ -334,6 +446,123 @@ async def _learn_feedback(
     finally:
         shutdown_code = await _close(engine)
     return max(code, shutdown_code)
+
+
+async def _list_beliefs(
+    *,
+    bands: list[BeliefBand] | None,
+    kinds: list[MemoryKind] | None,
+    limit: int,
+    offset: int,
+) -> int:
+    """Load settings, build the engine, list the beliefs, and close it (ADR-0073 §7).
+
+    The inspection counterpart to :func:`_ask`. One error boundary spans every stage
+    that can fail — loading settings, configuring logging, constructing the engine,
+    the read, and shutdown — so an :class:`AssistantError` is rendered and mapped to
+    a non-zero exit code rather than escaping (ADR-0042 §7). The paging arguments
+    were already checked against the store's accepted range at parse time
+    (:func:`_page_argument`), so the one failure that is not an ``AssistantError``
+    cannot reach here.
+    """
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        engine = build_engine(settings)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
+    """Load settings, build the engine, run the deletion ceremony, and close it.
+
+    The deletion counterpart to :func:`_ask`, with the same single error boundary
+    (ADR-0042 §7). ``--yes`` supplies the answer but not the rendering: the belief is
+    displayed either way, because a person cannot consent to destroying something
+    they were not shown and a non-interactive approval must not destroy what the user
+    never saw (ADR-0073 §5, ADR-0052 §4).
+    """
+    confirm: Callable[[Belief], bool] = (lambda _belief: True) if assume_yes else _confirm_forget
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        engine = build_engine(settings)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_forget(engine, belief_id, confirm=confirm)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _drive_beliefs(
+    engine: Engine,
+    *,
+    bands: list[BeliefBand] | None,
+    kinds: list[MemoryKind] | None,
+    limit: int,
+    offset: int,
+) -> int:
+    """Ask the façade for one page of beliefs and render it (ADR-0073 §7).
+
+    The adapter relays the filters and renders what comes back. It re-filters
+    nothing, re-orders nothing, reads no clock, and computes no band — the page's
+    membership and order are the store's contract and each row's band was projected
+    in the engine (ADR-0072 §7, ADR-0073 §7).
+    """
+    try:
+        page = await engine.beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_beliefs(page, limit=limit, offset=offset)
+    return _EXIT_OK
+
+
+async def _drive_forget(
+    engine: Engine, belief_id: str, *, confirm: Callable[[Belief], bool]
+) -> int:
+    """Show the belief, take the answer, and destroy it if the answer is yes.
+
+    Show-then-confirm, in that order (ADR-0073 §5): the render is taken as late as
+    it can be — immediately before the question — so the window in which a write can
+    land between what was shown and what is destroyed is the human's answering time
+    and nothing longer. That window is named rather than closed, and the consent
+    collected is consent to forget *the belief that id names*, which is what
+    :func:`_render_forget_prompt` says.
+
+    A refusal is a valid outcome and exits 0. An id naming no live belief, and a
+    delete that finds nothing left to destroy, are both reported and exit non-zero
+    (ADR-0073 §7).
+    """
+    try:
+        belief = await engine.belief(belief_id)
+        if belief is None:
+            _render_no_such_belief(belief_id)
+            return _EXIT_ERROR
+        _render_forget_prompt(belief)
+        if not confirm(belief):
+            console.print("[dim]Left alone. Nothing was forgotten.[/]")
+            return _EXIT_OK
+        destroyed = await engine.forget(belief.id)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not destroyed:
+        console.print("[yellow]Nothing to forget:[/] that belief was already gone.")
+        return _EXIT_ERROR
+    console.print("[green]Forgotten.[/] That belief is destroyed — it is in no export.")
+    return _EXIT_OK
 
 
 async def _drive_resume(
@@ -512,6 +741,182 @@ def _render_learn(outcome: LearnOutcome) -> None:
     )
     for summary in outcome.results:
         console.print(f"  - {_LEARN_MESSAGES[summary.decision]} [dim]({_safe(summary.reason)})[/]")
+
+
+def _when(instant: datetime) -> str:
+    """Render an instant the engine supplied, in UTC.
+
+    Pure formatting of a value that arrived on the DTO — no clock is read here, and
+    none may be (golden rule 3): every time this surface shows is one memory
+    recorded, never one this process observed.
+    """
+    return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _why(belief: Belief) -> str:
+    """Why this belief is held — band-dependent (ADR-0073 §4).
+
+    Total over :class:`~ai_assistant.core.types.BeliefBand` and mechanically so: the
+    wildcard does nothing but ``assert_never``, so a band added to ``core`` without a
+    line here fails the gate rather than rendering an empty reason. The same shape
+    ``band_of`` itself uses.
+
+    The answer is complete for one band and owed for two, and the wording keeps
+    ADR-0073 §4's two floors:
+
+    * **Derived** — the citations are reported as a *count* and named as not yet
+      showable. They are never rendered as evidence, and never silently dropped;
+      the ids are not even carried to this module
+      (:class:`~ai_assistant.orchestration.Belief` holds only the count), so no
+      renderer here can pass one off as the warrant. Resolving them into readable
+      evidence is due with the first producer of derived beliefs (#431).
+    * **Attested** — it is named as someone else's report, so it reads as neither
+      the user's word nor the assistant's inference, and the line says outright that
+      ``Last revised`` is the assistant's clock rather than the source's.
+    """
+    match belief.band:
+        case BeliefBand.ASSERTED:
+            return "you told me, and your own word is the whole of it."
+        case BeliefBand.DERIVED:
+            if belief.evidence_count == 0:
+                return "I worked it out, and no supporting evidence was recorded."
+            return (
+                f"I worked it out from {belief.evidence_count} piece(s) of evidence, which "
+                "I cannot show you yet."
+            )
+        case BeliefBand.ATTESTED:
+            return (
+                "a source you connected reported it — neither your word nor my inference. "
+                "Which source, and when it said so, are not recorded, so 'Last revised' "
+                "below is when I changed my mind and not when the source spoke."
+            )
+        case _:  # pragma: no cover - exhaustive
+            assert_never(belief.band)
+
+
+def _forget_warning(band: BeliefBand) -> str:
+    """What forgetting a belief in this band costs (ADR-0073 §5).
+
+    The ceremony is uniform in mechanism and asymmetric in message, because the
+    consequence is: an assertion is not re-derivable and losing one is unrecoverable
+    (ADR-0072 §1, ADR-0038 §2), while a derived or attested belief loses the belief
+    and not its origin. The obligation is to represent a deletion as neither more
+    final than it is nor less. Total over the bands, like :func:`_why`.
+    """
+    match band:
+        case BeliefBand.ASSERTED:
+            return "You told me this. Forgetting it is permanent — nothing can work it out again."
+        case BeliefBand.DERIVED:
+            return (
+                "I worked this out. Forgetting it destroys the belief but not what I "
+                "worked it out from, so I may reach it again."
+            )
+        case BeliefBand.ATTESTED:
+            return (
+                "A connected source reported this. Forgetting it destroys my copy but "
+                "not the source, so a later sync may bring it back."
+            )
+        case _:  # pragma: no cover - exhaustive
+            assert_never(band)
+
+
+def _render_belief(belief: Belief) -> None:
+    """Render one belief with everything ADR-0073 §4 requires it to convey.
+
+    The band leads the row and is never left to be implied by position; confidence,
+    kind, the canonical content, why it is held, when the assistant last revised it
+    and the id are all shown, as is the end of its validity window where one is set.
+    Every listed belief is live, so an *open* window carries no information and is
+    not rendered as though it did.
+
+    Engine-supplied text — the content, the id — is neutralised for this terminal
+    like any other (``_safe``, ADR-0042 §4). The band and kind are this system's own
+    closed vocabularies, not carried data.
+    """
+    console.print(
+        f"\n  [bold cyan]{belief.band.value}[/] · {belief.kind.value} · "
+        f"confidence {belief.confidence:.2f}"
+    )
+    console.print(f"  {_safe(belief.content)}")
+    console.print(f"  [dim]Why:[/] {_why(belief)}")
+    console.print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
+    if belief.valid_until is not None:
+        console.print(f"  [dim]Believed until:[/] {_when(belief.valid_until)}")
+    console.print(f"  [dim]id:[/] {_safe(belief.id)}")
+
+
+def _render_beliefs(page: tuple[Belief, ...], *, limit: int, offset: int) -> None:
+    """Render one page of beliefs (ADR-0073 §7).
+
+    **No total is shown**, and none is available to show: "is there more" is answered
+    by asking for the next page, so a full page says so and names the offset that
+    would fetch it, rather than implying a count nobody computed.
+    """
+    if not page:
+        console.print("[dim]No live belief matches.[/]")
+        return
+    console.print(f"[bold]{len(page)} belief(s)[/], most recently revised first.")
+    for belief in page:
+        _render_belief(belief)
+    if limit and len(page) == limit:
+        console.print(
+            f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
+        )
+
+
+def _render_forget_prompt(belief: Belief) -> None:
+    """Show what is about to be destroyed, and what destroying it costs (ADR-0073 §5).
+
+    Three things, in this order, because a person cannot consent to destroying
+    something they were not shown (ADR-0042 §4, ADR-0052 §4):
+
+    1. the belief itself, in full;
+    2. the band-appropriate warning — what is lost, and what is not;
+    3. what the confirmation actually covers. It is consent to forget **the belief
+       that id names**, not a guarantee that what is destroyed is byte-for-byte what
+       was just rendered: the show and the delete are two calls and the window
+       between them is named rather than closed (ADR-0073 §5). And it destroys rather
+       than retires, which is the contrast — kept versus destroyed — that a surface
+       offering both a correction and a deletion owes (ADR-0073 §6).
+    """
+    console.print("\n[bold yellow]About to forget this belief[/]")
+    _render_belief(belief)
+    console.print(f"\n  [yellow]{_forget_warning(belief.band)}[/]")
+    console.print(
+        "  This destroys the record: nothing of it is kept, not even in an export. "
+        "To fix it instead, use [bold]assistant learn --kind correction[/], which "
+        "retires the old belief and keeps it on the record."
+    )
+    console.print(
+        "  [dim]You are forgetting whatever belief that id names when you answer, "
+        "which may have changed since it was shown.[/]"
+    )
+
+
+def _render_no_such_belief(belief_id: str) -> None:
+    """Report an id that names no *live* belief (ADR-0073 §5).
+
+    The read behind this surface is live-only, so an id naming a belief the assistant
+    has since revised does not resolve and is declined rather than destroyed —
+    deleting what cannot be displayed is exactly what the ceremony forbids. The right
+    to erase such a record is not lost; what is missing is a surface for it, which
+    belongs with the deferred history view (ADR-0073 §3, §10).
+    """
+    console.print(
+        f"[yellow]No live belief has the id[/] {_safe(belief_id)}. "
+        "It may never have existed, or it may have been revised or forgotten already — "
+        "this surface shows and destroys only beliefs held right now."
+    )
+
+
+def _confirm_forget(_belief: Belief) -> bool:
+    """Read the human's yes/no *without* rendering — the caller already displayed it.
+
+    The counterpart to :func:`_confirm` on the deletion path (I/O; ADR-0042 §6).
+    Defaults to **no**: the question is about destroying something irreversibly, so a
+    bare Enter must not be the answer that destroys it.
+    """
+    return typer.confirm("Forget it?", default=False)
 
 
 def _render_confirmation(confirmation: Confirmation) -> None:

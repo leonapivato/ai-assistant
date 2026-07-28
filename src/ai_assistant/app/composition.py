@@ -190,6 +190,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             runner=runner,
             plans=plans,
             trail=trail,
+            # The same store the loop retrieves from and the writer persists to, so
+            # the inspection surface lists the beliefs the assistant actually uses
+            # and ``forget`` destroys what the user was shown (ADR-0073 §7).
+            memory=memory,
             closers=[_as_async(memory.close), _as_async(trail.close), _as_async(plans.close)],
         )
     except BaseException:

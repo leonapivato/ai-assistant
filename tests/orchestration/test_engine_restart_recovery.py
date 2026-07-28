@@ -138,6 +138,7 @@ def _make_engine(plans: SqlitePlanStore, trail: SqliteAuditTrail) -> Engine:
         runner=runner,
         plans=plans,
         trail=trail,
+        memory=memory,
         closers=[_aclose(plans.close), _aclose(trail.close)],
     )
 

@@ -21,6 +21,15 @@ adapter may and may not do with it is ADR-0042 §6: it renders the content,
 collects the human's yes/no, and relays an **opaque** :class:`ContinuationToken`;
 it never authors a permission outcome, and it never inspects the token.
 
+Beside them sit the two non-turn legs, each its own result DTO: :meth:`Engine.learn`
+folds one piece of feedback into memory (:class:`LearnOutcome`), and the
+**inspection surface** — :meth:`Engine.beliefs`, :meth:`Engine.belief` and
+:meth:`Engine.forget` — lets a person read what the assistant believes about them
+and destroy any of it (:class:`Belief`; ADR-0073 §7). Inspection is where
+:func:`~ai_assistant.core.types.band_of` is applied, **once**: classifying a record
+into its band is ADR-0072 §1's projection, and an adapter doing it would put that
+projection in `interfaces/` (ADR-0073 §7).
+
 **Scope today.** ``respond`` "still ends at the plan" and the multi-step
 plan-driving stage — ordering, dependencies and cancellation across a plan's
 steps — is "the next slice" (`loop.py`). So a turn drives **at most one** step,
@@ -47,19 +56,21 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import structlog
 
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import MemoryDecisionKind, StepStatus
+from ai_assistant.core.types import MemoryDecisionKind, MemoryKind, StepStatus, band_of
 from ai_assistant.orchestration.runner import Disposition
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-    from datetime import timedelta
+    from datetime import datetime, timedelta
 
-    from ai_assistant.core.protocols import AuditTrail, PlanStore
+    from ai_assistant.core.protocols import AuditTrail, MemoryStore, PlanStore
     from ai_assistant.core.types import (
+        BeliefBand,
         ExecutionState,
         FeedbackEvent,
         FrozenJsonMapping,
         MemoryIngestResult,
+        MemoryRecord,
         PermissionDecision,
     )
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
@@ -73,6 +84,13 @@ _T = TypeVar("_T")
 #: :class:`Engine`). Generous enough that a real interactive session never reaches
 #: it, low enough that an abandoning client cannot exhaust memory.
 _DEFAULT_MAX_OUTSTANDING = 1024
+
+#: Default page size for :meth:`Engine.beliefs`. Restated here rather than left to
+#: ``MemoryStore.list_beliefs``'s own default so the façade's signature says what a
+#: caller gets by saying nothing (ADR-0073 §2's bounded default, 50, matching
+#: ``AuditTrail.recent``). It is relayed explicitly on every call, so a store whose
+#: default drifted could not silently change what this surface returns.
+_DEFAULT_BELIEF_PAGE = 50
 
 
 def _uuid() -> str:
@@ -316,6 +334,94 @@ def _learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class Belief:
+    """One live belief, as a person reads it (ADR-0073 §4, §7).
+
+    A frozen ``orchestration`` dataclass beside :class:`TurnOutcome` and
+    :class:`IngestSummary` and for their reason: it crosses no *subsystem*
+    boundary, only `interfaces`, which already depends on this package (ADR-0042
+    §1). It is deliberately **not** a raw
+    :class:`~ai_assistant.core.types.MemoryRecord`, and the deciding reason is not
+    tidiness — :func:`~ai_assistant.core.types.band_of` is applied *here*, once, in
+    the engine (:meth:`from_record`), because an adapter doing it would put
+    ADR-0072 §1's projection into `interfaces/`. It also flattens the four-member
+    discriminated union an adapter would otherwise branch over, and drops ``score``,
+    which is meaningless on a path where nothing was ranked (ADR-0073 §2).
+
+    **What it carries is exactly ADR-0073 §4's list, and the omissions are ruled
+    rather than incidental.** The kind-specific fields (a preference's ``strength``,
+    an episode's ``participants``) are not carried: ``content`` is the store's own
+    canonical text rendering of every kind. ``SemanticMemory.valid_until`` is not
+    carried either, and is named here because it shares a name with
+    :attr:`valid_until` below while meaning something else — a content-declared
+    fact expiry, not the operational live-belief window.
+
+    **The evidence citations are carried as a count and never as ids**, which is
+    ADR-0073 §4's floor made structural: a derived belief must not be presented as
+    carrying a warrant the surface cannot show, and "a citation the surface cannot
+    render as evidence is never rendered *as* evidence — not as a reassuring id, not
+    silently dropped." An adapter that never receives the ids cannot render one as
+    though it were the evidence. Resolving a citation into readable evidence is
+    deferred **with a gate** — a precondition of the first producer of derived
+    beliefs shipping (ADR-0073 §4, §10; #431) — so this DTO grows that field with
+    that lane, not before.
+
+    Attributes:
+        id: The record's id, opaque, and what :meth:`Engine.forget` names.
+        band: The standing the belief is held with (ADR-0072 §2), projected from
+            its provenance source. Never omitted, and never left to be implied by
+            position (ADR-0073 §4).
+        kind: Which of the four typed memories this is — what the ``kinds`` filter
+            selects on, and the difference between reading a preference and a fact.
+        content: The canonical text rendering of the belief.
+        confidence: How strongly it is held, in ``[0, 1]``.
+        evidence_count: How many citations stand behind it. ``0`` for an assertion,
+            whose warrant is the user's own word (ADR-0038 §1a) and needs no
+            citation.
+        last_updated: The transaction stamp — when *the assistant* last revised this
+            belief (ADR-0045 §3) — which is also the enumeration's sort key. It is
+            **our** clock and not a source's: an attested belief synced on Tuesday
+            from a calendar that said so on Monday carries Tuesday here, so a
+            renderer must not offer this as when a source said so (ADR-0073 §4).
+        valid_until: The end of the belief's validity window, where one is set;
+            ``None`` where the window is open. Every listed belief is live by
+            construction, so an open window carries no information and a set end
+            does ("believed until…").
+    """
+
+    id: str
+    band: BeliefBand
+    kind: MemoryKind
+    content: str
+    confidence: float
+    evidence_count: int
+    last_updated: datetime
+    valid_until: datetime | None = None
+
+    @classmethod
+    def from_record(cls, record: MemoryRecord) -> Belief:
+        """Project one stored record into the belief a person reads (ADR-0073 §7).
+
+        The one place a ``core``
+        :class:`~ai_assistant.core.types.MemoryRecord` is read on the inspection
+        path, and the one place :func:`~ai_assistant.core.types.band_of` is applied
+        — everything an adapter sees downstream is ``orchestration``-level, exactly
+        as :meth:`LearnOutcome.from_results` holds that boundary on the learn path.
+        """
+        provenance = record.provenance
+        return cls(
+            id=record.id,
+            band=band_of(provenance.source),
+            kind=MemoryKind(record.kind),
+            content=record.content,
+            confidence=provenance.confidence,
+            evidence_count=len(provenance.evidence),
+            last_updated=provenance.last_updated,
+            valid_until=record.validity.valid_until,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _Parked:
     """The private state one continuation token names (never seen by an adapter).
 
@@ -349,6 +455,7 @@ class Engine:
         runner: StepRunner,
         plans: PlanStore,
         trail: AuditTrail,
+        memory: MemoryStore,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -384,6 +491,19 @@ class Engine:
                 records nothing; authoring rulings stays the runner's (ADR-0042 §6).
                 A façade wired to a *second* trail would recover confirmations the
                 runner's own ``resume`` cannot resolve.
+            memory: Long-term memory — the same instance ``loop`` retrieves from and
+                the writer behind it persists to (a composition-root single-instance
+                obligation of the same shape as ``plans`` and ``trail``; ADR-0028
+                §4). The façade reads it for the inspection surface
+                (:meth:`beliefs`, :meth:`belief`) and deletes through it
+                (:meth:`forget`), because ADR-0042 §6 forbids an adapter reaching
+                memory itself and ADR-0072 §7 forbids re-filtering ``export`` above
+                the store. It is held **directly** rather than reached through
+                ``loop``: inspection is not a turn, and threading a read that
+                answers "what do you believe about me" through the turn stage would
+                make the stage the seam for a question it has no part in. Wired to a
+                *second* store, a listing would show beliefs the assistant does not
+                use and ``forget`` would destroy nothing the user was shown.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -438,6 +558,7 @@ class Engine:
         self._runner = runner
         self._plans = plans
         self._trail = trail
+        self._memory = memory
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -555,6 +676,144 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._learn(event))
+
+    async def beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = _DEFAULT_BELIEF_PAGE,
+        offset: int = 0,
+    ) -> tuple[Belief, ...]:
+        """Enumerate the beliefs the assistant holds right now (ADR-0073 §1, §7).
+
+        The read half of "the user can read the assistant's beliefs about them".
+        It relays the filters to :meth:`~ai_assistant.core.protocols.MemoryStore.list_beliefs`
+        and translates each record into a :class:`Belief`, which is where
+        :func:`~ai_assistant.core.types.band_of` is applied (ADR-0073 §7).
+
+        Everything about *what* comes back is the store's ratified contract, not
+        this façade's: live beliefs only (a retired record is history, reachable
+        through ``export`` alone), newest revision first with ``id`` breaking ties,
+        and a page that is full whenever enough matching records exist. Offset
+        paging over a store that is being written to may skip or repeat a record,
+        which ADR-0073 §2 names and accepts.
+
+        **No total count is offered** (ADR-0073 §7): "is there more" is answered by
+        asking for the next page, and a total would be a second query against a
+        Tier 1 store for a UI nobody has designed.
+
+        Both filters are **materialised before the awaiting task is created**, so a
+        caller that mutates the sequence it passed cannot change which page it gets:
+        the store's own input-observation clause (ADR-0065) binds what the store
+        reads, and this keeps the relay through :meth:`_tracked` — which defers the
+        first read of these arguments until the task runs — honest on its own terms.
+
+        Args:
+            bands: If given, restrict the listing to these belief bands. ``None``
+                means every band; an **empty sequence selects nothing**.
+            kinds: If given, restrict it to these memory kinds, same convention. The
+                two compose by conjunction: a belief is listed when its band is
+                selected *and* its kind is.
+            limit: How many beliefs the page holds at most. Bounded by default,
+                because an unbounded read of a Tier 1 store by default is a shape
+                worth not offering (ADR-0021 §4).
+            offset: How many beliefs of the ordered, filtered sequence to skip.
+
+        Returns:
+            The page, in the store's specified order. Empty when nothing matches.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` or ``offset`` falls outside ``0 <= value <
+                2**63``, as the store refuses rather than clamps (ADR-0073 §2). Not
+                an :class:`~ai_assistant.core.errors.AssistantError`, so an adapter
+                that lets a user supply either must refuse an out-of-range value at
+                its own parse boundary rather than at this one.
+            MemoryStoreError: If memory cannot be read.
+        """
+        self._reject_if_closing()
+        snapshot_bands = None if bands is None else tuple(bands)
+        snapshot_kinds = None if kinds is None else tuple(kinds)
+        return await self._tracked(
+            self._beliefs(bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset)
+        )
+
+    async def belief(self, record_id: str) -> Belief | None:
+        """Read the one belief ``record_id`` names, or ``None`` (ADR-0073 §5, §7).
+
+        The single-belief read the deletion ceremony needs: a person cannot consent
+        to destroying something they were not shown, so :meth:`forget` is preceded by
+        this (ADR-0042 §4, ADR-0052 §4, applied to the other irreversible thing this
+        system does on a user's word).
+
+        Backed by :meth:`~ai_assistant.core.protocols.MemoryStore.get` and therefore
+        **live-only**, like everything else on this surface. So an id naming a
+        *retired* record does not resolve here and ``None`` comes back — the surface
+        declines what it cannot display rather than destroying it (ADR-0073 §5).
+        ``MemoryStore.delete`` still reaches any record by id and is unchanged, so no
+        data right is lost; what is missing is a surface for retiring history, which
+        belongs with the deferred history view (ADR-0073 §3, §10).
+
+        Args:
+            record_id: The id the user named, taken as opaque.
+
+        Returns:
+            The belief, or ``None`` when no live belief has that id.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            MemoryStoreError: If memory cannot be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._belief(record_id))
+
+    async def forget(self, record_id: str) -> bool:
+        """Destroy the record ``record_id`` names (ADR-0073 §5; ADR-0007 §1).
+
+        "Kill any of them", relayed to
+        :meth:`~ai_assistant.core.protocols.MemoryStore.delete` and nothing more.
+        The **contract does not change and the store grows no band-conditional
+        refusal**: ADR-0004 §6 gives the user an unconditional right to delete their
+        data, and a store that refused because of the band it had itself assigned
+        would make that right conditional on its own classification. The asymmetry
+        between the bands is real (destroying an assertion is unrecoverable;
+        destroying a derived or attested belief loses the belief and not its origin)
+        and it belongs in **what the user is told before they answer**, which is the
+        adapter's ceremony, not in what the store will do.
+
+        This destroys rather than retires. A *correction* keeps the prior record —
+        it is retired, stays on disk and stays in ``export`` — and runs through the
+        policy (``learn``, ADR-0022); this leaves nothing anywhere. That contrast,
+        **kept versus destroyed**, is what a surface offering both must convey, and
+        it is why inspection adds no second correction path and no edit-in-place
+        (ADR-0073 §6).
+
+        **The show and the delete are two calls.** A write landing between them is
+        destroyed without having been shown, and this is named rather than closed
+        (ADR-0073 §5): a conditional delete would be the compare-and-swap ADR-0046
+        §5 deferred for want of a second concurrent writer, and a confirmation prompt
+        is not that writer. What the window admits is bounded in practice — an id is
+        an idempotency key, and of the two rulings that write over a conflict
+        ``SUPERSEDE`` mints a fresh id while ``REINFORCE`` folds the same belief — so
+        the reachable case is that the user is shown belief X and destroys a
+        strengthened X. The consent an adapter collects is therefore consent to
+        forget **the belief that id names**, not a guarantee that the bytes destroyed
+        are the bytes rendered, and an adapter must not claim otherwise.
+
+        Args:
+            record_id: The id the user named, taken as opaque.
+
+        Returns:
+            ``True`` if a record was destroyed, ``False`` if no record had that id —
+            which the adapter renders and maps to an exit code (ADR-0073 §7).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            MemoryStoreError: If memory cannot be written.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._memory.delete(record_id))
 
     async def pending_confirmations(self) -> list[Confirmation]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
@@ -980,6 +1239,30 @@ class Engine:
         results = await self._loop.learn(event)
         return LearnOutcome.from_results(results)
 
+    async def _beliefs(
+        self,
+        *,
+        bands: tuple[BeliefBand, ...] | None,
+        kinds: tuple[MemoryKind, ...] | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[Belief, ...]:
+        """Relay the enumeration to the store and project each record (ADR-0073 §7).
+
+        The filters arrive already materialised by :meth:`beliefs`; the page's order
+        and membership are the store's, and this adds no re-ordering, no re-filtering
+        and no count of its own.
+        """
+        records = await self._memory.list_beliefs(
+            bands=bands, kinds=kinds, limit=limit, offset=offset
+        )
+        return tuple(Belief.from_record(record) for record in records)
+
+    async def _belief(self, record_id: str) -> Belief | None:
+        """Read one live record and project it, or report that there is none."""
+        record = await self._memory.get(record_id)
+        return None if record is None else Belief.from_record(record)
+
     def _step_outcome(
         self, turn: TurnResult | None, disposition: StepDisposition, *, handle: str | None
     ) -> StepOutcome:
@@ -1099,6 +1382,7 @@ class Engine:
 
 
 __all__ = [
+    "Belief",
     "Confirmation",
     "ContinuationToken",
     "Engine",

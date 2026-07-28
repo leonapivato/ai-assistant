@@ -20,6 +20,7 @@ import pytest
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
     ActionPlan,
+    BeliefBand,
     CostBasis,
     DataTier,
     FeedbackEvent,
@@ -29,14 +30,19 @@ from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
+    MemorySource,
     PlanStep,
+    Provenance,
     Reversibility,
     RiskLevel,
+    SemanticMemory,
     StepStatus,
     ToolCost,
     ToolDefinition,
+    Validity,
 )
 from ai_assistant.orchestration import (
+    Belief,
     ContinuationToken,
     Disposition,
     Engine,
@@ -61,7 +67,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, MemoryUpdateProposal
 
@@ -149,6 +155,32 @@ class RaisingMemoryStore(FakeMemoryStore):
         raise MemoryStoreError(msg)
 
 
+class RecordingBeliefStore(FakeMemoryStore):
+    """A store that records the arguments each ``list_beliefs`` call reached it with.
+
+    Lets a test assert the *relay* — that the façade passes the filters and the page
+    through untouched, and that what arrives is a snapshot rather than the caller's
+    own sequence — without inferring it from which records came back.
+    """
+
+    def __init__(self, *, now: Callable[[], datetime]) -> None:
+        super().__init__(now=now)
+        self.calls: list[
+            tuple[Sequence[BeliefBand] | None, Sequence[MemoryKind] | None, int, int]
+        ] = []
+
+    async def list_beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        self.calls.append((bands, kinds, limit, offset))
+        return await super().list_beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+
+
 class Harness:
     """A wired :class:`Engine` and the fakes behind it, for assertions."""
 
@@ -201,6 +233,7 @@ class Harness:
             runner=runner,
             plans=self.plans,
             trail=self.trail,
+            memory=self.memory,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
         )
@@ -386,6 +419,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
     )
 
@@ -492,6 +526,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -543,6 +578,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -586,6 +622,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
     )
     first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
@@ -716,6 +753,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
     )
     facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
@@ -1094,6 +1132,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
     )
@@ -1153,6 +1192,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        memory=harness.memory,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
     )
@@ -1178,6 +1218,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             runner=harness.engine._runner,
             plans=harness.plans,
             trail=harness.trail,
+            memory=harness.memory,
             max_outstanding_confirmations=0,
         )
 
@@ -1192,6 +1233,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             runner=harness.engine._runner,
             plans=harness.plans,
             trail=harness.trail,
+            memory=harness.memory,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
         )
 
@@ -1368,6 +1410,268 @@ async def test_learn_is_drained_before_shutdown_closes_resources() -> None:
     closing = asyncio.ensure_future(harness.engine.aclose())
     await asyncio.sleep(0)  # let aclose reach its drain
     assert not closed.is_set()  # the resource is not closed while the write is in flight
+
+    release.set()
+    await call
+    await closing
+    assert closed.is_set()
+    assert closed_while_inflight is False
+
+
+# --- the belief inspection surface (ADR-0073 §4, §5, §7) ----------------
+
+
+def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is the point
+    record_id: str,
+    *,
+    source: MemorySource = MemorySource.USER_ASSERTED,
+    confidence: float = 1.0,
+    evidence: tuple[str, ...] = (),
+    last_updated: datetime = AT,
+    valid_until: datetime | None = None,
+    content: str = "the office is in Boston",
+    score: float | None = None,
+) -> SemanticMemory:
+    """A stored semantic record, with every field the projection reads addressable."""
+    return SemanticMemory(
+        id=record_id,
+        content=content,
+        fact=content,
+        score=score,
+        validity=Validity(valid_until=valid_until),
+        provenance=Provenance(
+            source=source, confidence=confidence, evidence=evidence, last_updated=last_updated
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "band"),
+    [
+        (MemorySource.USER_ASSERTED, BeliefBand.ASSERTED),
+        (MemorySource.OBSERVED, BeliefBand.DERIVED),
+        (MemorySource.INFERRED, BeliefBand.DERIVED),
+        (MemorySource.EXTERNAL, BeliefBand.ATTESTED),
+    ],
+)
+def test_from_record_applies_the_band_projection_in_the_engine(
+    source: MemorySource, band: BeliefBand
+) -> None:
+    """Every source is classified here, once, so no adapter ever has to (ADR-0073 §7)."""
+    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
+    belief = Belief.from_record(_record("rec-1", source=source, confidence=confidence))
+    assert belief.band is band
+    assert belief.confidence == confidence
+
+
+def test_from_record_carries_exactly_what_the_surface_must_convey() -> None:
+    """The DTO carries ADR-0073 §4's fields: id, band, kind, content, confidence, times."""
+    until = datetime(2026, 8, 1, tzinfo=UTC)
+    belief = Belief.from_record(
+        _record(
+            "rec-1",
+            source=MemorySource.INFERRED,
+            confidence=0.62,
+            evidence=("episode-1", "episode-2"),
+            valid_until=until,
+        )
+    )
+    assert belief.id == "rec-1"
+    assert belief.kind is MemoryKind.SEMANTIC
+    assert belief.content == "the office is in Boston"
+    assert belief.last_updated == AT
+    assert belief.valid_until == until
+
+
+def test_from_record_carries_evidence_as_a_count_and_never_as_ids() -> None:
+    """ADR-0073 §4's derived floor, made structural: the citations do not leave here.
+
+    A citation the surface cannot render as evidence is never rendered *as* evidence
+    — "not as a reassuring id, not silently dropped". Carrying only the count is what
+    stops an adapter passing an id off as the warrant: it never receives one. That
+    the count is preserved is what stops the citations being silently dropped.
+    """
+    belief = Belief.from_record(
+        _record("rec-1", source=MemorySource.INFERRED, confidence=0.5, evidence=("ep-1", "ep-2"))
+    )
+    assert belief.evidence_count == 2
+    assert "ep-1" not in str(belief)  # no citation id is reachable from the DTO at all
+
+
+def test_from_record_drops_the_relevance_score() -> None:
+    """Nothing was ranked on this path, so no score is carried (ADR-0073 §2, §7)."""
+    belief = Belief.from_record(_record("rec-1", score=0.93))
+    assert not hasattr(belief, "score")
+
+
+async def test_beliefs_lists_what_memory_holds_in_the_store_s_own_order() -> None:
+    """The façade relays the enumeration and projects each record (ADR-0073 §1, §7)."""
+    harness = Harness()
+    await harness.memory.add(_record("older", last_updated=AT - timedelta(days=1)))
+    await harness.memory.add(_record("newer", last_updated=AT))
+
+    page = await harness.engine.beliefs()
+    assert [belief.id for belief in page] == ["newer", "older"]  # the store's order, unchanged
+    assert all(isinstance(belief, Belief) for belief in page)
+    assert page[0].band is BeliefBand.ASSERTED
+
+
+async def test_beliefs_returns_an_empty_page_when_nothing_matches() -> None:
+    """An empty store is an empty tuple, not an error."""
+    harness = Harness()
+    assert await harness.engine.beliefs() == ()
+
+
+async def test_beliefs_relays_every_filter_and_the_bounded_default_page() -> None:
+    """Filters and paging reach the store verbatim; the default limit is stated (§2)."""
+    harness = Harness(memory=RecordingBeliefStore(now=lambda: AT))
+    store = harness.memory
+    assert isinstance(store, RecordingBeliefStore)
+
+    await harness.engine.beliefs()
+    await harness.engine.beliefs(
+        bands=[BeliefBand.DERIVED], kinds=[MemoryKind.SEMANTIC], limit=2, offset=7
+    )
+    assert store.calls == [
+        # No filters, and the bounded default page starting from the beginning (§2).
+        (None, None, 50, 0),
+        # Every filter and both paging arguments, relayed exactly as given.
+        ((BeliefBand.DERIVED,), (MemoryKind.SEMANTIC,), 2, 7),
+    ]
+
+
+async def test_beliefs_selects_nothing_for_an_explicitly_empty_filter() -> None:
+    """An empty sequence is relayed as itself — it selects nothing, unlike None (§1)."""
+    harness = Harness(memory=RecordingBeliefStore(now=lambda: AT))
+    store = harness.memory
+    assert isinstance(store, RecordingBeliefStore)
+    await harness.engine.beliefs(bands=[], kinds=[])
+    assert store.calls[-1] == ((), (), 50, 0)
+
+
+async def test_beliefs_snapshots_its_filters_so_a_caller_cannot_change_the_page() -> None:
+    """The filters are materialised before the awaiting task reads them (ADR-0065)."""
+    harness = Harness(memory=RecordingBeliefStore(now=lambda: AT))
+    store = harness.memory
+    assert isinstance(store, RecordingBeliefStore)
+
+    bands = [BeliefBand.ASSERTED]
+    await harness.engine.beliefs(bands=bands)
+    bands.append(BeliefBand.DERIVED)  # mutating the caller's list afterwards
+    assert store.calls[-1][0] == (BeliefBand.ASSERTED,)  # the store saw the snapshot
+
+
+async def test_beliefs_relays_an_out_of_range_page_refusal() -> None:
+    """The store refuses rather than clamps, and the façade does not swallow it (§2)."""
+    harness = Harness()
+    with pytest.raises(ValueError, match="limit"):
+        await harness.engine.beliefs(limit=-1)
+
+
+async def test_belief_reads_the_one_a_deletion_is_about_to_destroy() -> None:
+    """The single read show-then-confirm needs, projected like any other (§5, §7)."""
+    harness = Harness()
+    await harness.memory.add(_record("rec-1", source=MemorySource.EXTERNAL, confidence=0.8))
+    belief = await harness.engine.belief("rec-1")
+    assert belief is not None
+    assert belief.id == "rec-1"
+    assert belief.band is BeliefBand.ATTESTED
+
+
+async def test_belief_is_none_for_an_id_no_live_record_has() -> None:
+    """Unknown, and — because ``get`` is live-only — retired, both read as None (§5)."""
+    harness = Harness()
+    assert await harness.engine.belief("nothing") is None
+    retired = _record("retired", valid_until=AT - timedelta(days=1))
+    await harness.memory.add(retired)
+    assert await harness.engine.belief("retired") is None
+
+
+async def test_forget_destroys_the_record_and_reports_that_it_did() -> None:
+    """``forget`` is ``MemoryStore.delete``, relayed (ADR-0073 §5)."""
+    harness = Harness()
+    await harness.memory.add(_record("rec-1"))
+    assert await harness.engine.forget("rec-1") is True
+    assert await harness.engine.belief("rec-1") is None
+    assert await harness.engine.beliefs() == ()
+
+
+async def test_forget_reports_false_for_an_id_no_record_has() -> None:
+    """ "No such belief" is a return value the adapter renders, not an error (§7)."""
+    harness = Harness()
+    assert await harness.engine.forget("nothing") is False
+
+
+@pytest.mark.parametrize("band", list(BeliefBand))
+async def test_forget_refuses_no_band(band: BeliefBand) -> None:
+    """The store grows no band-conditional refusal: a data right is unconditional (§5).
+
+    ADR-0004 §6 gives the user an unconditional right to delete their data, so a
+    belief is destroyed whatever band the system itself put it in. The asymmetry
+    between the bands lives in what the user is told before answering, not in what
+    the deletion will do.
+    """
+    source = {
+        BeliefBand.ASSERTED: MemorySource.USER_ASSERTED,
+        BeliefBand.DERIVED: MemorySource.INFERRED,
+        BeliefBand.ATTESTED: MemorySource.EXTERNAL,
+    }[band]
+    confidence = 1.0 if band is BeliefBand.ASSERTED else 0.5
+    harness = Harness()
+    await harness.memory.add(_record("rec-1", source=source, confidence=confidence))
+    shown = await harness.engine.belief("rec-1")
+    assert shown is not None
+    assert shown.band is band
+    assert await harness.engine.forget("rec-1") is True
+
+
+async def test_forget_leaves_nothing_behind_not_even_in_an_export() -> None:
+    """Forgetting destroys; a correction would have retired and kept it (ADR-0073 §6)."""
+    harness = Harness()
+    await harness.memory.add(_record("rec-1"))
+    await harness.engine.forget("rec-1")
+    assert await harness.memory.export() == []
+
+
+@pytest.mark.parametrize("call", ["beliefs", "belief", "forget"])
+async def test_the_inspection_surface_is_refused_once_shutdown_has_begun(call: str) -> None:
+    """After aclose, no inspection call is accepted either (ADR-0042 §2)."""
+    harness = Harness()
+    await harness.engine.aclose()
+    calls: dict[str, Callable[[], Awaitable[object]]] = {
+        "beliefs": harness.engine.beliefs,
+        "belief": lambda: harness.engine.belief("rec-1"),
+        "forget": lambda: harness.engine.forget("rec-1"),
+    }
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await calls[call]()
+
+
+async def test_forget_is_drained_before_shutdown_closes_resources() -> None:
+    """A deletion touches the connection-owning store, so aclose waits for it (§2)."""
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    closed = asyncio.Event()
+    closed_while_inflight = False
+
+    class GatedDeleteStore(FakeMemoryStore):
+        async def delete(self, record_id: str) -> bool:
+            entered.set()
+            await release.wait()
+            return await super().delete(record_id)
+
+    async def close() -> None:
+        nonlocal closed_while_inflight
+        closed_while_inflight = not release.is_set()
+        closed.set()
+
+    harness = Harness(memory=GatedDeleteStore(now=lambda: AT), closers=(close,))
+    call = asyncio.ensure_future(harness.engine.forget("rec-1"))
+    await entered.wait()
+
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.sleep(0)  # let aclose reach its drain
+    assert not closed.is_set()  # the store is not closed while the deletion is in flight
 
     release.set()
     await call
