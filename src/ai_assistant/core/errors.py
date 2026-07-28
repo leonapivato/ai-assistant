@@ -155,6 +155,36 @@ class ConversationStoreError(AssistantError):
     """
 
 
+class UnknownConversationError(ConversationStoreError):
+    """The id named no conversation this store can operate on (ADR-0076 §2).
+
+    Narrowed out of :class:`ConversationStoreError` for one caller and one
+    question: **a sweep cannot otherwise tell "already done" from "broken".**
+    Sweeper A enumerates conversation ``C``; sweeper B — or the deleting call, or
+    a later scheduler — finishes ``C`` and drops it; A's next
+    ``episodes_to_purge(C)`` then raises. Against one undifferentiated class A
+    either aborts a start-up sweep that was working perfectly, or swallows real
+    store faults to avoid doing so.
+
+    So an enumerated id that is gone by the time the stage acts on it is a
+    **no-op** — the sweep moves to the next id, because a conversation that is
+    gone is a deletion that completed — while every other
+    ``ConversationStoreError`` aborts the sweep and is reported. That is what makes
+    a duplicated *walk* harmless, the half ``drop_if_eligible``'s re-check (which
+    makes a duplicated *drop* harmless) does not cover.
+
+    **Additive, not a narrowing of what ADR-0074 §9 promised**: a subclass *is* a
+    ``ConversationStoreError``, so every existing ``except ConversationStoreError``
+    still catches it and §9's "every method raises ``ConversationStoreError``"
+    stays true as written. It is the shape :class:`MemoryStoreConflictError`
+    already has under :class:`MemoryStoreError`, for the reason recorded there.
+
+    Raised for an id the store does not know **as an operable conversation** —
+    absent, or stamped deleted, which every presenting read already treats as
+    absent (ADR-0074 §8). A store *fault* still raises the base class.
+    """
+
+
 class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 

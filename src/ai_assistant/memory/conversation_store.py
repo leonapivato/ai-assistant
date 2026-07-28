@@ -37,7 +37,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
@@ -197,6 +197,26 @@ def _episode_id_of(value: object) -> str:
     """
     if type(value) is not str or not value.strip():
         msg = f"a stored episode id is not usable: {describe_untrusted(value)}"
+        raise ConversationStoreError(msg)
+    return value
+
+
+def _stamped_id_of(value: object) -> str:
+    """Read a stored conversation id, refusing anything that is not usable.
+
+    The sibling of :func:`_episode_id_of`, and needed for the same reason:
+    :meth:`SqliteConversationStore.stamped_conversation_ids` hands its result
+    straight to a caller that will act on it, and it reaches no frozen type whose
+    ``Identifier`` would refuse a ``BLOB`` or a stray number first. Coercing one
+    with ``str()`` would send a sweep after an id nothing holds — and, worse, place
+    the *next* batch's lexical cursor after a string no row ever carried, silently
+    skipping every tombstone between the two.
+
+    Raises:
+        ConversationStoreError: If the stored value is not a non-blank ``str``.
+    """
+    if type(value) is not str or not value.strip():
+        msg = f"a stored conversation id is not usable: {describe_untrusted(value)}"
         raise ConversationStoreError(msg)
     return value
 
@@ -547,10 +567,14 @@ class SqliteConversationStore:
         return rows[0] if rows else None
 
     @staticmethod
-    def _unknown(conversation_id: str) -> ConversationStoreError:
-        """The refusal §1 requires: an id the store does not know is not created."""
+    def _unknown(conversation_id: str) -> UnknownConversationError:
+        """The refusal §1 requires: an id the store does not know is not created.
+
+        The narrow subclass (ADR-0076 §2), so a sweep can tell an id another
+        sweeper already finished from a database that is failing.
+        """
         described = describe_untrusted(conversation_id)
-        return ConversationStoreError(f"no such conversation: {described}")
+        return UnknownConversationError(f"no such conversation: {described}")
 
     # --- the contract --------------------------------------------------------
 
@@ -642,8 +666,9 @@ class SqliteConversationStore:
         whose reads take the same care for the same reason.
 
         Raises:
-            ConversationStoreError: If the id names nothing or names a stamped
-                conversation, or the store cannot be written.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If the store cannot be written.
         """
         async with self._lock:
             row = await _run_to_completion(self._mark_active_sync, conversation_id)
@@ -679,8 +704,10 @@ class SqliteConversationStore:
         so no ordinal is consumed and no row is left behind (§9.1).
 
         Raises:
-            ConversationStoreError: If the id names nothing or names a stamped
-                conversation, or ``parked`` duplicates a binding already claimed.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If ``parked`` duplicates a binding already
+                claimed, or the store cannot be written.
             ValueError: If ``occurred_at`` is not a timezone-aware instant.
         """
         async with self._lock:
@@ -785,7 +812,7 @@ class SqliteConversationStore:
 
         Raises:
             ValueError: If ``limit`` or ``before_ordinal`` is out of range.
-            ConversationStoreError: If the id names nothing or names a stamped
+            UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
         """
         page = self._tail_limit if limit is None else limit
@@ -846,7 +873,7 @@ class SqliteConversationStore:
         Raises:
             ValueError: If ``limit`` is out of range, or ``after_id`` is not an
                 episode id of this conversation.
-            ConversationStoreError: If the id names nothing.
+            UnknownConversationError: If the id names nothing.
         """
         batch = self._purge_batch if limit is None else limit
         _check_page_bound("limit", batch)
@@ -891,6 +918,49 @@ class SqliteConversationStore:
                 self._verified_episode_id(conversation_id, _ordinal_of(row[1]), row[0])
                 for row in rows
             ]
+
+    async def stamped_conversation_ids(
+        self,
+        *,
+        limit: int | None = None,
+        after_id: str | None = None,
+    ) -> list[str]:
+        """Return the next batch of stamped-but-not-dropped ids, ``id`` ascending.
+
+        The cursor is a **lexical bound on the id space** — ``id > ?`` — and never
+        a row lookup, because this walk's rows are dropped by the very sweep
+        walking them: by the time the caller asks for the next batch, the id it
+        carries may name nothing, and a cursor resolved by lookup would stall
+        exactly when the sweep was working correctly (ADR-0076 §2). Grace is not a
+        filter here; :meth:`drop_if_eligible` judges it under the exclusion.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If the store cannot be read.
+        """
+        batch = self._purge_batch if limit is None else limit
+        _check_page_bound("limit", batch)
+        if batch == 0:
+            return []
+        async with self._lock:
+            rows = await _run_to_completion(self._stamped_ids_sync, batch, after_id)
+        return [_stamped_id_of(row[0]) for row in rows]
+
+    def _stamped_ids_sync(self, batch: int, after_id: str | None) -> list[Any]:
+        if after_id is None:
+            return self._fetch(
+                self._conn,
+                "list stamped conversations",
+                "SELECT id FROM conversations WHERE deleted_at IS NOT NULL ORDER BY id ASC LIMIT ?",
+                (batch,),
+            )
+        return self._fetch(
+            self._conn,
+            "list stamped conversations",
+            "SELECT id FROM conversations WHERE deleted_at IS NOT NULL AND id > ? "
+            "ORDER BY id ASC LIMIT ?",
+            (after_id, batch),
+        )
 
     async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]:
         """List unstamped conversations, last activity first, ``id`` breaking ties.

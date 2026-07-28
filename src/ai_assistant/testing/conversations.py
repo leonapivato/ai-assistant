@@ -31,7 +31,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import (
     FIRST_TURN_ORDINAL,
     Conversation,
@@ -229,15 +229,16 @@ class FakeConversationStore:
         """Return a conversation that exists and is not stamped, or raise.
 
         Raises:
-            ConversationStoreError: If the id names nothing, or names a
+            UnknownConversationError: If the id names nothing, or names a
                 conversation stamped deleted — refused, never created (ADR-0074
-                §1, §8).
+                §1, §8). The narrow subclass, so a sweep can tell "someone else
+                already finished this" from "the store is broken" (ADR-0076 §2).
         """
         conversation = self._conversations.get(conversation_id)
         if conversation is None or conversation.deleted_at is not None:
             described = describe_untrusted(conversation_id)
             msg = f"no such conversation: {described}"
-            raise ConversationStoreError(msg)
+            raise UnknownConversationError(msg)
         return conversation
 
     def _known(self, conversation_id: str) -> Conversation:
@@ -247,12 +248,12 @@ class FakeConversationStore:
         conversation's index precisely *because* it is stamped (ADR-0074 §8).
 
         Raises:
-            ConversationStoreError: If the id names nothing.
+            UnknownConversationError: If the id names nothing.
         """
         conversation = self._conversations.get(conversation_id)
         if conversation is None:
             msg = f"no such conversation: {describe_untrusted(conversation_id)}"
-            raise ConversationStoreError(msg)
+            raise UnknownConversationError(msg)
         return conversation
 
     def _episode_id(self, conversation_id: str, ordinal: int) -> str:
@@ -330,7 +331,7 @@ class FakeConversationStore:
         """Record that a turn has begun, leaving ``last_turn_at`` alone.
 
         Raises:
-            ConversationStoreError: If the id names nothing or names a stamped
+            UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
         """
         async with self._exclusive(conversation_id):
@@ -352,8 +353,10 @@ class FakeConversationStore:
         refusal consumes no ordinal and leaves no row behind (ADR-0074 §9.1).
 
         Raises:
-            ConversationStoreError: If the id names nothing or names a stamped
-                conversation, or ``parked`` duplicates a binding already claimed.
+            UnknownConversationError: If the id names nothing or names a stamped
+                conversation.
+            ConversationStoreError: If ``parked`` duplicates a binding already
+                claimed.
             ValueError: If ``occurred_at`` is not a timezone-aware instant.
         """
         async with self._exclusive(conversation_id):
@@ -393,7 +396,7 @@ class FakeConversationStore:
 
         Raises:
             ValueError: If ``limit`` or ``before_ordinal`` is out of range.
-            ConversationStoreError: If the id names nothing or names a stamped
+            UnknownConversationError: If the id names nothing or names a stamped
                 conversation.
         """
         page = self._tail_limit if limit is None else limit
@@ -421,7 +424,7 @@ class FakeConversationStore:
         Raises:
             ValueError: If ``limit`` is out of range, or ``after_id`` is not an
                 episode id of this conversation.
-            ConversationStoreError: If the id names nothing.
+            UnknownConversationError: If the id names nothing.
         """
         batch = self._purge_batch if limit is None else limit
         _check_page_bound("limit", batch)
@@ -438,6 +441,33 @@ class FakeConversationStore:
                 raise ValueError(msg)
             start = positions[0] + 1
         return [turn.episode_id for turn in rows[start : start + batch]]
+
+    async def stamped_conversation_ids(
+        self,
+        *,
+        limit: int | None = None,
+        after_id: str | None = None,
+    ) -> list[str]:
+        """Return the next batch of stamped-but-not-dropped ids, ``id`` ascending.
+
+        The cursor is placed **lexically** and never by looking the row up: this
+        walk's rows are removed by the very sweep walking them, so the id the
+        caller carries has to be enough to position the next batch on its own
+        (ADR-0076 §2). An ``after_id`` naming no row is therefore a valid cursor.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``.
+        """
+        batch = self._purge_batch if limit is None else limit
+        _check_page_bound("limit", batch)
+        if batch == 0:
+            return []
+        stamped = sorted(
+            one.id for one in self._conversations.values() if one.deleted_at is not None
+        )
+        if after_id is not None:
+            stamped = [one for one in stamped if one > after_id]
+        return stamped[:batch]
 
     async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]:
         """List unstamped conversations, last activity first, ``id`` breaking ties.

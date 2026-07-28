@@ -608,10 +608,27 @@ class Planner(Protocol):
         no business importing. Retrieved memory is also what makes a plan
         personal rather than generic.
 
+        **``memories`` is what the pipeline assembled for this turn, not one
+        relevance cut** (ADR-0074 §5). It carries the conversation's recent turns
+        **first**, in order, then the records retrieved as relevant, best first
+        *within that group*. The wording is restated rather than read generously:
+        a conversation tail is usually the most relevant thing the store holds for
+        a continued exchange, but a user who changes the subject mid-conversation
+        is handed prior turns that are not relevant to the new goal at all, so
+        calling the whole sequence "best first" would be a strain. The signature is
+        unchanged and ``Planner`` grows no ``history`` parameter — both groups are
+        ``MemoryRecord``s the planner already renders, and a second channel would
+        split one prompt input in two for a distinction the planner does not act
+        on. The widening is flagged under golden rule 5 rather than smuggled: a
+        planner may rely on the grouping being meaningful, and must not rely on the
+        sequence being globally ranked.
+
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
-            memories: Records retrieved as relevant to the goal, best first.
+            memories: The records the pipeline assembled for this turn — the
+                conversation's recent turns in order, then records retrieved as
+                relevant, best first within that group.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`.
@@ -1347,6 +1364,14 @@ class ConversationStore(Protocol):
     being a readable record of a deleted conversation while the deletion can
     still be carried out (§9).
 
+    **Two reads carve out of that exclusion, and neither presents anything.**
+    ADR-0076 adds the second: :meth:`stamped_conversation_ids` enumerates the
+    tombstones, which is what makes a crashed deletion finishable at all — §8's
+    tombstone was already durable and already named every episode involved, and
+    nothing could *find* it. ADR-0074 §9.4's exclusion set is otherwise untouched
+    in either direction: a caller that obtains a stamped id learns which ids are
+    stamped and can learn nothing else about them.
+
     **Every read is bounded by default and totally ordered** (ADR-0021 §4,
     ADR-0073 §2): turns by ordinal ascending, conversations by ``last_active_at``
     descending with ``id`` ascending as the tie-break. Paging arguments carry
@@ -1364,6 +1389,15 @@ class ConversationStore(Protocol):
     spelling for absence (a ``None`` return, or the ``bool`` of the two lifecycle
     mutations) that spelling is used and nothing is raised; every other method
     raises.
+
+    **The unknown-id refusal is the narrower
+    :class:`~ai_assistant.core.errors.UnknownConversationError`** (ADR-0076 §2),
+    a subclass, so §9's sentence above stays true as written and every existing
+    ``except ConversationStoreError`` still catches it. A store *fault* raises the
+    base class. The distinction exists for the sweep and nothing else: an id that
+    is gone by the time a sweep reaches it is a deletion someone else completed,
+    and telling that from "the store is broken" is what lets a walk carry on
+    instead of aborting.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). Input observation (ADR-0065) binds it too and is vacuous in
@@ -1434,9 +1468,10 @@ class ConversationStore(Protocol):
         per-conversation exclusion as an append, a stamp and a reclaim.
 
         Raises:
-            ConversationStoreError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted — refused, never created (§1) — or
-                the store cannot be written.
+            UnknownConversationError: If ``conversation_id`` names nothing or
+                names a conversation stamped deleted — refused, never created
+                (§1).
+            ConversationStoreError: If the store cannot be written.
         """
         ...
 
@@ -1482,11 +1517,12 @@ class ConversationStore(Protocol):
             derived episode id.
 
         Raises:
-            ConversationStoreError: If ``conversation_id`` names nothing, or names
-                a conversation stamped deleted — an append to a stamped
+            UnknownConversationError: If ``conversation_id`` names nothing, or
+                names a conversation stamped deleted — an append to a stamped
                 conversation is refused, which is what makes a deletion durable
-                against a racing capture (§8) — or ``parked`` duplicates a binding
-                already claimed, or the store cannot be written.
+                against a racing capture (§8).
+            ConversationStoreError: If ``parked`` duplicates a binding already
+                claimed, or the store cannot be written.
             ValueError: If ``occurred_at`` is not a timezone-aware instant with a
                 determinate offset (ADR-0023 §3): a naive value would be silently
                 localised to the host's zone.
@@ -1534,10 +1570,92 @@ class ConversationStore(Protocol):
                 bound reaches SQLite, which reads ``LIMIT -1`` as *no limit at
                 all*, and an over-wide one raises ``OverflowError`` out of the
                 driver — so two backends silently disagree.
-            ConversationStoreError: If ``conversation_id`` names nothing or names
-                a conversation stamped deleted. ``turns`` is an ordinary
+            UnknownConversationError: If ``conversation_id`` names nothing or
+                names a conversation stamped deleted. ``turns`` is an ordinary
                 presenting read, so it refuses a tombstone exactly as :meth:`get`
                 hides one; the sweeps use :meth:`episodes_to_purge` instead.
+            ConversationStoreError: If the store cannot be read.
+        """
+        ...
+
+    async def stamped_conversation_ids(
+        self,
+        *,
+        limit: int | None = None,
+        after_id: str | None = None,
+    ) -> list[str]:
+        """Page over the ids of conversations stamped deleted but not yet dropped.
+
+        The read ADR-0076 adds, and the one thing §8's deletion protocol was
+        missing: the tombstone is durable and names every episode involved, but
+        every other read excludes a stamped conversation by design, so a process
+        that died between the stamp and the drop left work **no later run could
+        rediscover**. The episodes the index named were then never destroyed and
+        the index itself outlived its grace indefinitely — the residue §8's grace
+        and reclaim exist to reclaim, made permanent by the absence of a way to
+        enumerate it.
+
+        **Ids and nothing else.** Not :class:`~ai_assistant.core.types.Conversation`
+        records, not the stamp instant, not turn counts — the same shape and the
+        same argument :meth:`episodes_to_purge` makes: returning only what the work
+        needs removes the exposure instead of labelling it. A record-returning read
+        would be a general resurrection of everything §8's stamp exists to hide,
+        bought for a caller that needs an id to pass to two methods it already has.
+
+        **The stamp instant is deliberately not returned either.** Handing back
+        ``(id, deleted_at)`` so the caller could skip tombstones still inside their
+        grace is wrong twice over: :meth:`drop_if_eligible` already re-checks the
+        grace under the per-conversation exclusion, so a caller pre-filtering on
+        ``deleted_at`` would decide eligibility on a reading taken *outside* that
+        exclusion — the hazard §9.4 forbids, one layer up — and the sweep does not
+        want the filter anyway, because §8's step 2 destroys a stamped
+        conversation's episodes **whether or not** its grace has elapsed. So this
+        yields every stamped conversation regardless of grace.
+
+        **The order is ``id`` ascending and the cursor is placed lexically — not
+        by looking the row up — and that is a correctness requirement.**
+        :meth:`episodes_to_purge` may place its cursor by lookup because §9
+        guarantees its rows survive the whole traversal ("nothing is removed until
+        the record is dropped"). *This* walk has the opposite property: its rows
+        are removed by the very sweep walking them. The ordinary sequence is take a
+        batch, destroy each conversation's episodes, :meth:`drop_if_eligible`, then
+        ask for the next batch using the last id received — by which time that row
+        may be gone. A cursor resolved by lookup would be unplaceable exactly when
+        the sweep is working correctly, and ordering by ``deleted_at`` would
+        compound it, since a dropped row's stamp instant is unrecoverable. So the
+        ordering key must be one the **caller already carries**, and ``id`` is the
+        only such value this read returns.
+
+        **Reading removes nothing**, exactly as :meth:`episodes_to_purge` removes
+        nothing: a row leaves when :meth:`drop_if_eligible` succeeds and not
+        before, so the sweep stays idempotent by re-walking and a *resumed* walk is
+        as safe as a restarted one.
+
+        Args:
+            limit: Batch size; ``None`` asks for the store's configured batch —
+                **100**, the figure the purge walk this is walked beside uses, so
+                one sweep has one number to reason about rather than two. It is a
+                fixed figure and not a ``Settings`` field: unlike the retention
+                horizon it expresses no user policy, and unlike the replay window
+                it sizes no prompt, so it is only ever a round-trip-versus-memory
+                trade on a walk that always runs to exhaustion. ``0`` returns an
+                empty batch.
+            after_id: Exclusive cursor naming a **position in the id space**: the
+                next batch is every stamped id ordering strictly after that string.
+                An id that names no row is therefore a perfectly good cursor and is
+                **not** an error — which is the whole point (see above). ``None``
+                starts at the beginning.
+
+        Returns:
+            The batch, ``id`` ascending. An empty batch means the walk is done, and
+            the deletion sweep **must** drain to one: finishing a batch and
+            stopping is the failure §9's own multi-batch clause forbids.
+
+        Raises:
+            ValueError: If ``limit`` is outside ``[0, 2**63)``. ADR-0073 §2's
+                posture, inherited unchanged; ``after_id`` carries no such refusal,
+                because there is nothing for the store to fail to place.
+            ConversationStoreError: If the store cannot be read.
         """
         ...
 
@@ -1593,8 +1711,11 @@ class ConversationStore(Protocol):
                 not an episode id of this conversation. A cursor the store cannot
                 place is refused rather than silently restarting the walk, which
                 would make a sweep loop forever over its first batch.
-            ConversationStoreError: If ``conversation_id`` names nothing, or the
-                store cannot be read.
+            UnknownConversationError: If ``conversation_id`` names nothing. A
+                sweep reaching an id another sweep already finished treats this as
+                a **no-op and moves to the next id** (ADR-0076 §2); a store fault
+                aborts it.
+            ConversationStoreError: If the store cannot be read.
         """
         ...
 

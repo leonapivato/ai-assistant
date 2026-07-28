@@ -181,10 +181,19 @@ class ModelBackedPlanner:
         read once, into the prompt, before the same first ``await`` and never
         again — the other discharge the clause allows.
 
+        ``memories`` carries what the pipeline assembled for this turn, which
+        ADR-0074 §5 widened from "relevant, best first" to the conversation's
+        recent turns first and then the relevance-retrieved records. This planner
+        renders the sequence **in the order it is handed** and reads no global
+        ranking into it, which is exactly what that widening asks of a consumer
+        (:meth:`~ai_assistant.core.protocols.Planner.plan`).
+
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
-            memories: Records retrieved as relevant to the goal, best first.
+            memories: The records the pipeline assembled for this turn — the
+                conversation's recent turns in order, then records retrieved as
+                relevant, best first within that group (ADR-0074 §5).
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan` for ``goal``.
