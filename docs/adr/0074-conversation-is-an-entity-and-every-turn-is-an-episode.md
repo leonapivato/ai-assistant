@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-07-28
 - **This is a contract change.** §9 adds one Protocol — `ConversationStore` — to
-  `core/protocols.py`, two types to `core/types.py`, and one error class to
+  `core/protocols.py`, four types to `core/types.py`, and one error class to
   `core/errors.py`. Golden rule 5 therefore applies: this ADR ships as **its own
   docs-only PR**, is reviewed while still `Proposed` so a finding can still change
   the decision, and is flipped to `Accepted` on merge (`CONTRIBUTING.md`,
@@ -891,9 +891,9 @@ count and span rather than every turn.
   `ConversationTurn` (the conversation it belongs to, its ordinal, the id of the
   episode that records it, when it occurred, and — where the turn parked — the
   execution and step ids of the binding it parked on, so a recovered resume finds
-  its conversation, §3).
-  Both frozen pydantic models (ADR-0068), both timezone-aware at every instant
-  (ADR-0023, ADR-0030).
+  its conversation, §3) — the parked ids carried as the `ParkedBinding` value
+  below. Both frozen pydantic models (ADR-0068), both timezone-aware at every
+  instant (ADR-0023, ADR-0030).
 - **`core/protocols.py`** gains **one** Protocol, `ConversationStore`, owing:
   start a conversation, inserting only if the minted id is absent and retrying on
   collision (§1); read one by id; append a turn — allocating its ordinal, deriving
@@ -917,16 +917,31 @@ stage in `orchestration`** owns every cross-store sequence — §8's deletion an
 reclaim sweep — because `orchestration` is the one place that legitimately holds
 both handles by injection.
 
-The split is then clean, and each half is testable where it lives:
+**Two sweeps, and only one of them destroys anything.** Collapsing them is the
+error to avoid, because they answer opposite questions:
 
-- **The stage** enumerates the index, destroys the episodes through `MemoryStore`,
-  and only then asks the conversation store to drop. It *knows* no live turn
-  remains, because it just removed them; nothing has to infer it.
-- **The store** owns what it can see and what must be atomic with its own
-  mutations: the stamp, the exclusion, and a **conditional drop** that re-checks —
-  under that exclusion — that the conversation has not been reactivated since and
-  that its grace has elapsed (§8). A drop that merely trusted its caller's earlier
-  reading would be the reclaim-versus-continuation race reintroduced one layer up.
+- **Finishing a user deletion** (§8) — the conversation is stamped, the user asked
+  for it to be gone, and the stage *destroys* the episodes the index names before
+  asking the store to drop the record. Destruction here is the request being
+  carried out.
+- **Retention reclaim** (§7) — nobody asked for anything to be deleted. The stage
+  **never destroys an episode**: episodes leave on their own `expires_at`, stamped
+  at capture from the horizon in force when they were written (ADR-0007 §2's
+  read-time expiry). Reclaim only *observes* — it reads the index and asks
+  `MemoryStore` whether any turn still resolves — and drops the conversation
+  record only when none does and `last_active_at` is past the horizon.
+
+Stating it as one sequence would have made a retention sweep destructive: a live
+episode would be destroyed because its *conversation* was old, and a record stamped
+under a 30-day horizon would die under a later 7-day setting it was never written
+against. Retention belongs to the record, and a conversation is reclaimed for being
+empty rather than emptied for being reclaimable.
+
+The store's half is the same for both, and it is what must be atomic with its own
+mutations: the stamp, the exclusion, and a **conditional drop** that re-checks —
+under that exclusion — that the conversation has not been reactivated since and
+that its grace has elapsed (§8). A drop that merely trusted its caller's earlier
+reading would be the reclaim-versus-continuation race reintroduced one layer up.
 
 **`export` returns the conversations and their turn index**, as the two frozen
 types, which the caller serialises with `model_dump(mode="json")` — ADR-0007 §3's
@@ -936,6 +951,15 @@ records and `MemoryStore.export` already exports them, so repeating them here
 would put the same Tier 1 text in two exports under two retention rules. A
 conversation stamped deleted but not yet reclaimed is **not** exported — it is
 deleted as far as every read is concerned (§8).
+- **`core/types.py` also gains the two small values the surface exchanges**, named
+  here rather than left to the lane because both cross the Protocol boundary
+  (`CLAUDE.md`: public data crossing a boundary is a `core` pydantic model):
+  **`ParkedBinding`** — the `execution_id`/`step_id` pair recovery already keys on
+  (§3, ADR-0044), frozen, so the parked-turn association is one value rather than
+  two positional strings that can be swapped; and **`ConversationExport`** — the
+  conversations and their turns, each ordered as §9.2 orders its read, following
+  `PlanExport`'s precedent that a store's export gets its own `core` type
+  (ADR-0014 §5) rather than an anonymous tuple.
 - **`core/errors.py`** gains a `ConversationStoreError` in the `AssistantError`
   hierarchy, because every seam raises from it (`CONTRIBUTING.md`) and no existing
   class fits — a conversation is not memory, planning, context, or audit.
@@ -949,14 +973,14 @@ class ConversationStore(Protocol):
     async def get(self, conversation_id: str) -> Conversation | None: ...
     async def mark_active(self, conversation_id: str) -> Conversation: ...
     async def append(
-        self, conversation_id: str, *, occurred_at: datetime, parked: Binding | None = None
+        self, conversation_id: str, *, occurred_at: datetime, parked: ParkedBinding | None = None
     ) -> ConversationTurn: ...
     async def turns(
         self, conversation_id: str, *, limit: int = ..., before_ordinal: int | None = None
     ) -> list[ConversationTurn]: ...
     async def recent(self, *, limit: int = 50, offset: int = 0) -> list[Conversation]: ...
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None: ...
-    async def turn_of_binding(self, binding: Binding) -> ConversationTurn | None: ...
+    async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None: ...
     async def stamp_deleted(self, conversation_id: str) -> bool: ...
     async def drop_if_eligible(self, conversation_id: str) -> bool: ...
     async def export(self) -> ConversationExport: ...
@@ -1054,8 +1078,7 @@ different questions:
 
 **What the implementing lane owes** (stage 2; stage 1 is this ADR merging):
 
-1. The Protocol, the two types (plus the small `Binding` and `ConversationExport`
-   values the signature above names), and the error class. **Plus one edit to an
+1. The Protocol, the four types, and the error class. **Plus one edit to an
    existing Protocol's docstring**: `Planner.plan`'s `memories`, restated as §5
    rules it. No signature changes, so no triad is owed for `Planner` — but the
    conformance suite's expectations about that parameter move with the wording,
@@ -1271,10 +1294,12 @@ different questions:
   turn is ever missing one", and no two-store design can promise the stronger form.
   The observer does not exist yet, and the substrate is correct without it — the
   same shape leg 1 landed in (a correct surface over an empty band).
-- **The contract owed is one Protocol, two types, and one error class.** No
-  existing Protocol changes, which is the smallest surface this leg could have
-  needed and is only possible because ADR-0005 already typed episodic memory and
-  `Planner.plan` already takes records.
+- **The contract owed is one Protocol, four types, and one error class** — the two
+  the conversation is made of, plus the parked binding and the export value the
+  surface exchanges. No existing Protocol changes *shape*, and one changes meaning
+  (`Planner.plan`'s `memories`, §5) — which is as small as this leg could be, and
+  only that small because ADR-0005 already typed episodic memory and `Planner.plan`
+  already takes records.
 - **The episode stays source-agnostic**, and #441's leg-2 constraint is carried
   rather than declined (§3). It costs nothing here because it is the *absence* of a
   field: an episode belonging to no conversation is the default shape, so the first
