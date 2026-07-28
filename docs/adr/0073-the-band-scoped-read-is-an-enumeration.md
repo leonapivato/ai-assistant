@@ -290,14 +290,34 @@ optional: it is the whole point of the screen. Per belief, the surface conveys:
   `strength`, an episode's `participants`) are **not** carried: `content` is what
   the store itself uses to represent the record, and adding six more fields for a
   band that holds no records yet is surface without a consumer.
-- **Why it is held.** For an `ASSERTED` belief the answer is the band itself
-  plus when it was last revised: a user's assertion is its own warrant (ADR-0038
-  §1a) and there is nothing further to cite. For a `DERIVED` one it is
-  `Provenance.evidence`, the citations ADR-0072 §3 obliges it to carry — conveyed
-  as the **opaque references they are**, echoed and never interpreted by the
-  adapter. *Resolving* a citation into readable evidence is deferred (§10): it is
-  a second read per belief, against a band with no producer, and what a citation
-  that no longer resolves should render is exactly the open half of #431.
+- **Why it is held — and the answer is band-dependent, complete for one band and
+  owed for another.** For an `ASSERTED` belief the answer is the band itself plus
+  when it was last revised: a user's assertion is its own warrant (ADR-0038 §1a)
+  and there is nothing further to cite. That is a *complete* answer, and it is the
+  answer for every belief that can exist when this surface ships, since nothing
+  yet writes `OBSERVED` or `INFERRED`.
+
+  For a `DERIVED` belief the complete answer is what its citations *say*, and
+  rendering an id — `evidence: ["episode-123"]` — is not that. This ADR does not
+  pretend otherwise. It rules a **floor** now and a **gate** on the lane that
+  makes the gap real:
+
+  - **The floor**, requiring no further read: the surface conveys that the belief
+    is derived and how many citations stand behind it, and it **must not present a
+    derived belief as carrying a warrant it cannot show.** A citation the surface
+    cannot render as evidence is never rendered *as* evidence — not as a
+    reassuring id, not silently dropped.
+  - **The gate**: resolving citations into readable evidence is **due with the
+    first producer of derived beliefs, as a precondition of that producer
+    shipping** — not an open-ended deferral. Leg 3's observer may not land a
+    populated `DERIVED` band behind an inspection surface that cannot say why.
+    It is deferred *to* that lane rather than decided here because it is a second
+    store read per belief against a band with no records, and because what an
+    unresolvable citation renders is the open half of #431 — a question the
+    observer's lane will hold the evidence to answer and this one does not.
+
+  So leg 1's exit test is met by what ships (every belief asserted, every "why"
+  complete), and the day it would stop being met is the day the gate fires.
 - **When it was last revised** — `provenance.last_updated`, the transaction stamp
   (ADR-0045 §3), which is also the sort key (§2). This is what "since when have
   you believed this" means today.
@@ -558,8 +578,10 @@ half must not land without its suite.
   transaction-time axis ADR-0045 §1 deferred (§3). Also the surface for deleting a
   retired record, which §5 leaves unreachable.
 - **Resolving an evidence citation into readable evidence**, and what a citation
-  that no longer resolves renders (§4). The open half of #431, due with the first
-  producer of derived beliefs.
+  that no longer resolves renders (§4). The open half of #431. Deferred **with a
+  gate, not open-endedly**: it is a precondition of the first producer of derived
+  beliefs shipping, so the surface can say why before there is anything to say it
+  about.
 - **Whether a `MemoryStore` write ever becomes conditional on a revision** (§5),
   which would close the show-then-confirm window and several others. That is
   ADR-0046 §5's deferral and #248's question, due when a second concurrent writer
@@ -592,10 +614,15 @@ half must not land without its suite.
 - **The user gets a read that cannot disagree with retrieval.** Both honour the
   same two axes through the same store-level predicate, which is what ADR-0072 §7
   refused adapter-side filtering to protect.
-- **Leg 1's exit test becomes reachable**: list (§1, §7), see why (§4), kill (§5).
-  What it will show on the day it ships is a store of assertions, because the
-  derived band has no producer — the surface is correct and the band is empty, and
-  the observer fills it.
+- **Leg 1's exit test is met by what ships**: list (§1, §7), see why (§4), kill
+  (§5). What it shows on the day it ships is a store of assertions, because the
+  derived band has no producer — and for an assertion "why" is complete without a
+  citation to resolve (ADR-0038 §1a). The surface is correct and the band is empty.
+- **The observer inherits a precondition, not a debt** (§4). It may not populate
+  the derived band behind an inspection surface that can only show citation ids,
+  so the day the exit test would weaken is the day that gate fires. Stating it as
+  a gate rather than a deferral is the difference between a decision and a
+  postponement.
 - **Paging is honest and slightly weaker than a transaction.** A record revised
   between two pages can be skipped or repeated (§2). Accepted, named, and cheap to
   strengthen if a listing ever has enough rows for it to matter.
