@@ -245,12 +245,39 @@ user's assertion is its own warrant". A derived belief with no evidence is the
 opposite case: it cannot answer "why do you believe that?", so it fails VISION
 §Principle 1 and it fails leg 1's exit test, which is that the user can see why
 each belief is held. So **a proposal in the `DERIVED` band cites at least one
-evidence reference.** The enforcement point is the `MemoryPolicy` gate, not the
-type: propose/dispose is already where a proposal is judged against something
-other than its own shape (ADR-0005 §3), and a policy can state the rule for the
-band it is judging without constraining `EXTERNAL` or `USER_ASSERTED` records that
-legitimately cite nothing. Writing that rule belongs to the observer's lane, with
-its producer in hand.
+evidence reference**, and **an evidence reference denotes the id of a record in
+the same store** — the reading ADR-0005 §2 already implies ("references, e.g.
+episode ids") and ADR-0038 §1a relies on when it calls evidence the field that
+explains why a memory exists. Pinning the referent is what makes the rule mean
+something: an opaque string satisfies "non-empty" and explains nothing.
+
+The enforcement point is the `MemoryPolicy` gate, not the type: propose/dispose is
+already where a proposal is judged against something other than its own shape
+(ADR-0005 §3), and a policy can state the rule for the band it is judging without
+constraining `EXTERNAL` or `USER_ASSERTED` records that legitimately cite nothing.
+Writing that rule belongs to the observer's lane, with its producer in hand.
+
+**Non-emptiness is necessary and not sufficient, and this ADR does not pretend
+otherwise.** `MemoryPolicy.decide` receives the proposal and the resolved conflict
+records and no store handle, so the gate can require that a derived proposal cites
+*something* but cannot check that the citation resolves. A producer that emits a
+dangling reference passes it. Two limits follow, and both are named rather than
+closed here:
+
+- **Write-time resolvability** would have to be enforced somewhere with store
+  access — the writer, in the same call that already resolves conflicts — not at
+  the policy seam. That is a `MemoryWriter` obligation and a conformance clause,
+  which belongs to the lane that has a producer capable of breaching it.
+- **Resolvability cannot be a durable guarantee at any seam,** because evidence
+  can dangle *after* a sound write: the cited episode may be deleted by the user
+  (ADR-0007 §1) or purged past its retention deadline (ADR-0004 §6, ADR-0007 §2)
+  while the belief derived from it survives. So what happens to a derived belief
+  whose evidence has gone — retire it, keep it with its explanation degraded, or
+  cascade the delete — is a real question about the interaction of retention with
+  derived beliefs, orthogonal to the write path and filed (§10) rather than
+  guessed at here. It is the honest limit on §1's "re-derivable": a derived belief
+  is re-derivable while the observations behind it are still retained, and a
+  retention deadline can end that.
 
 **`OBSERVED` and `INFERRED` are distinguished by whether the evidence entails the
 belief.** ADR-0005 named both and never separated them, and every subsequent ADR
@@ -455,6 +482,10 @@ distinguishes from a measurement someone took.
   the rule; it would be source-conditional, since `EXTERNAL` may carry 1.0.
 - **The `MemoryPolicy` rule enforcing derived-beliefs-cite-evidence** (§3). Same
   lane, same reason.
+- **Where evidence *resolvability* is enforced, and what happens to a derived
+  belief whose evidence is later deleted or expires** (§3). The first is a
+  `MemoryWriter` obligation for the lane with a producer; the second is a
+  retention-versus-derived-belief question that no write-time check can settle.
 - **Whether §3's obligations extend to `Goal`, and what would enforce them there**
   (§3). `Goal` carries `Provenance` and reaches no propose/dispose gate, so a
   producer of inferred goals would need an enforcement seam of its own. No such
