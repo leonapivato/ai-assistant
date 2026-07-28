@@ -564,19 +564,32 @@ on a transient store error. And because capture's episode id is always one it
 minted and inserted (§3), a compensation can never destroy a record capture did not
 write.
 
-**The grace period is what makes the tombstone a fence rather than a race.** An
-intent recorded before the stamp can still be holding an unwritten episode when
-step 2 runs; sweeping only what resolves *now* and then dropping the index would
-discard the one record that could ever name it. So the tombstone outlives the
-deletion by a configured grace (the `confirmation_ttl` shape again — a
-`timedelta`), and the reclaim re-runs after it. A capture that lands its episode
-inside the grace is swept; the grace is generous relative to a turn, which is
-bounded by the caller's own per-attempt budget (ADR-0029 §4).
+**Capture verifies after its write, and that — not the clock — is the fence.** An
+append that succeeded before the stamp is not evidence that the conversation still
+exists when the episode write commits: the two are separate calls on separate
+stores, and `write_atomic` awaits an embedder before it reaches its own lock, so
+the gap is unbounded in principle. So the compensation rule is stated on both
+edges: **capture re-reads the conversation after the episode write, and deletes
+the episode it just wrote if that conversation is stamped or gone.** A refused
+append (the deletion landed first) and a completed one (the deletion landed
+mid-write) then have the same outcome, and neither depends on how long anything
+took.
 
-**What is left is one bounded window, and it is accepted rather than claimed
-away.** A capture that was paused mid-write when the deletion ran, and whose
-episode lands *after* the grace, leaves an episode the sweep no longer has a record
-to find. Three things are true about it, and all three are why this ADR accepts it:
+**The grace period widens the sweep's reach; it is not a bound and is not offered
+as one.** No elapsed time proves that a suspended write cannot still commit —
+`Engine.converse`'s timeout is explicitly "not an overall wall-clock deadline",
+only a per-attempt budget (ADR-0029 §4, ADR-0042 §3), so nothing in this system
+licenses "long enough". What the grace does is keep the tombstone — and with it
+the only record naming a pending intent — alive past the deletion, so a capture
+that commits and *then* dies is still swept when the reclaim next runs. The
+tombstone's lifetime is a configured `timedelta` (the `confirmation_ttl` shape),
+and the reclaim re-runs against it.
+
+**What is left is one window, and it is accepted rather than claimed away.** It is
+now the conjunction of two failures rather than a duration: a capture must commit
+its episode *and* fail or die before its verification, *and* the tombstone must
+already have been reclaimed when it does. Three things are true about it, and all
+three are why this ADR accepts it:
 
 - **No protocol over two stores closes it.** Every ordering, tombstone or handshake
   moves the window; only a transaction spanning both stores removes it, and there
@@ -586,9 +599,10 @@ to find. Three things are true about it, and all three are why this ADR accepts 
 - **The reachable version is already gone.** A capture and a deletion of one
   conversation cannot overlap through anything shipped: one process, one client,
   one command at a time (roadmap stance 3). Where they *can* overlap — two engines
-  over shared stores — §9's store-level exclusion serialises the append against the
-  deletion, so what remains is the narrower case of an episode write paused across
-  a whole grace period.
+  over shared stores — the append is serialised against the deletion by §9's
+  store-level exclusion, and a write that slips past it is caught by the
+  verification above. What is left needs the verifying process to die in the
+  interval between two of its own calls, on the one conversation being deleted.
 - **The residue is visible and destroyable, not invisible.** The episode is a
   record like any other: it appears in `assistant beliefs --kind episodic`, in
   `export`, and `forget` destroys it. What is lost is the automatic sweep, not the
@@ -727,6 +741,11 @@ different questions:
      `ConversationStoreError` when the retry budget is exhausted.
    - **An append refused because the conversation is gone** — the compensating
      delete runs, and it deletes the episode capture just wrote and nothing else.
+   - **A deletion that lands while the episode write is in flight**, so the append
+     succeeded and the conversation is stamped by the time the write commits — the
+     post-write verification destroys the episode (§8). This is the case elapsed
+     time cannot decide, so a test that only exercises the refused-append edge
+     leaves the fence untested.
    - **A compensating delete that itself fails** — the turn still returns its
      answer, and the failure is reported rather than swallowed (§9.6).
    - **An interruption between the two writes**, in each order, asserting the
@@ -896,11 +915,13 @@ different questions:
   content a completed deletion could no longer find, and a data right that depends
   on a best-effort cleanup completing is not a right. The residue is bounded and
   content-free: ids, ordinals and timestamps, until the sweep runs.
-- **One window is accepted rather than closed** (§8): an episode whose write was
-  paused across the whole grace period lands with nothing left to sweep it. No
-  two-store protocol closes that, only a transaction spanning both, and the
-  reachable instance of it is already excluded by the store-level serialisation and
-  by there being one client. It is stated, tested as the residue it is, and handed
+- **One window is accepted rather than closed** (§8), and it is a conjunction of
+  failures rather than a duration: a capture commits its episode, dies before the
+  verification that would have destroyed it, and the tombstone that would have
+  named it has already been reclaimed. No two-store protocol closes that, only a
+  transaction spanning both, and the reachable instance is already excluded by the
+  store-level serialisation, the post-write verification, and there being one
+  client. It is stated, tested as the residue it is, and handed
   to leg 5 with the concurrent-access posture it belongs to — the disposition
   ADR-0073 §5 took for its own window.
 - **The obligation landed on the seam rather than on the engine**, which is the
