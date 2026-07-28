@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -58,22 +58,27 @@ def _fixed_now() -> datetime:
     return _NOW
 
 
-def _provenance() -> Provenance:
-    return Provenance(source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN)
+def _provenance(
+    *, source: MemorySource = MemorySource.OBSERVED, last_updated: datetime = _WHEN
+) -> Provenance:
+    certain = source is MemorySource.USER_ASSERTED
+    return Provenance(source=source, confidence=1.0 if certain else 0.6, last_updated=last_updated)
 
 
-def _semantic(
+def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need to vary
     record_id: str,
     content: str,
     *,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
+    source: MemorySource = MemorySource.OBSERVED,
+    last_updated: datetime = _WHEN,
 ) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
         content=content,
         fact=content,
-        provenance=_provenance(),
+        provenance=_provenance(source=source, last_updated=last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
     )
@@ -778,6 +783,73 @@ async def test_migration_adds_valid_until_to_a_post_expires_at_table(
         assert {r.id for r in await store.export()} == {"retired", "live"}
     finally:
         store.close()
+
+
+async def test_list_beliefs_orders_and_pages_migration_era_rows(tmp_path: Path) -> None:
+    # Store-specific mechanics the shared suite cannot reach: rows written before
+    # the lifecycle columns existed. ``list_beliefs`` pre-filters expiry and
+    # ``valid_until`` from those columns, so a migrated row is only ordered and
+    # paged correctly if the rebuild backfilled them — and it sorts on
+    # ``last_updated``, which lives in the JSON blob the rebuild copies verbatim.
+    db = tmp_path / "legacy.db"
+    _write_legacy_db(
+        db,
+        [
+            _semantic("newest", "legacy c", last_updated=_WHEN + timedelta(hours=2)),
+            _semantic("middle", "legacy b", last_updated=_WHEN + timedelta(hours=1)),
+            _semantic("oldest", "legacy a", last_updated=_WHEN),
+            _semantic("gone", "legacy expired", expires_at=_WHEN, last_updated=_NOW),
+            _semantic(
+                "retired",
+                "legacy retired",
+                validity=Validity(valid_until=_WHEN),
+                last_updated=_NOW,
+            ),
+        ],
+    )
+
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8), now=_fixed_now)
+    try:
+        # The two unreadable rows carry the *newest* stamps, so they sort ahead of
+        # the cut: a page of 2 is short unless both axes are applied before it.
+        assert [r.id for r in await store.list_beliefs(limit=2)] == ["newest", "middle"]
+        assert [r.id for r in await store.list_beliefs(limit=2, offset=2)] == ["oldest"]
+        assert {r.id for r in await store.export()} == {"newest", "middle", "oldest", "retired"}
+    finally:
+        store.close()
+
+
+async def test_list_beliefs_orders_instants_of_differing_precision_chronologically(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    # The reason this store does not sort in SQL. ``last_updated`` is stored only
+    # as ISO text inside the JSON blob, and pydantic emits "...:00Z" for a whole
+    # second but "...:00.000001Z" otherwise — and '.' < 'Z', so a text ORDER BY
+    # (or a json_extract one) puts the *later* instant last. Chronologically the
+    # microsecond one is newer and must lead.
+    store = make_store()
+    whole = datetime(2026, 3, 1, tzinfo=UTC)
+    await store.add(_semantic("whole", "a", last_updated=whole))
+    await store.add(_semantic("micro", "b", last_updated=whole + timedelta(microseconds=1)))
+
+    assert [r.id for r in await store.list_beliefs()] == ["micro", "whole"]
+
+
+async def test_list_beliefs_kind_filter_reaches_the_sql_pre_filter(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    # The kind filter is the one predicate this read binds into the SQL, as an
+    # ``IN`` list whose placeholder count varies with the filter. Two kinds at
+    # once is what a single-placeholder mistake would break.
+    store = make_store()
+    await store.add(_semantic("s", "a fact"))
+    await store.add(_preference("p", "a preference"))
+
+    both = await store.list_beliefs(kinds=[MemoryKind.SEMANTIC, MemoryKind.PREFERENCE])
+    one = await store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
+
+    assert {r.id for r in both} == {"s", "p"}
+    assert [r.id for r in one] == ["p"]
 
 
 async def _write_real_schema_db(

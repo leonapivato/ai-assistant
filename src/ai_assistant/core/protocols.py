@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionPlan,
         ActionRequest,
+        BeliefBand,
         CurrentContext,
         Embedding,
         ExecutionState,
@@ -253,9 +254,17 @@ class MemoryStore(Protocol):
     belief's window and inserting its replacement are two writes that must land
     together, never leaving the first without the second (ADR-0045 §8).
 
+    Two reads answer two different questions and must not disagree. :meth:`search`
+    is *retrieval*: it takes a query and ranks by relevance. :meth:`list_beliefs`
+    is *inspection*: no query, a specified total order, a page, and a filter on the
+    belief band (ADR-0073 §1). Both honour the same two read-time axes through the
+    same store-level predicate, so "what do you believe about me" and "what do you
+    retrieve" can never answer differently about a record's liveness.
+
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060). How :meth:`add` and :meth:`write_atomic` observe the records they
-    are handed is governed by this module's input-observation clause (ADR-0065).
+    are handed, and how :meth:`list_beliefs` observes its ``bands`` and ``kinds``
+    filters, is governed by this module's input-observation clause (ADR-0065).
     """
 
     async def add(self, record: MemoryRecord) -> str:
@@ -318,6 +327,111 @@ class MemoryStore(Protocol):
             query: The search text.
             limit: Maximum number of records to return.
             kinds: If given, restrict results to these memory kinds.
+        """
+        ...
+
+    async def list_beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        """Enumerate the beliefs held right now, newest revision first (ADR-0073 §1).
+
+        The band-scoped read ADR-0072 §7 ruled owed: "show me what you believe
+        about me". It carries **no query text** and is not a retrieval — nothing is
+        ranked and no relevance is computed — so it is an enumeration with a stable
+        order and a page rather than a filter on :meth:`search`.
+
+        **Both read-time axes are honoured, exactly as ``get``/``search`` honour
+        them.** An expired record is never returned, and neither is a record not
+        live at now — a closed ``valid_until`` or a not-yet-open ``valid_from``,
+        both ends enforced (ADR-0007, ADR-0045 §6). Inspection reads **live
+        beliefs only**: a retired record is not a belief the assistant holds but a
+        record of one it used to, and it stays reachable through ``export`` alone
+        (ADR-0073 §3). There is deliberately no ``include_retired`` axis.
+
+        **The order is total, stable and specified: ``provenance.last_updated``
+        descending, ties broken by ``id`` ascending.** Some total order has to be
+        named or two stores answer the same page differently while each believes it
+        conforms — the argument ``AuditTrail.recent`` already makes, applied to a
+        second store. Newest-revision-first is the right default for inspection,
+        and supersession moves ``last_updated``, so a corrected topic surfaces
+        where the user will look for it.
+
+        **A page is the slice ``[offset : offset + limit]`` of the ordered,
+        filtered sequence.** Take every record passing **both** filters and **both**
+        read-time axes, order it by the rule above, skip ``offset`` of them, and
+        return the next ``limit``. It follows that **a page is full whenever enough
+        matching records exist**: exactly ``limit`` records come back when the
+        filtered set has at least ``offset + limit`` members. So every predicate
+        this read applies belongs *before* the cut — the two filters and both
+        read-time axes alike. That binds the window more strictly than ``search``
+        is bound: ADR-0045 §6 permits filtering ``valid_from`` after the ranking
+        cut there, because dropping a row costs a method with no offset a result it
+        never owed, whereas here it drops a row the caller can reach by no later
+        page at all.
+
+        Offset paging over a mutating store may skip or repeat a record — a
+        revision moves one in the order and a deletion shifts every later one. That
+        is accepted and named rather than closed: a listing a user re-runs is not a
+        transaction (ADR-0073 §2), and no total match count is offered ("is there
+        more" is answered by asking for the next page).
+
+        ``score`` is ``None`` on every returned record — **cleared, not merely
+        unset**. No relevance was computed, and a *stored* record can already carry
+        one, since ``add`` accepts any :class:`~ai_assistant.core.types.MemoryRecord`
+        including one ``search`` returned with its score populated.
+
+        Records are detached snapshots, like every other ``MemoryStore`` read.
+
+        Args:
+            bands: If given, restrict results to these belief bands. ``None`` means
+                every band; an **empty sequence selects nothing**. Keyed on
+                :class:`~ai_assistant.core.types.BeliefBand` and never on
+                ``MemorySource``: the band is the vocabulary ADR-0072 §2 ratified
+                and the unit the user reads, and a source filter would push
+                ``band_of`` into every caller and let one ask for half a band —
+                ``OBSERVED`` without ``INFERRED`` — which ADR-0072 §4 keeps
+                indistinguishable to the supersession law.
+            kinds: If given, restrict results to these memory kinds. The same
+                convention, stated rather than inferred from ``search`` so no
+                implementation reads ``kinds=()`` as "no filter" — the opposite
+                outcome, every record instead of none. The two filters compose by
+                **conjunction**: a record is listed when its band is selected *and*
+                its kind is.
+            limit: Maximum number of records in the page. ``limit=0`` returns an
+                empty page: asking for nothing is a question with an answer.
+                Bounded by default (50, matching ``AuditTrail.recent``), because an
+                unbounded read of a Tier 1 store by default is a shape worth not
+                offering (ADR-0021 §4).
+            offset: How many records of the ordered, filtered sequence to skip
+                before the page begins.
+
+        Returns:
+            The page: matching records in the specified order, each a detached
+            snapshot with ``score`` cleared to ``None``.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` falls outside ``0 <= value <
+                2**63`` — non-negative, and representable as a signed 64-bit
+                integer. Both ends are refused rather than clamped because both are
+                places two backends silently disagree. *Negative* is
+                ``AuditTrail.recent``'s argument with more force: this is the first
+                ``MemoryStore`` read that reaches a backend as a literal
+                ``LIMIT ?``/``OFFSET ?``, and SQLite reads ``LIMIT -1`` as *no limit
+                at all*, turning the bounded read into the unbounded one it exists
+                to avoid. *Too large* is the same failure from the other side:
+                Python's ``int`` is unbounded and SQLite's parameter binding is not,
+                so an over-wide value raises ``OverflowError`` out of the driver
+                while an in-memory store answers with an empty page. This
+                deliberately differs from ``search``, whose non-positive ``limit``
+                matches nothing: that limit is a ranking cut applied after a KNN and
+                can neither invert into unboundedness nor reach a bind parameter.
+            MemoryStoreError: If the store cannot be read, or a stored record is
+                corrupt.
         """
         ...
 

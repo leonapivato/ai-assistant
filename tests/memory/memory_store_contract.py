@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     StoreFactory = Callable[[Callable[[], datetime]], MemoryStore]
 from ai_assistant.core.types import (
+    BeliefBand,
     MemoryKind,
     MemoryRecord,
     MemorySource,
@@ -56,6 +57,14 @@ _FAR_FUTURE = datetime(2999, 1, 1, tzinfo=UTC)
 # fixture below exposes it so window *boundary* cases can be built relative to it.
 _STORE_NOW = datetime(2026, 6, 1, tzinfo=UTC)
 _ONE_HOUR = timedelta(hours=1)
+_ONE_MINUTE = timedelta(minutes=1)
+#: The transaction stamp every fixture record carries unless a case varies it —
+#: comfortably before ``_STORE_NOW``, so nothing is accidentally not-yet-live.
+_REVISED = datetime(2026, 1, 1, tzinfo=UTC)
+#: ``list_beliefs``'s default page size (ADR-0073 §2), and the number of extra
+#: records the default-limit case seeds beyond it so the default is really tested.
+_DEFAULT_PAGE = 50
+_MORE_THAN_A_PAGE = 55
 
 #: What a failure of the cancellation case below means, in one place: every
 #: assertion in it is the same invariant seen from a different side.
@@ -65,34 +74,52 @@ _RELEASED_EARLY = (
 )
 
 
-def _provenance() -> Provenance:
-    return Provenance(
-        source=MemorySource.OBSERVED,
-        confidence=0.6,
-        last_updated=datetime(2026, 1, 1, tzinfo=UTC),
-    )
+def _provenance(
+    *,
+    source: MemorySource = MemorySource.OBSERVED,
+    last_updated: datetime = _REVISED,
+) -> Provenance:
+    """Provenance for a fixture record, in whichever band ``source`` places it.
+
+    Confidence follows the source rather than being a parameter: ``USER_ASSERTED``
+    provenance is unconstructable below 1.0 (``_user_asserted_is_certain``), and
+    every other source in these cases wants a sub-1.0 figure.
+    """
+    certain = source is MemorySource.USER_ASSERTED
+    return Provenance(source=source, confidence=1.0 if certain else 0.6, last_updated=last_updated)
 
 
-def _semantic(
+def _semantic(  # noqa: PLR0913 — one keyword per record axis a case may need to vary
     record_id: str,
     content: str,
     *,
     expires_at: datetime | None = None,
     validity: Validity | None = None,
+    source: MemorySource = MemorySource.OBSERVED,
+    last_updated: datetime = _REVISED,
 ) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
         content=content,
         fact=content,
-        provenance=_provenance(),
+        provenance=_provenance(source=source, last_updated=last_updated),
         expires_at=expires_at,
         validity=validity or Validity(),
     )
 
 
-def _preference(record_id: str, content: str) -> MemoryRecord:
+def _preference(
+    record_id: str,
+    content: str,
+    *,
+    source: MemorySource = MemorySource.OBSERVED,
+    last_updated: datetime = _REVISED,
+) -> MemoryRecord:
     return PreferenceMemory(
-        id=record_id, content=content, preference=content, provenance=_provenance()
+        id=record_id,
+        content=content,
+        preference=content,
+        provenance=_provenance(source=source, last_updated=last_updated),
     )
 
 
@@ -639,6 +666,297 @@ class MemoryStoreContract:
         results = await store.search("coffee")
 
         assert {r.id for r in results} == {"c0", "c1", "c2"}
+
+    # --- band-scoped enumeration: list_beliefs (ADR-0073 §2) ------------------
+    # One clause per obligation in ADR-0073 §2, as §8 requires. Two of them are
+    # about the *arguments doing anything* and a suite of small explicit values
+    # never reaches either: the offset case asserts returned **ids** (an
+    # implementation ignoring offset serves a correct first page forever and
+    # passes a length-only assertion), and the default-limit case seeds more than
+    # a page (an implementation defaulting to 100, or to unbounded, satisfies
+    # every explicit-limit case while breaking the bounded default).
+    #
+    # There is deliberately **no input-observation clause** for this read.
+    # ``store_suspended_at_its_first_await`` suspends the next ``add`` or
+    # ``write_atomic`` and nothing else, and widening it is #436's business — a gap
+    # ``search`` already has in shipped code, so it is closed for both reads at
+    # once or not at all (ADR-0073 §8). The stimulus is also not available in a
+    # weaker form: this read derives one result from one filter, so an
+    # implementation that re-read ``bands`` after suspending would return the
+    # *later* version's answer whole — coherent, and therefore not a tear ADR-0065
+    # can see. What the ADR requires is the implementation shape (materialise both
+    # filters before the first await), which each implementation documents.
+    # Likewise no cancellation clause: ``_CANCELLATION_OPS`` is write-scoped and
+    # the locked read paths are tracked separately (#397).
+
+    async def test_list_beliefs_returns_live_beliefs(self, store: MemoryStore) -> None:
+        # The baseline: an enumeration with no query, returning what is held.
+        await store.add(_semantic("s", "a stored fact"))
+        await store.add(_preference("p", "a stored preference"))
+
+        listed = await store.list_beliefs()
+
+        assert {record.id for record in listed} == {"s", "p"}
+        assert {record.kind for record in listed} == {"semantic", "preference"}
+
+    async def test_list_beliefs_honours_both_read_time_axes_on_both_ends(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0073 §2/§3: inspection reads live beliefs only, through the same
+        # predicate get/search use — expired, retired, and not-yet-open alike are
+        # out, so this read and retrieval cannot disagree.
+        await store.add(_semantic("live", "held"))
+        await store.add(_semantic("expired", "forgotten", expires_at=_LONG_AGO))
+        await store.add(_semantic("retired", "was held", validity=Validity(valid_until=_LONG_AGO)))
+        await store.add(_semantic("future", "not yet", validity=Validity(valid_from=_FAR_FUTURE)))
+
+        assert [record.id for record in await store.list_beliefs()] == ["live"]
+        # ...and the three hidden ones are still *retained*: this is a read filter,
+        # never a deletion (the retired one is export's business, ADR-0073 §3).
+        assert {record.id for record in await store.export()} >= {"retired", "future"}
+
+    async def test_list_beliefs_window_boundaries_are_half_open(
+        self, store: MemoryStore, now: datetime
+    ) -> None:
+        # [from, until), the same boundary get/search are held to: at valid_until
+        # the belief is already retired; at valid_from it is already live.
+        await store.add(_semantic("at_until", "x", validity=Validity(valid_until=now)))
+        await store.add(_semantic("at_from", "y", validity=Validity(valid_from=now)))
+        await store.add(
+            _semantic("before_until", "z", validity=Validity(valid_until=now + _ONE_HOUR))
+        )
+
+        assert {record.id for record in await store.list_beliefs()} == {"at_from", "before_until"}
+
+    async def test_list_beliefs_orders_by_last_updated_descending_then_id_ascending(
+        self, store: MemoryStore
+    ) -> None:
+        # ADR-0073 §2's total order. Both halves are needed: without the time key
+        # the newest revision does not lead, and without the id tie-break two
+        # stores answer the same page differently while each believes it conforms.
+        await store.add(_semantic("b", "tied, second by id", last_updated=_REVISED))
+        await store.add(_semantic("a", "tied, first by id", last_updated=_REVISED))
+        await store.add(_semantic("c", "newest revision", last_updated=_REVISED + _ONE_HOUR))
+
+        assert [record.id for record in await store.list_beliefs()] == ["c", "a", "b"]
+
+    async def test_list_beliefs_offset_selects_a_later_slice_of_the_same_order(
+        self, store: MemoryStore
+    ) -> None:
+        # Asserting *ids*, not the page's length: an implementation that ignores
+        # offset returns a full, correctly-ordered first page forever and passes a
+        # length-only assertion for good, leaving nothing past it reachable.
+        for i in range(5):
+            await store.add(_semantic(f"r{i}", f"note {i}", last_updated=_REVISED - i * _ONE_HOUR))
+
+        assert [r.id for r in await store.list_beliefs(limit=2)] == ["r0", "r1"]
+        assert [r.id for r in await store.list_beliefs(limit=2, offset=2)] == ["r2", "r3"]
+        assert [r.id for r in await store.list_beliefs(limit=2, offset=4)] == ["r4"]
+        assert await store.list_beliefs(limit=2, offset=5) == []  # past the end
+
+    async def test_list_beliefs_default_limit_is_a_bounded_page(self, store: MemoryStore) -> None:
+        # Exercised with more than a page of matching records, deliberately: an
+        # implementation defaulting to 100, or to unbounded, satisfies every
+        # explicit-limit case on this list while breaking the guarantee that keeps
+        # an unbounded read of a Tier 1 store from being what saying nothing gets.
+        for i in range(_MORE_THAN_A_PAGE):
+            await store.add(
+                _semantic(f"r{i:03d}", f"note {i}", last_updated=_REVISED - i * _ONE_MINUTE)
+            )
+
+        listed = await store.list_beliefs()
+
+        assert [r.id for r in listed] == [f"r{i:03d}" for i in range(_DEFAULT_PAGE)]
+
+    async def test_list_beliefs_limit_zero_returns_an_empty_page(self, store: MemoryStore) -> None:
+        # Asking for nothing is a question with an answer, not an error.
+        await store.add(_semantic("1", "a stored fact"))
+
+        assert await store.list_beliefs(limit=0) == []
+
+    @pytest.mark.parametrize(
+        ("limit", "offset", "rejected"),
+        [
+            pytest.param(-1, 0, "limit", id="negative-limit"),
+            pytest.param(_DEFAULT_PAGE, -1, "offset", id="negative-offset"),
+            pytest.param(2**63, 0, "limit", id="over-wide-limit"),
+            pytest.param(_DEFAULT_PAGE, 2**63, "offset", id="over-wide-offset"),
+        ],
+    )
+    async def test_list_beliefs_refuses_paging_outside_the_signed_64_bit_range(
+        self, store: MemoryStore, limit: int, offset: int, rejected: str
+    ) -> None:
+        # Both ends, because both are places two backends silently disagree:
+        # SQLite reads LIMIT -1 as *no limit at all*, and a value past the bind
+        # range raises OverflowError out of the driver where an in-memory store
+        # answers with an empty page (ADR-0073 §2). Refused, never clamped.
+        #
+        # The message must name the offending parameter. That is what separates
+        # "the store refused this argument" from any other ValueError raised
+        # somewhere inside the read — a decode failure would otherwise satisfy an
+        # unqualified ``pytest.raises`` and certify a store that never checked.
+        await store.add(_semantic("1", "a stored fact"))
+
+        with pytest.raises(ValueError, match=rejected):
+            await store.list_beliefs(limit=limit, offset=offset)
+
+    async def test_list_beliefs_filters_by_band(self, store: MemoryStore) -> None:
+        # None is every band; an empty sequence selects nothing; a band selects the
+        # whole band, both sources of DERIVED together (ADR-0072 §4 keeps them
+        # indistinguishable, which is why the filter is by band and not by source).
+        await store.add(_semantic("asserted", "told", source=MemorySource.USER_ASSERTED))
+        await store.add(_semantic("observed", "watched", source=MemorySource.OBSERVED))
+        await store.add(_semantic("inferred", "reasoned", source=MemorySource.INFERRED))
+        await store.add(_semantic("external", "reported", source=MemorySource.EXTERNAL))
+        every = {"asserted", "observed", "inferred", "external"}
+
+        assert {r.id for r in await store.list_beliefs()} == every
+        assert {r.id for r in await store.list_beliefs(bands=None)} == every
+        assert await store.list_beliefs(bands=[]) == []
+        derived = await store.list_beliefs(bands=[BeliefBand.DERIVED])
+        assert {r.id for r in derived} == {"observed", "inferred"}
+        pair = await store.list_beliefs(bands=[BeliefBand.ASSERTED, BeliefBand.ATTESTED])
+        assert {r.id for r in pair} == {"asserted", "external"}
+
+    async def test_list_beliefs_filters_by_kind(self, store: MemoryStore) -> None:
+        # The same convention, stated rather than inferred from ``search``: an
+        # empty ``kinds`` selects nothing, never "no filter" (ADR-0073 §1).
+        await store.add(_semantic("s", "a fact"))
+        await store.add(_preference("p", "a preference"))
+
+        assert {r.id for r in await store.list_beliefs()} == {"s", "p"}
+        assert {r.id for r in await store.list_beliefs(kinds=None)} == {"s", "p"}
+        assert await store.list_beliefs(kinds=[]) == []
+        listed = await store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
+        assert [r.id for r in listed] == ["p"]
+
+    async def test_list_beliefs_composes_the_two_filters_by_conjunction(
+        self, store: MemoryStore
+    ) -> None:
+        # A record is listed when its band is selected *and* its kind is — the full
+        # 2x2, so a store that unions the filters fails on three of the four.
+        await store.add(_semantic("as", "fact told", source=MemorySource.USER_ASSERTED))
+        await store.add(_preference("ap", "pref told", source=MemorySource.USER_ASSERTED))
+        await store.add(_semantic("ds", "fact inferred", source=MemorySource.INFERRED))
+        await store.add(_preference("dp", "pref inferred", source=MemorySource.INFERRED))
+
+        listed = await store.list_beliefs(
+            bands=[BeliefBand.ASSERTED], kinds=[MemoryKind.PREFERENCE]
+        )
+
+        assert [r.id for r in listed] == ["ap"]
+
+    async def test_list_beliefs_page_is_full_under_the_filters(self, store: MemoryStore) -> None:
+        # Filtering must happen before the cut: an implementation that takes the
+        # first ``limit`` records and *then* drops the non-matching ones returns a
+        # short page while matches it never looked at remain.
+        for i in range(6):
+            stamp = _REVISED - i * _ONE_HOUR
+            if i % 2 == 0:  # the non-matching kind sorts ahead of each match
+                await store.add(_preference(f"r{i}", f"note {i}", last_updated=stamp))
+            else:
+                await store.add(_semantic(f"r{i}", f"note {i}", last_updated=stamp))
+
+        page = await store.list_beliefs(kinds=[MemoryKind.SEMANTIC], limit=2)
+
+        assert [r.id for r in page] == ["r1", "r3"]
+
+    async def test_list_beliefs_page_is_full_under_the_window_and_expiry_axes(
+        self, store: MemoryStore
+    ) -> None:
+        # The case a suite naturally omits, and the one that separates this read
+        # from ``search``: the records sorting *ahead* of the cut are unreadable
+        # (expired, retired, not yet open), so an implementation that mirrors
+        # search's ratified post-filter (ADR-0045 §6) applies them after LIMIT and
+        # returns a short page — losing rows no later page returns.
+        newest = _REVISED
+        await store.add(_semantic("x0", "expired", last_updated=newest, expires_at=_LONG_AGO))
+        await store.add(
+            _semantic(
+                "x1",
+                "retired",
+                last_updated=newest - _ONE_HOUR,
+                validity=Validity(valid_until=_LONG_AGO),
+            )
+        )
+        await store.add(
+            _semantic(
+                "x2",
+                "not yet",
+                last_updated=newest - 2 * _ONE_HOUR,
+                validity=Validity(valid_from=_FAR_FUTURE),
+            )
+        )
+        for i in range(3):
+            await store.add(
+                _semantic(f"r{i}", f"live {i}", last_updated=newest - (3 + i) * _ONE_HOUR)
+            )
+
+        page = await store.list_beliefs(limit=2)
+
+        assert [r.id for r in page] == ["r0", "r1"]
+
+    async def test_list_beliefs_clears_a_score_the_stored_record_carries(
+        self, store: MemoryStore
+    ) -> None:
+        # Seeded non-None on purpose: ``add`` takes any MemoryRecord, including one
+        # ``search`` handed back with its relevance populated, so an enumerator
+        # returning stored copies unchanged would surface a figure from some other
+        # query. Asserting None over default-constructed records tests nothing.
+        await store.add(_semantic("scored", "coffee"))
+        ranked = [r for r in await store.search("coffee") if r.id == "scored"]
+        assert ranked
+        assert ranked[0].score is not None  # the store populated one
+        await store.add(ranked[0])  # re-add the *scored* copy
+
+        listed = await store.list_beliefs()
+
+        assert [r.id for r in listed] == ["scored"]
+        assert listed[0].score is None
+
+    async def test_list_beliefs_judges_every_record_against_one_clock_reading(
+        self, store_factory: StoreFactory
+    ) -> None:
+        # One page, one "now" — the clause ``search`` already carries, which
+        # matters more here: rows dropped mid-scan are also a *paging* fault, since
+        # they shift every subsequent offset.
+        step = _ONE_HOUR
+        state = {"now": _STORE_NOW}
+
+        def advancing() -> datetime:
+            reading = state["now"]
+            state["now"] = reading + step
+            return reading
+
+        store = store_factory(advancing)
+        # All fall due after the first reading but before any later one, so a
+        # per-record advancing clock would retire the later-iterated ones.
+        deadline = _STORE_NOW + step // 2
+        for i in range(3):
+            await store.add(
+                _semantic(f"c{i}", f"note {i}", validity=Validity(valid_until=deadline))
+            )
+
+        listed = await store.list_beliefs()
+
+        assert {record.id for record in listed} == {"c0", "c1", "c2"}
+
+    async def test_list_beliefs_returns_detached_snapshots(self, store: MemoryStore) -> None:
+        # Like every other MemoryStore read: what comes back cannot reach stored
+        # state. Under ADR-0068 the record graph is frozen, so the mutations that
+        # would reach it are unrepresentable rather than merely isolated.
+        await store.add(_semantic("iso", "coffee", validity=Validity(valid_until=_FAR_FUTURE)))
+
+        listed = await store.list_beliefs()
+        assert [record.id for record in listed] == ["iso"]
+        with pytest.raises(ValidationError):
+            listed[0].validity.valid_until = _LONG_AGO  # would retire the stored belief
+        with pytest.raises(ValidationError):
+            listed[0].provenance.confidence = 0.1  # nested model is frozen too
+
+        again = await store.list_beliefs()
+        assert [record.id for record in again] == ["iso"]
+        assert again[0].provenance.confidence == 0.6
 
     # --- Atomic multi-write obligations (ADR-0046) ----------------------------
 
