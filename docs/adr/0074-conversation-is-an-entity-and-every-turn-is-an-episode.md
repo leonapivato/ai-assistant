@@ -188,9 +188,19 @@ below.
 
 **`last_active_at` and `last_turn_at` are two different facts and are two
 fields.** Activity is "someone was here", set when the conversation is created and
-again whenever a turn begins; `last_turn_at` is "a turn landed", set only by
-capture and unset until one does (§9). Writing an attempted continuation into
-`last_turn_at` would claim a turn that may never complete, and the distinction is
+again whenever a turn begins. `last_turn_at` is "a turn was **recorded**" — set by
+the append that writes the turn into the index, and unset until one is (§9).
+
+**It is recorded-time, not landed-time, and that is a decision rather than an
+approximation.** A turn's existence in this design *is* its index entry: the
+episode is its content, and content can be missing from a turn that certainly
+happened — deleted by the user (§8), expired (§7), or never written because the
+memory store failed (§3). A field meaning "the episode is on disk" would need an
+operation to set it after the second write, would be false for exactly the turns
+whose content was later removed, and would make the record disagree with the read
+rule that already treats an unresolvable turn as a gap (§5). Writing an *attempted
+continuation* into it would be the different and worse error — claiming a turn that
+was never even recorded — which is what `last_active_at` is for. The distinction is
 not cosmetic: `last_turn_at` unset is what tells the empty conversation from the
 one whose first turn landed instantly, which §7's reclaim and any future idleness
 reading both depend on. The mark is a conversation-store mutation like any other,
@@ -243,7 +253,7 @@ because they behave differently on the way there:
 
 ### 3. Every turn is an episode: capture writes one `EpisodicMemory` per outcome
 
-**Every turn the engine hands back is durably recorded as exactly one
+**Every turn the engine hands back is durably recorded, as exactly one
 `EpisodicMemory` in the one `MemoryStore`** (ADR-0072 §1). The turn *is* the
 episode; episodes are not distilled from some other, more primitive turn entity.
 Three reasons, in the order they bind:
@@ -301,6 +311,18 @@ what the user saw, and a park *is* an answer. The alternative — hold the episo
 open until the park resolves — makes the record of an exchange depend on a
 confirmation the user may never answer (ADR-0059's lifetime deadline), so an
 abandoned park would erase the question the user actually asked.
+
+**The guarantee is exact about which half is durable.** A turn is recorded when its
+index entry lands, and its episode is written immediately after (§8's intent log).
+The two are separate stores, so a memory-store failure — an embedder fault, a
+locked database — leaves a turn recorded with **no** episode: the transcript shows
+a gap at that ordinal, the observer has nothing to cite for it, and the failure is
+**reported on the outcome** (§9) rather than swallowed. That is the honest form of
+"every turn is captured", and it is preferred over the two alternatives. Failing
+the turn would throw away an answer the user already has because the record of it
+could not be written. Retrying would record the exchange twice (above). A missing
+episode is the one outcome that loses nothing but the record, says so, and is
+indistinguishable — to every reader — from the turn the user deleted themselves.
 
 **A turn that raises before producing an outcome is not captured**, and the gap is
 deliberate. There is no exchange to record: the adapter rendered an error, the
@@ -1076,6 +1098,12 @@ different questions:
   made stingy. The cost is real and named, in two stages: a conversation whose
   turns have passed the horizon continues with no history, and one that has been
   idle for the whole horizon is reclaimed and its id stops resolving (§2, §7).
+- **"Every turn is captured" is a guarantee about the turn, not about its
+  content.** The index entry is durable; the episode is written right after and can
+  fail, leaving a gap the outcome reports (§3). Stating it that way is what keeps
+  the ADR from promising an atomicity two stores cannot give, and it costs nothing
+  a reader did not already have to handle — a gap is what a deleted or expired turn
+  looks like too.
 - **A resumed conversation can show gaps**, from a deleted turn or an expired one
   (§5, §7, §8). That is the deletion right working, and it is the one behaviour
   a "restore my history" instinct would break.
