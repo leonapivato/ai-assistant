@@ -191,6 +191,43 @@ async def test_what_was_written_survives_a_reopen(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+async def test_a_crashed_deletion_is_rediscoverable_across_a_reopen(tmp_path: Path) -> None:
+    """ADR-0076 §4.4, in the case the gap was actually found in: "at engine start".
+
+    §8's reclaim is specified to run at engine start, and #447 was the discovery
+    that nothing could find its work there. The shared suite asserts the
+    enumeration within one process; only the persistent store can assert it across
+    the process boundary the sweep exists for — a stamp that landed, a purge and a
+    drop that never did, and a fresh store over the same file.
+    """
+    path = tmp_path / "conversations.db"
+    clock = MovableClock()
+    grace = timedelta(hours=1)
+
+    store = SqliteConversationStore(path=path, now=clock, tombstone_grace=grace)
+    try:
+        conversation = await store.start()
+        turn = await store.append(conversation.id, occurred_at=clock())
+        assert await store.stamp_deleted(conversation.id) is True
+        # ...and here the process dies: no episode purged, no record dropped.
+    finally:
+        store.close()
+
+    reopened = SqliteConversationStore(path=path, now=clock, tombstone_grace=grace)
+    try:
+        assert await reopened.stamped_conversation_ids() == [conversation.id]
+        assert await reopened.episodes_to_purge(conversation.id) == [turn.episode_id]
+        assert await reopened.drop_if_eligible(conversation.id) is False, "inside the grace"
+
+        clock.advance(grace)
+
+        assert await reopened.drop_if_eligible(conversation.id) is True
+        assert await reopened.stamped_conversation_ids() == []
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize(
     ("execution_id", "step_id"),
     [(None, "step-1"), ("exec-1", None)],

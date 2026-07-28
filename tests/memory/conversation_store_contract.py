@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import FIRST_TURN_ORDINAL, ParkedBinding
 
 if TYPE_CHECKING:
@@ -177,6 +177,39 @@ async def _walk_episodes(store: ConversationStore, conversation_id: str, *, page
             return seen
         seen.extend(batch)
         cursor = batch[-1]
+
+
+async def _walk_stamped(store: ConversationStore, *, page: int) -> list[str]:
+    """Walk every stamped conversation id forwards through ``after_id``."""
+    seen: list[str] = []
+    cursor: str | None = None
+    while True:
+        batch = await store.stamped_conversation_ids(limit=page, after_id=cursor)
+        if not batch:
+            return seen
+        seen.extend(batch)
+        cursor = batch[-1]
+
+
+async def _walk_stamped_from(
+    store: ConversationStore, *, cursor: str | None, page: int
+) -> list[str]:
+    """Continue a stamped walk from ``cursor``, which may name no row at all."""
+    seen: list[str] = []
+    while True:
+        batch = await store.stamped_conversation_ids(limit=page, after_id=cursor)
+        if not batch:
+            return seen
+        seen.extend(batch)
+        cursor = batch[-1]
+
+
+async def _stamp_many(store: ConversationStore, count: int) -> list[str]:
+    """Start ``count`` conversations and stamp every one of them deleted."""
+    started = [await store.start() for _ in range(count)]
+    for conversation in started:
+        assert await store.stamp_deleted(conversation.id) is True
+    return sorted(one.id for one in started)
 
 
 class ConversationStoreContract:
@@ -772,6 +805,247 @@ class ConversationStoreContract:
                 f"{_INTERLEAVED}: the append succeeded, so the index the sweep reads "
                 f"must name its episode"
             )
+
+    # --- enumerating the tombstones (ADR-0076) -------------------------------
+
+    async def test_a_stamped_conversation_is_enumerable_and_an_unstamped_one_is_not(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0076 §4.1: the pair, so returning everything passes neither half.
+
+        This is the read the whole ADR exists for. Without it a process that died
+        between §8's stamp and its drop left a tombstone no later run could
+        rediscover, so the episodes its index named were never destroyed.
+        """
+        stamped, _ = await _seed(store, 1)
+        live, _ = await _seed(store, 1)
+        await store.stamp_deleted(stamped)
+
+        assert await store.stamped_conversation_ids() == [stamped]
+        assert live not in await store.stamped_conversation_ids()
+
+    async def test_a_dropped_conversation_is_not_enumerated(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.2: the trivially-true half, and what makes the walk terminate."""
+        clock = MovableClock()
+        store = _build(factory, now=clock)
+        conversation_id, _ = await _seed(store, 1)
+        await store.stamp_deleted(conversation_id)
+        clock.advance(_GRACE)
+
+        assert await store.drop_if_eligible(conversation_id) is True
+
+        assert await store.stamped_conversation_ids() == []
+
+    async def test_grace_is_not_a_filter_on_the_enumeration(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.3: a conversation stamped a moment ago is still enumerated.
+
+        §8's step 2 destroys a stamped conversation's episodes **whether or not**
+        its grace has elapsed; only step 3 is conditional, and step 3 is
+        ``drop_if_eligible``, which judges for itself under the exclusion. An
+        implementation that pre-filtered on the grace here would hide exactly the
+        tombstones whose episodes still have to be destroyed.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock, tombstone_grace=_GRACE)
+        conversation_id, _ = await _seed(store, 1)
+        await store.stamp_deleted(conversation_id)
+
+        assert await store.stamped_conversation_ids() == [conversation_id]
+        assert await store.drop_if_eligible(conversation_id) is False, "still inside the grace"
+
+    async def test_a_crashed_deletion_is_rediscoverable_and_finishable(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.4: the clause this ADR exists for.
+
+        The interrupted §8 sequence: stamp, then *nothing* — no purge, no drop, as
+        a process death between steps leaves it. A later run must be able to find
+        the tombstone, still read the episode ids it names, and finish the deletion
+        once the grace has elapsed.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock, tombstone_grace=_GRACE)
+        conversation_id, turns = await _seed(store, 3)
+        await store.stamp_deleted(conversation_id)
+
+        assert await store.stamped_conversation_ids() == [conversation_id]
+        assert await store.episodes_to_purge(conversation_id) == [
+            turn.episode_id for turn in turns
+        ], "the tombstone still names every episode the sweep must destroy"
+
+        clock.advance(_GRACE)
+
+        assert await store.drop_if_eligible(conversation_id) is True
+        assert await store.stamped_conversation_ids() == []
+
+    async def test_the_stamped_walk_reaches_every_batch(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.5: more tombstones than one batch, drained, each seen once."""
+        store = _build(factory, purge_batch=2)
+        ids = await _stamp_many(store, 7)
+
+        walked = await _walk_stamped(store, page=2)
+
+        assert walked == ids, "the walk must visit every tombstone exactly once, id ascending"
+
+    async def test_the_stamped_walk_survives_its_own_drops(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.6: the clause the lexical cursor exists for.
+
+        The ordinary sweep sequence drops the rows it is walking, so by the time it
+        asks for the next batch the id it carries names nothing. An implementation
+        resolving the cursor by looking the row up passes every other clause here
+        and stalls after its first page in ordinary use — exactly when the sweep is
+        working correctly.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock, tombstone_grace=_GRACE, purge_batch=2)
+        ids = await _stamp_many(store, 7)
+        clock.advance(_GRACE)
+
+        seen: list[str] = []
+        cursor: str | None = None
+        while True:
+            batch = await store.stamped_conversation_ids(limit=2, after_id=cursor)
+            if not batch:
+                break
+            seen.extend(batch)
+            for conversation_id in batch:
+                assert await store.drop_if_eligible(conversation_id) is True
+            cursor = batch[-1]  # this row is now gone
+
+        assert seen == ids, "a cursor placed by row lookup would stall after the first page"
+
+    async def test_a_row_dropped_by_another_sweeper_still_positions_the_walk(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.6, from outside: someone else drops the cursor row.
+
+        Same case, arriving from a second caller rather than from this walk's own
+        drops — which is the one the start-up sweep actually meets.
+        """
+        clock = MovableClock()
+        store = _build(factory, now=clock, tombstone_grace=_GRACE, purge_batch=2)
+        ids = await _stamp_many(store, 5)
+        clock.advance(_GRACE)
+
+        first = await store.stamped_conversation_ids(limit=2)
+        assert first == ids[:2]
+        # A *second* sweeper finishes the conversation this walk is about to page
+        # from, so the cursor names no row by the time it is used.
+        assert await store.drop_if_eligible(first[-1]) is True
+
+        rest = await _walk_stamped_from(store, cursor=first[-1], page=2)
+
+        assert rest == ids[2:], "the walk must reach the remaining tombstones and terminate"
+
+    async def test_the_enumeration_is_id_ascending_and_bounded_by_the_configured_batch(
+        self, store: ConversationStore, purge_default: int
+    ) -> None:
+        """ADR-0076 §4.7: the order, and the default — 100, the purge walk's figure.
+
+        Exercised with more than a batch of tombstones so the figure is really
+        asserted: a suite testing only small explicit values never reaches either
+        (ADR-0073 §8), and an unasserted default is two stores answering the same
+        sweep differently.
+        """
+        ids = await _stamp_many(store, purge_default + 2)
+
+        page = await store.stamped_conversation_ids()
+
+        assert len(page) == purge_default
+        assert page == ids[:purge_default], "id ascending, and the batch is the configured one"
+
+    async def test_the_stamped_enumerations_paging_posture(self, store: ConversationStore) -> None:
+        """ADR-0076 §4.8: out of range refused, ``limit=0`` empty, an absent cursor placed.
+
+        The last half is the negative of the lexical-cursor clause: ``after_id``
+        names a *position in the id space*, so an id naming no row is a perfectly
+        good cursor rather than an error — which is what keeps a resumed walk
+        working after its rows have been dropped.
+        """
+        ids = await _stamp_many(store, 2)
+
+        for bad in (-1, 2**63, 2**64):
+            with pytest.raises(ValueError, match="must be an int"):
+                await store.stamped_conversation_ids(limit=bad)
+        with pytest.raises(ValueError, match="must be an int"):
+            await store.stamped_conversation_ids(limit=cast("int", 1.5))
+        assert await store.stamped_conversation_ids(limit=0) == []
+        assert await store.stamped_conversation_ids(after_id="") == ids, (
+            "a cursor before every id positions the walk at the beginning"
+        )
+        assert await store.stamped_conversation_ids(after_id=ids[-1] + "￿") == [], (
+            "a cursor naming no row positions the walk rather than raising"
+        )
+
+    async def test_the_enumeration_is_not_a_way_around_the_front_door(
+        self, store: ConversationStore
+    ) -> None:
+        """ADR-0076 §4.9: every other read still refuses the conversation it names.
+
+        Asserted on the *same* conversation while it is enumerable here, because
+        that pair is the whole of what bounds this method: the return shape and the
+        five reads that still say nothing.
+        """
+        conversation_id, turns = await _seed(store, 1)
+        binding = ParkedBinding(execution_id="exec-9", step_id="step-9")
+        await store.append(conversation_id, occurred_at=_NOW, parked=binding)
+        await store.stamp_deleted(conversation_id)
+
+        assert await store.stamped_conversation_ids() == [conversation_id]
+
+        assert await store.get(conversation_id) is None
+        assert await store.recent() == []
+        assert (await store.export()).conversations == ()
+        assert (await store.export()).turns == ()
+        assert await store.turn_of_episode(turns[0].episode_id) is None
+        assert await store.turn_of_binding(binding) is None
+        with pytest.raises(ConversationStoreError):
+            await store.turns(conversation_id)
+
+    async def test_an_unknown_id_raises_the_narrow_subclass(self, store: ConversationStore) -> None:
+        """ADR-0076 §4.10, first half: every method that refuses an unknown id.
+
+        The sweep's whole use for the subclass is telling *someone else already
+        finished this one* from *stop*, so an implementation that raised the base
+        class here would leave a start-up sweep unable to carry on past a
+        conversation another sweeper had just dropped.
+        """
+        for call in (
+            store.mark_active("nobody"),
+            store.append("nobody", occurred_at=_NOW),
+            store.turns("nobody"),
+            store.episodes_to_purge("nobody"),
+        ):
+            with pytest.raises(UnknownConversationError):
+                await call
+
+    async def test_a_store_fault_raises_the_base_class_and_not_the_subclass(
+        self, factory: ConversationStoreFactory
+    ) -> None:
+        """ADR-0076 §4.10, second half: a subclass raised for everything buys less than nothing.
+
+        A non-conforming clock reading is a genuine store fault every
+        implementation reaches (ADR-0026 §7), and it must arrive as the base class:
+        a sweep that treated it as "already done" would silently skip the
+        conversations after it and report success.
+        """
+        store = _build(factory, now=lambda: datetime(2026, 6, 1))  # noqa: DTZ001 — the fault
+
+        with pytest.raises(ConversationStoreError) as raised:
+            await store.start()
+
+        assert not isinstance(raised.value, UnknownConversationError), (
+            "a store fault is not 'this conversation is already gone', and a sweep "
+            "that read it as one would abandon the rest of its work quietly"
+        )
 
     # --- retention reclaim ---------------------------------------------------
 

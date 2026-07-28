@@ -79,7 +79,19 @@ class PlannerContract:
         with pytest.raises((ValidationError, AttributeError, TypeError)):
             plan.goal_id = "tampered"
 
-    async def test_accepts_retrieved_memories(self, planner: Planner) -> None:
-        """Memory is passed in, not fetched — it is what makes a plan personal."""
+    async def test_accepts_the_memories_the_pipeline_assembled(self, planner: Planner) -> None:
+        """Memory is passed in, not fetched — it is what makes a plan personal.
+
+        ``memories`` is **what the pipeline assembled for this turn**, which
+        ADR-0074 §5 widened from "records retrieved as relevant, best first": the
+        conversation's recent turns come first, in order, then the
+        relevance-retrieved records, best first *within that group*. The signature
+        did not change, so no triad is owed — but this suite's expectation moves
+        with the wording, which is the review concern ``CONTRIBUTING.md`` names when
+        a Protocol's meaning changes without its shape. What a conforming planner
+        may **not** do is read a global ranking into the sequence: for a user who
+        changes the subject mid-conversation, the tail is not the most relevant
+        thing the store holds.
+        """
         plan = await planner.plan(_goal(), context=_context(), memories=())
         assert plan.goal_id == "g1"
