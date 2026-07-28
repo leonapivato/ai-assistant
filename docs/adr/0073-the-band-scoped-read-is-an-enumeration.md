@@ -178,11 +178,19 @@ properties, not mechanisms; how a backend achieves them is its own business.
   assistant recently come to believe"), `last_updated` is present on every record
   (`Provenance` requires it), and supersession moves it, so a corrected topic
   surfaces where the user will look for it.
-- **A page is full whenever enough matching records exist.** A request for
-  `limit` records returns exactly `limit` when the filtered set — after **both**
-  filters and both read-time axes — has at least `offset + limit` members. This
-  forbids the short-page failure a naive post-filter produces (filtering after the
-  limit is applied), which is the one way paging silently loses records.
+- **A page is a slice of the ordered, filtered sequence: `[offset : offset +
+  limit]`.** Take every record that passes **both** filters and **both**
+  read-time axes, order it by the rule above, skip `offset` of them, and return
+  the next `limit`. Both halves are stated because each fails on its own: an
+  implementation that ignores `offset` returns a full, correctly-ordered first
+  page forever, and nothing beyond it is reachable — the read is then not an
+  enumeration at all, it is a fixed top-`limit`.
+
+  It follows that **a page is full whenever enough matching records exist**: a
+  request returns exactly `limit` records when the filtered set has at least
+  `offset + limit` members. That is the corollary worth naming, because it is the
+  one a naive implementation breaks — filtering after the limit is applied is the
+  one way paging silently loses records.
 
   **This binds the window as strictly as it binds the filters, and that is
   stronger than what `search` carries.** ADR-0045 §6 ratified filtering
@@ -524,6 +532,17 @@ the next lane:
    refusals at **both** ends (negative, and beyond the 64-bit bound), `limit=0`,
    `None` versus empty versus non-empty for `bands` **and** for `kinds`, the two
    composing by conjunction, and detachment.
+
+   Two of them are about the *arguments doing anything*, and a suite that tests
+   only explicit, small values never reaches either. **A non-zero `offset` must
+   assert the returned ids**, not merely the page's length: an implementation
+   ignoring `offset` returns a full ordered page every time and passes a
+   length-only assertion for good. And **the default `limit` must be exercised
+   with more than 50 matching records**, asserting the first 50: an implementation
+   defaulting to 100, or to unbounded, satisfies every explicit-limit case on this
+   list while breaking §2's bounded-default guarantee — the guarantee that keeps an
+   unbounded read of a Tier 1 store from being what a caller gets by saying
+   nothing.
 
    **One page is judged against one clock reading**, the clause
    `MemoryStoreContract.test_search_judges_every_record_against_one_clock_reading`
