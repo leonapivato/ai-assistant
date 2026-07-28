@@ -126,8 +126,25 @@ It does **not** cover, and this list is exhaustive rather than illustrative:
   capture #441 sketches. Each may argue for the same exemption on the same
   grounds when it exists; none inherits it here, because none is deterministic
   recording of an exchange this system itself conducted and can vouch for.
-- **Any write whose content a model chose.** The exemption is available to a
-  producer that records what happened, never to one that decides what is true.
+- **Any write that asserts something about the user.** This is the boundary, and
+  it is worth stating carefully, because a captured turn *does* contain
+  model-generated text — the assistant's own reply is half of the exchange. The
+  distinction is not whether a model produced the words but **what the record
+  claims**:
+
+  - Recording **that the assistant said X, at this time, in this conversation** is
+    an event. It is true because it happened, a policy has nothing to weigh, and
+    it is exempt.
+  - Recording **that X is true of the user** is an assertion. It is a belief
+    whatever produced it, it is exactly what "false or oversensitive" (ADR-0005 §3)
+    is about, and it goes through the gate.
+
+  So the exemption follows the record's *claim*, not the provenance of its
+  characters. The same model output crosses both sides: quoted inside an episode it
+  is exempt; distilled by leg 3 into "the user prefers…" it is a proposal like any
+  other. That is the same line ADR-0072 §3 draws between evidence and the belief
+  read off it, applied to the one case where the evidence happens to contain
+  machine-written words.
 
 ### 3. What replaces the gate for this class
 
