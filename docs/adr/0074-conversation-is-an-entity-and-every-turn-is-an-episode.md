@@ -13,8 +13,9 @@
   in one change (`CONTRIBUTING.md`, "Adding a Protocol"), and stage 1 is this ADR
   merging (§9).
 - **Changes no existing Protocol.** `MemoryStore`, `MemoryWriter`, `MemoryPolicy`
-  and `Planner` are untouched (§3, §5, §9). Capture uses `add`, continuation uses
-  `get` and `search`, and the conversation's turns reach the model through
+  and `Planner` are untouched (§3, §5, §9). Capture uses `write_atomic` in the
+  `INSERT_IF_ABSENT` mode ADR-0046 §2 already ratified, continuation uses `get`
+  and `search`, and the conversation's turns reach the model through
   `Planner.plan`'s existing `memories` parameter.
 - **Amends and supersedes nothing.** Applying ADR-0070 §1's test: no clause of a
   prior ADR is replaced. ADR-0005's taxonomy is used as written (§3); ADR-0072
@@ -41,9 +42,12 @@
   1), §5 (logging), §6 (data rights), §7 (data minimization — "prefer references
   over copies where practical"); ADR-0042 §1 (the concrete façade), §3 (one call
   in, one result out), §4 (a parked confirmation); ADR-0052 (durable resume of a
-  park); ADR-0064 (an ordinal only moves forward, and the store proves it);
+  park); ADR-0046 §2 (the write modes, and why a minted id is inserted rather than
+  upserted), §3 ("absent" is physical presence), §5 (the deferred compare-and-swap,
+  #248); ADR-0064 (an ordinal only moves forward, and the store proves it);
   ADR-0066 §1 (what `complete` will accept as a history); ADR-0014 §5 and ADR-0049
-  (the precedent that state with its own lifecycle gets its own store).
+  (the precedent that state with its own lifecycle gets its own store); #441 (the
+  unratified vision direction whose leg-2 constraints §3 carries and §11 files).
 
 ## Context
 
@@ -190,7 +194,7 @@ status field on a record that has none forecloses nothing.
 conversation ends is the user ending it, which is ADR-0004 §6's right rather than a
 lifecycle this system invented.
 
-### 3. A turn is an episode: capture writes one `EpisodicMemory` per outcome
+### 3. Every turn is an episode: capture writes one `EpisodicMemory` per outcome
 
 **Every turn the engine hands back is durably recorded as exactly one
 `EpisodicMemory` in the one `MemoryStore`** (ADR-0072 §1). The turn *is* the
@@ -214,7 +218,25 @@ Three reasons, in the order they bind:
   because ADR-0005 §1 gives every record a `content` "canonical text rendering,
   used for lexical and (later) embedding retrieval".
 
-**The unit is the turn, not the message and not the conversation.**
+**The entailment runs one way: every turn is an episode, and not every episode is
+a turn.** This ADR decides what a *conversation* deposits in the store; it does
+not define an episode as a thing conversations produce. `EpisodicMemory` is
+ADR-0005 §1's general kind — "something that happened" — and a source that is not
+a conversation at all deposits one too: a calendar event ingested by leg 6's
+sensors, and (per #441, a direction recorded but not ratified) a captured moment
+with a timestamp and no dialogue around it.
+
+The shape carries that without a caveat, and it is §9's decision that makes it so:
+**conversation membership lives in the conversation index, not as a field on the
+record.** An episode belonging to no conversation is therefore the *default* shape
+rather than a permitted exception — there is no `conversation_id` to leave unset,
+no convention about what an empty one means, and no producer obliged to invent a
+conversation to have somewhere to put its episode. A design that had put
+membership on the record would have made "episode = turn" true by construction,
+which is exactly the retrofit #441 asks leg 2 to avoid.
+
+**The unit is the turn, not the message and not the conversation** — for a
+conversational episode, which is the only source that exists to decide for.
 
 - *Not the conversation*: an episode that grows with each turn is a mutable
   aggregate, and the shared record graph is frozen (ADR-0068). A citation to "the
@@ -242,7 +264,8 @@ the store the user inspects and the observer mines. Revisit if the observer turn
 out to need failed turns; it is additive.
 
 **Capture is deterministic recording, and it does not pass the propose/dispose
-gate.** It calls `MemoryStore.add` directly, not `MemoryWriter.ingest`. ADR-0005's
+gate.** It writes to the store directly rather than through `MemoryWriter.ingest`.
+ADR-0005's
 worry is stated precisely and is a different worry: "if the **model** can write
 arbitrary statements straight into permanent memory, memory becomes an unbounded,
 unreviewable side effect" (§Context, third problem), and its rule is that "memory
@@ -257,6 +280,27 @@ that both happened.
 **What bounds it instead is that capture writes one record per outcome, judges
 nothing (§4), and retains under a finite default horizon (§7).** Unmediated is not
 unbounded.
+
+**The write is an insert, not an upsert, and that is a contract-level choice
+already available.** Capture writes the episode as a one-element `write_atomic`
+batch in `INSERT_IF_ABSENT` mode — **not** `add`. `add` is a documented upsert
+keyed on the caller's id, which is right for a caller whose id means "this record
+again" and wrong for a producer minting a fresh one: a colliding id would silently
+replace an unrelated record with an episode. ADR-0046 §2 already ruled exactly
+this case for exactly this reason — `INSERT_IF_ABSENT` is what "a minted id that
+must not clobber an existing record" gets (ADR-0045 §4) — and it is explicit that
+"a batch of one is legal and degenerates to a single atomic write". So capture
+needs no contract change to get it, and the improbability of a UUID4 collision is
+not the argument: an id factory is *injected* (§1), and a test double, a seeded
+factory, or a future non-random scheme makes the collision reachable in ways
+probability says nothing about.
+
+On `MemoryStoreConflictError` capture retries once with a fresh id and then fails
+the capture, degrading the turn rather than the answer (§9). Two things follow that
+matter later: the episode id capture reports is always one it created, so §8's
+compensation can never destroy a record capture did not write; and "absent" is
+physical presence (ADR-0046 §3), so an id colliding with an expired-but-unpurged
+row is refused rather than resurrected.
 
 ### 4. What capture stamps — and the two obligations on the derived band
 
@@ -468,27 +512,52 @@ ordering above is a rule about a *failed* deletion, and on its own it does not
 cover a capture that interleaves with a successful one: a turn that wrote its
 episode before the deletion enumerated the conversation's episodes, and appends
 its index entry after, would leave a captured turn alive under a conversation the
-user was told was destroyed. So the rule is stated in the one place that can
-close it: **an index append refused because the conversation no longer exists
-obliges capture to delete the episode it just wrote.** The refusal already
+user was told was destroyed. So capture carries a compensating rule: **an index
+append refused because the conversation no longer exists obliges capture to delete
+the episode it just wrote.** The refusal already
 exists — §1 refuses an unknown conversation id, and a deleted conversation is
 unknown — so what is added is the compensation, not a new failure mode. It is
 narrow deliberately: an append refused for any *other* reason leaves the episode
 in place, because an orphan episode is a true record of an exchange and deleting
 it would destroy data on a transient store error.
 
-**What that leaves is a crash window, not a hole in the right.** A process that
-dies between the episode write and the refusal leaves an orphan episode, which
-the user reaches through the belief surface and `export` like any other record
-(ADR-0073 §5). Closing it properly needs the two writes to be one transaction
-across two stores, which is machinery with no consumer at this scale — and the
-serialised alternative, a lock that refuses appends for the duration of a
-deletion, is a concurrency primitive ratified ahead of the second writer that
-would justify it (ADR-0046 §5, #248). Today the reachable case is narrower still:
-one process, one client, one command at a time (roadmap stance 3), so a capture
-and a deletion do not overlap. This is the shape ADR-0073 §5 already accepted for
-its own show-then-confirm window — name the window, bound it, and revisit it with
-the second writer (§11) rather than build the primitive now.
+**Compensation is the fallback, not the guarantee — the guarantee is that the two
+do not overlap.** Compensation alone is not enough, and saying so is the point:
+if the process dies after the episode write and before the compensating delete, or
+if that delete itself fails, the conversation index is already gone and no re-run
+of the deletion can discover the orphan. A guarantee that depends on a
+best-effort cleanup completing is not a guarantee. So the rule this ADR ratifies
+is the one that makes the race unreachable rather than survivable:
+
+**A conversation's mutations are serialised by the process that owns them.** A
+capture appending to a conversation and a deletion of that conversation do not
+interleave: they are mutually excluded inside the engine — which holds both
+handles and runs both on one event loop — and, when the hub arrives, inside the
+hub. This is not a concurrency primitive ratified ahead of its consumer. It is
+local mutual exclusion within one process — an `asyncio.Lock`, the mechanism
+`SqliteMemoryStore`, `MemoryIngestor`, the audit trail and the `Engine`'s own
+recovery path each already hold one of — and it is the shape VISION §Principle 8 has
+already committed to: "keeping critical state deterministic (Principle 7) is far
+easier when exactly one process owns it." Deletion is critical state.
+
+What that leaves is bounded and honest, and neither residue is a false claim of
+deletion:
+
+- **A crash mid-deletion** — episodes gone, index not — leaves the conversation
+  still listed, still naming its (now unresolvable) turns. The user sees it did not
+  work and re-runs; the operation is idempotent, and the index is exactly the
+  record that makes the retry able to finish.
+- **A crash mid-capture** — episode written, index entry not — leaves an orphan
+  episode. No deletion was in flight, so nothing was claimed destroyed; the record
+  is a true one, and it is reachable and destroyable through the surfaces leg 1
+  shipped (`assistant beliefs --kind episodic`, `forget`, `export`).
+
+**A second writer breaks the serialisation, and that is why it is deferred with
+the second spoke** (§11). A cross-process guarantee needs either a durable
+deletion tombstone that refuses a capture before its memory write, or the two
+writes in one transaction across two stores — machinery whose consumer is the
+multi-spoke world, not this one. What this ADR owes that world is that the
+question is named and that nothing here forecloses either answer.
 
 **Deleting one episode is deleting one record**, through the surface leg 1 already
 shipped (ADR-0073 §5's show-then-confirm, with its window named and accepted). The
@@ -583,6 +652,28 @@ different questions:
    detachment, and input observation. A suite that only exercises small explicit values will not reach
    the ordinal invariant or the defaults; the argument ADR-0073 §8 makes about
    `offset` and about the default `limit` applies here unchanged.
+
+   **The cross-store protocol is not testable there, and is owed its own tests.**
+   A conformance suite exercises one store against one contract; §3's insert, §8's
+   ordering, its compensation and its serialisation span two stores and the stage
+   between them, so they are the *capture stage's* tests, in `tests/orchestration/`,
+   against injected doubles rather than in the shared suite. Every one of the
+   following is a case where the guarantee is either kept or silently lost, and
+   none of them is reachable from a suite that only writes successfully:
+
+   - **A colliding episode id** — an injected id factory returning a stored id
+     must produce a retry with a fresh id, and must never overwrite the stored
+     record (§3). The factory is injected precisely so this is deterministic.
+   - **An append refused because the conversation is gone** — the compensating
+     delete runs, and it deletes the episode capture just wrote and nothing else.
+   - **A compensating delete that itself fails** — the turn still returns its
+     answer, and the failure is reported rather than swallowed (§9.6).
+   - **An interruption between the two writes**, in each order, asserting the
+     residue each case is ratified to leave (§8): an orphan episode after a
+     capture, a re-runnable deletion after a deletion.
+   - **A capture and a deletion of the same conversation issued concurrently** —
+     asserting they serialise (§8) rather than interleave, which is the clause
+     that makes the compensation a fallback rather than the guarantee.
 3. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
@@ -605,7 +696,12 @@ different questions:
   with no transaction, and makes leg 2 depend on leg 3's distiller to produce
   anything citable.
 - **A `conversation_id` field on `EpisodicMemory`.** §9. Two homes for one
-  relation, on a type that is general to episodes from any source.
+  relation, on a type that is general to episodes from any source — and the field
+  that would have made "episode = turn" true by construction, which #441 asks leg 2
+  not to do (§3).
+- **Writing the episode with `MemoryStore.add`.** §3. A blind upsert under a
+  freshly minted id can replace an unrelated record, and `INSERT_IF_ABSENT` for
+  exactly this case is already ratified (ADR-0046 §2).
 - **A `messages: tuple[Message, ...]` payload on `EpisodicMemory`.** §5. Continuity
   reaches the model as records, so the structured message list has no reader — and
   `Role.TOOL` turns are not representable at the model seam anyway (ADR-0066 §1).
@@ -650,6 +746,23 @@ different questions:
   continuation happen entirely behind the `Engine` façade, so the transport
   boundary is the façade's (leg 5's local-API ADR), and nothing decided here
   crosses a wire or assumes it does not.
+- **Who triggered an episode's retention** — the user asking for a moment to be
+  kept, versus the assistant deciding to keep it. #441 records this as a
+  distinction a later rung will need, and it is deliberately not designed here:
+  there is one producer, it is deterministic, and everything it captures is
+  triggered by the user having a conversation, so a field distinguishing the two
+  would today hold one constant. Nothing forecloses it — the trigger is a property
+  of the *episode*, and `EpisodicMemory` can carry an additive field (or
+  `Provenance` can, where the lane argues the distinction is provenance rather than
+  payload) without touching this ADR's decisions, because membership is by index
+  (§3) and capture stamps no field the trigger would contradict (§4). What that
+  lane must not do is infer the trigger from the band: `OBSERVED` says the
+  assistant witnessed something, and says nothing about who asked for it to be
+  kept.
+- **Every sensor-side question #441 raises** — ephemeral buffers, wake phrases,
+  transcription, distillation, and the salience classifier. Out of scope by that
+  issue's own terms, and untouched here beyond §3's ruling that an episode need not
+  belong to a conversation.
 - **Cross-conversation episodic recall and its ranking** (§6). Due with leg 7's
   retrieval-under-load work, or earlier if the observer needs it.
 - **What a belief whose evidence has expired renders** (§7). ADR-0072 §3's filed
@@ -674,6 +787,10 @@ different questions:
   existing Protocol changes, which is the smallest surface this leg could have
   needed and is only possible because ADR-0005 already typed episodic memory and
   `Planner.plan` already takes records.
+- **The episode stays source-agnostic**, and #441's leg-2 constraint is carried
+  rather than declined (§3). It costs nothing here because it is the *absence* of a
+  field: an episode belonging to no conversation is the default shape, so the first
+  non-conversational producer adds a source, not a migration.
 - **Capture is the first producer into the derived band**, arriving ahead of the
   observer. That is stated rather than discovered, and it is why §4 answers
   ADR-0072 §3's two obligations explicitly instead of leaving the next lane to
