@@ -380,8 +380,9 @@ replay of a months-old conversation is a prompt nobody sized. Which turns fall
 inside the bound is a window over the conversation's ordinals, not a relevance
 question.
 
-**Turns are read through the index and fetched by id**, and an id that no longer
-resolves is **skipped, not an error** (§8's partial states, §7's expiry). A
+**Turns are read through the index and fetched by id**, and an id that does not
+resolve is **skipped, not an error** — whether it was deleted, expired, or is an
+intent whose episode write never landed (§7, §8). A
 conversation that lost a turn to a deletion shows a gap; it does not fail to
 resume, and it never resurrects the deleted turn.
 
@@ -490,74 +491,71 @@ a store where ADR-0004 §6 is conditional".
 
 **The conversation is a deletion unit, because it is the unit the user thinks
 in.** "Forget this conversation" destroys the conversation's episodes and its
-index. It is not atomic — two stores, no cross-store transaction — so the order is
-ratified rather than left to the implementer:
+index. That spans two stores with no transaction between them, so the protocol is
+ratified rather than left to the implementer — and it is ratified as a protocol
+rather than as an ordering, because an ordering alone cannot make it hold.
 
-- **Episodes first, index second, in both directions.** On capture: write the
-  episode, then the turn index. On deletion: delete the episodes, then the index.
-- **A partial failure must never leave content the user believes destroyed.**
-  Deleting the index first would leave orphan episodes — still retrievable, still
-  inspectable — under a conversation the user was told was gone. Deleting the
-  episodes first leaves index entries pointing at nothing, which the read skips as
-  a gap (§5), so the visible state is *more* deleted than the operation completed,
-  never less.
-- **The same asymmetry makes the capture order right.** A failure between the two
-  writes leaves an episode that no conversation lists: a true record of something
-  that happened, retrievable and deletable, merely absent from a transcript. The
-  reverse would list a turn whose content never existed.
-- **The operation is idempotent**, so re-running it finishes a partial one.
+**The index entry is written first, and it names the episode before the episode
+exists.** Capture appends the turn — ordinal, `occurred_at`, and the id it has
+minted for the episode — and *then* writes the episode (§3). This is an intent
+log, and it buys the one property the deletion needs: **no episode can exist for a
+conversation without its id having been recorded in that conversation's index
+first.** So an enumeration of the index names every episode that conversation will
+ever have, including one whose write has not landed yet. The cost is that a crash
+between the two writes leaves an index entry with no episode, which §5's read rule
+already renders as a gap — the same thing a deleted turn looks like, and a great
+deal better than the reverse, which is content no conversation admits to.
 
-**Capture compensates when the conversation it was writing into is gone.** The
-ordering above is a rule about a *failed* deletion, and on its own it does not
-cover a capture that interleaves with a successful one: a turn that wrote its
-episode before the deletion enumerated the conversation's episodes, and appends
-its index entry after, would leave a captured turn alive under a conversation the
-user was told was destroyed. So capture carries a compensating rule: **an index
-append refused because the conversation no longer exists obliges capture to delete
-the episode it just wrote.** The refusal already
-exists — §1 refuses an unknown conversation id, and a deleted conversation is
-unknown — so what is added is the compensation, not a new failure mode. It is
-narrow deliberately: an append refused for any *other* reason leaves the episode
-in place, because an orphan episode is a true record of an exchange and deleting
-it would destroy data on a transient store error.
+**Deletion is a tombstone, then a sweep, and the tombstone is the conversation
+record itself.** Deleting conversation C:
 
-**Compensation is the fallback, not the guarantee — the guarantee is that the two
-do not overlap.** Compensation alone is not enough, and saying so is the point:
-if the process dies after the episode write and before the compensating delete, or
-if that delete itself fails, the conversation index is already gone and no re-run
-of the deletion can discover the orphan. A guarantee that depends on a
-best-effort cleanup completing is not a guarantee. So the rule this ADR ratifies
-is the one that makes the race unreachable rather than survivable:
+1. **stamps C deleted** (a `deleted_at` on the record, §9), which is durable and
+   refuses every later append to C;
+2. **deletes every episode the index names**, including any whose write is still in
+   flight — an id not yet present is a no-op, and the stamp is what stops it
+   arriving unnoticed;
+3. **drops the index and the record**, once step 2 has nothing left that resolves.
 
-**A conversation's mutations are serialised by the process that owns them.** A
-capture appending to a conversation and a deletion of that conversation do not
-interleave: they are mutually excluded inside the engine — which holds both
-handles and runs both on one event loop — and, when the hub arrives, inside the
-hub. This is not a concurrency primitive ratified ahead of its consumer. It is
-local mutual exclusion within one process — an `asyncio.Lock`, the mechanism
-`SqliteMemoryStore`, `MemoryIngestor`, the audit trail and the `Engine`'s own
-recovery path each already hold one of — and it is the shape VISION §Principle 8 has
-already committed to: "keeping critical state deterministic (Principle 7) is far
-easier when exactly one process owns it." Deletion is critical state.
+A deleted conversation is gone from every read — `recent` never lists a stamped
+record, and a continuation naming one is refused exactly as an unknown id is (§1).
 
-What that leaves is bounded and honest, and neither residue is a false claim of
-deletion:
+**Steps 1–3 normally run to completion in the deleting call, and the tombstone is
+what makes a crash survivable rather than final.** If the process dies at any
+point, or a racing capture writes its episode after step 2, the stamped record and
+its index are still there, still naming every episode id involved. So the
+**reclaim** — the same sweep §7 gives the empty-conversation case, run by the
+deleting call, at engine start, and later by the hub's scheduler (leg 5) — finishes
+it: delete what the index names, then drop the record. It is idempotent, and it can
+run any number of times.
 
-- **A crash mid-deletion** — episodes gone, index not — leaves the conversation
-  still listed, still naming its (now unresolvable) turns. The user sees it did not
-  work and re-runs; the operation is idempotent, and the index is exactly the
-  record that makes the retry able to finish.
-- **A crash mid-capture** — episode written, index entry not — leaves an orphan
-  episode. No deletion was in flight, so nothing was claimed destroyed; the record
-  is a true one, and it is reachable and destroyable through the surfaces leg 1
-  shipped (`assistant beliefs --kind episodic`, `forget`, `export`).
+**This is why the serialisation obligation sits on the store and not on a
+caller.** An `asyncio.Lock` inside one `Engine` would not do it: the engine's own
+code already contemplates "another engine over the same durable stores"
+(`orchestration/engine.py`), so two engines — in one process or two — hold two
+locks and serialise nothing. **`ConversationStore` therefore owes per-conversation
+mutual exclusion between an append and a deletion as a contract obligation** (§9),
+which every implementation satisfies in its own way: an in-memory store with a
+lock, a SQLite-backed one with a transaction, which is also what makes it hold
+across processes. Putting the obligation on the seam rather than on the caller is
+the same reasoning ADR-0064 uses for the ordinal — an invariant a caller is
+*asked* to maintain is an invariant that holds until a second caller exists.
 
-**A second writer breaks the serialisation, and that is why it is deferred with
-the second spoke** (§11). A cross-process guarantee needs either a durable
-deletion tombstone that refuses a capture before its memory write, or the two
-writes in one transaction across two stores — machinery whose consumer is the
-multi-spoke world, not this one. What this ADR owes that world is that the
-question is named and that nothing here forecloses either answer.
+**Compensation stays, as the fast path.** An append refused because the
+conversation is stamped obliges capture to delete the episode it just wrote, so
+the common case leaves nothing for the sweep to find. It is narrow deliberately: an
+append refused for any *other* reason leaves the episode in place, because an
+orphan episode is a true record of an exchange and deleting it would destroy data
+on a transient store error. And because capture's episode id is always one it
+minted and inserted (§3), a compensation can never destroy a record capture did not
+write.
+
+**What is left is a bounded residue, and it is named rather than claimed away.**
+Between the stamp and the reclaim, a deleted conversation's record and index
+survive: **ordinals, timestamps, and episode ids — no content**. That is a real
+residue of a deletion the user was told succeeded, and it is bounded by the reclaim
+running in the deleting call and again at start-up, so it persists only across a
+crash. Shrinking it further would mean holding the index in memory rather than on
+disk, which is the durability that makes the sweep possible in the first place.
 
 **Deleting one episode is deleting one record**, through the surface leg 1 already
 shipped (ADR-0073 §5's show-then-confirm, with its window named and accepted). The
@@ -569,8 +567,9 @@ count and span rather than every turn.
 
 **New surface in `core` — a breaking change (golden rule 5):**
 
-- **`core/types.py`** gains `Conversation` (the identity, `started_at`, and
-  `last_turn_at`, which is **optional and unset until a turn lands**, §2) and
+- **`core/types.py`** gains `Conversation` (the identity, `started_at`,
+  `last_turn_at` — **optional and unset until a turn lands**, §2 — and
+  `deleted_at`, the tombstone stamp of §8, likewise optional) and
   `ConversationTurn` (the conversation it belongs to, its ordinal, the id of the
   episode that records it, and when it occurred).
   Both frozen pydantic models (ADR-0068), both timezone-aware at every instant
@@ -578,10 +577,11 @@ count and span rather than every turn.
 - **`core/protocols.py`** gains **one** Protocol, `ConversationStore`, owing:
   start a conversation; read one by id; append a turn, allocating its ordinal;
   read a conversation's turn tail, bounded and ordered; read recent conversations,
-  bounded and ordered by `last_turn_at` (§2); resolve an episode id back to the
+  bounded and ordered by last activity (§2); resolve an episode id back to the
   turn that cites it (§10 declines duplicating that relation onto the record, so
-  the store owes both directions); delete a conversation; export; and reclaim
-  conversations left empty by expiry (§7).
+  the store owes both directions); stamp a conversation deleted (§8); export; and
+  reclaim — the sweep that finishes a stamped deletion and drops conversations left
+  empty by expiry (§7, §8).
 - **`core/errors.py`** gains a `ConversationStoreError` in the `AssistantError`
   hierarchy, because every seam raises from it (`CONTRIBUTING.md`) and no existing
   class fits — a conversation is not memory, planning, context, or audit.
@@ -609,7 +609,13 @@ because they are where two implementations silently differ:
 2. **Every read is bounded by default and totally ordered** (ADR-0021 §4, ADR-0073
    §2): turns by ordinal ascending, conversations by last activity descending with
    the id as tie-break (§2).
-3. **The standing module clauses bind it** like every other Protocol: input
+3. **A conversation's mutations are mutually exclusive at the store** (§8): an
+   append and a deletion of the same conversation never interleave, an append to a
+   stamped conversation is refused, and a stamped conversation is absent from every
+   read. This is an obligation on the *seam* precisely because a caller-held lock
+   does not survive a second caller — the engine's own code already contemplates
+   "another engine over the same durable stores".
+4. **The standing module clauses bind it** like every other Protocol: input
    observation before the first await (ADR-0065), cancellation that does not orphan
    a resource (ADR-0060), and detached snapshots on every read.
 
@@ -672,8 +678,16 @@ different questions:
      residue each case is ratified to leave (§8): an orphan episode after a
      capture, a re-runnable deletion after a deletion.
    - **A capture and a deletion of the same conversation issued concurrently** —
-     asserting they serialise (§8) rather than interleave, which is the clause
-     that makes the compensation a fallback rather than the guarantee.
+     asserting they serialise (§8) rather than interleave. **Through two `Engine`
+     instances sharing one pair of stores**, not one: a lock held by a single
+     engine passes the one-engine version of this test and fails the topology the
+     engine already supports, which is the fault this clause exists to catch. The
+     store-level obligation belongs in the conformance suite too, so every
+     implementation is held to it rather than only the wiring.
+   - **A racing capture that lands its episode after a completed deletion** —
+     asserting the reclaim finds and destroys it, because the stamped record and
+     its index are still there naming it (§8). And **a reclaim run twice**, to pin
+     idempotence.
 3. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
@@ -726,15 +740,15 @@ different questions:
 
 ### 11. What this ADR does not decide
 
-- **Multi-spoke concurrency.** Two clients appending to one conversation at once,
-  and a capture that interleaves with a deletion (§8). Not foreclosed: §9's
-  ordinal is allocated and proved by the store, so concurrent appends land in one
-  agreed order rather than an ambiguous one. What is deferred is everything that
-  needs a *conflict* to be detectable — an expected-tail argument on append, the
-  policy for refusing a stale appender (reject, re-order, or branch), and a
-  serialisation between capture and deletion. All three are ADR-0046 §5's deferred
-  compare-and-swap (#248) in different clothes, and all three become real questions
-  with the second spoke, not before.
+- **Multi-spoke concurrency.** Two clients appending to one conversation at once.
+  Not foreclosed, and partly already answered: §9's ordinal is allocated and proved
+  by the store, so concurrent appends land in one agreed order rather than an
+  ambiguous one, and §8's exclusion between an append and a deletion is a store
+  obligation rather than a caller's lock, so it holds for two engines over one pair
+  of stores. What is deferred is what needs a *stale* appender to be detectable — an
+  expected-tail argument on append, and the policy for refusing one (reject,
+  re-order, or branch). That is ADR-0046 §5's deferred compare-and-swap (#248) in
+  this ADR's clothes, and it becomes a real question with the second spoke.
 - **Push delivery and sync.** Not foreclosed: a client holds nothing but an id it
   was given (§1, §2), so "conversation X has a new turn" is deliverable to it
   without any state migration on either side.
@@ -811,12 +825,18 @@ different questions:
 - **A resumed conversation can show gaps**, from a deleted turn or an expired one
   (§5, §7, §8). That is the deletion right working, and it is the one behaviour
   a "restore my history" instinct would break.
-- **Deletion across two stores is ordered rather than atomic** (§8). The residue of
-  a partial failure is always *more* deleted than the operation completed, which is
-  the only asymmetry a data right can tolerate, and a capture racing a deletion
-  compensates by destroying the episode it just wrote. What survives that is a
-  crash window, named and bounded rather than closed with a cross-store
-  transaction nothing else needs yet.
+- **Deletion across two stores is a protocol, not an ordering** (§8): an intent
+  log, a durable tombstone, a sweep that finishes it, and a store-level exclusion
+  between an append and a deletion. That is more than an ordering rule, and the
+  reason is that an ordering cannot hold — a crash or a racing capture leaves
+  content a completed deletion could no longer find, and a data right that depends
+  on a best-effort cleanup completing is not a right. The residue is bounded and
+  content-free: ids, ordinals and timestamps, until the sweep runs.
+- **The obligation landed on the seam rather than on the engine**, which is the
+  correction that mattered most in review. A lock inside one `Engine` would have
+  looked correct and served nothing: the engine already contemplates another engine
+  over the same durable stores, so the guarantee had to be the store's or it was
+  nobody's.
 - **The hub inherits a conversation model it does not have to change** (§11): ids
   it minted, clients that hold nothing, an ordinal it can arbitrate on, and no
   transport assumptions.
@@ -871,6 +891,18 @@ different questions:
 - **A conversation that ends after an idle period.** Rejected in §2. It is a
   presentation judgement with no consumer, and getting it wrong splits, in the
   record, what the user experienced as one thread.
+- **Serialising capture against deletion with a lock inside the `Engine`.**
+  Rejected in §8, and it is worth recording because it was this ADR's first
+  answer. It reads as sufficient — one process, one loop — and it is not: the
+  engine's own recovery path is written for "another engine over the same durable
+  stores", so two engines hold two locks and exclude nothing. A guarantee about
+  durable state belongs to whatever owns the durable state.
+- **An ordering rule alone — episodes first, index second — with a compensating
+  delete.** Rejected in §8. It survives a *failed* deletion and not a completed
+  one: a capture that writes its episode after the enumeration, and then crashes
+  before compensating, leaves content no re-run can find, because the index that
+  would have named it is gone. The tombstone exists precisely so that the record
+  naming the orphan outlives the deletion.
 - **Letting the client mint the conversation id.** Rejected in §1. It makes
   collision the hub's problem to arbitrate and lets a client name an id it was
   never given.
