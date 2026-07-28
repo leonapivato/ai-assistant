@@ -980,6 +980,15 @@ under that exclusion — that the conversation has not been reactivated since an
 that its grace has elapsed (§8). A drop that merely trusted its caller's earlier
 reading would be the reclaim-versus-continuation race reintroduced one layer up.
 
+**What that re-check does and does not promise.** It defeats a reclaim whose
+eligibility is evaluated while the activity mark is *within* the horizon — the race
+§9.3's boundary rule decides. It does **not** keep a conversation alive for an
+arbitrarily long turn: once the mark itself has aged past the horizon the
+conversation is eligible again, and §7's ratified mid-turn outcome applies. The two
+clauses describe different instants and neither weakens the other, stated because
+an implementer reading only one of them would build either the lease this ADR
+declines or the race it forbids.
+
 **`export` returns the conversations and their turn index**, as the two frozen
 types, which the caller serialises with `model_dump(mode="json")` — ADR-0007 §3's
 rule and its reason applied to a second store ("the store does not invent a
