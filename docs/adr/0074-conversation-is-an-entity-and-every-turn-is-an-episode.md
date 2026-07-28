@@ -1,7 +1,22 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion)
 - Date: 2026-07-28
+- Note (2026-07-28): **§9's obligation set is no longer the whole of what
+  `ConversationStore` owes, and its clause "no read returns a stamped
+  conversation's rows at all" no longer holds for the deletion sweep.** ADR-0076
+  adds one read — the ids of stamped-but-not-dropped conversations — because §8
+  says the reclaim runs "at engine start" and nothing here let it find its work,
+  so a crashed deletion leaked the episodes it had not yet destroyed (#447).
+  ADR-0076 §1 names the exact scope replaced and what stands. Everything else
+  here is untouched: §8's protocol, its tombstone and its grace; §7's retention;
+  §9's coordinator ruling, its two sweeps and the export split; and §9.1–§9.5's
+  five ratified semantics — including §9.4's exclusion set, which is unchanged
+  verbatim, the new read presenting nothing. ADR-0076 lands **in the same change
+  as this note**, so this Status line never names an ADR that does not exist —
+  the hazard ADR-0070 §1 guards against — and if that change does not land,
+  neither does this. Appended note per ADR-0070 §1; no text below it is
+  rewritten.
 - **This is a contract change.** §9 adds one Protocol — `ConversationStore` — to
   `core/protocols.py`, four types to `core/types.py`, and one error class to
   `core/errors.py`. Golden rule 5 therefore applies: this ADR ships as **its own
