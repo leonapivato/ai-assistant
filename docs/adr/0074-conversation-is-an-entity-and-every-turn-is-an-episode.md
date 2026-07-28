@@ -1018,6 +1018,30 @@ made:
 Both reads are needed and neither substitutes for the other: the deletion sweep
 must see *every* row, including those whose episodes are gone, or it cannot finish;
 the user's export must see none of them.
+
+**The composed export is internally consistent by construction, and is not an
+atomic snapshot of the two stores.** Both halves are separate reads, so a write
+landing between them is unavoidable without a transaction spanning the stores —
+the thing §11 defers to leg 5. What *is* ratified is the rule that keeps the
+artifact coherent: **the conversation half is filtered against the memory half of
+the same export, never against a live read.** Take `MemoryStore.export`, take the
+conversation snapshot, then drop every turn whose episode is absent from the
+memory half already taken.
+
+- **No turn can dangle**, because the filter's source of truth is the artifact
+  itself rather than a store that may have moved.
+- **The residue runs one way only**: an episode captured mid-export can appear in
+  the memory half with no turn indexing it. That reads as an un-indexed episode —
+  content the user *has*, exactly the shape §8 already contemplates — never as a
+  turn pointing at content the user cannot see.
+- **A deletion racing the export loses the episode from both halves or from
+  neither**, since a turn is kept only when its episode is present in the same
+  artifact.
+
+So the export is a faithful account of data the user holds, taken over an interval
+rather than an instant, and it never claims an exchange whose content it cannot
+show. An export that must correspond to a single instant needs the cross-store
+transaction, and is revisited with it (§11).
 - **`core/types.py` also gains the two small values the surface exchanges**, named
   here rather than left to the lane because both cross the Protocol boundary
   (`CLAUDE.md`: public data crossing a boundary is a `core` pydantic model):
@@ -1244,6 +1268,11 @@ different questions:
      snapshot legitimately still carries the rows. An implementation that handed
      the raw snapshot to the user would pass every store-level export assertion
      while leaking when the user was talking and how often.
+   - **A deletion racing the export**, in both orders and for both a single
+     `forget` and a whole conversation — asserting the artifact never carries a
+     turn whose episode it does not also carry (§9), which is the property the
+     filter-against-the-same-artifact rule buys and which a test filtering against
+     a live store would not catch.
    - **`episode_retention = None` with an empty conversation** — reclaim does not
      drop it, however long it has been idle (§7). The pair with the stamping case
      is what stops an implementation reading `None` as "no horizon, so everything
