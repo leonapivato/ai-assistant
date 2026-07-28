@@ -1,6 +1,6 @@
 # 75. Deterministic episodic capture is exempt from the proposal → policy write path
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This ADR partially supersedes ADR-0005**, in the scope named in §1: its
   proposal → policy write path, insofar as that path covers the deterministic
