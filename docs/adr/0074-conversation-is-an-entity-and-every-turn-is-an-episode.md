@@ -144,8 +144,9 @@ assumption becomes a migration; and an id that sorts by mint time is an ordering
 consumers start relying on before anyone decided it was one (§2's `last_turn_at`
 is the ordering key, and it is a field).
 
-**Starting a conversation is an insert, never an overwrite.** `start` writes the
-record only if its id names nothing — the same rule and the same reason as §3's
+**Starting a conversation is an insert, never an overwrite.** `ConversationStore.start`
+mints through its injected id factory and writes the record only if that id names
+nothing — the same rule and the same reason as §3's
 episode insert, and it matters for the same reason: the factory is *injected*, so
 a repeating test double, a seeded factory, or a future non-random scheme makes a
 collision reachable in a way probability does not answer. On collision `start`
@@ -156,8 +157,9 @@ silently returned the existing record would graft a stranger's turns onto this
 client's — the same failure §1 refuses when a *client* names an id, arriving from
 the other direction.
 
-**The hub mints; a client presents an id it was given.** A client never invents a
-conversation id. If it could, two clients could collide on one, and a client could
+**The hub mints; a client presents an id it was given.** Minting is the store's
+within the hub (above); what matters at this boundary is that it is *server-side*.
+A client never invents a conversation id. If it could, two clients could collide on one, and a client could
 name an id that already exists and graft its turns onto a conversation it was
 never part of. This is VISION §Principle 7's rule (identity is deterministic
 state) applied to the one identity the product has not needed until now.
@@ -176,10 +178,13 @@ user said stays out of logs unconditionally (ADR-0004 §5).
 
 ### 2. Lifecycle: one way to start, one way to continue, and no implicit end
 
-**Start.** A turn carrying no conversation id starts one. The engine mints the
-identity and records the conversation *before* the turn's work, so the id exists
-independently of whether the turn succeeds, and the turn reports the id it ran
-under. A turn that fails outright therefore leaves an empty conversation, which is
+**Start.** A turn carrying no conversation id starts one: the engine calls
+`ConversationStore.start` and *receives* the minted conversation, **before** the
+turn's work, so the id exists independently of whether the turn succeeds and the
+turn reports the id it ran under. **The store owns the minting**, holding the
+injected id factory and performing §1's insert-if-absent and its retry — one owner,
+because the retry is only expressible where the insert happens, and an engine that
+minted an id would hand the store a value it could not re-mint on collision. A turn that fails outright therefore leaves an empty conversation, which is
 harmless and reclaimable (§7).
 
 **Continue.** A turn carrying a conversation id appends to that conversation. This
