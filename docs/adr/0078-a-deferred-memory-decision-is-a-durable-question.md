@@ -1339,9 +1339,9 @@ it" (`ingest.py:135-139`). A gate that opens on an unexamined field hands that
 guarantee back. So the exception carries six checks of its own, all of them
 performable at the boundary with what the writer already holds:
 
-0. **The proposal's `sensitivity` is not `DataTier.SECRET`** — and this one is not
-   about the confirmation at all. It is an unconditional refusal at the writer
-   boundary, independent of the model validator §2 adds, because a validator is
+0. **No write happens for a `DataTier.SECRET` proposal** — and this one is not
+   about the confirmation at all. It is a refusal at the writer boundary,
+   independent of the model validator §2 adds, because a validator is
    not a boundary: `model_construct` and `model_copy(update=...)` both skip
    validation, and this repository already treats a definition "tampered past
    ``frozen=True`` with ``object.__setattr__``" as inside its threat model
@@ -1353,16 +1353,26 @@ performable at the boundary with what the writer already holds:
    polite versions; this is the one that holds when they are bypassed, which is
    what "belt and braces" has to mean to be worth writing.
 
-   **It runs before the ruling is dispatched on, and that placement is the
-   decision.** It is listed here because it guards the same outcome, but it is
-   **not** part of `_refuse_unsafe_fold`, which `ingest` reaches only for
-   `REINFORCE` and `SUPERSEDE` (`ingest.py:503-533`). Put it in the helper — the
-   obvious reading of §10's "the refusal helper's signature widens" — and an
-   injected policy ruling `ACCEPT` or `STORE_TEMPORARY` on a validator-bypassed
-   secret proposal writes it straight through `_apply` without the check ever
-   running. A rule that is unconditional has to sit where every ruling passes,
-   which is the top of `ingest`, before conflict resolution and before the policy
-   is asked.
+   **It gates the *write*, not the ruling, and the placement follows from that.**
+   It runs **after the policy has ruled and before any write is dispatched** —
+   refusing every write-producing ruling (`ACCEPT`, `STORE_TEMPORARY`,
+   `REINFORCE`, `SUPERSEDE`) on a secret-tier proposal, and letting `ASK_USER` and
+   `REJECT` return normally, because neither writes anything. Both ends of that are
+   load-bearing and an earlier revision got each wrong in turn:
+
+   - **Not inside `_refuse_unsafe_fold`**, which `ingest` reaches only for
+     `REINFORCE` and `SUPERSEDE` (`ingest.py:503-533`). That is the obvious reading
+     of §10's "the refusal helper's signature widens", and it lets an injected
+     policy ruling `ACCEPT` or `STORE_TEMPORARY` write the secret straight through
+     `_apply`.
+   - **Not at the top of `ingest` either.** An unconditional refusal *before* the
+     policy runs would turn the ordinary secret-tier path into an error: today a
+     secret `learn` reaches `DefaultMemoryPolicy`, is ruled `ASK_USER`, writes
+     nothing and raises nothing (§1), and that behaviour is what this ADR
+     preserves. Refusing there would break the one path it promised not to touch.
+
+   ADR-0004 §3 forbids a secret **in the database**, not a secret being *judged*.
+   The gate belongs exactly where the judgement becomes a write.
 1. The ruling is `SUPERSEDE`. A `REINFORCE` onto an assertion stays refused under
    clause 1 whatever the confirmation says — folding at the target's id would
    rewrite the user's own words, which no answer authorises.
@@ -2004,9 +2014,9 @@ On ratification:
 2. `DefaultMemoryPolicy`'s confirmation rule and the `_refuse_unsafe_fold`
    narrowing (§5). The refusal helper's signature widens to see the proposal's
    confirmation, not only the incoming record (`ingest.py:111-113`). **Check 0 is
-   the exception and does not go in that helper**: it is unconditional, so it sits
-   at the top of `ingest` where every ruling passes, not on a path only two of them
-   take.
+   the exception and does not go in that helper**: it gates writes, so it sits
+   between the policy's ruling and the write dispatch — reached by every
+   write-producing ruling, and by no ruling that writes nothing.
 3. The write-stage enqueue and the answer path, in `orchestration`, with §3's two
    composition-root obligations enforced by a test rather than requested in prose —
    the standard ADR-0028 §4 set when it made
@@ -2071,7 +2081,10 @@ On ratification:
    `SUPERSEDE`, `ACCEPT` and `STORE_TEMPORARY`**, because those last two never
    reach the fold helper: a check placed there passes the `SUPERSEDE` case and
    writes the secret on the other two, which is the single most likely way to
-   implement this wrongly. Asserting only the unconstructable half would certify
+   implement this wrongly. **And driven for `ASK_USER` and `REJECT` in the
+   negative** — neither raises, because neither writes — which is the other way to
+   implement it wrongly and the one that breaks the ordinary secret path §1
+   preserves. Asserting only the unconstructable half would certify
    the validator and leave the boundary untested, and the failure it guards is a
    credential in the memory database. And a `learn` whose proposal is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
    result — **raises nothing**, and renders the *existing* non-answerable message
