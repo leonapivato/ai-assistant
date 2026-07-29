@@ -1,7 +1,25 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Accepted
+- Status: Accepted, §5's check-not-a-guarantee clause amended by ADR-0081
 - Date: 2026-07-28
+- Note (2026-07-29): **§5's third clause is bounded, not lifted.** Its statement —
+  *"It is a check, not a guarantee. An episode deleted between the check and the
+  write leaves a citation that no longer resolves, and no seam closes that"* —
+  stands **verbatim for the case it names and argues**: a destruction by an actor
+  *other than the ingest*, in the window between the check and the write, whose
+  residue is a citation that **no longer resolves**. That is "the same two-store
+  race ADR-0074 §8 accepted and bounded" its own justification names, and §6's
+  handling of it — lazy resolution, a deleted-evidence tombstone, a lowered
+  presented confidence, no rewrite — is **entirely unchanged**.
+  [ADR-0081](0081-no-write-consumes-the-evidence-its-own-proposal-cites.md) §1
+  refuses a different case the sentence read in isolation would sweep in: a write
+  **the ingest itself performs**, landing at an id its own proposal cites, whose
+  residue is a citation that **still resolves** — to the record that replaced its
+  referent — and which §6 therefore cannot detect or render. ADR-0081 §5 applies
+  ADR-0070 §1's test and records why that is an amendment noted here rather than a
+  supersession: nothing §5 decided is replaced, and no reader acting on the clause
+  or on §6 acts differently. §5's other clauses, §6 in whole, and every other
+  section stand untouched.
 - **This is a contract change.** §9 adds **one** Protocol — `Observer` — to
   `core/protocols.py`; **one** type — `ObservationOutcome` — and **one**
   source-conditional validator on `Provenance`, both in `core/types.py` (§7); and
