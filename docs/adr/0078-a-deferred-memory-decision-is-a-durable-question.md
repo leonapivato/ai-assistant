@@ -523,13 +523,23 @@ conforming to the words. It owes:
   *different* key is a separate event and the contract must say which, or a
   dict-backed fake silently overwrites someone else's pending question while SQLite
   raises a primary-key error and the two disagree about whether a question still
-  exists. So `defer` **inserts only if the id is absent** and otherwise raises
+  exists. So `defer` **inserts only if the id is absent**, and otherwise — the
+  same-key retry above excepted — raises
   `DeferralStoreError`, committing nothing — insert-if-absent in ADR-0046 §3's
   sense, where "absent" is *physical presence* rather than read-visibility, so a
   resolved or lapsed row still blocks the id.
 
-  **The id check comes first, and the precedence is stated because the two rules
-  can both fire.** A call carrying id `a` and key `K2`, against a store holding
+  **A retry of the same question under the same id is not a collision.** If the
+  stored row's `question_key` equals the incoming one, the id names *the same
+  question*, which is what a caller retrying an uncertain admission produces — so
+  the key-idempotent path runs and the admission is `SUPPRESSED`. The refusal is
+  for one id naming **two different questions**, which is the minting fault. Stated
+  as an explicit exception because the two rules otherwise contradict each other on
+  exactly this input, and an implementation cannot both raise and suppress: an
+  earlier revision required the raise (below) and, elsewhere, the suppression.
+
+  **Otherwise the id check comes first, and the precedence is stated because the
+  two rules can both fire.** A call carrying id `a` and key `K2`, against a store holding
   `(a, K1)` and `(b, K2)`, is simultaneously a key duplicate of `b` and a physical
   collision on `a`; unstated, a dict-backed fake takes the suppression path while a
   SQL-shaped one raises, and the suite certifies both. The id collision wins,
@@ -576,8 +586,10 @@ conforming to the words. It owes:
   every check about the token and stamps the wrong parent. So the link is on the
   record: `DeferredProposal` carries `predecessor_id` (§2), the successor says what
   it succeeds, and the token says the caller may say it. The pair is symmetric —
-  parent `successor_id` ↔ child `predecessor_id` — which is also what makes the
-  chain walkable from either end for the surface.
+  parent `successor_id` ↔ child `predecessor_id` when the successor is newly
+  admitted, and one-way when it collapses onto a question that was already open
+  (below) — which is what makes the chain walkable for the surface without
+  claiming an origin a question does not have.
 
   The store validates all of it in the same atomic operation as the admission,
   raising `DeferralStoreError` and changing nothing if any condition fails: the
@@ -601,8 +613,24 @@ conforming to the words. It owes:
   durable, so it does not consult that ceiling — refusing to surface an
   already-parked step would strand it".
 
-  Dedup still applies to a successor; its key differs by construction, since its
-  conflict set does.
+  **Dedup still applies to a successor, and a suppressed one still links.** The
+  successor's key differs from its parent's by construction, since its conflict set
+  does — but not necessarily from some *other* pending question, because a producer
+  may already have asked exactly it. When the successor admission is `SUPPRESSED`,
+  the store still stamps the parent's `successor_id`, with **the existing
+  question's id**, under the same conditions and in the same commit. Without that
+  the parent has no successor to name, `resolve(REDEFERRED)` has nothing to check
+  against, and a legitimately claimed answer strands `APPLYING` forever — a
+  duplicate question the queue was right to refuse, punished by stranding the
+  answer that raised it.
+
+  So the parent/child pair is symmetric **only when the successor was newly
+  admitted**. On the suppressed path the parent names the existing question and
+  that question does not name back: it has its own origin, and rewriting its
+  `predecessor_id` would falsify where it came from. One-way is the honest link,
+  and it is the one the surface needs — "your answer raised this, which was already
+  open" — while the reverse direction would claim the user's answer created a
+  question that predates it.
   **Admission is one atomic operation** — the key lookup, the answerable-count
   check and the insert commit or fail together, like `claim` and `resolve` below and
   for the same reason. Left non-atomic, two concurrent producers each see room at
@@ -841,7 +869,10 @@ that would otherwise be prose:
    read-then-insert implementation and certifies nothing.
 3. **`defer` raises on a physical id collision and mutates nothing** — a new
    deferral whose `id` matches a stored row carrying a **different** key, checked
-   against a `PENDING` row and against a terminal one. Without it a dict-backed
+   against a `PENDING` row and against a terminal one — **and does not raise when
+   the key is the same**, which is clause 4's retry and the exception §2 states.
+   The pair has to be driven together: each alone reads as a rule about ids, and
+   only both show where the line is. Without it a dict-backed
    fake overwrites and a SQL store raises, and the suite certifies two different
    contracts. **And the intersection**: an input that is *both* a key duplicate of
    one row and an id collision with another **raises**, changing nothing (§2's
@@ -854,7 +885,10 @@ that would otherwise be prose:
 5. **`successor_to_claim` admits past a full queue and only from a live claim, for
    the parent the successor names** (§2). At the cap, a **valid token whose claim
    is on the `APPLYING` deferral the successor's `predecessor_id` names** admits
-   and stamps that parent's `successor_id`. Six refusals, each changing nothing: an
+   and stamps that parent's `successor_id` — **and a successor whose key collides
+   with a question already pending is `SUPPRESSED` and stamps the parent with
+   *that* question's id**, which is the case that otherwise strands a claimed
+   answer and the one a suite never reaches unless it seeds the collision first. Six refusals, each changing nothing: an
    **unknown token**; a token whose parent has since been **resolved**; a token
    whose parent **already carries a successor**; a **well-formed token for another
    live claim** — two questions claimed concurrently, the successor naming one and
@@ -1517,9 +1551,12 @@ nagging.
   waiting, and re-submit. Reaching for `admission.deferral` here is the dereference
   the three-shape validator exists to make impossible to write by accident.
 
-`learn` renders whichever line applies, so the user is never left holding a
-correction the system quietly swallowed — and that includes the full-queue case,
-which is the one an implementation is most likely to leave as a silent no-op.
+`learn` renders whichever line applies, so a user who submitted a correction is
+never left holding one the system quietly swallowed — including the full-queue
+case, which is the one an implementation is most likely to leave as a silent
+no-op. A producer with nobody watching gets the same three outcomes on its own
+result rather than a rendered line; §7 states what that does and does not
+promise.
 
 That is a correction to an earlier revision of this section, which claimed an
 immediate change of mind was "reachable by `learn`". It is not, for an *identical*
@@ -1548,8 +1585,26 @@ The **answerable** queue —
 a configured maximum. Lapsed and resolved rows awaiting `purge` do not count
 against it, so a queue cannot be held shut by questions nobody can answer. At the
 cap `defer` returns a **refused** `DeferralAdmission` carrying no deferral, and the
-proposal is not enqueued; the refusal is **reported, not swallowed** — it reaches
-the caller, so `learn` renders it and the surface says the queue is full. Eviction is rejected:
+proposal is not enqueued; the refusal is **reported, not swallowed**.
+
+**What "reported" promises, stated at the width it actually holds.** It reaches
+the caller, and there are two kinds of caller. A `learn` renders it in the moment,
+to the person who just typed. A producer with nobody watching — the observer —
+gets it on its own outcome, which ADR-0077 §9 already requires to pair "the
+`MemoryUpdateProposal` the observer made with the `MemoryIngestResult` it
+received", so a refused deferral is visible there rather than swallowed. And
+because neither reaches a user who is not looking, **the questions surface itself
+reports that the queue is full** (§8): the state is discoverable by opening the
+list, which is where someone who wants to act on it already is.
+
+What is *not* promised is an unprompted notification for a refusal nobody was
+present for. That needs push, and push is leg 5's (§11) — §8's design lets it be
+added without a contract change, which is the most this ADR can honestly claim
+while the only client is a CLI the user runs by hand. Saying "the user must be
+told" without that qualification was an overclaim, since the observer's refusals
+are exactly the ones with no one in the room.
+
+Eviction is rejected:
 dropping the oldest question to make room for a newer one is the silent vanishing
 this ADR exists to end, performed by the mechanism meant to prevent it. Refusing the
 *new* one is safe in a way evicting the old one is not, because the producer still
@@ -1601,6 +1656,10 @@ engine**, so no adapter classifies anything.
   should be told that the thing they would be overruling is already gone. This list
   is not decoration: it is the exact scope the answer authorises (§5);
 - **when it was asked and when it goes stale**;
+- **that the queue is full**, when it is (§7). Not a per-question field but a
+  property of the listing: it is the one refusal no `learn` line can reach,
+  because the proposals it refuses come from a producer nobody is watching, and a
+  user who opens the list is exactly the person who can act on it.
 - for an `APPLYING` question, **that an answer was begun and its outcome is not
   recorded**, and §9's two steps in order: dispose of it, then check the belief and
   correct again if it is missing. Not "retry" — the system does not know whether
@@ -1821,7 +1880,12 @@ On ratification:
    the answer writes nothing and stamps `STALE` (§6); and a `learn` against a
    **full queue**, asserting the user is told the queue is full rather than getting
    silence — the `refused` branch of §7, which is the one an implementation is most
-   likely to leave as a no-op because nothing raises. None belongs in the store's
+   likely to leave as a no-op because nothing raises. **And the observer's half of
+   the same case**: a producer proposal ruled `ASK_USER` against a full queue is
+   refused, is carried on that producer's own result rather than rendered
+   anywhere, and the questions listing reports the queue as full. That is the
+   guarantee §7 narrows to, and asserting it is what keeps the narrowing from
+   becoming a quiet retreat. None belongs in the store's
    conformance suite — they are properties of the sequence, and the sequence lives
    here.
 
