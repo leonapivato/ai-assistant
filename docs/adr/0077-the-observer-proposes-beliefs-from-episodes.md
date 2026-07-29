@@ -636,11 +636,15 @@ resolving is *loss*, never a producer bug. Two clauses fix its shape:
   but only for ids it selected.** The writer sees "this id does not resolve" and
   cannot tell an expiry from a producer typo, so the discrimination belongs to
   the one component that knows: the stage compares the unresolved ids against the
-  batch it selected. **In the batch** — the evidence went away under it, which is
-  the race — the proposal is dropped and counted, and the remaining proposals are
-  still ingested. **Not in the batch** — the producer cited something it was
-  never handed, which is the fault §5's mapping rule exists to prevent — the
-  error propagates. The dropped proposal is worthless anyway: a belief whose only
+  batch it selected. **Every unresolved id in the batch** — the evidence went
+  away under it, which is the race — the proposal is dropped and counted, and the
+  remaining proposals are still ingested. **Any unresolved id outside it** — the
+  producer cited something it was never handed, which is the fault §5's mapping
+  rule exists to prevent — the error propagates. The quantifier is "every",
+  deliberately: a proposal citing a selected episode that expired *and* a foreign
+  id would otherwise be droppable, and dropping it would bury the producer bug
+  under the race that happened to accompany it. A fault plus an expiry is still a
+  fault. The dropped proposal is worthless anyway: a belief whose only
   support no longer resolves cannot answer "why do you believe that?", and
   storing it would manufacture at birth the all-tombstoned state §6 handles for
   beliefs that earned their evidence first. This is what keeps §5's guarantee —
@@ -702,11 +706,23 @@ apart and because the user's question — "is there still something behind this?
 is answered by absence either way.
 
 **Presented confidence falls with lost support; stored confidence does not
-move.** The number a surface shows is a function of the stored confidence and how
-many of the belief's citations still resolve, with these properties: never above
-the stored value; strictly below it when any citation is lost; equal when all
-resolve; bounded below by a documented positive floor; pure, with no clock. The
-exact function is the implementing lane's.
+move.** The number a surface shows is a pure function — no clock — of the stored
+confidence and how many of the belief's citations still resolve, with these
+properties: never above the stored value; equal to it when all resolve; and,
+when support is lost, strictly below it **until it reaches a documented positive
+floor**, which it never goes under. The exact function is the implementing lane's.
+
+**The floor takes precedence over the strict decrease, and the order matters
+because the two collide.** `Provenance.confidence` permits `0.0` and §5 requires
+only that a derived producer stay strictly below `1.0`, so a belief can be stored
+at or beneath the floor — and there is no number that is both strictly below its
+stored confidence and not under the floor. So the rule is stated as a clamp: the
+adjusted value is the degraded one or the floor, whichever is higher, and where
+the stored value is already at or under the floor the adjustment is a no-op. The
+loss is then conveyed by the tombstones beside it, which is the honest signal
+anyway — a number that has run out of room to fall says nothing, and a surface
+that "must decrease" would be forced to invent a negative confidence or to
+present a belief as better supported than the floor allows.
 
 Three consequences of that split are decided here rather than left to be
 discovered:
@@ -1033,7 +1049,10 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   same rendering, which is what stops an implementation from hooking deletion
   only and passing every deletion test (§6's decisive argument, pinned).
 - **A belief whose citations are all gone** — floor confidence, the unsupported
-  state named, still live, still deletable, and **not** retired.
+  state named, still live, still deletable, and **not** retired. **And one stored
+  at or below the floor to begin with** — the adjustment is a no-op and the
+  tombstones carry the loss (§6), the case a "must strictly decrease" reading
+  cannot satisfy at all.
 - **A proposal citing an id the store does not hold** — refused by the writer,
   nothing stored (§5).
 - **An episode that expires between selection and the write, in a batch of
@@ -1050,7 +1069,9 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   under test is the *fold*, not the model: an observer free to answer differently
   would make the assertion about the provider.
 - **An observer citing an id that was never in its batch** — the writer's
-  refusal **propagates**; it is not swallowed as a race (§5). The pair with the
+  refusal **propagates**; it is not swallowed as a race (§5). **And the mixed
+  case**: one unresolved id from the batch and one from nowhere, asserting it
+  propagates too, since a fault accompanied by an expiry is still a fault. The pair with the
   expiry case above is the whole of the discrimination, and an implementation
   that catches `UnresolvedEvidenceError` without checking the batch passes the
   expiry test and hides a producer bug forever.
