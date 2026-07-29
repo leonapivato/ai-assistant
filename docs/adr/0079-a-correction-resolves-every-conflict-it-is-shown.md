@@ -144,7 +144,8 @@ Then:
 
 - **At or below the limit**, the detected set is handed to the `MemoryPolicy`
   **whole** — nothing the detector holds is discarded — and a `SUPERSEDE` retires
-  the whole supersedable part of it, exactly as ADR-0050 §1 already rules.
+  the named target plus every supersedable member of it, exactly the set ADR-0050
+  §1 already rules and unchanged in composition.
 - **Above the limit**, the ingest **refuses**: it raises `MemoryStoreError`,
   writes nothing, closes no window, and asks the policy for no ruling.
 
@@ -320,10 +321,18 @@ decided here.
 
 ### 3. The full-set retirement becomes a universal `MemoryWriter` obligation (#314)
 
-**We will promote it.** A `SUPERSEDE` retiring every supersedable record in the
-conflict set the policy ruled on — not only the named `target` — becomes an
-obligation of the `MemoryWriter` contract, driven by the shared conformance suite
-and matched by the canonical `FakeMemoryWriter`.
+**We will promote it.** A `SUPERSEDE` retiring **the named `target`, plus every
+other conflict in the set the policy ruled on whose source is supersedable** —
+not the target alone — becomes an obligation of the `MemoryWriter` contract,
+driven by the shared conformance suite and matched by the canonical
+`FakeMemoryWriter`. That is ADR-0050 §1's retirement set stated verbatim, and the
+target clause is load-bearing rather than decorative: ADR-0045 §5b permits a
+`SUPERSEDE` onto an `EXTERNAL` target, and ADR-0050 §1 rules that "an `EXTERNAL`
+target a custom policy *names explicitly* is still retired — it is the `target` —
+but sibling `EXTERNAL` conflicts are left live". A promotion phrased as "every
+supersedable conflict" alone would silently release a conforming writer from
+retiring a named `EXTERNAL` target, which is the one thing the pre-ADR-0050
+contract already obliged.
 
 ADR-0050 §1's reason for leaving it alone was accurate and is now spent:
 
@@ -372,9 +381,15 @@ semantics below are the contract, the spelling is the implementing lane's
 **`core/protocols.py` — `MemoryWriter.ingest`, documented semantics only.** No
 signature change, no member, no new Protocol, no `core` type. Two clauses:
 
-- the `SUPERSEDE` obligation — a supersession retires **every** supersedable
-  record among the conflicts the ruling was made on, not only the `target_id` the
-  ruling names, in one atomic unit with the correction;
+- the `SUPERSEDE` obligation — a supersession retires the record `target_id`
+  names **and** every other conflict in the ruled-on set whose source is
+  supersedable, in one atomic unit with the correction. Both halves are stated:
+  retiring the named target is the obligation the contract already carried
+  (ADR-0040 §5a), including where that target is `EXTERNAL` (ADR-0045 §5b,
+  ADR-0050 §1), and the widening adds the supersedable siblings without touching
+  it. The two standing refusals are unchanged — nothing folds onto a
+  `USER_ASSERTED` target under either ruling (clause 1), and `USER_ASSERTED` and
+  `EXTERNAL` *siblings* are never swept in (ADR-0050 §1);
 - the raise clause — `MemoryStoreError` when conflict resolution **surfaces** more
   conflicts than the writer will resolve in one ingest, with nothing written and
   no ruling sought. Stated on what the writer retrieved, not on what the store
@@ -391,12 +406,19 @@ particular `MemoryPolicy.decide` gains no obligation: it may be handed a larger
 
 1. **A multi-conflict `SUPERSEDE`.** A conflict set holding the ruling's named
    target plus at least two further supersedable conflicts, one `USER_ASSERTED`
-   sibling and one `EXTERNAL` sibling. Pinned: every supersedable conflict is
-   retired — window closed, absent from `get`/`search` read from a clock at or
-   after the close (`_AFTER_CLOSE`, the existing device), present in `export`
-   (ADR-0045 §6); the asserted and external siblings are **left live**
-   (ADR-0050 §1's two held-out sources); `record_id` is the correction's fresh id
-   and names none of the retired records.
+   sibling and one `EXTERNAL` sibling. Pinned: the named target and every
+   supersedable conflict are retired — window closed, absent from `get`/`search`
+   read from a clock at or after the close (`_AFTER_CLOSE`, the existing device),
+   present in `export` (ADR-0045 §6); the asserted and external siblings are
+   **left live** (ADR-0050 §1's two held-out sources); `record_id` is the
+   correction's fresh id and names none of the retired records.
+1a. **A multi-conflict `SUPERSEDE` onto an `EXTERNAL` named target.** The same
+   shape with the ruling naming the `EXTERNAL` record. Pinned: that target **is**
+   retired, its `EXTERNAL` siblings are not, and the supersedable siblings are —
+   the asymmetry ADR-0050 §1 rules and ADR-0045 §5b permits. This case exists
+   because the widening's phrasing is where it could quietly be lost; the suite
+   already drives the target-only `EXTERNAL` supersession, and this extends it to
+   the set.
 2. **All-or-nothing across the whole set.** With an always-colliding id factory,
    **every** target is left live and unchanged — the existing single-target case
    generalised, pinning ADR-0045 §8's floor at N.
