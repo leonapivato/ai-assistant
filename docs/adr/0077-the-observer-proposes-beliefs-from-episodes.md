@@ -441,10 +441,20 @@ user asked for:
   which is the failure `memory_degraded` exists to prevent (ADR-0022 §3).
 - **A malformed response degrades**: entries the producer can use are proposed,
   entries it cannot are discarded and **counted**. Nothing is invented to fill a
-  gap, and no repair loop re-prompts beyond ADR-0047 §6's bounded shape. The
-  extraction contract is ADR-0071's `raw_decode` scan, never ADR-0047 §4 step 1's
-  superseded brace slice — a second producer re-deriving that mechanism would
-  reintroduce #293.
+  gap. The extraction contract is ADR-0071's `raw_decode` scan, never ADR-0047 §4
+  step 1's superseded brace slice — a second producer re-deriving that mechanism
+  would reintroduce #293.
+
+  **The response is one envelope carrying a list of entries** (ADR-0047 §4's
+  shape), and **an envelope that does not decode at all has no entries — it is
+  reported as exactly one `discarded_unusable`**. This is the denominator the
+  invariant below would otherwise lack: without it, `I cannot help` yields zero
+  proposals and zero discards, which is indistinguishable from a model that
+  looked at the batch and honestly proposed nothing — the one confusion this
+  counting exists to remove. **The producer does not re-prompt.** ADR-0047 §6
+  repairs because a turn has no answer without a plan; an observation has nothing
+  waiting on it, so the cheap remedy is a later run rather than a second call
+  inside this one.
 
   **Counting is why the producer returns a value rather than a sequence.** A bare
   `Sequence[MemoryUpdateProposal]` cannot say whether five proposals are five
@@ -846,8 +856,9 @@ class Observer(Protocol):
    semantic drop falling between the two buckets (§4); **an unusable entry
    sitting past the proposal bound is counted once, as unusable, and the bound is
    still filled from the usable entries behind it** (§4's order — the case that
-   catches a producer capping before it validates); an empty batch yields no
-   proposals and zero discards; input observation (ADR-0065) and cancellation
+   catches a producer capping before it validates); **an undecodable response is
+   exactly one unusable discard, never a silent empty result** (§4); an empty
+   batch yields no proposals and zero discards; input observation (ADR-0065) and cancellation
    (ADR-0060). The canonical fake must be able to report non-zero discards of
    both kinds, or none of the counting clauses is exercisable.
 4. **The canonical fake** in `ai_assistant.testing`, plus the concrete
