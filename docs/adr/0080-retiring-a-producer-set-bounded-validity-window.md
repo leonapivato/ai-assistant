@@ -476,9 +476,16 @@ the two could drift into disagreeing about whether a write is *possible*, which
    byte-identical to what was planted — no window closed, no correction written,
    no id minted — which is the §6 clause and the generalisation of ADR-0079 §4's
    obligation 2 from the id-factory failure to this one. On the success branch,
-   **every** retired record carries the *same* `valid_until` (§1's one-instant
-   rule) and each retired record's window is **well-formed** — `valid_until`
-   strictly greater than `valid_from` wherever `valid_from` is set.
+   two things: every retired record's window is **well-formed** — `valid_until`
+   strictly greater than `valid_from` wherever `valid_from` is set — and every
+   retired record **that §1's clamp leaves at the writer's own end** carries the
+   *same* `valid_until`. That qualifier is not a hedge: §1 requires a record whose
+   own `valid_until` is earlier than the close to keep *its* end, so those records
+   are outside the equality by the rule's own terms, and obligation 1 is what pins
+   them. Since every member of obligation 2's planted set is such a record — a
+   `valid_from`-only target and an open-window sibling, neither carrying an end —
+   the equality holds over the whole set there, which is what makes the
+   one-sampled-instant requirement observable at all.
 
 **No writer clock is pinned, and `WriterFactory` gains nothing.** This is the
 constraint that shapes the obligations: the suite "deliberately does not pin
@@ -491,10 +498,11 @@ stated as a **disjunction** the suite can observe:
 - **either** `ingest` raised `MemoryStoreError` and no record in the set changed
   and no correction was written — the branch a writer whose close instant is at
   or before `F` owes;
-- **or** `ingest` succeeded, **and** every retired record — the future-dated
-  target included — carries the same `valid_until`, **and** that instant is
-  strictly after `F`. Which is exactly the case where the window *was*
-  representable, so the close was lawful and no refusal was owed.
+- **or** `ingest` succeeded, **and** both planted records — neither of which
+  carries a `valid_until` of its own, so §1 leaves both at the writer's end —
+  were retired with the same `valid_until`, **and** that instant is strictly
+  after `F`. Which is exactly the case where the window *was* representable, so
+  the close was lawful and no refusal was owed.
 
 **The success branch's two conjuncts are what make the disjunction airtight, and
 neither is decorative.** A weaker form — asserting only that the *sibling's*
@@ -502,7 +510,7 @@ stamped close is at or after `F` — is satisfiable by a writer that violates bo
 §1 and §3: sample the clock once per target, close the future-dated target at an
 instant before `F` (persisting the inverted window `[F, earlier)`, which
 `model_copy(update=...)` constructs without re-running `Validity`'s validator),
-then sample again past `F` for the sibling. Requiring the retired records to
+then sample again past `F` for the sibling. Requiring the two retired records to
 share one `valid_until` rules out the per-target sampling that makes the
 divergence possible, and requiring each retired window to be well-formed rules
 out the persisted inversion directly rather than by inference. Both must be
