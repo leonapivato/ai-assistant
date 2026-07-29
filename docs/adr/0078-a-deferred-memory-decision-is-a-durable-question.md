@@ -1974,10 +1974,16 @@ truth.
 parent was deleted mid-apply, the successor's `defer` finds **no parent** — not
 merely no token — so it takes the **ordinary** path (§2): no cap bypass, nothing
 linked. The coordinator therefore **branches on the `DeferralAdmission` it gets
-back** rather than assuming a successor exists. `ADMITTED` or `SUPPRESSED` and it
-reports the disposal alongside the question now carrying the concern; `REFUSED` —
-the queue was full, and this admission had no exemption to spend — and it reports
-that no follow-on question could be queued. Saying "re-deferred" there would claim
+back** rather than assuming a successor exists. `ADMITTED` and it reports the
+disposal alongside the new question. `SUPPRESSED` and it reports the disposal
+alongside **§7's guidance for the state of the row that suppressed it** — which is
+not always a follow-on question: a `PENDING` row is one the user can answer, but a
+`REJECTED` one means they already declined this and must forget it to be asked
+again, and an `APPLYING` one is another interrupted answer. Calling any of those
+"the follow-on question" would tell a user their answer raised something askable
+when it raised nothing they can act on. `REFUSED` — the queue was full, and this
+admission had no exemption to spend — and it reports that no follow-on question
+could be queued. Saying "re-deferred" there would claim
 a question was asked when none was, which is the one sentence this ADR cannot
 write. Nothing on this path raises: both conditions are things the user brought
 about, and both are told.
@@ -2056,9 +2062,11 @@ On ratification:
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
    ingest writes nothing and returns `ASK_USER`: the successor takes the
    **ordinary** path — no parent to link to and the cap applying — and the disposal
-   is reported rather than raised. **Driven with room in the queue and with the
-   queue full**, since only the second shows a `REFUSED` successor reported as
-   refused rather than as a re-deferral. The two branches fail differently and only
+   is reported rather than raised. **Driven three ways — room in the queue, queue
+   full, and the successor's key already held by a retained `REJECTED` row** —
+   since each produces a different `DeferralAdmission` and a different line, and
+   only the third shows a suppressed successor rendered as §7's guidance rather
+   than as an answerable follow-on. The two branches fail differently and only
    one of them is the obvious case to write;
    §9's two-step recovery end to end — crash after `claim`, `delete`, then a
    re-`learn` that **admits a new question** rather than colliding with the
