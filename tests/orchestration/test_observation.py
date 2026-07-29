@@ -65,6 +65,9 @@ ROUTE = "anthropic:claude-opus-4-8"
 
 BATCH = 20
 
+#: Spelled once: an ``INFERRED`` belief needs two distinct supports (ADR-0077 §5).
+INFERRED = MemorySource.INFERRED
+
 
 class _RacingWriter:
     """A ``MemoryWriter`` that refuses named proposals for unresolved evidence.
@@ -651,3 +654,66 @@ async def test_a_real_expiry_between_selection_and_the_write_drops_only_that_pro
     assert await harness.memory.get("rec-3") is not None
     assert await harness.memory.get("rec-2") is None
     assert report.stored == 2
+
+
+# --- the citations travel with the proposal (ADR-0077 §4) ---------------
+
+
+async def test_a_deferred_proposal_carries_the_episodes_it_cites() -> None:
+    """ADR-0077 §4's visibility interim, in full: content, **citations**, reason.
+
+    Nothing persists a deferred proposal, so the report is the only place its warrant
+    is ever shown. A count would be the last word on a belief the user is being asked
+    to act on.
+    """
+    harness = Harness(
+        observer=FakeObserver(
+            [ObservedBelief(content="the user works from Lisbon", supports=2, step=INFERRED)]
+        ),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.ASK_USER),
+    )
+    conversation = await harness.conversation_with(2)
+    turns = await harness.conversations.turns(conversation)
+    cited = [await harness.memory.get(turn.episode_id) for turn in turns]
+
+    report = await harness.stage.observe(conversation)
+
+    deferred = report.proposals[0]
+    assert deferred.decision is LearnDecision.DEFERRED
+    assert deferred.evidence_count == 2
+    assert [item.content for item in deferred.evidence] == [
+        episode.content for episode in cited if episode is not None
+    ]
+    assert all(item.lost is False for item in deferred.evidence)
+
+
+async def test_a_dropped_proposal_tombstones_the_citation_that_went_away() -> None:
+    """The evidence that vanished renders as gone, not as the copy still in the batch.
+
+    Echoing the batch's copy would print back a record the store no longer holds —
+    content the user may have destroyed a moment earlier — while dropping the entry
+    would hide a citation, which ADR-0073 §4's floor forbids.
+    """
+    gate = ObservationGate()
+    harness = Harness(
+        observer=FakeObserver(
+            [ObservedBelief(content="a belief", supports=2, step=INFERRED, record_id="rec-1")],
+            gate=gate,
+        )
+    )
+    conversation = await harness.conversation_with(2)
+    selected = await _batch_ids(harness, conversation)
+
+    running = asyncio.ensure_future(harness.stage.observe(conversation))
+    await gate.reached()
+    assert await harness.memory.delete(selected[0]) is True
+    gate.release()
+    report = await running
+
+    assert report.dropped_unsupported == 1
+    dropped = report.proposals[0]
+    assert dropped.decision is None
+    assert dropped.evidence_count == 2
+    assert dropped.evidence[0].lost is True  # the one that went away
+    assert dropped.evidence[0].content is None
+    assert dropped.evidence[1].lost is False  # the one that survived, still readable
