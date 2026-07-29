@@ -677,8 +677,8 @@ conforming to the words. It owes:
   `"1"`, `"2"`, `"3"` mints a fresh token every time and satisfies the word, while
   `interrupted` publishes every `APPLYING` deferral's id — so a caller reads an id,
   guesses the token, and resolves someone else's claim or spends its cap exemption.
-  A capability anyone can guess is a parameter with extra steps. So: unique over
-  the store's lifetime, and drawn from a **cryptographically unpredictable** source
+  A capability anyone can guess is a parameter with extra steps. So: **unique among
+  live claims** (below), and drawn from a **cryptographically unpredictable** source
   — `secrets`, not a counter and not a clock — **injected** like every other
   non-determinism in this codebase, so a test can fix it and a deployment cannot
   accidentally weaken it.
