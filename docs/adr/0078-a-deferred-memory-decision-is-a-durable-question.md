@@ -260,17 +260,6 @@ question about what is safe to emit).
   reads `None` as "keep forever… the user's deliberate choice"
   (`core/config.py:382-384`).
 
-  **A model validator enforces the pair, because "is" is not a constraint.** Saying
-  `expires_at` *is* `deferred_at + retention` describes an honest caller; `defer`
-  takes a caller-supplied `core` model, so the contract has to refuse a dishonest
-  one. In the shape `MemoryDecision._outcome_fields_are_consistent`
-  (`types.py:696-719`) already uses: `retention` is positive or `None`; the two
-  fields are `None` **together or not at all**; and when both are set, `expires_at`
-  equals `deferred_at + retention` exactly. Without it a secret-tier question can
-  be admitted with a one-day `retention` and `expires_at=None`, and a literal
-  implementation keeps it answerable forever and never purges it — §1's finite
-  exposure cap defeated by a record the contract accepted.
-
   Then: `state`; once
   claimed, `claimed_at` — but **not** the claim token, which no read republishes
   (`claim`, below); `predecessor_id`, the question this one succeeds when it was
@@ -278,6 +267,39 @@ question about what is safe to emit).
   `answered_at`,
   `outcome_record_id` (the id the accepted apply left live, or `None`) and
   `successor_id` (the question a `REDEFERRED` answer raised, or `None`).
+
+  **A model validator enforces the whole record, because "is" is not a
+  constraint.** Saying `expires_at` *is* `deferred_at + retention`, or that
+  `claimed_at` appears *once claimed*, describes an honest caller; `defer` takes a
+  caller-supplied `core` model, so the contract has to refuse a dishonest one. In
+  the shape `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`)
+  already uses, over two groups of fields:
+
+  - **The deadlines.** `retention` is positive or `None`; `retention` and
+    `expires_at` are `None` **together or not at all**; and when both are set,
+    `expires_at` equals `deferred_at + retention` exactly. Without this a
+    secret-tier question is admissible with a one-day `retention` and
+    `expires_at=None`, and a literal implementation keeps it answerable forever and
+    never purges it — §1's finite exposure cap defeated by a record the contract
+    accepted.
+  - **The lifecycle.** Each `state` requires its own stamps and forbids the others':
+    `PENDING` carries none of `claimed_at`, `answered_at`, `outcome_record_id`,
+    `successor_id`; `APPLYING` requires `claimed_at` and carries no terminal
+    payload; every terminal state requires `answered_at` **and** `claimed_at`
+    (except `REJECTED` reached unclaimed, §2's one unclaimed transition), with the
+    per-state id rules `resolve` enforces.
+
+  **And `defer` admits only a *fresh* record**: `state is PENDING`, no stamps of any
+  kind, raising `DeferralStoreError` and changing nothing otherwise. Validity is not
+  sufficient here — a well-formed `APPLYING` row is a perfectly valid
+  `DeferredProposal` and a catastrophic *admission*. Injected directly it would
+  bypass the `claim` transition that mints the only token able to resolve it, sit
+  outside the answerable cap, be unclaimable and unresolvable forever, never be
+  purged (§2's `APPLYING` exclusion), and block its `question_key` until someone
+  deletes it. Repeat with distinct keys and the queue fills with permanently
+  interrupted questions nobody created and nobody can answer. Every state after
+  `PENDING` is reached by a transition this Protocol owns; none is reached by being
+  handed in.
 
   **The deadline is half-open, and the boundary instant is fixed here rather than
   left to each backend.** A question is answerable while `now < expires_at`; **at**
@@ -669,7 +691,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Nineteen clauses the suite must carry are named here**, because they are the ones a
+**Twenty clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -780,20 +802,28 @@ that would otherwise be prose:
     clause proves the refusal without proving what the refusal is *for* — that a
     question nobody could answer cannot become a retained `REJECTED` key that
     suppresses the next honest proposal.
-17. **`DeferredProposal` refuses an inconsistent deadline pair** (§2): a positive
-    `retention` with `expires_at=None`, a `None` `retention` with an `expires_at`,
-    a non-positive `retention`, and an `expires_at` that is not exactly
-    `deferred_at + retention`. Every listed case elsewhere constructs an honest
-    pair, so nothing else reaches the record that defeats §1's exposure cap while
-    being perfectly well-typed.
-18. **The fingerprint and the key agree across independently built inputs** (§7):
+17. **`DeferredProposal` refuses an inconsistent record** (§2), in two groups. The
+    deadlines: a positive `retention` with `expires_at=None`, a `None` `retention`
+    with an `expires_at`, a non-positive `retention`, and an `expires_at` that is
+    not exactly `deferred_at + retention`. The lifecycle: a `PENDING` record
+    carrying any stamp, an `APPLYING` one without `claimed_at` or carrying terminal
+    payload, and a terminal one without `answered_at`. Every listed case elsewhere
+    constructs an honest record, so nothing else reaches the ones that are
+    perfectly well-typed and defeat §1's exposure cap or the claim transition.
+18. **`defer` refuses a record that is not fresh** (§2) and changes nothing: an
+    `APPLYING` record, each terminal state, and a `PENDING` one carrying a stamp.
+    The `APPLYING` case is the one that matters and the one validity alone does not
+    catch — a valid record, a catastrophic admission: unclaimable, unresolvable,
+    never purged, blocking its key, and repeatable until the queue is full of
+    questions nobody created.
+19. **The fingerprint and the key agree across independently built inputs** (§7):
     a proposal reconstructed field-by-field from a serialised form fingerprints
     identically to the original, and a confirmation issued against the first
     verifies against the second. This is the parity the confirmed path depends on
     and the one a suite that always hashes the same in-memory object never tests —
     the failure it guards is not a mismatch on some input but a mismatch on
     *every* input, i.e. no asserted conflict ever confirmable.
-19. **The key is a canonical projection** (§7), which needs a case per excluded
+20. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; two whose `evidence` or whose
