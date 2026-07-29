@@ -237,6 +237,17 @@ question about what is safe to emit).
   claimed, `claim_id` and `claimed_at` (§9); and, once resolved, `answered_at`,
   `outcome_record_id` (the id the accepted apply left live, or `None`) and
   `successor_id` (the question a `REDEFERRED` answer raised, or `None`).
+
+  **The deadline is half-open, and the boundary instant is fixed here rather than
+  left to each backend.** A question is answerable while `now < expires_at`; **at**
+  `expires_at` it is not. That is `Validity.is_live_at`'s own convention — "``True``
+  iff ``valid_from <= now < valid_until``" (`types.py:471-476`) — and the reason to
+  adopt it is consistency rather than preference: two deadline notions in one memory
+  system that disagree at the instant they name is a defect waiting for the first
+  test that lands exactly on it. Unstated, one store writes `expires_at <= now` and
+  another `< now`, and they hide the same question one instant apart. **Every**
+  operation that consults the deadline uses this comparison — `pending`, `claim`,
+  the cap count, the key's reach, and `purge`.
 - **`DeferralState`** — a `StrEnum`: `PENDING`, `APPLYING`, `ACCEPTED`, `REJECTED`,
   `STALE`, `REDEFERRED`. The last is the terminal state of a claimed answer whose
   re-ingest surfaced an assertion the user was never shown (§5a step 1): the answer
@@ -266,16 +277,26 @@ change is additive and no existing producer moves:
 **`core/protocols.py` gains one Protocol, `DeferralStore`**, `@runtime_checkable`
 like every other, owing:
 
-- **`defer(deferred) -> str | None`** — admit a question. **Key-idempotent**: if a
-  deferral **the key still speaks for** carries the same `question_key`, that
-  deferral's id is returned and nothing is inserted — the reconciliation ADR-0052
-  §2 ratified for parked confirmations ("a binding already named by an entry reuses
-  that entry's handle instead of minting a second"). A key "still speaks for" a
-  deferral that is answerable (`PENDING`, not past `expires_at`), being applied
-  (`APPLYING`), or `REJECTED` within its retention (§7's no-nagging rule). A key
-  whose only match is *expired-and-unanswered*, `ACCEPTED`, `STALE` or `REDEFERRED`
-  does **not** collide: the question lapsed, was settled, or was replaced by the
-  successor it names, and a fresh proposal deserves a fresh question.
+- **`defer(deferred) -> DeferredProposal | None`** — admit a question, returning
+  **the deferral that now holds it**. **Key-idempotent**: if a deferral **the key
+  still speaks for** carries the same `question_key`, that deferral is returned and
+  nothing is inserted — the reconciliation ADR-0052 §2 ratified for parked
+  confirmations ("a binding already named by an entry reuses that entry's handle
+  instead of minting a second"). A key "still speaks for" a deferral that is
+  answerable (`PENDING`, before `expires_at`), being applied (`APPLYING`), or
+  `REJECTED` within its retention (§7's no-nagging rule). A key whose only match is
+  *lapsed-and-unanswered*, `ACCEPTED`, `STALE` or `REDEFERRED` does **not** collide:
+  the question lapsed, was settled, or was replaced by the successor it names, and a
+  fresh proposal deserves a fresh question.
+
+  **It returns the record rather than the id, so admission is legible in one
+  call.** Both outcomes are successes, and the caller has to tell them apart to
+  render §7's suppression guidance at all: `result.id == deferred.id` means it was
+  admitted, any other id means an existing question stands in the way, and the
+  record carries **which** — its `state`, its `answered_at`, the whole basis of the
+  line the user is shown. Returning a bare id would leave the caller to re-`get` it,
+  which costs a round trip and reads a state that may have moved since; returning
+  the record makes the answer atomic with the decision that produced it.
 
   **An `APPLYING` key blocks until its row is deleted, and only until then.** It
   has to block while an apply may still be running, or a re-proposal admits a twin
@@ -338,7 +359,7 @@ like every other, owing:
   duplicate write the claim exists to prevent, restored by the recovery mechanism.
   §9 states what a stranded claim does instead.
 - **`pending(*, limit=50, offset=0) -> list[DeferredProposal]`** — the answerable
-  questions: `state is PENDING` **and** not past `expires_at`, judged against the
+  questions: `state is PENDING` **and** before `expires_at` (§2's half-open comparison), judged against the
   store's own clock reading, read-time-relatively as every `MemoryStore` read is
   (ADR-0045 §6). Bounded by default for the reason ADR-0073 §2's
   bounded-default guarantee exists, as ADR-0073 §8 states it: it "keeps an unbounded
@@ -349,14 +370,19 @@ like every other, owing:
   `deferred_at` **ascending**, `id` ascending as tie-break (§7 argues the
   direction). A row whose `expires_at` is `None` never lapses out of this read.
 
-  **`limit` and `offset` carry ADR-0073 §2's explicit range, `0 <= value < 2**63`,
-  refused at both ends before the first `await`.** Not a detail: `limit=-1` is
-  SQLite's spelling for *no limit*, so an unvalidated negative turns the bounded
-  read of a Tier 1 — sometimes Tier 0 — queue into an unbounded one, and a value
-  past the 64-bit bound surfaces a driver `OverflowError` instead of a
-  `DeferralStoreError`. ADR-0073 §8 makes the refusals at **both** ends a named
-  conformance obligation for `list_beliefs` for exactly these two reasons; this read
-  is the same shape and inherits them rather than rediscovering them.
+  **`limit` and `offset` are `int` — a `bool` is not a count — and carry ADR-0073
+  §2's explicit range, `0 <= value < 2**63`. Type and range are both refused before
+  the first `await`.** Not a detail, and the range alone is not enough: `limit=-1`
+  is SQLite's spelling for *no limit*, so an unvalidated negative turns the bounded
+  read of a Tier 1 — sometimes Tier 0 — queue into an unbounded one; a value past
+  the 64-bit bound surfaces a driver `OverflowError` instead of a
+  `DeferralStoreError`; and `1.5` satisfies the range while a SQL driver refuses to
+  bind it and an in-memory fake slices happily with it, so two conforming stores
+  disagree about what the call even means. `True` is an `int` subclass and is
+  refused for the reason ADR-0022 §4a already gives for `conflict_limit` — "a
+  `bool` is not a count". ADR-0073 §8 makes the range refusals at **both** ends a
+  named conformance obligation for `list_beliefs`; this read is the same shape,
+  inherits them, and adds the type check the numeric range cannot express.
 - **`interrupted(*, limit=50, offset=0) -> list[DeferredProposal]`** — the same
   bounded, ordered enumeration over `APPLYING` rows, under the same order, the same
   bounded default and the same argument range. It exists because §8 requires
@@ -466,7 +492,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Twelve clauses the suite must carry are named here**, because they are the ones a
+**Thirteen clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -506,28 +532,37 @@ that would otherwise be prose:
    the differences between "we asked and you declined", "that question lapsed", and
    "an answer to that may be committing right now", and a suite that tests only the
    live collision leaves all of them unpinned.
-8. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
+8. **The deadline boundary is driven at the instant itself** (§2), on an injected
+    clock: a deferral read at exactly `expires_at` is **not** answerable — absent
+    from `pending`, refused by `claim`, outside the cap count, no longer speaking
+    for its key — and one read an instant before it is answerable on all four. The
+    listed clock cases otherwise step well past the deadline and never touch the
+    comparison that two backends actually spell differently.
+9. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
    after any clock advance, `claim` takes it, its key still collides, and `purge`
    leaves it. Four assertions, because an implementation that coerces `None` to a
    sentinel passes the first three and fails the fourth — or passes all four against
    a *far-future* sentinel and then quietly deletes the question when the sentinel
    arrives.
-9. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
+10. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
    same bounded default as `pending`, and the two reads are **disjoint**: no row
    appears in both. A store that returned an interrupted question among the
    answerable ones would offer the user a claim that cannot be taken.
-10. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
-   ends** (§2), and a **non-zero `offset` asserts the returned ids** rather than the
-   page length — ADR-0073 §8's own warning, that an implementation ignoring `offset`
-   returns a full ordered page every time and passes a length-only assertion for
-   good. And the **default `limit` is exercised with more than 50 matching rows**,
-   for §8's other reason: an implementation defaulting to unbounded satisfies every
-   explicit-limit case while breaking the bounded-default guarantee.
-11. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
+11. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
+    ends, and refuse a non-`int` or a `bool` before any await** (§2) — a float, a
+    string and `True`, each of which either satisfies the range or passes an
+    `isinstance(x, int)` check while meaning something no two backends agree on.
+    A **non-zero `offset` asserts the returned ids** rather than the page length —
+    ADR-0073 §8's own warning, that an implementation ignoring `offset` returns a
+    full ordered page every time and passes a length-only assertion for good. And
+    the **default `limit` is exercised with more than 50 matching rows**, for §8's
+    other reason: an implementation defaulting to unbounded satisfies every
+    explicit-limit case while breaking the bounded-default guarantee.
+12. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
     record id, `ACCEPTED` carrying a successor id, `REDEFERRED` without a successor
     id, and `REJECTED`/`STALE` carrying either. Four cases, because the transition
     tests pass against a store that writes whatever payload it is handed.
-12. **The key is a canonical projection** (§7), which needs a case per excluded
+13. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; and two whose `evidence` or
@@ -940,13 +975,14 @@ question **reached the user and was answered**. Asking again is not honesty, it 
 nagging.
 
 **Suppression is reported, not silent, and that is what makes it reversible.**
-`defer` returns the id of the deferral the key spoke for (§2), so the coordinator
-can always tell whether it admitted a question or was handed an existing one, and
-which. When it was handed one, the caller is told **which prior question stands in
-the way and how to clear it** — for a `REJECTED` row, "you declined this on
-<date>; forget that question to be asked again"; for an `APPLYING` one, §9's first
-recovery step. `learn` renders that line, so the user is never left holding a
-correction the system quietly swallowed.
+`defer` returns the deferral the key spoke for (§2), so the coordinator can tell
+in one call whether it admitted a question or was handed an existing one — the id
+differs from the one it minted — and, from the same record, which state that
+existing question is in. The caller is then told **which prior question stands in
+the way and how to clear it**: for a `REJECTED` row, "you declined this on <date>;
+forget that question to be asked again"; for an `APPLYING` one, §9's first recovery
+step. `learn` renders that line, so the user is never left holding a correction the
+system quietly swallowed.
 
 That is a correction to an earlier revision of this section, which claimed an
 immediate change of mind was "reachable by `learn`". It is not, for an *identical*
@@ -971,7 +1007,7 @@ prevent, and `deferral_ttl`'s `None` is already the deliberate "ask me forever"
 escape at the other axis.
 
 The **answerable** queue —
-`PENDING` and not past `expires_at`, the same set `pending` returns — is bounded by
+`PENDING` and before `expires_at`, the same set `pending` returns — is bounded by
 a configured maximum. Lapsed and resolved rows awaiting `purge` do not count
 against it, so a queue cannot be held shut by questions nobody can answer. At the
 cap `defer` returns `None` and the proposal is not
