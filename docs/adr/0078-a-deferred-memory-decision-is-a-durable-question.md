@@ -295,8 +295,9 @@ like every other, owing:
 
 - **`defer(deferred) -> DeferralAdmission`** — admit a question, returning **what
   happened and the deferral that now holds it**. **Key-idempotent**: if a deferral **the key
-  still speaks for** carries the same `question_key`, that deferral is returned and
-  nothing is inserted — the reconciliation ADR-0052 §2 ratified for parked
+  still speaks for** carries the same `question_key`, the admission is *suppressed*
+  and carries that deferral, and nothing is inserted — the reconciliation ADR-0052
+  §2 ratified for parked
   confirmations ("a binding already named by an entry reuses that entry's handle
   instead of minting a second"). A key "still speaks for" a deferral that is
   answerable (`PENDING`, before `expires_at`), being applied (`APPLYING`), or
@@ -1051,10 +1052,12 @@ match, which is why `sensitivity` is in the key although it is not part of the
 record. A different conflict set is likewise a different question, and §5's bounded
 authority depends on it.
 
-`defer` is idempotent on the key (§2): a second arrival returns the existing
-deferral's id and **does not refresh its deadline**. Refreshing would let a chatty
-producer keep a question alive indefinitely by re-proposing, which is the opposite
-of a lifetime.
+`defer` is idempotent on the key (§2): a second arrival is admitted as **nothing**,
+and comes back as a *suppressed* `DeferralAdmission` whose `deferral` is the
+existing question — never as a bare id, which is the shape §2 replaced and which a
+caller reading this section alone would otherwise write. Its deadline is **not
+refreshed**: refreshing would let a chatty producer keep a question alive
+indefinitely by re-proposing, which is the opposite of a lifetime.
 
 **A rejected key is not re-asked while it is retained.** A producer re-proposing
 something the user declined gets no new question. This is the one place this ADR
