@@ -759,14 +759,17 @@ it gives ADR-0074 §5's declined `get_many` its second consumer — revisited wi
 the hub, where a resume already crosses a transport (§11).
 
 **A belief whose citations are *all* tombstoned is held, marked, and answerable —
-not silently kept and not auto-destroyed.** It stays live at the floor
-confidence, and the surface says in as many words that nothing supports it any
-more. The three candidates were weighed on merits:
+not silently kept and not auto-destroyed.** It stays live at its **effective
+floor — `min(stored confidence, floor)`, the lower bound above** — which is the
+floor itself for every belief stored above it and the stored value for one that
+was never above it. The surface says in as many words that nothing supports it
+any more; the number is what has room to say, and the tombstones say the rest. The three candidates were weighed on merits:
 
 - **Auto-retire** is refused: it is the cascade under another name, it destroys a
   belief that may be perfectly true, and it makes the user's deletion of an old
   conversation silently undo an accumulation they never asked to lose.
-- **Held at floor, and nothing else**, is refused as the *whole* answer: an
+- **Held at the effective floor, and nothing else**, is refused as the *whole*
+  answer: an
   unsupported belief that keeps reaching prompts with no way for the user to be
   asked about it is the "wrong record laundered into a fact" ADR-0072 §6 exists
   to prevent, one step removed.
@@ -1048,11 +1051,12 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
 - **A belief whose cited episode has *expired*** rather than being deleted —
   same rendering, which is what stops an implementation from hooking deletion
   only and passing every deletion test (§6's decisive argument, pinned).
-- **A belief whose citations are all gone** — floor confidence, the unsupported
-  state named, still live, still deletable, and **not** retired. **And one stored
-  at or below the floor to begin with** — the adjustment is a no-op, both bounds
-  having collapsed onto the stored value, and the tombstones carry the loss
-  (§6).
+- **A belief whose citations are all gone** — its **effective floor**, the
+  unsupported state named, still live, still deletable, and **not** retired.
+  **Two stored values, either side of the floor**: one above it lands on the
+  floor, one at or below it is unchanged, both bounds having collapsed onto the
+  stored value. The pair is what pins `min(stored, floor)` rather than either
+  half of it (§6).
 - **A proposal citing an id the store does not hold** — refused by the writer,
   nothing stored (§5).
 - **An episode that expires between selection and the write, in a batch of
@@ -1306,7 +1310,8 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   is not: it lets deleting an old conversation silently unlearn a belief the user
   never asked to lose, and it is indistinguishable — from the user's side — from
   the assistant forgetting things at random.
-- **Retiring an unsupported belief instead of holding it at the floor.**
+- **Retiring an unsupported belief instead of holding it at its effective
+  floor.**
   Rejected in §6. Retirement is non-destructive (ADR-0045 §4) and would still
   remove the belief from every live read, which is the cascade's effect through
   a different door.
