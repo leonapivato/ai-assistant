@@ -203,6 +203,16 @@ ADR-0074 §9.3's ruling that "the defaults are named, not left to the
 implementation": two conforming stages picking 20 and 2,000 would send
 categorically different amounts of Tier 1 data while each believed it conformed.
 
+**A batch is a set: an episode appears in it at most once.** A batch carrying the
+same episode id twice is refused with a `ValueError`, for the reason the floor in
+§5 exists: two prompt entries for one episode, cited by the model under two
+labels, would let a single observation supply the two *distinct* supports an
+`INFERRED` belief owes, and would raise the confidence §5 computes from that
+count. Support is therefore counted over **distinct episode ids** — belt and
+braces, because the count is the thing the floor and the confidence both rest on
+— and a caller handing the producer the same episode twice has a bug in its
+selection, which a silent de-duplication would hide rather than fix.
+
 **An oversized batch is refused, never truncated.** The producer is constructed
 with its maximum and raises `ValueError` on a batch larger than it — the posture
 ADR-0073 §2 set for an out-of-range read argument ("out of range is a
@@ -429,20 +439,34 @@ user asked for:
   intact (ADR-0013 §5). The user asked for observation and it did not happen;
   returning "no beliefs" would be indistinguishable from "nothing to learn",
   which is the failure `memory_degraded` exists to prevent (ADR-0022 §3).
-- **A malformed response degrades**: entries that parse and validate are
-  proposed, entries that do not are discarded and **counted**. Nothing is
-  invented to fill a gap, and no repair loop re-prompts beyond ADR-0047 §6's
-  bounded shape. The extraction contract is ADR-0071's `raw_decode` scan, never
-  ADR-0047 §4 step 1's superseded brace slice — a second producer re-deriving
-  that mechanism would reintroduce #293.
+- **A malformed response degrades**: entries the producer can use are proposed,
+  entries it cannot are discarded and **counted**. Nothing is invented to fill a
+  gap, and no repair loop re-prompts beyond ADR-0047 §6's bounded shape. The
+  extraction contract is ADR-0071's `raw_decode` scan, never ADR-0047 §4 step 1's
+  superseded brace slice — a second producer re-deriving that mechanism would
+  reintroduce #293.
 
   **Counting is why the producer returns a value rather than a sequence.** A bare
   `Sequence[MemoryUpdateProposal]` cannot say whether five proposals are five
-  good entries, ten of which five were malformed, or ten of which five exceeded
+  good entries, ten of which five were unusable, or ten of which five exceeded
   §2's bound: the three are indistinguishable at the seam, and only the producer
   can tell them apart. Silence would then read as success — the failure ADR-0022
   §3 put `memory_degraded` on the outcome to prevent. So `observe` returns an
-  `ObservationOutcome`: the proposals, plus the two discard counts (§9).
+  `ObservationOutcome`: the proposals, plus two discard counts (§9).
+
+  **The two counts are exhaustive, and that is an invariant rather than a
+  description.** `discarded_unusable` counts **every** entry the producer refused
+  for any reason of its own — unparseable, failing validation, citing a label
+  that is not in the batch, below §5's evidence floor, or naming a kind §2
+  forbids — and `discarded_over_limit` counts what was dropped to meet §2's
+  bound. **The proposals returned plus the two counts equal the number of entries
+  the model emitted.** Without that invariant a drop can fall between the two
+  buckets: an entry citing an unknown label parses cleanly and is inside the
+  bound, so it would be discarded silently and the outcome would be
+  indistinguishable from a model that proposed nothing — which is the same
+  silence this bullet exists to remove, one level down. A finer taxonomy of
+  reasons is deliberately not carried: the user's question is "did anything get
+  thrown away", and a reason enum would be surface with no consumer.
 - **A writer failure propagates** as `MemoryStoreError` (ADR-0028 §5) and
   **nothing is reported**, which is ADR-0022 §4's ruling applied unchanged:
   proposals are applied in order and independently, there is no transaction, and
@@ -481,8 +505,11 @@ believe that?" answer a list of everything the observer happened to be reading.
 can harden into a permanent, wrong 'preference'" — and ADR-0072 §3 supplies the
 line: an `OBSERVED` belief restates what its evidence directly shows, so one
 episode entails it; an `INFERRED` belief generalises beyond the evidence, and a
-generalisation from one instance is the exact shape of that failure. Below the
-floor the producer proposes nothing.
+generalisation from one instance is the exact shape of that failure. The count is
+over **distinct episode ids**, never over citations: two labels resolving to one
+episode are one support, which is the same rule §1's duplicate-batch refusal
+enforces from the input side. Below the floor the producer proposes nothing, and
+the entry it dropped is counted (§4).
 
 **The floor is the producer's, not the gate's**, and this ADR says which is
 which, because two rules that look alike would otherwise drift:
@@ -756,8 +783,9 @@ ever existed.
   subscription pattern the word otherwise names.
 - **`core/types.py`** gains **one** type and one validator (§7).
   `ObservationOutcome` is a frozen pydantic model (ADR-0068) carrying the
-  proposals and the two discard counts §4 requires — malformed entries, and
-  entries beyond §2's bound — each a non-negative integer. It is a `core` type
+  proposals and the two discard counts §4 requires — `discarded_unusable` and
+  `discarded_over_limit`, each a non-negative integer, together exhaustive over
+  every entry the model emitted (§4). It is a `core` type
   because it crosses a subsystem boundary (`CLAUDE.md`), following
   `MemoryIngestResult`'s precedent that a seam returning more than one fact
   returns a named value rather than a tuple. The proposal, the episode and the
@@ -801,9 +829,15 @@ class Observer(Protocol):
    meet it is counted on the outcome**; **a batch larger than the configured
    maximum is refused with a `ValueError` rather than truncated** (§1 — the case
    an implementation that silently slices passes every other clause on this
-   list); an empty batch yields no proposals and zero discards; input observation
-   (ADR-0065) and cancellation (ADR-0060). The canonical fake must be able to
-   report non-zero discards, or none of the counting clauses is exercisable.
+   list); **a batch carrying one episode id twice is refused** (§1), and **an
+   `INFERRED` proposal never draws its two supports from one episode id** (the
+   pair that closes the duplicate-input route to the evidence floor); **an entry
+   dropped for citing a label outside the batch, or for falling below the
+   evidence floor, is counted in `discarded_unusable`** — the clause that stops a
+   semantic drop falling between the two buckets (§4); an empty batch yields no
+   proposals and zero discards; input observation (ADR-0065) and cancellation
+   (ADR-0060). The canonical fake must be able to report non-zero discards of
+   both kinds, or none of the counting clauses is exercisable.
 4. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
@@ -915,8 +949,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   user can read into an exception, and would put one rule in two places to
   drift — where ADR-0045 §5 clause 1's floor refuses to *apply* a ruling rather
   than pre-empting one.
-- **Truncating an oversized batch.** §1. A silent truncation makes the caller's
-  bound unobservable and drops episodes the caller believed were observed.
+- **Truncating an oversized batch, or silently de-duplicating one.** §1. Both
+  hide a caller's selection bug instead of surfacing it, and the second is the
+  route by which one episode becomes two supports for an `INFERRED` belief.
+- **A reason enum on a discarded entry.** §4. Two exhaustive counts answer "was
+  anything thrown away"; a taxonomy of reasons is surface with no consumer.
 - **A partial-result error or outcome for a batch whose ingest fails part-way.**
   §4. It is a new failure transport built for one caller, over a gap ADR-0022 §4
   already ruled on and #104 already owns; the recovery path is the inspection
