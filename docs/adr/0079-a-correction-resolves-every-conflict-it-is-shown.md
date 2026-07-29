@@ -1,4 +1,4 @@
-# 79. A correction retires every belief it contradicts, or it does not land
+# 79. A correction resolves every conflict it is shown, or it does not land
 
 - Status: Proposed
 - Date: 2026-07-28
@@ -48,7 +48,8 @@
   amend-versus-supersede test applied in §5) and §4 (the status vocabulary),
   ADR-0073 §1 (the "semantics are the contract, spelling is the lane's" form),
   the roadmap's leg 4 (the exit test this ADR half-discharges); issues #313 and
-  #314 (the two questions decided), #306, #423.
+  #314 (the two questions decided), #306, #423, #457 (the retrieval-side residual
+  §1 names and declines to close), #411.
 
 ## Context
 
@@ -133,26 +134,42 @@ siblings from the widening is not reopened here.
 
 ## Decision
 
-### 1. The conflict set is complete, or the ingest refuses (#313)
+### 1. A ruling is made on every conflict retrieval surfaces, or the ingest refuses (#313)
 
 **We will re-found `conflict_limit` as a ceiling rather than a truncation.**
 
 Conflict detection reads the store once, as it does today, and can distinguish
-"at most `conflict_limit` conflicts exist" from "more than `conflict_limit`
-exist". Then:
+"retrieval surfaced at most `conflict_limit` conflicts" from "it surfaced more".
+Then:
 
-- **At or below the limit**, the detected set is the **complete** set of
-  same-kind, at-or-above-threshold conflicts the store holds. It is handed to the
-  `MemoryPolicy` whole, and a `SUPERSEDE` retires the whole supersedable part of
-  it, exactly as ADR-0050 §1 already rules — with "detected" now meaning
-  "everything there is" rather than "the top five".
+- **At or below the limit**, the detected set is handed to the `MemoryPolicy`
+  **whole** — nothing the detector holds is discarded — and a `SUPERSEDE` retires
+  the whole supersedable part of it, exactly as ADR-0050 §1 already rules.
 - **Above the limit**, the ingest **refuses**: it raises `MemoryStoreError`,
   writes nothing, closes no window, and asks the policy for no ruling.
 
-The law this states, in one sentence: **a correction retires every belief it
-contradicts, or it does not land.** There is no surplus. #313's residual is not
-made smaller; it is made unreachable, because the only state in which it could
-arise is the state the ingest refuses.
+The law this states, in one sentence: **a correction resolves every conflict it
+is shown, or it does not land.** That phrasing is ADR-0050 §1's own — it fixed
+the honest form of the claim as "a `SUPERSEDE` retires *every conflict it is
+shown*, not 'every conflict that exists on the topic'" — and this ADR keeps it
+verbatim while changing what "shown" means and removing the silent discard.
+
+**What is closed, and what is not.** Two distinct things could leave a
+contradicting belief live after a correction, and they have different owners:
+
+- **The writer discarding evidence in hand.** Detection retrieves a set and the
+  writer keeps the top `conflict_limit`, silently dropping the rest. This is
+  #313's defect, and it is closed **completely**: the surplus is not made smaller,
+  it is made unreachable, because the only state that produces one is the state
+  the ingest now refuses.
+- **Retrieval never surfacing the record at all.** `MemoryStore.search` is a
+  bounded retrieval and this ADR does not make it exhaustive (below). A conflict
+  retrieval does not return is a conflict nothing in this path can act on.
+
+This ADR closes the first and is explicit that it does not close the second. The
+second is a pre-existing property of retrieval that bounds ADR-0050's status quo
+identically — its cap-of-five is subject to it too — and it is filed with its own
+owner (§6).
 
 **Why one knob and not two.** The obvious alternative is to keep
 `conflict_limit` as the deliberation budget and add a second, larger
@@ -171,7 +188,7 @@ know *which* conflict changes a ruling — that is the policy's own rule set, wh
 is exactly why `DefaultMemoryPolicy`'s gate broke when the writer truncated for
 it. A policy that cannot afford the whole set may narrow its own view, because
 only it knows which members are fungible. The writer's obligation is to hand over
-a set that is complete or to refuse; it is not to guess.
+everything it retrieved or to refuse; it is not to guess which part matters.
 
 **Why refuse rather than truncate loudly.** The third option is to keep
 truncating, land the correction, and report on `MemoryIngestResult` that the
@@ -209,8 +226,7 @@ leaves every target live and unchanged. `MemoryIngestResult.record_id` is still
 the correction's freshly-minted id. `MemoryDecision.target_id` still names one
 primary and is still not grown to a list (ADR-0050 §1, §3).
 
-**Three properties the completeness claim rests on, stated so they can be
-checked.**
+**What the claim rests on, and the one thing it must not claim.**
 
 - **It is a bound, not a loop.** The detector performs the same single
   `MemoryStore.search` it performs today, with a wider limit and an overflow
@@ -221,12 +237,28 @@ checked.**
   the arithmetic is the lane's, in ADR-0074 §9's form — the semantics here are
   the contract, the spelling is not.
 - **It rests on `search` being ranked.** `MemoryStore.search` returns "the
-  records most relevant to `query`, best first" (`core/protocols.py`), so a
-  returned row scoring below `conflict_threshold` proves no *un*returned row
-  scores at or above it. This is the identical property `_detect_conflicts`'s
-  existing over-fetch already assumes; this ADR names it as a dependency rather
-  than leaving it implicit, because completeness is now a stated obligation
-  rather than a best effort.
+  records most relevant to `query`, best first" (`core/protocols.py`), so among
+  the rows it *does* return, one scoring below `conflict_threshold` proves no
+  later returned row scores at or above it. This is the identical property
+  `_detect_conflicts`'s existing over-fetch already assumes; this ADR names it as
+  a dependency rather than leaving it implicit.
+- **It must not claim that retrieval is exhaustive, because it is not.**
+  `MemoryStore.search` bounds nothing about records it never returns, and the
+  durable store is concretely bounded: `SqliteMemoryStore` applies the kind,
+  expiry and window filters *after* a KNN of `limit * _RESULT_OVERFETCH` (8),
+  clamped to sqlite-vec's `k` ceiling of 4096, and its own comment records the
+  consequence — "a caller can still be under-served if more than this multiple of
+  `limit` nearer neighbours are all filtered out". Retired records are filtered in
+  exactly that pass, so a well-corrected topic accumulates precisely the
+  filtered-out neighbours that consume the headroom. A `SUPERSEDE` therefore
+  retires every conflict **retrieval surfaced**, at a ceiling two orders of
+  magnitude above ADR-0050's cap and with no writer-side discard — and that is the
+  whole of the guarantee. Making retrieval itself threshold-complete is a
+  `MemoryStore` obligation and a sqlite-vec engineering problem, out of this ADR's
+  lane and filed as issue #457. Stating the limit here is not a hedge: an ADR that promised
+  absolute completeness would be promising something no store on this contract
+  delivers, and the conformance suite — which drives `FakeMemoryStore` — could not
+  detect the difference.
 - **It adds no observation of the caller's proposal.** The detector's read is the
   one `ingest` already makes, against the single deep copy taken on the
   coroutine's first executed line (`core/protocols.py`'s input-observation
@@ -251,11 +283,12 @@ read soundly.
 The ordering is fixed here, abstractly, because a many-conflict correction can
 itself be one ADR-0050 §2 rules `ASK_USER`:
 
-1. **Completeness.** Detection yields the complete conflict set or the ingest
-   refuses (§1). No ruling is ever made on a truncated set.
-2. **The ruling.** The policy rules on that complete set. ADR-0050 §2's gate
-   therefore fires whenever *any* conflict is `USER_ASSERTED` — including one
-   that would previously have ranked below the cap and been invisible. A
+1. **Completeness.** Detection hands over everything retrieval surfaced, or the
+   ingest refuses (§1). No ruling is ever made on a writer-truncated set.
+2. **The ruling.** The policy rules on that whole set. ADR-0050 §2's gate
+   therefore fires whenever *any* surfaced conflict is `USER_ASSERTED` —
+   including one that would previously have ranked below the cap and been
+   discarded before the policy saw it. A
    many-conflict correction that also contradicts a prior assertion is
    `ASK_USER`, **not** `SUPERSEDE`.
 3. **Retirement.** Only a `SUPERSEDE` retires anything. `ASK_USER` writes nothing
@@ -338,9 +371,11 @@ signature change, no member, no new Protocol, no `core` type. Two clauses:
 - the `SUPERSEDE` obligation — a supersession retires **every** supersedable
   record among the conflicts the ruling was made on, not only the `target_id` the
   ruling names, in one atomic unit with the correction;
-- the raise clause — `MemoryStoreError` when the store holds more conflicts than
-  the writer will resolve in one ingest, with nothing written and no ruling
-  sought. This is flagged under golden rule 5 as a semantics widening rather than
+- the raise clause — `MemoryStoreError` when conflict resolution **surfaces** more
+  conflicts than the writer will resolve in one ingest, with nothing written and
+  no ruling sought. Stated on what the writer retrieved, not on what the store
+  holds, because the writer can only observe the former (§1). This is flagged
+  under golden rule 5 as a semantics widening rather than
   waved through as a no-op, the treatment ADR-0074 §9 gave `Planner.plan`'s
   `memories` parameter.
 
@@ -365,10 +400,13 @@ particular `MemoryPolicy.decide` gains no obligation: it may be handed a larger
    minted id is the target itself" case generalised to the retirement set, since
    a repeated id in the batch is `write_atomic`'s hard error rather than the
    retryable conflict a re-mint handles (ADR-0046 §3).
-4. **Complete-or-refuse.** With the writer's limit driven low and more conflicts
+4. **Resolve-or-refuse.** With the writer's limit driven low and more conflicts
    than that planted, `ingest` raises `MemoryStoreError`, nothing is written, no
    window is closed, and the policy is not asked. The obligation is stated
-   relative to *the writer's own* limit, so no value is pinned.
+   relative to *the writer's own* limit, so no value is pinned. It is also stated
+   on the conflicts the writer's own retrieval surfaced, which is all a suite
+   running over `FakeMemoryStore` can observe — the durable store's retrieval
+   headroom is a different obligation with a different owner (§1, §6).
 
 **`WriterFactory` gains one optional, keyword-only seam: the conflict limit.**
 Exactly the argument the suite already makes for `id_factory` — "most obligations
@@ -389,10 +427,11 @@ the same behaviour.
 
 **`src/ai_assistant/memory/` — the production side.** `_detect_conflicts` widens
 its read and refuses above the ceiling; the default limit rises to 100.
-`_retirement_set` and `_apply_supersede` need **no change at all** — with the
-conflict set complete, ADR-0050 §1's applier already retires everything there is.
-`DefaultMemoryPolicy` is unchanged; its two asserted-conflict gates simply stop
-being defeatable by truncation. The existing regression test
+`_retirement_set` and `_apply_supersede` need **no change at all** — nothing is
+discarded before them, so ADR-0050 §1's applier already retires the whole set it
+is handed. `DefaultMemoryPolicy` is unchanged; its two asserted-conflict gates
+simply stop being defeatable by the writer's own truncation. The existing
+regression test
 `test_a_correction_retires_at_most_the_conflict_limit_leaving_a_bounded_surplus`
 is retargeted from "a bounded surplus stays live" to "the over-ceiling ingest
 refuses and writes nothing" — the same boundary, the opposite ratified outcome.
@@ -462,6 +501,18 @@ physical line, with a scope that names a clause and carries no `ADR-NNNN` token:
 
 ### 6. What this ADR does not decide
 
+- **Whether `MemoryStore` retrieval owes threshold-completeness** (issue #457).
+  This ADR removes the *writer's* truncation and is explicit that it cannot make
+  retrieval exhaustive (§1): `SqliteMemoryStore` post-filters after a bounded KNN
+  and documents that it "can still be under-served", and no rule above the store
+  can distinguish "there are no more" from "the nearer ones were filtered out".
+  Closing that needs either a new `MemoryStore` obligation — a Protocol change,
+  so its own ADR under golden rule 5 — or SQL-side pre-filtering, which is a
+  sqlite-vec engineering question. Both are a store lane, not this one; #457
+  carries the options and the regression it needs. Until then, an unsurfaced
+  conflict can still leave a stale derived belief live *and* can still hide an
+  asserted conflict from ADR-0050 §2's gate — a smaller residual than #313's, on
+  a different axis, and one that bounds ADR-0050's status quo identically.
 - **Retirement semantics for a producer-set bounded validity window** — clamp,
   refuse, or never-lived (issue #306, a **queued separate ADR**). Deliberately
   not absorbed. `_close_window`'s two ratified floors — never extend, never write
@@ -490,17 +541,21 @@ physical line, with a scope that names a clause and carries no `ADR-NNNN` token:
 
 ## Consequences
 
-- **The store never holds a belief the user has just denied.** Leg 4's exit test,
-  first half, is discharged for the many-conflict case: a correction either
-  retires every derived belief it contradicts or it does not land, and both
-  outcomes leave the store consistent. The second half — "a deferred question
-  reaches the user instead of vanishing" — remains ADR-0078's.
-- **Two existing gates stop being silently defeatable.** Because the policy now
-  rules on the complete set, ADR-0050 §2's assertion-versus-assertion `ASK_USER`
-  and `DefaultMemoryPolicy` rule 2's inference-versus-assertion `ASK_USER` fire on
-  an asserted conflict wherever it ranks. This is a soundness fix neither #313 nor
-  #314 records, and it is the strongest reason §1 chose one ceiling over two
-  budgets.
+- **The write path stops discarding contradictions it is holding.** Leg 4's exit
+  test, first half, is discharged for the many-conflict case *to the reach of
+  retrieval*: a correction retires every conflict detection surfaced or it does
+  not land, and both outcomes leave the store consistent with what the ingest
+  saw. What remains is not a writer-side surplus but a retrieval gap, filed as
+  #457 with its own owner (§6). The second half — "a deferred question reaches
+  the user instead of vanishing" — remains ADR-0078's.
+- **Two existing gates stop being defeatable by truncation.** Because the policy
+  now rules on everything detection surfaced, ADR-0050 §2's
+  assertion-versus-assertion `ASK_USER` and `DefaultMemoryPolicy` rule 2's
+  inference-versus-assertion `ASK_USER` fire on a surfaced asserted conflict
+  wherever it ranks, instead of only when it ranks in the top five. This is a
+  soundness fix neither #313 nor #314 records, and it is the strongest reason §1
+  chose one ceiling over two budgets. It is not made *undefeatable*: an asserted
+  conflict retrieval never surfaces is still invisible (#457).
 - **Corrections read more of the store.** Every ingest's conflict search fetches
   up to the ceiling rather than six rows, and a policy may be handed up to 100
   conflicts. `DefaultMemoryPolicy` costs two linear scans over that, which is
@@ -529,9 +584,17 @@ physical line, with a scope that names a clause and carries no `ADR-NNNN` token:
   line edited and a dated note appended in this same change (ADR-0070 §1/§4). Its
   §1 widening ruling and all of §2 remain the operative law and are strengthened
   rather than replaced.
+- **A retrieval-side residual is now named and owned.** Removing the writer's
+  truncation makes the store's own bound the binding one, so the ADR states it
+  rather than inheriting it silently: `SqliteMemoryStore.search` may under-serve a
+  conflict query, and retired records are among the neighbours that consume its
+  headroom, so the exposure grows with use. Filed as **#457** with the options and
+  the regression it needs (§1, §6). This is a pre-existing property, not one this
+  ADR introduces — it bounds ADR-0050's cap-of-five identically — but it is the
+  next thing standing between leg 4's exit test and an unqualified claim.
 - **Issues #313 and #314 are closed by this ADR** once its implementation lane
-  lands; #306, #423 and the observer's volume question stay open with named owners
-  (§6).
+  lands; #306, #423, #457 and the observer's volume question stay open with named
+  owners (§6).
 - **Revisit if** a real contradiction signal lands (ADR-0050 §2/§3's standing
   deferral — a sharper signal would shrink the conflict set and make the ceiling
   bite less often), if the deferred `EXTERNAL` supersession choice is made (the
@@ -585,6 +648,19 @@ physical line, with a scope that names a clause and carries no `ADR-NNNN` token:
   fake, and after §1 the two would disagree about whether a write is *possible*,
   not merely about how much it retires. The suite is where an obligation stops
   being one implementation's habit.
+- **Make retrieval itself threshold-complete, so the conflict set is exhaustive
+  rather than merely undiscarded.** This is the version of §1 that would justify
+  an unqualified claim, and it is the right eventual answer — but it is a
+  `MemoryStore` obligation, not a write-path one. It needs either a new Protocol
+  method or a new guarantee on `search` (a contract change owing its own ADR under
+  golden rule 5), *and* the sqlite-vec work to pre-filter kind, expiry and window
+  inside the KNN rather than after it — the limitation `_RESULT_OVERFETCH` exists
+  to paper over. Out of this ADR's lane and larger than it; filed as #457, with
+  the `SqliteMemoryStore` regression it requires (planted filtered nearer
+  neighbours hiding an above-threshold conflict), which the shared suite cannot
+  reach because it runs over `FakeMemoryStore`. Deferring it does not weaken this
+  ADR's decision — the writer's own discard is closed either way — it only bounds
+  the claim, which §1 states rather than assumes.
 - **Promote the obligation by pinning the ceiling's value in the suite.**
   Rejected: the suite deliberately does not pin the conflict limit, the threshold,
   or the tuning check, and a suite that fixed the number would stop being a
