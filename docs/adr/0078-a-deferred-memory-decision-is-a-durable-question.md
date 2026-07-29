@@ -1960,12 +1960,7 @@ The surface states both steps on the stranded question itself, because a recover
 the user has to infer from a Protocol's dedup rule is not a recovery.
 
 **A `resolve` that finds nothing is reported, not raised — and what it reports
-comes from the ingest, not from the failure.** The same holds one step earlier on
-the re-deferral branch: if the parent was deleted while its answer was being
-applied, the successor's `defer` finds **no parent** — not merely no token — and
-admits an ordinary question, and the sequence continues to a `resolve` that
-returns `False`. Nothing on this path
-raises for a disposal the user asked for. If the question was deleted while
+comes from the ingest, not from the failure.** If the question was deleted while
 its answer was being applied, `resolve` returns `False`. The coordinator still
 holds the `MemoryIngestResult`, and **that** is what it reports: the record written
 and its id, or that the answer was re-deferred, or that nothing was written. The
@@ -1974,6 +1969,18 @@ committed write out of a failed bookkeeping call would be the ADR's own honesty
 rule broken at the last step: a re-deferred answer writes nothing (§5a step 1), so
 "the change was made" would be false for exactly the case that most needs the
 truth.
+
+**The same care applies one step earlier, on the re-deferral branch.** If the
+parent was deleted mid-apply, the successor's `defer` finds **no parent** — not
+merely no token — so it takes the **ordinary** path (§2): no cap bypass, nothing
+linked. The coordinator therefore **branches on the `DeferralAdmission` it gets
+back** rather than assuming a successor exists. `ADMITTED` or `SUPPRESSED` and it
+reports the disposal alongside the question now carrying the concern; `REFUSED` —
+the queue was full, and this admission had no exemption to spend — and it reports
+that no follow-on question could be queued. Saying "re-deferred" there would claim
+a question was asked when none was, which is the one sentence this ADR cannot
+write. Nothing on this path raises: both conditions are things the user brought
+about, and both are told.
 
 **The residue, precisely, and it is a bookkeeping loss rather than a data one.**
 After a crash inside a claim, one question's outcome is unrecorded until the user
