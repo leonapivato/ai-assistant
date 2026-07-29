@@ -3,8 +3,8 @@
 - Status: Proposed
 - Date: 2026-07-28
 - **This is a contract change.** §9 adds **one** Protocol — `Observer` — to
-  `core/protocols.py`, and **one** source-conditional validator to `Provenance`
-  in `core/types.py` (§7). Golden rule 5 therefore applies: this ADR ships as
+  `core/protocols.py`, **one** type — `ObservationOutcome` — and **one**
+  source-conditional validator on `Provenance`, both in `core/types.py` (§7). Golden rule 5 therefore applies: this ADR ships as
   **its own docs-only PR**, is reviewed while still `Proposed` so a finding can
   still change the decision, and is flipped to `Accepted` on merge
   (`CONTRIBUTING.md`, "Contract ADRs land before their implementation";
@@ -158,8 +158,9 @@ the tree constructs a proposal whose source is `OBSERVED` or `INFERRED`.
 ### 1. The observer reads episodes it is handed, and can read nothing else
 
 The observer is a **model-backed producer in `learning`** that takes a bounded
-batch of `EpisodicMemory` records and returns `MemoryUpdateProposal`s. That is
-the whole of its input.
+batch of `EpisodicMemory` records and returns `MemoryUpdateProposal`s — with the
+two discard counts §4 requires, as one `ObservationOutcome` (§9). That is the
+whole of its input.
 
 **It holds no store handle, and that is the scope limit rather than a rule about
 it.** `Observer.observe` receives the episodes; it cannot fetch more, cannot
@@ -429,13 +430,31 @@ user asked for:
   returning "no beliefs" would be indistinguishable from "nothing to learn",
   which is the failure `memory_degraded` exists to prevent (ADR-0022 §3).
 - **A malformed response degrades**: entries that parse and validate are
-  proposed, entries that do not are discarded and **counted on the outcome**.
-  Nothing is invented to fill a gap, and no repair loop re-prompts beyond
-  ADR-0047 §6's bounded shape. The extraction contract is ADR-0071's
-  `raw_decode` scan, never ADR-0047 §4 step 1's superseded brace slice — a second
-  producer re-deriving that mechanism would reintroduce #293.
-- **A writer failure propagates** as `MemoryStoreError` (ADR-0028 §5), with
-  earlier proposals already applied and reported.
+  proposed, entries that do not are discarded and **counted**. Nothing is
+  invented to fill a gap, and no repair loop re-prompts beyond ADR-0047 §6's
+  bounded shape. The extraction contract is ADR-0071's `raw_decode` scan, never
+  ADR-0047 §4 step 1's superseded brace slice — a second producer re-deriving
+  that mechanism would reintroduce #293.
+
+  **Counting is why the producer returns a value rather than a sequence.** A bare
+  `Sequence[MemoryUpdateProposal]` cannot say whether five proposals are five
+  good entries, ten of which five were malformed, or ten of which five exceeded
+  §2's bound: the three are indistinguishable at the seam, and only the producer
+  can tell them apart. Silence would then read as success — the failure ADR-0022
+  §3 put `memory_degraded` on the outcome to prevent. So `observe` returns an
+  `ObservationOutcome`: the proposals, plus the two discard counts (§9).
+- **A writer failure propagates** as `MemoryStoreError` (ADR-0028 §5) and
+  **nothing is reported**, which is ADR-0022 §4's ruling applied unchanged:
+  proposals are applied in order and independently, there is no transaction, and
+  "reporting success for a partially applied set would be a claim about memory
+  integrity this loop cannot make". So the honest statement of the guarantee is
+  the uncomfortable one: **the operation raises, an unknown prefix of its
+  proposals is already stored, and the result is indeterminate from the
+  exception**. This ADR adds no partial-result error type to soften it — that
+  would be a new failure transport built for one caller, where the recovery path
+  already exists and is the one leg 1 shipped: `assistant beliefs` shows exactly
+  what landed, and `forget` removes any of it. #104 is what closes it properly,
+  and it is a memory-contract decision rather than an observer one.
 - **No proposals is a normal outcome**, not an error (ADR-0022 §4).
 
 ### 5. Evidence discipline: what a proposal cites, and what is refused for citing badly
@@ -731,13 +750,19 @@ ever existed.
 **New surface in `core` — a breaking change (golden rule 5):**
 
 - **`core/protocols.py`** gains **one** Protocol, `Observer`, owing: turn a
-  bounded batch of `EpisodicMemory` records into zero or more
-  `MemoryUpdateProposal`s. It is named for its product role, as every Protocol
-  here is (`Planner`, `MemoryPolicy`, `FeedbackProcessor`); nothing in this
-  codebase uses the subscription pattern the word otherwise names.
-- **`core/types.py`** gains **no new type** and one validator (§7). The proposal,
-  the episode, the record kinds and `MemoryIngestResult` already exist, which is
-  why this leg's contract cost is one Protocol rather than a family.
+  bounded batch of `EpisodicMemory` records into an `ObservationOutcome`. It is
+  named for its product role, as every Protocol here is (`Planner`,
+  `MemoryPolicy`, `FeedbackProcessor`); nothing in this codebase uses the
+  subscription pattern the word otherwise names.
+- **`core/types.py`** gains **one** type and one validator (§7).
+  `ObservationOutcome` is a frozen pydantic model (ADR-0068) carrying the
+  proposals and the two discard counts §4 requires — malformed entries, and
+  entries beyond §2's bound — each a non-negative integer. It is a `core` type
+  because it crosses a subsystem boundary (`CLAUDE.md`), following
+  `MemoryIngestResult`'s precedent that a seam returning more than one fact
+  returns a named value rather than a tuple. The proposal, the episode and the
+  record kinds already exist, which is why the cost is one type rather than a
+  family.
 - **`MemoryWriter.ingest`'s documented semantics** gain §5's refusal clause. No
   signature change.
 - **No new error class.** A model failure is a `ModelError`, a store failure a
@@ -750,15 +775,14 @@ contract, the spelling is the lane's:
 ```python
 @runtime_checkable
 class Observer(Protocol):
-    async def observe(
-        self, episodes: Sequence[EpisodicMemory]
-    ) -> Sequence[MemoryUpdateProposal]: ...
+    async def observe(self, episodes: Sequence[EpisodicMemory]) -> ObservationOutcome: ...
 ```
 
 **What the implementing lane owes** (stage 2; stage 1 is this ADR merging):
 
-1. The Protocol and the `Provenance` validator, plus the `MemoryWriter.ingest`
-   docstring restated as §5 rules it, **and its conformance clause**: a `DERIVED`
+1. The Protocol, `ObservationOutcome`, and the `Provenance` validator, plus the
+   `MemoryWriter.ingest` docstring restated as §5 rules it, **and its
+   conformance clause**: a `DERIVED`
    proposal citing a record the store does not hold is refused with a
    `ValueError`, nothing is written, and an `ASSERTED` or `EXTERNAL` proposal
    citing nothing is unaffected.
@@ -772,12 +796,14 @@ class Observer(Protocol):
    from the batch it was given and none from outside it; an `INFERRED` proposal
    cites at least two distinct episodes; no proposal is `EPISODIC`; confidence is
    strictly below 1.0 and is the same for the same batch twice (the clause that
-   catches a producer passing the model's number through); **the returned count
-   never exceeds the configured maximum**; **a batch larger than the configured
+   catches a producer passing the model's number through); **the returned
+   proposal count never exceeds the configured maximum, and anything dropped to
+   meet it is counted on the outcome**; **a batch larger than the configured
    maximum is refused with a `ValueError` rather than truncated** (§1 — the case
    an implementation that silently slices passes every other clause on this
-   list); an empty batch yields no proposals; input observation (ADR-0065) and
-   cancellation (ADR-0060).
+   list); an empty batch yields no proposals and zero discards; input observation
+   (ADR-0065) and cancellation (ADR-0060). The canonical fake must be able to
+   report non-zero discards, or none of the counting clauses is exercisable.
 4. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
@@ -835,7 +861,16 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   `observation_max_proposals` fails at load as a `ConfigurationError` (§1, §2),
   the posture every other tuning value in `Settings` already takes.
 - **A model failure and a malformed response**, asserting the two different
-  behaviours §4 ratifies: propagate, versus degrade-and-count.
+  behaviours §4 ratifies: propagate, versus degrade-and-count — the second
+  asserting the counts reach the *user-facing* outcome, not merely the
+  `ObservationOutcome`, since a stage that drops them re-creates the silence §4
+  refuses.
+- **A writer failure on the second of three proposals** — the operation raises,
+  the first proposal is **still stored**, and nothing reports success (§4). The
+  assertion pins the indeterminate partial write as ratified behaviour, so a
+  later reader finds it in the suite instead of mistaking it for a bug, and a
+  later implementer does not invent the partial-result transport this ADR
+  declines.
 - **An observation run with `observer_model` unset and set** — the same route as
   conversation in the first case, the named one in the second, **and no fallback
   in either**, asserted by making the primary fail and checking that no second
@@ -882,6 +917,10 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   than pre-empting one.
 - **Truncating an oversized batch.** §1. A silent truncation makes the caller's
   bound unobservable and drops episodes the caller believed were observed.
+- **A partial-result error or outcome for a batch whose ingest fails part-way.**
+  §4. It is a new failure transport built for one caller, over a gap ADR-0022 §4
+  already ruled on and #104 already owns; the recovery path is the inspection
+  surface leg 1 shipped.
 - **A sensitive-subject filter inside the observer.** §2.
 - **A `get_many` on `MemoryStore`.** §6. ADR-0074 §5 declined it; this ADR gives
   it a second consumer and leaves the decision where the hub will hold it.
@@ -937,9 +976,9 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   band, its confidence and its evidence, and correctable by the user — which is
   the roadmap's exit test for leg 3 and the first time VISION §Principle 1's
   "built chiefly by observation" is true of anything in the tree.
-- **The contract cost is one Protocol and one validator** — everything else the
-  lane owes is a rule inside a concrete component, a `Settings` field or a test —
-  because ADR-0005 typed the proposal, ADR-0028 contracted the write path,
+- **The contract cost is one Protocol, one type and one validator** — everything
+  else the lane owes is a rule inside a concrete component, a `Settings` field or
+  a test — because ADR-0005 typed the proposal, ADR-0028 contracted the write path,
   ADR-0072 fixed what a derived belief means, ADR-0073 built the surface and
   ADR-0074 built the substrate. The heaviest design ADR of the arc adds the least
   contract surface of the four, which is what contract-first was for.
@@ -967,6 +1006,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
 - **Every presented belief costs a read per citation** (§6), bounded by the page.
   It is the first real cost of ADR-0074 §5's declined batch read, and it is where
   that decision gets revisited.
+- **A failed ingest leaves an indeterminate partial write**, and this ADR
+  states it rather than papering over it (§4). It is ADR-0022 §4's ruling
+  inherited unchanged, it costs the operation a clean result on the one path
+  where memory integrity cannot be claimed, and #104 — a batch or transaction on
+  `MemoryStore` — is what closes it.
 - **Observation is deliberately slower than it could be.** An explicit trigger
   means episodes can expire unobserved and the user must ask for accumulation
   they were promised passively. That is the price of not shipping volume ahead of
