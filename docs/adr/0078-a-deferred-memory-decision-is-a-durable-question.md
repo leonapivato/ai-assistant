@@ -683,15 +683,26 @@ conforming to the words. It owes:
   non-determinism in this codebase, so a test can fix it and a deployment cannot
   accidentally weaken it.
 
-  **Uniqueness is checked, not assumed**, because an injected source makes it
-  checkable and an unchecked one makes the guarantee a hope: `secrets` is
-  unpredictable but not collision-free, and a test double can return the same
-  value twice. `claim` therefore detects a token already in use and re-draws,
-  **bounded, raising `DeferralStoreError` on exhaustion having changed nothing** —
-  the same shape §2's id re-mint loop uses, for the same reason. A duplicate token
-  is not a cosmetic clash: two claims sharing one lets either holder resolve the
-  other's question or spend its successor exemption, which is the whole capability
-  collapsing.
+  **Uniqueness is guaranteed among *live* claims and is otherwise a property of the
+  draw — stated at that width deliberately.** `claim` detects a token already held
+  by a live claim and re-draws, **bounded, raising `DeferralStoreError` on
+  exhaustion having changed nothing**, the same shape §2's id re-mint loop uses.
+  That is worth checking because a duplicate is not a cosmetic clash: two live
+  claims sharing a token lets either holder resolve the other's question or spend
+  its successor exemption, which is the whole capability collapsing.
+
+  **What it does not promise is uniqueness across the store's whole history**, and
+  an earlier revision said "unique over the store's lifetime", which is more than
+  the mechanism delivers. Delete an `APPLYING` deferral, admit a new one reusing
+  the now-absent id, claim it, and a source that returned the same token again
+  would hand the stale holder the new question — no live row exists to collide
+  with. Closing that needs a durable ledger of every token ever issued, surviving
+  `delete` and `clear`: **storage of exactly what the user asked to destroy**, with
+  its own retention question, to defend against a source repeating a 128-bit draw.
+  The requirement is therefore on the *source* — cryptographically unpredictable,
+  at least 128 bits — and the live check is a guard against a broken or
+  deliberately-repeating one, not a substitute for it. A source that repeats is a
+  fault to fix, not a state to reconcile.
 
   **The token comes back here and nowhere else**, which is what lets it stand as
   the capability `resolve` and `successor_to_claim` both key on (above). It is not
@@ -910,11 +921,12 @@ that would otherwise be prose:
    the clause that actually bites — **not derivable from anything a read exposes**:
    driven by asserting the token is absent from `get`, `pending`, `interrupted` and
    `export`, and by refusing a store whose tokens are sequential. A suite that only
-   checks "two claims differ" certifies a counter. **And the collision path**, via
-   an injected source: one duplicate then a distinct value re-draws and claims
-   normally; an always-duplicate source exhausts the budget and raises with the
-   deferral left `PENDING`. Without the second, "unique" is a property nobody
-   drives.
+   checks "two claims differ" certifies a counter. **And the live-collision path**, via an injected
+   source: one duplicate of a **currently held** token then a distinct value
+   re-draws and claims normally; an always-duplicate source exhausts the budget and
+   raises with the deferral left `PENDING`. Both are about live claims, which is
+   the width §2 states — a suite asserting uniqueness against deleted rows would be
+   certifying a ledger this ADR deliberately does not build.
 2. **`claim` admits exactly one of two concurrent callers.** Two `claim`s on one
    `PENDING` deferral yield one record and one `None`, driven through the
    store-suspension hook the other contracts already use for their compare-and-set
@@ -2257,6 +2269,11 @@ On ratification:
   ADR-0045 §10's item; untouched.
 - **Whether `DefaultMemoryPolicy` adopts `EXTERNAL` supersession.** Untouched;
   still ADR-0045 §5/§7's deferred choice.
+- **A durable ledger of issued claim tokens** (§2). Token uniqueness is enforced
+  among live claims and otherwise rests on the draw; a token repeating after its
+  deferral was deleted is not defended against by bookkeeping, because the
+  bookkeeping would outlive the deletion the user asked for. Revisit only if a
+  token source that repeats becomes a real condition rather than a test double.
 - **An urgency-ordered or imminent-expiry view of the queue** (§7). The one read
   orders by admission; under a single lifetime that is also expiry order, and under
   mixed lifetimes it is not. Filed with the queue's other presentation questions,
