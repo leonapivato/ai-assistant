@@ -236,14 +236,29 @@ question about what is safe to emit).
   (`MemoryUpdateProposal`) verbatim, *including* the `conflicts` ids resolved at
   ruling time (§4); the `decision` (`MemoryDecision`, whose `kind` is `ASK_USER` and
   whose non-optional `reason` is what the surface renders as "why you are being
-  asked"); `deferred_at`; `expires_at` — the answerability deadline, **stamped onto
-  the record at deferral** from the lifetime in force, following ADR-0059 §1's
-  ruling that a confirmation's lifetime is fixed on the record rather than
-  recomputed from a live setting — **optional**, and `None` when `deferral_ttl` is
-  the user's deliberate "ask me forever" (§6), in which case every deadline
-  comparison below treats the question as never lapsing, the way `episode_retention`
+  asked"); `deferred_at`; **`retention`** — the lifetime in force *at admission*,
+  a duration or `None`; and `expires_at`, the answerability deadline, which is
+  `deferred_at + retention` (or `None`). Both are **stamped onto the record at
+  deferral**, following ADR-0059 §1's ruling that a confirmation's lifetime is fixed
+  on the record rather than recomputed from a live setting.
+
+  **The duration is stored as well as the instant, and that is not redundancy.**
+  `expires_at` answers "is this still answerable?" and is fixed at admission.
+  The *other* deadline — how long a resolved question's record is kept (§2's
+  `purge`, §7's no-nagging rule) — is anchored on `answered_at`, which is not known
+  until the answer arrives, so it can only be computed later. Computing it from the
+  **live** setting is what an earlier revision did, and it breaks the very rule
+  `expires_at` follows: defer under a 30-day lifetime, reject tomorrow, shorten the
+  setting to a day, and the rejected key is dropped 29 days early and the user is
+  re-asked a question they already declined — a retention the user never chose,
+  differing between two processes reading different config. So the duration rides
+  on the record and `purge` reads it there. Live configuration governs questions
+  admitted from now on; it never reaches back.
+
+  `None` in either field is the user's deliberate "ask me forever" (§6): the
+  question never lapses and its record is never purged, the way `episode_retention`
   reads `None` as "keep forever… the user's deliberate choice"
-  (`core/config.py:382-384`); `question_key`, the dedup key (§7); `state`; once
+  (`core/config.py:382-384`). Then: `question_key`, the dedup key (§7); `state`; once
   claimed, `claimed_at` — but **not** the claim token, which no read republishes
   (`claim`, below); `predecessor_id`, the question this one succeeds when it was
   raised by a re-deferral (`defer`, below), `None` otherwise; and, once resolved,
@@ -492,16 +507,31 @@ like every other, owing:
   `include_retired` axis: two different questions behind one flag is one argument
   doing two jobs, and the answerable queue is the read every caller wants by
   default.
-- **`resolve(deferral_id, *, claim_id, state, answered_at, record_id) -> bool`** —
-  the terminal compare-and-set, atomic with its own read. It succeeds from
-  `APPLYING` to **any** terminal state — `ACCEPTED`, `REJECTED`, `STALE` or
-  `REDEFERRED` — **only when `claim_id` matches the token `claim` minted for it**, and
-  from `PENDING` to `REJECTED` with `claim_id=None` (an unclaimed rejection writes
-  nothing, so it needs no claim). A `REDEFERRED` resolution names the successor in
-  place of `record_id`, since it wrote no record, and the id it names must be the
-  `successor_id` the store already stamped when it admitted that successor (above)
-  — so the transition is checked against durable state rather than trusting the
-  caller to name the right question.
+- **`resolve(deferral_id, *, claim_id, state, answered_at, record_id=None,
+  successor_id=None) -> bool`** — the terminal compare-and-set, atomic with its own
+  read. It succeeds from `APPLYING` to **any** terminal state — `ACCEPTED`,
+  `REJECTED`, `STALE` or `REDEFERRED` — **only when `claim_id` matches the token
+  `claim` minted for it**, and from `PENDING` to `REJECTED` with `claim_id=None`
+  (an unclaimed rejection writes nothing, so it needs no claim).
+
+  **The two ids are separate parameters, not one overloaded slot.** An earlier
+  revision said a `REDEFERRED` resolution "names the successor in place of
+  `record_id`" while the payload rules forbade `record_id` on that state — an
+  instruction to pass a value through a parameter the same contract says must be
+  absent, which a fake would read as the successor and a SQL store would reject.
+  Two names, each meaning one thing. A `REDEFERRED` resolution's `successor_id`
+  must equal the one the store already stamped when it admitted that successor
+  (above), so the transition is checked against durable state rather than trusting
+  the caller to name the right question.
+
+  **An unclaimed rejection is subject to the deadline too.** `PENDING → REJECTED`
+  carries the same `now < expires_at` predicate every other operation does (§2's
+  half-open comparison), and fails past it. Without that, a client that displayed
+  the question a moment before it lapsed can reject it a moment after, and the
+  lapsed row becomes a **retained `REJECTED` key** that suppresses a fresh
+  identical proposal — the one outcome §7 says a lapsed key must not have. A
+  question that is no longer answerable is no longer *rejectable*; the two are the
+  same statement.
 
   **Every terminal state must be reachable from `APPLYING`, and `REJECTED` is the
   one an earlier revision omitted.** `MemoryWriter` takes an injected
@@ -564,8 +594,18 @@ like every other, owing:
   reached at the instant it names" convention** the answerability comparison uses
   (above). A row is purgeable when:
 
-  - it is **terminal** and `answered_at + deferral_ttl <= now`; or
-  - it is **`PENDING`** and `expires_at is not None and expires_at <= now`.
+  - it is **terminal**, its `retention` is not `None`, and
+    `answered_at + retention <= now`; or
+  - it is **`PENDING`**, its `expires_at` is not `None`, and `expires_at <= now`.
+
+  **Both read the record, never the live setting** — `retention` is the duration
+  stamped at admission (above), so a configuration change never reaches back and
+  shortens or extends a question already asked. And `retention is None` is a
+  complete answer rather than an undefined expression: **a terminal row admitted
+  under "ask me forever" is never purged**, which is the same choice its `PENDING`
+  sibling makes and the same one the user made. A rule that only worked for finite
+  durations would leave an implementation to raise or invent behaviour at exactly
+  the setting the user chose deliberately.
 
   Both are inclusive at the instant, the same rule as answerability seen from the
   other side. **The two anchors are different on purpose, and the asymmetry is the
@@ -573,17 +613,16 @@ like every other, owing:
   something depends on it surviving: §7's no-nagging rule reads a `REJECTED` key to
   refuse re-asking, and that is the whole retention argument. A *lapsed* row has no
   such dependant — its key stopped speaking the instant it lapsed (§2), so nothing
-  reads it and nothing is served by keeping it. Giving it the same
-  `+ deferral_ttl` grace, as an earlier revision did by symmetry, held an unanswered
-  secret-tier proposal for **twice** the configured lifetime while §1 called that
-  lifetime the cap on how long unresolved sensitive content sits. Retention has to
-  be argued per state, not applied uniformly because the two lines look alike.
+  reads it and nothing is served by keeping it. Giving it the same grace, as an
+  earlier revision did by symmetry, held an unanswered secret-tier proposal for
+  **twice** the configured lifetime while §1 called that lifetime the cap on how
+  long unresolved sensitive content sits. Retention has to be argued per state, not
+  applied uniformly because the two lines look alike.
 
   So the `PENDING` clause is what makes §1's cap true, and it is the one a purge
   naturally omits: an unanswered question never transitions (expiry is not a state,
   above), so a purge keyed on terminal states alone keeps a lapsed secret-tier
-  proposal forever. A `PENDING` row with `expires_at=None` is never purgeable,
-  because it has no anchor — §6's "ask me forever", carried through.
+  proposal forever.
   **It never removes an `APPLYING` row, at any age.** That row is the only durable
   record that an answer was begun; destroying it while its `ingest` is still
   running — a slow embed, a stalled store — would let the memory write commit
@@ -610,7 +649,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Fifteen clauses the suite must carry are named here**, because they are the ones a
+**Seventeen clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -653,45 +692,52 @@ that would otherwise be prose:
    nothing authorised), and an `APPLYING` row addressed with a stale or absent
    `claim_id`.
 7. **`purge` removes a lapsed `PENDING` deferral at `expires_at`** — seeded through
-   an injected clock — **retains a `REJECTED` one until `answered_at +
-   deferral_ttl`, leaves an `APPLYING` one however old it is, and `delete` removes
-   that same `APPLYING` row.** Four cases pulling in different directions, which is
-   exactly why an implementation gets one wrong: the first is §1's exposure cap, the
-   second is §7's no-nagging rule, the third is §9's guard on the record of an
-   answer, and the fourth is ADR-0007's unconditional data right. A suite that
-   applies one grace to every finished row passes the second and fails the first.
-8. **`defer` collides on the key and only on the key.** Two proposals differing
+   an injected clock — **retains a `REJECTED` one until `answered_at + retention`,
+   leaves an `APPLYING` one however old it is, and `delete` removes that same
+   `APPLYING` row.** Four cases pulling in different directions, which is exactly
+   why an implementation gets one wrong: the first is §1's exposure cap, the second
+   is §7's no-nagging rule, the third is §9's guard on the record of an answer, and
+   the fourth is ADR-0007's unconditional data right. A suite that applies one grace
+   to every finished row passes the second and fails the first.
+8. **`purge` reads the stored `retention`, not the live setting** (§2): a deferral
+   admitted under one lifetime, resolved, and then judged after the setting has
+   **changed** is still purged on the duration it was admitted with. Nothing else
+   in the suite varies configuration between admission and resolution, so nothing
+   else reaches this — and an implementation that reads the setting passes every
+   other purge clause.
+9. **`defer` collides on the key and only on the key.** Two proposals differing
    *only* in `provenance.source`, and two differing only in `sensitivity`, must both
    admit as separate questions (§7), while an identical repeat collides and does not
    refresh the deadline. A suite that varies only `content` certifies a weaker key
    than the one ratified.
-9. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
+10. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
    `REJECTED` one within retention, and an `APPLYING` one, do** (§2, §7). These are
    the differences between "we asked and you declined", "that question lapsed", and
    "an answer to that may be committing right now", and a suite that tests only the
    live collision leaves all of them unpinned.
-10. **The deadline boundary is driven at the instant itself** (§2), on an injected
+11. **The deadline boundary is driven at the instant itself** (§2), on an injected
     clock: a deferral read at exactly `expires_at` is **not** answerable — absent
     from `pending`, refused by `claim`, outside the cap count, no longer speaking
     for its key — and one read an instant before it is answerable on all four. The
     listed clock cases otherwise step well past the deadline and never touch the
     comparison that two backends actually spell differently. **And `purge`'s own two
     boundaries at their instants** (§2): a terminal row exactly at
-    `answered_at + deferral_ttl`, and a lapsed `PENDING` row exactly at
+    `answered_at + retention`, and a lapsed `PENDING` row exactly at
     `expires_at` — each purged at equality and each retained one instant before.
     The two anchors differ, so a suite that drives one and infers the other proves
     nothing about the one that carries §1's exposure cap.
-11. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
-   after any clock advance, `claim` takes it, its key still collides, and `purge`
-   leaves it. Four assertions, because an implementation that coerces `None` to a
-   sentinel passes the first three and fails the fourth — or passes all four against
-   a *far-future* sentinel and then quietly deletes the question when the sentinel
-   arrives.
-12. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
+12. **A deferral admitted under "ask me forever" never lapses and is never purged**
+    (§2, §6): with `expires_at=None`, `pending` returns it after any clock advance,
+    `claim` takes it, its key still collides, and `purge` leaves it — **and, once
+    `REJECTED`, `purge` still leaves it**, because `retention` is `None` too. Five
+    assertions, because an implementation that coerces `None` to a sentinel passes
+    the first three and fails the rest, and one that handles only the `PENDING`
+    half raises or invents behaviour on the terminal one.
+13. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
    same bounded default as `pending`, and the two reads are **disjoint**: no row
    appears in both. A store that returned an interrupted question among the
    answerable ones would offer the user a claim that cannot be taken.
-13. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
+14. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
     ends, and refuse a non-`int` or a `bool` before any await** (§2) — a float, a
     string and `True`, each of which either satisfies the range or passes an
     `isinstance(x, int)` check while meaning something no two backends agree on.
@@ -701,11 +747,20 @@ that would otherwise be prose:
     the **default `limit` is exercised with more than 50 matching rows**, for §8's
     other reason: an implementation defaulting to unbounded satisfies every
     explicit-limit case while breaking the bounded-default guarantee.
-14. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
-    record id, `ACCEPTED` carrying a successor id, `REDEFERRED` without a successor
-    id, and `REJECTED`/`STALE` carrying either. Four cases, because the transition
-    tests pass against a store that writes whatever payload it is handed.
-15. **The key is a canonical projection** (§7), which needs a case per excluded
+15. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
+    `record_id`, `ACCEPTED` carrying a `successor_id`, `REDEFERRED` without a
+    `successor_id`, `REDEFERRED` carrying a `record_id`, `REDEFERRED` naming a
+    successor other than the one the store stamped, and `REJECTED`/`STALE` carrying
+    either. Six cases, because the transition tests pass against a store that
+    writes whatever payload it is handed, and the two ids are separate parameters
+    precisely so each of these is expressible rather than ambiguous.
+16. **An unclaimed rejection past the deadline fails** (§2): `resolve(state=REJECTED,
+    claim_id=None)` succeeds an instant before `expires_at` and fails at it, and the
+    lapsed row's key still does not collide afterwards. Without the second half the
+    clause proves the refusal without proving what the refusal is *for* — that a
+    question nobody could answer cannot become a retained `REJECTED` key that
+    suppresses the next honest proposal.
+17. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; and two whose `evidence` or
@@ -1488,7 +1543,9 @@ On ratification:
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
 5. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7), the cap
    `gt=0` and both refused at load, with load-time tests for zero and negative
-   values as `confirmation_ttl` already has.
+   values as `confirmation_ttl` already has. **`deferral_ttl` is read exactly once
+   per question, at admission**, and stamped onto the record as `retention` and
+   `expires_at` (§2); no later operation consults the setting.
 6. The façade methods, the `Question` DTO and the CLI commands (§8), including the
    separate interrupted enumeration, the `APPLYING` rendering and the disposal
    verb (§9), the re-deferred `AnswerOutcome` that hands the user the successor
