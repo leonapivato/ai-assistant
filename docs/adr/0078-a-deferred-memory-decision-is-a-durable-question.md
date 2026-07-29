@@ -1830,6 +1830,16 @@ On ratification:
    the assertion that would have caught the stranded-claim hole, so it is named
    rather than left to be inferred from the first.
 
+   **And one for the arm this ADR does not close** (§1): a `learn` whose proposal
+   is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
+   result — **raises nothing**, and renders the *existing* non-answerable message
+   rather than the new one. All three halves are needed. Without the first an
+   implementation calls `defer` and surfaces its validation failure as an error on
+   a path that is supposed to be ordinary; without the third it routes every
+   `ASK_USER` through the queued-question line and tells the user to go answer
+   something that was never queued — and every other listed test still passes,
+   because they all drive the arms that *are* closed.
+
    **And two more.** One for the outcome mapping's totality: an accept driven
    through a `MemoryWriter` whose injected policy rules `REJECT` resolves the claim
    to `REJECTED` rather than leaving it `APPLYING` (§2) — a conforming policy that
