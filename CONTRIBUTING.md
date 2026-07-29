@@ -282,7 +282,9 @@ run before a rebase is not a gate run against `main`.
 
 The mechanics of the role — clone inventory, brief contents, what to re-check
 before believing a report, merge sequencing — live in the `dispatch-agents`
-skill, alongside `find-parallel-work`, which proposes the lanes it dispatches.
+skill, alongside `pre-dispatch-survey`, which establishes the state its briefs
+are written against. Neither decides *what* the work is: `docs/roadmap.md` owns
+scope, and its legs are ordered.
 
 ## Git & commits
 
