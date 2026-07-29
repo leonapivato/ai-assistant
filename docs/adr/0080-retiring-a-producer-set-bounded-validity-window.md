@@ -325,33 +325,47 @@ not of either alone, and it is deliberately the same shape as the obligation
 one its caller retrieves from — a composition-root obligation, unenforceable here
 precisely because no store is on this seam" (ADR-0028 §4).
 
-Under close-coherence the refusal **cannot arise**. A record with
-`valid_from > now` is, by ADR-0045 §2's liveness predicate, not live at the close
-instant, and conflict detection surfaces only records the *store* read as live
-(ADR-0045 §6), so `valid_from <= now_read <= now_close`. The forward-advancing
-wall clock the shipped composition gives both parties satisfies it (the detector
-reads before the applier closes); so does any writer whose instant is at or after
-its store's read. What breaks it is a store read **ahead** of the writer's
+Under close-coherence the refusal arises **only at the tie**, and otherwise not
+at all. A record with `valid_from > now_close` is, by ADR-0045 §2's liveness
+predicate, not live at the close instant, and conflict detection surfaces only
+records the *store* read as live (ADR-0045 §6), so close-coherence gives
+`valid_from <= now_read <= now_close`. That leaves exactly two cases: strict
+inequality, where the window is representable and no refusal is owed; and
+`valid_from == now_read == now_close`, where the record is live at the read
+(`valid_from` is inclusive) and the chosen end lands on it — the tie §3 refuses.
+
+**The tie is a genuine close-coherent exception, and it is stated rather than
+defined away.** Close-coherence could be given the strict form
+`now_close > now_read`, which would make the refusal unreachable under it; that
+is rejected because the shipped composition can legitimately produce equal
+readings — two `datetime.now(UTC)` samples at a resolution coarser than the work
+between them — and a definition that declares that incoherent would be
+describing a clock, not a composition. So the honest statement is: a
+close-coherent composition refuses only where a record's window opens exactly at
+the close instant, which is representationally impossible to retire (§3's first
+edge), not a disagreement about time.
+
+What breaks close-coherence outright is a store read **ahead** of the writer's
 close — an injected test clock, genuinely disagreeing clocks, or a writer whose
-constant instant predates what its store is serving. All three are the same
-defect, and it is the clock-coherence gap #460 now carries; the tie
-(`valid_from == now_close`) sits at the boundary of close-coherence and refuses
-for the representability reason above rather than for a disagreement.
+constant instant predates what its store is serving. All three are one defect,
+and it is the clock-coherence gap #460 now carries.
 
 So the refusal is the instrument ADR-0079 §1 describes for its ceiling and
 `_MAX_SUPERSEDE_ATTEMPTS` before it: it exists to make a pathological
-*composition* fail loudly rather than corrupt something, not to bound an ordinary
-one. It is not a claim that no conforming writer can trigger it — §1 does not
-constrain the instant's value, so one can, and that writer's composition is
-exactly the incoherent one this paragraph names.
+*composition* — or, at the tie, an unrepresentable retirement — fail loudly
+rather than corrupt something, not to bound an ordinary one. It is not a claim
+that no conforming writer can trigger it: §1 does not constrain the instant's
+value, so one can, and that writer is either in the incoherent composition above
+or on the tie.
 
 **It therefore does not blunt the law ADR-0079 made total.** ADR-0079 §1's law is
 over the conflicts retrieval *surfaced*, and it already states its own reach
 rather than claiming exhaustiveness. This refusal removes nothing from that
-reach: under a close-coherent composition it never fires, and where it does fire the
-inputs to the ingest are already mutually inconsistent — the same class of
-statement ADR-0079 §1 makes when it refuses above the ceiling ("the ingest's
-*inputs* cannot be trusted"). An error the operator sees is the better outcome
+reach: under a close-coherent composition it fires only at §3's tie, where the
+retirement is unrepresentable rather than merely awkward, and otherwise only where
+the ingest's inputs are already mutually inconsistent — the same class of statement
+ADR-0079 §1 makes when it refuses above the ceiling ("the ingest's *inputs* cannot
+be trusted"). An error the operator sees is the better outcome
 than a persisted window the store will refuse to decode.
 
 ### 4. Never-lived is rejected, and `Validity`'s invariant is not relaxed
@@ -778,13 +792,13 @@ sibling deferral of #306's absolute-hide half is likewise honoured, not absorbed
   a belief off the read path and never puts one back" a contract property rather
   than an implementation habit — the one thing a naive reading of ADR-0045 §4
   step 1 gets wrong.
-- **A correction can now fail on a clock disagreement.** §3's refusal is a real
+- **A correction can now fail on an unretirable target.** §3's refusal is a real
   user-visible failure mode: an ingest raises and the user's correction does not
-  land. It is bounded to a state a close-coherent composition cannot produce (§3), it
-  is loud rather than silent, and it leaves every record in the set exactly as it
-  was — but it is a second
-  way for a correction to refuse, alongside ADR-0079 §1's ceiling, and both are
-  `MemoryStoreError` today.
+  land. It is bounded to two states (§3) — a composition that is not
+  close-coherent, and the tie where a record's window opens exactly at the close
+  instant — it is loud rather than silent, and it leaves every record in the set
+  exactly as it was. But it is a second way for a correction to refuse, alongside
+  ADR-0079 §1's ceiling, and both are `MemoryStoreError` today.
 - **The suite gains three obligations and no seam.** The reviewable unit is one
   docstring, three suite obligations, and the fake matching. `WriterFactory` is
   unchanged, so no existing subclass needs to move, and the suite still pins no
