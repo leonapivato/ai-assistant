@@ -2045,15 +2045,20 @@ system happens to know.
 call.** A cancelled `answer` **propagates** its `CancelledError`
 ([ADR-0060](0060-cancellation-must-not-orphan-a-resource.md)), and the coordinator
 **applies nothing further and cleans nothing up**, wherever the cancellation lands.
-The sequence has **four** awaited steps and therefore four windows — `claim`,
-`ingest`, the successor `defer` on the re-deferral branch, and `resolve` — and the
-list is exhaustive by construction: those are every call the answer path makes. The reason is the same
+An **accept** has four awaited steps and therefore four windows — `claim`,
+`ingest`, the successor `defer` on the re-deferral branch, and `resolve`. A
+**rejection** has one, its single unclaimed `resolve`, and it is the gentlest of
+them: cancelled before that CAS the question is still `PENDING` and fully
+answerable, because a rejection takes no claim and so leaves nothing half-done;
+cancelled after, it is a retained `REJECTED` row, which is what the answer meant.
+Five windows across the two paths, and the list is exhaustive by construction:
+those are every call an answer makes. The reason is the same
 each time: ADR-0060 makes a cancelled call's effect indeterminate *to its caller*,
 so the caller may not infer either that the step landed or that it did not, and
 every corrective action needs exactly that inference. The durable state is right
 without it, because each step's own CAS or write is atomic — whatever committed is
-committed, and the row is then either terminal or stranded `APPLYING` — the two
-states this design already renders honestly. The windows differ only in what they
+committed, and the row is then terminal, still `PENDING`, or stranded `APPLYING` —
+all states this design already renders honestly. The windows differ only in what they
 leave:
 
 - **Inside `claim`**, after its CAS and before it returns: the row is `APPLYING`
@@ -2245,7 +2250,10 @@ On ratification:
    `resolve`**, driven on both sides of its CAS — cancelled after it commits, the
    terminal row is retained and readable; cancelled before, the row is still
    `APPLYING` — with neither "repaired" by the coordinator, which is the assertion,
-   since both are already right; **cancellation of the successor `defer`**, after
+   since both are already right. **And the rejection path's single window**, on both
+   sides of its unclaimed CAS: cancelled after, a retained `REJECTED` row; cancelled
+   before, a question still `PENDING` and still answerable, which the accept-path
+   cases cannot show because they all start from a claim; **cancellation of the successor `defer`**, after
    its commit and before it returns: the successor survives and the parent keeps its
    stamped `successor_id`. Driven for a newly admitted successor and for one
    suppressed onto each of a `PENDING`, a `REJECTED` and an `APPLYING` row, since
