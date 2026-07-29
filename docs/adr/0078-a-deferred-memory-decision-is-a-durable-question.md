@@ -2182,11 +2182,13 @@ On ratification:
    the bounded end, asserted, because "bounded" without an exhaustion case is a
    loop nobody has counted. Both paths are named because an implementation can
    correctly retry successors and still propagate the ordinary error, which parks
-   nothing and loses exactly the correction the user just typed; an
+   nothing and loses exactly the correction the user just typed;
    an accept whose `ingest` **raises** — driven for `UnresolvedEvidenceError`, the
    ordinary case where cited evidence was deleted between the question and the
-   answer, and for a store failure — propagates the error, writes no bookkeeping,
-   and leaves the deferral `APPLYING` and reachable through `interrupted`; an
+   answer, for a store failure, and for **cancellation** — propagates, writes no
+   bookkeeping, and leaves the deferral `APPLYING` and reachable through
+   `interrupted`, the cancellation case asserted rather than assumed to follow from
+   the other two because it is the one an error boundary silently handles; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
