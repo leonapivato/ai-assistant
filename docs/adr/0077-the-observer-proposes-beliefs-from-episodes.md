@@ -790,11 +790,35 @@ halves, deliberately:
 
 ### 8. Trigger and cadence: an explicit operation, which the scheduler later calls
 
-**Observation is an explicit operation on the `Engine` façade** — take a bounded
-batch of episodes (optionally scoped to one conversation), observe it, ingest
-what comes back, return what happened. The CLI is its first caller. It is
-**not** wired into the turn, and there is no polling, no background task and no
-ambient machinery.
+**Observation is an explicit operation on the `Engine` façade** — select a
+bounded batch of episodes, observe it, ingest what comes back, return what
+happened. The CLI is its first caller. It is **not** wired into the turn, and
+there is no polling, no background task and no ambient machinery.
+
+**The selection rule is named, because "a bounded batch" alone starves.** The
+operation takes an optional conversation id: it observes **that conversation's
+most recent `observation_batch_size` turns**, or, given none, the same window
+over the **most recently active** conversation — the order ADR-0074 §2 already
+made total for `recent`, over the tail read ADR-0074 §9 already made bounded.
+Left unstated, an implementation selecting "the newest N episodes in the store"
+would re-read the same N on every run, and the N+1th could never be requested at
+all: it would expire unobserved with no way for the user to reach it. With a
+conversation as the unit, everything is reachable — `assistant conversations`
+lists them and the user can name any one — and the selection is deterministic
+enough to test.
+
+**This does not make the producer conversation-shaped.** The Protocol still takes
+episodes and the producer still never asks where they came from (§1). What is
+conversation-scoped is *today's only selector*, in the stage that holds both
+stores, which is exactly where #441's constraint leaves that choice: a sensor's
+episodes belong to no conversation, and reaching them needs a second selection
+rule in the stage, not a different `Observer`.
+
+**Two gaps in coverage are accepted and named**: a conversation the user never
+observes, and — in a conversation longer than the window — turns older than the
+tail. Both expire unobserved under ADR-0074 §7's horizon. Closing them means
+knowing what has already been observed, which is the cursor below, which is leg
+5's.
 
 Four reasons, in the order they bind:
 
@@ -925,9 +949,15 @@ class Observer(Protocol):
    forbidden kind, more usable entries than the bound, an unusable entry sitting
    past the bound (asserting it counts once and the bound still fills from behind
    it), and a response that does not decode at all (asserting exactly one
-   unusable discard, and no second call to the model). **Confidence determinism
-   belongs here too**: the same scripted response twice yields byte-identical
-   confidences. It cannot be a suite clause phrased as "the same batch twice",
+   unusable discard, and no second call to the model). **The whole confidence
+   contract belongs here too**, because §5's properties are statements about the
+   function and only a scripted response holds its inputs still: four responses
+   — `OBSERVED` on one and on two supports, `INFERRED` on two and on three —
+   assert that confidence is non-decreasing in distinct support and that
+   `OBSERVED` outranks `INFERRED` at equal support; the same response twice
+   yields byte-identical confidences; and **the same response under a clock moved
+   between calls yields the same confidences**, which is the only way "no clock"
+   is observable at all. It cannot be a suite clause phrased as "the same batch twice",
    because a conforming model-backed observer may legitimately return a different
    belief on a second call — an `OBSERVED` proposal citing one episode, then an
    `INFERRED` one citing two — and a suite asserting equal confidence across two
@@ -1036,6 +1066,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   later reader finds it in the suite instead of mistaking it for a bug, and a
   later implementer does not invent the partial-result transport this ADR
   declines.
+- **Two successive observations, unscoped, with two conversations in the
+  store** — the second names the other conversation and its episodes are
+  observed, asserting the selection rule (§8) rather than an implementation that
+  re-reads the newest N of the store forever. The negative case is the point: an
+  episode outside the first batch must be reachable.
 - **An observation run with `observer_model` unset and set** — the same route as
   conversation in the first case, the named one in the second, **and no fallback
   in either**, asserted by making the primary fail and checking that no second
