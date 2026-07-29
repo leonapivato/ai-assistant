@@ -1994,10 +1994,13 @@ On ratification:
    snapshot carrying `result.conflicts` (§3). Then: two concurrent
    `answer(id, accept=True)` calls leave **one** correction in the store and report
    the loser as not-open (§9); an accept suspended inside `ingest` while a `purge`
-   runs still finds its row and resolves against it (§2's `APPLYING` exclusion); an
-   a successor admission whose **minted id collides** — forced — is re-minted and
-   retried, so the parent still resolves `REDEFERRED` naming a reachable successor
-   rather than stranding `APPLYING`;
+   runs still finds its row and resolves against it (§2's `APPLYING` exclusion); a
+   successor admission whose **minted id collides once** — forced — is re-minted and
+   retried, so the parent still resolves `REDEFERRED` naming a reachable successor;
+   one against an **always-colliding factory** exhausts the budget, raises, writes
+   nothing, and leaves the parent `APPLYING` and reachable through `interrupted` —
+   the bounded end, asserted, because "bounded" without an exhaustion case is a
+   loop nobody has counted; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
