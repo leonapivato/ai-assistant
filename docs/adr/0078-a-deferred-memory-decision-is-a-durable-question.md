@@ -530,9 +530,15 @@ conforming to the words. It owes:
   resolved or lapsed row still blocks the id.
 
   **A retry of the same question under the same id is not a collision.** If the
-  stored row's `question_key` equals the incoming one, the id names *the same
-  question*, which is what a caller retrying an uncertain admission produces — so
-  the key-idempotent path runs and the admission is `SUPPRESSED`. The refusal is
+  stored row's `question_key` equals the incoming one **and still speaks for it**
+  (above), the id names a question that is still open, which is what a caller
+  retrying an uncertain admission produces — so the key-idempotent path runs and
+  the admission is `SUPPRESSED`. If the key no longer speaks — the row lapsed,
+  or is `ACCEPTED`, `STALE` or `REDEFERRED` — the exception does **not** apply and
+  the id raises: that question is finished, the incoming proposal deserves a fresh
+  one, and a fresh question gets a fresh id. Scoping the exception to a speaking
+  key is what keeps the two rules from disagreeing on a lapsed row, which an
+  earlier revision left open by saying only "the same key". The refusal is
   for one id naming **two different questions**, which is the minting fault. Stated
   as an explicit exception because the two rules otherwise contradict each other on
   exactly this input, and an implementation cannot both raise and suppress: an
@@ -870,9 +876,11 @@ that would otherwise be prose:
 3. **`defer` raises on a physical id collision and mutates nothing** — a new
    deferral whose `id` matches a stored row carrying a **different** key, checked
    against a `PENDING` row and against a terminal one — **and does not raise when
-   the key is the same**, which is clause 4's retry and the exception §2 states.
-   The pair has to be driven together: each alone reads as a rule about ids, and
-   only both show where the line is. Without it a dict-backed
+   the key is the same **and still speaks**, which is clause 4's retry and the
+   exception §2 states — **while a same-id retry against a key that no longer
+   speaks raises**, driven for a lapsed row and for an `ACCEPTED` one. The set has
+   to be driven together: each case alone reads as a rule about ids, and only all
+   of them show where the line is. Without it a dict-backed
    fake overwrites and a SQL store raises, and the suite certifies two different
    contracts. **And the intersection**: an input that is *both* a key duplicate of
    one row and an id collision with another **raises**, changing nothing (§2's
@@ -1554,9 +1562,8 @@ nagging.
 `learn` renders whichever line applies, so a user who submitted a correction is
 never left holding one the system quietly swallowed — including the full-queue
 case, which is the one an implementation is most likely to leave as a silent
-no-op. A producer with nobody watching gets the same three outcomes on its own
-result rather than a rendered line; §7 states what that does and does not
-promise.
+no-op. §7 states what this does **not** promise: a producer with nobody watching
+reports its refusals to its own stage, and no further.
 
 That is a correction to an earlier revision of this section, which claimed an
 immediate change of mind was "reachable by `learn`". It is not, for an *identical*
@@ -1587,22 +1594,25 @@ against it, so a queue cannot be held shut by questions nobody can answer. At th
 cap `defer` returns a **refused** `DeferralAdmission` carrying no deferral, and the
 proposal is not enqueued; the refusal is **reported, not swallowed**.
 
-**What "reported" promises, stated at the width it actually holds.** It reaches
-the caller, and there are two kinds of caller. A `learn` renders it in the moment,
-to the person who just typed. A producer with nobody watching — the observer —
-gets it on its own outcome, which ADR-0077 §9 already requires to pair "the
-`MemoryUpdateProposal` the observer made with the `MemoryIngestResult` it
-received", so a refused deferral is visible there rather than swallowed. And
-because neither reaches a user who is not looking, **the questions surface itself
-reports that the queue is full** (§8): the state is discoverable by opening the
-list, which is where someone who wants to act on it already is.
+**What "reported" promises, stated at the width it actually holds — which is
+narrower than an earlier revision claimed.** `defer` returns `REFUSED` to the
+**write stage**, and the stage passes it on in whatever it returns to *its* caller.
+Where that caller is a `learn`, the façade's learn result carries it and the CLI
+renders it in the moment, to the person who just typed (§8). That is the whole
+mechanism, and it is enough for the path issue #423 is about.
 
-What is *not* promised is an unprompted notification for a refusal nobody was
-present for. That needs push, and push is leg 5's (§11) — §8's design lets it be
-added without a contract change, which is the most this ADR can honestly claim
-while the only client is a CLI the user runs by hand. Saying "the user must be
-told" without that qualification was an overclaim, since the observer's refusals
-are exactly the ones with no one in the room.
+**Where nobody is watching, this ADR promises nothing, and that is the honest
+position rather than a gap to paper over.** An observer proposal refused at the
+cap is reported to the observing stage and no further; what that stage's own
+result carries is ADR-0077's to decide, not this ADR's to specify from outside.
+Two mechanisms would close it and **neither is taken here**: a capacity or count
+read on `DeferralStore`, so the questions surface could show the queue as full —
+contract surface for a UI nobody has designed, which is ADR-0073 §7's reason for
+declining a total count on `beliefs`; or a push, which is leg 5's (§11). An
+earlier revision asserted both without either existing — the surface cannot
+distinguish ten pending questions under a cap of ten from ten under a cap of
+twenty, because nothing exposes the cap — and asserting a guarantee with no
+mechanism is the failure this ADR is named after, committed by the ADR itself.
 
 Eviction is rejected:
 dropping the oldest question to make room for a newer one is the silent vanishing
@@ -1656,10 +1666,6 @@ engine**, so no adapter classifies anything.
   should be told that the thing they would be overruling is already gone. This list
   is not decoration: it is the exact scope the answer authorises (§5);
 - **when it was asked and when it goes stale**;
-- **that the queue is full**, when it is (§7). Not a per-question field but a
-  property of the listing: it is the one refusal no `learn` line can reach,
-  because the proposals it refuses come from a producer nobody is watching, and a
-  user who opens the list is exactly the person who can act on it.
 - for an `APPLYING` question, **that an answer was begun and its outcome is not
   recorded**, and §9's two steps in order: dispose of it, then check the belief and
   correct again if it is missing. Not "retry" — the system does not know whether
@@ -1880,12 +1886,7 @@ On ratification:
    the answer writes nothing and stamps `STALE` (§6); and a `learn` against a
    **full queue**, asserting the user is told the queue is full rather than getting
    silence — the `refused` branch of §7, which is the one an implementation is most
-   likely to leave as a no-op because nothing raises. **And the observer's half of
-   the same case**: a producer proposal ruled `ASK_USER` against a full queue is
-   refused, is carried on that producer's own result rather than rendered
-   anywhere, and the questions listing reports the queue as full. That is the
-   guarantee §7 narrows to, and asserting it is what keeps the narrowing from
-   becoming a quiet retreat. None belongs in the store's
+   likely to leave as a no-op because nothing raises. None belongs in the store's
    conformance suite — they are properties of the sequence, and the sequence lives
    here.
 
@@ -2101,8 +2102,9 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   which is a lifetime in name only.
 - **Re-ask a rejected question when the producer proposes it again.** Rejected
   (§7): the question reached the user and was answered. A change of mind is
-  reachable immediately through `learn`, which is the ratified correction path
-  (ADR-0073 §6).
+  reachable through §7's two steps — forget the prior question, then `learn` —
+  which uses only the ratified correction path (ADR-0073 §6). `learn` alone is
+  suppressed by the retained row, which is the point of retaining it.
 - **Resolve the deferral terminally first, then apply.** Rejected (§9): a crash
   between them leaves the question `ACCEPTED` and nothing written — the silent drop,
   with a receipt saying it was handled. The claim gets the concurrency guarantee a
