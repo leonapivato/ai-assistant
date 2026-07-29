@@ -597,22 +597,28 @@ conforming to the words. It owes:
   (below) — which is what makes the chain walkable for the surface without
   claiming an origin a question does not have.
 
-  The store validates all of it in the same atomic operation as the admission.
-  **A token naming no stored claim is not a fault** — it is the deleted-parent
-  case, and it admits the successor as an **ordinary question**: no cap bypass, no
-  link, no `successor_id` stamped. That is the right outcome and not a fallback.
-  The parent has been destroyed by the user mid-apply (§2's `delete`), so there is
-  no claimed answer to strand and no bookkeeping to record; the exemption exists to
-  protect a waiting parent, and there is none. It is also safe against a forged
-  token, which then buys exactly what passing no token buys.
+  The store validates all of it in the same atomic operation as the admission, and
+  the first question it asks is about the **parent**, not the token — because
+  `predecessor_id` is supplied, so the two cases a token alone conflates are
+  distinguishable:
 
-  The remaining conditions are faults and **raise `DeferralStoreError`, changing
-  nothing**: the claim the token names is on a deferral **other than** the one
-  `deferred.predecessor_id` names; that deferral is no longer `APPLYING`; or it
-  already carries a `successor_id`. Each is a caller that holds a real token and
-  is using it wrongly. The two arguments must also agree on presence — a
-  `predecessor_id` without a token, or a token without one, is a malformed call and
-  raises. On success the store stamps that `successor_id` in the
+  - **`predecessor_id` names no stored deferral.** The parent was destroyed by the
+    user mid-apply (§2's `delete`), so there is no claimed answer to strand and no
+    bookkeeping to record. The successor is admitted as an **ordinary question** —
+    no cap bypass, no link, no `successor_id` stamped — and nothing raises. The
+    exemption exists to protect a waiting parent and there is none.
+  - **`predecessor_id` names a stored deferral, and the token does not match that
+    deferral's claim.** This **raises**, changing nothing. It is the case an
+    earlier revision folded into the one above and must not: the parent is alive
+    and waiting, admitting an unlinked successor leaves it with no
+    `successor_id` to name, and its `resolve(REDEFERRED)` then fails forever. A
+    live parent with a bad token is a caller fault, and a fault that strands a
+    real answer is exactly the kind to surface rather than absorb.
+
+  The remaining conditions are faults too and raise: that deferral is no longer
+  `APPLYING`, or it already carries a `successor_id`. The two arguments must also
+  agree on presence — a `predecessor_id` without a token, or a token without one,
+  is a malformed call and raises. On success the store stamps that `successor_id` in the
   same commit, which is what makes the last condition enforceable and gives
   `resolve`'s `REDEFERRED` transition durable state to check rather than the
   caller's word.
@@ -905,16 +911,15 @@ that would otherwise be prose:
    and stamps that parent's `successor_id` — **and a successor whose key collides
    with a question already pending is `SUPPRESSED` and stamps the parent with
    *that* question's id**, which is the case that otherwise strands a claimed
-   answer and the one a suite never reaches unless it seeds the collision first. An **unknown token** — the deleted-parent case — admits
-   the successor as an ordinary question, subject to the cap and linked to nothing,
-   and does **not** raise. Five refusals, each changing nothing: a token whose
-   parent has since been **resolved**; one whose parent **already carries a
-   successor**; a **well-formed token for another live claim** — two questions
-   claimed concurrently, the successor naming one and the token naming the other; a
+   answer and the one a suite never reaches unless it seeds the collision first. A `predecessor_id` naming **no stored deferral** — the
+   deleted parent — admits the successor as an ordinary question, subject to the
+   cap and linked to nothing, without raising. **The same unknown token against a
+   parent that is still stored raises**, and the pair must be driven together:
+   they differ only in whether the parent exists, and a suite that drives one and
+   calls it "the unknown-token case" certifies the rule that strands a live answer.
+   Four further refusals, each changing nothing: a token whose parent has since
+   been **resolved**; one whose parent **already carries a successor**; a
    `predecessor_id` **with no token**; and a token **with no `predecessor_id`**.
-   The third is the one a suite naturally omits and the one the two arguments exist
-   together to catch: a suite that only ever passes the token it just received, for
-   the parent it just claimed, certifies neither.
 6. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
@@ -1843,8 +1848,9 @@ the user has to infer from a Protocol's dedup rule is not a recovery.
 **A `resolve` that finds nothing is reported, not raised — and what it reports
 comes from the ingest, not from the failure.** The same holds one step earlier on
 the re-deferral branch: if the parent was deleted while its answer was being
-applied, the successor's `defer` finds no claim, admits an ordinary question, and
-the sequence continues to a `resolve` that returns `False`. Nothing on this path
+applied, the successor's `defer` finds **no parent** — not merely no token — and
+admits an ordinary question, and the sequence continues to a `resolve` that
+returns `False`. Nothing on this path
 raises for a disposal the user asked for. If the question was deleted while
 its answer was being applied, `resolve` returns `False`. The coordinator still
 holds the `MemoryIngestResult`, and **that** is what it reports: the record written
