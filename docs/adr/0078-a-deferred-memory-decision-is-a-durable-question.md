@@ -339,7 +339,7 @@ from the other direction.
   **A model validator still enforces the whole record.** The store produces it, but
   the type crosses the Protocol boundary on every read, so its invariants belong on
   the model rather than in one implementation's care — the same reason
-  `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) is a
+  `MemoryDecision._outcome_fields_are_consistent` (`types.py:724-752`) is a
   validator and not a comment. Over three groups of fields:
 
   - **The sensitivity.** `proposal.sensitivity` is **not** `DataTier.SECRET`
@@ -385,7 +385,7 @@ from the other direction.
   **The deadline is half-open, and the boundary instant is fixed here rather than
   left to each backend.** A question is answerable while `now < expires_at`; **at**
   `expires_at` it is not. That is `Validity.is_live_at`'s own convention — "``True``
-  iff ``valid_from <= now < valid_until``" (`types.py:471-476`) — and the reason to
+  iff ``valid_from <= now < valid_until``" (`types.py:501-506`) — and the reason to
   adopt it is consistency rather than preference: two deadline notions in one memory
   system that disagree at the instant they name is a defect waiting for the first
   test that lands exactly on it. Unstated, one store writes `expires_at <= now` and
@@ -434,7 +434,7 @@ from the other direction.
   The key covers both layers, so it cannot.
 - **The writer can recompute it, and where it looks is the load-bearing detail.**
   `MemoryIngestor` overwrites its own copy's `conflicts` with the *live* set before
-  the policy rules (`ingest.py:477-479`), so a check run against that copy would
+  the policy rules (`ingest.py:478-480`), so a check run against that copy would
   compare the wrong set. The key is recomputed from the proposal **as handed to
   `ingest`** — whose `conflicts` are the frozen ids the question was asked about
   (§3's snapshot) — before conflict resolution replaces them. That is available:
@@ -449,12 +449,12 @@ from the other direction.
 change is additive and no existing producer moves:
 
 - `MemoryUpdateProposal.confirmation: UserConfirmation | None = None` (beside
-  `conflicts`, `types.py:642-645`).
-- `MemoryIngestResult.conflicts: tuple[str, ...] = ()` (`types.py:725`) — §4.
+  `conflicts`, `types.py:672-675`).
+- `MemoryIngestResult.conflicts: tuple[str, ...] = ()` (`types.py:755`) — §4.
 
 **And two computed properties on `MemoryUpdateProposal`** — `proposal_fingerprint`
 and `question_key`, both `Sha256Hex` (§7). Properties rather than fields, for the
-reason `parameters_digest` is one (`types.py:2653-2682`); the store indexes the key
+reason `parameters_digest` is one (`types.py:2749-2779`); the store indexes the key
 and no caller supplies either. `DeferredProposal` therefore carries no key of its
 own: the question's identity is a function of the proposal it holds, so the two
 cannot disagree.
@@ -543,7 +543,7 @@ conforming to the words. It owes:
 
   **`DeferralAdmission` has exactly three shapes**, one per
   `DeferralAdmissionOutcome` member, and its validator pins them the way
-  `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) pins a
+  `MemoryDecision._outcome_fields_are_consistent` (`types.py:724-752`) pins a
   ruling's: `ADMITTED` carries the new deferral; `SUPPRESSED` carries the existing
   one the key spoke for; `REFUSED` carries nothing and means the answerable queue
   was at its cap (§7). A physical id collision is not among them — it raises
@@ -687,7 +687,7 @@ conforming to the words. It owes:
   retention it was admitted under. A validator requiring only that the stamp
   *exists* catches neither. Taking the parameter away is the whole fix, and it
   removes an argument rather than adding a check — the placement argument
-  `parameters_digest` makes for a digest (`types.py:2653-2682`), applied to a
+  `parameters_digest` makes for a digest (`types.py:2749-2779`), applied to a
   clock.
 
   **The two ids are separate parameters, not one overloaded slot.** An earlier
@@ -723,7 +723,7 @@ conforming to the words. It owes:
 
   **Each terminal state carries its own required payload, and the other's is
   forbidden**, in exactly the shape `MemoryDecision._outcome_fields_are_consistent`
-  (`types.py:696-719`) already enforces for a ruling: `ACCEPTED` requires
+  (`types.py:724-752`) already enforces for a ruling: `ACCEPTED` requires
   `record_id` and no successor; `REDEFERRED` requires `successor_id` and no record
   id; `REJECTED` and `STALE` require neither and permit neither. Without it a valid
   claim can resolve `ACCEPTED` with no record id at all, and the question then
@@ -738,7 +738,7 @@ conforming to the words. It owes:
   gives for its conditional drop: "a drop that merely trusted its caller's earlier
   reading would be the race reintroduced one layer up."
 - **`delete(deferral_id) -> bool`** and **`clear() -> int`** — ADR-0007's data
-  rights, shaped as `MemoryStore.delete`/`clear` (`protocols.py:442`, `:453`), and
+  rights, shaped as `MemoryStore.delete`/`clear` (`protocols.py:444`, `:455`), and
   **unconditional**: no state refuses them. ADR-0073 §9 declines a *band*-conditional
   delete because "it makes a data right conditional on a classification the system
   assigned", and a state-conditional one is the same mistake with an internal label
@@ -761,12 +761,12 @@ conforming to the words. It owes:
   recovery reachable.
 - **`export() -> list[DeferredProposal]`** — ADR-0004 §6. A plain list of the frozen
   type the caller serialises with `model_dump(mode="json")`, matching
-  `MemoryStore.export` (`protocols.py:461`) and `AuditTrail.export`
-  (`protocols.py:1278`) rather than minting a bespoke export type: this store has
+  `MemoryStore.export` (`protocols.py:463`) and `AuditTrail.export`
+  (`protocols.py:1463`) rather than minting a bespoke export type: this store has
   one collection, so `PlanExport`/`ConversationExport`'s reason for existing does
   not apply.
 - **`purge() -> int`** — shaped as `MemoryStore.purge_expired`
-  (`protocols.py:474`), with **two named anchors and the same "a deadline is
+  (`protocols.py:476`), with **two named anchors and the same "a deadline is
   reached at the instant it names" convention** the answerability comparison uses
   (above). A row is purgeable when:
 
@@ -987,7 +987,7 @@ that would otherwise be prose:
 
 ### 3. The enqueue is the coordinator's, and two composition-root obligations come with it
 
-`MemoryWriter.ingest` (`protocols.py:531`) does not change, and does not learn to
+`MemoryWriter.ingest` (`protocols.py:533`) does not change, and does not learn to
 queue — ADR-0028's Consequences ruled that out and this ADR agrees with the ruling
 rather than working around it. Instead the **orchestration write stage** — which
 already holds the `MemoryWriter` by injection and now also holds the
@@ -1004,7 +1004,7 @@ is reported and nothing is persisted, which is what happens today.
 
 **What it enqueues is a snapshot, not the proposal it was handed, and the
 difference is the whole point of §4.** `MemoryIngestor` resolves conflicts onto its
-*own* copy (`ingest.py:477-479`), so the caller's proposal still carries an empty
+*own* copy (`ingest.py:478-480`), so the caller's proposal still carries an empty
 `conflicts` when `ingest` returns. The stage must therefore build the
 `DeferredProposal` around a proposal whose `conflicts` is **exactly
 `result.conflicts`** — the ids the policy actually ruled against (§4). Enqueuing
@@ -1022,6 +1022,13 @@ reaches memory through the orchestration write stage, not through a `MemoryWrite
 handle of its own.** A producer holding the writer directly gets the ratified
 policy and applier and silently loses the queue — the drop this ADR ends, restored
 by a wiring choice.
+
+**It is already honoured, checked rather than assumed.** ADR-0077's producer
+landed while this ADR was in review, and `ModelBackedObserver`
+(`learning/observer.py:172`) holds no `MemoryWriter`: its own module docstring
+says "the ingesting stage — never this class — puts each proposal through the"
+gate (`observer.py:16`). So the obligation below describes what the second
+producer already does, and what a third must keep doing.
 
 That obligation is affordable because ADR-0077 §4 already pays its half: a deferred
 proposal is **self-contained**, so the stage can hold it without holding anything
@@ -1060,7 +1067,7 @@ what the answer authorises*, so the ids are load-bearing for correctness, not
 decoration.
 
 The value already exists one frame in. `MemoryIngestor._ingest` resolves conflicts
-and stamps them onto its own copy of the proposal (`ingest.py:477-479`) before
+and stamps them onto its own copy of the proposal (`ingest.py:478-480`) before
 calling the policy — but that copy is local and the result carries only `decision`
 and `record_id`, so the caller's proposal still has an empty `conflicts`. Nothing
 new is computed; a value that already crosses the policy seam now also crosses the
@@ -1109,8 +1116,8 @@ restated:
   §1's" — and it inherits it by the same route as everything else: **the confirmed
   answer is a re-ingest**, so the ratified applier applies it. There is no second
   supersession path here for a rule to be forgotten on.
-- **The write is atomic**, by ADR-0046's `write_atomic` (`protocols.py:283`) with
-  `INSERT_IF_ABSENT` for the correction (`types.py:574-581`), as ADR-0045 §8 ruled
+- **The write is atomic**, by ADR-0046's `write_atomic` (`protocols.py:285`) with
+  `INSERT_IF_ABSENT` for the correction (`types.py:604-611`), as ADR-0045 §8 ruled
   and ADR-0050 §1 applies to a multi-target retirement.
 
 **Two narrowings are needed, and each is the discharge of a stated deferral rather
@@ -1195,7 +1202,7 @@ overturn without asking (ADR-0038's whole point)." So:
   being a value rather than a bare `tuple[str, ...] | None` is what keeps that case
   from reading as "no confirmation" under a truthiness check, which would re-defer
   an answered question forever. It is the same class of misread `MemoryWrite` is
-  frozen to prevent (`types.py:592-599`).
+  frozen to prevent (`types.py:622-629`).
 
 **What the floor checks, and what it cannot.** An earlier draft of this section
 left `confirmation` entirely unverified and called that a coordinator convention.
@@ -1240,7 +1247,7 @@ performable at the boundary with what the writer already holds:
 **What no in-process value can do, stated plainly rather than implied.** None of
 this makes the confirmation unforgeable, and this ADR does not claim it does. Any
 subsystem holding the injected `MemoryStore` can already call `write_atomic`
-(`protocols.py:283`) and close any window it likes; a floor on the writer is not a
+(`protocols.py:285`) and close any window it likes; a floor on the writer is not a
 security boundary against arbitrary in-process code and never was. What it *is* —
 and what the five checks above restore — is a guarantee that **no ruling reaches a
 user assertion by inference**: not from a policy's judgement, not from topical
@@ -1328,7 +1335,7 @@ exposure cap is a promise about the *default*, and it says so.
 
 **Stale is not expired, and the difference is the proposal's own clock.** A
 proposal's record carries its own validity window (`MemoryBase.validity`,
-`types.py:498`, ADR-0045 §2). If that window is **not open at the answer instant**,
+`types.py:528`, ADR-0045 §2). If that window is **not open at the answer instant**,
 accepting would write a record that is already retired — a belief born dead. The
 answer path therefore checks it and, when closed, refuses the apply and stamps the
 deferral `STALE`. Two independent deadlines, both of which must hold: `expires_at`
@@ -1397,7 +1404,7 @@ would: SHA-256 over `_canonical_json`'s ADR-0021 §1 form (`ensure_ascii=False`,
 UTF-8, keys ordered), typed `Sha256Hex`, and computed **on the model that owns the
 data** — because "a `str` field each caller filled in would be a canonicalisation
 per caller, and two that disagreed would produce a false mismatch at execution —
-which reads as an attack rather than as a bug" (`types.py:2653-2682`).
+which reads as an attack rather than as a bug" (`types.py:2749-2779`).
 
 The failure that argument prevents is precisely the one here. The coordinator
 fingerprints at admission and the writer recomputes at answer time; two *specified*
@@ -2008,7 +2015,7 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   nothing, because the shown conflicts have since gone) and `None` (not confirmed)
   differ only by identity, and one truthiness check turns a confirmed answer back
   into an infinite re-deferral — the same class of misread `MemoryWrite` is frozen to
-  prevent (`types.py:592-599`).
+  prevent (`types.py:622-629`).
 - **Carry `confirmation` as trusted metadata and check nothing at the writer.**
   Rejected (§5): it was this ADR's own earlier draft, and it misread what
   `_refuse_unsafe_fold` is for. The floor exists because "any conforming
