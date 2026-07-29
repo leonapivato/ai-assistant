@@ -2020,6 +2020,27 @@ only guards the bookkeeping guards the wrong thing.
 from `PENDING` to `REJECTED`, and a concurrent second rejection simply returns
 `False`.
 
+**An `ingest` that raises after the claim leaves the deferral `APPLYING`, and
+that is a decision rather than an oversight.** It is an ordinary path, not only a
+crash: a deferred derived proposal can cite evidence that resolved when the
+question was queued and has since been deleted, so `ingest` raises
+`UnresolvedEvidenceError` before writing anything; a store failure raises
+`MemoryStoreError` at a moment the coordinator cannot classify. In both the
+exception **propagates unchanged** — this ADR invents no error transport, the
+position ADR-0028 §5 takes for the same seam — and the claim is **neither resolved
+nor released nor deleted**.
+
+Resolving it terminally to tidy up is the tempting move and the wrong one: for a
+store failure the coordinator does not know whether the write landed, so
+`ACCEPTED` and `REJECTED` are both potentially false, and stamping either is the
+lie §9 exists to prevent. `STALE` is worse — it names a specific reason that is not
+this one. So the answer lands where everything indeterminate lands, which the
+design already has: the question shows up in `interrupted` as *an answer was begun
+and its outcome is not recorded*, and §9's two steps dispose of it. One
+indeterminate state, reached by a crash, by an exception, or by an exhausted
+re-mint, is easier to render honestly than three that differ only in what the
+system happens to know.
+
 **A claim is one-way, and that is what keeps the guarantee true after a crash.** A
 process that dies between `claim` and `resolve` leaves the deferral `APPLYING`
 forever: `pending` does not return it, `claim` will not re-take it, `purge` will not
@@ -2162,6 +2183,10 @@ On ratification:
    loop nobody has counted. Both paths are named because an implementation can
    correctly retry successors and still propagate the ordinary error, which parks
    nothing and loses exactly the correction the user just typed; an
+   an accept whose `ingest` **raises** — driven for `UnresolvedEvidenceError`, the
+   ordinary case where cited evidence was deleted between the question and the
+   answer, and for a store failure — propagates the error, writes no bookkeeping,
+   and leaves the deferral `APPLYING` and reachable through `interrupted`; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
