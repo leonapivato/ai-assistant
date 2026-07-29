@@ -263,17 +263,20 @@ closed, the correction does not land, and **every** record in the retirement set
 is left **unchanged** (§6).
 
 **"Unchanged", not "left live", and the distinction is load-bearing here.** The
-refusal writes nothing, so each record's liveness afterwards is exactly what it
-was before the ingest — which for a record carrying its own bounded window is not
-necessarily *live*. A target whose `valid_until` has already passed at the
-reader's clock was retrieved as a conflict from a store clock before that end and
-is not live at a later one, refusal or no refusal. So the guarantee this ADR can
-make, and the one §7 states, is that **no window is closed and no record is
-written**; visibility is then whatever ADR-0045 §6's read-time predicate says at
-the reader's own clock. ADR-0079 §4's obligation 2 phrases the same all-or-nothing
-property as "every target is left live and unchanged" because its targets are
-ordinary open-window records, for which the two coincide; under this ADR they
-need not, so the weaker, exact form is used.
+guarantee is about **stored state**: the refusal writes nothing, so every record
+in the set is byte-identical afterwards to what was stored before the ingest, and
+no window is closed. It is deliberately **not** a claim about liveness, because
+liveness is not a property of a record at all — ADR-0045 §2's predicate evaluates
+the record's window against the *reader's* clock, so what a reader sees can change
+with no write whatever. A target whose producer bounded it at `valid_until = E`
+was retrieved as a live conflict from a store clock before `E` and is invisible to
+one at or after it, refusal or no refusal. So the promise §7 states is that the
+records and their windows are unchanged; what any subsequent read returns is
+whatever ADR-0045 §6's predicate says at that reader's own clock. ADR-0079 §4's
+obligation 2 phrases the same all-or-nothing property as "every target is left
+live and unchanged" because its targets are ordinary open-window records, for
+which liveness cannot lapse on its own; under this ADR it can, so the exact form
+is used.
 
 This is not a second retirement rule. It is the acknowledgement that for such a
 record there is no representable retirement at all: `Validity`'s validator
@@ -439,8 +442,8 @@ Two clauses:
 - **the raise clause**: `MemoryStoreError` when a record the ruling would retire
   carries a `valid_from` at or after that end, so the closed window would be
   empty or inverted — with nothing written, no window closed, and every record in
-  the set left **unchanged**, so each one's liveness is exactly what it was
-  before the ingest (§3). This is flagged under golden rule 5 as a
+  the set left **unchanged** — the stored records and their windows, not a claim
+  about what a later read returns (§3). This is flagged under golden rule 5 as a
   semantics widening rather than waved through as a no-op, the treatment ADR-0074
   §9 gave `Planner.plan`'s `memories` parameter and ADR-0079 §4 its own raise
   clause.
