@@ -1066,11 +1066,14 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   later reader finds it in the suite instead of mistaking it for a bug, and a
   later implementer does not invent the partial-result transport this ADR
   declines.
-- **Two successive observations, unscoped, with two conversations in the
-  store** — the second names the other conversation and its episodes are
-  observed, asserting the selection rule (§8) rather than an implementation that
-  re-reads the newest N of the store forever. The negative case is the point: an
-  episode outside the first batch must be reachable.
+- **Two conversations in the store, observed in two runs** — the unscoped run
+  selects the **most recently active** one, and a second run **naming the other**
+  observes that one's episodes (§8). The pair pins the selector in both
+  directions and, more to the point, pins that an episode outside the first batch
+  is *reachable* — which an implementation re-reading the newest N of the store
+  forever would fail. Unscoped twice selects the same conversation twice, by
+  design: there is no cursor and no rotation, and a test asserting otherwise
+  would be demanding the state §8 declines.
 - **An observation run with `observer_model` unset and set** — the same route as
   conversation in the first case, the named one in the second, **and no fallback
   in either**, asserted by making the primary fail and checking that no second
