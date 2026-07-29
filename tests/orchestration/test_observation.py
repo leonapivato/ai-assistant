@@ -17,6 +17,7 @@ landed.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,7 @@ from ai_assistant.testing import (
     FakeMemoryStore,
     FakeMemoryWriter,
     FakeObserver,
+    ObservationGate,
     ObservedBelief,
 )
 
@@ -601,3 +603,51 @@ def test_a_non_integer_batch_size_is_a_type_error(bad: object) -> None:
             batch_size=bad,  # type: ignore[arg-type]  # the point of the test
             route=ROUTE,
         )
+
+
+async def test_a_real_expiry_between_selection_and_the_write_drops_only_that_proposal() -> None:
+    """ADR-0077 §5's race, driven end to end through the **canonical** writer.
+
+    The scripted double above pins the stage's discrimination in isolation; this pins
+    it against the write path that actually ships the refusal. The episode is
+    destroyed while ``observe`` is held at its first ``await`` — after the batch was
+    selected and before any proposal is ingested — which is precisely the window §5
+    describes: an episode is selected while live and the model call suspends for a
+    round trip.
+
+    The negative half carries as much weight as the positive: an implementation
+    treating ``UnresolvedEvidenceError`` as a fault would abort a batch that was
+    working, on nothing worse than a retention horizon doing its job.
+    """
+    gate = ObservationGate()
+    harness = Harness(
+        observer=FakeObserver(
+            [
+                ObservedBelief(content="first", start=0, record_id="rec-1"),
+                ObservedBelief(content="second", start=1, record_id="rec-2"),
+                ObservedBelief(content="third", start=2, record_id="rec-3"),
+            ],
+            gate=gate,
+        )
+    )
+    conversation = await harness.conversation_with(3)
+    selected = await _batch_ids(harness, conversation)
+
+    running = asyncio.ensure_future(harness.stage.observe(conversation))
+    await gate.reached()
+    # The evidence goes away *under* the observation, exactly as an expiry or a
+    # `forget-conversation` would. The batch is already chosen; the writes have not
+    # begun.
+    assert await harness.memory.delete(selected[1]) is True
+    gate.release()
+    report = await running
+
+    assert report.dropped_unsupported == 1
+    dropped = next(entry for entry in report.proposals if entry.content == "second")
+    assert dropped.decision is None  # no ruling was sought, so none is claimed
+    assert dropped.record_id is None
+    # The batch was not aborted: the two proposals whose evidence survived landed.
+    assert await harness.memory.get("rec-1") is not None
+    assert await harness.memory.get("rec-3") is not None
+    assert await harness.memory.get("rec-2") is None
+    assert report.stored == 2
