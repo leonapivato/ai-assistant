@@ -965,8 +965,8 @@ that would otherwise be prose:
    mutates nothing** — a new
    deferral whose `id` matches a stored row carrying a **different** key, checked
    against a `PENDING` row and against a terminal one — **and does not raise when
-   the key is the same **and still speaks**, which is clause 4's retry and the
-   exception §2 states — **while a same-id retry against a key that no longer
+   the key is the same **and still speaks**, which is the same-id retry clause
+   below and the exception §2 states — **while a same-id retry against a key that no longer
    speaks raises**, driven for a lapsed row and for an `ACCEPTED` one. The set has
    to be driven together: each case alone reads as a rule about ids, and only all
    of them show where the line is. Without it a dict-backed
@@ -1103,8 +1103,8 @@ that would otherwise be prose:
     driven with an injected clock at a known instant, the admitted record's
     `deferred_at` is that instant, its `retention` is the store's configured
     lifetime, and its `expires_at` is their sum — with **no argument able to change
-    any of the three**. Like clause 16, this is an assertion about the signature as
-    much as the behaviour: it is what stops a question being admitted already lapsed
+    any of the three**. Like the `answered_at` clause above, this is an assertion
+    about the signature as much as the behaviour: it is what stops a question being admitted already lapsed
     (never answerable, immediately purgeable, its content dropped in silence) or
     dated far enough ahead to hold the queue and its Tier 1 content for decades,
     neither of which a self-consistency validator can see.
