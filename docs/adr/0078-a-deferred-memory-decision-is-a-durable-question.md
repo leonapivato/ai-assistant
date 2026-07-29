@@ -993,12 +993,24 @@ that would otherwise be prose:
    terminal, and `purge` is the only one driven by a clock rather than a caller —
    suspend `claim` on a live `PENDING` row, advance the injected clock past
    `expires_at`, let `purge` remove it, and a read-then-write backend brings it
-   back. Either the continuation linearizes first and the destruction then removes
-   what it wrote, or the destruction wins and the continuation returns its
-   no-row result **without recreating anything**; every case ends with the row
-   absent from `get` and `export`. A read-then-write store passes every sequential
-   clause and fails only these, and what it fails at is restoring data that was
-   destroyed.
+   back.
+
+   **The assertion splits by winner, and only `purge` needs the split.** `delete`
+   and `clear` are unconditional, so either ordering ends with the row absent from
+   `get` and `export` — the destruction removes what the continuation wrote, or the
+   continuation finds nothing and writes nothing. `purge` is **conditional on
+   state** (§2), so uniform "absent" would contradict its own rule: when the
+   continuation wins, a `claim` leaves the row `APPLYING`, which `purge` may never
+   remove at any age, and a `resolve` leaves a terminal row retained until
+   `answered_at + retention` — in both, the correct outcome is that the row
+   **survives** and purge passed over it. Only when `purge` wins against a still-
+   `PENDING` row is it absent, and that is where the no-resurrection assertion
+   bites. Asserting the conditional cases is worth as much as asserting the
+   destructive ones: a purge that swept an `APPLYING` row would pass a
+   uniformly-absent matrix and break §9's guard on the record of an answer.
+
+   A read-then-write store passes every sequential clause and fails these, and what
+   it fails at is restoring data that was destroyed.
 5. **`defer`'s admission is atomic**, driven the same way: two concurrent
    same-key calls leave **one** row, and two concurrent distinct calls at
    capacity-minus-one admit exactly one. A sequential test passes against a
