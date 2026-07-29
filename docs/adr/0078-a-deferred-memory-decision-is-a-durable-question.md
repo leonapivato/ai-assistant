@@ -208,22 +208,46 @@ against `ConversationStore`'s thirteen. It earns the surface because the thing i
 persists — a question the system asked and has not been answered — genuinely exists
 nowhere today.
 
-**It is Tier 1 personal data at minimum, and sometimes Tier 0.** The proposal
-carries the user's own words, and the secret-tier arm (`policy.py:155-159`) means
-the queue can hold `DataTier.SECRET` content. The store therefore inherits every
-obligation the `MemoryStore` carries under [ADR-0004](0004-privacy-and-data-handling.md)
-and [ADR-0007](0007-memory-data-rights.md) — the same data directory and file
+**It is Tier 1 personal data, and it is Tier 1 *only*.** The proposal carries the
+user's own words, so the store inherits every obligation the `MemoryStore` carries
+under [ADR-0004](0004-privacy-and-data-handling.md) and
+[ADR-0007](0007-memory-data-rights.md) — the same data directory and file
 permissions, inclusion in export, destructible on request — and §6's finite
-lifetime is load-bearing for it rather than merely tidy: it is a **cap on how long
-unresolved sensitive content sits unanswered**, which is a tighter guarantee than
+lifetime is load-bearing rather than merely tidy: it is a **cap on how long
+unresolved personal content sits unanswered**, which is a tighter guarantee than
 accepting the proposal would have given. The cap holds for every state but one: a
 deferral interrupted mid-apply is never swept, because sweeping it can orphan a
 committed memory write (§2, §9). It is instead *shown* until the user disposes of
 it, which is a worse guarantee stated honestly rather than a better one claimed
-falsely. Deferral content is never logged; a log
-line names the deferral id (the posture
-[ADR-0055](0055-context-source-name-is-safe-to-log.md) sets for a comparable
-question about what is safe to emit).
+falsely. Deferral content is never logged; a log line names the deferral id (the
+posture [ADR-0055](0055-context-source-name-is-safe-to-log.md) sets for a
+comparable question about what is safe to emit).
+
+**A `DataTier.SECRET` proposal is therefore never queued, and the record type
+refuses one.** This is the one arm of the policy (`policy.py:155-159`) this
+mechanism does **not** close, and it is excluded on ratified grounds rather than
+by omission. ADR-0004 §3 is unconditional: "Tier 0 secrets are stored in the **OS
+keyring** via the `keyring` library — never in the memory database, never in a
+committed file." A durable queue is a file. Today the secret-tier arm is precisely
+what keeps such content *out* of storage — it defers, `ASK_USER` writes nothing,
+and the process exits — so persisting it here would not be closing a gap but
+opening one, taking the only piece of data ADR-0004 forbids a database and giving
+it a second database.
+
+Doing it properly needs the `SecretStore` seam ADR-0004 §3 names and **which does
+not exist yet** (`core/protocols.py` has no such Protocol): the payload in the
+keyring, a non-secret reference in the queue, and a read/export/delete path
+coordinated across the two. That is its own ADR with its own lane, and inventing
+it here — for a producer that does not exist, since nothing in the codebase
+constructs a `DataTier.SECRET` proposal — would be the smuggling golden rule 5
+forbids.
+
+So the exclusion is **enforced, not requested**: `DeferredProposal`'s validator
+refuses a proposal whose `sensitivity is DataTier.SECRET` (§2), which means no
+conforming store can hold one however it is called, and the write stage never
+enqueues one (§3). The secret-tier arm keeps exactly today's behaviour — reported
+in the moment, nothing persisted — and §11 files the gap with its owner rather
+than letting it look closed.
 
 ### 2. The contract surface owed, stated precisely
 
@@ -287,6 +311,10 @@ question about what is safe to emit).
   `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) is a
   validator and not a comment. Over three groups of fields:
 
+  - **The sensitivity.** `proposal.sensitivity` is **not** `DataTier.SECRET`
+    (§1). ADR-0004 §3 forbids Tier 0 content a file, and a validator is the only
+    place that holds however the store is called; the write stage's own filter
+    (§3) is the polite version of the same rule, not a substitute for it.
   - **The ruling.** `decision.kind` **is `ASK_USER`**. Every other clause in this
     ADR is written about a question the policy deferred, and a record built around
     an `ACCEPT` or a `SUPERSEDE` is not a question at all — it is a durable pending
@@ -300,7 +328,7 @@ question about what is safe to emit).
   - **The deadlines.** `retention` is positive or `None`; `retention` and
     `expires_at` are `None` **together or not at all**; and when both are set,
     `expires_at` equals `deferred_at + retention` exactly. Without this a
-    secret-tier question is admissible with a one-day `retention` and
+    question is admissible with a one-day `retention` and
     `expires_at=None`, and a literal implementation keeps it answerable forever and
     never purges it — §1's finite exposure cap defeated by a record the contract
     accepted.
@@ -590,7 +618,7 @@ conforming to the words. It owes:
   §2's explicit range, `0 <= value < 2**63`. Type and range are both refused before
   the first `await`.** Not a detail, and the range alone is not enough: `limit=-1`
   is SQLite's spelling for *no limit*, so an unvalidated negative turns the bounded
-  read of a Tier 1 — sometimes Tier 0 — queue into an unbounded one; a value past
+  read of a Tier 1 queue into an unbounded one; a value past
   the 64-bit bound surfaces a driver `OverflowError` instead of a
   `DeferralStoreError`; and `1.5` satisfies the range while a SQL driver refuses to
   bind it and an in-memory fake slices happily with it, so two conforming stores
@@ -731,15 +759,15 @@ conforming to the words. It owes:
   refuse re-asking, and that is the whole retention argument. A *lapsed* row has no
   such dependant — its key stopped speaking the instant it lapsed (§2), so nothing
   reads it and nothing is served by keeping it. Giving it the same grace, as an
-  earlier revision did by symmetry, held an unanswered secret-tier proposal for
+  earlier revision did by symmetry, held an unanswered Tier 1 proposal for
   **twice** the configured lifetime while §1 called that lifetime the cap on how
   long unresolved sensitive content sits. Retention has to be argued per state, not
   applied uniformly because the two lines look alike.
 
   So the `PENDING` clause is what makes §1's cap true, and it is the one a purge
   naturally omits: an unanswered question never transitions (expiry is not a state,
-  above), so a purge keyed on terminal states alone keeps a lapsed secret-tier
-  proposal forever.
+  above), so a purge keyed on terminal states alone keeps a lapsed proposal —
+  the user's own words — on disk forever.
   **It never removes an `APPLYING` row, at any age.** That row is the only durable
   record that an answer was begun; destroying it while its `ingest` is still
   running — a slow embed, a stalled store — would let the memory write commit
@@ -882,8 +910,10 @@ that would otherwise be prose:
     clause proves the refusal without proving what the refusal is *for* — that a
     question nobody could answer cannot become a retained `REJECTED` key that
     suppresses the next honest proposal.
-18. **`DeferredProposal` refuses an inconsistent record** (§2), in three groups.
-    The ruling: **every non-`ASK_USER` `MemoryDecisionKind`** — `ACCEPT`, `REJECT`,
+18. **`DeferredProposal` refuses an inconsistent record** (§2), in four groups.
+    The sensitivity: a `DataTier.SECRET` proposal is refused and `defer` leaves the
+    store unchanged — the clause that keeps ADR-0004 §3's "never in a committed
+    file" true of this store no matter who calls it. The ruling: **every non-`ASK_USER` `MemoryDecisionKind`** — `ACCEPT`, `REJECT`,
     `REINFORCE`, `SUPERSEDE`, `STORE_TEMPORARY` — is refused, and `defer` leaves the
     store unchanged when handed one. Parametrise it over the enum rather than
     picking a representative: a rule about which member is admissible is exactly the
@@ -936,6 +966,10 @@ This is ADR-0074 §9's coordinator rule applied unchanged: "the two-store sequen
 belongs to a coordinator, not to either store… `orchestration` is the one place
 that legitimately holds both handles by injection." Neither store may hold the
 other (golden rule 1), and the sequence spans both.
+
+**It enqueues nothing for a `DataTier.SECRET` proposal** (§1): the stage filters
+those out before `defer`, and the record type refuses one anyway (§2). The ruling
+is reported and nothing is persisted, which is what happens today.
 
 **What it enqueues is a snapshot, not the proposal it was handed, and the
 difference is the whole point of §4.** `MemoryIngestor` resolves conflicts onto its
@@ -1062,9 +1096,9 @@ proposal carrying a `confirmation` is judged in three steps, in this order:
    present in the live conflict set.
 3. Otherwise rule `ACCEPT`.
 
-The rule must come **first** because both the secret-tier arm
-(`policy.py:155-159`) and the assertion arm (`policy.py:73`) would otherwise
-re-defer the answer to the question they just asked, forever. Step 1 is what keeps
+The rule must come **first** because the assertion arms
+(`policy.py:73`, `policy.py:164-168`) would otherwise re-defer the answer to the
+question they just asked, forever. Step 1 is what keeps
 that precedence from becoming a blanket override: the confirmed path skips the
 questions already answered, not the ones not yet asked.
 
@@ -1125,12 +1159,12 @@ overturn without asking (ADR-0038's whole point)." So:
 - A conflict the user *was* shown that has since been retired or deleted simply is
   not in the live set; the apply proceeds without it. Authorising a retirement that
   is already moot costs nothing.
-- `retires` is empty for the secret-tier arm, which asks "may I keep this at all?"
-  and authorises no retirement. `UserConfirmation` being a value rather than a bare
-  `tuple[str, ...] | None` is what keeps that case from reading as "no confirmation"
-  under a truthiness check — the silent re-deferral that encoding would produce. It
-  is the same class of misread `MemoryWrite` is frozen to prevent
-  (`types.py:592-599`).
+- **`retires` may legitimately be empty** — every conflict the user was shown has
+  since gone, so the answer authorises a write and no retirement. `UserConfirmation`
+  being a value rather than a bare `tuple[str, ...] | None` is what keeps that case
+  from reading as "no confirmation" under a truthiness check, which would re-defer
+  an answered question forever. It is the same class of misread `MemoryWrite` is
+  frozen to prevent (`types.py:592-599`).
 
 **What the floor checks, and what it cannot.** An earlier draft of this section
 left `confirmation` entirely unverified and called that a coordinator convention.
@@ -1230,7 +1264,7 @@ whose failure re-opens one.
 **That choice puts a load on `purge`, and §2 states it rather than leaving it to be
 inferred.** An unanswered question never reaches a terminal state, so a `purge`
 keyed on terminal states alone would keep every lapsed question — including a
-`DataTier.SECRET` proposal — on disk forever, while §1 promises the lifetime is a
+proposal on disk forever, while §1 promises the lifetime is a
 cap on how long unresolved sensitive content sits. `purge` therefore covers
 expired-and-unanswered rows as well as terminal ones (§2), and the conformance
 suite drives the case (§10).
@@ -1413,9 +1447,9 @@ content are **not** the same question — the first asks "shall I keep what I wo
 out?", the second is the user telling us directly, and collapsing them would show
 the user the observation while silently discarding the assertion, which is the drop
 this ADR exists to end reintroduced by the mechanism meant to keep the queue tidy.
-And a `SECRET` and a `PERSONAL` proposal ask different questions even when the words
-match, which is why `sensitivity` is in the key although it is not part of the
-record. A different conflict set is likewise a different question, and §5's bounded
+And a `PERSONAL` and an `OPERATIONAL` proposal ask different questions even when
+the words match, which is why `sensitivity` is in the key although it is not part
+of the record. A different conflict set is likewise a different question, and §5's bounded
 authority depends on it.
 
 `defer` is idempotent on the key (§2): a second arrival is admitted as **nothing**,
@@ -1806,6 +1840,14 @@ On ratification:
 
 ### 11. What this ADR does not decide
 
+- **A resolution path for the secret-tier deferral** (§1). ADR-0004 §3 forbids
+  Tier 0 content a file, so this queue may not hold one, and the arm keeps today's
+  behaviour: reported in the moment, nothing persisted. Closing it needs the
+  `SecretStore` seam ADR-0004 §3 names and that `core/protocols.py` does not yet
+  have — payload in the keyring, a non-secret reference in the queue, and a
+  read/export/delete path across the two. Owner: a `SecretStore` lane, gated on a
+  producer existing; nothing in the codebase constructs a `DataTier.SECRET`
+  proposal today.
 - **A real contradiction signal.** Still ADR-0045 §7's and ADR-0050 §3's open
   deferral. This ADR builds the *other* gate §7 named; it does not narrow the
   question that triggers one. If a signal lands, fewer questions are asked and
@@ -1915,9 +1957,9 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   member would break every exhaustive match in the codebase to express nothing new.
 - **Encode the confirmation as `confirmed_retirements: tuple[str, ...] | None` and
   skip the `UserConfirmation` value.** Rejected (§5): `()` (confirmed, retires
-  nothing — the secret-tier case) and `None` (not confirmed) differ only by
-  identity, and one truthiness check turns a confirmed secret-tier answer back into
-  an infinite re-deferral — the same class of misread `MemoryWrite` is frozen to
+  nothing, because the shown conflicts have since gone) and `None` (not confirmed)
+  differ only by identity, and one truthiness check turns a confirmed answer back
+  into an infinite re-deferral — the same class of misread `MemoryWrite` is frozen to
   prevent (`types.py:592-599`).
 - **Carry `confirmation` as trusted metadata and check nothing at the writer.**
   Rejected (§5): it was this ADR's own earlier draft, and it misread what
@@ -1968,7 +2010,7 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   Rejected (§2): it makes ADR-0007's data right conditional on an internal state the
   system assigned, which is ADR-0073 §9's objection to a band-conditional delete
   with a different label. And it would be permanent for a *stranded* claim, so a
-  user could never destroy an interrupted secret-tier question. The consequence a
+  user could never destroy an interrupted question at all. The consequence a
   refusal was protecting against — `resolve` finding nothing — is reported rather
   than prevented (§9).
 - **Give a deleted `APPLYING` row a content-free tombstone so the late `resolve`
