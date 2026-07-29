@@ -156,6 +156,24 @@ and ship.
 
 Rebase-merge only; the repo forbids squash and merge commits.
 
+**Release the clone after the merge.** A lane leaves its clone sitting on the
+merged feature branch, and §1's test calls a clone free only if it is on `main`
+and clean — so an unreleased clone reads as busy forever and the next batch
+either overrides the test by eye or resets by hand:
+
+```bash
+git -C "$clone" switch main --quiet && git -C "$clone" pull --ff-only
+git -C "$clone" cherry main <area>/<slug>        # any '+' line = not upstream yet
+git -C "$clone" branch -D <area>/<slug>          # only once that prints nothing
+```
+
+**Check with `cherry`, not `branch -d`.** Rebase-merge rewrites the commits, so
+the local tip is never an ancestor of `main` and the ancestry-based `-d` refuses
+on a lane that *did* land — which trains you to reach for `-D` reflexively, and
+`-D` on a lane that did *not* land discards it silently. `git cherry` compares
+patch ids instead, so it answers the question that ancestry cannot: did this
+work reach `main` in any form? Empty output means yes.
+
 **Renaming a clone breaks its `.venv`** (absolute paths): `rm -rf .venv && just
 setup` after. Never rename a clone an agent is running in.
 
