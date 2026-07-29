@@ -1189,8 +1189,32 @@ proposal carrying a `confirmation` is judged in three steps, in this order:
    is outside the answer's authority, and committing beside it is the #245 gap
    (ADR-0050 §2). The answer becomes a **re-deferral** (§9), not a write.
 2. Otherwise rule `SUPERSEDE` on the first id in `confirmation.retires` that is
-   present in the live conflict set.
+   present in the live conflict set **and whose source is `USER_ASSERTED`**.
 3. Otherwise rule `ACCEPT`.
+
+**Step 2 names an *asserted* target, and the qualifier is load-bearing in two
+directions.** The confirmation exists to authorise the one thing similarity may
+not do — retire a record the user gave us (§5b) — so an asserted conflict is what
+it is *for*. Without the qualifier, a conflict set holding an `EXTERNAL` record
+and an assertion, both in `retires`, could target the `EXTERNAL` one: the
+`DefaultMemoryPolicy` would then be superseding an `EXTERNAL` record, which
+ADR-0045 §5/§7 leave as a **deferred policy choice** and §11 still defers — adopted
+by accident, through an ordering nobody chose. And the assertion the user actually
+confirmed retiring would stay live, because the applier's widening sweeps only
+supersedable siblings around the named target (ADR-0050 §1): the answer would
+retire the one record it was not given for and leave the one it was.
+
+**Every confirmed *asserted* conflict is retired, not only the named one.** §5b's
+narrowing of ADR-0050 §1 is what does it — an asserted conflict named in `retires`
+is in the retirement set — so a confirmation covering two prior assertions retires
+both, in the one atomic batch. The named target is still the primary the ruling
+audits; the rest ride the same widening the derived siblings already do.
+
+**An `EXTERNAL` id in `retires` is simply not acted on.** `retires` is a ceiling,
+not an instruction (below): the user may have been shown an external record among
+the conflicts, and authorising its retirement does not make the default policy
+adopt `EXTERNAL` supersession. That choice stays where ADR-0045 §7 left it, and a
+policy that does adopt it later inherits this path unchanged.
 
 The rule must come **first** because the assertion arms
 (`policy.py:73`, `policy.py:164-168`) would otherwise re-defer the answer to the
@@ -1333,7 +1357,18 @@ issued for a **different question**, in each of the two shapes that matter:
   other's apply. The input a *fingerprint* binding waves through — and invisible to
   a suite that varies content, which is every natural way to write the case above.
 
-It **applies** only when all five checks hold. A suite asserting only the refusal
+It **applies** only when all five checks hold.
+
+**And two clauses about *which* record a confirmed `SUPERSEDE` retires** (§5a),
+which the refusal cases never reach: a conflict set holding an `EXTERNAL` record
+and a prior assertion, both named in `retires`, retires **the assertion** and
+leaves the external record live — the ordering case that would otherwise adopt
+`EXTERNAL` supersession by accident; and a `retires` naming **two prior
+assertions**, both live, retires **both** in one batch. Each is a case a suite
+built from single-conflict fixtures never constructs, and each decides which
+record the user's answer actually acted on.
+
+A suite asserting only the refusal
 certifies the gate as shut; one asserting only the pass certifies nothing about the
 floor; one omitting either mismatch shape certifies a bearer token rather than a
 bound authority.
