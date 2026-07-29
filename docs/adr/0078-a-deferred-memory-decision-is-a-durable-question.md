@@ -1336,9 +1336,22 @@ behaviour: "a policy reaches the ingestor through an injected seam and any
 conforming implementation may rule differently. The refusal therefore lives here,
 at the boundary that performs the write, rather than in the policy that recommends
 it" (`ingest.py:135-139`). A gate that opens on an unexamined field hands that
-guarantee back. So the exception carries five checks of its own, all of them
+guarantee back. So the exception carries six checks of its own, all of them
 performable at the boundary with what the writer already holds:
 
+0. **The proposal's `sensitivity` is not `DataTier.SECRET`** — and this one is not
+   about the confirmation at all. It is an unconditional refusal at the writer
+   boundary, independent of the model validator §2 adds, because a validator is
+   not a boundary: `model_construct` and `model_copy(update=...)` both skip
+   validation, and this repository already treats a definition "tampered past
+   ``frozen=True`` with ``object.__setattr__``" as inside its threat model
+   (`types.py:2362`, ADR-0018 §3, ADR-0021 §4). Without it every check below can
+   pass on a validator-bypassing secret proposal under an injected `SUPERSEDE`
+   policy, and the writer persists a secret to `MemoryStore` — ADR-0004 §3's
+   "never in the memory database", reached through the one seam whose whole job is
+   to refuse writes nobody authorised. §5a's ordering and §2's validator are the
+   polite versions; this is the one that holds when they are bypassed, which is
+   what "belt and braces" has to mean to be worth writing.
 1. The ruling is `SUPERSEDE`. A `REINFORCE` onto an assertion stays refused under
    clause 1 whatever the confirmation says — folding at the target's id would
    rewrite the user's own words, which no answer authorises.
@@ -1373,7 +1386,7 @@ this makes the confirmation unforgeable, and this ADR does not claim it does. An
 subsystem holding the injected `MemoryStore` can already call `write_atomic`
 (`protocols.py:285`) and close any window it likes; a floor on the writer is not a
 security boundary against arbitrary in-process code and never was. What it *is* —
-and what the five checks above restore — is a guarantee that **no ruling reaches a
+and what the six checks above restore — is a guarantee that **no ruling reaches a
 user assertion by inference**: not from a policy's judgement, not from topical
 similarity, not from a confirmation that belongs to another question. The remaining
 step, that a claimed confirmation corresponds to a deferral a user actually
@@ -1399,7 +1412,7 @@ issued for a **different question**, in each of the two shapes that matter:
   other's apply. The input a *fingerprint* binding waves through — and invisible to
   a suite that varies content, which is every natural way to write the case above.
 
-It **applies** only when all five checks hold.
+It **applies** only when all six checks hold.
 
 **And two clauses about *which* record a confirmed `SUPERSEDE` retires** (§5a),
 which the refusal cases never reach: a conflict set holding an `EXTERNAL` record
@@ -2038,9 +2051,12 @@ On ratification:
 
    **And two for the arm this ADR does not close** (§1). A `DataTier.SECRET`
    proposal carrying a `confirmation` is **unconstructable**, and a `SUPERSEDE`
-   driven from one is refused at the writer floor — the belt and braces §5a
-   describes, asserted because the failure it guards is a credential in the memory
-   database. And a `learn` whose proposal is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
+   driven from one **built past the validator** — `model_construct`, under an
+   injected policy that rules `SUPERSEDE` — is refused at the writer floor with
+   **no memory write**, which is check 0 and the only half of the belt and braces
+   that survives a bypass. Asserting only the unconstructable half would certify
+   the validator and leave the boundary untested, and the failure it guards is a
+   credential in the memory database. And a `learn` whose proposal is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
    result — **raises nothing**, and renders the *existing* non-answerable message
    rather than the new one. All three halves are needed. Without the first an
    implementation calls `defer` and surfaces its validation failure as an error on
@@ -2227,7 +2243,7 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   `_refuse_unsafe_fold` is for. The floor exists because "any conforming
   implementation may rule differently" (`ingest.py:135-139`); a gate that opens on
   an unexamined field returns that guarantee to the caller's good intentions. The
-  five checks §5 requires are what a boundary can actually verify, and §5 is
+  six checks §5 requires are what a boundary can actually verify, and §5 is
   explicit about what remains beyond them.
 - **Let the answer retire every asserted conflict live at answer time, not only the
   ones shown.** Rejected (§5): the user answered about the records they saw.
