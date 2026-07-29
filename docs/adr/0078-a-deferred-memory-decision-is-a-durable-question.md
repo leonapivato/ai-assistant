@@ -797,7 +797,8 @@ that would otherwise be prose:
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; two whose `evidence` or whose
-    frozen conflict-id set differ only in **order** collide; and two
+    frozen conflict-id set differ only in **order**, or only in a **repeated
+    member**, collide; and two
     `ProceduralMemory` proposals whose `steps` differ only in **order** do
     **not** — they are different workflows. The last pair is the one a suite
     written with tidy fixtures never reaches, since the sequences it builds happen
@@ -1236,13 +1237,18 @@ this key should paper over.
 preserves it everywhere else.** The criterion is whether reordering the members
 changes what the record says.
 
-- **Normalised (sorted): `Provenance.evidence` and the frozen conflict-id set.**
-  Both are bags of references — "references (e.g. episode ids) supporting this
-  record" — where membership is the content and position is an artefact of how they
-  were gathered. Conflict detection ranks by score, so two equal-scored conflicts
-  come back `(A, B)` on one call and `(B, A)` on the next; digesting the raw
-  sequence would mint two keys for one question, the same nag as a transaction
-  stamp, from ordering.
+- **Normalised — sorted *and deduplicated* — `Provenance.evidence` and the frozen
+  conflict-id set.** Both are bags of references — "references (e.g. episode ids)
+  supporting this record" — where membership is the content and position is an
+  artefact of how they were gathered. Conflict detection ranks by score, so two
+  equal-scored conflicts come back `(A, B)` on one call and `(B, A)` on the next;
+  digesting the raw sequence would mint two keys for one question, the same nag as
+  a transaction stamp, from ordering. **Deduplication is the same argument, not an
+  extra one**: if membership is the content, then `("episode-1",)` and
+  `("episode-1", "episode-1")` state the same support, and a normalisation that
+  sorted without deduplicating would let a repeated id do exactly what a reordered
+  one would — admit a second question for a set the user has already been asked
+  about. Sorting alone answers half the criterion.
 - **Preserved: `ProceduralMemory.steps`, and every other ordered field.** A
   workflow *is* its order. "Back up the database, then delete it" and "delete the
   database, then back it up" are the same three words and opposite instructions,
