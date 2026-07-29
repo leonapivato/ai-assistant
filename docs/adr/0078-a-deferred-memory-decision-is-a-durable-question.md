@@ -41,6 +41,14 @@
   than owed as an argument. ADR-0079 §2's ordering — completeness, then the ruling,
   then retirement, with a deferral winning and retiring nothing on its way — is the
   law §5's confirmed path obeys at every step.
+- **Inherits [ADR-0080](0080-retiring-a-producer-set-bounded-validity-window.md)
+  (merged, `Accepted`) by the same route.** It partially superseded ADR-0045 §4
+  step 1 — a producer-set bounded window is **clamped** on retirement, with a
+  narrow refusal for what cannot be represented — and §6 binds this ADR in terms:
+  "whoever commits an `ASK_USER` resolution inherits this rule with §1's… ADR-0078
+  owns that mechanism". Because §5 resolves by re-ingesting, the rule arrives with
+  the applier and needs nothing restated. ADR-0080 §5 also **answers**, rather than
+  defers, the write-time window question §6 previously filed against #306.
 - **[ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) (the observer)
   is merged, `Accepted`,** and it names this ADR as the owner of the mechanism
   while supplying the one property that mechanism needs: "a deferred proposal is
@@ -237,7 +245,9 @@ question about what is safe to emit).
   reads `None` as "keep forever… the user's deliberate choice"
   (`core/config.py:382-384`); `question_key`, the dedup key (§7); `state`; once
   claimed, `claimed_at` — but **not** the claim token, which no read republishes
-  (`claim`, below); and, once resolved, `answered_at`,
+  (`claim`, below); `predecessor_id`, the question this one succeeds when it was
+  raised by a re-deferral (`defer`, below), `None` otherwise; and, once resolved,
+  `answered_at`,
   `outcome_record_id` (the id the accepted apply left live, or `None`) and
   `successor_id` (the question a `REDEFERRED` answer raised, or `None`).
 
@@ -381,13 +391,26 @@ like every other, owing:
   there, so a surface can still say *when* an answer was begun). Holding the token
   is holding the claim.
 
-  The store validates it, in the same atomic operation as the admission, raising
-  `DeferralStoreError` and changing nothing if any condition fails: the token must
-  name a stored claim, its deferral must still be **`APPLYING`**, and that deferral
-  must not already carry a `successor_id`. On success the store stamps that
-  `successor_id` in the same commit, which is what makes the third condition
-  enforceable and gives `resolve`'s `REDEFERRED` transition durable state to check
-  rather than the caller's word.
+  **The successor names its own parent, so the token authorises rather than
+  identifies.** A capability alone still leaves the store unable to tell *which*
+  question a successor belongs to: two answers claimed concurrently, and a
+  coordinator that passes Q2's token while enqueuing Q1's successor, satisfies
+  every check about the token and stamps the wrong parent. So the link is on the
+  record: `DeferredProposal` carries `predecessor_id` (§2), the successor says what
+  it succeeds, and the token says the caller may say it. The pair is symmetric —
+  parent `successor_id` ↔ child `predecessor_id` — which is also what makes the
+  chain walkable from either end for the surface.
+
+  The store validates all of it in the same atomic operation as the admission,
+  raising `DeferralStoreError` and changing nothing if any condition fails: the
+  token must name a stored claim; **that claim's deferral must be the one
+  `deferred.predecessor_id` names**; the deferral must still be **`APPLYING`**; and
+  it must not already carry a `successor_id`. The two arguments must also agree on
+  presence — a `predecessor_id` without a token, or a token without one, is a
+  malformed call and raises. On success the store stamps that `successor_id` in the
+  same commit, which is what makes the last condition enforceable and gives
+  `resolve`'s `REDEFERRED` transition durable state to check rather than the
+  caller's word.
 
   That is what bounds it. One successor per claim, one claim per question, and every
   question admitted under the cap — so the answerable queue can exceed its
@@ -613,15 +636,17 @@ that would otherwise be prose:
    retry** (§2), in `PENDING`, `REJECTED` and `APPLYING`: *suppressed*, never
    *admitted*. This is the case an id comparison got wrong, and a suite that only
    ever retries with a fresh id never reaches it.
-5. **`successor_to_claim` admits past a full queue and only from a live claim**
-   (§2), in five cases: at the cap, a **valid token for an `APPLYING` parent**
-   admits and stamps that parent's `successor_id`; an **unknown token**, a token
-   whose parent has since been **resolved**, a token whose parent **already carries
-   a successor**, and — the case that matters most — a **well-formed token for a
-   different claim** each raise and change nothing. The last is the one a suite
-   naturally omits, and it is the whole difference between a capability and a
-   parameter: a suite that only ever passes the token it just received certifies
-   nothing about a caller that supplies someone else's.
+5. **`successor_to_claim` admits past a full queue and only from a live claim, for
+   the parent the successor names** (§2). At the cap, a **valid token whose claim
+   is on the `APPLYING` deferral the successor's `predecessor_id` names** admits
+   and stamps that parent's `successor_id`. Six refusals, each changing nothing: an
+   **unknown token**; a token whose parent has since been **resolved**; a token
+   whose parent **already carries a successor**; a **well-formed token for another
+   live claim** — two questions claimed concurrently, the successor naming one and
+   the token naming the other; a `predecessor_id` **with no token**; and a token
+   **with no `predecessor_id`**. The fourth is the one a suite naturally omits and
+   the one the two arguments exist together to catch: a suite that only ever passes
+   the token it just received, for the parent it just claimed, certifies neither.
 6. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
@@ -802,7 +827,14 @@ restated:
   correction at a **new id absent from the store**, returned as
   `MemoryIngestResult.record_id`. Nothing is destroyed; the user's earlier
   assertion stays in `export`, which is what made ADR-0050 §2 willing to ask the
-  question at all.
+  question at all. **How that window is closed is now ADR-0080's**, which
+  partially superseded ADR-0045 §4 step 1: a producer-set bounded window is
+  **clamped**, with a narrow refusal for the case it cannot represent. This ADR
+  inherits that rule exactly as ADR-0080 §6 says any resolution mechanism does —
+  "whoever commits an `ASK_USER` resolution inherits this rule with [ADR-0079]
+  §1's" — and it inherits it by the same route as everything else: **the confirmed
+  answer is a re-ingest**, so the ratified applier applies it. There is no second
+  supersession path here for a rule to be forgotten on.
 - **The write is atomic**, by ADR-0046's `write_atomic` (`protocols.py:283`) with
   `INSERT_IF_ABSENT` for the correction (`types.py:574-581`), as ADR-0045 §8 ruled
   and ADR-0050 §1 applies to a multi-target retirement.
@@ -1034,14 +1066,19 @@ right place to stop:
   behaviour the memory model already has, and ADR-0028's amendment describes the
   same class of outcome for supersession in the same terms — "a read-time-filtering
   property, not a supersession bug".
-- **Closing it means a validity check at the write boundary for *every* proposal**,
-  not only confirmed ones — a change to the general write path, decided on
-  proportionality against every producer, not smuggled in through the answer path.
-- **It already has an owner.** The semantics of a *producer-set* bounded window —
-  the roadmap's leg 4 names them explicitly as "clamp, refuse, or never-lived" and
-  "undecided", needing their own ADR (#306) — are exactly what a write-boundary
-  check would have to implement. Deciding them here would pre-empt that ADR from
-  the wrong side of the seam. Filed (§11) against it.
+- **The write boundary deliberately does not check, and that is now ratified rather
+  than pending.** [ADR-0080](0080-retiring-a-producer-set-bounded-validity-window.md)
+  §5 answers "whether `MemoryStore` should refuse a producer-set bounded envelope
+  window at write time" — **no**, on ADR-0045 §6's ratified posture, and it records
+  that as answered rather than deferred. So the check this ADR performs at the
+  answer is not a stopgap standing in for one the write path will grow: it is the
+  only place such a check belongs, and it exists here because a *question* going
+  stale between asking and answering is a product fact about the user's answer, not
+  a storage rule.
+- **A store-authoritative instant is a different question with a different owner.**
+  Issue **#460**, split out of #306 by ADR-0080 §9, is the absolute
+  clock-coherence-independent guarantee; it is a `MemoryStore` lane. Nothing here
+  waits on it.
 
 ### 7. Volume: dedup by question, a cap that refuses rather than evicts, oldest first
 
@@ -1286,7 +1323,8 @@ discovered.
 **A re-deferral is a completed answer, not a failed one.** When the re-ingest
 surfaces a `USER_ASSERTED` conflict outside the answer's authority, the policy rules
 `ASK_USER`, nothing is written, and the coordinator **enqueues the successor first
-— `defer(successor, successor_to_claim=<the token `claim` gave it>)`, §2 — and then
+— the successor carrying `predecessor_id` set to the question being answered, and
+`defer(successor, successor_to_claim=<the token `claim` gave it>)`, §2 — and then
 resolves the original to `REDEFERRED` naming it**. It already holds that token; the
 whole sequence runs inside one claim. That order
 matters for the same reason step 2 precedes step 3 everywhere else: a crash after
@@ -1477,11 +1515,11 @@ On ratification:
   deferral. This ADR builds the *other* gate §7 named; it does not narrow the
   question that triggers one. If a signal lands, fewer questions are asked and
   nothing here changes. Owner: the policy lane.
-- **A validity check at the memory write boundary** (§6). The answer path checks
-  the proposal's window when the answer arrives; a window closing *during* the apply
-  writes a record that reads as not-live. Closing it means checking on every write,
-  for every producer, and it needs the producer-set-bounded-window semantics the
-  roadmap's leg 4 names as undecided and owing their own ADR. Owner: **#306**.
+- **A validity check at the memory write boundary** (§6). Not deferred here —
+  **answered "no" by ADR-0080 §5**, which this ADR relies on rather than reopens.
+  The residue it leaves (a window closing *during* an apply lands a record every
+  later read hides) is the memory model's ordinary read-time-relative behaviour,
+  and the absolute-hide half is issue **#460**, a `MemoryStore` lane (ADR-0080 §9).
 - **How the hub delivers a question** — push, notification, per-spoke delivery
   state (§8). Owner: leg 5's local-API and service ADRs.
 - **What the observer proposes and at what rate** (§7). Decided by ADR-0077, now
