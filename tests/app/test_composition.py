@@ -8,6 +8,7 @@ or API key is needed.
 
 from __future__ import annotations
 
+import stat
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -16,10 +17,16 @@ import pytest
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
-from ai_assistant.core.errors import AssistantError, ConfigurationError, ModelError
+from ai_assistant.core.errors import (
+    AssistantError,
+    ConfigurationError,
+    DeferralStoreError,
+    ModelError,
+)
 from ai_assistant.core.types import Reversibility, RiskLevel
 from ai_assistant.learning import ModelBackedObserver
-from ai_assistant.memory import MemoryIngestor, SqliteMemoryStore
+from ai_assistant.memory import MemoryIngestor, SqliteDeferralStore, SqliteMemoryStore
+from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
@@ -551,3 +558,104 @@ async def test_build_engine_tells_the_stage_the_route_the_observer_reads_through
         assert engine._observation._route == "openai:gpt-5"
     finally:
         await engine.aclose()
+
+
+async def test_build_engine_opens_the_deferral_queue_under_the_data_dir(
+    tmp_path: Path,
+) -> None:
+    """The deferred-question queue is a fourth Tier 1 store, wired here (ADR-0078 §10).
+
+    Opened under the same data directory and with the same owner-only file mode as
+    the others, because what it holds is the user's own words waiting on an answer
+    (ADR-0004 §4). An unwired store would be dead code and a question would still
+    have nowhere to wait — the gap ADR-0078 exists to close.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        path = tmp_path / "deferrals.db"
+        assert path.exists()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    finally:
+        await engine.aclose()
+
+
+def _spy_on_deferrals(monkeypatch: pytest.MonkeyPatch) -> list[SqliteDeferralStore]:
+    """Record every deferral store the builder constructs, still building real ones.
+
+    A recording subclass rather than a stub, so the engine it is wired into is the
+    real one and this assertion is about the *built* store rather than about a
+    double standing where it would have been.
+    """
+    built: list[SqliteDeferralStore] = []
+
+    class _Recorded(SqliteDeferralStore):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)  # type: ignore[arg-type]  # the root's own keywords
+            built.append(self)
+
+    monkeypatch.setattr(composition_module, "SqliteDeferralStore", _Recorded)
+    return built
+
+
+async def test_build_engine_leaves_the_deferral_stores_token_source_at_its_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The composition-root assertion ADR-0078 §10 item 4 owes.
+
+    "Unpredictable" is a property of the *source*, and injection alone would let this
+    layer wire a counter and satisfy every word of "fresh" — while ``interrupted``
+    publishes every claimed question's id to any caller, so a guessable token is one
+    a reader can spend on someone else's claim. No type expresses that the default
+    was kept, so this test does (the shape ADR-0028 §4 established for the same class
+    of hazard).
+    """
+    built = _spy_on_deferrals(monkeypatch)
+
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert len(built) == 1
+        assert built[0]._new_claim_id is deferral_store_module._secret_claim_id
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_gives_the_deferral_queue_the_configured_tuning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both tunings are the user's configuration and both reach the constructor (§10).
+
+    Read **once**, there, and stamped onto each question at admission — which is what
+    keeps a later change to the setting from reaching back and shortening a question
+    already asked (ADR-0078 §2).
+    """
+    built = _spy_on_deferrals(monkeypatch)
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        deferral_ttl=timedelta(days=3),
+        deferral_queue_limit=7,
+    )
+
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert built[0]._retention == timedelta(days=3)
+        assert built[0]._queue_limit == 7
+    finally:
+        await engine.aclose()
+
+
+async def test_the_deferral_queue_joins_the_ordered_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store this layer opens is a resource this layer owns (ADR-0042 §2).
+
+    One left out of the façade's shutdown path is a connection leaked on every
+    session. Asserted by using the store after ``aclose``: a closed ``sqlite3``
+    connection refuses, and this seam reports that as its own error.
+    """
+    built = _spy_on_deferrals(monkeypatch)
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+
+    await engine.aclose()
+
+    with pytest.raises(DeferralStoreError):
+        await built[0].export()

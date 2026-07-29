@@ -15,7 +15,12 @@ from ai_assistant.context import AssemblingContextProvider, ClockContextSource
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
-from ai_assistant.memory import DefaultMemoryPolicy, MemoryIngestor, SqliteMemoryStore
+from ai_assistant.memory import (
+    DefaultMemoryPolicy,
+    MemoryIngestor,
+    SqliteDeferralStore,
+    SqliteMemoryStore,
+)
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.models import (
     HashingEmbedder,
@@ -62,6 +67,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       persistence), so the closed learning loop is not silently open (ADR-0028 §4);
     * one :class:`InMemoryToolRegistry` object is injected as both the selecting
       ``ToolRegistry`` and the acting ``ToolInvoker`` (ADR-0029 §8);
+    * the deferred-question queue (ADR-0078) is opened here, under the same data
+      directory and owner-only file mode as the other Tier 1 stores, and joined to
+      the façade's ordered shutdown — with its claim-token source left at its
+      ``secrets``-backed **default**, which is the guarantee rather than a detail;
     * one :class:`SqlitePlanStore` is shared by the runner, the executor, and
       the façade, and one :class:`SqliteAuditTrail` by the runner and the façade
       — the façade reads the trail (query-only) to recover a durably-parked
@@ -88,7 +97,7 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     no database file is written for a build that was never going to succeed. Only
     the steps that genuinely need an open store stay below that line.
 
-    **It owns the resources it opens.** The three connection-owning stores are
+    **It owns the resources it opens.** The four connection-owning stores are
     opened first among the resources; if any *later* construction fails, the ones
     already opened are closed before the error propagates, so no half-built engine
     leaks a connection (ADR-0042 §2). On success, their ``close`` methods are handed
@@ -190,6 +199,30 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             tombstone_grace=settings.conversation_tombstone_grace,
         )
         opened.append(conversations.close)
+        # The deferred-question queue (ADR-0078 §2). A **fourth** connection-owning
+        # Tier 1 store, under the same data directory and the same owner-only file
+        # mode, because what it holds is the user's own words waiting on an answer.
+        #
+        # Both tunings are the *user's* configuration and both reach the
+        # constructor, where they are validated once and read once: the lifetime is
+        # stamped onto each question at admission, so a later change to the setting
+        # cannot reach back and shorten a question already asked (§2), and the cap is
+        # strictly positive because a cap of zero would refuse every question while
+        # the system reported health (§7, ADR-0022 §4a).
+        #
+        # **The claim-token source is deliberately not passed.** Its default is a
+        # ``secrets``-backed draw, and that default is the guarantee: ``interrupted``
+        # publishes every claimed question's id to any caller, so a predictable token
+        # is one a reader can guess and spend. Wiring anything here — even something
+        # that looks random — is how "unpredictable" becomes a word in an ADR
+        # (§2, §10 item 4), which is why a test asserts the built store carries the
+        # default rather than trusting this comment.
+        deferrals = SqliteDeferralStore(
+            path=directory / "deferrals.db",
+            retention=settings.deferral_ttl,
+            queue_limit=settings.deferral_queue_limit,
+        )
+        opened.append(deferrals.close)
 
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
@@ -269,6 +302,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 _as_async(trail.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
+                # The deferral queue joins the façade's ordered shutdown (ADR-0042
+                # §2, ADR-0078 §10 item 5). Nothing enqueues into it yet — the write
+                # stage and the answer path are the next lane's — but a store this
+                # layer opens is a resource this layer owns, and one left out of the
+                # shutdown path is a connection leaked on every session.
+                _as_async(deferrals.close),
             ],
         )
     except BaseException:

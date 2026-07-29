@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
+from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker, succeeds
 from ai_assistant.testing.learning import FakeFeedbackProcessor
@@ -39,6 +40,7 @@ __all__ = [
     "FakeAuditTrail",
     "FakeContextProvider",
     "FakeConversationStore",
+    "FakeDeferralStore",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
     "FakeMemoryPolicy",

@@ -577,6 +577,42 @@ class MemoryWriterContract:
         assert policy.last_proposal.conflicts == ("existing",)
         assert isinstance(policy.last_proposal.conflicts, tuple)
 
+    @pytest.mark.parametrize("kind", list(MemoryDecisionKind))
+    async def test_ingest_returns_the_conflict_ids_it_resolved_on_every_ruling(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """The result carries what the ruling was ruled *against* (ADR-0078 §4).
+
+        The clause ADR-0078 §4 adds to ADR-0028 §8's list, and the reason it is a
+        conformance obligation rather than an implementation detail: the writer
+        resolves conflicts onto its **own** copy of the proposal, so the caller's
+        proposal still carries an empty ``conflicts`` when ``ingest`` returns. A
+        coordinator that enqueued the untouched original would satisfy every other
+        clause in this suite and produce a question showing the user no conflicting
+        assertion, an answer whose authority is empty, and a re-ingest that meets
+        that assertion outside the authority and defers again — the user answers,
+        and is asked the same thing.
+
+        Parametrised over **every** ruling rather than a representative one, because
+        "on every ruling" is the whole clause: the set is resolved before the policy
+        is asked, so an implementation that attached it only where something was
+        written would pass a sampled test and drop it on exactly the ``ASK_USER``
+        this exists for. It is not a claim about *which* records conflict — that
+        stays the implementation's tuning and is still excluded (ADR-0028 §8).
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(_preference("existing"))
+        policy = FakeMemoryPolicy(kind)
+
+        result = await make_writer(store, policy).ingest(_proposal(_preference("new")))
+
+        assert result.decision.kind is kind
+        assert result.conflicts == ("existing",)
+        # A tuple, not a list: the field is frozen on a frozen model, and a
+        # mutable sequence installed past it would let a caller rewrite what a
+        # question was asked about after the question was asked.
+        assert isinstance(result.conflicts, tuple)
+
     async def test_accept_stores_the_record_and_returns_its_id(
         self, make_writer: WriterFactory
     ) -> None:
