@@ -381,6 +381,102 @@ def learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
             return LearnDecision.STORED_TEMPORARILY
 
 
+#: The floor a belief's **presented** confidence falls to as its support is lost
+#: (ADR-0077 §6). A documented positive constant, and the *exact* value is this
+#: lane's: what §6 ratifies is that the adjustment is a pure function of the stored
+#: confidence and how many citations still resolve, bounded above by the stored
+#: value and below by ``min(stored, floor)``.
+#:
+#: Positive rather than zero because a belief whose evidence is all gone is **held,
+#: marked and answerable — not auto-retired** (§6): a presented zero would read as
+#: "the assistant no longer believes this", which is the cascade under another name.
+#: Low, because an unsupported derived belief that keeps reaching prompts at its old
+#: standing is the "wrong record laundered into a fact" ADR-0072 §6 exists to
+#: prevent.
+_PRESENTATION_FLOOR = 0.1
+
+
+def presented_confidence(stored: float, *, cited: int, resolved: int) -> float:
+    """The confidence a surface states, given how much support still resolves (§6).
+
+    **Presentation only.** The stored number never moves: nothing here writes, and
+    ``MemoryStore.search`` stays confidence-neutral (ADR-0072 §5), so retrieval order
+    is untouched by a value computed at the moment of display. ``export`` likewise
+    carries the record *as stored* — an export is the user's data as held, not a
+    rendering of it (ADR-0007 §3).
+
+    The ratified properties, all of which this satisfies by construction:
+
+    * **equal to ``stored`` when every citation resolves**, and when the record
+      cites nothing at all (an assertion's warrant is the user's own word);
+    * **bounded above by ``stored``** — losing support never makes a belief look
+      better held;
+    * **bounded below by ``min(stored, floor)``**, never by the floor alone. That
+      is the whole of the edge case: ``Provenance.confidence`` permits ``0.0`` and
+      only *this* producer is bound to a positive ladder, so a belief can be stored
+      at or beneath the floor — where an absolute floor and "never above stored"
+      have no value between them at all. Capping the floor by the stored value keeps
+      both bounds satisfiable everywhere;
+    * **strictly decreasing in lost support while above the effective floor**, and
+      unchanged once it has reached it — which, for a belief stored at or below the
+      floor, is from the first loss onward. A value that has run out of room to fall
+      says nothing about how much support went away, which is what the tombstones
+      beside it are for;
+    * **no clock, no randomness, nothing read from a store.**
+
+    Args:
+        stored: The confidence as written on the record.
+        cited: How many citations the record carries.
+        resolved: How many of them still resolve to a record the store holds.
+
+    Returns:
+        The number every surface states for this belief.
+    """
+    floor = min(stored, _PRESENTATION_FLOOR)
+    # Nothing cited, or nothing lost: the stored value stands unadjusted.
+    if cited in (0, resolved):
+        return stored
+    # Linear between the effective floor (nothing resolves) and the stored value
+    # (everything does). Where ``stored <= floor`` the two coincide and the span is
+    # zero, so the result is ``stored`` at every level of support — the no-op §6
+    # names, with the loss carried by the tombstones instead.
+    return floor + (stored - floor) * (resolved / cited)
+
+
+@dataclass(frozen=True, slots=True)
+class Evidence:
+    """One citation behind a belief, as a person reads it (ADR-0077 §6).
+
+    **Resolved lazily, at this façade, and never by rewriting the record.** The
+    evidence tuple keeps the ids as written; a presenting read resolves each through
+    ``MemoryStore.get`` and renders what it finds. Eager rewriting at deletion time
+    is refused for a decisive reason rather than an economic one: most evidence loss
+    is *expiry*, which retention enforces at read time with no per-record event to
+    hook, so an eager mechanism would handle the conversation deletion and silently
+    leave every expired citation dangling.
+
+    **It carries no id, deliberately.** ADR-0073 §4's floor is that "a citation the
+    surface cannot render as evidence is never rendered *as* evidence — not as a
+    reassuring id, not silently dropped", and an adapter that never receives the id
+    cannot render one as though it were the warrant.
+
+    Attributes:
+        content: The cited record's own canonical text, or ``None`` where the
+            citation no longer resolves — a **tombstone**. The tombstone says an
+            evidence item stood here and is gone, and deliberately does not say what
+            it was, nor whether it was *deleted* or merely *expired*: the read cannot
+            tell those apart, and the user's question — "is there still something
+            behind this?" — is answered by absence either way.
+    """
+
+    content: str | None = None
+
+    @property
+    def lost(self) -> bool:
+        """Whether this citation no longer resolves."""
+        return self.content is None
+
+
 @dataclass(frozen=True, slots=True)
 class Belief:
     """One live belief, as a person reads it (ADR-0073 §4, §7).
@@ -404,15 +500,15 @@ class Belief:
     :attr:`valid_until` below while meaning something else — a content-declared
     fact expiry, not the operational live-belief window.
 
-    **The evidence citations are carried as a count and never as ids**, which is
-    ADR-0073 §4's floor made structural: a derived belief must not be presented as
-    carrying a warrant the surface cannot show, and "a citation the surface cannot
-    render as evidence is never rendered *as* evidence — not as a reassuring id, not
-    silently dropped." An adapter that never receives the ids cannot render one as
-    though it were the evidence. Resolving a citation into readable evidence is
-    deferred **with a gate** — a precondition of the first producer of derived
-    beliefs shipping (ADR-0073 §4, §10; #431) — so this DTO grows that field with
-    that lane, not before.
+    **The evidence citations are carried as resolved values and never as ids**,
+    which is ADR-0073 §4's floor made structural: a derived belief must not be
+    presented as carrying a warrant the surface cannot show, and "a citation the
+    surface cannot render as evidence is never rendered *as* evidence — not as a
+    reassuring id, not silently dropped." An adapter that never receives the ids
+    cannot render one as though it were the evidence. ADR-0073 §4 deferred resolving
+    them **with a gate** — a precondition of the first producer of derived beliefs
+    shipping (#431) — and ADR-0077 §6 discharges it: :attr:`evidence` is that field,
+    and a citation that no longer resolves arrives as an explicit tombstone.
 
     Attributes:
         id: The record's id, opaque, and what :meth:`Engine.forget` names.
@@ -422,10 +518,17 @@ class Belief:
         kind: Which of the four typed memories this is — what the ``kinds`` filter
             selects on, and the difference between reading a preference and a fact.
         content: The canonical text rendering of the belief.
-        confidence: How strongly it is held, in ``[0, 1]``.
-        evidence_count: How many citations stand behind it. ``0`` for an assertion,
-            whose warrant is the user's own word (ADR-0038 §1a) and needs no
-            citation.
+        confidence: How strongly it is held, in ``[0, 1]`` — **the presented
+            value**, already adjusted for lost support (:func:`presented_confidence`,
+            ADR-0077 §6). The stored number is not carried, and that is the point:
+            every surface that states a confidence must state the adjusted one, and
+            a DTO offering both would let two surfaces quote different numbers for
+            one belief. The record itself is untouched, and ``export`` still carries
+            it as stored.
+        evidence: One entry per citation, in the order the record wrote them —
+            resolved to readable content, or a tombstone where it no longer
+            resolves. Empty for an assertion, whose warrant is the user's own word
+            (ADR-0038 §1a) and needs no citation.
         last_updated: The transaction stamp — when *the assistant* last revised this
             belief (ADR-0045 §3) — which is also the enumeration's sort key. It is
             **our** clock and not a source's: an attested belief synced on Tuesday
@@ -442,12 +545,36 @@ class Belief:
     kind: MemoryKind
     content: str
     confidence: float
-    evidence_count: int
     last_updated: datetime
+    evidence: tuple[Evidence, ...] = ()
     valid_until: datetime | None = None
 
+    @property
+    def evidence_count(self) -> int:
+        """How many citations stand behind it, resolved or not."""
+        return len(self.evidence)
+
+    @property
+    def lost_evidence(self) -> int:
+        """How many of its citations no longer resolve."""
+        return sum(1 for item in self.evidence if item.lost)
+
+    @property
+    def unsupported(self) -> bool:
+        """Whether every citation behind it has gone (ADR-0077 §6).
+
+        A belief in this state is **held, marked and answerable — not auto-retired**:
+        retiring it would be the cascade under a softer name, and it may be perfectly
+        true. It sits at its effective floor, ``forget`` still destroys it, and the
+        user asserting it themselves still supersedes it into the asserted band.
+
+        ``False`` for a belief that cites nothing at all: an assertion is not
+        unsupported, it is supported by the user's own word.
+        """
+        return bool(self.evidence) and all(item.lost for item in self.evidence)
+
     @classmethod
-    def from_record(cls, record: MemoryRecord) -> Belief:
+    def from_record(cls, record: MemoryRecord, evidence: tuple[Evidence, ...] = ()) -> Belief:
         """Project one stored record into the belief a person reads (ADR-0073 §7).
 
         The one place a ``core``
@@ -455,15 +582,24 @@ class Belief:
         path, and the one place :func:`~ai_assistant.core.types.band_of` is applied
         — everything an adapter sees downstream is ``orchestration``-level, exactly
         as :meth:`LearnOutcome.from_results` holds that boundary on the learn path.
+
+        ``evidence`` is resolved by the caller, because resolving it is a *store
+        read* and this is a pure projection. It must carry one entry per citation on
+        the record, in order: the presented confidence is computed from how many of
+        them resolved, so a caller that dropped the lost ones would report a belief
+        as fully supported at the exact moment it stopped being.
         """
         provenance = record.provenance
+        resolved = sum(1 for item in evidence if not item.lost)
         return cls(
             id=record.id,
             band=band_of(provenance.source),
             kind=MemoryKind(record.kind),
             content=record.content,
-            confidence=provenance.confidence,
-            evidence_count=len(provenance.evidence),
+            confidence=presented_confidence(
+                provenance.confidence, cited=len(evidence), resolved=resolved
+            ),
+            evidence=evidence,
             last_updated=provenance.last_updated,
             valid_until=record.validity.valid_until,
         )
@@ -1732,12 +1868,39 @@ class Engine:
         records = await self._memory.list_beliefs(
             bands=bands, kinds=kinds, limit=limit, offset=offset
         )
-        return tuple(Belief.from_record(record) for record in records)
+        return tuple([await self._project(record) for record in records])
 
     async def _belief(self, record_id: str) -> Belief | None:
         """Read one live record and project it, or report that there is none."""
         record = await self._memory.get(record_id)
-        return None if record is None else Belief.from_record(record)
+        return None if record is None else await self._project(record)
+
+    async def _project(self, record: MemoryRecord) -> Belief:
+        """Resolve the record's citations, then project it (ADR-0077 §6).
+
+        **Lazily, here, and without rewriting anything.** The evidence tuple keeps
+        the ids as written and each is resolved through
+        :meth:`~ai_assistant.core.protocols.MemoryStore.get` at the moment of
+        presentation, so a citation the user destroyed — or one that expired under a
+        retention horizon, which is the *commoner* case and has no event to hook —
+        renders as a tombstone rather than a dangling id. Nothing is written: the
+        record graph is frozen (ADR-0068), and losing evidence is not the producer
+        changing its mind.
+
+        Resolution happens at this façade rather than in `interfaces/`, which golden
+        rule 3 keeps thin and which ADR-0072 §7 already refused to give a
+        live-at-now computation.
+
+        The cost is a ``get`` per citation per presented belief, bounded by the page
+        (ADR-0073 §2's default of 50) and by evidence tuples that are small by
+        construction. Accepted for now, and it is where ADR-0074 §5's declined
+        ``get_many`` gets its second consumer — revisited at the hub.
+        """
+        resolved: list[Evidence] = []
+        for cited in record.provenance.evidence:
+            found = await self._memory.get(cited)
+            resolved.append(Evidence(content=None if found is None else found.content))
+        return Belief.from_record(record, tuple(resolved))
 
     def _step_outcome(
         self, turn: TurnResult | None, disposition: StepDisposition, *, handle: str | None
@@ -1863,9 +2026,11 @@ __all__ = [
     "ContinuationToken",
     "ConversationSummary",
     "Engine",
+    "Evidence",
     "IngestSummary",
     "LearnDecision",
     "LearnOutcome",
     "StepOutcome",
     "TurnOutcome",
+    "presented_confidence",
 ]

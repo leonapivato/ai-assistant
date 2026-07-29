@@ -35,7 +35,11 @@ The façade also carries the **belief inspection surface** (ADR-0073 §7):
 ``beliefs`` enumerates what the assistant holds, ``belief`` reads the one a
 deletion is about to destroy, and ``forget`` destroys it — each returning or
 naming a ``Belief``, the ``orchestration`` DTO in which a record's *band* is
-computed, once, before any adapter sees it.
+computed, once, before any adapter sees it. Its citations are resolved **lazily,
+here**, into readable ``Evidence`` or an explicit tombstone, and its stated
+confidence is the one lost support has already lowered
+(``presented_confidence``) — never the stored number, which nothing on this path
+ever writes (ADR-0077 §6).
 
 ``ConversationLifecycle`` is the **capture/lifecycle stage** (ADR-0074 §9): the
 one layer holding both durable stores, and therefore the owner of every sequence
@@ -66,11 +70,13 @@ from ai_assistant.orchestration.engine import (
     ContinuationToken,
     ConversationSummary,
     Engine,
+    Evidence,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
     StepOutcome,
     TurnOutcome,
+    presented_confidence,
 )
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.loop import LearningLoop, TurnResult
@@ -93,6 +99,7 @@ __all__ = [
     "DataExport",
     "Disposition",
     "Engine",
+    "Evidence",
     "IngestSummary",
     "LearnDecision",
     "LearnOutcome",
@@ -106,4 +113,5 @@ __all__ = [
     "StepRunner",
     "TurnOutcome",
     "TurnResult",
+    "presented_confidence",
 ]
