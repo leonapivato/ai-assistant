@@ -1004,8 +1004,15 @@ class Observer(Protocol):
    **Its result is an `orchestration` type beside `LearnOutcome`**, not a `core`
    one — it crosses no subsystem boundary, only `interfaces` (ADR-0022 §2's
    reasoning for `TurnResult`) — and it carries four things, deliberately kept
-   apart: the per-proposal `MemoryIngestResult`s (so an `ASK_USER` is visible with
-   its candidate, §4); the producer's two counts **relayed unchanged**; a
+   apart. First, one entry per proposal, **each pairing the
+   `MemoryUpdateProposal` the observer made with the `MemoryIngestResult` it
+   received** — or with the unresolved-evidence drop that replaced it (§5). The
+   pairing is the decision, not a convenience: `MemoryIngestResult` carries a
+   ruling and a record id and nothing else, and for an `ASK_USER` that id is
+   `None`, so an entry built from the result alone would render a deferral as a
+   bare ruling with nothing to show — which is precisely the visibility §4
+   promises while ADR-0078 is unbuilt. Then: the producer's two counts **relayed
+   unchanged**; a
    **separate count of proposals dropped at the write for unresolved evidence**
    (§5); and the model route that read the episodes (§3). The separation is the
    decision: `ObservationOutcome`'s invariant is over the entries the model
