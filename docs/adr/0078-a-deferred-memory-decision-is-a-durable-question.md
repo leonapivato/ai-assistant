@@ -277,9 +277,23 @@ like every other, owing:
   until the user disposes of the question, which is precisely why §9's recovery
   makes that disposal its **first** step rather than an afterthought.
 
+  **An id already present is a hard error, not an overwrite.** Key idempotency is
+  about the *question*; a caller-minted `id` colliding with a stored row carrying a
+  *different* key is a separate event and the contract must say which, or a
+  dict-backed fake silently overwrites someone else's pending question while SQLite
+  raises a primary-key error and the two disagree about whether a question still
+  exists. So `defer` **inserts only if the id is absent** and otherwise raises
+  `DeferralStoreError`, committing nothing — insert-if-absent in ADR-0046 §3's
+  sense, where "absent" is *physical presence* rather than read-visibility, so a
+  resolved or lapsed row still blocks the id. The coordinator mints ids, as it does
+  for `MemoryRecord`, and a collision is a minting fault to surface rather than
+  absorb; ADR-0074 §9's `start` takes the same position for a conversation id, with
+  retry-on-collision at the minting site.
+
   It returns **`None` in exactly one case** — the answerable queue is at its cap and
   the question was not admitted (§7). One nullable return, one meaning; the
-  duplicate path never yields `None`.
+  duplicate path never yields `None` and the collision path raises rather than
+  returning at all.
 
   **A re-deferral does not consult the cap.** When an answer's re-ingest raises a
   successor question (§5a step 1, §9), that question is admitted whatever the queue
@@ -444,7 +458,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Eleven clauses the suite must carry are named here**, because they are the ones a
+**Twelve clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -458,52 +472,62 @@ that would otherwise be prose:
    same-key calls leave **one** row, and two concurrent distinct calls at
    capacity-minus-one admit exactly one. A sequential test passes against a
    read-then-insert implementation and certifies nothing.
-3. **`resolve` refuses every state but the one it names, and every `claim_id` but
+3. **`defer` raises on a physical id collision and mutates nothing** — a new
+   deferral whose `id` matches a stored row carrying a **different** key, checked
+   against a `PENDING` row and against a terminal one. Without it a dict-backed
+   fake overwrites and a SQL store raises, and the suite certifies two different
+   contracts.
+4. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
    nothing authorised), and an `APPLYING` row addressed with a stale or absent
    `claim_id`.
-4. **`purge` removes an expired-and-unanswered `PENDING` deferral** — seeded
+5. **`purge` removes an expired-and-unanswered `PENDING` deferral** — seeded
    through an injected clock, not merely a `REJECTED` one — **and leaves an
    `APPLYING` one however old it is, while `delete` removes that same row.** The
    three pull in different directions, which is exactly why an implementation gets
    one of them wrong: the first is §6's exposure cap, the second is §9's guard on
    the record of an answer, and the third is ADR-0007's unconditional data right.
-5. **`defer` collides on the key and only on the key.** Two proposals differing
+6. **`defer` collides on the key and only on the key.** Two proposals differing
    *only* in `provenance.source`, and two differing only in `sensitivity`, must both
    admit as separate questions (§7), while an identical repeat collides and does not
    refresh the deadline. A suite that varies only `content` certifies a weaker key
    than the one ratified.
-6. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
+7. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
    `REJECTED` one within retention, and an `APPLYING` one, do** (§2, §7). These are
    the differences between "we asked and you declined", "that question lapsed", and
    "an answer to that may be committing right now", and a suite that tests only the
    live collision leaves all of them unpinned.
-7. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
+8. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
    after any clock advance, `claim` takes it, its key still collides, and `purge`
    leaves it. Four assertions, because an implementation that coerces `None` to a
    sentinel passes the first three and fails the fourth — or passes all four against
    a *far-future* sentinel and then quietly deletes the question when the sentinel
    arrives.
-8. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
+9. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
    same bounded default as `pending`, and the two reads are **disjoint**: no row
    appears in both. A store that returned an interrupted question among the
    answerable ones would offer the user a claim that cannot be taken.
-9. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
+10. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
    ends** (§2), and a **non-zero `offset` asserts the returned ids** rather than the
    page length — ADR-0073 §8's own warning, that an implementation ignoring `offset`
    returns a full ordered page every time and passes a length-only assertion for
    good. And the **default `limit` is exercised with more than 50 matching rows**,
    for §8's other reason: an implementation defaulting to unbounded satisfies every
    explicit-limit case while breaking the bounded-default guarantee.
-10. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
+11. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
     record id, `ACCEPTED` carrying a successor id, `REDEFERRED` without a successor
     id, and `REJECTED`/`STALE` carrying either. Four cases, because the transition
     tests pass against a store that writes whatever payload it is handed.
-11. **The key is computed by exclusion** (§7): two proposals differing *only* in
-    their `validity` window admit as separate questions, and two differing only in
-    `id` or `score` collide. The first is the case an enumerated key got wrong; the
-    second is what keeps the key from matching nothing at all.
+12. **The key is a canonical projection** (§7), which needs a case per excluded
+    field and a case per collection. Two proposals differing *only* in `validity`
+    admit as separate questions; two differing only in `id`, only in `score`, or
+    only in `provenance.last_updated` **collide**; and two whose `evidence` or
+    whose frozen conflict-id set differ only in **order** collide. The first is
+    the case an enumerated key got wrong, the middle three are what keep the key
+    from matching nothing at all, and the last is the one a suite written with
+    tidy fixtures never reaches — the sequences it builds happen to be in the same
+    order every time.
 
 ### 3. The enqueue is the coordinator's, and two composition-root obligations come with it
 
@@ -838,26 +862,49 @@ The observer will produce proposals continuously and some fraction will be ruled
 `ASK_USER`. Three rules keep the queue dignified at that rate. None of them designs
 the observer.
 
-**Dedup on a `question_key`, and the key is defined by exclusion rather than by a
-list.** The key is a deterministic digest over **the whole proposed
-`MemoryRecord` except `id` and `score`, plus the proposal's `sensitivity`, plus the
-frozen conflict-id set.**
+**Dedup on a `question_key`, defined by a criterion and an exclusion list rather
+than by an inventory of what counts.** The key is a deterministic digest over a
+**canonical projection** of the proposed `MemoryRecord`, plus the proposal's
+`sensitivity`, plus the frozen conflict-id set. The projection is the whole record
+minus the fields that are *bookkeeping about the record rather than the belief it
+states*, and there are exactly three:
 
-Stating it as "everything but two fields" is the decision, not a shorthand. An
-enumerated list of the fields that matter looked sufficient in an earlier revision
-and was not: it named kind, content and provenance source, and omitted the
-`validity` window — so two proposals with identical words, one expiring tomorrow
-and one open-ended, collapsed into one question, and answering it stored a belief
-that dies tomorrow while the durable one was never asked about. That was not a
-missing entry, it was the wrong shape of rule: **anything that changes what
-accepting would store changes what the user is being asked**, and a list has to be
-extended by whoever adds the next field, in a file they are not editing. The
-exclusions are the two fields that cannot mean anything here — `id` is minted per
-proposal, so including it makes the key match nothing, and `score` is `None` on a
-stored record and populated only by retrieval (ADR-0005 §1).
+- **`id`** — identity, minted per proposal, so including it makes the key match
+  nothing at all.
+- **`score`** — `None` on a stored record and populated only by retrieval
+  (ADR-0005 §1); it says how a search ranked something, not what is believed.
+- **`provenance.last_updated`** — **transaction time**, which ADR-0045 §3 clarified
+  it to be. It is when the record was written, not what it says. Including it is
+  the failure mode this criterion exists to catch and an earlier revision walked
+  straight into: two identical observations produced a minute apart carry different
+  stamps, so every one of them is a new question and the user is nagged by the
+  mechanism whose job is to stop that.
 
-Two consequences of the rule are worth naming because they are the cases that
-motivated it. An `OBSERVED` proposal and a later `USER_ASSERTED` one with identical
+Everything else stays in, and where a field is arguable the criterion decides it
+rather than taste. `confidence` is **in**: a belief offered weakly and the same
+words offered strongly are different things to be asked to accept
+(ADR-0072 §6 makes confidence the producer's belief strength). A producer that
+jitters its confidence across re-observations of one thing is emitting genuinely
+different proposals, and stabilising that is ADR-0077's obligation, not something
+this key should paper over.
+
+**Canonical means every collection is order-independent**, `evidence` and the
+conflict-id set alike. Conflict detection ranks by score, so two equal-scored
+conflicts can come back `(A, B)` on one call and `(B, A)` on the next, and a digest
+over the raw sequences would mint two keys for one question — the same nag, from
+ordering rather than from a stamp. The projection sorts them.
+
+The shape of this rule is the decision, not a shorthand for a list. An enumerated
+key looked sufficient in an earlier revision and omitted the `validity` window, so
+two proposals with identical words — one expiring tomorrow, one open-ended —
+collapsed into one question, and answering it stored a belief that dies tomorrow
+while the durable one was never asked about. That was not a missing entry but the
+wrong shape: **anything that changes what accepting would store changes what the
+user is being asked**, and an inventory has to be extended by whoever adds the next
+field, in a file they are not editing. An exclusion list with a stated criterion
+classifies the next field for them.
+
+Two consequences are worth naming. An `OBSERVED` proposal and a later `USER_ASSERTED` one with identical
 content are **not** the same question — the first asks "shall I keep what I worked
 out?", the second is the user telling us directly, and collapsing them would show
 the user the observation while silently discarding the assertion, which is the drop
