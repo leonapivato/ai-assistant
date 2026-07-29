@@ -916,9 +916,12 @@ fake certifies the double while the real store drifts.
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
-1. **`claim` mints an unpredictable, unique token.** Distinct across repeated
-   claims of different deferrals and across a claim-resolve-reclaim cycle, and —
-   the clause that actually bites — **not derivable from anything a read exposes**:
+1. **`claim` mints an unpredictable token, unique among live claims.** Distinct
+   across claims of **different deferrals held at the same time** — and no more
+   than that, because §2 does not promise uniqueness after a resolution or a
+   deletion, and a clause demanding it would force the historical ledger §11
+   declines. The one that actually bites is that it is **not derivable from
+   anything a read exposes**:
    driven by asserting the token is absent from `get`, `pending`, `interrupted` and
    `export`, and by refusing a store whose tokens are sequential. A suite that only
    checks "two claims differ" certifies a counter. **And the live-collision path**, via an injected
