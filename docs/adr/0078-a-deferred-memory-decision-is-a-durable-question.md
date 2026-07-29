@@ -796,12 +796,15 @@ that would otherwise be prose:
 19. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
-    only in `provenance.last_updated` **collide**; and two whose `evidence` or
-    whose frozen conflict-id set differ only in **order** collide. The first is
-    the case an enumerated key got wrong, the middle three are what keep the key
-    from matching nothing at all, and the last is the one a suite written with
-    tidy fixtures never reaches — the sequences it builds happen to be in the same
-    order every time.
+    only in `provenance.last_updated` **collide**; two whose `evidence` or whose
+    frozen conflict-id set differ only in **order** collide; and two
+    `ProceduralMemory` proposals whose `steps` differ only in **order** do
+    **not** — they are different workflows. The last pair is the one a suite
+    written with tidy fixtures never reaches, since the sequences it builds happen
+    to be in the same order every time, and it is the pair that decides whether
+    the canonicalisation is a criterion or a blanket sort: a blanket sort passes
+    every other clause on this list while letting a pending "back up, then delete"
+    suppress "delete, then back up".
 
 ### 3. The enqueue is the coordinator's, and two composition-root obligations come with it
 
@@ -1229,11 +1232,31 @@ jitters its confidence across re-observations of one thing is emitting genuinely
 different proposals, and stabilising that is ADR-0077's obligation, not something
 this key should paper over.
 
-**Canonical means every collection is order-independent**, `evidence` and the
-conflict-id set alike. Conflict detection ranks by score, so two equal-scored
-conflicts can come back `(A, B)` on one call and `(B, A)` on the next, and a digest
-over the raw sequences would mint two keys for one question — the same nag, from
-ordering rather than from a stamp. The projection sorts them.
+**Canonical normalises the order of collections that are *sets in meaning*, and
+preserves it everywhere else.** The criterion is whether reordering the members
+changes what the record says.
+
+- **Normalised (sorted): `Provenance.evidence` and the frozen conflict-id set.**
+  Both are bags of references — "references (e.g. episode ids) supporting this
+  record" — where membership is the content and position is an artefact of how they
+  were gathered. Conflict detection ranks by score, so two equal-scored conflicts
+  come back `(A, B)` on one call and `(B, A)` on the next; digesting the raw
+  sequence would mint two keys for one question, the same nag as a transaction
+  stamp, from ordering.
+- **Preserved: `ProceduralMemory.steps`, and every other ordered field.** A
+  workflow *is* its order. "Back up the database, then delete it" and "delete the
+  database, then back it up" are the same three words and opposite instructions,
+  and sorting them would let a pending version of one **suppress** the other —
+  the queue silently swallowing a materially different, potentially destructive
+  procedure on the grounds that it looked alike. That is the rule this key exists
+  to enforce, broken by the mechanism meant to enforce it.
+
+The criterion is stated rather than the list, for the same reason the exclusions
+are: `EpisodicMemory.participants` reads as set-like and `steps` does not, and the
+next ordered field should be classified by asking the question rather than by
+finding this paragraph. Where a field's meaning is genuinely ambiguous, **preserve
+the order** — the cost of preserving it is a duplicate question the user can
+dismiss, and the cost of normalising it wrongly is a question they never see.
 
 The shape of this rule is the decision, not a shorthand for a list. An enumerated
 key looked sufficient in an earlier revision and omitted the `validity` window, so
