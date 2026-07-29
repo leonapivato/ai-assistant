@@ -2077,11 +2077,14 @@ On ratification:
    proposal carrying a `confirmation` is **unconstructable**, and a `SUPERSEDE`
    driven from one **built past the validator** — `model_construct`, under an
    injected policy — is refused with **no memory write**, which is check 0 and the
-   only half of the belt and braces that survives a bypass. **Driven for
-   `SUPERSEDE`, `ACCEPT` and `STORE_TEMPORARY`**, because those last two never
-   reach the fold helper: a check placed there passes the `SUPERSEDE` case and
-   writes the secret on the other two, which is the single most likely way to
-   implement this wrongly. **And driven for `ASK_USER` and `REJECT` in the
+   only half of the belt and braces that survives a bypass. **Driven for every
+   write-producing ruling — `ACCEPT`, `STORE_TEMPORARY`, `REINFORCE` and
+   `SUPERSEDE`** — parametrised over the set rather than sampled from it. Each
+   omission is a live hole: `ACCEPT` and `STORE_TEMPORARY` never reach the fold
+   helper, so a check placed there passes `SUPERSEDE` and writes the secret on
+   them; and `REINFORCE` reaches `_apply`'s merge-and-add path against a
+   non-asserted target, so a gate written for the three that came up in discussion
+   persists the secret through the fourth. **And driven for `ASK_USER` and `REJECT` in the
    negative** — neither raises, because neither writes — which is the other way to
    implement it wrongly and the one that breaks the ordinary secret path §1
    preserves. Asserting only the unconstructable half would certify
