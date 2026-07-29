@@ -683,6 +683,16 @@ conforming to the words. It owes:
   non-determinism in this codebase, so a test can fix it and a deployment cannot
   accidentally weaken it.
 
+  **Uniqueness is checked, not assumed**, because an injected source makes it
+  checkable and an unchecked one makes the guarantee a hope: `secrets` is
+  unpredictable but not collision-free, and a test double can return the same
+  value twice. `claim` therefore detects a token already in use and re-draws,
+  **bounded, raising `DeferralStoreError` on exhaustion having changed nothing** —
+  the same shape §2's id re-mint loop uses, for the same reason. A duplicate token
+  is not a cosmetic clash: two claims sharing one lets either holder resolve the
+  other's question or spend its successor exemption, which is the whole capability
+  collapsing.
+
   **The token comes back here and nowhere else**, which is what lets it stand as
   the capability `resolve` and `successor_to_claim` both key on (above). It is not
   a field of `DeferredProposal`, so no read republishes it and `export` cannot leak
@@ -900,7 +910,11 @@ that would otherwise be prose:
    the clause that actually bites — **not derivable from anything a read exposes**:
    driven by asserting the token is absent from `get`, `pending`, `interrupted` and
    `export`, and by refusing a store whose tokens are sequential. A suite that only
-   checks "two claims differ" certifies a counter.
+   checks "two claims differ" certifies a counter. **And the collision path**, via
+   an injected source: one duplicate then a distinct value re-draws and claims
+   normally; an always-duplicate source exhausts the budget and raises with the
+   deferral left `PENDING`. Without the second, "unique" is a property nobody
+   drives.
 2. **`claim` admits exactly one of two concurrent callers.** Two `claim`s on one
    `PENDING` deferral yield one record and one `None`, driven through the
    store-suspension hook the other contracts already use for their compare-and-set
@@ -1522,8 +1536,19 @@ belongs with the second. A permission confirmation gates an action **the user ju
 asked for** and is worthless once stale; a memory deferral is generated **by the
 system**, at whatever rate the observer runs, and a never-expiring queue of
 machine-asked questions is precisely the undignified pile §7 exists to prevent. So:
-a `deferral_ttl` setting, positive, defaulting to a finite duration, with `None`
+a `deferral_ttl` setting, positive, **defaulting to 30 days**, with `None`
 reachable only as the user's deliberate "ask me forever" choice.
+
+**The number is stated rather than left to the lane**, because "finite" admits a
+one-microsecond default that expires every question before a user can list it and
+a decades-long one that keeps unanswered Tier 1 content for a working lifetime —
+both conforming, neither intended. Thirty days is `episode_retention`'s horizon
+(`config.py:425-433`), and matching it is the argument: a deferred question is
+about a belief, and for an observed one the *evidence* is episodes on that clock.
+A question outliving them asks the user to adjudicate something the system can no
+longer explain — §8's surface would show a citation that no longer resolves. One
+horizon for the content and the questions about it is easier to reason about than
+two, and the deployment can still change either.
 
 **`None` is a real value with stated behaviour, not a gap.** A question deferred
 under `deferral_ttl=None` carries `expires_at=None`, and every operation that
@@ -2165,7 +2190,8 @@ On ratification:
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
 5. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7), the cap
    `gt=0` and both refused at load, with load-time tests for zero and negative
-   values as `confirmation_ttl` already has. Both reach the **store's constructor**,
+   values as `confirmation_ttl` already has, **and a test pinning the 30-day
+   default** — the value §6 argues for, which no invalid-value test can assert. Both reach the **store's constructor**,
    validated there in the `_check_tuning` shape (§2), so they are read once per
    store and stamped onto each record as `retention`/`expires_at`; no operation
    consults them again.
