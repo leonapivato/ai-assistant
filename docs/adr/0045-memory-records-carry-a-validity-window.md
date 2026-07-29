@@ -13,9 +13,9 @@
   the record's `valid_from` is at or after that end — an empty or inverted
   interval `Validity` and `SqliteMemoryStore`'s decode both reject — the ingest
   **refuses** with `MemoryStoreError`, nothing written and every target left
-  live. For a target with an open-ended window, which is every target this ADR's
-  own mechanisms produce, ADR-0080 §1 writes `valid_until = now` exactly as this
-  step says. ADR-0080 §8 names the exact scope replaced and applies ADR-0070 §1's
+  unchanged. For a target with an open-ended window, which is every target this
+  ADR's own mechanisms produce, ADR-0080 §1 writes `valid_until = now` exactly as
+  this step says. ADR-0080 §8 names the exact scope replaced and applies ADR-0070 §1's
   test to it.
 
   **Everything else here stands and is untouched**: §1's single-axis staging;
