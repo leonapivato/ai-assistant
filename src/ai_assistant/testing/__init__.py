@@ -19,6 +19,13 @@ from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
 from ai_assistant.testing.models import FakeModelProvider, ModelCall
+from ai_assistant.testing.observation import (
+    DEFAULT_MAX_BATCH_SIZE,
+    DEFAULT_MAX_PROPOSALS,
+    FakeObserver,
+    ObservationGate,
+    ObservedBelief,
+)
 from ai_assistant.testing.permissions import FakeActionPolicy, FakeAuditTrail
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
@@ -26,6 +33,8 @@ from ai_assistant.testing.tools import FakeToolRegistry
 from ai_assistant.testing.writer import FakeMemoryWriter
 
 __all__ = [
+    "DEFAULT_MAX_BATCH_SIZE",
+    "DEFAULT_MAX_PROPOSALS",
     "FakeActionPolicy",
     "FakeAuditTrail",
     "FakeContextProvider",
@@ -36,12 +45,15 @@ __all__ = [
     "FakeMemoryStore",
     "FakeMemoryWriter",
     "FakeModelProvider",
+    "FakeObserver",
     "FakePlanStore",
     "FakePlanner",
     "FakeToolImplementation",
     "FakeToolInvoker",
     "FakeToolRegistry",
     "ModelCall",
+    "ObservationGate",
+    "ObservedBelief",
     "PolicyCall",
     "succeeds",
 ]

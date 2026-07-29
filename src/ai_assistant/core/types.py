@@ -405,6 +405,36 @@ class Provenance(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _derived_is_never_certain(self) -> Provenance:
+        """A belief in the ``DERIVED`` band may not claim certainty (ADR-0077 §7).
+
+        The mirror of the clause above, and the reason both are on the *type*
+        rather than in a policy: 1.0 is the standing the user's own word carries
+        (ADR-0072 §3), so a value that claims it while naming a source we worked
+        out ourselves is incoherent wherever it appears. ``EXTERNAL`` is
+        deliberately untouched — a connected source may legitimately report a fact
+        it is certain of (ADR-0038 §2a) — and it is not in this band.
+
+        ADR-0072 §3 declined this validator and said exactly when to revisit:
+        "there is no producer yet that could violate the rule". ADR-0077's
+        observer is that producer, so the condition it named is met.
+
+        Enforcing it here rather than at the ``MemoryPolicy`` gate is what closes
+        the confidence half of #432: the gate is not the only path a
+        :class:`Provenance` takes — :class:`Goal` carries one and reaches no
+        propose/dispose gate at all — and a validator on the value needs no gate.
+        The *evidence* obligation #432 also describes stays open, and cannot be a
+        validator: an assertion legitimately cites nothing.
+        """
+        if band_of(self.source) is BeliefBand.DERIVED and self.confidence == _FULL_CONFIDENCE:
+            msg = (
+                f"{self.source.name} provenance is in the DERIVED band and must "
+                f"have confidence below 1.0"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class Validity(BaseModel):
     """The interval during which a record is the system's live belief (ADR-0045 §2).
@@ -735,6 +765,73 @@ class MemoryIngestResult(BaseModel):
             "For a REINFORCE it is the reinforced record's id; for a SUPERSEDE, the id "
             "of the record now holding the live belief (ADR-0045 §4)."
         ),
+    )
+
+
+# --- observation: what one pass over a batch of episodes produced (ADR-0077) --
+# The producer's return value, and the reason it is a value rather than a bare
+# sequence: five proposals could be five good entries, or ten of which five were
+# unusable, and only the producer can tell those apart (§4).
+
+
+class ObservationOutcome(BaseModel):
+    """What one :class:`~ai_assistant.core.protocols.Observer` pass produced.
+
+    The proposals an observer distilled from the batch it was handed, plus what
+    it threw away getting there. It is a value rather than a
+    ``Sequence[MemoryUpdateProposal]`` because a bare sequence cannot distinguish
+    "five good beliefs" from "ten entries, five of them unusable" — and silence
+    would then read as success, which is the failure ``memory_degraded`` exists to
+    prevent (ADR-0022 §3, ADR-0077 §4). It follows
+    :class:`MemoryIngestResult`'s precedent that a seam returning more than one
+    fact returns a named value rather than a tuple.
+
+    **The two counts are exhaustive and disjoint over what the model emitted**
+    (ADR-0077 §4). ``len(proposals) + discarded_unusable + discarded_over_limit``
+    equals the number of entries the model emitted, an undecodable response
+    counting as exactly one entry — so ``"I cannot help"`` reports one unusable
+    discard rather than being indistinguishable from a model that read the batch
+    and honestly proposed nothing. No entry is counted in both.
+
+    That invariant is **not** enforced here, and deliberately not: it is a
+    statement about a *model response*, which a conforming ``Observer`` need not
+    have. An observer with no model emits no entries, and this type would have to
+    invent one to check anything. The invariant is held by the tests of each
+    model-backed implementation (ADR-0077 §9.3).
+
+    Counts of what the *writer* later refused do not belong here either: a
+    proposal the producer legitimately made and the write path then dropped is a
+    different fact, and folding it into either count would misreport the model's
+    output. That count is the ingesting stage's (ADR-0077 §5).
+
+    Attributes:
+        proposals: The beliefs to put through the write path, in the producer's
+            own order. Empty is a normal outcome, not an error (ADR-0022 §4).
+        discarded_unusable: Entries the producer refused for a reason of its own
+            — unparseable, failing validation, citing evidence it was never
+            handed, below its evidence floor, or naming a kind an observer may
+            not propose.
+        discarded_over_limit: Otherwise-usable proposals dropped to meet the
+            producer's configured maximum. Discarded rather than queued: a queue
+            is durable state nothing here ratifies, and the episodes remain in the
+            store for a later pass to read again (ADR-0077 §2).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    proposals: tuple[MemoryUpdateProposal, ...] = Field(
+        default=(),
+        description="The beliefs distilled from the batch, in the producer's order.",
+    )
+    discarded_unusable: int = Field(
+        default=0,
+        ge=0,
+        description="Model entries the producer refused for a reason of its own.",
+    )
+    discarded_over_limit: int = Field(
+        default=0,
+        ge=0,
+        description="Usable proposals dropped to meet the producer's configured maximum.",
     )
 
 

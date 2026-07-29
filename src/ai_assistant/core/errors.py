@@ -7,7 +7,10 @@ Add new, specific subclasses rather than raising bare ``Exception``.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class AssistantError(Exception):
@@ -138,6 +141,52 @@ class MemoryStoreConflictError(MemoryStoreError):
     mint again" from "the store is broken, abort" — mirroring
     :class:`StaleExecutionError` under :class:`PlanningError`.
     """
+
+
+class UnresolvedEvidenceError(MemoryStoreError):
+    """A ``DERIVED`` proposal cited a record the store does not hold (ADR-0077 §5).
+
+    Raised by ``MemoryWriter.ingest`` before any ruling is sought: nothing is
+    written, and no decision is fabricated — a ruling is the policy's to make
+    (ADR-0005 §3), so a writer inventing a ``REJECT`` would put a decision nobody
+    made into the ingest result.
+
+    Narrowed out of :class:`MemoryStoreError` for one caller and one question:
+    **the ingesting stage cannot otherwise tell a race from a bug.** An episode is
+    selected while live and the observing model call suspends for a round trip, so
+    a citation can expire under its retention horizon — or be deleted with its
+    conversation — between selection and the write. That is an ordinary
+    consequence of a finite horizon, not a producer fault; against one
+    undifferentiated class the stage either aborts a batch that was working, or
+    swallows real faults to avoid doing so.
+
+    :attr:`unresolved_ids` is what makes the discrimination possible. The writer
+    sees only "this id does not resolve"; the stage compares those ids against the
+    batch it selected. **Every** unresolved id inside that batch is the race — drop
+    that proposal, count it, carry on with the rest. **Any** id outside it is the
+    producer citing something it was never handed, and propagates. The quantifier
+    is deliberate: a fault accompanied by an expiry is still a fault.
+
+    **Additive, not a narrowing.** A subclass *is* a ``MemoryStoreError``, so
+    every existing ``except MemoryStoreError`` still catches it and ADR-0028 §5's
+    "``MemoryStoreError`` is what crosses this seam" stays true as written. It is
+    precisely the distinguishable subclass ADR-0079 §4 named and left open, taken
+    by the lane that has the consumer, in the shape
+    :class:`UnknownConversationError` already has under
+    :class:`ConversationStoreError`.
+    """
+
+    def __init__(self, message: str, unresolved_ids: Sequence[str] = ()) -> None:
+        """Create the refusal, recording which citations failed to resolve.
+
+        Args:
+            message: What was refused and why, for a human reader.
+            unresolved_ids: The cited ids the store does not hold, in the order
+                they were cited. Snapshotted into a tuple, so a caller mutating
+                the sequence it passed cannot rewrite the error after the fact.
+        """
+        super().__init__(message)
+        self.unresolved_ids: tuple[str, ...] = tuple(unresolved_ids)
 
 
 class ConversationStoreError(AssistantError):
