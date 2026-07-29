@@ -2044,15 +2044,17 @@ system happens to know.
 **Cancellation gets one rule for the whole sequence, stated once rather than per
 call.** A cancelled `answer` **propagates** its `CancelledError`
 ([ADR-0060](0060-cancellation-must-not-orphan-a-resource.md)), and the coordinator
-**applies nothing further and cleans nothing up**, wherever the cancellation lands
-— inside `claim`, inside `ingest`, or inside `resolve`. The reason is the same
+**applies nothing further and cleans nothing up**, wherever the cancellation lands.
+The sequence has **four** awaited steps and therefore four windows — `claim`,
+`ingest`, the successor `defer` on the re-deferral branch, and `resolve` — and the
+list is exhaustive by construction: those are every call the answer path makes. The reason is the same
 each time: ADR-0060 makes a cancelled call's effect indeterminate *to its caller*,
 so the caller may not infer either that the step landed or that it did not, and
 every corrective action needs exactly that inference. The durable state is right
 without it, because each step's own CAS or write is atomic — whatever committed is
-committed, and the row is then either terminal or stranded `APPLYING`, the two
-states this design already renders honestly. The three windows differ only in what
-they leave:
+committed, and the row is then either terminal or stranded `APPLYING` — the two
+states this design already renders honestly. The windows differ only in what they
+leave:
 
 - **Inside `claim`**, after its CAS and before it returns: the row is `APPLYING`
   and **nobody holds the token**. Nothing can be applied — there is no token to
@@ -2063,6 +2065,13 @@ they leave:
   because cancellation is the one an error boundary swallows by default. It can
   land after the write dispatched, so whether memory changed is as unknown as after
   a store failure.
+- **Inside the successor `defer`**, after its atomic admission and before it
+  returns: the parent is `APPLYING` **and already carries a `successor_id`**, with
+  the successor admitted or suppressed onto an existing question. Nothing is undone
+  — the successor is a real question the user can answer, and deleting it to
+  "unwind" a cancelled call would destroy the one thing that call got right. This
+  is the *best* of the stranded cases rather than a worse one: §9's recovery finds
+  a parent that already names where its concern went, and §8 shows it.
 - **Inside `resolve`**, which is the only window that can leave a **finished**
   question: the terminal CAS may commit and the cancellation arrive before the call
   returns, so the deferral is `ACCEPTED` — correctly, the apply did happen — while
@@ -2095,6 +2104,10 @@ that is the actual epistemic situation and the surface says so rather than
 guessing. The recovery uses only ratified verbs, and it is **two steps, in order**:
 
 1. **Dispose of the stranded question** (`forget_question`, §8 → `delete`, §2).
+   Where the parent already names a successor — a cancellation caught after the
+   re-deferral admitted one (above) — the surface shows that question too, so the
+   user disposes of the stranded parent and still has the one their answer
+   raised.
    This is not optional bookkeeping and the ordering is the whole point: while the
    row lives it holds its `question_key`, so a re-proposal of the same correction
    would collide with it and be handed back an id nothing can claim. Deleting
@@ -2227,7 +2240,10 @@ On ratification:
    `resolve`**, driven on both sides of its CAS — cancelled after it commits, the
    terminal row is retained and readable; cancelled before, the row is still
    `APPLYING` — with neither "repaired" by the coordinator, which is the assertion,
-   since both are already right; an
+   since both are already right; **cancellation of the successor `defer`**, after
+   its commit and before it returns, driven for a newly admitted successor and for
+   one suppressed onto an existing question: the successor survives, the parent
+   keeps its stamped `successor_id`, and the recovery surface names it; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
