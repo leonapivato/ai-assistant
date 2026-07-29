@@ -3,8 +3,9 @@
 - Status: Proposed
 - Date: 2026-07-28
 - **This is a contract change.** §9 adds **one** Protocol — `Observer` — to
-  `core/protocols.py`, **one** type — `ObservationOutcome` — and **one**
-  source-conditional validator on `Provenance`, both in `core/types.py` (§7). Golden rule 5 therefore applies: this ADR ships as
+  `core/protocols.py`; **one** type — `ObservationOutcome` — and **one**
+  source-conditional validator on `Provenance`, both in `core/types.py` (§7); and
+  **one** error class, `UnresolvedEvidenceError`, to `core/errors.py` (§5). Golden rule 5 therefore applies: this ADR ships as
   **its own docs-only PR**, is reviewed while still `Proposed` so a finding can
   still change the decision, and is flipped to `Accepted` on merge
   (`CONTRIBUTING.md`, "Contract ADRs land before their implementation";
@@ -596,6 +597,26 @@ that has a producer capable of breaching it"), and it is what makes §6's
 tombstone unambiguous: **every citation resolved once**, so a citation that stops
 resolving is *loss*, never a producer bug. Two clauses fix its shape:
 
+- **The refusal is nameable, because the stage cannot otherwise tell a race
+  from a bug.** An episode is selected while live (§1) and the model call
+  suspends for a round trip, so a citation can expire under ADR-0074 §7's horizon
+  — or be deleted with its conversation — between selection and the write. That
+  is an *ordinary* outcome of a finite retention horizon, not a producer fault,
+  and an undifferentiated refusal would force the stage to choose between
+  aborting a batch that is working and swallowing real faults to avoid it. So
+  `core/errors.py` gains `UnresolvedEvidenceError`, a subclass of the `ValueError`
+  the refusal already is — additive in the shape ADR-0076 §2 gave
+  `UnknownConversationError` for the identical dilemma, so every existing
+  `except ValueError` still catches it and §5's rule stands as written.
+
+  **The stage drops that proposal, counts it, and carries on with the rest.**
+  It is worthless anyway: a belief whose citation no longer resolves cannot
+  answer "why do you believe that?" for the only support it had, and storing it
+  would manufacture at birth the all-tombstoned state §6 handles for beliefs that
+  earned their evidence first. Any *other* `ValueError` from `ingest` propagates,
+  because that one is a producer emitting a citation it never read. This is the
+  boundary that keeps §5's guarantee — **nothing unsupported is ever stored** —
+  from turning an expiry into a failed operation.
 - **It refuses rather than rules.** The writer raises rather than returning a
   fabricated `REJECT`: a decision is the policy's to make (ADR-0005 §3), and a
   writer inventing one would put a ruling nobody made into the ingest result. The
@@ -816,9 +837,11 @@ ever existed.
   family.
 - **`MemoryWriter.ingest`'s documented semantics** gain §5's refusal clause. No
   signature change.
-- **No new error class.** A model failure is a `ModelError`, a store failure a
-  `MemoryStoreError` (ADR-0028 §5), a malformed citation a `ValueError` (§5), and
-  a malformed model response is a degradation rather than an exception (§4).
+- **`core/errors.py`** gains **one** class, `UnresolvedEvidenceError`, a
+  `ValueError` subclass carrying §5's refusal so an evidence race is separable
+  from a producer bug. Nothing else: a model failure is a `ModelError`, a store
+  failure a `MemoryStoreError` (ADR-0028 §5), and a malformed model response is a
+  degradation rather than an exception (§4).
 
 An illustrative signature, in ADR-0073 §1's form — the semantics above are the
 contract, the spelling is the lane's:
@@ -831,12 +854,12 @@ class Observer(Protocol):
 
 **What the implementing lane owes** (stage 2; stage 1 is this ADR merging):
 
-1. The Protocol, `ObservationOutcome`, and the `Provenance` validator, plus the
-   `MemoryWriter.ingest` docstring restated as §5 rules it, **and its
-   conformance clause**: a `DERIVED`
-   proposal citing a record the store does not hold is refused with a
-   `ValueError`, nothing is written, and an `ASSERTED` or `EXTERNAL` proposal
-   citing nothing is unaffected.
+1. The Protocol, `ObservationOutcome`, `UnresolvedEvidenceError`, and the
+   `Provenance` validator, plus the `MemoryWriter.ingest` docstring restated as
+   §5 rules it, **and its conformance clause**: a `DERIVED` proposal citing a
+   record the store does not hold is refused with an `UnresolvedEvidenceError`,
+   nothing is written, and an `ASSERTED` or `EXTERNAL` proposal citing nothing is
+   unaffected.
 2. **The `DefaultMemoryPolicy` rule** (§5): a `DERIVED` proposal citing no
    evidence rules `REJECT`, an `EPISODIC` record is **not** refused for citing
    nothing, and `ASSERTED`/`EXTERNAL` proposals are untouched. Three tests, one
@@ -928,6 +951,12 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   state named, still live, still deletable, and **not** retired.
 - **A proposal citing an id the store does not hold** — refused by the writer,
   nothing stored (§5).
+- **An episode that expires between selection and the write, in a batch of
+  three** — the proposal citing it is dropped and counted, **the other two are
+  still ingested**, and the operation does not fail (§5). The negative assertion
+  matters as much: an implementation treating the refusal as a fault aborts a
+  batch that was working, on nothing worse than a retention horizon doing its
+  job.
 - **A model response citing a label outside the batch** — the citation is
   dropped, and a proposal left with none is discarded rather than repaired (§5).
 - **A batch observed twice, through an observer scripted to return the same
@@ -1072,7 +1101,8 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   band, its confidence and its evidence, and correctable by the user — which is
   the roadmap's exit test for leg 3 and the first time VISION §Principle 1's
   "built chiefly by observation" is true of anything in the tree.
-- **The contract cost is one Protocol, one type and one validator** — everything
+- **The contract cost is one Protocol, one type, one validator and one error
+  class** — everything
   else the lane owes is a rule inside a concrete component, a `Settings` field or
   a test — because ADR-0005 typed the proposal, ADR-0028 contracted the write path,
   ADR-0072 fixed what a derived belief means, ADR-0073 built the surface and
