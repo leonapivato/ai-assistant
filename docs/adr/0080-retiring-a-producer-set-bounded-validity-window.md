@@ -553,12 +553,17 @@ accepted:
 
 **The third gap is closed by a per-writer regression, and the lane owes it.**
 Each writer's own tests already inject a clock, so each gets a multi-target
-`SUPERSEDE` driven by an **advancing** clock — one that returns a later instant
-on each call — asserting that every retired record in the set carries the *same*
-`valid_until`. A writer re-sampling per target fails it; a writer sampling once
-passes whatever the clock does next. That is the deterministic form the shared
-suite cannot express without a clock seam it has ruled out, and it belongs beside
-the clamp and refusal regressions that are already there.
+`SUPERSEDE` driven by a **counting, advancing** clock — one that records every
+call and returns a later instant each time — asserting three things together:
+the clock was called **exactly once**, every retired record carries the *same*
+`valid_until`, and that instant **equals the clock's first returned value**. All
+three are needed and none is redundant. Equality alone is satisfied by a writer
+that re-samples a constant clock; equality plus advancing is satisfied by a
+writer that ignores its injected clock and hard-codes an instant; the call count
+and the first-value identity together rule out both, and they are observable
+because the test owns the clock. That is the deterministic form the shared suite
+cannot express without a clock seam it has ruled out, and it belongs beside the
+clamp and refusal regressions that are already there.
 
 Driving the exact clamp and the exact refusal against an **injected** clock is
 therefore the per-writer tests' job and stays there (`test_ingest.py`,
