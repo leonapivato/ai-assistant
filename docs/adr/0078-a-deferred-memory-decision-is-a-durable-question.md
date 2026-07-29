@@ -258,7 +258,20 @@ question about what is safe to emit).
   `None` in either field is the user's deliberate "ask me forever" (§6): the
   question never lapses and its record is never purged, the way `episode_retention`
   reads `None` as "keep forever… the user's deliberate choice"
-  (`core/config.py:382-384`). Then: `question_key`, the dedup key (§7); `state`; once
+  (`core/config.py:382-384`).
+
+  **A model validator enforces the pair, because "is" is not a constraint.** Saying
+  `expires_at` *is* `deferred_at + retention` describes an honest caller; `defer`
+  takes a caller-supplied `core` model, so the contract has to refuse a dishonest
+  one. In the shape `MemoryDecision._outcome_fields_are_consistent`
+  (`types.py:696-719`) already uses: `retention` is positive or `None`; the two
+  fields are `None` **together or not at all**; and when both are set, `expires_at`
+  equals `deferred_at + retention` exactly. Without it a secret-tier question can
+  be admitted with a one-day `retention` and `expires_at=None`, and a literal
+  implementation keeps it answerable forever and never purges it — §1's finite
+  exposure cap defeated by a record the contract accepted.
+
+  Then: `state`; once
   claimed, `claimed_at` — but **not** the claim token, which no read republishes
   (`claim`, below); `predecessor_id`, the question this one succeeds when it was
   raised by a re-deferral (`defer`, below), `None` otherwise; and, once resolved,
@@ -319,6 +332,13 @@ change is additive and no existing producer moves:
 - `MemoryUpdateProposal.confirmation: UserConfirmation | None = None` (beside
   `conflicts`, `types.py:642-645`).
 - `MemoryIngestResult.conflicts: tuple[str, ...] = ()` (`types.py:725`) — §4.
+
+**And two computed properties on `MemoryUpdateProposal`** — `proposal_fingerprint`
+and `question_key`, both `Sha256Hex` (§7). Properties rather than fields, for the
+reason `parameters_digest` is one (`types.py:2653-2682`); the store indexes the key
+and no caller supplies either. `DeferredProposal` therefore carries no key of its
+own: the question's identity is a function of the proposal it holds, so the two
+cannot disagree.
 
 **`core/protocols.py` gains one Protocol, `DeferralStore`**, `@runtime_checkable`
 like every other, owing:
@@ -649,7 +669,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Seventeen clauses the suite must carry are named here**, because they are the ones a
+**Nineteen clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -760,7 +780,20 @@ that would otherwise be prose:
     clause proves the refusal without proving what the refusal is *for* — that a
     question nobody could answer cannot become a retained `REJECTED` key that
     suppresses the next honest proposal.
-17. **The key is a canonical projection** (§7), which needs a case per excluded
+17. **`DeferredProposal` refuses an inconsistent deadline pair** (§2): a positive
+    `retention` with `expires_at=None`, a `None` `retention` with an `expires_at`,
+    a non-positive `retention`, and an `expires_at` that is not exactly
+    `deferred_at + retention`. Every listed case elsewhere constructs an honest
+    pair, so nothing else reaches the record that defeats §1's exposure cap while
+    being perfectly well-typed.
+18. **The fingerprint and the key agree across independently built inputs** (§7):
+    a proposal reconstructed field-by-field from a serialised form fingerprints
+    identically to the original, and a confirmation issued against the first
+    verifies against the second. This is the parity the confirmed path depends on
+    and the one a suite that always hashes the same in-memory object never tests —
+    the failure it guards is not a mismatch on some input but a mismatch on
+    *every* input, i.e. no asserted conflict ever confirmable.
+19. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; and two whose `evidence` or
@@ -1145,14 +1178,37 @@ the observer.
 than by an inventory of what counts.** In two layers, because §5's writer check
 needs the inner one on its own:
 
-- the **`proposal_fingerprint`** — a deterministic digest over a **canonical
-  projection** of the proposed `MemoryRecord`, plus the proposal's `sensitivity`;
+- the **`proposal_fingerprint`** — a digest over a **canonical projection** of the
+  proposed `MemoryRecord`, plus the proposal's `sensitivity`;
 - the **`question_key`** — `digest(proposal_fingerprint, sorted conflict ids)`.
 
 The writer can recompute the fingerprint from a proposal it holds and cannot
 recompute the key, whose conflict set was frozen when the question was asked (§5b
-check 4). The projection is the whole record minus the fields that are *bookkeeping
-about the record rather than the belief it states*, and there are exactly three:
+check 4).
+
+**Both are computed properties of `MemoryUpdateProposal`, not fields anyone
+supplies, and both use the encoding this repository has already ratified.** That is
+`PermissionDecision.parameters_digest`'s arrangement, adopted wholesale because it
+was designed for this exact hazard and argues itself better than a restatement
+would: SHA-256 over `_canonical_json`'s ADR-0021 §1 form (`ensure_ascii=False`,
+UTF-8, keys ordered), typed `Sha256Hex`, and computed **on the model that owns the
+data** — because "a `str` field each caller filled in would be a canonicalisation
+per caller, and two that disagreed would produce a false mismatch at execution —
+which reads as an attack rather than as a bug" (`types.py:2653-2682`).
+
+The failure that argument prevents is precisely the one here. The coordinator
+fingerprints at admission and the writer recomputes at answer time; two *specified*
+implementations of "a deterministic digest over a canonical projection" — one over
+`model_dump(mode="json")`, one over a Python repr — are each deterministic, disagree
+on every input, and the symptom is that **no asserted conflict can ever be
+confirmed**, with the confirmed apply refusing at check 4 for a proposal that is
+honestly the one asked about. One property on one model cannot come apart from
+itself. `question_key` is likewise a property, delegating to the fingerprint and
+the proposal's own frozen `conflicts`, so the store indexes a value it never has to
+be told.
+
+The projection is the whole record minus the fields that are *bookkeeping about the
+record rather than the belief it states*, and there are exactly three:
 
 - **`id`** — identity, minted per proposal, so including it makes the key match
   nothing at all.
