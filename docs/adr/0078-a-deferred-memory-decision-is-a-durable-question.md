@@ -549,12 +549,25 @@ like every other, owing:
   `include_retired` axis: two different questions behind one flag is one argument
   doing two jobs, and the answerable queue is the read every caller wants by
   default.
-- **`resolve(deferral_id, *, claim_id, state, answered_at, record_id=None,
-  successor_id=None) -> bool`** — the terminal compare-and-set, atomic with its own
-  read. It succeeds from `APPLYING` to **any** terminal state — `ACCEPTED`,
-  `REJECTED`, `STALE` or `REDEFERRED` — **only when `claim_id` matches the token
-  `claim` minted for it**, and from `PENDING` to `REJECTED` with `claim_id=None`
-  (an unclaimed rejection writes nothing, so it needs no claim).
+- **`resolve(deferral_id, *, claim_id, state, record_id=None, successor_id=None)
+  -> bool`** — the terminal compare-and-set, atomic with its own read. It succeeds
+  from `APPLYING` to **any** terminal state — `ACCEPTED`, `REJECTED`, `STALE` or
+  `REDEFERRED` — **only when `claim_id` matches the token `claim` minted for it**,
+  and from `PENDING` to `REJECTED` with `claim_id=None` (an unclaimed rejection
+  writes nothing, so it needs no claim).
+
+  **`answered_at` is stamped by the store, not passed in** — the same way `claim`
+  stamps `claimed_at` and `defer` stamps the deadlines, and for a reason stronger
+  than symmetry: that instant is a **retention anchor** (§2's `purge`), so a caller
+  that supplies it decides how long its own rejection suppresses the next honest
+  proposal. Resolve a question `REJECTED` with an instant in 1970 and `purge`
+  removes the record at once, so the user is re-asked something they just declined;
+  supply one far in the future and the same key stays suppressed long past the
+  retention it was admitted under. A validator requiring only that the stamp
+  *exists* catches neither. Taking the parameter away is the whole fix, and it
+  removes an argument rather than adding a check — the placement argument
+  `parameters_digest` makes for a digest (`types.py:2653-2682`), applied to a
+  clock.
 
   **The two ids are separate parameters, not one overloaded slot.** An earlier
   revision said a `REDEFERRED` resolution "names the successor in place of
@@ -691,7 +704,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Twenty clauses the suite must carry are named here**, because they are the ones a
+**Twenty-one clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -796,13 +809,18 @@ that would otherwise be prose:
     either. Six cases, because the transition tests pass against a store that
     writes whatever payload it is handed, and the two ids are separate parameters
     precisely so each of these is expressible rather than ambiguous.
-16. **An unclaimed rejection past the deadline fails** (§2): `resolve(state=REJECTED,
+16. **`resolve` stamps `answered_at` from the store's own clock** (§2): a
+    resolution driven with the store's injected clock at a known instant records
+    that instant, and the value is not reachable from the call — there is no
+    parameter to forge, which is the clause's whole content and the reason it is
+    an assertion about the signature as much as the behaviour.
+17. **An unclaimed rejection past the deadline fails** (§2): `resolve(state=REJECTED,
     claim_id=None)` succeeds an instant before `expires_at` and fails at it, and the
     lapsed row's key still does not collide afterwards. Without the second half the
     clause proves the refusal without proving what the refusal is *for* — that a
     question nobody could answer cannot become a retained `REJECTED` key that
     suppresses the next honest proposal.
-17. **`DeferredProposal` refuses an inconsistent record** (§2), in two groups. The
+18. **`DeferredProposal` refuses an inconsistent record** (§2), in two groups. The
     deadlines: a positive `retention` with `expires_at=None`, a `None` `retention`
     with an `expires_at`, a non-positive `retention`, and an `expires_at` that is
     not exactly `deferred_at + retention`. The lifecycle: a `PENDING` record
@@ -810,20 +828,20 @@ that would otherwise be prose:
     payload, and a terminal one without `answered_at`. Every listed case elsewhere
     constructs an honest record, so nothing else reaches the ones that are
     perfectly well-typed and defeat §1's exposure cap or the claim transition.
-18. **`defer` refuses a record that is not fresh** (§2) and changes nothing: an
+19. **`defer` refuses a record that is not fresh** (§2) and changes nothing: an
     `APPLYING` record, each terminal state, and a `PENDING` one carrying a stamp.
     The `APPLYING` case is the one that matters and the one validity alone does not
     catch — a valid record, a catastrophic admission: unclaimable, unresolvable,
     never purged, blocking its key, and repeatable until the queue is full of
     questions nobody created.
-19. **The fingerprint and the key agree across independently built inputs** (§7):
+20. **The fingerprint and the key agree across independently built inputs** (§7):
     a proposal reconstructed field-by-field from a serialised form fingerprints
     identically to the original, and a confirmation issued against the first
     verifies against the second. This is the parity the confirmed path depends on
     and the one a suite that always hashes the same in-memory object never tests —
     the failure it guards is not a mismatch on some input but a mismatch on
     *every* input, i.e. no asserted conflict ever confirmable.
-20. **The key is a canonical projection** (§7), which needs a case per excluded
+21. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; two whose `evidence` or whose
