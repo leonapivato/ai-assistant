@@ -454,13 +454,22 @@ user asked for:
   §3 put `memory_degraded` on the outcome to prevent. So `observe` returns an
   `ObservationOutcome`: the proposals, plus two discard counts (§9).
 
-  **The two counts are exhaustive, and that is an invariant rather than a
-  description.** `discarded_unusable` counts **every** entry the producer refused
-  for any reason of its own — unparseable, failing validation, citing a label
-  that is not in the batch, below §5's evidence floor, or naming a kind §2
-  forbids — and `discarded_over_limit` counts what was dropped to meet §2's
-  bound. **The proposals returned plus the two counts equal the number of entries
-  the model emitted.** Without that invariant a drop can fall between the two
+  **The two counts are exhaustive and disjoint, which takes an order.** The
+  producer **validates every entry first, and applies §2's bound only to the
+  entries that survived**. So `discarded_unusable` counts **every** entry the
+  producer refused for any reason of its own — unparseable, failing validation,
+  citing a label that is not in the batch, below §5's evidence floor, or naming a
+  kind §2 forbids — and `discarded_over_limit` counts only usable proposals
+  dropped to meet the bound. **The proposals returned plus the two counts equal
+  the number of entries the model emitted**, and no entry lands in both.
+
+  The order is ratified rather than left to the implementer because both halves
+  of it are observable. Capping first would put an unusable entry into
+  `discarded_over_limit` when it happened to sit past the cut and into
+  `discarded_unusable` when it did not, so two conforming producers would report
+  different outcomes for one response — and, worse, it would let a malformed
+  entry occupy a slot a good one could have filled, so a model that emitted six
+  entries of which one was junk would yield four proposals instead of five. Without that invariant a drop can fall between the two
   buckets: an entry citing an unknown label parses cleanly and is inside the
   bound, so it would be discarded silently and the outcome would be
   indistinguishable from a model that proposed nothing — which is the same
@@ -834,7 +843,10 @@ class Observer(Protocol):
    pair that closes the duplicate-input route to the evidence floor); **an entry
    dropped for citing a label outside the batch, or for falling below the
    evidence floor, is counted in `discarded_unusable`** — the clause that stops a
-   semantic drop falling between the two buckets (§4); an empty batch yields no
+   semantic drop falling between the two buckets (§4); **an unusable entry
+   sitting past the proposal bound is counted once, as unusable, and the bound is
+   still filled from the usable entries behind it** (§4's order — the case that
+   catches a producer capping before it validates); an empty batch yields no
    proposals and zero discards; input observation (ADR-0065) and cancellation
    (ADR-0060). The canonical fake must be able to report non-zero discards of
    both kinds, or none of the counting clauses is exercisable.
