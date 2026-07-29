@@ -117,18 +117,13 @@ gh pr ready                     # you decide when; don't wait to be told
 
 Codex reviews every change — a model independent of the one that wrote it. It
 reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
-re-running or it is invisible. Each run records an artifact under `.review/`,
-named by the anchor it is selected by —
-`<loop_id-or-noloop>-<persona>-<base_sha>-<tree>.md` (ADR-0027 §6; `noloop`
-stands in on the bypass path — no sandbox, or CI — which keeps no loop identity). `just ship`
-refuses to post unless one covers the **content** the PR head carries. Amending,
-squashing, or reverting to a reviewed tree therefore costs no round; changing a
-reviewed byte does. **A base move does not cost a round on its own:** where it leaves the
-reviewed patch untouched and clears ADR-0027 §3's floor — the contract surface,
-the standing review contracts, `docs/adr/**` — the artifact can still cover
-`HEAD`, and `ship` publishes the base drift on the PR. It costs a round when it
-edits the reviewed hunks or lands in the floor. `CONTRIBUTING.md` carries the
-paths and the rest of the conditions.
+re-running or it is invisible. Each run records an artifact under `.review/`, and
+`just ship` refuses to post unless one covers the **content** the PR head
+carries. So amending, squashing, or reverting to a reviewed tree costs no round;
+changing a reviewed byte does. A base move may or may not — it depends on what
+the move touched. **`CONTRIBUTING.md` → "Report the review, then mark it ready"
+carries every condition, including which paths cost a round; do not work them out
+from memory.**
 
 Running the review sends the diff to OpenAI. That is a normal, expected step of
 finishing a change, already authorized — not a decision to escalate.
