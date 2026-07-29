@@ -4,7 +4,8 @@
 - Date: 2026-07-28
 - **This is a contract change, and it is flagged as such (golden rule 5).** New
   `core` surface: a `DeferralStore` Protocol, a `DeferredProposal` record with its
-  state enum, the `UserConfirmation` and `DeferralAdmission` values, one field added
+  state enum, the `UserConfirmation`, `DeferralClaim` and `DeferralAdmission`
+  values, one field added
   to `MemoryUpdateProposal`, one added to `MemoryIngestResult`, and a
   `DeferralStoreError`. It ships **no
   code**: it merges as its own PR ahead of any implementation and carries the
@@ -235,7 +236,8 @@ question about what is safe to emit).
   comparison below treats the question as never lapsing, the way `episode_retention`
   reads `None` as "keep forever… the user's deliberate choice"
   (`core/config.py:382-384`); `question_key`, the dedup key (§7); `state`; once
-  claimed, `claim_id` and `claimed_at` (§9); and, once resolved, `answered_at`,
+  claimed, `claimed_at` — but **not** the claim token, which no read republishes
+  (`claim`, below); and, once resolved, `answered_at`,
   `outcome_record_id` (the id the accepted apply left live, or `None`) and
   `successor_id` (the question a `REDEFERRED` answer raised, or `None`).
 
@@ -260,6 +262,9 @@ question about what is safe to emit).
   no sweep is needed to make a question stop being answerable. `STALE` *is* stored,
   because it records that an answer arrived and was refused — §6 says why the two
   are different facts.
+- **`DeferralClaim`** — a frozen value carrying the claimed `deferral` and the
+  `claim_id` token `claim` minted for it. One value rather than two strings a caller
+  could swap, for the reason ADR-0074 §9 gives `ParkedBinding`.
 - **`DeferralAdmission`** — a frozen value carrying `outcome` (admitted /
   suppressed / refused) and `deferral: DeferredProposal | None`, with the validator
   above. It crosses the Protocol boundary, so `CLAUDE.md`'s rule makes it a `core`
@@ -293,7 +298,7 @@ change is additive and no existing producer moves:
 **`core/protocols.py` gains one Protocol, `DeferralStore`**, `@runtime_checkable`
 like every other, owing:
 
-- **`defer(deferred, *, successor_to=None) -> DeferralAdmission`** — admit a
+- **`defer(deferred, *, successor_to_claim=None) -> DeferralAdmission`** — admit a
   question, returning **what happened and the deferral that now holds it**.
   **Key-idempotent**: if a deferral **the key
   still speaks for** carries the same `question_key`, the admission is *suppressed*
@@ -356,19 +361,33 @@ like every other, owing:
   was at its cap (§7). A physical id collision is not among them — it raises
   (above) rather than returning a fourth shape nobody would check for.
 
-  **A re-deferral does not consult the cap, and it says so on the call rather than
-  by convention.** `defer` takes one more argument — `successor_to: str | None =
-  None`, the id of the **claimed parent** whose answer raised this question (§5a
-  step 1, §9). When it is given, the cap is not consulted.
+  **A re-deferral does not consult the cap, and the exemption is held by a
+  capability rather than named by an id.** `defer` takes one more argument —
+  `successor_to_claim: str | None = None`, **the parent's `claim_id`** (§5a step 1,
+  §9). When it is given, the cap is not consulted.
 
-  It is **not** a bypass flag a producer could set. The store validates it, in the
-  same atomic operation as the admission, against three conditions, raising
-  `DeferralStoreError` and changing nothing if any fails: the parent must exist, it
-  must be **`APPLYING`** — so only an answer actually in flight can raise a
-  successor — and it must not already carry a `successor_id`. On success the store
-  stamps the parent's `successor_id` as part of that same commit, which is what
-  makes the second condition enforceable and gives `resolve`'s `REDEFERRED`
-  transition something to check rather than trust.
+  **Naming the parent by its deferral id would not have worked, and the reason is
+  the point.** An earlier revision did exactly that and called the three checks
+  below sufficient. They are not: `interrupted` publishes the ids of `APPLYING`
+  rows to any caller (below), so an id proves only that *some* answer is in flight,
+  not that this caller is the one applying it. Anything holding such an id could
+  admit an unrelated question past a full queue and stamp a live parent's
+  `successor_id`, and that parent's real answer would then either strand — its
+  successor slot taken — or resolve `ACCEPTED` while pointing at a question it never
+  raised. The **`claim_id` is the capability**: it is minted by `claim`, returned to
+  that caller alone, and — the part that makes it worth anything — **it is on no
+  other read.** `get`, `pending`, `interrupted` and `export` return
+  `DeferredProposal`s, which do not carry it (§2's record fields; `claimed_at` is
+  there, so a surface can still say *when* an answer was begun). Holding the token
+  is holding the claim.
+
+  The store validates it, in the same atomic operation as the admission, raising
+  `DeferralStoreError` and changing nothing if any condition fails: the token must
+  name a stored claim, its deferral must still be **`APPLYING`**, and that deferral
+  must not already carry a `successor_id`. On success the store stamps that
+  `successor_id` in the same commit, which is what makes the third condition
+  enforceable and gives `resolve`'s `REDEFERRED` transition durable state to check
+  rather than the caller's word.
 
   That is what bounds it. One successor per claim, one claim per question, and every
   question admitted under the cap — so the answerable queue can exceed its
@@ -390,14 +409,21 @@ like every other, owing:
   match and the queue holds the same question twice. The observer is precisely a
   concurrent producer, so this is a live condition rather than a theoretical one.
 - **`get(deferral_id) -> DeferredProposal | None`.**
-- **`claim(deferral_id) -> DeferredProposal | None`** — a compare-and-set from
+- **`claim(deferral_id) -> DeferralClaim | None`** — a compare-and-set from
   `PENDING` to `APPLYING`, atomic with its own read, refusing a deferral past
-  `expires_at`. It **mints a fresh `claim_id` onto the record** and returns the
-  claimed record carrying it; `None` when the deferral is absent, expired, or not
-  `PENDING`. **Nothing may apply an answer without holding a claim** (§5, §9): this
-  is what makes an answer apply at most once under concurrency, and it is the
-  ADR-0044 §2 "a binding resolves once" invariant moved one step earlier so that it
-  covers the *apply*, not only the bookkeeping.
+  `expires_at`. It **mints a fresh `claim_id`**, stamps `claimed_at`, and returns a
+  `DeferralClaim` — the claimed `DeferredProposal` **and** the token; `None` when
+  the deferral is absent, expired, or not `PENDING`. **Nothing may apply an answer
+  without holding a claim** (§5, §9): this is what makes an answer apply at most
+  once under concurrency, and it is the ADR-0044 §2 "a binding resolves once"
+  invariant moved one step earlier so that it covers the *apply*, not only the
+  bookkeeping.
+
+  **The token comes back here and nowhere else**, which is what lets it stand as
+  the capability `resolve` and `successor_to_claim` both key on (above). It is not
+  a field of `DeferredProposal`, so no read republishes it and `export` cannot leak
+  it — a capability is not the user's data, and an export that carried one would
+  hand the ability to resolve a live claim to anything that reads the file.
 - **There is no `release`, and its absence is a decision.** A claim is never
   returned to `PENDING` — not on a timeout (the lease ADR-0074 §9 declines) and not
   on request. An operation that re-opened a claim would have to be callable by
@@ -446,7 +472,7 @@ like every other, owing:
 - **`resolve(deferral_id, *, claim_id, state, answered_at, record_id) -> bool`** —
   the terminal compare-and-set, atomic with its own read. It succeeds from
   `APPLYING` to **any** terminal state — `ACCEPTED`, `REJECTED`, `STALE` or
-  `REDEFERRED` — **only when `claim_id` matches the one the record carries**, and
+  `REDEFERRED` — **only when `claim_id` matches the token `claim` minted for it**, and
   from `PENDING` to `REJECTED` with `claim_id=None` (an unclaimed rejection writes
   nothing, so it needs no claim). A `REDEFERRED` resolution names the successor in
   place of `record_id`, since it wrote no record, and the id it names must be the
@@ -587,13 +613,15 @@ that would otherwise be prose:
    retry** (§2), in `PENDING`, `REJECTED` and `APPLYING`: *suppressed*, never
    *admitted*. This is the case an id comparison got wrong, and a suite that only
    ever retries with a fresh id never reaches it.
-5. **`successor_to` admits past a full queue and only from a live claim** (§2), in
-   four cases: at the cap with an `APPLYING` parent it **admits** and stamps that
-   parent's `successor_id`; naming a `PENDING` parent, naming an absent one, and
-   naming an `APPLYING` parent that already carries a successor each **raise** and
-   change nothing. The first is the exemption; the other three are what keep it
-   from being a bypass flag, and a suite that drives only the happy path certifies
-   exactly the bypass this argument rejects.
+5. **`successor_to_claim` admits past a full queue and only from a live claim**
+   (§2), in five cases: at the cap, a **valid token for an `APPLYING` parent**
+   admits and stamps that parent's `successor_id`; an **unknown token**, a token
+   whose parent has since been **resolved**, a token whose parent **already carries
+   a successor**, and — the case that matters most — a **well-formed token for a
+   different claim** each raise and change nothing. The last is the one a suite
+   naturally omits, and it is the whole difference between a capability and a
+   parameter: a suite that only ever passes the token it just received certifies
+   nothing about a caller that supplies someone else's.
 6. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
@@ -1258,15 +1286,16 @@ discovered.
 **A re-deferral is a completed answer, not a failed one.** When the re-ingest
 surfaces a `USER_ASSERTED` conflict outside the answer's authority, the policy rules
 `ASK_USER`, nothing is written, and the coordinator **enqueues the successor first
-— `defer(successor, successor_to=<the claimed parent>)`, §2 — and then resolves the
-original to `REDEFERRED` naming it**. That order
+— `defer(successor, successor_to_claim=<the token `claim` gave it>)`, §2 — and then
+resolves the original to `REDEFERRED` naming it**. It already holds that token; the
+whole sequence runs inside one claim. That order
 matters for the same reason step 2 precedes step 3 everywhere else: a crash after
 resolving but before enqueuing would leave a question marked handled with no
 successor, which is the silent drop wearing a terminal state. Crashing the other way
 leaves the original `APPLYING` and the successor already asked — visible, and
 recoverable by §9's two steps. The successor is admitted regardless of the queue cap
 (§2), so a full queue cannot strand a claimed answer — and because the store
-validates `successor_to` against a parent that is genuinely `APPLYING` and has no
+validates the claim token against a parent that is genuinely `APPLYING` and has no
 successor yet, that exemption cannot be reached from anywhere but here.
 
 **The claim is what makes an answer apply at most once.** Without it, two
@@ -1501,9 +1530,10 @@ On ratification:
 **Harder.**
 
 - **New `core` contract surface, and a new store**, which is the cost this ADR
-  argues for in §1 rather than assumes: one Protocol, four `core/types.py`
-  additions (the record, its state enum, and the two values `UserConfirmation` and
-  `DeferralAdmission`), two added fields on existing types, one error class, and a
+  argues for in §1 rather than assumes: one Protocol, five `core/types.py`
+  additions (the record, its state enum, and the three values `UserConfirmation`,
+  `DeferralClaim` and `DeferralAdmission`), two added fields on existing types, one
+  error class, and a
   triad with two bindings.
 - **A fourth store in the composition root**, with its own file, its own
   retention, its own export and delete obligations under ADR-0004/ADR-0007, and its
