@@ -245,7 +245,12 @@ like every other, owing:
   (`APPLYING`), or `REJECTED` within its retention (§7's no-nagging rule). A key
   whose only match is *expired-and-unanswered*, `ACCEPTED` or `STALE` does **not**
   collide: the question lapsed or was settled, and a fresh proposal deserves a fresh
-  question. It returns **`None` in exactly one case** — the answerable queue is at
+  question. **An `APPLYING` key stops speaking when its row does** — on `delete`,
+  which destroys the key (below), or on `purge`'s horizon. It has to block while an
+  apply may still be running, or a re-proposal admits a twin question whose later
+  answer would write the second correction the claim exists to prevent; and it must
+  stop blocking when the row is disposed of, or §9's recovery is unreachable.
+  It returns **`None` in exactly one case** — the answerable queue is at
   its cap and the question was not admitted (§7). One nullable return, one meaning;
   the duplicate path never yields `None`.
   **Admission is one atomic operation** — the key lookup, the answerable-count
@@ -294,7 +299,27 @@ like every other, owing:
   gives for its conditional drop: "a drop that merely trusted its caller's earlier
   reading would be the race reintroduced one layer up."
 - **`delete(deferral_id) -> bool`** and **`clear() -> int`** — ADR-0007's data
-  rights, shaped as `MemoryStore.delete`/`clear` (`protocols.py:442`, `:453`).
+  rights, shaped as `MemoryStore.delete`/`clear` (`protocols.py:442`, `:453`), and
+  **unconditional**: no state refuses them. ADR-0073 §9 declines a *band*-conditional
+  delete because "it makes a data right conditional on a classification the system
+  assigned", and a state-conditional one is the same mistake with an internal label
+  instead of a band.
+
+  **An `APPLYING` row is deletable too, and `purge` still may not touch one — the
+  difference is who is acting, and it is the whole distinction.** A `delete` is the
+  user destroying their own Tier 1 record, which ADR-0007 makes unconditional and
+  ADR-0073 §6 already rules on: "the record is *destroyed*, unconditionally… losing
+  the history is what they asked for". A `purge` is the system sweeping on a timer.
+  If an in-flight `ingest` then commits, its `resolve` finds nothing and returns
+  `False` — which after a `delete` means *the question was disposed of while the
+  answer was being applied*, a true statement the coordinator reports (§9), and
+  after a sweep would mean *the system quietly destroyed the only record that an
+  answer was ever given*. The first is a consequence the user chose; the second is
+  one nobody chose, which is why §2's `purge` excludes the state and `delete` does
+  not.
+
+  Deleting destroys the `question_key` with the row, which is what makes §9's
+  recovery reachable.
 - **`export() -> list[DeferredProposal]`** — ADR-0004 §6. A plain list of the frozen
   type the caller serialises with `model_dump(mode="json")`, matching
   `MemoryStore.export` (`protocols.py:461`) and `AuditTrail.export`
@@ -309,12 +334,12 @@ like every other, owing:
   keyed on terminal states alone would keep a lapsed secret-tier proposal on disk
   forever while §1 and §6 promise the opposite.
   **It never removes an `APPLYING` row, at any age.** That row is the only durable
-  record that an answer was begun; deleting it while its `ingest` is still running —
-  a slow embed, a stalled store — would let the memory write commit against a
-  question that no longer exists, so `resolve` fails and a committed change is left
-  with no outcome recorded anywhere. A stranded claim is disposed of by an explicit
-  `delete`, never by a sweep (§9). Correctness does not depend on `purge` running,
-  but §1's Tier-0 exposure cap does, for every state except that one.
+  record that an answer was begun; destroying it while its `ingest` is still
+  running — a slow embed, a stalled store — would let the memory write commit
+  against a question that no longer exists, so `resolve` fails and the fact that an
+  answer was given survives nowhere. A sweep may not make that decision; a user
+  may, and does, through `delete` (below). Correctness does not depend on `purge`
+  running, but §1's exposure cap does, for every state except `APPLYING`.
 
 Both `Sequence`-typed arguments and every mutable input are observed **before the
 first `await`** ([ADR-0065](0065-a-call-observes-its-inputs-before-its-first-await.md));
@@ -355,9 +380,10 @@ that would otherwise be prose:
    `claim_id`.
 4. **`purge` removes an expired-and-unanswered `PENDING` deferral** — seeded
    through an injected clock, not merely a `REJECTED` one — **and leaves an
-   `APPLYING` one however old it is.** Both halves are load-bearing and pull in
-   opposite directions, which is exactly why an implementation gets one of them
-   wrong: the first is §6's exposure cap, the second is §9's orphan guard.
+   `APPLYING` one however old it is, while `delete` removes that same row.** The
+   three pull in different directions, which is exactly why an implementation gets
+   one of them wrong: the first is §6's exposure cap, the second is §9's guard on
+   the record of an answer, and the third is ADR-0007's unconditional data right.
 5. **`defer` collides on the key and only on the key.** Two proposals differing
    *only* in `provenance.source`, and two differing only in `sensitivity`, must both
    admit as separate questions (§7), while an identical repeat collides and does not
@@ -639,6 +665,27 @@ declined to act. That is worth keeping; a question nobody answered is not.
 This reads the **envelope** window only. Reconciling `SemanticMemory.valid_until`
 with it is ADR-0045 §10's open item and is not touched here (§11).
 
+**The check is at the answer, not at the write, and this ADR says so rather than
+implying a guarantee it does not deliver.** The coordinator reads the window when
+the answer arrives; `MemoryIngestor` does not re-read it before storing, so a
+window that closes *during* the apply — between the check and the `write_atomic` —
+still lands a record that every subsequent read hides. Three things make that the
+right place to stop:
+
+- **Nothing is lost, and nothing is inconsistent.** The record is written, retained,
+  and in `export`; it is merely not live. That is the ordinary read-time-relative
+  behaviour the memory model already has, and ADR-0028's amendment describes the
+  same class of outcome for supersession in the same terms — "a read-time-filtering
+  property, not a supersession bug".
+- **Closing it means a validity check at the write boundary for *every* proposal**,
+  not only confirmed ones — a change to the general write path, decided on
+  proportionality against every producer, not smuggled in through the answer path.
+- **It already has an owner.** The semantics of a *producer-set* bounded window —
+  the roadmap's leg 4 names them explicitly as "clamp, refuse, or never-lived" and
+  "undecided", needing their own ADR (#306) — are exactly what a write-boundary
+  check would have to implement. Deciding them here would pre-empt that ADR from
+  the wrong side of the seam. Filed (§11) against it.
+
 ### 7. Volume: dedup by question, a cap that refuses rather than evicts, oldest first
 
 The observer will produce proposals continuously and some fraction will be ruled
@@ -678,7 +725,19 @@ change of mind is reachable by waiting, and an immediate one is reachable by
 `learn`, which proposes afresh and is the ratified correction path (ADR-0073 §6:
 "inspection adds no second correction path"; nor does this).
 
-**A cap that refuses new questions and keeps old ones.** The **answerable** queue —
+**A cap that refuses new questions and keeps old ones — and it is strictly
+positive.** A cap of `0` is at capacity before its first admission, so every
+`ASK_USER` proposal is refused and the drop this ADR exists to end returns in full,
+by configuration, while the system reports health. That is precisely the class of
+value ADR-0022 §4a refuses at construction because it "disables a stage while the
+loop keeps reporting health", and `core/config.py` already refuses its siblings the
+same way (`confirmation_ttl` and `conversation_tombstone_grace` both carry
+`gt=timedelta(0)`). So the cap is `gt=0`, refused at load rather than per
+admission. There is no "unlimited" spelling: an uncapped queue is what §7 exists to
+prevent, and `deferral_ttl`'s `None` is already the deliberate "ask me forever"
+escape at the other axis.
+
+The **answerable** queue —
 `PENDING` and not past `expires_at`, the same set `pending` returns — is bounded by
 a configured maximum. Lapsed and resolved rows awaiting `purge` do not count
 against it, so a queue cannot be held shut by questions nobody can answer. At the
@@ -820,21 +879,38 @@ alongside the first. That is the duplicate the claim exists to prevent, restored
 the mechanism meant to repair it. So the answer is applied at most once, full stop,
 and the cost is paid where it can be seen.
 
-**What the user is left with is a question in a stated, honest state.** The listing
-shows it (§8): an answer was begun and its outcome was never recorded. The system
-does **not** know whether the memory write landed — that is the actual epistemic
-situation and the surface says so rather than guessing. The recovery is the ratified
-one and needs nothing new: read the belief (`assistant beliefs`, ADR-0073), and if
-the correction is not there, `learn` it again — the correction path ADR-0073 §6
-says is the only one. Disposal is `delete`.
+**What the user is left with is a question in a stated, honest state, and a
+two-step recovery.** The listing shows it (§8): an answer was begun and its outcome
+was never recorded. The system does **not** know whether the memory write landed —
+that is the actual epistemic situation and the surface says so rather than
+guessing. The recovery uses only ratified verbs, and it is **two steps, in order**:
+
+1. **Dispose of the stranded question** (`forget_question`, §8 → `delete`, §2).
+   This is not optional bookkeeping and the ordering is the whole point: while the
+   row lives it holds its `question_key`, so a re-proposal of the same correction
+   would collide with it and be handed back an id nothing can claim. Deleting
+   destroys the key with the content, which unblocks the key.
+2. **Read the belief and correct it if it is missing** — `assistant beliefs`
+   (ADR-0073), then `learn`, the correction path ADR-0073 §6 says is the only one.
+   A re-proposal now admits a fresh question, or lands directly if the conflict it
+   would have contradicted is already retired.
+
+The surface states both steps on the stranded question itself, because a recovery
+the user has to infer from a Protocol's dedup rule is not a recovery.
+
+**A `resolve` that finds nothing is reported, not raised.** If the question was
+deleted while its answer was being applied, `resolve` returns `False` and the
+memory write has already committed. The coordinator says exactly that — the change
+was made, the question is gone — because it is true and because raising would
+misreport a completed write as a failure.
 
 **The residue, precisely, and it is a bookkeeping loss rather than a data one.**
-After a crash inside a claim, one question's outcome is unrecorded, and its
-`question_key` stays blocked for as long as the row lives. Nothing is destroyed, no
-answer is applied twice, and no memory write is orphaned — the write either
-committed or did not, and either way the store's own contents are consistent and
-readable. The direction is *unrecorded-and-visible*, never lost-and-silent, which
-is the one-way-residue standard ADR-0074 §9 holds its composed export to.
+After a crash inside a claim, one question's outcome is unrecorded until the user
+disposes of it. Nothing is destroyed, no answer is applied twice, and no memory
+write is orphaned — the write either committed or did not, and either way the
+store's own contents are consistent and readable. The direction is
+*unrecorded-and-visible*, never lost-and-silent, which is the one-way-residue
+standard ADR-0074 §9 holds its composed export to.
 
 Closing even that needs the cross-store transaction leg 5 owes (ADR-0074 §11), at
 which point claim and apply commit together and the state cannot exist. Filed
@@ -871,18 +947,26 @@ On ratification:
    composition-root obligations enforced by a test rather than requested in prose —
    the standard ADR-0028 §4 set when it made
    `test_a_learned_preference_is_reused_on_a_later_turn` carry its same-store rule.
-   **Three integration assertions come with the answer path**, all on injected
+   **Five integration assertions come with the answer path**, all on injected
    clocks and deterministic suspension rather than timing: two concurrent
    `answer(id, accept=True)` calls leave **one** correction in the store and report
    the loser as not-open (§9); an accept suspended inside `ingest` while a `purge`
-   runs still finds its row and resolves against it (§2's `APPLYING` exclusion);
-   and an accept whose proposal's validity window has closed writes nothing and
-   stamps `STALE` (§6). None belongs in the store's conformance suite — they are
-   properties of the sequence, and the sequence lives here.
+   runs still finds its row and resolves against it (§2's `APPLYING` exclusion); an
+   accept suspended inside `ingest` while `forget_question` deletes the same
+   deferral commits its memory write, reports the disposal, and **does not raise**
+   (§2, §9);
+   §9's two-step recovery end to end — crash after `claim`, `delete`, then a
+   re-`learn` that **admits a new question** rather than colliding with the
+   stranded key; and an accept whose proposal's validity window has closed before
+   the answer writes nothing and stamps `STALE` (§6). None belongs in the store's
+   conformance suite — they are properties of the sequence, and the sequence lives
+   here.
 4. A production `DeferralStore` alongside the existing SQLite stores, under the
    same `data_dir` plumbing and file permissions (ADR-0004), wired in the
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
-5. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7).
+5. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7), the cap
+   `gt=0` and both refused at load, with load-time tests for zero and negative
+   values as `confirmation_ttl` already has.
 6. The façade methods, the `Question` DTO and the CLI commands (§8), including the
    `APPLYING` rendering and the disposal verb (§9), and no verb that claims to
    retry an apply.
@@ -906,6 +990,11 @@ On ratification:
   deferral. This ADR builds the *other* gate §7 named; it does not narrow the
   question that triggers one. If a signal lands, fewer questions are asked and
   nothing here changes. Owner: the policy lane.
+- **A validity check at the memory write boundary** (§6). The answer path checks
+  the proposal's window when the answer arrives; a window closing *during* the apply
+  writes a record that reads as not-live. Closing it means checking on every write,
+  for every producer, and it needs the producer-set-bounded-window semantics the
+  roadmap's leg 4 names as undecided and owing their own ADR. Owner: **#306**.
 - **How the hub delivers a question** — push, notification, per-spoke delivery
   state (§8). Owner: leg 5's local-API and service ADRs.
 - **What the observer proposes and at what rate** (§7). Owner: ADR-0077. This ADR
@@ -1049,6 +1138,20 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   what nobody holds. So a claim is one-way, the interrupted state is shown rather
   than repaired, and the user's recovery is `learn` — which is the ratified
   correction path anyway (ADR-0073 §6).
+- **Refuse `delete` on an `APPLYING` row, to protect the in-flight apply.**
+  Rejected (§2): it makes ADR-0007's data right conditional on an internal state the
+  system assigned, which is ADR-0073 §9's objection to a band-conditional delete
+  with a different label. And it would be permanent for a *stranded* claim, so a
+  user could never destroy an interrupted secret-tier question. The consequence a
+  refusal was protecting against — `resolve` finding nothing — is reported rather
+  than prevented (§9).
+- **Give a deleted `APPLYING` row a content-free tombstone so the late `resolve`
+  lands.** Rejected: `DeferredProposal` would need every field optional to express
+  a row with no proposal and no ruling, and the tombstone would record an outcome
+  for a question the user destroyed — keeping a trace of exactly what they asked to
+  be rid of. ADR-0074 §8's tombstone earns its keep because a conversation's index
+  must catch a late write to *other* durable state; here the late write commits on
+  its own and is visible in `assistant beliefs`, so there is nothing to catch.
 - **Purge a long-abandoned `APPLYING` row along with the lapsed `PENDING` ones.**
   Rejected (§2): the row is the only durable trace that an answer was begun, and a
   sweep that removes it while its `ingest` is still running — a slow embed is
