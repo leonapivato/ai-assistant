@@ -1190,7 +1190,23 @@ proposal carrying a `confirmation` is judged in three steps, in this order:
    (ADR-0050 §2). The answer becomes a **re-deferral** (§9), not a write.
 2. Otherwise rule `SUPERSEDE` on the first id in `confirmation.retires` that is
    present in the live conflict set **and whose source is `USER_ASSERTED`**.
-3. Otherwise rule `ACCEPT`.
+3. Otherwise **fall through to the policy's ordinary rules, unchanged** — which
+   supersede the best-ranked supersedable inference if the set holds one
+   (`_rule_on_assertion` arm 2, ADR-0038) and `ACCEPT` if it does not (arm 3).
+
+**Step 3 falls through rather than accepting, and an earlier revision got this
+wrong in a way worth recording.** It read "otherwise `ACCEPT`", which quietly
+disabled the ordinary supersession law for every confirmed proposal. Freeze a
+question over `(A: USER_ASSERTED, D: INFERRED)`; let `A` be retired or deleted
+before the answer arrives; then no confirmed asserted target is live, and a bare
+`ACCEPT` lands the correction **beside `D`** — a stale inference the user just
+corrected, left live by the confirmed path when the unconfirmed one would have
+retired it. The confirmed path exists to override the arms that would otherwise
+*re-defer an answered question*; it has no business overriding the arms that
+retire derived beliefs, which ADR-0038 entitles an assertion to overturn without
+asking and ADR-0079 §1 requires be resolved completely. Falling through is also
+simply less to specify: the confirmed path adds a gate and a target rule, and
+inherits everything else.
 
 **Step 2 names an *asserted* target, and the qualifier is load-bearing in two
 directions.** The confirmation exists to authorise the one thing similarity may
@@ -1363,8 +1379,11 @@ It **applies** only when all five checks hold.
 which the refusal cases never reach: a conflict set holding an `EXTERNAL` record
 and a prior assertion, both named in `retires`, retires **the assertion** and
 leaves the external record live — the ordering case that would otherwise adopt
-`EXTERNAL` supersession by accident; and a `retires` naming **two prior
-assertions**, both live, retires **both** in one batch. Each is a case a suite
+`EXTERNAL` supersession by accident; a `retires` naming **two prior
+assertions**, both live, retires **both** in one batch; and a question whose shown
+assertion has been **retired or deleted before the answer arrives**, leaving a live
+derived conflict, still supersedes that inference rather than accepting beside it
+(§5a step 3). Each is a case a suite
 built from single-conflict fixtures never constructs, and each decides which
 record the user's answer actually acted on.
 
