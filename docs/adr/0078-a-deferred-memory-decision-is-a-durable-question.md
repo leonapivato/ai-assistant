@@ -286,8 +286,18 @@ question about what is safe to emit).
   the type crosses the Protocol boundary on every read, so its invariants belong on
   the model rather than in one implementation's care — the same reason
   `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) is a
-  validator and not a comment. Over two groups of fields:
+  validator and not a comment. Over three groups of fields:
 
+  - **The ruling.** `decision.kind` **is `ASK_USER`**. Every other clause in this
+    ADR is written about a question the policy deferred, and a record built around
+    an `ACCEPT` or a `SUPERSEDE` is not a question at all — it is a durable pending
+    entry for a proposal that was never deferred, which the surface would present
+    and the answer path would re-ingest as though a user had been asked. The
+    orchestration write stage filters on `ASK_USER` before it calls `defer` (§3),
+    but a public Protocol may not rely on its one honest caller: stating the kind
+    in prose and enforcing nothing is how the description and the contract come
+    apart. On the model rather than in `defer`, for the same reason the lifecycle
+    checks are — it is what the record *means*, not a rule about one call.
   - **The deadlines.** `retention` is positive or `None`; `retention` and
     `expires_at` are `None` **together or not at all**; and when both are set,
     `expires_at` equals `deferred_at + retention` exactly. Without this a
@@ -859,8 +869,12 @@ that would otherwise be prose:
     clause proves the refusal without proving what the refusal is *for* — that a
     question nobody could answer cannot become a retained `REJECTED` key that
     suppresses the next honest proposal.
-18. **`DeferredProposal` refuses an inconsistent record** (§2), in two groups. The
-    deadlines: a positive `retention` with `expires_at=None`, a `None` `retention`
+18. **`DeferredProposal` refuses an inconsistent record** (§2), in three groups.
+    The ruling: **every non-`ASK_USER` `MemoryDecisionKind`** — `ACCEPT`, `REJECT`,
+    `REINFORCE`, `SUPERSEDE`, `STORE_TEMPORARY` — is refused, and `defer` leaves the
+    store unchanged when handed one. Parametrise it over the enum rather than
+    picking a representative: a rule about which member is admissible is exactly the
+    kind that a later member silently joins the wrong side of. The deadlines: a positive `retention` with `expires_at=None`, a `None` `retention`
     with an `expires_at`, a non-positive `retention`, and an `expires_at` that is
     not exactly `deferred_at + retention`. The lifecycle: a `PENDING` record
     carrying any stamp, an `APPLYING` one without `claimed_at` or carrying terminal
