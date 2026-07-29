@@ -43,6 +43,14 @@ that spans them — capturing a turn as an ``EpisodicMemory``, carrying out a
 conversation-scoped deletion, reclaiming what retention has emptied, and
 composing the export a user receives. ADR-0074 §9's coordinator ruling puts those
 here precisely because neither store may hold the other (golden rule 1).
+
+``ObservationStage`` is the **observation stage** (ADR-0077 §8), the second such
+two-store owner: it selects a bounded batch of a conversation's recent episodes,
+hands them to the injected ``Observer``, and puts every proposal that comes back
+through the ratified write path — reporting what was proposed, what became of it,
+and which model route read the episodes (``ObservationReport``,
+``ObservedProposal``). The producer holds no store, so selecting the batch could
+never have been its job (ADR-0077 §1).
 """
 
 from ai_assistant.orchestration.conversations import (
@@ -66,6 +74,11 @@ from ai_assistant.orchestration.engine import (
 )
 from ai_assistant.orchestration.executor import StepExecutor
 from ai_assistant.orchestration.loop import LearningLoop, TurnResult
+from ai_assistant.orchestration.observation import (
+    ObservationReport,
+    ObservationStage,
+    ObservedProposal,
+)
 from ai_assistant.orchestration.runner import Disposition, StepDisposition, StepRunner
 
 __all__ = [
@@ -84,6 +97,9 @@ __all__ = [
     "LearnDecision",
     "LearnOutcome",
     "LearningLoop",
+    "ObservationReport",
+    "ObservationStage",
+    "ObservedProposal",
     "StepDisposition",
     "StepExecutor",
     "StepOutcome",

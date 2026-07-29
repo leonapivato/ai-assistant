@@ -36,6 +36,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     Disposition,
     Engine,
+    ObservationStage,
     StepExecutor,
     StepRunner,
 )
@@ -50,6 +51,7 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeObserver,
     FakeToolInvoker,
 )
 
@@ -154,6 +156,14 @@ def _make_engine(
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: AT,
+        ),
+        observation=ObservationStage(
+            observer=FakeObserver(),
+            conversations=conversations,
+            memory=memory,
+            writer=writer,
+            batch_size=20,
+            route="anthropic:claude-opus-4-8",
         ),
         closers=[_aclose(plans.close), _aclose(trail.close)],
     )

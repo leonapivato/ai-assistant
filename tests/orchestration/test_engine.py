@@ -54,6 +54,9 @@ from ai_assistant.orchestration import (
     IngestSummary,
     LearnDecision,
     LearnOutcome,
+    ObservationReport,
+    ObservationStage,
+    ObservedProposal,
     StepExecutor,
     StepRunner,
     TurnOutcome,
@@ -68,8 +71,10 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeObserver,
     FakePlanStore,
     FakeToolInvoker,
+    ObservationGate,
 )
 
 if TYPE_CHECKING:
@@ -90,6 +95,12 @@ PATIENT = timedelta(seconds=30)
 
 #: The episodic horizon the harness's capture stage stamps with (ADR-0074 §7).
 RETENTION = timedelta(days=30)
+
+#: The observation bounds and route the harness wires (ADR-0077 §1, §3). Both are
+#: the composition root's job in production; here they are fixed so a test can
+#: assert the route the report names.
+OBSERVATION_BATCH = 20
+OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
@@ -209,6 +220,7 @@ class Harness:
         closers: Sequence[object] = (),
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
+        observer: object | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -234,6 +246,18 @@ class Harness:
         self.policy_for_writer = FakeMemoryPolicy()
 
         writer = FakeMemoryWriter(store=self.memory, policy=self.policy_for_writer, now=lambda: AT)
+        # The observation stage over the *same* store and writer, as the composition
+        # root wires it (ADR-0077 §8). Kept on the harness so a test can read what
+        # batch reached the producer.
+        self.observer = observer if observer is not None else FakeObserver()
+        self.observation = ObservationStage(
+            observer=self.observer,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
+            conversations=self.conversation_store,
+            memory=self.memory,
+            writer=writer,
+            batch_size=OBSERVATION_BATCH,
+            route=OBSERVER_ROUTE,
+        )
         loop = LearningLoop(
             context=FakeContextProvider(),
             memory=self.memory,
@@ -261,6 +285,7 @@ class Harness:
             trail=self.trail,
             memory=self.memory,
             conversations=self.conversations,
+            observation=self.observation,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
         )
@@ -448,6 +473,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
     )
 
@@ -556,6 +582,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -609,6 +636,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -654,6 +682,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
     )
     first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
@@ -786,6 +815,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
     )
     facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
@@ -1166,6 +1196,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
     )
@@ -1227,6 +1258,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         trail=harness.trail,
         memory=harness.memory,
         conversations=harness.conversations,
+        observation=harness.observation,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
     )
@@ -1254,6 +1286,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             trail=harness.trail,
             memory=harness.memory,
             conversations=harness.conversations,
+            observation=harness.observation,
             max_outstanding_confirmations=0,
         )
 
@@ -1270,6 +1303,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             trail=harness.trail,
             memory=harness.memory,
             conversations=harness.conversations,
+            observation=harness.observation,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
         )
 
@@ -1995,3 +2029,84 @@ async def test_forget_conversation_shows_the_span_then_destroys_everything() -> 
     assert await harness.engine.conversation(first.conversation_id) is None
     assert await harness.engine.recent_conversations() == ()
     assert await harness.memory.export() == [], "every episode it recorded is gone"
+
+
+# --- the observation leg (ADR-0077 §8) -----------------------------------
+
+
+async def _one_captured_turn(harness: Harness) -> str:
+    """Record one turn through the capture stage, so an episode exists to observe."""
+    conversation = await harness.conversations.begin(None)
+    await harness.conversations.capture(conversation.id, content="the user said something")
+    return conversation.id
+
+
+async def test_observe_delegates_to_the_stage_and_reports_what_happened() -> None:
+    """One call in, one report out — and it names the route that read the episodes.
+
+    The route is ADR-0013 §6's owed reporting, made on the one call where it matters
+    most: a model reading back the transcript.
+    """
+    harness = Harness()
+    conversation = await _one_captured_turn(harness)
+
+    report = await harness.engine.observe(conversation)
+
+    assert isinstance(report, ObservationReport)
+    assert report.conversation_id == conversation
+    assert report.episodes_read == 1
+    assert report.route == OBSERVER_ROUTE
+    assert report.proposals  # the default fake observer proposes from the batch
+    assert all(isinstance(entry, ObservedProposal) for entry in report.proposals)
+
+
+async def test_observe_with_no_id_selects_the_most_recently_active_conversation() -> None:
+    """The façade relays "no id" as ADR-0077 §8's selector, not as "everything"."""
+    harness = Harness()
+    conversation = await _one_captured_turn(harness)
+
+    report = await harness.engine.observe()
+
+    assert report.conversation_id == conversation
+
+
+async def test_observe_is_refused_once_shutdown_has_begun() -> None:
+    """It writes to the connection-owning store, so it is admission-checked (§2)."""
+    harness = Harness()
+    await harness.engine.aclose()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await harness.engine.observe()
+
+
+async def test_observe_is_drained_before_shutdown_closes_resources() -> None:
+    """An in-flight observation quiesces before the stores close (ADR-0042 §2).
+
+    It reads both durable stores and writes to one, so closing underneath it would
+    be closing a connection a live write is using.
+    """
+    gate = ObservationGate()
+    closed: list[str] = []
+    harness = Harness(
+        observer=FakeObserver(gate=gate),
+        closers=(_recording_closer(closed),),
+    )
+    conversation = await _one_captured_turn(harness)
+
+    running = asyncio.ensure_future(harness.engine.observe(conversation))
+    await gate.reached()
+    shutdown = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.sleep(0)
+    assert closed == []  # the store is still open while the observation runs
+    gate.release()
+    await running
+    await shutdown
+    assert closed == ["closed"]
+
+
+def _recording_closer(closed: list[str]) -> Callable[[], Awaitable[None]]:
+    """A closer that records that it ran, for the drain assertion above."""
+
+    async def _close() -> None:
+        closed.append("closed")
+
+    return _close

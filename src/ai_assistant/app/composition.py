@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
-from ai_assistant.learning import RuleBasedFeedbackProcessor
+from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import DefaultMemoryPolicy, MemoryIngestor, SqliteMemoryStore
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.models import (
@@ -30,6 +30,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
     LearningLoop,
+    ObservationStage,
     StepExecutor,
     StepRunner,
 )
@@ -71,7 +72,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       rather than two (ADR-0074 §7, §9);
     * the model seam is composed **retry inside routing**, the order ADR-0013 §3
       recommends and that nothing in `models/` can enforce, since enforcing it
-      would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`).
+      would mean a wrapper knowing what wraps it (see :func:`_build_model_provider`);
+    * the **observer's** seam is composed differently on purpose — retry and *no
+      routing*, one named route that never falls back (ADR-0077 §3, see
+      :func:`_build_observer_provider`) — and the stage is told which route that is,
+      because reporting which model read the episodes is what ADR-0013 §6 records as
+      owed and no seam exposes it.
 
     **Configuration is validated before any resource is opened (#372).** The
     resource-free construction — the model seam (which checks every configured
@@ -102,8 +108,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         settings: Loaded application settings — the model specs the router routes
             over (``default_model`` then ``fallback_models``, ADR-0062) and their
             resilience knobs, the context localisation window, the parked-confirmation
-            lifetime the runner enforces (``confirmation_ttl``, #310), and the four
-            permission gate thresholds the policy is constructed with (#239).
+            lifetime the runner enforces (``confirmation_ttl``, #310), the four
+            permission gate thresholds the policy is constructed with (#239), and
+            the observer's route and its two per-call bounds (``observer_model``,
+            ``observation_batch_size``, ``observation_max_proposals``; ADR-0077).
         data_dir: Where the SQLite stores live. Defaults to a per-user directory
             (``~/.ai-assistant``), created if absent; a test passes a temporary
             path.
@@ -118,7 +126,9 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             ``OSError`` so an adapter's ``AssistantError`` boundary surfaces it
             rather than letting it escape as a traceback. Or if a configured model
             spec names a vendor pydantic-ai does not know or whose optional package
-            is not installed (ADR-0062 §2, see :func:`_build_model_provider`). Or if
+            is not installed — the router's specs (ADR-0062 §2, see
+            :func:`_build_model_provider`) and the observer's own route alike
+            (ADR-0077 §3, see :func:`_build_observer_provider`). Or if
             the on-device embedder cannot be constructed because its vendored model
             artifact is missing or incomplete (ADR-0006 §2, ADR-0024, see
             :func:`_build_embedder`).
@@ -130,6 +140,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     # above the data directory. Every step that needs an open store stays below,
     # inside the cleanup block that closes what it opened on a later failure.
     model = _build_model_provider(settings, _model_specs(settings))
+    # The observer's route, built here and separately: it is one route and it never
+    # falls back (ADR-0077 §3). Above the data directory with the rest, so an
+    # observer spec naming an uninstalled vendor fails the build rather than the
+    # first observation.
+    observer_route = _observer_spec(settings)
+    observer_model = _build_observer_provider(settings, observer_route)
     context = AssemblingContextProvider(
         [
             ClockContextSource(
@@ -228,6 +244,26 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 memory=memory,
                 retention=settings.episode_retention,
             ),
+            # The observation stage (ADR-0077 §8), over the *same* memory store and
+            # the *same* writer the learn leg uses, so an observed belief is
+            # retrievable, inspectable and forgettable through the surfaces the user
+            # already has — and so a proposal's citations resolve against the store
+            # its episodes were selected from (ADR-0028 §4's obligation, applied to a
+            # second producer). One ``Settings`` value bounds both the selection and
+            # the producer, which is what keeps the stage's batch inside the bound
+            # the producer refuses beyond (ADR-0077 §1, §9.7).
+            observation=ObservationStage(
+                observer=ModelBackedObserver(
+                    observer_model,
+                    max_batch_size=settings.observation_batch_size,
+                    max_proposals=settings.observation_max_proposals,
+                ),
+                conversations=conversations,
+                memory=memory,
+                writer=writer,
+                batch_size=settings.observation_batch_size,
+                route=observer_route,
+            ),
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),
@@ -318,6 +354,83 @@ def _build_model_provider(settings: Settings, specs: Sequence[str]) -> RoutingPr
     return RoutingProvider(
         [Route(RetryingProvider(PydanticAIProvider(spec), policy=policy)) for spec in specs]
     )
+
+
+def _observer_spec(settings: Settings) -> str:
+    """The one ``"provider:model"`` spec the observer reads episodes through (ADR-0077 §3).
+
+    ``observer_model`` when the operator named one; otherwise ``default_model`` —
+    **the route already configured for conversation**, and deliberately not the
+    whole ``fallback_models`` preference order, because this route never falls back
+    (:func:`_build_observer_provider`).
+
+    That default is what makes the setting cost nothing to have: it names no
+    provider the operator did not already configure, so ADR-0004 §2's property —
+    user data reaches only providers the user explicitly configured — cannot be
+    breached by leaving it unset. What the setting buys is that the choice is
+    *nameable and separable*: an operator who wants the episodic stream read by a
+    smaller, cheaper or locally-hosted model changes one value and does not touch
+    the route their answers come from.
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The spec, never empty: ``default_model`` stands behind it.
+    """
+    return (
+        settings.observer_model if settings.observer_model is not None else settings.default_model
+    )
+
+
+def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
+    """Build the observer's model seam: **retry, and no routing at all** (ADR-0077 §3).
+
+    The deliberate difference from :func:`_build_model_provider`, and the whole of
+    ADR-0077 §3's second part: **an observation's failure is never re-sent to a
+    second provider.** ADR-0013 §4 already rules the mechanism — "a caller who names
+    a model has already chosen" — and here its own Consequences decide the case:
+
+    * fallback's cost is that *more providers may see a given prompt*, which for a
+      turn buys an answer the user is waiting for. An observation buys nothing with
+      it, because observation is **deferrable**: the episodes are durable, nothing
+      is waiting, and the free remedy is to run again.
+    * it is the one payload where the trade inverts. A turn's prompt is one
+      utterance; an observation's prompt is accumulated history, so widening the set
+      of recipients for reliability is exactly what ADR-0004 §7's minimisation rule
+      argues against when the reliability buys nothing.
+
+    So the observer is handed a :class:`RetryingProvider` and not a
+    :class:`RoutingProvider` — there is no second candidate for a routable failure
+    to advance to, rather than a router that happens to hold one route. **Retry is
+    not fallback**: it re-sends to the *same* provider, so it widens no recipient
+    set, and dropping it would make the observer less resilient than every other
+    call for no privacy gain.
+
+    The route **requires its own credential** (ADR-0013 §6), which follows from the
+    same shape: nothing stands behind it, so a provider the deployment cannot
+    authenticate to fails the observation rather than quietly diverting the
+    transcript somewhere it can.
+
+    Args:
+        settings: Loaded application settings — the resilience knobs the retry
+            wrapper is built from, the same ones every other route gets, because how
+            patient this deployment is is not a property of which vendor answered.
+        spec: The observer's ``"provider:model"`` spec (:func:`_observer_spec`).
+
+    Returns:
+        The provider the observer reads episodes through.
+
+    Raises:
+        ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or
+            whose optional package is not installed — checked here for the reason
+            ADR-0062 §2 gives, so an operator learns at startup rather than on the
+            first observation. It is checked even when it repeats ``default_model``:
+            the check is cheap, and a helper that trusted a caller to have checked
+            already would break the day the two stop coinciding.
+    """
+    ensure_vendor_available(spec)
+    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
 
 
 def _build_embedder(settings: Settings) -> Embedder:

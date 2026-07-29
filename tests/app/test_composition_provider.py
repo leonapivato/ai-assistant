@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.app import build_engine
-from ai_assistant.app.composition import _build_model_provider, _model_specs
-from ai_assistant.core.config import Settings
+from ai_assistant.app import build_engine, composition
+from ai_assistant.app.composition import _build_model_provider, _model_specs, _observer_spec
+from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavailableError
 from ai_assistant.core.types import Message, Role
+from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
 from ai_assistant.planning import ModelBackedPlanner
 
@@ -263,3 +264,119 @@ def test_every_spec_is_checked_not_merely_the_first() -> None:
     """
     with pytest.raises(ConfigurationError, match="nosuchvendor"):
         _build_model_provider(Settings(), ("anthropic:claude-x", "nosuchvendor:whatever"))
+
+
+# --- the observer's route: named, separable, and never falling back (ADR-0077 §3) ---
+
+
+def _observer_provider(engine: Engine) -> ModelProvider:
+    """The provider the composed engine's observer will actually read episodes with.
+
+    The same deliberate reach-in ``_planner_model`` uses: the composition root's
+    obligations are about *which object ends up where*, and no public surface
+    exposes that — an ``Observer`` holds its provider and shows nobody.
+    """
+    observer = engine._observation._observer
+    assert isinstance(observer, ModelBackedObserver)
+    return observer._model
+
+
+def test_the_observer_reads_through_the_conversational_route_when_unset() -> None:
+    """Unset means ``default_model``, which widens no recipient set (ADR-0077 §3)."""
+    settings = Settings(default_model="anthropic:claude-x", fallback_models=("openai:gpt-5",))
+    assert _observer_spec(settings) == "anthropic:claude-x"
+
+
+def test_a_named_observer_model_is_the_route_that_reads_episodes() -> None:
+    """Set, it names the route — and the answers' route is untouched."""
+    settings = Settings(default_model="anthropic:claude-x", observer_model="openai:gpt-5")
+    assert _observer_spec(settings) == "openai:gpt-5"
+    assert _model_specs(settings) == ("anthropic:claude-x",)
+
+
+async def test_build_engine_gives_the_observer_a_route_that_cannot_fall_back(
+    tmp_path: Path,
+) -> None:
+    """The observer's seam is a ``RetryingProvider``, never a ``RoutingProvider``.
+
+    **This is the no-fallback property, structurally**: with two specs configured
+    the planner gets a two-route router, and the observer gets a provider that holds
+    no route list at all — so there is no second candidate a routable failure could
+    advance to. An implementation that reused the router wholesale would pass every
+    other test in this file (ADR-0077 §3, ADR-0013 §4).
+
+    Retry is deliberately kept: it re-sends to the *same* provider, so it widens no
+    recipient set, and dropping it would make the observer less resilient than every
+    other call for no privacy gain.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-x",
+        fallback_models=("openai:gpt-5",),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        model = _observer_provider(engine)
+        assert isinstance(model, RetryingProvider)
+        assert not isinstance(model, RoutingProvider)
+        assert isinstance(_planner_model(engine), RoutingProvider)  # the answers still route
+    finally:
+        await engine.aclose()
+
+
+@pytest.mark.parametrize(
+    ("observer_model", "expected"),
+    [(None, "anthropic:claude-x"), ("openai:gpt-5", "openai:gpt-5")],
+)
+async def test_only_the_named_route_is_reached_when_an_observation_fails(
+    tmp_path: Path, observer_model: str | None, expected: str
+) -> None:
+    """Unset and set, the primary failing reaches **no** second provider (ADR-0077 §3).
+
+    ADR-0077 §9's paired case, run through the real composed engine: every
+    ``PydanticAIProvider`` the build constructs is swapped for a counting double, the
+    observer's own call is driven, and the assertion is that exactly one spec was
+    ever called and it was the observer's. A router behind the observer would call
+    the fallback here and be caught.
+    """
+    built: dict[str, _FailingProvider] = {}
+
+    def _double(spec: str) -> _FailingProvider:
+        provider = _FailingProvider(ModelUnavailableError(f"{spec} is down"))
+        built[spec] = provider
+        return provider
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(composition, "PydanticAIProvider", _double)
+    try:
+        settings = Settings(
+            embedder=EmbedderKind.HASHING,
+            default_model="anthropic:claude-x",
+            fallback_models=("openai:gpt-5",),
+            observer_model=observer_model,
+            model_max_attempts=1,  # no backoff to wait on; retry is not what is on test
+        )
+        engine = build_engine(settings, data_dir=tmp_path)
+        try:
+            with pytest.raises(ModelError):
+                await _observer_provider(engine).complete(PROMPT)
+        finally:
+            await engine.aclose()
+    finally:
+        monkeypatch.undo()
+
+    called = {spec: double.calls for spec, double in built.items() if double.calls}
+    assert called == {expected: 1}
+
+
+def test_an_uninstalled_observer_vendor_stops_the_build(tmp_path: Path) -> None:
+    """The observer's route is vendor-checked too, at startup (ADR-0062 §2, ADR-0077 §3).
+
+    Without it a deployment whose answers route perfectly well would fail on the
+    first observation instead — and an observation is exactly the call an operator is
+    least likely to make while they still remember changing the setting.
+    """
+    settings = Settings(default_model="anthropic:claude-x", observer_model="groq:llama-3")
+
+    with pytest.raises(ConfigurationError, match="groq:llama-3"):
+        build_engine(settings, data_dir=tmp_path)
