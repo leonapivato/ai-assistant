@@ -838,36 +838,53 @@ class Observer(Protocol):
    nothing, and `ASSERTED`/`EXTERNAL` proposals are untouched. Three tests, one
    per clause. Without this the ADR's "every proposal cites" holds only for the
    producer that happens to obey it.
-3. **The shared conformance suite**, with a clause per obligation: every returned
-   proposal is in the `DERIVED` band; every proposal cites at least one id drawn
-   from the batch it was given and none from outside it; an `INFERRED` proposal
-   cites at least two distinct episodes; no proposal is `EPISODIC`; confidence is
+3. **The shared conformance suite** — the clauses that bind **every** `Observer`,
+   which are the ones expressible without a model: every returned proposal is in
+   the `DERIVED` band; every proposal cites at least one id drawn from the batch
+   it was given and none from outside it; an `INFERRED` proposal cites at least
+   two **distinct** episode ids; no proposal is `EPISODIC`; confidence is
    strictly below 1.0 and is the same for the same batch twice (the clause that
-   catches a producer passing the model's number through); **the returned
-   proposal count never exceeds the configured maximum, and anything dropped to
-   meet it is counted on the outcome**; **a batch larger than the configured
+   catches a producer passing a model's number through); **the returned proposal
+   count never exceeds the configured maximum**; **a batch larger than that
    maximum is refused with a `ValueError` rather than truncated** (§1 — the case
    an implementation that silently slices passes every other clause on this
-   list); **a batch carrying one episode id twice is refused** (§1), and **an
-   `INFERRED` proposal never draws its two supports from one episode id** (the
-   pair that closes the duplicate-input route to the evidence floor); **an entry
-   dropped for citing a label outside the batch, or for falling below the
-   evidence floor, is counted in `discarded_unusable`** — the clause that stops a
-   semantic drop falling between the two buckets (§4); **an unusable entry
-   sitting past the proposal bound is counted once, as unusable, and the bound is
-   still filled from the usable entries behind it** (§4's order — the case that
-   catches a producer capping before it validates); **an undecodable response is
-   exactly one unusable discard, never a silent empty result** (§4); an empty
-   batch yields no proposals and zero discards; input observation (ADR-0065) and cancellation
-   (ADR-0060). The canonical fake must be able to report non-zero discards of
-   both kinds, or none of the counting clauses is exercisable.
+   list); **a batch carrying one episode id twice is refused** (§1); both discard
+   counts are non-negative; an empty batch yields no proposals and zero discards;
+   input observation (ADR-0065) and cancellation (ADR-0060). The canonical fake
+   must be scriptable to report non-zero discards of both kinds, or no consumer
+   can test its own degradation path — the gap ADR-0022 §Consequences filed
+   against `FakeMemoryStore` as #105, not repeated here.
+
+   **The counting rules of §4 are *not* suite clauses, and putting them there
+   would be the error.** "Proposals plus both counts equal the entries the model
+   emitted", the validate-then-cap order, an out-of-batch citation label, and an
+   undecodable envelope are all statements about a *model response*, which a
+   conforming `Observer` need not have — the canonical fake has none. They are
+   the model-backed implementation's tests, in `tests/learning/`, against a
+   `FakeModelProvider` scripted per case: a valid envelope, one with an entry
+   citing an unknown label, one entry below the evidence floor, an entry of a
+   forbidden kind, more usable entries than the bound, an unusable entry sitting
+   past the bound (asserting it counts once and the bound still fills from behind
+   it), and a response that does not decode at all (asserting exactly one
+   unusable discard, and no second call to the model).
 4. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
 5. **The model-backed implementation** in `learning/`, with ADR-0047 §1's
    injected seams (`ModelProvider`, a guarded `Clock` per ADR-0026 §7, an
    `id_factory`), the prompt of §3, the label→id mapping of §5, and ADR-0071's
-   extraction. The extraction helper stays in the producing subsystem: two
+   extraction. **It owes the envelope schema — the list key, an entry's fields,
+   and how a citation label is spelled — and this ADR deliberately does not
+   ratify one.** The envelope is internal to one implementation and is not on the
+   `Observer` seam: a second observer would legitimately prompt differently, as a
+   second `Planner` would, so pinning a schema here would constrain nothing a
+   conforming implementation must satisfy while ratifying prompt spelling before
+   anyone has run it against a real model (`CONTRIBUTING.md`, "Spike first if you
+   need to"). ADR-0047 §4 is the precedent for *where* it belongs rather than an
+   argument for putting it here: that ADR is an implementation ADR — "it
+   implements the *existing* `Planner` Protocol… no `core/protocols.py` or
+   `core/types.py` change" — and it fixed its own producer's envelope in the lane
+   that built it. This one owes the same, and its tests above are what hold it. The extraction helper stays in the producing subsystem: two
    implementations of one scan is cheaper than promoting a non-contract helper
    into `core` on speculation, and the third model-backed producer is the trigger
    to promote it — the discipline ADR-0028 §7 and ADR-0045 §1 each applied.
@@ -995,6 +1012,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
 - **Retiring a producer-set bounded validity window** (#306). Leg 4. The observer
   sets no bounded window today, and it is deliberately not the lane that decides
   what retiring one means.
+- **The observer's prompt and its output envelope schema** (§9). The
+  implementing lane's, with a real model in hand, as ADR-0047 §4 was the
+  planner's. What *is* decided here is what may be in the payload (§3), what the
+  producer may take from the response (§5), and how what it refuses is counted
+  (§4) — the parts a reader downstream depends on.
 - **Cadence and aggregate volume.** Leg 5: how often observation runs, the
   durable cursor that stops it re-reading what it has seen (§8), and the process
   that runs it without being asked. **The per-call bounds are *not* deferred** —
