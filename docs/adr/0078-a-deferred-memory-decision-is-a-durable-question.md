@@ -672,6 +672,17 @@ conforming to the words. It owes:
   invariant moved one step earlier so that it covers the *apply*, not only the
   bookkeeping.
 
+  **The token is unpredictable, unique, and minted from an injected source.**
+  "Fresh" is not enough and an earlier revision stopped there: a store handing out
+  `"1"`, `"2"`, `"3"` mints a fresh token every time and satisfies the word, while
+  `interrupted` publishes every `APPLYING` deferral's id — so a caller reads an id,
+  guesses the token, and resolves someone else's claim or spends its cap exemption.
+  A capability anyone can guess is a parameter with extra steps. So: unique over
+  the store's lifetime, and drawn from a **cryptographically unpredictable** source
+  — `secrets`, not a counter and not a clock — **injected** like every other
+  non-determinism in this codebase, so a test can fix it and a deployment cannot
+  accidentally weaken it.
+
   **The token comes back here and nowhere else**, which is what lets it stand as
   the capability `resolve` and `successor_to_claim` both key on (above). It is not
   a field of `DeferredProposal`, so no read republishes it and `export` cannot leak
@@ -880,21 +891,27 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Twenty-one clauses the suite must carry are named here**, because they are the ones a
+**22 clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
-1. **`claim` admits exactly one of two concurrent callers.** Two `claim`s on one
+1. **`claim` mints an unpredictable, unique token.** Distinct across repeated
+   claims of different deferrals and across a claim-resolve-reclaim cycle, and —
+   the clause that actually bites — **not derivable from anything a read exposes**:
+   driven by asserting the token is absent from `get`, `pending`, `interrupted` and
+   `export`, and by refusing a store whose tokens are sequential. A suite that only
+   checks "two claims differ" certifies a counter.
+2. **`claim` admits exactly one of two concurrent callers.** Two `claim`s on one
    `PENDING` deferral yield one record and one `None`, driven through the
    store-suspension hook the other contracts already use for their compare-and-set
    clauses rather than by hoping a sequential test observes a race. This is §9's
    whole guarantee; asserting only that a single `claim` succeeds tests nothing
    about it.
-2. **`defer`'s admission is atomic**, driven the same way: two concurrent
+3. **`defer`'s admission is atomic**, driven the same way: two concurrent
    same-key calls leave **one** row, and two concurrent distinct calls at
    capacity-minus-one admit exactly one. A sequential test passes against a
    read-then-insert implementation and certifies nothing.
-3. **`defer` raises `DeferralIdConflictError` on a physical id collision and
+4. **`defer` raises `DeferralIdConflictError` on a physical id collision and
    mutates nothing** — a new
    deferral whose `id` matches a stored row carrying a **different** key, checked
    against a `PENDING` row and against a terminal one — **and does not raise when
@@ -908,11 +925,11 @@ that would otherwise be prose:
    one row and an id collision with another **raises**, changing nothing (§2's
    precedence). Two clauses that each pass in isolation say nothing about which
    wins when both apply, and that is the input on which two backends diverge.
-4. **`DeferralAdmission` reports the right outcome for a same-id, same-key
+5. **`DeferralAdmission` reports the right outcome for a same-id, same-key
    retry** (§2), in `PENDING`, `REJECTED` and `APPLYING`: *suppressed*, never
    *admitted*. This is the case an id comparison got wrong, and a suite that only
    ever retries with a fresh id never reaches it.
-5. **`successor_to_claim` admits past a full queue and only from a live claim, for
+6. **`successor_to_claim` admits past a full queue and only from a live claim, for
    the parent the successor names** (§2). At the cap, a **valid token whose claim
    is on the `APPLYING` deferral the successor's `predecessor_id` names** admits
    and stamps that parent's `successor_id` — **and a successor whose key collides
@@ -927,12 +944,12 @@ that would otherwise be prose:
    Four further refusals, each changing nothing: a token whose parent has since
    been **resolved**; one whose parent **already carries a successor**; a
    `predecessor_id` **with no token**; and a token **with no `predecessor_id`**.
-6. **`resolve` refuses every state but the one it names, and every `claim_id` but
+7. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
    nothing authorised), and an `APPLYING` row addressed with a stale or absent
    `claim_id`.
-7. **`purge` removes a lapsed `PENDING` deferral at `expires_at`** — seeded through
+8. **`purge` removes a lapsed `PENDING` deferral at `expires_at`** — seeded through
    an injected clock — **retains a `REJECTED` one until `answered_at + retention`,
    leaves an `APPLYING` one however old it is, and `delete` removes that same
    `APPLYING` row.** Four cases pulling in different directions, which is exactly
@@ -940,23 +957,23 @@ that would otherwise be prose:
    is §7's no-nagging rule, the third is §9's guard on the record of an answer, and
    the fourth is ADR-0007's unconditional data right. A suite that applies one grace
    to every finished row passes the second and fails the first.
-8. **`purge` reads the stored `retention`, not the live setting** (§2): a deferral
+9. **`purge` reads the stored `retention`, not the live setting** (§2): a deferral
    admitted under one lifetime, resolved, and then judged after the setting has
    **changed** is still purged on the duration it was admitted with. Nothing else
    in the suite varies configuration between admission and resolution, so nothing
    else reaches this — and an implementation that reads the setting passes every
    other purge clause.
-9. **`defer` collides on the key and only on the key.** Two proposals differing
+10. **`defer` collides on the key and only on the key.** Two proposals differing
    *only* in `provenance.source`, and two differing only in `sensitivity`, must both
    admit as separate questions (§7), while an identical repeat collides and does not
    refresh the deadline. A suite that varies only `content` certifies a weaker key
    than the one ratified.
-10. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
+11. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
    `REJECTED` one within retention, and an `APPLYING` one, do** (§2, §7). These are
    the differences between "we asked and you declined", "that question lapsed", and
    "an answer to that may be committing right now", and a suite that tests only the
    live collision leaves all of them unpinned.
-11. **The deadline boundary is driven at the instant itself** (§2), on an injected
+12. **The deadline boundary is driven at the instant itself** (§2), on an injected
     clock: a deferral read at exactly `expires_at` is **not** answerable — absent
     from `pending`, refused by `claim`, outside the cap count, no longer speaking
     for its key — and one read an instant before it is answerable on all four. The
@@ -967,18 +984,18 @@ that would otherwise be prose:
     `expires_at` — each purged at equality and each retained one instant before.
     The two anchors differ, so a suite that drives one and infers the other proves
     nothing about the one that carries §1's exposure cap.
-12. **A deferral admitted under "ask me forever" never lapses and is never purged**
+13. **A deferral admitted under "ask me forever" never lapses and is never purged**
     (§2, §6): with `expires_at=None`, `pending` returns it after any clock advance,
     `claim` takes it, its key still collides, and `purge` leaves it — **and, once
     `REJECTED`, `purge` still leaves it**, because `retention` is `None` too. Five
     assertions, because an implementation that coerces `None` to a sentinel passes
     the first three and fails the rest, and one that handles only the `PENDING`
     half raises or invents behaviour on the terminal one.
-13. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
+14. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
    same bounded default as `pending`, and the two reads are **disjoint**: no row
    appears in both. A store that returned an interrupted question among the
    answerable ones would offer the user a claim that cannot be taken.
-14. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
+15. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
     ends, and refuse a non-`int` or a `bool` before any await** (§2) — a float, a
     string and `True`, each of which either satisfies the range or passes an
     `isinstance(x, int)` check while meaning something no two backends agree on.
@@ -988,25 +1005,25 @@ that would otherwise be prose:
     the **default `limit` is exercised with more than 50 matching rows**, for §8's
     other reason: an implementation defaulting to unbounded satisfies every
     explicit-limit case while breaking the bounded-default guarantee.
-15. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
+16. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
     `record_id`, `ACCEPTED` carrying a `successor_id`, `REDEFERRED` without a
     `successor_id`, `REDEFERRED` carrying a `record_id`, `REDEFERRED` naming a
     successor other than the one the store stamped, and `REJECTED`/`STALE` carrying
     either. Six cases, because the transition tests pass against a store that
     writes whatever payload it is handed, and the two ids are separate parameters
     precisely so each of these is expressible rather than ambiguous.
-16. **`resolve` stamps `answered_at` from the store's own clock** (§2): a
+17. **`resolve` stamps `answered_at` from the store's own clock** (§2): a
     resolution driven with the store's injected clock at a known instant records
     that instant, and the value is not reachable from the call — there is no
     parameter to forge, which is the clause's whole content and the reason it is
     an assertion about the signature as much as the behaviour.
-17. **An unclaimed rejection past the deadline fails** (§2): `resolve(state=REJECTED,
+18. **An unclaimed rejection past the deadline fails** (§2): `resolve(state=REJECTED,
     claim_id=None)` succeeds an instant before `expires_at` and fails at it, and the
     lapsed row's key still does not collide afterwards. Without the second half the
     clause proves the refusal without proving what the refusal is *for* — that a
     question nobody could answer cannot become a retained `REJECTED` key that
     suppresses the next honest proposal.
-18. **`DeferredProposal` refuses an inconsistent record** (§2), in four groups.
+19. **`DeferredProposal` refuses an inconsistent record** (§2), in four groups.
     The sensitivity: a `DataTier.SECRET` proposal is refused and `defer` leaves the
     store unchanged — the clause that keeps ADR-0004 §3's "never in a committed
     file" true of this store no matter who calls it. The ruling: **every non-`ASK_USER` `MemoryDecisionKind`** — `ACCEPT`, `REJECT`,
@@ -1015,12 +1032,17 @@ that would otherwise be prose:
     picking a representative: a rule about which member is admissible is exactly the
     kind that a later member silently joins the wrong side of. The deadlines: a positive `retention` with `expires_at=None`, a `None` `retention`
     with an `expires_at`, a non-positive `retention`, and an `expires_at` that is
-    not exactly `deferred_at + retention`. The lifecycle: a `PENDING` record
-    carrying any stamp, an `APPLYING` one without `claimed_at` or carrying terminal
-    payload, and a terminal one without `answered_at`. Every listed case elsewhere
+    not exactly `deferred_at + retention`. The lifecycle, parametrised over the
+    states rather than sampled: a `PENDING` record carrying any stamp; an
+    `APPLYING` one without `claimed_at` or carrying terminal payload; a terminal one
+    without `answered_at`; and — the clause a single representative case misses —
+    **`ACCEPTED`, `STALE` and `REDEFERRED` each without `claimed_at`**, which §2
+    requires and which a backend can otherwise round-trip, recording an apply as
+    claim-protected when no claim ever covered it. `REJECTED` is driven both ways,
+    since it is the one state legal with and without a claim. Every listed case elsewhere
     constructs an honest record, so nothing else reaches the ones that are
     perfectly well-typed and defeat §1's exposure cap or the claim transition.
-19. **`defer` stamps the admission from the store's own clock and lifetime** (§2):
+20. **`defer` stamps the admission from the store's own clock and lifetime** (§2):
     driven with an injected clock at a known instant, the admitted record's
     `deferred_at` is that instant, its `retention` is the store's configured
     lifetime, and its `expires_at` is their sum — with **no argument able to change
@@ -1029,14 +1051,14 @@ that would otherwise be prose:
     (never answerable, immediately purgeable, its content dropped in silence) or
     dated far enough ahead to hold the queue and its Tier 1 content for decades,
     neither of which a self-consistency validator can see.
-20. **The fingerprint and the key agree across independently built inputs** (§7):
+21. **The fingerprint and the key agree across independently built inputs** (§7):
     a proposal reconstructed field-by-field from a serialised form produces an
     identical fingerprint **and key**, and a confirmation issued against the first
     verifies against the second. This is the parity the confirmed path depends on
     and the one a suite that always hashes the same in-memory object never tests —
     the failure it guards is not a mismatch on some input but a mismatch on
     *every* input, i.e. no asserted conflict ever confirmable.
-21. **The key is a canonical projection** (§7), which needs a case per excluded
+22. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; two whose `evidence` or whose
