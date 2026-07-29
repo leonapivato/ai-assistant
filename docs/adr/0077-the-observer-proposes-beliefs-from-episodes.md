@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This is a contract change.** §9 adds **one** Protocol — `Observer` — to
   `core/protocols.py`; **one** type — `ObservationOutcome` — and **one**
