@@ -457,10 +457,10 @@ user asked for:
   would reintroduce #293.
 
   **The response is one envelope carrying a list of entries** (ADR-0047 §4's
-  shape), and **an envelope that does not decode at all has no entries — it is
-  reported as exactly one `discarded_unusable`**. This is the denominator the
-  invariant below would otherwise lack: without it, `I cannot help` yields zero
-  proposals and zero discards, which is indistinguishable from a model that
+  shape), and **an envelope that does not decode at all counts as exactly one
+  entry, and that entry is `discarded_unusable`** — a synthetic unit, so the
+  invariant below has a denominator here too. Without it, `I cannot help` yields
+  zero proposals and zero discards, which is indistinguishable from a model that
   looked at the batch and honestly proposed nothing — the one confusion this
   counting exists to remove. **The producer does not re-prompt.** ADR-0047 §6
   repairs because a turn has no answer without a plan; an observation has nothing
@@ -482,7 +482,8 @@ user asked for:
   citing a label that is not in the batch, below §5's evidence floor, or naming a
   kind §2 forbids — and `discarded_over_limit` counts only usable proposals
   dropped to meet the bound. **The proposals returned plus the two counts equal
-  the number of entries the model emitted**, and no entry lands in both.
+  the number of entries the model emitted** — an undecodable envelope counting as
+  the one synthetic entry above — and no entry lands in both.
 
   The order is ratified rather than left to the implementer because both halves
   of it are observable. Capping first would put an unusable entry into
@@ -710,7 +711,10 @@ move.** The number a surface shows is a pure function — no clock — of the st
 confidence and how many of the belief's citations still resolve, **bounded above
 by the stored confidence and below by `min(stored confidence, floor)`**, where
 the floor is a documented positive constant. Inside those bounds it equals the
-stored value when every citation resolves and decreases as support is lost. The
+stored value when every citation resolves, and each further citation lost lowers
+it **strictly while it is above the effective floor** and leaves it unchanged
+once it has reached it — which, where the stored value was already at or below
+the floor, is from the first loss onward. The
 exact function is the implementing lane's.
 
 **The lower bound is `min(stored, floor)` rather than the floor itself, and the
