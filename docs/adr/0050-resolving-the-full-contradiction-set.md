@@ -7,13 +7,16 @@
   surplus is a filed residual*, the paragraph beginning *"The surplus does not
   self-heal by re-proposal"*, and the Consequences restatement *"a surplus beyond
   the cap stays live as a bounded, filed residual"* are replaced by
-  [ADR-0079](0079-a-correction-retires-every-belief-it-contradicts.md) §1, which
+  [ADR-0079](0079-a-correction-resolves-every-conflict-it-is-shown.md) §1, which
   re-founds `conflict_limit` as a **ceiling rather than a truncation**: at or
-  below it the detected conflict set is complete, above it the ingest refuses and
-  writes nothing. So a correction no longer "retires exactly `conflict_limit` of
-  them and the surplus stays live" — there is no surplus, because the state that
-  produced one is refused (issue #313). ADR-0079 §5 names the exact scope
-  replaced and applies ADR-0070 §1's test to it.
+  below it the whole detected set is handed to the policy and resolved, above it
+  the ingest refuses and writes nothing. So a correction no longer "retires
+  exactly `conflict_limit` of them and the surplus stays live" — the writer no
+  longer discards conflicts it is holding, and the state that produced a surplus
+  is refused (issue #313). §1's honest form of the claim — a `SUPERSEDE` retires
+  "every conflict it is *shown*" — is kept verbatim; ADR-0079 §1 widens what is
+  shown and files the remaining retrieval-side bound as issue #457. ADR-0079 §5
+  names the exact scope replaced and applies ADR-0070 §1's test to it.
 
   **Everything else here stands and is strengthened, not replaced**: §1's ruling
   that a `SUPERSEDE` retires the full supersedable conflict set rather than only
@@ -29,8 +32,15 @@
 
   ADR-0079 lands **in the same change as this note**, so this Status line never
   names an ADR that does not exist — the hazard ADR-0070 §1 guards against — and
-  if that change does not land, neither does this. Appended note per ADR-0070 §1;
-  no text below it is rewritten.
+  if that change does not land, neither does this. While ADR-0079 is still
+  `Proposed`, this line names a supersession that is drafted rather than ratified,
+  which is the form ADR-0075 established and ADR-0076's header records as
+  precedented on `main` (ADR-0005 carries `Partially superseded by ADR-0075` and
+  did so while ADR-0075 was `Proposed`); the `Proposed` → `Accepted` flip is the
+  ratifying edit at merge (ADR-0015 §5), and ADR-0070 §1 keeps the repair path
+  open besides — a marked supersession that never landed is restored by correcting
+  the Status line, which changes no decision. Appended note per ADR-0070 §1; no
+  text below it is rewritten.
 - **Not a contract change.** This is a policy-lane decision. It changes
   `DefaultMemoryPolicy` (`memory/policy.py`) and the `MemoryIngestor` supersession
   applier (`memory/ingest.py`) only; it adds no member, no field, and no method to
