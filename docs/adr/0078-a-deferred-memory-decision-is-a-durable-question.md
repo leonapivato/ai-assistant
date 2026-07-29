@@ -238,9 +238,23 @@ question about what is safe to emit).
   whose non-optional `reason` is what the surface renders as "why you are being
   asked"); `deferred_at`; **`retention`** — the lifetime in force *at admission*,
   a duration or `None`; and `expires_at`, the answerability deadline, which is
-  `deferred_at + retention` (or `None`). Both are **stamped onto the record at
-  deferral**, following ADR-0059 §1's ruling that a confirmation's lifetime is fixed
-  on the record rather than recomputed from a live setting.
+  `deferred_at + retention` (or `None`), following ADR-0059 §1's ruling that a
+  confirmation's lifetime is fixed on the record rather than recomputed from a live
+  setting.
+
+  **`DeferredProposal` is a record the store produces, never one a caller hands
+  in.** Every instant on it — `deferred_at`, `expires_at`, `claimed_at`,
+  `answered_at` — is stamped by the store from its own injected clock, and
+  `retention` from its own configured lifetime (§2's `defer`, `claim`, `resolve`).
+  That is one rule, and it exists because **each of those instants decides
+  something the caller would otherwise be deciding for itself**: `answered_at` is a
+  retention anchor, so a caller supplying it chooses how long its own rejection
+  suppresses the next proposal; `deferred_at` and `expires_at` are the lifetime, so
+  a caller supplying them admits a question already lapsed (never answerable,
+  immediately purgeable, its content silently dropped) or one that holds the queue
+  and its Tier 1 content for decades. Neither is caught by a validator that only
+  checks the fields agree with each other — 1970 and 2100 are both perfectly
+  self-consistent.
 
   **The duration is stored as well as the instant, and that is not redundancy.**
   `expires_at` answers "is this still answerable?" and is fixed at admission.
@@ -268,12 +282,11 @@ question about what is safe to emit).
   `outcome_record_id` (the id the accepted apply left live, or `None`) and
   `successor_id` (the question a `REDEFERRED` answer raised, or `None`).
 
-  **A model validator enforces the whole record, because "is" is not a
-  constraint.** Saying `expires_at` *is* `deferred_at + retention`, or that
-  `claimed_at` appears *once claimed*, describes an honest caller; `defer` takes a
-  caller-supplied `core` model, so the contract has to refuse a dishonest one. In
-  the shape `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`)
-  already uses, over two groups of fields:
+  **A model validator still enforces the whole record.** The store produces it, but
+  the type crosses the Protocol boundary on every read, so its invariants belong on
+  the model rather than in one implementation's care — the same reason
+  `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) is a
+  validator and not a comment. Over two groups of fields:
 
   - **The deadlines.** `retention` is positive or `None`; `retention` and
     `expires_at` are `None` **together or not at all**; and when both are set,
@@ -289,17 +302,17 @@ question about what is safe to emit).
     (except `REJECTED` reached unclaimed, §2's one unclaimed transition), with the
     per-state id rules `resolve` enforces.
 
-  **And `defer` admits only a *fresh* record**: `state is PENDING`, no stamps of any
-  kind, raising `DeferralStoreError` and changing nothing otherwise. Validity is not
-  sufficient here — a well-formed `APPLYING` row is a perfectly valid
-  `DeferredProposal` and a catastrophic *admission*. Injected directly it would
-  bypass the `claim` transition that mints the only token able to resolve it, sit
-  outside the answerable cap, be unclaimable and unresolvable forever, never be
-  purged (§2's `APPLYING` exclusion), and block its `question_key` until someone
-  deletes it. Repeat with distinct keys and the queue fills with permanently
-  interrupted questions nobody created and nobody can answer. Every state after
-  `PENDING` is reached by a transition this Protocol owns; none is reached by being
-  handed in.
+  **An earlier revision instead had `defer` take a whole `DeferredProposal` and
+  refuse anything but a fresh one.** That check is gone because what it guarded is
+  now unreachable: a caller with no way to supply a `state` cannot hand in a
+  well-formed `APPLYING` row — a perfectly valid record and a catastrophic
+  admission, since injected directly it bypasses the `claim` transition that mints
+  the only token able to resolve it, sits outside the answerable cap, is unclaimable
+  and unresolvable forever, is never purged (§2's `APPLYING` exclusion), and blocks
+  its `question_key` until someone deletes it. **Every state after `PENDING` is
+  reached by a transition this Protocol owns; none is reached by being handed in** —
+  and narrowing the input is a better way to say that than validating the wide one,
+  because it removes the possibility rather than the acceptance of it.
 
   **The deadline is half-open, and the boundary instant is fixed here rather than
   left to each backend.** A question is answerable while `now < expires_at`; **at**
@@ -374,8 +387,25 @@ cannot disagree.
 **`core/protocols.py` gains one Protocol, `DeferralStore`**, `@runtime_checkable`
 like every other, owing:
 
-- **`defer(deferred, *, successor_to_claim=None) -> DeferralAdmission`** — admit a
-  question, returning **what happened and the deferral that now holds it**.
+- **`defer(*, deferral_id, proposal, decision, predecessor_id=None,
+  successor_to_claim=None) -> DeferralAdmission`** — admit a question, returning
+  **what happened and the deferral that now holds it**.
+
+  **The arguments are exactly what the store cannot know and nothing else.** The
+  caller brings the question — its id (which it mints, below), the proposal, the
+  ruling, and the parent link when it has one — and the store brings everything
+  that is its own: `deferred_at` from its injected clock, `retention` from the
+  lifetime it was constructed with, `expires_at` derived from the two, and
+  `state=PENDING`. It is not handed a `DeferredProposal`; it **builds** one.
+
+  **The lifetime and the cap are constructor parameters, validated at
+  construction** — the `_check_tuning` arrangement ADR-0022 §4a ratified, and for
+  its reason: a bad value here disables a stage while the system reports health, so
+  it is refused when the store is built rather than per call. It also means
+  `deferral_ttl` is read **once per store**, never per operation, which is the other
+  half of §2's rule that live configuration never reaches back into a question
+  already asked.
+
   **Key-idempotent**: if a deferral **the key
   still speaks for** carries the same `question_key`, the admission is *suppressed*
   and carries that deferral, and nothing is inserted — the reconciliation ADR-0052
@@ -837,12 +867,15 @@ that would otherwise be prose:
     payload, and a terminal one without `answered_at`. Every listed case elsewhere
     constructs an honest record, so nothing else reaches the ones that are
     perfectly well-typed and defeat §1's exposure cap or the claim transition.
-19. **`defer` refuses a record that is not fresh** (§2) and changes nothing: an
-    `APPLYING` record, each terminal state, and a `PENDING` one carrying a stamp.
-    The `APPLYING` case is the one that matters and the one validity alone does not
-    catch — a valid record, a catastrophic admission: unclaimable, unresolvable,
-    never purged, blocking its key, and repeatable until the queue is full of
-    questions nobody created.
+19. **`defer` stamps the admission from the store's own clock and lifetime** (§2):
+    driven with an injected clock at a known instant, the admitted record's
+    `deferred_at` is that instant, its `retention` is the store's configured
+    lifetime, and its `expires_at` is their sum — with **no argument able to change
+    any of the three**. Like clause 16, this is an assertion about the signature as
+    much as the behaviour: it is what stops a question being admitted already lapsed
+    (never answerable, immediately purgeable, its content dropped in silence) or
+    dated far enough ahead to hold the queue and its Tier 1 content for decades,
+    neither of which a self-consistency validator can see.
 20. **The fingerprint and the key agree across independently built inputs** (§7):
     a proposal reconstructed field-by-field from a serialised form produces an
     identical fingerprint **and key**, and a confirmation issued against the first
@@ -1702,9 +1735,10 @@ On ratification:
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
 5. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7), the cap
    `gt=0` and both refused at load, with load-time tests for zero and negative
-   values as `confirmation_ttl` already has. **`deferral_ttl` is read exactly once
-   per question, at admission**, and stamped onto the record as `retention` and
-   `expires_at` (§2); no later operation consults the setting.
+   values as `confirmation_ttl` already has. Both reach the **store's constructor**,
+   validated there in the `_check_tuning` shape (§2), so they are read once per
+   store and stamped onto each record as `retention`/`expires_at`; no operation
+   consults them again.
 6. The façade methods, the `Question` DTO and the CLI commands (§8), including the
    separate interrupted enumeration, the `APPLYING` rendering and the disposal
    verb (§9), the re-deferred `AnswerOutcome` that hands the user the successor
