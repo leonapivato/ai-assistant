@@ -1,0 +1,944 @@
+# 77. The observer proposes beliefs from episodes, through the gate, on a named route
+
+- Status: Proposed
+- Date: 2026-07-28
+- **This is a contract change.** §9 adds **one** Protocol — `Observer` — to
+  `core/protocols.py`, and **one** source-conditional validator to `Provenance`
+  in `core/types.py` (§7). Golden rule 5 therefore applies: this ADR ships as
+  **its own docs-only PR**, is reviewed while still `Proposed` so a finding can
+  still change the decision, and is flipped to `Accepted` on merge
+  (`CONTRIBUTING.md`, "Contract ADRs land before their implementation";
+  ADR-0015 §5). **No code changes with it.** Because the Protocol is *new*, the
+  implementing lane owes the full triad — Protocol, shared conformance suite,
+  canonical fake — in one change (`CONTRIBUTING.md`, "Adding a Protocol"), and
+  stage 1 is this ADR merging.
+- **Changes no existing Protocol's *shape*, and widens one's documented
+  semantics.** `MemoryWriter.ingest` gains one refusal clause (§5): a `DERIVED`
+  proposal whose evidence names no record the store holds is refused rather than
+  written. No signature changes; the docstring and the conformance suite do,
+  which is the review concern `CONTRIBUTING.md` names when a Protocol's meaning
+  changes without its shape. `MemoryStore`, `MemoryPolicy`, `FeedbackProcessor`
+  and `ConversationStore` are untouched — the rule §5 puts on the *shipped*
+  `DefaultMemoryPolicy` is a rule in a concrete policy, not contract surface.
+- **Amends and supersedes nothing.** Applying ADR-0070 §1's test to each ADR this
+  decision touches:
+  - **ADR-0072 §3** declined a `Provenance` validator explicitly and **filed the
+    question for this lane** ("Whether `Provenance` grows a
+    `DERIVED`-implies-sub-1.0 validator is filed (§10) for the observer's lane,
+    which will be the first code that could breach it"). §7 answers a filed
+    question; a reader of ADR-0072 was told the question was open and whose it
+    was, and acts identically before and after.
+  - **ADR-0072 §10** files "what happens to a derived belief whose evidence is
+    later deleted or expires", and §3 names the three candidates — "retire it,
+    keep it with its explanation degraded, or cascade the delete". §6 chooses the
+    middle one. Choosing among options a prior ADR listed as open is not a change
+    to what it decided.
+  - **ADR-0072 §6** ("a derived belief that reaches a prompt is rendered as a
+    belief, carrying its band and its confidence") is **discharged, not
+    weakened**: §6 below decides *which* number that is once support has been
+    destroyed — a case ADR-0072 could not reach, because it predates any producer
+    of derived beliefs and any evidence that could be deleted. Nothing licenses
+    omitting the confidence, and ADR-0072 §5's confidence-neutral `search` is
+    untouched: the adjustment is presentational and never reorders retrieval.
+  - **ADR-0073 §4** put a **gate** on this lane — "resolving citations into
+    readable evidence is due with the first producer of derived beliefs, as a
+    precondition of that producer shipping". §6 discharges it and answers "the
+    open half of #431" that §4 handed here.
+  - **ADR-0074 §4** constrained the `MemoryPolicy` rule this lane owes ("an
+    `EPISODIC` record reaching the gate must not be refused for citing nothing").
+    §5 writes the rule inside that constraint.
+  - **ADR-0075 §2** names leg 3's observer as **not** covered by the capture
+    exemption. §4 keeps it inside the gate, which is what that clause requires.
+  No ADR's Status line is edited.
+- **Refs:** the roadmap's leg 3 (the mandate: "a model-backed producer that reads
+  episodes and proposes `OBSERVED`/`INFERRED` memories through the existing
+  `MemoryPolicy` gate", and the two decisions it demands — "the scope of
+  observation and what justifies retention" and "**which model reads the raw
+  episodes**"), its leg 4 ("These land before the observer runs at volume"), its
+  leg 5 (the hub's internal scheduler) and its stance 1 (propose/dispose is the
+  existing chassis, given its most important producer); VISION §Principle 1
+  ("every inference should have evidence, confidence, scope, and a way to be
+  corrected"; "built chiefly by **observation**, not by interrogation"),
+  §Principle 2 (selective memory; "observing broadly and retaining broadly are
+  different things"; "watching is trustworthy only on those terms"); ADR-0004 §1
+  (conversation history is Tier 1), §2 as amended (user data may be sent only to
+  model providers the user has explicitly configured), §5 (logs are Tier 2), §6
+  (data rights), §7 (data minimisation — "send the minimum necessary context to
+  the model provider"); ADR-0005 §1 (the four kinds; `content` as the canonical
+  rendering), §2 (`Provenance`; `evidence` as "references (e.g. episode ids)"),
+  §3 (propose/dispose and the policy outcomes); ADR-0006 §2 (on-device embedding
+  is the default, "so that memory content never leaves the device just to be
+  indexed"; cloud is opt-in), §3 (embedders live in `models/`); ADR-0024 §1 (no
+  runtime code fetches a model artifact), §6 (one vendored model, no
+  arbitrary-model path); ADR-0061 §1 (the two vendor extras the installed
+  artifact ships); ADR-0013 §4 (an explicit `model=` override disables routing),
+  §6 (every route must be a provider the user configured, and the composition
+  root owes it); ADR-0062 §4 (a per-route model override is deliberately not
+  configurable); ADR-0007 §2 (retention enforced at read time); ADR-0009 §3
+  (learning produces proposals; the pipeline closes the loop); ADR-0022 §3 (abort
+  versus degrade, and why `memory_degraded` is on the outcome), §4 as amended by
+  ADR-0028 §4 ("no proposals is a normal outcome"); ADR-0028 §1 (the writer's one
+  method), §4 (`orchestration` injects and delegates; the same-store
+  composition-root obligation), §5 (`MemoryStoreError` crosses the seam), §7
+  (batch and transaction deferred, #104); ADR-0038 §1a (an assertion is its own
+  warrant), §2 (the error asymmetry and re-derivability), §3 (derived never
+  retires asserted); ADR-0040 §1 (`REINFORCE`/`SUPERSEDE` name the *relation*);
+  ADR-0045 §4 (supersession closes a window), §5 (no fold onto a `USER_ASSERTED`
+  target), §6 (read-time liveness); ADR-0047 §1 (injected seams), §2 (the ids are
+  the planner's, never the model's), §6 (malformed output); ADR-0071 (the
+  `raw_decode` extraction that replaced the brace slice, #293); ADR-0026 (the
+  injected clock); ADR-0042 §1 (the façade is concrete, not a contract), §3 (one
+  call in, one result out); ADR-0068 (the frozen record graph); ADR-0072 §1–§7
+  and §10; ADR-0073 §1 (`None` means every value), §2 (bounded default, named
+  order, out-of-range is a `ValueError`), §4 (the floor and the gate), §5
+  (`delete` is unconditional), §7 (the façade is shape, not spelling); ADR-0074
+  §3 (capture), §4 (what capture stamps and the two derived-band obligations), §5
+  (why `get_many` was declined), §6 (episodes are excluded from retrieval and
+  from the default listing), §7 (the episode horizon), §9 (the stores and the
+  coordinator), §11 (its deferrals); ADR-0075 §1 (the scope replaced), §2 (the
+  exemption is one producer wide and **does not reach the observer**), §5 (the
+  sensitivity question handed here); #431 (the owner direction §6 ratifies), #432
+  (§7 half-closes), #441 (the constraints §1 and §3 carry), #423 (ADR-0078, in
+  flight), #313/#314 (ADR-0079, in flight), #306, #104, #248, #425.
+
+## Context
+
+Legs 1 and 2 built the two halves this leg joins. ADR-0072 and ADR-0073 gave the
+user a way to read and kill what the assistant believes, over a store whose
+`DERIVED` band has never held a record. ADR-0074 and ADR-0075 gave that band its
+substrate: every turn is durably recorded as an `EpisodicMemory`, written
+directly, retained under a finite horizon, deletable by conversation. Both
+surfaces are correct and one of them is empty. The roadmap's premise is that
+closing that gap is worth more than any breadth it defers, because "a system that
+learns only by dictation is the 'repeatedly explain preferences' failure
+VISION.md opens by condemning".
+
+The dated position, at the time of writing:
+
+**Everything the producer needs exists except the producer.** `MemoryPolicy` and
+`MemoryWriter` are shipped and wired; `Engine.learn` already runs proposals
+through the writer; `list_beliefs` enumerates a band; `assistant beliefs` and
+`assistant forget` render and destroy; episodes are captured on every turn and
+excluded from retrieval and from the default listing (ADR-0074 §6). No code in
+the tree constructs a proposal whose source is `OBSERVED` or `INFERRED`.
+
+**Four forces make this a decision rather than an implementation detail.**
+
+1. **The episodic stream is the most sensitive data the system holds**, and a
+   model has to read it. The roadmap says so and demands the choice be explicit:
+   "the on-device embedder (ADR-0006/0024) is the precedent, and the router seam
+   (ADR-0013) makes a local/small-model route a named option rather than an
+   accident of configuration". Left to the implementer, the observer would simply
+   reach for the same `default_model` the planner uses, and the most consequential
+   egress decision in the product would be made by whichever provider happened to
+   be configured (§3).
+2. **The gate is the mechanism that makes watching trustworthy, and it is not
+   optional here.** VISION §Principle 2 is explicit that "a system that observes
+   with no gate in front of memory and no inspection surface behind it is
+   surveillance, not personalization", and ADR-0075 §2 names the observer as the
+   paradigm case the gate exists for — "a model's inference about a person, which
+   must be rejectable". What each of the six rulings *means* for a producer that
+   emits many proposals per batch has never been worked through (§4).
+3. **A derived belief outlives its evidence, by design.** Episodes carry a finite
+   horizon (ADR-0074 §7) and the user may destroy a conversation at any time
+   (ADR-0074 §8), while the belief distilled from it is retained indefinitely.
+   ADR-0072 §3 named this and filed it; ADR-0073 §4 gated this lane on it. The
+   owner ruled the direction on #431 (2026-07-28): **deleting a conversation does
+   not delete the beliefs derived from it**, a destroyed citation becomes an
+   explicit tombstone, and lost support may lower the belief's confidence. The
+   mechanics are unratified (§6).
+4. **Volume is the risk, and the roadmap sequences leg 4 against it.** Leg 4 says
+   the epistemic-soundness fixes — `ASK_USER` with no resolution path (#423), the
+   contradiction surplus (#313/#314), bounded-window retirement (#306) — "land
+   before the observer runs at volume". So this ADR has to decide a trigger that
+   *cannot* produce volume yet, without inventing machinery leg 5 will own (§8).
+
+## Decision
+
+### 1. The observer reads episodes it is handed, and can read nothing else
+
+The observer is a **model-backed producer in `learning`** that takes a bounded
+batch of `EpisodicMemory` records and returns `MemoryUpdateProposal`s. That is
+the whole of its input.
+
+**It holds no store handle, and that is the scope limit rather than a rule about
+it.** `Observer.observe` receives the episodes; it cannot fetch more, cannot
+widen its own batch, cannot read a belief, a plan, an audit record or a
+permission decision, and cannot reach `MemoryStore` at all. The alternative — a
+producer holding a store and choosing what to read — would make "the scope of
+observation" a property of the producer's code rather than of a ratified seam,
+and every later reviewer would have to re-derive it by reading an implementation.
+Here it is a type: episodes in, proposals out.
+
+**Selection therefore belongs to `orchestration`**, the one place that
+legitimately holds both stores by injection (ADR-0074 §9, the same ruling that
+put the two-store sweeps there). It selects the batch; the producer judges it.
+
+**The store's read-time axes do the filtering for free.** The stage can only
+select episodes the store still returns, and `get`/`search`/`list_beliefs` never
+return an expired or non-live record (ADR-0007 §2, ADR-0045 §6). A deleted
+conversation's episodes are destroyed (ADR-0074 §8). So an episode the user has
+put beyond reach is beyond the observer's reach too, with no separate filter to
+keep in step — which is the failure a second filter would eventually have.
+
+**A batch is a set of episodes, not a conversation.** Nothing in the Protocol,
+the producer, or the prompt requires the batch's members to share a conversation,
+and the producer never asks which conversation an episode came from. This is
+#441's leg-2 constraint carried forward at no cost: ADR-0074 §3 made an episode
+belonging to no conversation the *default* shape, and a producer that keyed on
+conversation membership would have re-imposed "episode = turn" one layer up,
+where leg 6's ingested sources and #441's captured moments would have to be
+retrofitted around it.
+
+**The batch is bounded**, by a configured maximum, for the reason every read in
+this system is bounded (ADR-0021 §4, ADR-0073 §2) and one more: the batch is a
+prompt. An unbounded batch is a prompt nobody sized and an egress nobody
+measured.
+
+### 2. What it may propose: three kinds, two epistemic steps, and a utility bar
+
+**Kinds.** The observer proposes `SemanticMemory`, `PreferenceMemory` and
+`ProceduralMemory` — never `EpisodicMemory`. An episode is a record that
+something happened, and the only thing entitled to write one is the deterministic
+capture path that was present when it happened (ADR-0074 §3, ADR-0075 §2). A
+model-authored episode would be a fabricated event wearing the type reserved for
+witnessed ones, and it would be *cited* by later beliefs as though it were
+evidence. The observer distils evidence; it does not manufacture it.
+
+**Epistemic step.** Every proposal is `OBSERVED` or `INFERRED`, and the producer
+chooses between them on ADR-0072 §3's test — whether the cited evidence *entails*
+the belief or merely *supports* it. Both land in the `DERIVED` band (ADR-0072
+§2), so nothing about the supersession law depends on the choice; what depends on
+it is the confidence the producer assigns (§5) and the floor on how much evidence
+a proposal needs (§5). ADR-0072 §3's own reason is why the distinction is worth
+carrying: "a wrong `OBSERVED` record is a recording bug… a wrong `INFERRED`
+record is a reasoning error over evidence that is itself correct", and a producer
+that cannot tell them apart "is not entitled to either label".
+
+**The bar for proposing at all is durable usefulness, not interestingness.** A
+proposal is warranted only when the belief is **about the user** and would change
+a later answer — a preference, a durable fact about them or their world, a
+workflow they follow. Summarising the exchange is the failure mode: it turns the
+belief store into a second transcript, at indefinite retention, behind the
+surface that answers "what do you believe about me". This is VISION §Principle
+2's "remember selectively… avoid preserving sensitive or incidental details
+without justification" stated as a producer-side rule, and it is the half of that
+principle a gate cannot enforce, because a policy judging one proposal at a time
+cannot see that all twenty of them are a retelling.
+
+**Output is bounded per batch**, by a configured maximum, and excess is
+**discarded rather than queued**. A model asked to observe will happily emit
+twenty beliefs about one conversation; nothing downstream would reject them
+individually, and leg 4's soundness work has not landed (§8). Discarding rather
+than queueing keeps the bound honest: a queue is durable state this ADR does not
+ratify, and the episodes remain in the store, so a later run over the same batch
+can propose what this one dropped.
+
+**Sensitivity: the tiering question ADR-0075 §5 handed here is answered by
+declining a category filter.** Every belief the observer proposes is Tier 1
+personal data, so `MemoryUpdateProposal.sensitivity` is `PERSONAL` on every
+proposal, and there is deliberately no observer-side taxonomy of forbidden
+subjects. Two reasons, and the second is the one that decides:
+
+- **The vocabulary does not exist.** ADR-0004 §1's three tiers are the whole of
+  it, and "health", "sexuality", "finances" are not tiers. Inventing a
+  sensitive-category enum here would ratify a taxonomy on the strength of one
+  producer's need, in the ADR that has the least evidence about how it would be
+  used.
+- **A subject filter would be the wrong instrument even if it existed.** An
+  assistant that refuses to model the user in the areas they talk about most is
+  not more trustworthy; it is less useful and equally observant. The mechanism
+  VISION §Principle 2 actually names is the one this ADR uses: propose, dispose,
+  render with provenance, delete on demand. `sensitivity` stays on the proposal
+  because a *deployment* may give its policy a stricter rule (the shipped policy
+  already defers every `SECRET`-tier proposal to the user), and that is where a
+  bar belongs — at the gate, deterministic and reviewable, not inside the model
+  that is doing the observing.
+
+### 3. Which model reads the episodes: a named route, no fallback, minimal payload
+
+This is the decision the roadmap demands be explicit, and it has four parts.
+
+**The observer's model route is its own named configuration.** `Settings` gains
+`observer_model: _ModelSpec | None`, beside `default_model` and
+`fallback_models`. Unset — the default — means the observer reads through the
+route the operator has *already* configured for conversation. Set, it names the
+route that reads episodes, and the composition root builds it like any other.
+
+Unset-means-the-conversational-route is chosen over off-by-default and over a
+distinct required value for one reason: **it widens nothing.** ADR-0004 §2's
+property, as amended, is that user data reaches only providers the user
+explicitly configured, and a default that names no new provider cannot breach it.
+An off-by-default observer would make leg 3's exit test unreachable without
+configuration, and a *required* second spec would make the commonest correct
+setup — one provider, used for everything — an error.
+
+What the setting buys is that **the choice is nameable, visible and separable**.
+An operator who wants the episodic stream read by a smaller, cheaper or
+locally-hosted model changes one setting and does not touch the route their
+answers come from. Without it, the two are the same decision by accident of
+configuration, which is precisely the accident the roadmap asks this ADR to
+prevent.
+
+**The observer's call never falls back.** Whatever route it names, a failure is
+not re-sent to a second provider. ADR-0013 §4 already rules the mechanism — "a
+caller who names a model has already chosen" — and here the reasons are its own
+Consequences read against this payload:
+
+- **Fallback's cost is that "more providers may see a given prompt"** (ADR-0013
+  §Consequences). For a turn that buys an answer the user is waiting for. For an
+  observation it buys nothing, because **observation is deferrable**: the
+  episodes are durable, nothing is waiting, and the free remedy is to run again.
+- **It is the one payload where the trade inverts.** A turn's prompt is one
+  utterance; an observation's prompt is accumulated history. Widening the set of
+  recipients for reliability is exactly what ADR-0004 §7's minimisation rule
+  argues against when the reliability buys nothing.
+
+So a routable failure that would advance a turn to the next candidate simply ends
+the observation, and the failure is reported (§4).
+
+**The payload is the batch and nothing else.** The prompt carries the episodes'
+canonical `content` (ADR-0005 §1) and what the model needs to cite them (§5). It
+does **not** carry the user's existing beliefs, the profile, the context facet,
+or a plan. Sending beliefs would be the obvious way to stop the observer
+re-proposing what is already known — and it is refused, because de-duplication is
+the gate's job and the gate is deterministic and local: a repeat is folded into a
+`REINFORCE` (§4). Paying for that with a second class of Tier 1 data in the
+prompt would be minimisation (ADR-0004 §7) traded away for something already
+solved. Nothing about an episode or a proposal reaches a log (ADR-0004 §5).
+
+**On-device is the direction, and it is stated as such rather than pretended.**
+ADR-0006 §2 made on-device embedding the default "so that memory content never
+leaves the device just to be indexed", and ADR-0024 turned that model into a
+build input. The same argument applies with more force here — reading the
+transcript is a stronger act than indexing it — and it **cannot be honoured
+today**: ADR-0024 §6 vendors exactly one model and it is an embedder, ADR-0061 §1
+ships two vendor extras and both are hosted, and `Settings` has no endpoint
+configuration with which to name a locally-hosted OpenAI-compatible route. So
+this ADR ratifies the shape rather than a claim: the route is a first-class
+named setting, so the day a local generative route is realizable it becomes a
+configuration change and this decision's default is revisited (§11,
+Consequences). #441's leg-3 constraint is carried here: the same setting is
+where local transcription and distillation would point, which is another reason
+it is a route rather than a boolean.
+
+**The observe outcome names the route that read the episodes.** ADR-0013 §6
+records as an open gap that "which provider answered is not currently reported,
+and should be once there is an interface to report it". This operation is that
+interface for the one call where it matters most, and the report is to the user
+on the result — never to a log, which ADR-0013 §2 keeps free of model ids.
+
+### 4. The write path: proposals through the ratified gate, ruling by ruling
+
+**The observer writes nothing.** It returns proposals; the `orchestration` stage
+ingests each through `MemoryWriter.ingest`, in order and independently, exactly
+as `learn` already does (ADR-0009 §3, ADR-0028 §4). The producer holds no writer
+and no policy, so it cannot rule on its own output — which is the entire content
+of "the model proposes; a deterministic policy disposes" for the producer the
+principle was written for (ADR-0005 §3, ADR-0075 §2).
+
+There is no transaction, and this ADR adds none: ADR-0028 §7 deferred batch and
+transaction (#104), and a partially applied batch of independent beliefs is not
+the failure a transaction exists to prevent. The producer leaves
+`MemoryUpdateProposal.conflicts` empty: conflicts are resolved by the writer, in
+the same call that rules on them, and are "not supplied by the caller" (ADR-0028
+§3). A producer that filled them would be re-deriving `memory`'s conflict
+semantics — the duplication ADR-0028 exists to remove.
+
+What each ruling means for this producer:
+
+| Ruling | What happens | Why it is right here |
+| --- | --- | --- |
+| `ACCEPT` | The belief is stored, citing its episodes. | The intended path. |
+| `REINFORCE` | Folded into the conflicting record at the target's id. | **This is how accumulation works**, not a duplicate-write bug: observing the same thing again strengthens the belief instead of creating a second one (ADR-0040 §1). |
+| `SUPERSEDE` | The conflicting *derived* record is retired, window closed. | A later observation may overturn an earlier inference. It can never reach an assertion: no fold lands on a `USER_ASSERTED` target (ADR-0045 §5), and derived never retires asserted (ADR-0038 §3). |
+| `STORE_TEMPORARY` | Stored with the policy's TTL. | A thin belief gets a window instead of permanence. Intended, and now reachable: the producer's confidence ladder (§5) can fall below the policy's `min_confidence`. |
+| `REJECT` | Nothing is stored, and nothing is retried. | The gate refusing a proposal is the gate working. Re-proposing it would be arguing with a deterministic policy. |
+| `ASK_USER` | Nothing is stored; the proposal is **reported**, not dropped. | Below. |
+
+**Two of those six are unreachable for this producer under the shipped policy,
+and that is stated rather than left for an implementer to notice.**
+`DefaultMemoryPolicy` rules `SUPERSEDE` only for a *user-asserted* proposal; a
+non-asserted proposal with conflicts rules `REINFORCE`, and one whose conflicts
+include an assertion rules `ASK_USER`. `REJECT` likewise has no rule that reaches
+it there. The table is the contract's vocabulary, not a prediction of what today's
+policy emits: the stage handles all six because the policy is injected and a
+deployment may run a stricter one, and because ADR-0079 and leg 4 are due to
+change what a conflict-heavy ruling does. What the observer must never do is
+depend on a ruling being unreachable.
+
+**`ASK_USER` is the observer's most likely deferral, and its resolution is
+ADR-0078's problem.** The shipped `DefaultMemoryPolicy` defers whenever a
+non-asserted proposal conflicts with a user-asserted record — "an inference never
+silently overrides a user-asserted memory". That is ADR-0038's asymmetry working
+exactly as designed, and it is the case the observer will hit most, because the
+beliefs it forms are about the same topics the user has corrected. Today that
+ruling has no resolution path and the conflict is silently dropped (#423).
+
+This ADR **names the dependency and does not design the mechanism**. ADR-0078 is
+in flight for #423 and owns what a pending memory decision is, how it is
+surfaced, and how a resolution flows back through the writer. What the observer
+owes it is one property, stated so ADR-0078 can rely on it:
+
+**A deferred proposal must be able to wait.** It is self-contained — the
+candidate record, its cited episode ids, its rationale — so it can be
+re-adjudicated later by something that was not present when it was made. The
+producer therefore neither retries a deferral, nor escalates it, nor rewrites the
+proposal to avoid it, nor holds it in memory to re-submit. Until ADR-0078 lands,
+an `ASK_USER` ruling is reported on the observe outcome with a `None` record id
+(ADR-0022 §4's shape), so a deferral is **visible** where today it is invisible.
+That is the interim, and it is deliberately not a queue.
+
+**Failure behaviour follows ADR-0022 §3's rule**, applied to an operation the
+user asked for:
+
+- **A model failure propagates** — `ModelError`, unwrapped, its classification
+  intact (ADR-0013 §5). The user asked for observation and it did not happen;
+  returning "no beliefs" would be indistinguishable from "nothing to learn",
+  which is the failure `memory_degraded` exists to prevent (ADR-0022 §3).
+- **A malformed response degrades**: entries that parse and validate are
+  proposed, entries that do not are discarded and **counted on the outcome**.
+  Nothing is invented to fill a gap, and no repair loop re-prompts beyond
+  ADR-0047 §6's bounded shape. The extraction contract is ADR-0071's
+  `raw_decode` scan, never ADR-0047 §4 step 1's superseded brace slice — a second
+  producer re-deriving that mechanism would reintroduce #293.
+- **A writer failure propagates** as `MemoryStoreError` (ADR-0028 §5), with
+  earlier proposals already applied and reported.
+- **No proposals is a normal outcome**, not an error (ADR-0022 §4).
+
+### 5. Evidence discipline: what a proposal cites, and what is refused for citing badly
+
+**Every proposal cites at least one episode id, and the ids are the producer's,
+never the model's.** ADR-0072 §3 rules that "a proposal in the `DERIVED` band
+cites at least one evidence reference" and that "an evidence reference denotes
+the id of a record in the same store". The model does not supply store ids: it
+references episodes by a label the prompt assigned to the batch, and the producer
+maps each label back to the id of the episode it actually read. This is ADR-0047
+§2's rule — "the step ids and the plan id are the planner's, never the model's" —
+applied to citations, and it is load-bearing rather than stylistic: a model that
+can write an id can write one for an episode it never saw, and the provenance
+display would then confidently cite a record that has nothing to do with the
+belief.
+
+**A label that does not map is dropped, and a proposal left citing nothing is
+discarded.** It is never repaired by attaching the batch wholesale: evidence
+attached to satisfy a rule is not evidence, and it would make the "why do you
+believe that?" answer a list of everything the observer happened to be reading.
+
+**`INFERRED` needs more than one episode; `OBSERVED` may rest on one.** ADR-0005
+§Context names the failure this floor exists for — "a single unusual interaction
+can harden into a permanent, wrong 'preference'" — and ADR-0072 §3 supplies the
+line: an `OBSERVED` belief restates what its evidence directly shows, so one
+episode entails it; an `INFERRED` belief generalises beyond the evidence, and a
+generalisation from one instance is the exact shape of that failure. Below the
+floor the producer proposes nothing.
+
+**The floor is the producer's, not the gate's**, and this ADR says which is
+which, because two rules that look alike would otherwise drift:
+
+- **The policy rule** (in the shipped `DefaultMemoryPolicy`, the rule ADR-0072 §3
+  assigned to this lane): a proposal in the `DERIVED` band citing **no** evidence
+  is refused. It is band-wide and minimal, because the gate serves every producer
+  and cannot know which epistemic step a record took. **It exempts `EPISODIC`
+  records**, as ADR-0074 §4 binds it to — an episode's warrant is that it
+  happened, and requiring it to cite something would demand a regress. That
+  exemption guards a path nothing takes today (capture does not reach the gate,
+  ADR-0075 §1; and §2 above forbids the observer to propose an episode), and it
+  is written anyway so the rule is not one refactor away from making its own
+  substrate unwritable.
+- **The producer floor** (`INFERRED` ≥ 2): the observer's own discipline, stated
+  here so a second observer inherits it rather than reinventing a weaker one.
+
+**Confidence is computed by the producer, and never taken from the model.** It is
+a deterministic, pure function of the epistemic step and the number of distinct
+supporting episodes, with these ratified properties:
+
+- strictly below 1.0 always — 1.0 is the standing only the user's own word
+  carries (ADR-0072 §3), and §7 makes that mechanical;
+- an `OBSERVED` belief on the same support outranks an `INFERRED` one, since the
+  latter took a step the evidence does not entail;
+- non-decreasing in the number of supporting episodes, under a ceiling;
+- no clock, no randomness, no model-supplied number.
+
+The exact values are the implementing lane's, exactly as ADR-0074 §4 ratified
+"a documented constant strictly below 1.0" and left the constant to the lane.
+Two things this buys, and both matter more than calibration: a model-supplied
+confidence is the model's mood rather than a comparable quantity, so nothing
+downstream could read two proposals' numbers against each other; and because the
+function is deterministic on its inputs, **re-observing the same episodes cannot
+inflate a belief** — the same evidence yields the same number, and a `REINFORCE`
+that takes the maximum finds nothing higher (§8).
+
+**Write-time resolvability is the writer's obligation.** `MemoryWriter.ingest`
+refuses a proposal in the `DERIVED` band whose evidence names a record the store
+does not hold. This closes the first half of #431 in the lane ADR-0072 §3 named
+("a `MemoryWriter` obligation and a conformance clause, which belongs to the lane
+that has a producer capable of breaching it"), and it is what makes §6's
+tombstone unambiguous: **every citation resolved once**, so a citation that stops
+resolving is *loss*, never a producer bug. Two clauses fix its shape:
+
+- **It refuses rather than rules.** The writer raises rather than returning a
+  fabricated `REJECT`: a decision is the policy's to make (ADR-0005 §3), and a
+  writer inventing one would put a ruling nobody made into the ingest result. The
+  refusal is a `ValueError` — a malformed argument at a seam, refused rather than
+  clamped, the posture ADR-0073 §2 already set for out-of-range reads — and it is
+  not a `MemoryStoreError`, which ADR-0028 §5 reserves for a store fault.
+- **It is a check, not a guarantee.** An episode deleted between the check and
+  the write leaves a citation that no longer resolves, and no seam closes that:
+  it is the same two-store race ADR-0074 §8 accepted and bounded, arriving from
+  the other side. §6 is what makes the residue honest rather than a dangling id.
+
+### 6. When the evidence is destroyed: a tombstone, a lowered presentation, no rewrite
+
+This section ratifies the owner's #431 direction (2026-07-28) as mechanics.
+**Deleting a conversation does not delete the beliefs derived from it.** The
+alternative — cascading the delete — is refused for the reason the direction
+gives it: a user deleting a conversation asked for the conversation to be gone,
+not for the assistant to unlearn what it worked out. Retiring the belief instead
+is the same act with a softer name.
+
+**Citations are resolved lazily, at the surface that presents the belief, and no
+stored record is ever rewritten.** The evidence tuple keeps the ids as written;
+a presenting read resolves each through `MemoryStore.get` and renders what it
+finds. Eager rewriting at destroy time is refused, and the argument is decisive
+rather than economic:
+
+- **It would cover the rare case and miss the common one.** Most evidence loss is
+  **expiry**, not deletion: episodes carry a finite default horizon (ADR-0074 §7)
+  and retention is enforced at *read time* (ADR-0007 §2), so there is no
+  per-episode event at which an eager rewrite could fire. An eager mechanism
+  would handle the conversation deletion and silently leave every expired
+  citation dangling — the worst of both, since the surface would then have to
+  handle the lazy case anyway.
+- **It would need a reverse index and a write fan-out.** "Which beliefs cite id
+  X" is a read no store offers; deleting a long conversation would then rewrite
+  an unbounded set of beliefs inside the deletion protocol ADR-0074 §8 already
+  spent a section making crash-safe.
+- **It would edit a belief because of something that happened to another
+  record.** The record graph is frozen (ADR-0068), and ADR-0072 §4's shape — a
+  correction retires and rewrites rather than editing — is the posture this
+  system takes when a belief must change. Nothing about losing evidence is the
+  producer changing its mind.
+
+**A citation that does not resolve renders as an explicit deleted-evidence
+tombstone.** Not a bare id, not a silent gap — ADR-0073 §4's floor already
+forbids both ("a citation the surface cannot render as evidence is never rendered
+*as* evidence — not as a reassuring id, not silently dropped"). The tombstone
+says an evidence item stood here and is gone, and **it deliberately does not say
+what it was**. That residue is ratified rather than tolerated: it is the price of
+an honest provenance display, and it is the same shape ADR-0074 §9 already
+accepted internally for a turn row that outlives its episode. The rendering also
+does not distinguish *deleted* from *expired*, because the read cannot tell them
+apart and because the user's question — "is there still something behind this?" —
+is answered by absence either way.
+
+**Presented confidence falls with lost support; stored confidence does not
+move.** The number a surface shows is a function of the stored confidence and how
+many of the belief's citations still resolve, with these properties: never above
+the stored value; strictly below it when any citation is lost; equal when all
+resolve; bounded below by a documented positive floor; pure, with no clock. The
+exact function is the implementing lane's.
+
+Three consequences of that split are decided here rather than left to be
+discovered:
+
+- **It is presentation, never ranking.** `MemoryStore.search` stays
+  confidence-neutral (ADR-0072 §5) and nothing about retrieval order changes.
+  This is the owner's constraint and it is also what makes lazy resolution
+  coherent: a number computed at presentation cannot reorder a store it never
+  touches.
+- **Every surface that states a confidence states the adjusted one.** The
+  inspection surface today; the prompt assembler when that lane lands, which
+  ADR-0072 §6 already obliges to convey a belief's confidence. Two surfaces
+  quoting different numbers for one belief would make the disclosure rule
+  meaningless.
+- **`export` carries the record as stored** — the ids as written and the stored
+  confidence — because an export is the user's data as held, not a rendering of
+  it (ADR-0007 §3). An exported id that no longer resolves is the same
+  that-not-what residue as the tombstone, in the artifact where the user can see
+  everything else too.
+
+**Where the resolution happens.** The `orchestration` façade, on the belief
+views it already assembles — not in `interfaces/`, which golden rule 3 keeps thin
+and which ADR-0072 §7 already refused to give a live-at-now computation. The
+listing resolves *existence* and renders the count, the lost count, and the
+adjusted confidence; the single-belief view renders the surviving citations as
+readable evidence and the lost ones as tombstones. **That discharges ADR-0073
+§4's gate**, which made resolving citations into readable evidence a precondition
+of this producer shipping.
+
+The cost is a `get` per citation per presented belief, bounded by the page
+(ADR-0073 §2's default of 50) and by evidence tuples that are small by
+construction (§5's floor is a minimum, not a target). It is accepted for now and
+it gives ADR-0074 §5's declined `get_many` its second consumer — revisited with
+the hub, where a resume already crosses a transport (§11).
+
+**A belief whose citations are *all* tombstoned is held, marked, and answerable —
+not silently kept and not auto-destroyed.** It stays live at the floor
+confidence, and the surface says in as many words that nothing supports it any
+more. The three candidates were weighed on merits:
+
+- **Auto-retire** is refused: it is the cascade under another name, it destroys a
+  belief that may be perfectly true, and it makes the user's deletion of an old
+  conversation silently undo an accumulation they never asked to lose.
+- **Held at floor, and nothing else**, is refused as the *whole* answer: an
+  unsupported belief that keeps reaching prompts with no way for the user to be
+  asked about it is the "wrong record laundered into a fact" ADR-0072 §6 exists
+  to prevent, one step removed.
+- **Surfaced for confirm-or-forget** is right, and most of it already ships. The
+  affordances exist: `assistant forget` destroys it unconditionally (ADR-0073
+  §5), and the user asserting the belief themselves supersedes it into the
+  asserted band (ADR-0038 §1, ADR-0072 §4) — confirm and forget, both reachable
+  today, over a state the surface now names. What does **not** exist is
+  *proactively asking*, which is a pending-question surface: ADR-0078's for a
+  memory decision, and the interruption policy's in the later arc. This ADR
+  ratifies the state and the rendering, and defers the asking to those lanes
+  rather than inventing a third queue (§11).
+
+### 7. `Provenance` grows the validator ADR-0072 §3 filed for this lane
+
+`Provenance` gains a source-conditional validator: **a source whose band is
+`DERIVED` may not carry confidence 1.0.** `USER_ASSERTED` keeps its existing
+implies-1.0 validator; `EXTERNAL` is untouched, because ADR-0038 §2a says it may
+legitimately carry 1.0.
+
+ADR-0072 §3 declined this and said exactly when to revisit — "there is no
+producer yet that could violate the rule", and "ratifying an enforcement
+mechanism ahead of the code it constrains is how a seam that does not survive
+first use gets blessed". This lane is that producer, so the condition it named
+is met.
+
+It is worth having as a type rule rather than a policy rule because the policy is
+not the only path a `Provenance` takes. Which is what settles **#432**, in two
+halves, deliberately:
+
+- **The confidence obligation is closed everywhere `Provenance` goes**, including
+  `Goal`, which "carries `Provenance` and reaches no propose/dispose gate". A
+  validator on the value needs no gate. Nothing breaks today: `orchestration`
+  stamps every goal `USER_ASSERTED`/1.0, and the only records in the derived band
+  are captured episodes, which already carry a documented sub-1.0 constant
+  (ADR-0074 §4).
+- **The evidence obligation is explicitly re-deferred**, with its owner named:
+  the lane that adds the first producer of *inferred goals*. It cannot be a
+  validator — an assertion legitimately cites nothing (ADR-0038 §1a) and
+  `EXTERNAL` may too — so it needs the enforcement seam #432 describes, and no
+  such producer exists. #432 stays open, narrowed to that half.
+
+### 8. Trigger and cadence: an explicit operation, which the scheduler later calls
+
+**Observation is an explicit operation on the `Engine` façade** — take a bounded
+batch of episodes (optionally scoped to one conversation), observe it, ingest
+what comes back, return what happened. The CLI is its first caller. It is
+**not** wired into the turn, and there is no polling, no background task and no
+ambient machinery.
+
+Four reasons, in the order they bind:
+
+1. **Nothing is waiting on it, and a turn is.** Running the observer inside
+   `converse` would add a full model round trip to the latency of every turn for
+   work the user is not waiting for. A one-shot CLI process has no "after the
+   answer" to hide it in either: the process lives for the turn, so the cost lands
+   on the user's wait however it is scheduled.
+2. **The roadmap sequences leg 4 against volume** — the `ASK_USER` gap (#423),
+   the contradiction surplus (#313/#314) and bounded-window retirement (#306)
+   "land before the observer runs at volume". A per-turn trigger *is* volume, on
+   the day it merges. An explicit one keeps the producer's output proportional to
+   the user's deliberate invocations until those land.
+3. **The first version of a producer that sends accumulated history to a model
+   should not run without the user knowing.** The user chooses when the
+   transcript is read, and the outcome tells them which route read it (§3). That
+   is a stronger form of consent than a setting, and it costs nothing while the
+   product has one user and one spoke (roadmap stance 3).
+4. **Leg 5's scheduler owns cadence, and inherits this operation unchanged.** The
+   hub's internal scheduler — already the named home for `purge_expired` and
+   confirmation deadlines — becomes a second caller of the same façade operation.
+   Cadence then becomes configuration rather than a contract change, which is
+   what the mandate asks for.
+
+**There is no durable cursor, and re-observation is safe by construction.** No
+state records which episodes have been observed. A second run over the same
+episodes re-proposes the same beliefs, and the gate folds each into a `REINFORCE`
+on the existing record rather than writing a duplicate (§4) — while §5's
+deterministic confidence means the fold finds nothing higher to take, so repeated
+observation cannot inflate a belief it keeps re-deriving. What a re-run does cost
+is a model call and a moved `provenance.last_updated`, which reorders the
+inspection listing (ADR-0073 §2's sort key). That is accepted and named: it is
+a true statement — the assistant did re-derive the belief today — and a cursor
+is durable per-user state whose natural owner is the resident process, filed with
+leg 5 (§11).
+
+**An episode may expire unobserved**, under ADR-0074 §7's finite horizon, and
+this ADR does not stretch the horizon to prevent it. The remedy is leg 5's
+schedule; the setting is the user's; and a belief is not owed every episode that
+ever existed.
+
+### 9. The contract surface owed, and what the implementing lane owes
+
+**New surface in `core` — a breaking change (golden rule 5):**
+
+- **`core/protocols.py`** gains **one** Protocol, `Observer`, owing: turn a
+  bounded batch of `EpisodicMemory` records into zero or more
+  `MemoryUpdateProposal`s. It is named for its product role, as every Protocol
+  here is (`Planner`, `MemoryPolicy`, `FeedbackProcessor`); nothing in this
+  codebase uses the subscription pattern the word otherwise names.
+- **`core/types.py`** gains **no new type** and one validator (§7). The proposal,
+  the episode, the record kinds and `MemoryIngestResult` already exist, which is
+  why this leg's contract cost is one Protocol rather than a family.
+- **`MemoryWriter.ingest`'s documented semantics** gain §5's refusal clause. No
+  signature change.
+- **No new error class.** A model failure is a `ModelError`, a store failure a
+  `MemoryStoreError` (ADR-0028 §5), a malformed citation a `ValueError` (§5), and
+  a malformed model response is a degradation rather than an exception (§4).
+
+An illustrative signature, in ADR-0073 §1's form — the semantics above are the
+contract, the spelling is the lane's:
+
+```python
+@runtime_checkable
+class Observer(Protocol):
+    async def observe(
+        self, episodes: Sequence[EpisodicMemory]
+    ) -> Sequence[MemoryUpdateProposal]: ...
+```
+
+**What the implementing lane owes** (stage 2; stage 1 is this ADR merging):
+
+1. The Protocol and the `Provenance` validator, plus the `MemoryWriter.ingest`
+   docstring restated as §5 rules it.
+2. **The shared conformance suite**, with a clause per obligation: every returned
+   proposal is in the `DERIVED` band; every proposal cites at least one id drawn
+   from the batch it was given and none from outside it; an `INFERRED` proposal
+   cites at least two distinct episodes; no proposal is `EPISODIC`; confidence is
+   strictly below 1.0 and is the same for the same batch twice (the clause that
+   catches a producer passing the model's number through); the output is bounded;
+   an empty batch yields no proposals; input observation (ADR-0065) and
+   cancellation (ADR-0060).
+3. **The canonical fake** in `ai_assistant.testing`, plus the concrete
+   `Test…Contract` subclass that runs it through the suite — without which the
+   triad check fails, naming what is missing (`CONTRIBUTING.md`).
+4. **The model-backed implementation** in `learning/`, with ADR-0047 §1's
+   injected seams (`ModelProvider`, a guarded `Clock` per ADR-0026 §7, an
+   `id_factory`), the prompt of §3, the label→id mapping of §5, and ADR-0071's
+   extraction. The extraction helper stays in the producing subsystem: two
+   implementations of one scan is cheaper than promoting a non-contract helper
+   into `core` on speculation, and the third model-backed producer is the trigger
+   to promote it — the discipline ADR-0028 §7 and ADR-0045 §1 each applied.
+5. **The `Settings` field** `observer_model`, defaulting to unset with §3's
+   meaning, validated at load like every other spec, and the composition-root
+   wiring that builds its route **without fallback** and requires its own
+   credential (ADR-0013 §6).
+6. **The `orchestration` stage and the façade operation** (§8), plus the
+   citation-resolving belief views (§6). The façade is concrete and not a
+   contract (ADR-0042 §1), so those names are shape, not spelling (ADR-0073 §7).
+7. **The CLI**: the observe command, and the belief surfaces rendering
+   tombstones, the adjusted confidence, and the all-unsupported state.
+
+**Tests the conformance suite cannot reach**, and which are therefore the stage's
+and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
+
+- **A belief whose cited episode is then deleted** — the listing shows the lost
+  count and a lowered confidence, the detail view shows a tombstone, the stored
+  record is **byte-identical to before** (the assertion that catches an
+  implementation that "fixed" the record instead of the rendering), and `export`
+  still carries the original id.
+- **A belief whose cited episode has *expired*** rather than being deleted —
+  same rendering, which is what stops an implementation from hooking deletion
+  only and passing every deletion test (§6's decisive argument, pinned).
+- **A belief whose citations are all gone** — floor confidence, the unsupported
+  state named, still live, still deletable, and **not** retired.
+- **A proposal citing an id the store does not hold** — refused by the writer,
+  nothing stored (§5).
+- **A model response citing a label outside the batch** — the citation is
+  dropped, and a proposal left with none is discarded rather than repaired (§5).
+- **A batch observed twice** — the second run reinforces rather than duplicating,
+  and the belief's confidence does not rise (§8).
+- **A proposal that conflicts with a user assertion** — `ASK_USER`, nothing
+  stored, and the deferral **reported** on the outcome (§4). The assertion worth
+  making is that it is not silently dropped, which is #423's whole complaint.
+- **A model failure and a malformed response**, asserting the two different
+  behaviours §4 ratifies: propagate, versus degrade-and-count.
+- **An observation run with `observer_model` unset and set** — the same route as
+  conversation in the first case, the named one in the second, **and no fallback
+  in either**, asserted by making the primary fail and checking that no second
+  provider was called. An implementation that reused the router wholesale would
+  pass every other test on this list.
+
+### 10. Explicitly declined
+
+- **An observer that holds a `MemoryStore`.** §1. It would make the scope of
+  observation a property of an implementation rather than of a seam, and it would
+  let a producer read the beliefs it is supposed to be proposing.
+- **Passing existing beliefs into the observation prompt** to suppress repeats.
+  §3. De-duplication is the gate's, deterministically and locally; paying for it
+  with a second class of Tier 1 data in the prompt trades minimisation for
+  something already solved.
+- **Letting the model supply confidence, or evidence ids.** §5. The first makes
+  two proposals' numbers incomparable and lets re-observation inflate a belief;
+  the second lets a model cite an episode it never read.
+- **Extending `FeedbackProcessor` to carry observation.** Its input is a
+  `FeedbackEvent` — explicit, user-stated feedback with a `FeedbackKind` of
+  `CORRECTION` or `PREFERENCE` (ADR-0009 §1). Episodes are neither, and
+  synthesising a `FeedbackEvent` per episode would put "the user said this"
+  wrapping around something the user did not say.
+- **Eager rewriting of citations at deletion time.** §6. It misses expiry
+  entirely, needs a reverse index and an unbounded write fan-out inside a
+  deletion protocol, and edits a frozen belief because another record went away.
+- **Cascading a delete from an episode to the beliefs citing it.** §6, and the
+  owner's #431 direction rules it out directly.
+- **Retiring a belief whose evidence is all gone.** §6. It is the cascade with a
+  softer name.
+- **Lowering the *stored* confidence when support is lost.** §6. It is a write
+  fan-out on a delete, it edits a record no producer revised, and the adjustment
+  is wanted only where a number is shown.
+- **A per-turn or background-task trigger.** §8. A latency tax on every turn for
+  work nothing waits on, and volume before leg 4.
+- **A durable "already observed" cursor.** §8. Per-user durable state whose owner
+  is the resident process; re-observation is safe without it.
+- **A pending-proposal queue for `ASK_USER`.** §4. That is ADR-0078's decision,
+  and a second queue invented here would be the thing it has to supersede.
+- **A sensitive-subject filter inside the observer.** §2.
+- **A `get_many` on `MemoryStore`.** §6. ADR-0074 §5 declined it; this ADR gives
+  it a second consumer and leaves the decision where the hub will hold it.
+
+### 11. What this ADR does not decide
+
+- **How an `ASK_USER` ruling is resolved.** ADR-0078 (#423), in flight. This ADR
+  states only what a deferred proposal owes it (§4).
+- **What happens to the conflicts beyond `conflict_limit`** when a correction
+  contradicts more inferences than the cap. ADR-0079 (#313/#314), in flight, and
+  it becomes reachable in practice on the day this producer runs.
+- **Retiring a producer-set bounded validity window** (#306). Leg 4. The observer
+  sets no bounded window today, and it is deliberately not the lane that decides
+  what retiring one means.
+- **Scheduling, batching and volume.** Leg 5: the cadence, the durable cursor
+  (§8), and the process that runs an observation nobody asked for. Not
+  foreclosed — the façade operation is what the scheduler calls, unchanged.
+- **An on-device generative route** (§3). It needs a local runtime, a
+  provisioning decision of the shape ADR-0024 made for the embedder, and endpoint
+  configuration `Settings` does not have. Filed; the named setting is what makes
+  it a configuration change when it arrives.
+- **Who triggered an episode's retention** — #441's user-versus-assistant
+  distinction, deferred by ADR-0074 §11 and still deferred: the observer does not
+  trigger episode retention, and the field would hold one constant until a
+  non-conversational capture source exists. Its owner is that lane (leg 6's
+  sensors, or #441's buffered capture). What leg 3 *does* take from #441 is the
+  source-agnostic batch (§1) and the weight of local distillation on the route
+  decision (§3).
+- **Multi-source episodes** — an episode ingested from a sensor rather than a
+  conversation. Leg 6. §1's batch is already source-agnostic, so this is an
+  additional producer of input, not a change here.
+- **Consolidation, decay and salience** — what happens to a derived belief that
+  is never reinforced and never corrected. Leg 7 (ADR-0072 §10, unchanged).
+- **Cross-conversation episodic recall and its ranking** (ADR-0074 §6, §11).
+  Untouched: the observer reads the batch it is handed rather than searching.
+- **The evidence obligation on `Goal`** (§7, #432), and any enforcement seam on
+  the goal write path. The lane that adds an inferred-goal producer.
+- **Whether the shipped policy should refuse to fold an `EPISODIC` record**
+  anyway (ADR-0075 §5). Still the policy owner's; §5's rule constrains what leg 3
+  writes, not what that lane may add.
+- **Prompt-assembly's band precedence and phrasing** (ADR-0072 §5, §6). This ADR
+  adds one obligation to that lane — a stated confidence is the adjusted one (§6)
+  — and decides nothing else about it.
+
+## Consequences
+
+- **The accumulation loop closes end to end.** A belief the user never dictated
+  is formed from observation, disposed by the ratified gate, rendered with its
+  band, its confidence and its evidence, and correctable by the user — which is
+  the roadmap's exit test for leg 3 and the first time VISION §Principle 1's
+  "built chiefly by observation" is true of anything in the tree.
+- **The contract cost is one Protocol and one validator**, because ADR-0005 typed
+  the proposal, ADR-0028 contracted the write path, ADR-0072 fixed what a derived
+  belief means, ADR-0073 built the surface and ADR-0074 built the substrate. The
+  heaviest design ADR of the arc adds the least contract surface of the four,
+  which is what contract-first was for.
+- **The gate holds where it matters most.** ADR-0075 exempted capture and named
+  the observer as the paradigm case the gate exists for; this ADR keeps it
+  inside, and the producer holds neither writer nor policy, so it cannot rule on
+  its own output even by mistake.
+- **Which model reads the transcript is now a named, separable setting** rather
+  than an accident of `default_model`, and observation never widens the set of
+  providers that see user data — by default it names none, and it never falls
+  back. The honest cost: the default route is a hosted provider, because no
+  on-device generative route is realizable in the installed artifact, and this ADR
+  says so rather than implying a local default it cannot ship.
+- **`ASK_USER` becomes visible before it becomes resolvable.** Until ADR-0078
+  lands, a deferral is reported instead of vanishing — which is a smaller thing
+  than resolving it and a strictly better position than #423 describes.
+- **A belief now outlives its evidence honestly.** The tombstone reveals *that*
+  an evidence item existed and was destroyed, never what it was; the presented
+  confidence falls; the stored record is untouched; retrieval is unmoved. The
+  accepted residue is that a deleted episode leaves a visible trace in the
+  provenance of a belief the user kept — the price of a provenance display that
+  does not lie, ratified rather than discovered.
+- **Every presented belief costs a read per citation** (§6), bounded by the page.
+  It is the first real cost of ADR-0074 §5's declined batch read, and it is where
+  that decision gets revisited.
+- **Observation is deliberately slower than it could be.** An explicit trigger
+  means episodes can expire unobserved and the user must ask for accumulation
+  they were promised passively. That is the price of not shipping volume ahead of
+  leg 4 and not shipping ambient machinery ahead of leg 5, and it is paid back by
+  the scheduler calling the same operation.
+- **The derived band stops being hypothetical for every lane downstream.**
+  Prompt assembly, consolidation and the contradiction work now have records to
+  reason about — and the two gates ADR-0073 §4 set on this producer are
+  discharged rather than inherited.
+- **Revisit if** a local generative route becomes realizable (§3's default moves
+  on-device); if leg 4 lands and the trigger should become the scheduler's (§8);
+  if the presented-versus-stored confidence split confuses users more than it
+  informs them; if the `INFERRED` floor of two episodes proves too strict for
+  beliefs a single rich exchange plainly supports; or if re-observation without a
+  cursor costs more in model calls than a cursor would cost in state.
+
+## Alternatives considered
+
+- **The observer holds a `MemoryStore` and selects its own episodes.** Rejected
+  in §1. It is the smaller wiring — one collaborator instead of a stage — and it
+  makes the scope of observation unreviewable, because "what does it read" then
+  has no answer short of reading the implementation. It would also let the
+  producer read the beliefs it proposes against, which is the input §3 declines
+  for minimisation reasons and §4 declines for de-duplication reasons.
+- **Observation on every turn, inside `converse`.** Rejected in §8. It is what
+  "passive accumulation" sounds like it should mean, and it taxes every turn with
+  a model round trip nothing waits on, produces volume on the day it merges, and
+  has nowhere to hide the latency in a one-shot process.
+- **A background task per turn, drained at engine close.** Rejected in §8. It
+  moves the latency after the printed answer without removing it, and it is
+  in-flight state the resident process is supposed to own (leg 5).
+- **Off by default, with a required `observer_model`.** Rejected in §3. It makes
+  the commonest correct setup — one configured provider used for everything — an
+  error, and it buys nothing over the explicit trigger, which already means no
+  episode is read without the user asking.
+- **Routing the observer over `fallback_models` like any other call.** Rejected
+  in §3. Fallback buys reliability by widening the set of providers that see a
+  prompt; for a deferrable job over accumulated history the reliability is worth
+  nothing and the widening is the one cost that matters.
+- **Cascading a delete: destroying beliefs whose evidence the user destroyed.**
+  Rejected in §6, and by the owner's direction on #431. It reads as respectful and
+  is not: it lets deleting an old conversation silently unlearn a belief the user
+  never asked to lose, and it is indistinguishable — from the user's side — from
+  the assistant forgetting things at random.
+- **Retiring an unsupported belief instead of holding it at the floor.**
+  Rejected in §6. Retirement is non-destructive (ADR-0045 §4) and would still
+  remove the belief from every live read, which is the cascade's effect through
+  a different door.
+- **Eager citation rewriting at deletion time.** Rejected in §6. It is the option
+  that "keeps the store honest at rest", and it misses expiry — the dominant case
+  — entirely, because retention is enforced at read time with no per-record
+  event to hook.
+- **Rendering a lost citation as its bare id, or omitting it.** Rejected by
+  ADR-0073 §4's floor before this ADR reaches it, and worth naming: an id is a
+  warrant the surface cannot show, and an omission makes a belief look
+  better-supported than it is.
+- **A model-supplied confidence, clamped below 1.0.** Rejected in §5. It is the
+  cheapest implementation and it makes every downstream comparison meaningless,
+  and — because it varies run to run — it lets repeated observation inflate a
+  belief through `REINFORCE`'s maximum.
+- **Enforcing the sub-1.0 derived rule at the policy instead of on
+  `Provenance`.** Rejected in §7: the policy is not the only path a `Provenance`
+  takes, and the `Goal` gap (#432) is precisely the path that has no policy.
+- **Deferring the whole #431 question again, to the lane that first sees a
+  dangling citation.** Rejected: this *is* that lane. ADR-0073 §4 made resolving
+  citations a precondition of this producer shipping, and a producer that
+  populates the derived band while the surface cannot say why is exactly what
+  that gate forbids.
