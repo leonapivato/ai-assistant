@@ -329,24 +329,33 @@ question about what is safe to emit).
   suppressed / refused) and `deferral: DeferredProposal | None`, with the validator
   above. It crosses the Protocol boundary, so `CLAUDE.md`'s rule makes it a `core`
   pydantic model rather than a tuple.
-- **`UserConfirmation`** — a frozen value carrying `deferral_id`,
-  `proposal_fingerprint`, `confirmed_at`, and `retires: tuple[str, ...]`, the record
-  ids the answer authorises retiring (§5). The fingerprint is what **binds the
-  authority to the proposal it was given for**: without it a confirmation is a
-  bearer token that any proposal sharing a conflicting assertion could present
-  (§5b check 4). It is a value rather than a naked field because it is *authority*,
-  and authority that can be inspected is authority that can be bounded.
-- **The fingerprint is §7's key minus its conflict set** — the digest over the
-  canonical projection of the proposed record plus the proposal's `sensitivity` —
-  so `question_key` is exactly `digest(proposal_fingerprint, sorted conflict ids)`.
-  Splitting it that way is what makes the binding checkable: the **writer can
-  recompute the fingerprint from the proposal in its hand**, while it cannot
-  recompute the key, whose conflict set was frozen when the question was asked and
-  is not the live one. It also binds to *what was asked about* rather than to a
-  minted identifier — a proposal's record `id` is caller-minted and unique only
-  once stored, so two unpersisted proposals with different content can carry the
-  same one, and an id-based binding would let a confirmation for one authorise the
-  other. The fingerprint cannot: different content, different fingerprint.
+- **`UserConfirmation`** — a frozen value carrying `deferral_id`, `question_key`,
+  `confirmed_at`, and `retires: tuple[str, ...]`, the record ids the answer
+  authorises retiring (§5). The key is what **binds the authority to the question it
+  was given for**: without it a confirmation is a bearer token that any proposal
+  presenting it could spend (§5b). It is a value rather than a naked field because
+  it is *authority*, and authority that can be inspected is authority that can be
+  bounded.
+- **It binds on the whole `question_key`, not on the proposal alone**, and the
+  difference is a real hole an earlier revision left open. A fingerprint covers
+  *what was proposed*; a question is what was proposed **against a particular
+  conflict set** (§7). Two questions can share a proposal exactly and be shown
+  different conflicts, and a confirmation bound only to the proposal would carry
+  one question's broader `retires` into the other's apply — retiring an assertion
+  that user was never shown, which is precisely the consent §5 exists to bound.
+  The key covers both layers, so it cannot.
+- **The writer can recompute it, and where it looks is the load-bearing detail.**
+  `MemoryIngestor` overwrites its own copy's `conflicts` with the *live* set before
+  the policy rules (`ingest.py:477-479`), so a check run against that copy would
+  compare the wrong set. The key is recomputed from the proposal **as handed to
+  `ingest`** — whose `conflicts` are the frozen ids the question was asked about
+  (§3's snapshot) — before conflict resolution replaces them. That is available:
+  `ingest` receives the caller's proposal and copies it (`ingest.py:470`).
+- Binding on the key also binds to *what was asked* rather than to a minted
+  identifier — a proposal's record `id` is caller-minted and unique only once
+  stored, so two unpersisted proposals with different content can carry the same
+  one, and an id-based binding would let a confirmation for one authorise the other.
+  A digest over what the proposal says, and what it was ruled against, cannot.
 
 **`core/types.py` also gains two fields on existing types**, both defaulted so the
 change is additive and no existing producer moves:
@@ -835,8 +844,8 @@ that would otherwise be prose:
     never purged, blocking its key, and repeatable until the queue is full of
     questions nobody created.
 20. **The fingerprint and the key agree across independently built inputs** (§7):
-    a proposal reconstructed field-by-field from a serialised form fingerprints
-    identically to the original, and a confirmation issued against the first
+    a proposal reconstructed field-by-field from a serialised form produces an
+    identical fingerprint **and key**, and a confirmation issued against the first
     verifies against the second. This is the parity the confirmed path depends on
     and the one a suite that always hashes the same in-memory object never tests —
     the failure it guards is not a mismatch on some input but a mismatch on
@@ -1071,7 +1080,7 @@ behaviour: "a policy reaches the ingestor through an injected seam and any
 conforming implementation may rule differently. The refusal therefore lives here,
 at the boundary that performs the write, rather than in the policy that recommends
 it" (`ingest.py:135-139`). A gate that opens on an unexamined field hands that
-guarantee back. So the exception carries four checks of its own, all of them
+guarantee back. So the exception carries five checks of its own, all of them
 performable at the boundary with what the writer already holds:
 
 1. The ruling is `SUPERSEDE`. A `REINFORCE` onto an assertion stays refused under
@@ -1081,28 +1090,34 @@ performable at the boundary with what the writer already holds:
 3. The target id is also among the conflicts this very ingest resolved (§4). A
    confirmation cannot authorise retiring a record the current ruling was not even
    made against.
-4. **`confirmation.proposal_fingerprint` equals the fingerprint recomputed from
-   the proposal being ingested** (§2). This is the check that stops the value being
-   a bearer token, and it is the one an earlier revision was missing: checks 1–3 all
-   pass when a confirmation given for question Q1 is presented with a *different*
-   proposal Q2 that happens to conflict with the same assertion, and the user's
-   answer to Q1 would then retire it on Q2's behalf.
+4. **`confirmation.question_key` equals the key recomputed from the proposal as
+   handed to `ingest`** — its fingerprint together with the frozen `conflicts` it
+   arrives carrying, read *before* conflict resolution replaces them (§2). This is
+   the check that stops the value being a bearer token, and it took two revisions to
+   get right. Checks 1–3 all pass when a confirmation given for question Q1 is
+   presented with a *different* proposal that happens to conflict with the same
+   assertion. Binding on the proposal alone closed that and left a narrower one
+   open: two questions can share a proposal **exactly** — same fingerprint — and
+   have been shown different conflict sets, so Q1's broader `retires` would spend
+   itself inside Q2's apply and retire an assertion Q2's user never saw. The key
+   covers the conflict set, so the two questions differ and the confirmation does
+   not travel.
+5. **Every id in `confirmation.retires` is among those frozen `conflicts`.** Check 3
+   already requires a target to be among the conflicts *this ingest* resolved, which
+   is the live set; this requires it to have been among the ones the user was
+   *shown*. Both, because the two sets can differ in either direction and the
+   authority is bounded by the smaller one — what was displayed.
 
-   **It is a fingerprint rather than the proposed record's id**, because an id
-   binding is not a binding: `MemoryRecord.id` is caller-minted and unique only
-   among *stored* records, so two unpersisted proposals with entirely different
-   content can carry the same one, and a `SUPERSEDE` mints a fresh output id so no
-   storage collision would stop the unauthorised retirement either. A digest over
-   what the proposal *says* has no such gap. The binding holds by construction on
-   the honest path: §5's coordinator rebuilds the proposal from the claimed
-   `DeferredProposal`, so what it fingerprints is what the question was asked about.
+   The whole binding holds by construction on the honest path: §5's coordinator
+   rebuilds the proposal from the claimed `DeferredProposal`, so both the content it
+   digests and the conflicts it carries are the ones the question was asked about.
 
 **What no in-process value can do, stated plainly rather than implied.** None of
 this makes the confirmation unforgeable, and this ADR does not claim it does. Any
 subsystem holding the injected `MemoryStore` can already call `write_atomic`
 (`protocols.py:283`) and close any window it likes; a floor on the writer is not a
 security boundary against arbitrary in-process code and never was. What it *is* —
-and what the four checks above restore — is a guarantee that **no ruling reaches a
+and what the five checks above restore — is a guarantee that **no ruling reaches a
 user assertion by inference**: not from a policy's judgement, not from topical
 similarity, not from a confirmation that belongs to another question. The remaining
 step, that a claimed confirmation corresponds to a deferral a user actually
@@ -1112,19 +1127,26 @@ deferral from `PENDING` to `APPLYING` first. That is the "coordinator-owned
 operation that binds the accepted answer to the stored deferral" this arrangement
 rests on, and it is a mechanism rather than a convention.
 
-**ADR-0028 §8's conformance suite gains its second clause**, in four parts. A
+**ADR-0028 §8's conformance suite gains its second clause**, in six parts. A
 `SUPERSEDE` naming a `USER_ASSERTED` target **raises**: without a covering
-`confirmation`; with one whose `retires` does not name that target, or whose named
-target is absent from the resolved conflicts; and — the case that would otherwise
-go untested — **with a confirmation issued for a different proposal**, exercised by
-presenting one question's confirmation alongside a second proposal that conflicts
-with the same assertion. That last case needs the two proposals to **share a
-proposed record id and differ in content**, because that is exactly the input an
-id-based binding waves through and a fingerprint refuses; a suite that varies the
-id instead passes against the weaker binding this ADR rejected. It **applies** only
-when all four checks hold. A suite asserting only the refusal certifies the gate as
-shut; one asserting only the pass certifies nothing about the floor; one omitting
-the mismatch cases certifies a bearer token rather than a bound authority.
+`confirmation`; with one whose `retires` does not name that target; with one whose
+named target is absent from the conflicts this ingest resolved; with one whose named
+target is absent from the **frozen** conflicts the proposal arrived carrying (check
+5); and — the two cases that would otherwise go untested — with a confirmation
+issued for a **different question**, in each of the two shapes that matter:
+
+- **Same proposed record id, different content.** The input an id-based binding
+  waves through; a suite that varies the id instead passes against the weaker
+  binding this ADR rejected.
+- **Identical proposal, different frozen conflict set.** Two questions with the same
+  fingerprint, shown different conflicts, one's confirmation presented against the
+  other's apply. The input a *fingerprint* binding waves through — and invisible to
+  a suite that varies content, which is every natural way to write the case above.
+
+It **applies** only when all five checks hold. A suite asserting only the refusal
+certifies the gate as shut; one asserting only the pass certifies nothing about the
+floor; one omitting either mismatch shape certifies a bearer token rather than a
+bound authority.
 
 ### 6. Rejecting, expiring, and going stale — three endings, three meanings
 
@@ -1227,16 +1249,20 @@ The observer will produce proposals continuously and some fraction will be ruled
 the observer.
 
 **Dedup on a `question_key`, defined by a criterion and an exclusion list rather
-than by an inventory of what counts.** In two layers, because §5's writer check
-needs the inner one on its own:
+than by an inventory of what counts.** In two layers, because the two answer
+different halves of "is this the same question?":
 
 - the **`proposal_fingerprint`** — a digest over a **canonical projection** of the
-  proposed `MemoryRecord`, plus the proposal's `sensitivity`;
-- the **`question_key`** — `digest(proposal_fingerprint, sorted conflict ids)`.
+  proposed `MemoryRecord`, plus the proposal's `sensitivity`: *what is being
+  proposed*;
+- the **`question_key`** — `digest(proposal_fingerprint, canonical conflict ids)`:
+  *what it is being proposed against*.
 
-The writer can recompute the fingerprint from a proposal it holds and cannot
-recompute the key, whose conflict set was frozen when the question was asked (§5b
-check 4).
+Both are recomputable by the writer from the proposal it is handed, whose
+`conflicts` are the frozen ids the question was asked about until the ingestor
+replaces them (§5b check 4). The two layers exist because dedup wants the outer one
+and §5's alternatives-considered wanted the inner one; the binding uses the outer,
+and §5 records why the inner alone was not enough.
 
 **Both are computed properties of `MemoryUpdateProposal`, not fields anyone
 supplies, and both use the encoding this repository has already ratified.** That is
@@ -1820,7 +1846,7 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   `_refuse_unsafe_fold` is for. The floor exists because "any conforming
   implementation may rule differently" (`ingest.py:135-139`); a gate that opens on
   an unexamined field returns that guarantee to the caller's good intentions. The
-  four checks §5 requires are what a boundary can actually verify, and §5 is
+  five checks §5 requires are what a boundary can actually verify, and §5 is
   explicit about what remains beyond them.
 - **Let the answer retire every asserted conflict live at answer time, not only the
   ones shown.** Rejected (§5): the user answered about the records they saw.
