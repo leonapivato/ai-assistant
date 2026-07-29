@@ -39,10 +39,18 @@
   than owed as an argument. ADR-0079 §2's ordering — completeness, then the ruling,
   then retirement, with a deferral winning and retiring nothing on its way — is the
   law §5's confirmed path obeys at every step.
-- **ADR-0077 (the observer) is still in flight.** It names this ADR as the
-  resolution mechanism for the proposals it mass-produces; it owes this decision
-  nothing but "a proposal that can wait", and §3 states the one obligation it
-  inherits. It is not a dependency of this one.
+- **[ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) (the observer)
+  is merged, `Accepted`,** and it names this ADR as the owner of the mechanism
+  while supplying the one property that mechanism needs: "a deferred proposal is
+  self-contained, so that a durable pending state can hold it without the producer
+  changing… The producer therefore neither retries a deferral, nor escalates it,
+  nor rewrites the proposal to avoid it, nor holds it to re-submit" (§4). §1's
+  store relies on exactly that, and §3 states the wiring obligation running the
+  other way. ADR-0077 §4 is also blunt about the state of the world this ADR
+  changes — "No component persists a deferred proposal: the ruling is reported on
+  the observe outcome and the process then exits, so that particular deferral is
+  gone" — which is the same drop §Context traces, reached from the observer's side
+  rather than `learn`'s.
 
 ## Context
 
@@ -543,12 +551,18 @@ that legitimately holds both handles by injection." Neither store may hold the
 other (golden rule 1), and the sequence spans both.
 
 **It is a property of the write stage, not of `learn`.** `LearningLoop.learn` is
-today's only path to `ingest`, but the observer (ADR-0077) is a second producer.
-The obligation ADR-0077's lane inherits is exactly one sentence: **a proposal
+today's only path to `ingest`, and ADR-0077's observer is the second producer. The
+obligation its implementing lane inherits is exactly one sentence: **a proposal
 reaches memory through the orchestration write stage, not through a `MemoryWriter`
 handle of its own.** A producer holding the writer directly gets the ratified
 policy and applier and silently loses the queue — the drop this ADR ends, restored
 by a wiring choice.
+
+That obligation is affordable because ADR-0077 §4 already pays its half: a deferred
+proposal is **self-contained**, so the stage can hold it without holding anything
+of the producer, and the producer "neither retries a deferral, nor escalates it,
+nor rewrites the proposal to avoid it, nor holds it to re-submit". A producer that
+did any of those would be a second, unratified resolution path racing this one.
 
 **Two composition-root obligations, stated rather than assumed**, in the form
 ADR-0028 §4 established for the same class of hazard — the shape ADR-0052 §1
@@ -1267,8 +1281,11 @@ On ratification:
   roadmap's leg 4 names as undecided and owing their own ADR. Owner: **#306**.
 - **How the hub delivers a question** — push, notification, per-spoke delivery
   state (§8). Owner: leg 5's local-API and service ADRs.
-- **What the observer proposes and at what rate** (§7). Owner: ADR-0077. This ADR
-  fixes only the queue's behaviour under load.
+- **What the observer proposes and at what rate** (§7). Decided by ADR-0077, now
+  merged. This ADR fixes only the queue's behaviour under the load that produces,
+  and it deliberately does not reach back across the seam: a proposal whose
+  `confidence` jitters between re-observations of one thing keys as a new question
+  each time (§7), and stabilising that is the producer's job, not the queue's.
 - **The over-limit surplus (#313) and the universal-`MemoryWriter` promotion of
   full-set retirement (#314).** Decided, and merged, by ADR-0079 §§1 and 3. This
   ADR inherits both by re-ingesting (§5, ADR-0079 §2) and re-decides neither.
