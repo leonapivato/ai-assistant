@@ -264,13 +264,24 @@ question about what is safe to emit).
   suppressed / refused) and `deferral: DeferredProposal | None`, with the validator
   above. It crosses the Protocol boundary, so `CLAUDE.md`'s rule makes it a `core`
   pydantic model rather than a tuple.
-- **`UserConfirmation`** — a frozen value carrying `deferral_id`, `proposed_id`,
-  `confirmed_at`, and `retires: tuple[str, ...]`, the record ids the answer
-  authorises retiring (§5). `proposed_id` is what **binds the authority to the
-  proposal it was given for**: without it a confirmation is a bearer token that any
-  proposal sharing a conflicting assertion could present (§5b check 4). It is a
-  value rather than a naked field because it is *authority*, and authority that can
-  be inspected is authority that can be bounded.
+- **`UserConfirmation`** — a frozen value carrying `deferral_id`,
+  `proposal_fingerprint`, `confirmed_at`, and `retires: tuple[str, ...]`, the record
+  ids the answer authorises retiring (§5). The fingerprint is what **binds the
+  authority to the proposal it was given for**: without it a confirmation is a
+  bearer token that any proposal sharing a conflicting assertion could present
+  (§5b check 4). It is a value rather than a naked field because it is *authority*,
+  and authority that can be inspected is authority that can be bounded.
+- **The fingerprint is §7's key minus its conflict set** — the digest over the
+  canonical projection of the proposed record plus the proposal's `sensitivity` —
+  so `question_key` is exactly `digest(proposal_fingerprint, sorted conflict ids)`.
+  Splitting it that way is what makes the binding checkable: the **writer can
+  recompute the fingerprint from the proposal in its hand**, while it cannot
+  recompute the key, whose conflict set was frozen when the question was asked and
+  is not the live one. It also binds to *what was asked about* rather than to a
+  minted identifier — a proposal's record `id` is caller-minted and unique only
+  once stored, so two unpersisted proposals with different content can carry the
+  same one, and an id-based binding would let a confirmation for one authorise the
+  other. The fingerprint cannot: different content, different fingerprint.
 
 **`core/types.py` also gains two fields on existing types**, both defaulted so the
 change is additive and no existing producer moves:
@@ -321,9 +332,19 @@ like every other, owing:
   exists. So `defer` **inserts only if the id is absent** and otherwise raises
   `DeferralStoreError`, committing nothing — insert-if-absent in ADR-0046 §3's
   sense, where "absent" is *physical presence* rather than read-visibility, so a
-  resolved or lapsed row still blocks the id. The coordinator mints ids, as it does
-  for `MemoryRecord`, and a collision is a minting fault to surface rather than
-  absorb; ADR-0074 §9's `start` takes the same position for a conversation id, with
+  resolved or lapsed row still blocks the id.
+
+  **The id check comes first, and the precedence is stated because the two rules
+  can both fire.** A call carrying id `a` and key `K2`, against a store holding
+  `(a, K1)` and `(b, K2)`, is simultaneously a key duplicate of `b` and a physical
+  collision on `a`; unstated, a dict-backed fake takes the suppression path while a
+  SQL-shaped one raises, and the suite certifies both. The id collision wins,
+  because it is a **caller-side minting fault** and the suppression path would hide
+  it: the caller would be handed back a different question, under an id it believes
+  it just minted and now believes it owns. A fault that is reported can be fixed; a
+  fault absorbed into a plausible-looking success is found later, by someone else.
+  The coordinator mints ids, as it does for `MemoryRecord`, and ADR-0074 §9's
+  `start` takes the same position for a conversation id, with
   retry-on-collision at the minting site.
 
   **`DeferralAdmission` has exactly three shapes**, and its validator pins them the
@@ -537,7 +558,10 @@ that would otherwise be prose:
    deferral whose `id` matches a stored row carrying a **different** key, checked
    against a `PENDING` row and against a terminal one. Without it a dict-backed
    fake overwrites and a SQL store raises, and the suite certifies two different
-   contracts.
+   contracts. **And the intersection**: an input that is *both* a key duplicate of
+   one row and an id collision with another **raises**, changing nothing (§2's
+   precedence). Two clauses that each pass in isolation say nothing about which
+   wins when both apply, and that is the input on which two backends diverge.
 4. **`DeferralAdmission` reports the right outcome for a same-id, same-key
    retry** (§2), in `PENDING`, `REJECTED` and `APPLYING`: *suppressed*, never
    *admitted*. This is the case an id comparison got wrong, and a suite that only
@@ -829,16 +853,21 @@ performable at the boundary with what the writer already holds:
 3. The target id is also among the conflicts this very ingest resolved (§4). A
    confirmation cannot authorise retiring a record the current ruling was not even
    made against.
-4. **`confirmation.proposed_id` equals the id of the record being proposed.** This
-   is the check that stops the value being a bearer token, and it is the one an
-   earlier revision was missing: checks 1–3 all pass when a confirmation given for
-   question Q1 is presented with a *different* proposal Q2 that happens to conflict
-   with the same assertion, and the user's answer to Q1 would then retire it on
-   Q2's behalf. Binding the confirmation to the proposal it was issued for is what
-   makes "an answer cannot be replayed onto a different proposal" true rather than
-   asserted. The binding holds by construction on the honest path: §5's coordinator
-   rebuilds the proposal from the claimed `DeferredProposal`, so the id it carries
-   is the one the question was asked about.
+4. **`confirmation.proposal_fingerprint` equals the fingerprint recomputed from
+   the proposal being ingested** (§2). This is the check that stops the value being
+   a bearer token, and it is the one an earlier revision was missing: checks 1–3 all
+   pass when a confirmation given for question Q1 is presented with a *different*
+   proposal Q2 that happens to conflict with the same assertion, and the user's
+   answer to Q1 would then retire it on Q2's behalf.
+
+   **It is a fingerprint rather than the proposed record's id**, because an id
+   binding is not a binding: `MemoryRecord.id` is caller-minted and unique only
+   among *stored* records, so two unpersisted proposals with entirely different
+   content can carry the same one, and a `SUPERSEDE` mints a fresh output id so no
+   storage collision would stop the unauthorised retirement either. A digest over
+   what the proposal *says* has no such gap. The binding holds by construction on
+   the honest path: §5's coordinator rebuilds the proposal from the claimed
+   `DeferredProposal`, so what it fingerprints is what the question was asked about.
 
 **What no in-process value can do, stated plainly rather than implied.** None of
 this makes the confirmation unforgeable, and this ADR does not claim it does. Any
@@ -859,13 +888,15 @@ rests on, and it is a mechanism rather than a convention.
 `SUPERSEDE` naming a `USER_ASSERTED` target **raises**: without a covering
 `confirmation`; with one whose `retires` does not name that target, or whose named
 target is absent from the resolved conflicts; and — the case that would otherwise
-go untested — **with a confirmation issued for a different proposal**, whose
-`proposed_id` does not match the record being proposed, exercised by presenting one
-question's confirmation alongside a second proposal that conflicts with the same
-assertion. It **applies** only when all four checks hold. A suite asserting only
-the refusal certifies the gate as shut; one asserting only the pass certifies
-nothing about the floor; one omitting the mismatch cases certifies a bearer token
-rather than a bound authority.
+go untested — **with a confirmation issued for a different proposal**, exercised by
+presenting one question's confirmation alongside a second proposal that conflicts
+with the same assertion. That last case needs the two proposals to **share a
+proposed record id and differ in content**, because that is exactly the input an
+id-based binding waves through and a fingerprint refuses; a suite that varies the
+id instead passes against the weaker binding this ADR rejected. It **applies** only
+when all four checks hold. A suite asserting only the refusal certifies the gate as
+shut; one asserting only the pass certifies nothing about the floor; one omitting
+the mismatch cases certifies a bearer token rather than a bound authority.
 
 ### 6. Rejecting, expiring, and going stale — three endings, three meanings
 
@@ -963,11 +994,17 @@ The observer will produce proposals continuously and some fraction will be ruled
 the observer.
 
 **Dedup on a `question_key`, defined by a criterion and an exclusion list rather
-than by an inventory of what counts.** The key is a deterministic digest over a
-**canonical projection** of the proposed `MemoryRecord`, plus the proposal's
-`sensitivity`, plus the frozen conflict-id set. The projection is the whole record
-minus the fields that are *bookkeeping about the record rather than the belief it
-states*, and there are exactly three:
+than by an inventory of what counts.** In two layers, because §5's writer check
+needs the inner one on its own:
+
+- the **`proposal_fingerprint`** — a deterministic digest over a **canonical
+  projection** of the proposed `MemoryRecord`, plus the proposal's `sensitivity`;
+- the **`question_key`** — `digest(proposal_fingerprint, sorted conflict ids)`.
+
+The writer can recompute the fingerprint from a proposal it holds and cannot
+recompute the key, whose conflict set was frozen when the question was asked (§5b
+check 4). The projection is the whole record minus the fields that are *bookkeeping
+about the record rather than the belief it states*, and there are exactly three:
 
 - **`id`** — identity, minted per proposal, so including it makes the key match
   nothing at all.
