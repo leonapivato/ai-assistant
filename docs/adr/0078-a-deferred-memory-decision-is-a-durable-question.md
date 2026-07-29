@@ -4,10 +4,9 @@
 - Date: 2026-07-28
 - **This is a contract change, and it is flagged as such (golden rule 5).** New
   `core` surface: a `DeferralStore` Protocol, a `DeferredProposal` record with its
-  state enum, the `UserConfirmation`, `DeferralClaim` and `DeferralAdmission`
-  values, one field added
-  to `MemoryUpdateProposal`, one added to `MemoryIngestResult`, and a
-  `DeferralStoreError`. It ships **no
+  state enum, an admission-outcome enum, the `UserConfirmation`, `DeferralClaim`
+  and `DeferralAdmission` values, one field added to `MemoryUpdateProposal`, one
+  added to `MemoryIngestResult`, and a `DeferralStoreError`. It ships **no
   code**: it merges as its own PR ahead of any implementation and carries the
   architecture review as well as the adversarial one.
 - **Takes up two deferrals that named an owner rather than a decision.**
@@ -348,10 +347,17 @@ question about what is safe to emit).
 - **`DeferralClaim`** — a frozen value carrying the claimed `deferral` and the
   `claim_id` token `claim` minted for it. One value rather than two strings a caller
   could swap, for the reason ADR-0074 §9 gives `ParkedBinding`.
-- **`DeferralAdmission`** — a frozen value carrying `outcome` (admitted /
-  suppressed / refused) and `deferral: DeferredProposal | None`, with the validator
-  above. It crosses the Protocol boundary, so `CLAUDE.md`'s rule makes it a `core`
-  pydantic model rather than a tuple.
+- **`DeferralAdmissionOutcome`** — a `StrEnum`: `ADMITTED`, `SUPPRESSED`,
+  `REFUSED`. A closed set with a name, like `DeferralState` and
+  `MemoryDecisionKind`, and not three strings described in prose: the coordinator
+  branches on it exhaustively (§7), and an exhaustive `match` needs a type that can
+  be exhausted. Left as free-form text, two conforming stores spell the same
+  outcome differently and `orchestration` cannot depend on either.
+- **`DeferralAdmission`** — a frozen value carrying `outcome:
+  DeferralAdmissionOutcome` and `deferral: DeferredProposal | None`, with the
+  validator above (`ADMITTED` and `SUPPRESSED` require a deferral; `REFUSED`
+  forbids one). It crosses the Protocol boundary, so `CLAUDE.md`'s rule makes it a
+  `core` pydantic model rather than a tuple.
 - **`UserConfirmation`** — a frozen value carrying `deferral_id`, `question_key`,
   `confirmed_at`, and `retires: tuple[str, ...]`, the record ids the answer
   authorises retiring (§5). The key is what **binds the authority to the question it
@@ -395,7 +401,13 @@ own: the question's identity is a function of the proposal it holds, so the two
 cannot disagree.
 
 **`core/protocols.py` gains one Protocol, `DeferralStore`**, `@runtime_checkable`
-like every other, owing:
+like every other. **Every member is an `async def`** — the signatures below are
+written as return types for readability, and each is `async` without exception.
+That is `CLAUDE.md`'s rule ("I/O-bound methods are `async`. The system composes on
+one event loop") and every store contract's shape (`MemoryStore`, `PlanStore`,
+`AuditTrail`, `ConversationStore`), and it is stated rather than assumed because a
+prose signature admits a synchronous implementation that blocks the loop while
+conforming to the words. It owes:
 
 - **`defer(*, deferral_id, proposal, decision, predecessor_id=None,
   successor_to_claim=None) -> DeferralAdmission`** — admit a question, returning
@@ -470,10 +482,11 @@ like every other, owing:
   `start` takes the same position for a conversation id, with
   retry-on-collision at the minting site.
 
-  **`DeferralAdmission` has exactly three shapes**, and its validator pins them the
-  way `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) pins a
-  ruling's: *admitted* carries the new deferral; *suppressed* carries the existing
-  one the key spoke for; *refused* carries nothing and means the answerable queue
+  **`DeferralAdmission` has exactly three shapes**, one per
+  `DeferralAdmissionOutcome` member, and its validator pins them the way
+  `MemoryDecision._outcome_fields_are_consistent` (`types.py:696-719`) pins a
+  ruling's: `ADMITTED` carries the new deferral; `SUPPRESSED` carries the existing
+  one the key spoke for; `REFUSED` carries nothing and means the answerable queue
   was at its cap (§7). A physical id collision is not among them — it raises
   (above) rather than returning a fourth shape nobody would check for.
 
@@ -1850,11 +1863,10 @@ On ratification:
 **Harder.**
 
 - **New `core` contract surface, and a new store**, which is the cost this ADR
-  argues for in §1 rather than assumes: one Protocol, five `core/types.py`
-  additions (the record, its state enum, and the three values `UserConfirmation`,
-  `DeferralClaim` and `DeferralAdmission`), two added fields on existing types, one
-  error class, and a
-  triad with two bindings.
+  argues for in §1 rather than assumes: one Protocol, six `core/types.py` additions
+  (the record, its state enum, the admission-outcome enum, and the three values
+  `UserConfirmation`, `DeferralClaim` and `DeferralAdmission`), two added fields on
+  existing types, one error class, and a triad with two bindings.
 - **A fourth store in the composition root**, with its own file, its own
   retention, its own export and delete obligations under ADR-0004/ADR-0007, and its
   own place in the ordered shutdown.
@@ -1934,7 +1946,9 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
   between them leaves the question `ACCEPTED` and nothing written — the silent drop,
   with a receipt saying it was handled. The claim gets the concurrency guarantee a
   terminal-first order would have given without inheriting its failure direction:
-  an interrupted claim is visible and re-openable, an interrupted lie is not.
+  an interrupted claim is visible and recoverable through §9's dispose-then-relearn
+  flow — never by re-opening it, which §2 forbids — while an interrupted lie is
+  neither visible nor recoverable at all.
 - **Apply first and rely on the terminal compare-and-set alone.** Rejected (§9):
   this was the earlier draft, and it is wrong for a reason that has nothing to do
   with crashes. Two ordinary concurrent answers both pass the read, both write, and
