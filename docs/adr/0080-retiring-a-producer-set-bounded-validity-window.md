@@ -316,22 +316,39 @@ that leaves the store consistent.
   arises only from a `valid_from` at or after the writer's close instant.
 
 **This refusal is a circuit breaker, and it fires on an incoherent composition
-rather than on a hard belief.** A record with `valid_from > now` is, by ADR-0045
-§2's own liveness predicate, **not live at the writer's clock** — and conflict
-detection surfaces only records the *store* read as live (ADR-0045 §6). Since the
-detector's read precedes the applier's clock sample within one ingest, a
-composition whose store and writer clocks advance forward together gives
-`valid_from <= now_read <= now_write`, and the case cannot arise. What produces it
-is a store read clock **ahead** of the writer's close — an injected test clock, or
-genuinely disagreeing clocks — which is the same clock-coherence gap #460 now
-carries. So the refusal is the instrument ADR-0079 §1 describes for its ceiling
-and `_MAX_SUPERSEDE_ATTEMPTS` before it: it exists to make a pathological state
-fail loudly rather than corrupt something, not to bound an ordinary one.
+rather than on a hard belief.** Name the condition precisely, because §1 leaves
+the close instant's *provenance* to the writer: a composition is **close-coherent**
+when the writer's close instant is at or after the instant its store's conflict
+read observed. That is a property of how a writer and a store are wired together,
+not of either alone, and it is deliberately the same shape as the obligation
+`MemoryWriter`'s docstring already carries — "the store it writes to must be the
+one its caller retrieves from — a composition-root obligation, unenforceable here
+precisely because no store is on this seam" (ADR-0028 §4).
+
+Under close-coherence the refusal **cannot arise**. A record with
+`valid_from > now` is, by ADR-0045 §2's liveness predicate, not live at the close
+instant, and conflict detection surfaces only records the *store* read as live
+(ADR-0045 §6), so `valid_from <= now_read <= now_close`. The forward-advancing
+wall clock the shipped composition gives both parties satisfies it (the detector
+reads before the applier closes); so does any writer whose instant is at or after
+its store's read. What breaks it is a store read **ahead** of the writer's
+close — an injected test clock, genuinely disagreeing clocks, or a writer whose
+constant instant predates what its store is serving. All three are the same
+defect, and it is the clock-coherence gap #460 now carries; the tie
+(`valid_from == now_close`) sits at the boundary of close-coherence and refuses
+for the representability reason above rather than for a disagreement.
+
+So the refusal is the instrument ADR-0079 §1 describes for its ceiling and
+`_MAX_SUPERSEDE_ATTEMPTS` before it: it exists to make a pathological
+*composition* fail loudly rather than corrupt something, not to bound an ordinary
+one. It is not a claim that no conforming writer can trigger it — §1 does not
+constrain the instant's value, so one can, and that writer's composition is
+exactly the incoherent one this paragraph names.
 
 **It therefore does not blunt the law ADR-0079 made total.** ADR-0079 §1's law is
 over the conflicts retrieval *surfaced*, and it already states its own reach
 rather than claiming exhaustiveness. This refusal removes nothing from that
-reach: under a coherent composition it never fires, and where it does fire the
+reach: under a close-coherent composition it never fires, and where it does fire the
 inputs to the ingest are already mutually inconsistent — the same class of
 statement ADR-0079 §1 makes when it refuses above the ceiling ("the ingest's
 *inputs* cannot be trusted"). An error the operator sees is the better outcome
@@ -763,7 +780,7 @@ sibling deferral of #306's absolute-hide half is likewise honoured, not absorbed
   step 1 gets wrong.
 - **A correction can now fail on a clock disagreement.** §3's refusal is a real
   user-visible failure mode: an ingest raises and the user's correction does not
-  land. It is bounded to a state a coherent composition cannot produce (§3), it
+  land. It is bounded to a state a close-coherent composition cannot produce (§3), it
   is loud rather than silent, and it leaves every record in the set exactly as it
   was — but it is a second
   way for a correction to refuse, alongside ADR-0079 §1's ceiling, and both are
