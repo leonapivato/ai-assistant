@@ -2067,11 +2067,15 @@ leave:
   a store failure.
 - **Inside the successor `defer`**, after its atomic admission and before it
   returns: the parent is `APPLYING` **and already carries a `successor_id`**, with
-  the successor admitted or suppressed onto an existing question. Nothing is undone
-  — the successor is a real question the user can answer, and deleting it to
-  "unwind" a cancelled call would destroy the one thing that call got right. This
-  is the *best* of the stranded cases rather than a worse one: §9's recovery finds
-  a parent that already names where its concern went, and §8 shows it.
+  the successor admitted or suppressed onto an existing question. Nothing is
+  undone: deleting the successor to "unwind" a cancelled call would destroy the one
+  thing that call got right. What the surface says about the linked row is **the
+  same state-specific rule the uncancelled path uses** (below) — `PENDING` is a
+  question the user can answer, `REJECTED` means forget it to be asked again, and
+  `APPLYING` is another interrupted answer. Only the first is a follow-on they can
+  act on, so only the first makes this the *best* of the stranded cases; the other
+  two leave a parent that names where its concern went and a linked row that needs
+  its own handling.
 - **Inside `resolve`**, which is the only window that can leave a **finished**
   question: the terminal CAS may commit and the cancellation arrive before the call
   returns, so the deferral is `ACCEPTED` — correctly, the apply did happen — while
@@ -2105,9 +2109,10 @@ guessing. The recovery uses only ratified verbs, and it is **two steps, in order
 
 1. **Dispose of the stranded question** (`forget_question`, §8 → `delete`, §2).
    Where the parent already names a successor — a cancellation caught after the
-   re-deferral admitted one (above) — the surface shows that question too, so the
-   user disposes of the stranded parent and still has the one their answer
-   raised.
+   re-deferral admitted one (above) — the surface shows that row too, rendered by
+   its own state (§7): a `PENDING` one is the question their answer raised and they
+   can go answer it; a `REJECTED` or `APPLYING` one is not, and says what it needs
+   instead.
    This is not optional bookkeeping and the ordering is the whole point: while the
    row lives it holds its `question_key`, so a re-proposal of the same correction
    would collide with it and be handed back an id nothing can claim. Deleting
@@ -2241,9 +2246,12 @@ On ratification:
    terminal row is retained and readable; cancelled before, the row is still
    `APPLYING` — with neither "repaired" by the coordinator, which is the assertion,
    since both are already right; **cancellation of the successor `defer`**, after
-   its commit and before it returns, driven for a newly admitted successor and for
-   one suppressed onto an existing question: the successor survives, the parent
-   keeps its stamped `successor_id`, and the recovery surface names it; an
+   its commit and before it returns: the successor survives and the parent keeps its
+   stamped `successor_id`. Driven for a newly admitted successor and for one
+   suppressed onto each of a `PENDING`, a `REJECTED` and an `APPLYING` row, since
+   the surface line differs per state and only the first is a question the user can
+   answer — the same four-way split the uncancelled path has, which is the point:
+   cancellation changes what the caller learned, not what the row is; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
