@@ -197,8 +197,13 @@ where leg 6's ingested sources and #441's captured moments would have to be
 retrofitted around it.
 
 **The batch is bounded, and the bound is named here rather than left to the
-lane.** `Settings` gains `observation_batch_size: int`, **positive, defaulting to
-20 episodes**, validated at load like every other tuning value. Every read in
+lane.** `Settings` gains `observation_batch_size: int`, **defaulting to 20 episodes and
+bounded to `[1, 2**63)` at load** — positive because a zero batch observes
+nothing while reporting health, and bounded above because the batch is read
+through `ConversationStore.turns`, whose `limit` "outside `[0, 2**63)`" is a
+`ValueError` by its own contract (§8). A setting the store read would refuse must
+fail at load, not at the first observation: that is what `load_settings` promises
+for every other value there. Every read in
 this system is bounded (ADR-0021 §4, ADR-0073 §2) and this one is also a *prompt*
 and an *egress*: an unbounded batch is a prompt nobody sized and a payload nobody
 measured. The default is deliberately small — a handful of exchanges, not a
@@ -1054,7 +1059,10 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   other by accident.
 - **Invalid limits** — a non-positive `observation_batch_size` or
   `observation_max_proposals` fails at load as a `ConfigurationError` (§1, §2),
-  the posture every other tuning value in `Settings` already takes.
+  **and so does an `observation_batch_size` of `2**63`**, which would otherwise
+  load cleanly and make every observation raise from the store read it is
+  translated into. The posture is the one every other tuning value in `Settings`
+  already takes.
 - **A model failure and a malformed response**, asserting the two different
   behaviours §4 ratifies: propagate, versus degrade-and-count — the second
   asserting the counts reach the *user-facing* outcome, not merely the
