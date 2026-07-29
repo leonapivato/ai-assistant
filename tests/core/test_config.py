@@ -568,3 +568,106 @@ def test_the_spec_pattern_accepts_every_model_name_pydantic_ai_ships() -> None:
         "the model-spec pattern rejects names pydantic-ai ships, so a deployment "
         f"naming one could not start: {sorted(rejected)}"
     )
+
+
+# --- the observer's route and its two per-call bounds (ADR-0077 §§1, 2, 3) ---
+
+
+def test_observer_model_is_unset_by_default() -> None:
+    """Unset means "read through the route conversation already uses" (ADR-0077 §3).
+
+    The default that **widens nothing**: ADR-0004 §2's property is that user data
+    reaches only providers the operator explicitly configured, and a default naming
+    no new provider cannot breach it. Which route unset resolves to is the
+    composition root's to apply — this only pins that the field says nothing.
+    """
+    assert Settings().observer_model is None
+
+
+def test_observer_model_accepts_a_route_of_its_own() -> None:
+    """Set, it names the route that reads episodes — separably from the answers'."""
+    settings = Settings(observer_model="openai:gpt-5", default_model="anthropic:claude-opus-4-8")
+    assert settings.observer_model == "openai:gpt-5"
+    assert settings.default_model == "anthropic:claude-opus-4-8"
+
+
+def test_a_malformed_observer_model_is_rejected_at_load() -> None:
+    """Validated for form like every other spec (ADR-0062 §2)."""
+    with pytest.raises(ValidationError, match="malformed model spec"):
+        Settings(observer_model="not-a-spec")
+
+
+def test_observer_model_may_repeat_the_default_model() -> None:
+    """Naming the conversational route explicitly is not a useless duplicate route.
+
+    ``_fallbacks_are_alternatives`` refuses a fallback repeating an earlier route,
+    because routing would re-send the same prompt to the same place. The observer is
+    not in that order at all — it is one route that never falls back — so naming
+    ``default_model`` there is simply saying out loud what unset already means.
+    """
+    settings = Settings(default_model="openai:gpt-5", observer_model="openai:gpt-5")
+    assert settings.observer_model == settings.default_model
+
+
+def test_observer_model_parses_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator sets one variable to move the episodic read to another model."""
+    monkeypatch.setenv("ASSISTANT_OBSERVER_MODEL", "openai:gpt-5")
+    assert load_settings().observer_model == "openai:gpt-5"
+
+
+def test_the_observation_bounds_have_the_defaults_the_adr_names() -> None:
+    """20 episodes and 5 proposals — named here, not left to the implementation.
+
+    ADR-0074 §9.3's rule applied by ADR-0077 §1: two conforming stages picking 20
+    and 2,000 would send categorically different amounts of Tier 1 data to a model
+    while each believed it conformed.
+    """
+    settings = Settings()
+    assert settings.observation_batch_size == 20
+    assert settings.observation_max_proposals == 5
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_non_positive_observation_batch_size_is_rejected(value: int) -> None:
+    """A zero batch observes nothing while reporting health (ADR-0077 §1)."""
+    with pytest.raises(ValidationError):
+        Settings(observation_batch_size=value)
+
+
+def test_an_observation_batch_size_at_the_stores_range_bound_is_rejected() -> None:
+    """``2**63`` would load cleanly and make every observation raise (ADR-0077 §1).
+
+    The batch is read through ``ConversationStore.turns``, whose ``limit`` outside
+    ``[0, 2**63)`` is a ``ValueError`` by its own contract. A setting the store would
+    refuse must fail at load, not at the first observation — which is what
+    ``load_settings`` promises for every other value here.
+    """
+    with pytest.raises(ValidationError):
+        Settings(observation_batch_size=2**63)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_non_positive_observation_max_proposals_is_rejected(value: int) -> None:
+    """A zero proposal bound could never propose anything (ADR-0077 §2)."""
+    with pytest.raises(ValidationError):
+        Settings(observation_max_proposals=value)
+
+
+def test_load_settings_rejects_an_invalid_observation_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It fails at load as a ``ConfigurationError``, like every other bad tuning."""
+    monkeypatch.setenv("ASSISTANT_OBSERVATION_BATCH_SIZE", "0")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
+
+
+def test_the_observation_bounds_parse_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both are ordinary integers in the environment, with the ``ASSISTANT_`` prefix."""
+    monkeypatch.setenv("ASSISTANT_OBSERVATION_BATCH_SIZE", "4")
+    monkeypatch.setenv("ASSISTANT_OBSERVATION_MAX_PROPOSALS", "2")
+    settings = load_settings()
+    assert settings.observation_batch_size == 4
+    assert settings.observation_max_proposals == 2

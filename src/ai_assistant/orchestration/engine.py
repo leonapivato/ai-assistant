@@ -30,6 +30,15 @@ and destroy any of it (:class:`Belief`; ADR-0073 §7). Inspection is where
 into its band is ADR-0072 §1's projection, and an adapter doing it would put that
 projection in `interfaces/` (ADR-0073 §7).
 
+:meth:`Engine.observe` is the third non-turn leg (ADR-0077 §8): the *passive* half
+of accumulation, where ``learn`` is the dictated one. It reads a bounded batch of
+a conversation's episodes, has the injected ``Observer`` propose what they justify
+believing, and puts each proposal through the same write path ``learn`` uses —
+returning an
+:class:`~ai_assistant.orchestration.observation.ObservationReport`. It is
+deliberately explicit: nothing triggers it but a caller, which today is the CLI
+and later is leg 5's scheduler, unchanged.
+
 **Scope today.** ``respond`` "still ends at the plan" and the multi-step
 plan-driving stage — ordering, dependencies and cancellation across a plan's
 steps — is "the next slice" (`loop.py`). So a turn drives **at most one** step,
@@ -85,6 +94,7 @@ if TYPE_CHECKING:
         ConversationLifecycle,
     )
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
+    from ai_assistant.orchestration.observation import ObservationReport, ObservationStage
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
 
 _log = structlog.get_logger(__name__)
@@ -335,7 +345,7 @@ class LearnOutcome:
         return cls(
             results=tuple(
                 IngestSummary(
-                    decision=_learn_decision(result.decision.kind),
+                    decision=learn_decision(result.decision.kind),
                     record_id=result.record_id,
                     reason=result.decision.reason,
                 )
@@ -344,12 +354,17 @@ class LearnOutcome:
         )
 
 
-def _learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
+def learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
     """Map a ``core`` memory ruling to its orchestration-level echo (ADR-0042 §1).
 
     Total by construction: every :class:`~ai_assistant.core.types.MemoryDecisionKind`
     is handled, so a new ruling added to ``core`` fails type-checking here until it
     is given an echo, rather than silently losing its rendering.
+
+    Package-internal rather than module-private: the observation stage translates
+    the rulings it collects the same way, because ADR-0077 §4 puts every proposal
+    through the write path ``learn`` already uses — and two copies of a total
+    mapping is how one of them silently stops being total.
     """
     match kind:
         case MemoryDecisionKind.ACCEPT:
@@ -579,6 +594,7 @@ class Engine:
         trail: AuditTrail,
         memory: MemoryStore,
         conversations: ConversationLifecycle,
+        observation: ObservationStage,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -636,6 +652,18 @@ class Engine:
                 Required rather than optional, deliberately — an engine that could
                 be built without it is an engine that can silently record nothing,
                 which is the one failure ADR-0074 §9 item 6 asks to be *reported*.
+            observation: The observation stage (ADR-0077 §8) — the other layer
+                holding both durable stores, because selecting a batch of episodes
+                spans them exactly as capture does. It must be wired to the *same*
+                ``MemoryStore`` passed above and to a writer over it, a
+                composition-root obligation of the same shape: a stage over a
+                second store would select episodes the write path cannot cite, and
+                every proposal it made would be refused for evidence that resolves
+                perfectly well in the store the user reads. Required rather than
+                optional, for the reason ``conversations`` is: an engine that could
+                be built without it is an engine whose ``observe`` silently does
+                nothing, and this operation is the *only* thing that fills the
+                derived band.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -692,6 +720,7 @@ class Engine:
         self._trail = trail
         self._memory = memory
         self._conversations = conversations
+        self._observation = observation
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -885,6 +914,63 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._learn(event))
+
+    async def observe(self, conversation_id: str | None = None) -> ObservationReport:
+        """Distil beliefs from a conversation's recent turns (ADR-0077 §8).
+
+        The accumulation leg, and an **explicit operation**: it is not wired into
+        the turn, nothing polls it, and no background task runs it. Four reasons,
+        in the order they bind (ADR-0077 §8): nothing is waiting on an observation
+        while a turn is, and a one-shot process has no "after the answer" to hide
+        the round trip in; the roadmap sequences leg 4's soundness work against
+        volume, and a per-turn trigger *is* volume on the day it merges; the first
+        producer that sends accumulated history to a model should not run without
+        the user knowing; and leg 5's scheduler becomes a second caller of this
+        same operation, so cadence becomes configuration rather than a contract
+        change.
+
+        Delegates to the
+        :class:`~ai_assistant.orchestration.observation.ObservationStage`, which
+        selects the batch, hands it to the injected ``Observer``, and puts each
+        returned proposal through the ``MemoryWriter`` — conflict resolution, the
+        policy's ruling and the write all happen behind that seam, exactly as
+        :meth:`learn` does it. The engine rules on nothing and writes nothing
+        itself.
+
+        Tracked like :meth:`converse`/:meth:`learn`: it reads both durable stores
+        and writes to one, so shutdown must drain it before closing those
+        connections (ADR-0042 §2).
+
+        Args:
+            conversation_id: The conversation to observe, or ``None`` for the most
+                recently active one (ADR-0077 §8). Relayed untouched: whether it
+                names a conversation is the store's question, and an unknown id
+                comes back as an ``AssistantError`` rather than as a silently empty
+                observation.
+
+        Returns:
+            An :class:`~ai_assistant.orchestration.observation.ObservationReport`:
+            what was proposed and what became of each proposal, what the producer
+            and the write path threw away, and **which route read the episodes** —
+            the report ADR-0013 §6 records as owed, made on the one call where it
+            matters most. The route is absent when no observer was called, which is
+            what a window whose episodes have all gone yields.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            UnknownConversationError: If ``conversation_id`` names nothing, or names
+                a conversation the user deleted.
+            ConversationStoreError: If the conversation index cannot be read.
+            MemoryStoreError: If an episode cannot be read, or the write path
+                failed. A partially applied batch is left as it stands and nothing
+                claims success for it (ADR-0022 §4); ``beliefs`` shows exactly what
+                landed.
+            ModelError: If the observing call failed, unwrapped and with its
+                classification intact. It is never re-sent to a second provider
+                (ADR-0077 §3).
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._observation.observe(conversation_id))
 
     async def beliefs(
         self,

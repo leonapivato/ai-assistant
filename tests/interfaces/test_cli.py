@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     FeedbackKind,
     Idempotency,
     MemoryKind,
+    MemorySource,
     PlanStep,
     Reversibility,
     RiskLevel,
@@ -45,6 +46,9 @@ from ai_assistant.orchestration import (
     LearnDecision,
     LearningLoop,
     LearnOutcome,
+    ObservationReport,
+    ObservationStage,
+    ObservedProposal,
     StepExecutor,
     StepRunner,
     TurnOutcome,
@@ -58,6 +62,7 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeObserver,
     FakePlanStore,
     FakeToolInvoker,
 )
@@ -68,6 +73,11 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+
+#: The route the harness's observation stage reports (ADR-0077 §3). In production
+#: the composition root supplies it from ``Settings``; here it is fixed so a case
+#: can assert the terminal names the route that read the episodes.
+OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 PATIENT = timedelta(seconds=30)
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
@@ -131,6 +141,25 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
 
 
+def _observation(
+    conversations: FakeConversationStore, memory: FakeMemoryStore, writer: FakeMemoryWriter
+) -> ObservationStage:
+    """The observation stage over the same stores the rest of the engine holds.
+
+    Wired the way the composition root wires it (ADR-0077 §8): one memory store for
+    selection, retrieval and the write path, so a proposal's citations resolve
+    against the store its episodes came from.
+    """
+    return ObservationStage(
+        observer=FakeObserver(),
+        conversations=conversations,
+        memory=memory,
+        writer=writer,
+        batch_size=20,
+        route=OBSERVER_ROUTE,
+    )
+
+
 def _engine(
     *,
     tools: tuple[ToolDefinition, ...] = (),
@@ -162,6 +191,7 @@ def _engine(
         now=lambda: AT,
         id_factory=lambda: next(ids),
     )
+    conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
         loop=loop,
         runner=runner,
@@ -169,11 +199,12 @@ def _engine(
         trail=trail,
         memory=memory,
         conversations=ConversationLifecycle(
-            conversations=FakeConversationStore(now=lambda: AT),
+            conversations=conversations,
             memory=memory,
             retention=timedelta(days=30),
             now=lambda: AT,
         ),
+        observation=_observation(conversations, memory, writer),
         closers=closers,
     )
 
@@ -1093,6 +1124,7 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
             retention=timedelta(days=30),
             now=lambda: AT,
         ),
+        observation=_observation(conversations, memory, writer),
     )
     return engine, conversations
 
@@ -1282,3 +1314,303 @@ async def test_forget_conversation_declines_an_id_it_cannot_show(output: StringI
 
     assert code == cli._EXIT_ERROR
     assert "No conversation has the id" in output.getvalue()
+
+
+# --- observe: the accumulation surface (ADR-0077 §8, §9.8) ---------------
+
+
+def _proposal(
+    *,
+    decision: LearnDecision | None = LearnDecision.STORED,
+    record_id: str | None = "rec-9",
+    content: str = "the user prefers metric units",
+    reason: str = "fake: configured decision",
+) -> ObservedProposal:
+    """One entry of an observation report, as the stage builds it."""
+    return ObservedProposal(
+        content=content,
+        kind=MemoryKind.SEMANTIC,
+        step=MemorySource.OBSERVED,
+        confidence=0.6,
+        evidence_count=2,
+        rationale="they said so twice",
+        decision=decision,
+        record_id=record_id,
+        reason=reason,
+    )
+
+
+class _RecordingObserveEngine:
+    """A stand-in façade recording the observation calls the command makes."""
+
+    def __init__(self, report: ObservationReport) -> None:
+        self._report = report
+        self.observed: list[str | None] = []
+
+    async def observe(self, conversation_id: str | None = None) -> ObservationReport:
+        self.observed.append(conversation_id)
+        return self._report
+
+    async def start(self) -> None:
+        """The start-up sweeps, which this stand-in has no stores to sweep."""
+
+    async def aclose(self) -> None:
+        """Nothing to release: this stand-in owns no resource."""
+
+
+class _FailingObserveEngine(_RecordingObserveEngine):
+    """A façade whose observation fails, so the boundary is exercised."""
+
+    def __init__(self) -> None:
+        super().__init__(ObservationReport())
+
+    async def observe(self, conversation_id: str | None = None) -> ObservationReport:
+        self.observed.append(conversation_id)
+        msg = "memory is unavailable"
+        raise MemoryStoreError(msg)
+
+
+def _observed_report(**overrides: object) -> ObservationReport:
+    """A report over one conversation, with one stored belief unless overridden."""
+    fields: dict[str, object] = {
+        "proposals": (_proposal(),),
+        "route": OBSERVER_ROUTE,
+        "conversation_id": "conv-1",
+        "episodes_read": 3,
+    }
+    fields.update(overrides)
+    return ObservationReport(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+
+def test_observe_names_what_was_read_and_which_model_read_it(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0013 §6's owed reporting, on the call where it matters most (ADR-0077 §3).
+
+    The user chooses when their transcript is read, and the surface tells them which
+    provider read it — a stronger form of consent than a setting.
+    """
+    engine = _RecordingObserveEngine(_observed_report())
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "3 episode(s)" in rendered
+    assert "conv-1" in rendered
+    assert OBSERVER_ROUTE in rendered
+    assert engine.observed == [None], "no id means the engine's own selector"
+
+
+def test_observe_relays_the_conversation_it_was_given(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The id is relayed untouched: whether it names a conversation is the engine's."""
+    engine = _RecordingObserveEngine(_observed_report(conversation_id="conv-2"))
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["observe", "conv-2"])
+
+    assert result.exit_code == 0
+    assert engine.observed == ["conv-2"]
+
+
+def test_observe_shows_each_belief_with_its_step_evidence_and_ruling(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Everything the surface owes: what was proposed, on what, and what became of it.
+
+    The **epistemic step** leads rather than the band, because every observed
+    proposal is derived and ``observed`` versus ``inferred`` is the informative half
+    (ADR-0072 §3). The id is shown so the belief is immediately inspectable with
+    ``assistant beliefs`` and destroyable with ``assistant forget``.
+    """
+    _wire(monkeypatch, _RecordingObserveEngine(_observed_report()))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "observed" in rendered
+    assert "semantic" in rendered
+    assert "0.60" in rendered
+    assert "2 episode(s)" in rendered
+    assert "the user prefers metric units" in rendered
+    assert "they said so twice" in rendered
+    assert "Stored a new memory." in rendered
+    assert "rec-9" in rendered
+    assert "assistant beliefs" in rendered
+
+
+def test_observe_renders_a_deferral_in_full_and_says_it_is_not_queued(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ASK_USER`` is **visible, not persisted** — the ratified interim (ADR-0077 §4).
+
+    Nothing records a deferred proposal (#423 stays open until ADR-0078 closes it),
+    so this rendering is the whole of it: the candidate, its evidence, the policy's
+    reason, and an explicit statement that it is gone when the command ends. A bare
+    ruling with no candidate would leave the user nothing to act on, which is #423's
+    complaint one level down.
+    """
+    report = _observed_report(
+        proposals=(
+            _proposal(
+                decision=LearnDecision.DEFERRED,
+                record_id=None,
+                content="the user works from Lisbon",
+                reason="fake: an inference never silently overrides an assertion",
+            ),
+        )
+    )
+    _wire(monkeypatch, _RecordingObserveEngine(report))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    # Flattened: Rich wraps at the console width, so a long reason spans lines.
+    rendered = " ".join(output.getvalue().split())
+    assert "the user works from Lisbon" in rendered  # the candidate, not just a ruling
+    assert "an inference never silently overrides an assertion" in rendered
+    assert "Not stored" in rendered
+    assert "gone when this command ends" in rendered
+    assert "assistant learn" in rendered, "the surface names what the user can do instead"
+
+
+def test_observe_reports_a_proposal_the_write_path_refused_for_lost_evidence(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drop is reported, never omitted (ADR-0077 §5).
+
+    No ruling was sought, so no ruling is claimed: the line says the belief was not
+    stored and why, rather than showing a decision nobody made.
+    """
+    report = _observed_report(
+        proposals=(
+            _proposal(
+                decision=None,
+                record_id=None,
+                # The stage's own words for a drop: no ruling was sought, so there is
+                # no policy reason to relay (ADR-0077 §5).
+                reason=(
+                    "the evidence it cited went away between selection and the write, "
+                    "so nothing was stored"
+                ),
+            ),
+        ),
+        dropped_unsupported=1,
+    )
+    _wire(monkeypatch, _RecordingObserveEngine(report))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "Not stored" in rendered
+    assert "the evidence it cited went away" in rendered
+
+
+def test_observe_reports_what_was_thrown_away(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Silence must not read as "there was nothing to learn" (ADR-0022 §3, ADR-0077 §4).
+
+    The three counts stay apart because they answer different questions: what the
+    producer could not use, what it dropped to stay inside its bound, and what the
+    write path refused for evidence that had gone.
+    """
+    report = _observed_report(discarded_unusable=2, discarded_over_limit=1, dropped_unsupported=3)
+    _wire(monkeypatch, _RecordingObserveEngine(report))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "Discarded 6" in rendered
+    assert "2 unusable" in rendered
+    assert "1 over the per-pass limit" in rendered
+    assert "3 whose evidence went away" in rendered
+
+
+def test_observe_says_so_when_the_batch_justified_no_belief(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pass that proposed nothing is a normal outcome, reported as one (ADR-0022 §4)."""
+    _wire(monkeypatch, _RecordingObserveEngine(_observed_report(proposals=())))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    assert "Nothing in them was worth believing" in output.getvalue()
+
+
+def test_observe_does_not_claim_a_route_when_no_model_was_asked(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window whose episodes have all gone reaches no provider (ADR-0077 §9.7).
+
+    Printing a route here would claim a read that never happened — the one thing §3's
+    reporting exists to make truthful.
+    """
+    report = ObservationReport(conversation_id="conv-1", route=None)
+    _wire(monkeypatch, _RecordingObserveEngine(report))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert OBSERVER_ROUTE not in rendered
+    assert "Nothing to observe" in rendered
+    assert "no model was asked" in rendered
+
+
+def test_observe_with_nothing_to_observe_at_all_says_so(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty store points the user at the command that fills it."""
+    _wire(monkeypatch, _RecordingObserveEngine(ObservationReport()))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    assert "No conversation to observe" in output.getvalue()
+
+
+def test_observe_renders_a_failure_rather_than_a_traceback(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One error boundary spans every stage, mapping to a non-zero code (ADR-0042 §7)."""
+    _wire(monkeypatch, _FailingObserveEngine())
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == cli._EXIT_ERROR
+    assert "Error" in output.getvalue()
+    assert "memory is unavailable" in output.getvalue()
+
+
+async def test_an_observed_belief_is_immediately_inspectable(output: StringIO) -> None:
+    """End to end over a real engine: observe, then read it back (ADR-0077 §9.8).
+
+    The claim the surface makes — "see them with ``assistant beliefs``" — asserted
+    rather than promised, over the same store the observation wrote to. The
+    provenance a reader gets is the derived band, so ``beliefs`` shows the belief
+    with the standing it was formed at.
+    """
+    engine, conversations = _conversation_engine()
+    try:
+        await cli._drive_turn(
+            engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True
+        )
+        conversation = (await conversations.recent())[0].id
+
+        assert await cli._drive_observe(engine, conversation) == 0
+        assert "1 belief(s) proposed" in output.getvalue()
+
+        assert await cli._drive_beliefs(engine, bands=None, kinds=None, limit=50, offset=0) == 0
+    finally:
+        await engine.aclose()
+
+    rendered = output.getvalue()
+    assert "derived" in rendered, "an observed belief reads back in the derived band"

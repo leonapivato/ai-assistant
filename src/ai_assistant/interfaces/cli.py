@@ -24,6 +24,13 @@ distinction matters most. A conversation the user deleted reaches none of these 
 not because anything here filters it, but because the store hides a stamped
 conversation from every read that presents one.
 
+``observe`` is the accumulation surface (ADR-0077 §8, §9.8): it asks the engine to
+read back one conversation's recent turns, and renders what was proposed, what the
+gate did with each proposal, and **which model route read the transcript**. It is
+explicit by design — nothing here polls, schedules, or observes as a side effect of
+another command — and it renders a deferred proposal in full, because nothing
+persists one yet (#423).
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -56,6 +63,8 @@ if TYPE_CHECKING:
         ConversationSummary,
         Engine,
         LearnOutcome,
+        ObservationReport,
+        ObservedProposal,
         TurnOutcome,
     )
 
@@ -434,6 +443,29 @@ def beliefs(
 
 
 @app.command()
+def observe(
+    conversation_id: str | None = typer.Argument(
+        None,
+        help="The conversation to observe. Defaults to the most recently active one.",
+    ),
+) -> None:
+    """Distil beliefs from a conversation's recent turns, and record what stuck.
+
+    The assistant reads back what was actually said, proposes what it should
+    durably believe about you as a result, and puts each proposal through the same
+    gate ``assistant learn`` uses — so nothing is stored just because a model
+    suggested it. What comes back names the model route that read the transcript,
+    every belief proposed and what became of it, and anything thrown away.
+
+    Nothing observes on its own: this runs only when you ask for it. Whatever is
+    stored is immediately visible with ``assistant beliefs`` and destroyable with
+    ``assistant forget``.
+    """
+    code = asyncio.run(_observe_conversation(conversation_id))
+    raise typer.Exit(code)
+
+
+@app.command()
 def forget(
     belief_id: str = typer.Argument(..., help="The id of the belief to destroy."),
     *,
@@ -662,6 +694,30 @@ async def _list_beliefs(
     return max(code, shutdown_code)
 
 
+async def _observe_conversation(conversation_id: str | None) -> int:
+    """Load settings, build the engine, run one observation pass, and close it.
+
+    The accumulation counterpart to :func:`_learn_feedback`, with the same single
+    error boundary (ADR-0042 §7): every stage that can fail — loading settings,
+    configuring logging, constructing the engine, the observation itself, and
+    shutdown — is inside it, so an :class:`AssistantError` is rendered and mapped to
+    a non-zero exit code rather than escaping as a traceback. The id is relayed
+    untouched, exactly as ``ask --conversation`` relays one: whether it names a
+    conversation is the engine's question (ADR-0074 §1).
+    """
+    try:
+        engine = await _open_engine()
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_observe(engine, conversation_id)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """Load settings, build the engine, run the deletion ceremony, and close it.
 
@@ -877,6 +933,24 @@ async def _drive_forget_conversation(
     return _EXIT_OK
 
 
+async def _drive_observe(engine: Engine, conversation_id: str | None) -> int:
+    """Run one observation pass and render what it did (ADR-0077 §8, ADR-0042 §6).
+
+    The adapter conveys the request and renders the engine's
+    :class:`~ai_assistant.orchestration.ObservationReport`; it selects no episodes,
+    proposes nothing, and authors no memory write — all of that is behind the
+    façade (ADR-0042 §6). An :class:`AssistantError` from any stage is rendered and
+    mapped to a non-zero exit code.
+    """
+    try:
+        report = await engine.observe(conversation_id)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_observation(report)
+    return _EXIT_OK
+
+
 async def _drive_learn(engine: Engine, event: FeedbackEvent) -> int:
     """Submit one feedback event and render what memory did with it (ADR-0042 §3, §6).
 
@@ -1079,6 +1153,107 @@ def _render_learn(outcome: LearnOutcome) -> None:
     )
     for summary in outcome.results:
         console.print(f"  - {_LEARN_MESSAGES[summary.decision]} [dim]({_safe(summary.reason)})[/]")
+
+
+def _render_observation(report: ObservationReport) -> None:
+    """Render one observation pass (ADR-0077 §8, §9.8).
+
+    Four things the user is owed, in this order:
+
+    1. **what was read, and by which model.** ADR-0013 §6 records "which provider
+       answered is not currently reported, and should be once there is an interface
+       to report it"; this is that interface, for the one call where it matters
+       most — a model reading back the transcript. The route is *absent* when the
+       observer was never called, and is then not claimed.
+    2. **every belief proposed**, whether or not it was stored, with the evidence
+       behind it and the gate's ruling. A proposal the gate refused is as
+       informative as one it kept.
+    3. **the deferrals**, in full and by name. ``ASK_USER`` writes nothing and
+       nothing persists it (ADR-0077 §4, #423), so if this rendering omitted the
+       candidate the deferral would be invisible — which is the gap the interim is
+       there to close. The note under a deferred proposal says outright that it is
+       not queued.
+    4. **what was thrown away**, so silence never reads as "there was nothing to
+       learn" (ADR-0022 §3).
+    """
+    if report.conversation_id is None:
+        console.print("[dim]No conversation to observe yet — have one first with[/] assistant ask.")
+        return
+    if report.route is None:
+        console.print(
+            f"[dim]Nothing to observe in conversation[/] {_safe(report.conversation_id)}[dim]: "
+            "none of its recent turns still has a recorded episode, so no model was asked.[/]"
+        )
+        return
+    console.print(
+        f"[bold]Observed[/] {report.episodes_read} episode(s) from conversation "
+        f"{_safe(report.conversation_id)}, read by [bold cyan]{_safe(report.route)}[/]."
+    )
+    if not report.proposals:
+        console.print("[dim]Nothing in them was worth believing durably.[/]")
+    else:
+        console.print(
+            f"{len(report.proposals)} belief(s) proposed, {report.stored} stored. "
+            "[dim]See them with[/] assistant beliefs[dim].[/]"
+        )
+        for proposal in report.proposals:
+            _render_observed_proposal(proposal)
+    _render_observation_discards(report)
+
+
+def _render_observed_proposal(proposal: ObservedProposal) -> None:
+    """Render one proposed belief and what the gate did with it.
+
+    The epistemic step leads the row rather than the band: every observed proposal
+    is in the ``derived`` band by contract, so the band carries no information here
+    while ``observed`` versus ``inferred`` is the difference between "your own words
+    show this" and "I generalised from them" (ADR-0072 §3).
+
+    Engine-supplied text — the content, the rationale, the policy's reason, the id —
+    is neutralised for this terminal like any other (``_safe``, ADR-0042 §4).
+    """
+    console.print(
+        f"\n  [bold cyan]{proposal.step.value}[/] · {proposal.kind.value} · "
+        f"confidence {proposal.confidence:.2f} · "
+        f"from {proposal.evidence_count} episode(s)"
+    )
+    console.print(f"  {_safe(proposal.content)}")
+    console.print(f"  [dim]Why:[/] {_safe(proposal.rationale)}")
+    if proposal.decision is None:
+        console.print(f"  [yellow]Not stored:[/] {_safe(proposal.reason)}.")
+        return
+    console.print(
+        f"  [dim]Memory:[/] {_LEARN_MESSAGES[proposal.decision]} [dim]({_safe(proposal.reason)})[/]"
+    )
+    if proposal.decision is LearnDecision.DEFERRED:
+        console.print(
+            "  [yellow]Shown here and nowhere else:[/] nothing has recorded this proposal, "
+            "so it is gone when this command ends. Assert it yourself with "
+            "[bold]assistant learn[/], or forget what it conflicts with."
+        )
+    if proposal.record_id is not None:
+        console.print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
+
+
+def _render_observation_discards(report: ObservationReport) -> None:
+    """Say what was thrown away getting here, or that nothing was (ADR-0077 §4).
+
+    Reported rather than left silent, because "no beliefs" and "ten beliefs, all
+    unusable" are the two states this counting exists to tell apart — silence
+    reading as success is the failure ``memory_degraded`` was added to prevent
+    (ADR-0022 §3). The three counts are kept apart because they answer different
+    questions: what the model emitted and the producer could not use, what the
+    producer dropped to stay inside its bound, and what the write path refused
+    because the evidence had gone.
+    """
+    if not report.discarded:
+        return
+    console.print(
+        f"\n[dim]Discarded {report.discarded}: "
+        f"{report.discarded_unusable} unusable, "
+        f"{report.discarded_over_limit} over the per-pass limit, "
+        f"{report.dropped_unsupported} whose evidence went away before it could be stored.[/]"
+    )
 
 
 def _when(instant: datetime) -> str:

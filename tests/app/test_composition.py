@@ -18,6 +18,7 @@ from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import AssistantError, ConfigurationError, ModelError
 from ai_assistant.core.types import Reversibility, RiskLevel
+from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, SqliteMemoryStore
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.orchestration import Engine
@@ -480,3 +481,73 @@ def test_a_context_config_failure_touches_no_disk_either(
     # The build failed at the context step, before touching disk: no data
     # directory, and therefore none of the connection-owning stores' files.
     assert not absent.exists()
+
+
+async def test_build_engine_wires_the_observation_stage_over_the_one_memory_store(
+    tmp_path: Path,
+) -> None:
+    """The stage selects from, and writes through, the store everything else uses.
+
+    ADR-0028 §4's obligation applied to a second producer (ADR-0077 §8): a stage over
+    a second store would select episodes the write path cannot cite, so every
+    proposal would be refused for evidence that resolves perfectly well in the store
+    the user reads — and the derived band would stay empty while the run reported
+    health.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        memory = engine._loop._memory
+        stage = engine._observation
+        assert stage._memory is memory
+        assert stage._writer is engine._loop._writer
+        # The same conversation index the capture stage appends turns to, or the
+        # selection would look for a conversation nothing ever recorded.
+        assert stage._conversations is engine._conversations._conversations
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_gives_the_stage_and_the_producer_one_batch_bound(
+    tmp_path: Path,
+) -> None:
+    """One ``Settings`` value bounds both, which is what keeps them in step.
+
+    ADR-0077 §1 puts the oversized-batch refusal on the producer because the
+    Protocol is a cross-subsystem contract; §9.7 correspondingly has the stage select
+    **at most** that many. Wired from two values, the producer's ``ValueError`` would
+    stop being a guard on a contract and start being a routine failure.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING, observation_batch_size=7, observation_max_proposals=2
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        stage = engine._observation
+        observer = stage._observer
+        assert isinstance(observer, ModelBackedObserver)
+        assert stage._batch_size == 7
+        assert observer.max_batch_size == 7
+        assert observer.max_proposals == 2
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_tells_the_stage_the_route_the_observer_reads_through(
+    tmp_path: Path,
+) -> None:
+    """The route the report names is the one the provider was built from (ADR-0013 §6).
+
+    No seam exposes it — an ``Observer`` holds its provider and shows nobody — so the
+    label is supplied by the layer that built the provider, and a stage told anything
+    else would report a read that did not happen.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-x",
+        observer_model="openai:gpt-5",
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert engine._observation._route == "openai:gpt-5"
+    finally:
+        await engine.aclose()

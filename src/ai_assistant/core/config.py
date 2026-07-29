@@ -285,6 +285,38 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Which model reads the episodic stream (ADR-0077 §3). A **first-class named
+    # setting** rather than an accident of ``default_model``, because an
+    # observation's prompt is accumulated history — the most sensitive data the
+    # system holds — and the roadmap demands that choice be explicit and separable
+    # from the route the user's answers come from.
+    #
+    # **Unset — the default — means the observer reads through the route already
+    # configured for conversation** (``default_model``). That is chosen over
+    # off-by-default and over a required second spec for one reason: it *widens
+    # nothing*. ADR-0004 §2's property is that user data reaches only providers the
+    # user explicitly configured, and a default naming no new provider cannot
+    # breach it; an off-by-default observer would make leg 3 unreachable without
+    # configuration, and a required second spec would make the commonest correct
+    # setup — one provider used for everything — an error.
+    #
+    # It is deliberately **not** part of ``fallback_models``' preference order, and
+    # the composition root builds it as a route of its own that **never falls
+    # back** (ADR-0013 §4, §6): fallback buys reliability by widening the set of
+    # providers that see a prompt, and for a deferrable job over accumulated
+    # history the reliability is worth nothing and the widening is the one cost
+    # that matters. Naming ``default_model`` here explicitly is therefore *not* the
+    # same as leaving it unset in general — it is the same route, still without
+    # fallback — so no duplicate check applies to it.
+    observer_model: _ModelSpec | None = Field(
+        default=None,
+        description=(
+            "Model that reads the episodic stream when observing, in pydantic-ai "
+            "'provider:model' form. Unset means the same route conversation uses. "
+            "Never falls back, whichever route it names."
+        ),
+    )
+
     # Resilience knobs for the model layer. The deadline is per attempt, so the
     # worst-case wall time of a call is roughly
     # ``max_attempts * timeout + total backoff``.
@@ -406,6 +438,39 @@ class Settings(BaseSettings):
             "How long a deleted conversation's tombstone survives the deletion, so a "
             "capture that commits late is still swept (ADR-0074 §8). Positive and finite."
         ),
+    )
+
+    # --- Observation (ADR-0077) ------------------------------------------
+    # The two per-call bounds on an observation pass. Both are **named here rather
+    # than left to the implementation** (ADR-0077 §1, §2, following ADR-0074 §9.3):
+    # two conforming stages picking 20 and 2,000 would send categorically different
+    # amounts of Tier 1 data to a model while each believed it conformed.
+    #
+    # ``observation_batch_size`` is how many of a conversation's most recent turns
+    # one pass reads. Positive, because a zero batch observes nothing while
+    # reporting health; and bounded **above** by ``2**63`` because the batch is
+    # read through ``ConversationStore.turns``, whose ``limit`` outside
+    # ``[0, 2**63)`` is a ``ValueError`` by its own contract. A setting the store
+    # would refuse must fail at load, not at the first observation — which is what
+    # ``load_settings`` promises for every other value here. The default is
+    # deliberately small: a handful of exchanges, not a month of transcript,
+    # because this batch is both a prompt and an egress.
+    #
+    # ``observation_max_proposals`` is the most beliefs one pass may return; excess
+    # is discarded rather than queued (a queue is durable state nothing ratifies,
+    # and the episodes remain in the store for a later pass). Five is ADR-0077 §2's
+    # selectivity bar in numbers — a batch that genuinely yields more durable
+    # beliefs than that is a batch worth observing twice.
+    observation_batch_size: int = Field(
+        default=20,
+        ge=1,
+        lt=2**63,
+        description=("How many of a conversation's most recent turns one observation pass reads."),
+    )
+    observation_max_proposals: int = Field(
+        default=5,
+        ge=1,
+        description="The most beliefs one observation pass may propose; excess is discarded.",
     )
 
     # --- Permissions -----------------------------------------------------
