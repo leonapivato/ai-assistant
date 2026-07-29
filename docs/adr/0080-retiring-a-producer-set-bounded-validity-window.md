@@ -1,6 +1,6 @@
 # 80. Retiring a producer-set bounded validity window clamps, and refuses only what it cannot represent
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This ADR partially supersedes [ADR-0045](0045-memory-records-carry-a-validity-window.md)**,
   in the scope named in §8: **§4 step 1's window-close instruction** (the
