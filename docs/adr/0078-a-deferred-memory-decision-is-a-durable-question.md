@@ -820,12 +820,21 @@ conforming to the words. It owes:
   `REDEFERRED` with the successor's; `REJECT` → `REJECTED`; and the coordinator's
   own pre-ingest window check → `STALE` without an ingest at all (§6).
 
-  **No write in this store may recreate a row a destruction removed**, and the rule
-  is stated over the class rather than over one method, because an earlier revision
-  stated it for `delete` alone and `clear` reopened it verbatim. Every destructive
-  operation — `delete`, `clear`, and `purge` — **linearizes against every write**,
-  and a write that lands after one finds nothing, does nothing, and reports what it
-  found.
+  **No *continuation* of a destroyed row may recreate it.** A continuation is a
+  write that mutates a row it has already observed — `claim` on a deferral it read
+  as `PENDING`, `resolve` on one it holds a claim or a state for. Every destructive
+  operation — `delete`, `clear`, `purge` — **linearizes against every
+  continuation**, and a continuation landing after one finds nothing, does nothing,
+  and reports what it found.
+
+  The rule is stated over that class rather than over one method, because an
+  earlier revision named `delete` alone and `clear` reopened it verbatim. It is
+  stated over *continuations* rather than over writes in general for the opposite
+  reason: `defer` is not a continuation, it **creates**, and §2 deliberately permits
+  a new question to reuse the id of a deleted one. A rule saying every write after
+  a destruction does nothing would forbid the very admission the physical-id rule
+  allows. Creating at a free id and resurrecting a destroyed row are different acts
+  that happen to touch the same key, and only the second is forbidden.
 
   For `resolve` that means: "atomic with its own read" bounds it against another
   `resolve` and says nothing about a destruction landing between that read and its
