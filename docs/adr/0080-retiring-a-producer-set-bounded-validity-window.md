@@ -565,6 +565,18 @@ because the test owns the clock. That is the deterministic form the shared suite
 cannot express without a clock seam it has ruled out, and it belongs beside the
 clamp and refusal regressions that are already there.
 
+**So is §3's tie, which nothing pins today.** The existing per-writer refusal
+tests plant `valid_from` strictly *after* the writer's clock, so they hold if
+`end <= valid_from` is weakened to `end < valid_from` — and under that weakening
+a target whose `valid_from` **equals** the close is written with the empty
+interval `[F, F)`, which `model_copy(update=...)` constructs without re-running
+`Validity`'s validator, so the fake retains it and SQLite persists a row that
+later fails decode. Each writer therefore also owes a clock-injected **tie**
+regression — `valid_from` exactly equal to the close instant — asserting
+`MemoryStoreError`, no correction written, and every record in the retirement
+set byte-identical. The shared disjunction cannot stand in for it: it is
+satisfied by the success branch, which the tie must never take.
+
 Driving the exact clamp and the exact refusal against an **injected** clock is
 therefore the per-writer tests' job and stays there (`test_ingest.py`,
 `test_fake_writer.py`, which already do the first two). The shared obligations
