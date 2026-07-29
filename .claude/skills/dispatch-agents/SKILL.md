@@ -5,9 +5,11 @@ description: Dispatch scoped work to parallel agents in sibling clones, then ver
 
 # dispatch-agents
 
-Runs the loop that begins where `find-parallel-work` stops. That skill
-*proposes* lanes; this one dispatches them, checks what returns, and merges in
-an order that respects contract-first.
+Runs the loop that begins where `pre-dispatch-survey` stops. That skill
+establishes *state* — what has merged, what open work already claims, where the
+slices would collide; this one dispatches the lanes, checks what returns, and
+merges in an order that respects contract-first. Scope itself comes from
+`docs/roadmap.md`, not from either skill.
 
 The commands here are illustrations for an operator, not an implementation —
 see §6. The judgement calls are yours, and §4 says why encoding them is a
