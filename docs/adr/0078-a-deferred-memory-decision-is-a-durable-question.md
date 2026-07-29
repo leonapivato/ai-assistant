@@ -1352,6 +1352,17 @@ performable at the boundary with what the writer already holds:
    to refuse writes nobody authorised. §5a's ordering and §2's validator are the
    polite versions; this is the one that holds when they are bypassed, which is
    what "belt and braces" has to mean to be worth writing.
+
+   **It runs before the ruling is dispatched on, and that placement is the
+   decision.** It is listed here because it guards the same outcome, but it is
+   **not** part of `_refuse_unsafe_fold`, which `ingest` reaches only for
+   `REINFORCE` and `SUPERSEDE` (`ingest.py:503-533`). Put it in the helper — the
+   obvious reading of §10's "the refusal helper's signature widens" — and an
+   injected policy ruling `ACCEPT` or `STORE_TEMPORARY` on a validator-bypassed
+   secret proposal writes it straight through `_apply` without the check ever
+   running. A rule that is unconditional has to sit where every ruling passes,
+   which is the top of `ingest`, before conflict resolution and before the policy
+   is asked.
 1. The ruling is `SUPERSEDE`. A `REINFORCE` onto an assertion stays refused under
    clause 1 whatever the confirmation says — folding at the target's id would
    rewrite the user's own words, which no answer authorises.
@@ -1992,7 +2003,10 @@ On ratification:
    they imply (§4, §5).
 2. `DefaultMemoryPolicy`'s confirmation rule and the `_refuse_unsafe_fold`
    narrowing (§5). The refusal helper's signature widens to see the proposal's
-   confirmation, not only the incoming record (`ingest.py:111-113`).
+   confirmation, not only the incoming record (`ingest.py:111-113`). **Check 0 is
+   the exception and does not go in that helper**: it is unconditional, so it sits
+   at the top of `ingest` where every ruling passes, not on a path only two of them
+   take.
 3. The write-stage enqueue and the answer path, in `orchestration`, with §3's two
    composition-root obligations enforced by a test rather than requested in prose —
    the standard ADR-0028 §4 set when it made
@@ -2052,9 +2066,12 @@ On ratification:
    **And two for the arm this ADR does not close** (§1). A `DataTier.SECRET`
    proposal carrying a `confirmation` is **unconstructable**, and a `SUPERSEDE`
    driven from one **built past the validator** — `model_construct`, under an
-   injected policy that rules `SUPERSEDE` — is refused at the writer floor with
-   **no memory write**, which is check 0 and the only half of the belt and braces
-   that survives a bypass. Asserting only the unconstructable half would certify
+   injected policy — is refused with **no memory write**, which is check 0 and the
+   only half of the belt and braces that survives a bypass. **Driven for
+   `SUPERSEDE`, `ACCEPT` and `STORE_TEMPORARY`**, because those last two never
+   reach the fold helper: a check placed there passes the `SUPERSEDE` case and
+   writes the secret on the other two, which is the single most likely way to
+   implement this wrongly. Asserting only the unconstructable half would certify
    the validator and leave the boundary untested, and the failure it guards is a
    credential in the memory database. And a `learn` whose proposal is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
    result — **raises nothing**, and renders the *existing* non-answerable message
