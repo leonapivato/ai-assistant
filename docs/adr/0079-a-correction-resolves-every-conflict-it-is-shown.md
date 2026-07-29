@@ -306,13 +306,17 @@ and it would commit part of a correction the user has not yet confirmed.
 Surfacing an `ASK_USER`, holding it durably, and applying the user's answer is
 **ADR-0078's** (in flight in a parallel lane, closing #423). This ADR designs none
 of it and names exactly one thing that binds it: **whatever commits an `ASK_USER`
-resolution as a `SUPERSEDE` carries §1's obligation in full.** Resolving a
-deferral may not land a correction that leaves contradicting derived beliefs
-live, and it may not bypass the ceiling by writing through a path that skips
-detection. If ADR-0078 chooses to resolve by re-ingesting the held proposal, it
-inherits §1 for free; if it chooses to commit directly, §1 is the constraint it
-must satisfy by other means, and it owes the argument. Nothing else about the
-mechanism is decided here.
+resolution as a `SUPERSEDE` carries §1's obligation, at §1's own reach and not
+beyond it.** Resolving a deferral may not land a correction that leaves live a
+derived conflict its own conflict resolution surfaced, and it may not sidestep
+the ceiling by writing through a path that skips conflict resolution altogether.
+It is *not* held to more than §1 delivers: an above-threshold conflict retrieval
+never surfaced is invisible to a resolver exactly as it is to an ingest (#457),
+and no obligation stated here can be discharged against it. If ADR-0078 chooses
+to resolve by re-ingesting the held proposal, it inherits §1 and its reach
+together; if it chooses to commit directly, §1 is the constraint it must satisfy
+by other means, and it owes the argument. Nothing else about the mechanism is
+decided here.
 
 ### 3. The full-set retirement becomes a universal `MemoryWriter` obligation (#314)
 
