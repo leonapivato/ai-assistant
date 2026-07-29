@@ -2188,7 +2188,10 @@ On ratification:
    answer, for a store failure, and for **cancellation** — propagates, writes no
    bookkeeping, and leaves the deferral `APPLYING` and reachable through
    `interrupted`, the cancellation case asserted rather than assumed to follow from
-   the other two because it is the one an error boundary silently handles; an
+   the other two because it is the one an error boundary silently handles;
+   **cancellation of `claim` itself**, suspended after its CAS and before it
+   returns, propagates, applies nothing, cleans nothing up, and leaves a row a
+   later `interrupted` — in a fresh process — still finds; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
