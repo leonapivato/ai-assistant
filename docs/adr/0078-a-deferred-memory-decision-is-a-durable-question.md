@@ -820,16 +820,21 @@ conforming to the words. It owes:
   `REDEFERRED` with the successor's; `REJECT` → `REJECTED`; and the coordinator's
   own pre-ingest window check → `STALE` without an ingest at all (§6).
 
-  **`resolve` and `delete` on one row are linearizable, and a `resolve` never
-  recreates a deleted row.** "Atomic with its own read" bounds `resolve` against
-  another `resolve`; it says nothing about a `delete` landing between that read and
-  its write, and a read-then-write backend would then write its stale terminal row
-  back — **resurrecting Tier 1 content the user destroyed**, through the call whose
-  only job is bookkeeping. So the two order against each other: a `resolve` that
-  linearizes *after* a successful `delete` finds nothing, returns `False`, and
-  writes nothing at all. §9 already says what the coordinator does with that
-  `False`; what is added here is that the row stays gone, absent from `get` and
-  `export`, whichever way the race fell.
+  **No write in this store may recreate a row a destruction removed**, and the rule
+  is stated over the class rather than over one method, because an earlier revision
+  stated it for `delete` alone and `clear` reopened it verbatim. Every destructive
+  operation — `delete`, `clear`, and `purge` — **linearizes against every write**,
+  and a write that lands after one finds nothing, does nothing, and reports what it
+  found.
+
+  For `resolve` that means: "atomic with its own read" bounds it against another
+  `resolve` and says nothing about a destruction landing between that read and its
+  write, so a read-then-write backend would put its stale terminal row back —
+  **resurrecting Tier 1 content the user destroyed**, through the call whose only
+  job is bookkeeping. A `resolve` that linearizes after a destruction therefore
+  returns `False` and writes nothing at all. §9 already says what the coordinator
+  does with that `False`; what is added here is that the row stays gone, absent
+  from `get` and `export`, whichever way the race fell.
 
   **Each terminal state carries its own required payload, and the other's is
   forbidden**, in exactly the shape `MemoryDecision._outcome_fields_are_consistent`
@@ -968,14 +973,17 @@ that would otherwise be prose:
    the one CAS the accept-path concurrency clauses never exercise, because they all
    go through `claim` first — and a read-then-write store lets both rejections
    succeed and reports the question answered twice.
-4. **A `delete` racing an in-flight `resolve` leaves the row gone**, driven with
-   the store suspended inside `resolve` — for a claimed terminal transition and for
-   the unclaimed rejection, since they enter from different states. Either the
-   resolution linearizes first and the delete then removes a terminal row, or the
-   delete wins and the resolution returns `False` **without recreating anything**;
-   both end with the row absent from `get` and `export`. A read-then-write store
-   passes every sequential clause and fails only this one, and what it fails at is
-   restoring data a user destroyed.
+4. **A destruction racing an in-flight `resolve` leaves the row gone**, driven with
+   the store suspended inside `resolve`, across the product of two axes: the
+   destruction is a `delete` **or a `clear`**, and the resolution is a claimed
+   terminal transition **or the unclaimed rejection**. Four cases, because the two
+   destructions have different scopes and the two resolutions enter from different
+   states, and a rule about one of them says nothing about the others. Either the
+   resolution linearizes first and the destruction then removes a terminal row, or
+   the destruction wins and the resolution returns `False` **without recreating
+   anything**; every case ends with the row absent from `get` and `export`. A
+   read-then-write store passes every sequential clause and fails only these, and
+   what it fails at is restoring data a user destroyed.
 5. **`defer`'s admission is atomic**, driven the same way: two concurrent
    same-key calls leave **one** row, and two concurrent distinct calls at
    capacity-minus-one admit exactly one. A sequential test passes against a
