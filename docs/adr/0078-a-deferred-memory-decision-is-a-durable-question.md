@@ -1,6 +1,6 @@
 # 78. A deferred memory decision is a durable question the user answers
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This is a contract change, and it is flagged as such (golden rule 5).** New
   `core` surface: a `DeferralStore` Protocol, a `DeferredProposal` record with its
