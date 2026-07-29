@@ -2041,6 +2041,38 @@ indeterminate state, reached by a crash, by an exception, or by an exhausted
 re-mint, is easier to render honestly than three that differ only in what the
 system happens to know.
 
+**Cancellation gets one rule for the whole sequence, stated once rather than per
+call.** A cancelled `answer` **propagates** its `CancelledError`
+([ADR-0060](0060-cancellation-must-not-orphan-a-resource.md)), and the coordinator
+**applies nothing further and cleans nothing up**, wherever the cancellation lands
+— inside `claim`, inside `ingest`, or inside `resolve`. The reason is the same
+each time: ADR-0060 makes a cancelled call's effect indeterminate *to its caller*,
+so the caller may not infer either that the step landed or that it did not, and
+every corrective action needs exactly that inference. The durable state is right
+without it, because each step's own CAS or write is atomic — whatever committed is
+committed, and the row is then either terminal or stranded `APPLYING`, the two
+states this design already renders honestly. The three windows differ only in what
+they leave:
+
+- **Inside `claim`**, after its CAS and before it returns: the row is `APPLYING`
+  and **nobody holds the token**. Nothing can be applied — there is no token to
+  authorise it — so it is stranded, which is the state above, reached by a third
+  route. That the lost-token case and the lost-outcome case land identically is
+  worth having: a user is never asked to distinguish two kinds of "I don't know".
+- **Inside `ingest`**: exactly the raising case above, and named separately only
+  because cancellation is the one an error boundary swallows by default. It can
+  land after the write dispatched, so whether memory changed is as unknown as after
+  a store failure.
+- **Inside `resolve`**, which is the only window that can leave a **finished**
+  question: the terminal CAS may commit and the cancellation arrive before the call
+  returns, so the deferral is `ACCEPTED` — correctly, the apply did happen — while
+  the caller learned nothing. Nothing needs doing; a later read shows the outcome it
+  should. Cancelled before that CAS, it is stranded like the rest.
+
+What an implementation must not do in any of the three is "repair" the row — the
+committed one by re-resolving, the stranded one by tidying — because it cannot
+tell which it has, and both are already correct.
+
 **A claim is one-way, and that is what keeps the guarantee true after a crash.** A
 process that dies between `claim` and `resolve` leaves the deferral `APPLYING`
 forever: `pending` does not return it, `claim` will not re-take it, `purge` will not
@@ -2191,7 +2223,11 @@ On ratification:
    the other two because it is the one an error boundary silently handles;
    **cancellation of `claim` itself**, suspended after its CAS and before it
    returns, propagates, applies nothing, cleans nothing up, and leaves a row a
-   later `interrupted` — in a fresh process — still finds; an
+   later `interrupted` — in a fresh process — still finds; **cancellation of
+   `resolve`**, driven on both sides of its CAS — cancelled after it commits, the
+   terminal row is retained and readable; cancelled before, the row is still
+   `APPLYING` — with neither "repaired" by the coordinator, which is the assertion,
+   since both are already right; an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
