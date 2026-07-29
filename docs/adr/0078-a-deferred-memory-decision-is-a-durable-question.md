@@ -293,8 +293,9 @@ change is additive and no existing producer moves:
 **`core/protocols.py` gains one Protocol, `DeferralStore`**, `@runtime_checkable`
 like every other, owing:
 
-- **`defer(deferred) -> DeferralAdmission`** — admit a question, returning **what
-  happened and the deferral that now holds it**. **Key-idempotent**: if a deferral **the key
+- **`defer(deferred, *, successor_to=None) -> DeferralAdmission`** — admit a
+  question, returning **what happened and the deferral that now holds it**.
+  **Key-idempotent**: if a deferral **the key
   still speaks for** carries the same `question_key`, the admission is *suppressed*
   and carries that deferral, and nothing is inserted — the reconciliation ADR-0052
   §2 ratified for parked
@@ -355,17 +356,33 @@ like every other, owing:
   was at its cap (§7). A physical id collision is not among them — it raises
   (above) rather than returning a fourth shape nobody would check for.
 
-  **A re-deferral does not consult the cap.** When an answer's re-ingest raises a
-  successor question (§5a step 1, §9), that question is admitted whatever the queue
-  depth. It is not a producer's new proposal; it is the continuation of one already
-  admitted, and refusing it would strand a claimed answer with nowhere to go and
-  leave the newly-surfaced assertion unasked — the exact drop this ADR ends. ADR-0052
-  §2 settled the same question in the same direction for parked confirmations:
-  "recovery presents parks that already happened and are already durable, so it does
-  not consult that ceiling — refusing to surface an already-parked step would strand
-  it". The queue can therefore exceed its cap, bounded by the number of claims in
-  flight, which is bounded by questions already admitted under it. Dedup still
-  applies; the successor's key differs by construction, since its conflict set does.
+  **A re-deferral does not consult the cap, and it says so on the call rather than
+  by convention.** `defer` takes one more argument — `successor_to: str | None =
+  None`, the id of the **claimed parent** whose answer raised this question (§5a
+  step 1, §9). When it is given, the cap is not consulted.
+
+  It is **not** a bypass flag a producer could set. The store validates it, in the
+  same atomic operation as the admission, against three conditions, raising
+  `DeferralStoreError` and changing nothing if any fails: the parent must exist, it
+  must be **`APPLYING`** — so only an answer actually in flight can raise a
+  successor — and it must not already carry a `successor_id`. On success the store
+  stamps the parent's `successor_id` as part of that same commit, which is what
+  makes the second condition enforceable and gives `resolve`'s `REDEFERRED`
+  transition something to check rather than trust.
+
+  That is what bounds it. One successor per claim, one claim per question, and every
+  question admitted under the cap — so the answerable queue can exceed its
+  configured maximum only by the number of answers currently in flight, and it
+  returns under it as each resolves. Without the exemption the alternative is worse
+  in a way the cap was never meant to buy: a claimed answer with nowhere to go, and
+  a newly-surfaced assertion never asked about — the exact drop this ADR ends.
+  ADR-0052 §2 settled the same question in the same direction for parked
+  confirmations: "recovery presents parks that already happened and are already
+  durable, so it does not consult that ceiling — refusing to surface an
+  already-parked step would strand it".
+
+  Dedup still applies to a successor; its key differs by construction, since its
+  conflict set does.
   **Admission is one atomic operation** — the key lookup, the answerable-count
   check and the insert commit or fail together, like `claim` and `resolve` below and
   for the same reason. Left non-atomic, two concurrent producers each see room at
@@ -431,8 +448,11 @@ like every other, owing:
   `APPLYING` to **any** terminal state — `ACCEPTED`, `REJECTED`, `STALE` or
   `REDEFERRED` — **only when `claim_id` matches the one the record carries**, and
   from `PENDING` to `REJECTED` with `claim_id=None` (an unclaimed rejection writes
-  nothing, so it needs no claim). A `REDEFERRED` resolution carries the successor's
-  id in place of `record_id`, since it wrote no record.
+  nothing, so it needs no claim). A `REDEFERRED` resolution names the successor in
+  place of `record_id`, since it wrote no record, and the id it names must be the
+  `successor_id` the store already stamped when it admitted that successor (above)
+  — so the transition is checked against durable state rather than trusting the
+  caller to name the right question.
 
   **Every terminal state must be reachable from `APPLYING`, and `REJECTED` is the
   one an earlier revision omitted.** `MemoryWriter` takes an injected
@@ -541,7 +561,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Fourteen clauses the suite must carry are named here**, because they are the ones a
+**Fifteen clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -567,12 +587,19 @@ that would otherwise be prose:
    retry** (§2), in `PENDING`, `REJECTED` and `APPLYING`: *suppressed*, never
    *admitted*. This is the case an id comparison got wrong, and a suite that only
    ever retries with a fresh id never reaches it.
-5. **`resolve` refuses every state but the one it names, and every `claim_id` but
+5. **`successor_to` admits past a full queue and only from a live claim** (§2), in
+   four cases: at the cap with an `APPLYING` parent it **admits** and stamps that
+   parent's `successor_id`; naming a `PENDING` parent, naming an absent one, and
+   naming an `APPLYING` parent that already carries a successor each **raise** and
+   change nothing. The first is the exemption; the other three are what keep it
+   from being a bypass flag, and a suite that drives only the happy path certifies
+   exactly the bypass this argument rejects.
+6. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
    nothing authorised), and an `APPLYING` row addressed with a stale or absent
    `claim_id`.
-6. **`purge` removes a lapsed `PENDING` deferral at `expires_at`** — seeded through
+7. **`purge` removes a lapsed `PENDING` deferral at `expires_at`** — seeded through
    an injected clock — **retains a `REJECTED` one until `answered_at +
    deferral_ttl`, leaves an `APPLYING` one however old it is, and `delete` removes
    that same `APPLYING` row.** Four cases pulling in different directions, which is
@@ -580,17 +607,17 @@ that would otherwise be prose:
    second is §7's no-nagging rule, the third is §9's guard on the record of an
    answer, and the fourth is ADR-0007's unconditional data right. A suite that
    applies one grace to every finished row passes the second and fails the first.
-7. **`defer` collides on the key and only on the key.** Two proposals differing
+8. **`defer` collides on the key and only on the key.** Two proposals differing
    *only* in `provenance.source`, and two differing only in `sensitivity`, must both
    admit as separate questions (§7), while an identical repeat collides and does not
    refresh the deadline. A suite that varies only `content` certifies a weaker key
    than the one ratified.
-8. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
+9. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
    `REJECTED` one within retention, and an `APPLYING` one, do** (§2, §7). These are
    the differences between "we asked and you declined", "that question lapsed", and
    "an answer to that may be committing right now", and a suite that tests only the
    live collision leaves all of them unpinned.
-9. **The deadline boundary is driven at the instant itself** (§2), on an injected
+10. **The deadline boundary is driven at the instant itself** (§2), on an injected
     clock: a deferral read at exactly `expires_at` is **not** answerable — absent
     from `pending`, refused by `claim`, outside the cap count, no longer speaking
     for its key — and one read an instant before it is answerable on all four. The
@@ -601,17 +628,17 @@ that would otherwise be prose:
     `expires_at` — each purged at equality and each retained one instant before.
     The two anchors differ, so a suite that drives one and infers the other proves
     nothing about the one that carries §1's exposure cap.
-10. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
+11. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
    after any clock advance, `claim` takes it, its key still collides, and `purge`
    leaves it. Four assertions, because an implementation that coerces `None` to a
    sentinel passes the first three and fails the fourth — or passes all four against
    a *far-future* sentinel and then quietly deletes the question when the sentinel
    arrives.
-11. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
+12. **`interrupted` enumerates `APPLYING` rows** in the same total order and with the
    same bounded default as `pending`, and the two reads are **disjoint**: no row
    appears in both. A store that returned an interrupted question among the
    answerable ones would offer the user a claim that cannot be taken.
-12. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
+13. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
     ends, and refuse a non-`int` or a `bool` before any await** (§2) — a float, a
     string and `True`, each of which either satisfies the range or passes an
     `isinstance(x, int)` check while meaning something no two backends agree on.
@@ -621,11 +648,11 @@ that would otherwise be prose:
     the **default `limit` is exercised with more than 50 matching rows**, for §8's
     other reason: an implementation defaulting to unbounded satisfies every
     explicit-limit case while breaking the bounded-default guarantee.
-13. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
+14. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
     record id, `ACCEPTED` carrying a successor id, `REDEFERRED` without a successor
     id, and `REJECTED`/`STALE` carrying either. Four cases, because the transition
     tests pass against a store that writes whatever payload it is handed.
-14. **The key is a canonical projection** (§7), which needs a case per excluded
+15. **The key is a canonical projection** (§7), which needs a case per excluded
     field and a case per collection. Two proposals differing *only* in `validity`
     admit as separate questions; two differing only in `id`, only in `score`, or
     only in `provenance.last_updated` **collide**; and two whose `evidence` or
@@ -1230,14 +1257,17 @@ discovered.
 
 **A re-deferral is a completed answer, not a failed one.** When the re-ingest
 surfaces a `USER_ASSERTED` conflict outside the answer's authority, the policy rules
-`ASK_USER`, nothing is written, and the coordinator **enqueues the successor
-question first and resolves the original to `REDEFERRED` naming it**. That order
+`ASK_USER`, nothing is written, and the coordinator **enqueues the successor first
+— `defer(successor, successor_to=<the claimed parent>)`, §2 — and then resolves the
+original to `REDEFERRED` naming it**. That order
 matters for the same reason step 2 precedes step 3 everywhere else: a crash after
 resolving but before enqueuing would leave a question marked handled with no
 successor, which is the silent drop wearing a terminal state. Crashing the other way
 leaves the original `APPLYING` and the successor already asked — visible, and
 recoverable by §9's two steps. The successor is admitted regardless of the queue cap
-(§2), so a full queue cannot strand a claimed answer.
+(§2), so a full queue cannot strand a claimed answer — and because the store
+validates `successor_to` against a parent that is genuinely `APPLYING` and has no
+successor yet, that exemption cannot be reached from anywhere but here.
 
 **The claim is what makes an answer apply at most once.** Without it, two
 concurrent answers — two CLI invocations, and routinely two spokes once the hub
