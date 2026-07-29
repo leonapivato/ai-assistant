@@ -13,10 +13,13 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
+    BeliefBand,
     DataTier,
     MemoryDecision,
     MemoryDecisionKind,
+    MemoryKind,
     MemorySource,
+    band_of,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +34,70 @@ _DEFAULT_TEMPORARY_TTL = timedelta(days=7)
 # than "not USER_ASSERTED": adding a `MemorySource` should not silently enrol it
 # in a destructive rule, and `EXTERNAL` is excluded on its own grounds (§2a).
 _SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+
+
+def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | None:
+    """The two rulings that precede any conflict reasoning, or ``None``.
+
+    Both are properties of the proposal alone, so neither needs to look at what it
+    contradicts — and neither commits anything, so ADR-0004 §3 holds whichever
+    fires:
+
+    1. **Secret-tier data defers** (ADR-0004 §3). Tier 0 belongs in the OS keyring,
+       never the memory store, so it is never committed by any other rule below.
+    2. **A derived belief citing no evidence is rejected** (ADR-0077 §5). It sits
+       *after* the secret gate deliberately: both write nothing, and rule 1's
+       ``ASK_USER`` is the more informative outcome for a Tier-0 proposal, so the
+       new rule narrows the non-secret path rather than pre-empting a ratified one.
+       Placed before the conflict rules because it is an *admissibility* floor: a
+       belief with no warrant is not worth deferring to the user about, whatever it
+       happens to contradict.
+    """
+    if proposal.sensitivity is DataTier.SECRET:
+        return MemoryDecision(
+            kind=MemoryDecisionKind.ASK_USER,
+            reason="secret-tier data requires explicit user confirmation",
+        )
+    if _cites_nothing_it_must_cite(proposal.proposed):
+        return MemoryDecision(
+            kind=MemoryDecisionKind.REJECT,
+            reason="a derived belief citing no evidence has no warrant (ADR-0077 §5)",
+        )
+    return None
+
+
+def _cites_nothing_it_must_cite(record: MemoryRecord) -> bool:
+    """Whether ``record`` is a derived belief with no evidence at all (ADR-0077 §5).
+
+    The gate's half of the evidence discipline, at the enforcement point ADR-0072 §3
+    named: "the enforcement point is the ``MemoryPolicy`` gate, not the type… a
+    policy can state the rule for the band it is judging without constraining
+    ``EXTERNAL`` or ``USER_ASSERTED`` records that legitimately cite nothing." A
+    derived belief is one the system worked out from evidence; one that cites none
+    cannot answer "why do you believe that?" at all.
+
+    Band-wide and minimal, because the gate serves every producer and cannot know
+    which epistemic step a record took. The *producer's* floor — an ``INFERRED``
+    belief needs two distinct episodes — is a different rule with a different owner
+    and does not live here.
+
+    **``EPISODIC`` records are exempt**, as ADR-0074 §4 binds this policy: an
+    episode's warrant is that it happened, and requiring it to cite something would
+    demand a regress. The exemption guards a path nothing takes today — capture does
+    not reach the gate (ADR-0075 §1) and ADR-0077 §2 forbids the observer to propose
+    an episode — and is written anyway, so the rule is not one refactor away from
+    making its own substrate unwritable.
+
+    Its counterpart is the *writer's* floor, resolvability (ADR-0077 §5). The two do
+    not overlap: an empty tuple names no record that fails to resolve, so it passes
+    the writer and is caught here; a populated tuple naming a record the store does
+    not hold passes any policy and is caught there.
+    """
+    return (
+        MemoryKind(record.kind) is not MemoryKind.EPISODIC
+        and band_of(record.provenance.source) is BeliefBand.DERIVED
+        and not record.provenance.evidence
+    )
 
 
 def _rule_on_assertion(conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
@@ -92,25 +159,32 @@ class DefaultMemoryPolicy:
     :class:`~ai_assistant.core.protocols.MemoryPolicy`. The rules, in order:
 
     1. Secret-tier proposals always defer to the user.
-    2. An inference never silently overrides a user-asserted memory — defer.
-    3. A user-asserted proposal that contradicts a *prior assertion* defers to
+    2. A proposal in the ``DERIVED`` band citing **no** evidence is rejected: a
+       belief we worked out from evidence, with no evidence, has no warrant
+       (ADR-0077 §5). ``EPISODIC`` records are exempt (ADR-0074 §4), and
+       ``ASSERTED``/``ATTESTED`` proposals are untouched — they legitimately cite
+       nothing (:func:`_cites_nothing_it_must_cite`).
+    3. An inference never silently overrides a user-asserted memory — defer.
+    4. A user-asserted proposal that contradicts a *prior assertion* defers to
        the user (``ASK_USER``): two things the user said cannot both stay live,
        yet neither may be destroyed on a topical-similarity signal, so the user
        resolves it (ADR-0050 §2, #245).
-    4. A user-asserted proposal *supersedes* the conflicting inferences: it rules
+    5. A user-asserted proposal *supersedes* the conflicting inferences: it rules
        ``SUPERSEDE`` naming the best-ranked ``OBSERVED``/``INFERRED`` conflict,
-       and the applier retires the *whole* supersedable conflict set it leads (up
-       to the detection cap), so a second and third stale inference on the topic do
-       not survive the correction (ADR-0038, ADR-0040, ADR-0050 §1, #244).
-    5. A user-asserted proposal with nothing to supersede is trusted and
+       and the applier retires the *whole* supersedable conflict set it leads —
+       which is now the whole set retrieval surfaced, since the writer refuses
+       rather than truncating above its ceiling (ADR-0079 §1) — so a second and
+       third stale inference on the topic do not survive the correction (ADR-0038,
+       ADR-0040, ADR-0050 §1, #244).
+    6. A user-asserted proposal with nothing to supersede is trusted and
        accepted.
-    6. A proposal that conflicts with an existing (non-asserted) record rules
+    7. A proposal that conflicts with an existing (non-asserted) record rules
        ``REINFORCE`` over it, folding into it (ADR-0040 §4).
-    7. Weak evidence (below ``min_confidence``) is stored temporarily, with an
+    8. Weak evidence (below ``min_confidence``) is stored temporarily, with an
        expiry, rather than committed.
-    8. Otherwise the proposal is accepted.
+    9. Otherwise the proposal is accepted.
 
-    Rules 2 and 4 are the same asymmetry read in both directions: an assertion
+    Rules 3 and 5 are the same asymmetry read in both directions: an assertion
     outranks an inference, and never the reverse.
     """
 
@@ -152,11 +226,11 @@ class DefaultMemoryPolicy:
         source = record.provenance.source
         is_asserted = source is MemorySource.USER_ASSERTED
 
-        if proposal.sensitivity is DataTier.SECRET:
-            return MemoryDecision(
-                kind=MemoryDecisionKind.ASK_USER,
-                reason="secret-tier data requires explicit user confirmation",
-            )
+        # Rules 1 and 2: properties of the proposal alone, ruled on before any
+        # conflict is read (:func:`_rule_on_admissibility`).
+        inadmissible = _rule_on_admissibility(proposal)
+        if inadmissible is not None:
+            return inadmissible
 
         asserted_conflict = any(
             c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts

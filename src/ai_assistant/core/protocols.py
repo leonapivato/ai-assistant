@@ -551,6 +551,43 @@ class MemoryWriter(Protocol):
         judged by the policy, which is where ADR-0072 §3 put that rule. The two do
         not overlap, and each lives in exactly one place.
 
+        **A correction resolves every conflict it is shown, or it does not land**
+        (ADR-0079 §1). A writer's conflict limit is a *ceiling*, not a truncation
+        budget: at or below it the whole set conflict resolution surfaced reaches
+        the policy — nothing retrieved is discarded — and above it this call
+        **refuses**, writing nothing, closing no window and seeking no ruling. The
+        obligation is stated on what the writer *retrieved*, because that is all a
+        writer can observe; retrieval is not thereby exhaustive, and a conflict it
+        never surfaced is invisible to this rule (issue #457). The limit's value
+        stays each writer's own tuning; only the behaviour at the boundary is
+        contract.
+
+        **A ``SUPERSEDE`` retires the whole ruled-on set** (ADR-0079 §3, restating
+        ADR-0050 §1): the record ``target_id`` names — **including** where that
+        target is ``EXTERNAL`` (ADR-0045 §5b) — *and* every other conflict in the
+        set the policy ruled on whose source is supersedable, in one atomic unit
+        with the correction. The two standing refusals are unchanged: nothing folds
+        onto a ``USER_ASSERTED`` target under either ruling, and ``USER_ASSERTED``
+        and ``EXTERNAL`` *siblings* are never swept in.
+
+        **A retirement clamps, and never resurrects** (ADR-0080 §1). Each record a
+        supersession retires is written back with its window closed at the
+        **earlier** of the writer's close instant and the record's own
+        ``valid_until``, every other field preserved — so a retirement never
+        extends a window and never moves ``valid_from``. One close instant serves
+        the whole retirement set; how a writer determines that instant is expressly
+        not contract, so a writer with no clock at all still conforms. A record
+        already ended by its own terms is written back unchanged on the window,
+        which counts as resolved rather than skipped.
+
+        Where no representable close exists — a record the ruling would retire
+        carries a ``valid_from`` at or after that end, so the window would be empty
+        or inverted — this call **refuses**, with nothing written, no window
+        closed, and every record in the set left **unchanged**: a statement about
+        the stored records and their windows, not about what a later read returns,
+        which ADR-0045 §6's read-time predicate decides at the reader's own clock
+        (ADR-0080 §3).
+
         Args:
             proposal: The candidate memory and why it was proposed. Its
                 ``conflicts`` are resolved here, not supplied by the caller.
@@ -566,9 +603,16 @@ class MemoryWriter(Protocol):
                 citing something it was never handed. Nothing is written and the
                 policy is not asked. A ``MemoryStoreError``, so an existing
                 handler for that class still catches it.
-            MemoryStoreError: If reading conflicts or writing a record failed,
-                or a ``REINFORCE`` or ``SUPERSEDE`` named a ``target_id`` that is
-                not among the conflicts.
+            MemoryStoreError: If conflict resolution surfaces more conflicts than
+                this writer will resolve in one ingest (ADR-0079 §1) — nothing
+                written, no ruling sought; if a record the ruling would retire has
+                no representable close (ADR-0080 §3) — nothing written, every
+                record in the set unchanged; if reading conflicts or writing a
+                record failed; or if a ``REINFORCE`` or ``SUPERSEDE`` named a
+                ``target_id`` that is not among the conflicts. Both new refusals
+                raise this class and **not** ``UnresolvedEvidenceError``, which
+                names an *evidence* failure rather than a conflict set or a
+                target's window (ADR-0080 §7).
         """
         ...
 
