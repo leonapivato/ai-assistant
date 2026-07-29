@@ -2125,10 +2125,20 @@ On ratification:
    the exception and does not go in that helper**: it gates writes, so it sits
    between the policy's ruling and the write dispatch — reached by every
    write-producing ruling, and by no ruling that writes nothing.
-3. The write-stage enqueue and the answer path, in `orchestration`, with §3's two
-   composition-root obligations enforced by a test rather than requested in prose —
-   the standard ADR-0028 §4 set when it made
+3. The write-stage enqueue and the answer path, in `orchestration`, with **all
+   three** of §3's composition-root obligations enforced by a test rather than
+   requested in prose — the standard ADR-0028 §4 set when it made
    `test_a_learned_preference_is_reused_on_a_later_turn` carry its same-store rule.
+   The first two are instance-wiring and a wiring test covers them. **The third is
+   not**, and an earlier revision said "two" and left it uncovered: *the answer
+   path is the only producer of a `UserConfirmation`*. Nothing in the writer's six
+   checks looks for a claim, so a helper that assembled a confirmation from a
+   pending deferral's id, key and conflict ids — all of which reads expose — could
+   retire a `USER_ASSERTED` record while every answer-path test still passed. It is
+   a structural property, so it takes a **structural test**: `UserConfirmation` is
+   constructed in exactly one place, and that place holds a claim. The repository
+   already asserts structure this way in `tests/core/test_protocol_triad.py`, which
+   is the shape to copy.
    **Seven integration assertions come with the answer path**, all on injected
    clocks and deterministic suspension rather than timing. The first is the one the
    rest depend on and the one no store or writer test can reach: **a `learn` whose
