@@ -528,6 +528,32 @@ asserted in the suite rather than left to the store: the shared suite runs over
 `FakeMemoryStore`, so `SqliteMemoryStore`'s decode re-validation — which would
 reject such a row on read — is not there to catch it.
 
+**What the shared suite cannot reach, stated rather than implied.** It fixes no
+writer clock, so it cannot observe that a stamped close instant *is* the writer's
+own reading of one. A writer that returns a constant close instant **conforms** —
+that is what "a writer with no clock at all conforms" means — so an assertion
+that the end is clock-derived would contradict the suite's standing exclusion
+rather than strengthen the contract. Two consequences follow, and both are
+accepted:
+
+- **The suite cannot force the refusal branch.** A writer whose close instant
+  always falls after the planted `F` lawfully takes the success branch every
+  time. The obligations prove the disjunction holds, not that both of its
+  branches are reachable.
+- **Obligation 1 bounds the close from above and not from below.** "Never
+  extend" does not catch a *premature* close — which this ADR does not make a
+  violation: §1 fixes the end as a function of the writer's own clock, and the
+  clock is exactly what the suite declines to pin.
+
+Driving the exact clamp and the exact refusal against an **injected** clock is
+therefore the per-writer tests' job and stays there (`test_ingest.py`,
+`test_fake_writer.py`, which already do it). The shared obligations exist to stop
+the two writers **diverging** — the thing ADR-0079 §3 promoted an obligation for
+— not to re-derive each writer's clock discipline. Naming that bound is the same
+move ADR-0079 §1 makes about its own reach: not a hedge, because a suite claiming
+more than `FakeMemoryStore` and an unpinned clock can observe would be claiming
+something no conforming writer is held to.
+
 So no clock seam is added, and the suite's standing refusal to pin the limit's
 value, the threshold, the tuning check and the clock all survive (ADR-0079 §4
 needed a seam for its obligation; this one does not). The `WriterFactory`
