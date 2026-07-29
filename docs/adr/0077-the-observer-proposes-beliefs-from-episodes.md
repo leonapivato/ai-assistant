@@ -707,22 +707,22 @@ is answered by absence either way.
 
 **Presented confidence falls with lost support; stored confidence does not
 move.** The number a surface shows is a pure function — no clock — of the stored
-confidence and how many of the belief's citations still resolve, with these
-properties: never above the stored value; equal to it when all resolve; and,
-when support is lost, strictly below it **until it reaches a documented positive
-floor**, which it never goes under. The exact function is the implementing lane's.
+confidence and how many of the belief's citations still resolve, **bounded above
+by the stored confidence and below by `min(stored confidence, floor)`**, where
+the floor is a documented positive constant. Inside those bounds it equals the
+stored value when every citation resolves and decreases as support is lost. The
+exact function is the implementing lane's.
 
-**The floor takes precedence over the strict decrease, and the order matters
-because the two collide.** `Provenance.confidence` permits `0.0` and §5 requires
-only that a derived producer stay strictly below `1.0`, so a belief can be stored
-at or beneath the floor — and there is no number that is both strictly below its
-stored confidence and not under the floor. So the rule is stated as a clamp: the
-adjusted value is the degraded one or the floor, whichever is higher, and where
-the stored value is already at or under the floor the adjustment is a no-op. The
-loss is then conveyed by the tombstones beside it, which is the honest signal
-anyway — a number that has run out of room to fall says nothing, and a surface
-that "must decrease" would be forced to invent a negative confidence or to
-present a belief as better supported than the floor allows.
+**The lower bound is `min(stored, floor)` rather than the floor itself, and the
+difference is the whole of the edge case.** `Provenance.confidence` permits
+`0.0`, and §5 binds only *this* producer to a positive ladder, so a belief can be
+stored at or beneath the floor — where an absolute floor and "never above stored"
+have no value between them at all. Capping the floor by the stored value keeps
+both bounds satisfiable everywhere: above the floor, degradation runs and stops
+there; at or below it, the two bounds coincide, the adjustment is a no-op, and
+the loss is carried by the tombstones beside the number. That is the honest
+signal anyway — a value that has run out of room to fall says nothing about how
+much support went away, which is what the tombstones are for.
 
 Three consequences of that split are decided here rather than left to be
 discovered:
@@ -1050,9 +1050,9 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   only and passing every deletion test (§6's decisive argument, pinned).
 - **A belief whose citations are all gone** — floor confidence, the unsupported
   state named, still live, still deletable, and **not** retired. **And one stored
-  at or below the floor to begin with** — the adjustment is a no-op and the
-  tombstones carry the loss (§6), the case a "must strictly decrease" reading
-  cannot satisfy at all.
+  at or below the floor to begin with** — the adjustment is a no-op, both bounds
+  having collapsed onto the stored value, and the tombstones carry the loss
+  (§6).
 - **A proposal citing an id the store does not hold** — refused by the writer,
   nothing stored (§5).
 - **An episode that expires between selection and the write, in a batch of
