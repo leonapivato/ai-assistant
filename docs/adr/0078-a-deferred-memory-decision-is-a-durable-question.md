@@ -29,11 +29,20 @@
   writing "amended by ADR-0078" onto a ratified ADR while ADR-0078 is only proposed
   is the state claim [ADR-0019](0019-no-state-claims-in-living-documents.md)
   forbids. §10 gives their exact form.
-- **In-flight siblings, referenced but not designed here.** ADR-0077 (the observer)
-  names this ADR as the resolution mechanism for the proposals it mass-produces;
-  it owes this decision nothing but "a proposal that can wait", and §3 states the
-  one obligation it inherits. ADR-0079 (the contradiction surplus, #313/#314) is
-  adjacent law on a disjoint question. Neither is a dependency of this one.
+- **Binds to [ADR-0079](0079-a-correction-resolves-every-conflict-it-is-shown.md)
+  (merged, `Accepted`), which names this ADR as the resolution mechanism and states
+  the one thing that binds it:** "whatever commits an `ASK_USER` resolution as a
+  `SUPERSEDE` carries §1's obligation, at §1's own reach and not beyond it… If
+  ADR-0078 chooses to resolve by re-ingesting the held proposal, it inherits §1 and
+  its reach together" (§2). **This ADR resolves by re-ingesting** (§5), so it takes
+  that route deliberately and the obligation is discharged by construction rather
+  than owed as an argument. ADR-0079 §2's ordering — completeness, then the ruling,
+  then retirement, with a deferral winning and retiring nothing on its way — is the
+  law §5's confirmed path obeys at every step.
+- **ADR-0077 (the observer) is still in flight.** It names this ADR as the
+  resolution mechanism for the proposals it mass-produces; it owes this decision
+  nothing but "a proposal that can wait", and §3 states the one obligation it
+  inherits. It is not a dependency of this one.
 
 ## Context
 
@@ -213,10 +222,16 @@ question about what is safe to emit).
   the record at deferral** from the lifetime in force, following ADR-0059 §1's
   ruling that a confirmation's lifetime is fixed on the record rather than
   recomputed from a live setting; `question_key`, the dedup key (§7); `state`; once
-  claimed, `claim_id` and `claimed_at` (§9); and, once resolved, `answered_at` and
-  `outcome_record_id` (the id the accepted apply left live, or `None`).
+  claimed, `claim_id` and `claimed_at` (§9); and, once resolved, `answered_at`,
+  `outcome_record_id` (the id the accepted apply left live, or `None`) and
+  `successor_id` (the question a `REDEFERRED` answer raised, or `None`).
 - **`DeferralState`** — a `StrEnum`: `PENDING`, `APPLYING`, `ACCEPTED`, `REJECTED`,
-  `STALE`. There is **no `EXPIRED` member**: expiry is read-time-relative and never
+  `STALE`, `REDEFERRED`. The last is the terminal state of a claimed answer whose
+  re-ingest surfaced an assertion the user was never shown (§5a step 1): the answer
+  was used — it produced a successor question — and the record names that successor
+  so the chain is walkable. Without it a re-deferred answer has no legal transition
+  out of `APPLYING` and strands. There is **no `EXPIRED` member**: expiry is
+  read-time-relative and never
   stamped, exactly as `MemoryRecord.expires_at` is (ADR-0007 §3, ADR-0045 §6), so
   no sweep is needed to make a question stop being answerable. `STALE` *is* stored,
   because it records that an answer arrived and was refused — §6 says why the two
@@ -243,16 +258,33 @@ like every other, owing:
   that entry's handle instead of minting a second"). A key "still speaks for" a
   deferral that is answerable (`PENDING`, not past `expires_at`), being applied
   (`APPLYING`), or `REJECTED` within its retention (§7's no-nagging rule). A key
-  whose only match is *expired-and-unanswered*, `ACCEPTED` or `STALE` does **not**
-  collide: the question lapsed or was settled, and a fresh proposal deserves a fresh
-  question. **An `APPLYING` key stops speaking when its row does** — on `delete`,
-  which destroys the key (below), or on `purge`'s horizon. It has to block while an
-  apply may still be running, or a re-proposal admits a twin question whose later
-  answer would write the second correction the claim exists to prevent; and it must
-  stop blocking when the row is disposed of, or §9's recovery is unreachable.
-  It returns **`None` in exactly one case** — the answerable queue is at
-  its cap and the question was not admitted (§7). One nullable return, one meaning;
-  the duplicate path never yields `None`.
+  whose only match is *expired-and-unanswered*, `ACCEPTED`, `STALE` or `REDEFERRED`
+  does **not** collide: the question lapsed, was settled, or was replaced by the
+  successor it names, and a fresh proposal deserves a fresh question.
+
+  **An `APPLYING` key blocks until its row is deleted, and only until then.** It
+  has to block while an apply may still be running, or a re-proposal admits a twin
+  question whose later answer writes the second correction the claim exists to
+  prevent. And `delete` is the *only* thing that stops it, because `purge` never
+  removes an `APPLYING` row at any age (below) — so a key stranded by a crash blocks
+  until the user disposes of the question, which is precisely why §9's recovery
+  makes that disposal its **first** step rather than an afterthought.
+
+  It returns **`None` in exactly one case** — the answerable queue is at its cap and
+  the question was not admitted (§7). One nullable return, one meaning; the
+  duplicate path never yields `None`.
+
+  **A re-deferral does not consult the cap.** When an answer's re-ingest raises a
+  successor question (§5a step 1, §9), that question is admitted whatever the queue
+  depth. It is not a producer's new proposal; it is the continuation of one already
+  admitted, and refusing it would strand a claimed answer with nowhere to go and
+  leave the newly-surfaced assertion unasked — the exact drop this ADR ends. ADR-0052
+  §2 settled the same question in the same direction for parked confirmations:
+  "recovery presents parks that already happened and are already durable, so it does
+  not consult that ceiling — refusing to surface an already-parked step would strand
+  it". The queue can therefore exceed its cap, bounded by the number of claims in
+  flight, which is bounded by questions already admitted under it. Dedup still
+  applies; the successor's key differs by construction, since its conflict set does.
   **Admission is one atomic operation** — the key lookup, the answerable-count
   check and the insert commit or fail together, like `claim` and `resolve` below and
   for the same reason. Left non-atomic, two concurrent producers each see room at
@@ -289,10 +321,12 @@ like every other, owing:
   direction).
 - **`resolve(deferral_id, *, claim_id, state, answered_at, record_id) -> bool`** —
   the terminal compare-and-set, atomic with its own read. It succeeds from
-  `APPLYING` to `ACCEPTED`/`STALE` **only when `claim_id` matches the one the record
-  carries** (the apply happened, or was refused as stale), and from `PENDING` to
-  `REJECTED` with `claim_id=None` (a rejection writes nothing, so it needs no
-  claim). `False` from any other state, on a mismatched or absent `claim_id`, and on
+  `APPLYING` to `ACCEPTED`, `STALE` or `REDEFERRED` **only when `claim_id` matches
+  the one the record carries** (the apply happened, was refused as stale, or raised
+  a successor question), and from `PENDING` to `REJECTED` with `claim_id=None` (a
+  rejection writes nothing, so it needs no claim). A `REDEFERRED` resolution carries
+  the successor's id in place of `record_id`, since it wrote no record.
+  `False` from any other state, on a mismatched or absent `claim_id`, and on
   a second attempt. The `claim_id` is what keeps the bookkeeping bound to the apply
   that actually ran: without it a caller who never applied anything could stamp a
   question `ACCEPTED`. It must be atomic within the store for the reason ADR-0074 §9
@@ -389,10 +423,11 @@ that would otherwise be prose:
    admit as separate questions (§7), while an identical repeat collides and does not
    refresh the deadline. A suite that varies only `content` certifies a weaker key
    than the one ratified.
-6. **An expired, an `ACCEPTED` and a `STALE` key do not collide; a `REJECTED` one
-   within retention does** (§2, §7). This is the difference between "we asked and
-   you declined" and "that question lapsed", and a suite that tests only the live
-   collision leaves it unpinned.
+6. **An expired, an `ACCEPTED`, a `STALE` and a `REDEFERRED` key do not collide; a
+   `REJECTED` one within retention, and an `APPLYING` one, do** (§2, §7). These are
+   the differences between "we asked and you declined", "that question lapsed", and
+   "an answer to that may be committing right now", and a suite that tests only the
+   live collision leaves all of them unpinned.
 
 ### 3. The enqueue is the coordinator's, and two composition-root obligations come with it
 
@@ -501,7 +536,7 @@ proposal carrying a `confirmation` is judged in three steps, in this order:
 1. If the live conflict set holds a `USER_ASSERTED` record **not** named in
    `confirmation.retires`, rule `ASK_USER` — an assertion the user was never shown
    is outside the answer's authority, and committing beside it is the #245 gap
-   (ADR-0050 §2). A fresh question is minted over the new set.
+   (ADR-0050 §2). The answer becomes a **re-deferral** (§9), not a write.
 2. Otherwise rule `SUPERSEDE` on the first id in `confirmation.retires` that is
    present in the live conflict set.
 3. Otherwise rule `ACCEPT`.
@@ -511,6 +546,13 @@ The rule must come **first** because both the secret-tier arm
 re-defer the answer to the question they just asked, forever. Step 1 is what keeps
 that precedence from becoming a blanket override: the confirmed path skips the
 questions already answered, not the ones not yet asked.
+
+This is ADR-0079 §2's ordering, unchanged, on the confirmed path: the set is
+complete before the ruling, the ruling is made on the whole set, and **only a
+`SUPERSEDE` retires anything** — so a re-deferred answer leaves the store exactly
+as it was and "retires nothing on its way". Sweeping the covered inferences while
+asking about the newly-surfaced assertion is refused for ADR-0079 §2's own reason:
+it would commit part of a correction the user has not yet confirmed.
 
 **(b) `_refuse_unsafe_fold` clause 1 is narrowed by exception, not lifted.** Today
 it refuses any fold onto a `USER_ASSERTED` target unconditionally
@@ -526,8 +568,11 @@ of the two acceptable gates. Clause 2 (a `USER_ASSERTED` proposal onto an
 Likewise **ADR-0050 §1's `USER_ASSERTED` hold-out from the retirement set is
 narrowed to the same exception**: the applier still never sweeps an asserted
 conflict in on similarity, but an asserted conflict *named in `retires`* is
-retired. Everything else in §1 stands, including the `EXTERNAL` hold-out and the
-`conflict_limit` bound.
+retired. Everything else in ADR-0050 §1 stands, including the `EXTERNAL` hold-out.
+Its over-limit surplus clause is deliberately not cited anywhere here: ADR-0079 §1
+replaced it, re-founding `conflict_limit` as a **ceiling rather than a truncation**,
+and the confirmed path inherits that reach with everything else it inherits by
+re-ingesting (ADR-0079 §2).
 
 **The authority is bounded by what was shown — and the bound is over *assertions*,
 not over every conflict.** This is the load-bearing clause and it must be stated at
@@ -793,9 +838,16 @@ engine**, so no adapter classifies anything.
   is not decoration: it is the exact scope the answer authorises (§5);
 - **when it was asked and when it goes stale**;
 - for an `APPLYING` question, **that an answer was begun and its outcome is not
-  recorded**, and what to do about it: check the belief, and correct again if it is
-  not there. Not "retry" — the system does not know whether the write landed, and a
-  verb that implies it does would be the one dishonest line on this surface.
+  recorded**, and §9's two steps in order: dispose of it, then check the belief and
+  correct again if it is missing. Not "retry" — the system does not know whether
+  the write landed, and a verb that implies it does would be the one dishonest line
+  on this surface.
+
+**An answer that re-defers says so, and points at the successor.** `AnswerOutcome`
+distinguishes *applied*, *rejected*, *stale* and *re-deferred*, and the last
+carries the new question's id so the user is handed the next question rather than
+being told their answer went nowhere (§5a step 1). Rendering a re-deferral as a
+failure would be the same lie in a smaller place.
 
 **CLI (`interfaces/cli.py`, beside `ask`/`resume`/`learn`/`beliefs`):** a listing
 command and an answering command taking a question id and an accept/reject choice.
@@ -845,8 +897,21 @@ discovered.
    is written.
 2. **`ingest`** applies the proposal under §5, carrying the `UserConfirmation` the
    claim authorises.
-3. **`resolve`** moves `APPLYING` to `ACCEPTED` (or `STALE`, §6) with the resulting
-   record id.
+3. **`resolve`** moves `APPLYING` to the terminal state the ingest produced, with
+   the id that state carries: `ACCEPTED` with the record written, `STALE` when the
+   window had closed before the answer (§6), or `REDEFERRED` when the ingest ruled
+   `ASK_USER` again (§5a step 1).
+
+**A re-deferral is a completed answer, not a failed one.** When the re-ingest
+surfaces a `USER_ASSERTED` conflict outside the answer's authority, the policy rules
+`ASK_USER`, nothing is written, and the coordinator **enqueues the successor
+question first and resolves the original to `REDEFERRED` naming it**. That order
+matters for the same reason step 2 precedes step 3 everywhere else: a crash after
+resolving but before enqueuing would leave a question marked handled with no
+successor, which is the silent drop wearing a terminal state. Crashing the other way
+leaves the original `APPLYING` and the successor already asked — visible, and
+recoverable by §9's two steps. The successor is admitted regardless of the queue cap
+(§2), so a full queue cannot strand a claimed answer.
 
 **The claim is what makes an answer apply at most once.** Without it, two
 concurrent answers — two CLI invocations, and routinely two spokes once the hub
@@ -898,11 +963,16 @@ guessing. The recovery uses only ratified verbs, and it is **two steps, in order
 The surface states both steps on the stranded question itself, because a recovery
 the user has to infer from a Protocol's dedup rule is not a recovery.
 
-**A `resolve` that finds nothing is reported, not raised.** If the question was
-deleted while its answer was being applied, `resolve` returns `False` and the
-memory write has already committed. The coordinator says exactly that — the change
-was made, the question is gone — because it is true and because raising would
-misreport a completed write as a failure.
+**A `resolve` that finds nothing is reported, not raised — and what it reports
+comes from the ingest, not from the failure.** If the question was deleted while
+its answer was being applied, `resolve` returns `False`. The coordinator still
+holds the `MemoryIngestResult`, and **that** is what it reports: the record written
+and its id, or that the answer was re-deferred, or that nothing was written. The
+`False` adds one clause — "the question is gone" — and nothing else. Reading a
+committed write out of a failed bookkeeping call would be the ADR's own honesty
+rule broken at the last step: a re-deferred answer writes nothing (§5a step 1), so
+"the change was made" would be false for exactly the case that most needs the
+truth.
 
 **The residue, precisely, and it is a bookkeeping loss rather than a data one.**
 After a crash inside a claim, one question's outcome is unrecorded until the user
@@ -961,6 +1031,15 @@ On ratification:
    the answer writes nothing and stamps `STALE` (§6). None belongs in the store's
    conformance suite — they are properties of the sequence, and the sequence lives
    here.
+
+   **Two more cover the re-deferral path** (§5a step 1, §9), which is the one with
+   no legal transition before this revision: an accept whose re-ingest meets a
+   newly-appeared unshown `USER_ASSERTED` conflict **writes nothing**, enqueues a
+   successor, and resolves the original `REDEFERRED` naming it; and **the same case
+   with the answerable queue already full** still admits the successor and still
+   resolves, because a re-deferral does not consult the cap (§2). The second is
+   the assertion that would have caught the stranded-claim hole, so it is named
+   rather than left to be inferred from the first.
 4. A production `DeferralStore` alongside the existing SQLite stores, under the
    same `data_dir` plumbing and file permissions (ADR-0004), wired in the
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
@@ -999,9 +1078,9 @@ On ratification:
   state (§8). Owner: leg 5's local-API and service ADRs.
 - **What the observer proposes and at what rate** (§7). Owner: ADR-0077. This ADR
   fixes only the queue's behaviour under load.
-- **The over-`conflict_limit` surplus (#313) and the universal-`MemoryWriter`
-  promotion of full-set retirement (#314).** Adjacent law, disjoint decision.
-  Owner: ADR-0079.
+- **The over-limit surplus (#313) and the universal-`MemoryWriter` promotion of
+  full-set retirement (#314).** Decided, and merged, by ADR-0079 §§1 and 3. This
+  ADR inherits both by re-ingesting (§5, ADR-0079 §2) and re-decides neither.
 - **Cross-store atomicity between the deferral store and `MemoryStore`** (§9).
   Owner: leg 5, with ADR-0074 §11's cross-store transaction.
 - **Reconciling `SemanticMemory.valid_until` with the envelope window** (§6). Still
