@@ -14,6 +14,7 @@ import pytest
 
 from ai_assistant.core.errors import (
     AssistantError,
+    MemoryStoreError,
     ModelAuthError,
     ModelContentFilterError,
     ModelError,
@@ -21,6 +22,7 @@ from ai_assistant.core.errors import (
     ModelResponseError,
     ModelTimeoutError,
     ModelUnavailableError,
+    UnresolvedEvidenceError,
 )
 
 # (error type, retryable, routable)
@@ -77,3 +79,38 @@ def test_the_conservative_default_is_inherited_not_repeated() -> None:
 
     assert NewlyAddedModelError.retryable is False
     assert NewlyAddedModelError.routable is False
+
+
+# --- the unresolved-evidence refusal (ADR-0077 §5) ---------------------------
+# The subclass ADR-0079 §4 named and left open. Its whole point is that the
+# ingesting stage can tell an evidence record that expired under it from a
+# producer citing something it was never handed, so the ids it carries are the
+# behaviour, not decoration.
+
+
+def test_unresolved_evidence_is_caught_by_an_existing_memory_store_handler() -> None:
+    """Additive under ``except MemoryStoreError`` (ADR-0028 §5 stays true)."""
+    error = UnresolvedEvidenceError("cites a record the store does not hold", ["ep-1"])
+
+    assert isinstance(error, MemoryStoreError)
+    assert isinstance(error, AssistantError)
+
+
+def test_unresolved_evidence_carries_the_ids_that_failed_to_resolve() -> None:
+    error = UnresolvedEvidenceError("nope", ["ep-1", "ep-2"])
+
+    assert error.unresolved_ids == ("ep-1", "ep-2")
+    assert str(error) == "nope"
+
+
+def test_unresolved_evidence_snapshots_the_ids_it_was_given() -> None:
+    """A caller mutating its own list must not rewrite the error after the fact."""
+    ids = ["ep-1"]
+    error = UnresolvedEvidenceError("nope", ids)
+    ids.append("ep-2")
+
+    assert error.unresolved_ids == ("ep-1",)
+
+
+def test_unresolved_evidence_names_no_ids_when_it_is_given_none() -> None:
+    assert UnresolvedEvidenceError("nope").unresolved_ids == ()

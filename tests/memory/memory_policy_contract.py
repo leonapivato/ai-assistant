@@ -51,6 +51,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.protocols import MemoryPolicy
 from ai_assistant.core.types import (
+    BeliefBand,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -62,12 +63,17 @@ from ai_assistant.core.types import (
     ProceduralMemory,
     Provenance,
     SemanticMemory,
+    band_of,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
+
+#: The top of the sweep for a belief in the DERIVED band, which may not claim the
+#: standing only the user's own word carries (ADR-0077 §7).
+_JUST_BELOW_FULL = 0.99
 
 # Decisions that result in the proposal reaching long-term storage. ASK_USER and
 # REJECT do not: one defers to a human, the other drops the proposal.
@@ -98,12 +104,16 @@ def _record(
     confidence: float = 0.6,
     record_kind: str = "semantic",
 ) -> MemoryRecord:
-    # `Provenance` pins USER_ASSERTED to full confidence, so the requested value
-    # is overridden rather than allowed to build a record the domain forbids.
-    # This makes the confidence sweep a no-op for that one source, by design: the
-    # suite exercises what a policy can actually be handed.
+    # `Provenance` pins USER_ASSERTED to full confidence, and — since ADR-0077 §7
+    # — forbids the DERIVED band from claiming it at all. Either way the requested
+    # value is overridden rather than allowed to build a record the domain
+    # forbids. This clips the confidence sweep at both ends, by design: the suite
+    # exercises what a policy can actually be handed, and the top of the range for
+    # a derived belief is now just below 1.0 rather than 1.0.
     if source is MemorySource.USER_ASSERTED:
         confidence = 1.0
+    elif band_of(source) is BeliefBand.DERIVED and confidence == 1.0:
+        confidence = _JUST_BELOW_FULL
     provenance = Provenance(source=source, confidence=confidence, last_updated=_WHEN)
     match record_kind:
         case "episodic":

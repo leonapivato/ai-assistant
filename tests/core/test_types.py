@@ -25,6 +25,7 @@ from ai_assistant.core.types import (
     MemoryWrite,
     MemoryWriteMode,
     Message,
+    ObservationOutcome,
     PreferenceMemory,
     ProceduralMemory,
     Provenance,
@@ -98,6 +99,81 @@ def test_inferred_provenance_may_be_uncertain() -> None:
 def test_confidence_is_bounded() -> None:
     with pytest.raises(ValidationError):
         Provenance(source=MemorySource.INFERRED, confidence=1.5, last_updated=_WHEN)
+
+
+# --- a derived belief may not claim certainty (ADR-0077 §7) ------------------
+# The question ADR-0072 §3 declined and filed for the lane with the first
+# producer that could breach it. Enforced on the *value* rather than at the
+# `MemoryPolicy` gate, because the gate is not the only path a `Provenance`
+# takes: `Goal` carries one and reaches no gate at all, which is the half of
+# #432 this closes.
+
+
+@pytest.mark.parametrize("source", [MemorySource.OBSERVED, MemorySource.INFERRED])
+def test_a_derived_provenance_may_not_claim_full_confidence(source: MemorySource) -> None:
+    assert band_of(source) is BeliefBand.DERIVED  # the rule is on the band, not the name
+
+    with pytest.raises(ValidationError, match="DERIVED"):
+        Provenance(source=source, confidence=1.0, last_updated=_WHEN)
+
+
+@pytest.mark.parametrize("source", [MemorySource.OBSERVED, MemorySource.INFERRED])
+def test_a_derived_provenance_accepts_anything_below_full(source: MemorySource) -> None:
+    """The bound is exclusive at 1.0 only; the rest of the range is untouched."""
+    assert Provenance(source=source, confidence=0.999, last_updated=_WHEN).confidence == 0.999
+    assert Provenance(source=source, confidence=0.0, last_updated=_WHEN).confidence == 0.0
+
+
+def test_an_external_provenance_may_still_claim_full_confidence() -> None:
+    """`EXTERNAL` is in the ATTESTED band, and ADR-0038 §2a lets it be certain."""
+    prov = Provenance(source=MemorySource.EXTERNAL, confidence=1.0, last_updated=_WHEN)
+
+    assert band_of(prov.source) is BeliefBand.ATTESTED
+    assert prov.confidence == 1.0
+
+
+def test_the_two_confidence_rules_do_not_overlap() -> None:
+    """Each band's rule binds its own sources and no others.
+
+    Asserted over the whole enum so a `MemorySource` added later cannot land in
+    the derived band with the rule silently not applying to it.
+    """
+    for source in MemorySource:
+        band = band_of(source)
+        forbidden = 1.0 if band is BeliefBand.DERIVED else 0.5
+        if band is BeliefBand.ATTESTED:
+            continue  # neither rule binds it
+        with pytest.raises(ValidationError):
+            Provenance(source=source, confidence=forbidden, last_updated=_WHEN)
+
+
+# --- what one observation produced (ADR-0077 §9) -----------------------------
+
+
+def test_an_observation_outcome_defaults_to_nothing_seen_and_nothing_lost() -> None:
+    outcome = ObservationOutcome()
+
+    assert outcome.proposals == ()
+    assert outcome.discarded_unusable == 0
+    assert outcome.discarded_over_limit == 0
+
+
+def test_an_observation_outcomes_unusable_count_is_non_negative() -> None:
+    with pytest.raises(ValidationError):
+        ObservationOutcome(discarded_unusable=-1)
+
+
+def test_an_observation_outcomes_over_limit_count_is_non_negative() -> None:
+    with pytest.raises(ValidationError):
+        ObservationOutcome(discarded_over_limit=-1)
+
+
+def test_an_observation_outcome_is_frozen() -> None:
+    """It is a report of what happened, so it must not be editable after the fact."""
+    outcome = ObservationOutcome(discarded_unusable=1)
+
+    with pytest.raises(ValidationError):
+        outcome.discarded_unusable = 0
 
 
 # --- bands: the standing a source places a belief in (ADR-0072 §2) -----------
