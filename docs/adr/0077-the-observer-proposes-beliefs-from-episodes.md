@@ -190,10 +190,27 @@ conversation membership would have re-imposed "episode = turn" one layer up,
 where leg 6's ingested sources and #441's captured moments would have to be
 retrofitted around it.
 
-**The batch is bounded**, by a configured maximum, for the reason every read in
-this system is bounded (ADR-0021 §4, ADR-0073 §2) and one more: the batch is a
-prompt. An unbounded batch is a prompt nobody sized and an egress nobody
-measured.
+**The batch is bounded, and the bound is named here rather than left to the
+lane.** `Settings` gains `observation_batch_size: int`, **positive, defaulting to
+20 episodes**, validated at load like every other tuning value. Every read in
+this system is bounded (ADR-0021 §4, ADR-0073 §2) and this one is also a *prompt*
+and an *egress*: an unbounded batch is a prompt nobody sized and a payload nobody
+measured. The default is deliberately small — a handful of exchanges, not a
+month of transcript — because §3 sends this batch to a model and §8 keeps the
+producer's output proportional until leg 4 lands. Naming the figure follows
+ADR-0074 §9.3's ruling that "the defaults are named, not left to the
+implementation": two conforming stages picking 20 and 2,000 would send
+categorically different amounts of Tier 1 data while each believed it conformed.
+
+**An oversized batch is refused, never truncated.** The producer is constructed
+with its maximum and raises `ValueError` on a batch larger than it — the posture
+ADR-0073 §2 set for an out-of-range read argument ("out of range is a
+`ValueError`, not a clamp"), and ADR-0022 §4a's reason for validating tuning at
+construction: a silent truncation disables half the work while the caller keeps
+reporting health, and the episodes the caller believed were observed were never
+read. The obligation is on the seam because the Protocol is a cross-subsystem
+contract: a stage that bounds its own selection is not evidence that the *next*
+caller will.
 
 ### 2. What it may propose: three kinds, two epistemic steps, and a utility bar
 
@@ -226,13 +243,17 @@ without justification" stated as a producer-side rule, and it is the half of tha
 principle a gate cannot enforce, because a policy judging one proposal at a time
 cannot see that all twenty of them are a retelling.
 
-**Output is bounded per batch**, by a configured maximum, and excess is
+**Output is bounded per batch, and the bound is named**: `Settings` gains
+`observation_max_proposals: int`, **positive, defaulting to 5**, and excess is
 **discarded rather than queued**. A model asked to observe will happily emit
 twenty beliefs about one conversation; nothing downstream would reject them
-individually, and leg 4's soundness work has not landed (§8). Discarding rather
-than queueing keeps the bound honest: a queue is durable state this ADR does not
+individually, and leg 4's soundness work has not landed (§8). Five is the
+selectivity bar above, in numbers: a batch that genuinely yields more durable
+beliefs than that is a batch worth observing twice. Discarding rather than
+queueing keeps the bound honest — a queue is durable state this ADR does not
 ratify, and the episodes remain in the store, so a later run over the same batch
-can propose what this one dropped.
+can propose what this one dropped. The bound is on the **producer's return
+value**, so it holds whatever the model emits and whatever the stage does next.
 
 **Sensitivity: the tiering question ADR-0075 §5 handed here is answered by
 declining a category filter.** Every belief the observer proposes is Tier 1
@@ -380,14 +401,25 @@ in flight for #423 and owns what a pending memory decision is, how it is
 surfaced, and how a resolution flows back through the writer. What the observer
 owes it is one property, stated so ADR-0078 can rely on it:
 
-**A deferred proposal must be able to wait.** It is self-contained — the
-candidate record, its cited episode ids, its rationale — so it can be
-re-adjudicated later by something that was not present when it was made. The
-producer therefore neither retries a deferral, nor escalates it, nor rewrites the
-proposal to avoid it, nor holds it in memory to re-submit. Until ADR-0078 lands,
-an `ASK_USER` ruling is reported on the observe outcome with a `None` record id
-(ADR-0022 §4's shape), so a deferral is **visible** where today it is invisible.
-That is the interim, and it is deliberately not a queue.
+**A deferred proposal is self-contained, so that a durable pending state can hold
+it without the producer changing.** Everything needed to re-adjudicate it later
+travels in the `MemoryUpdateProposal` itself — the candidate record, its cited
+episode ids, its rationale — rather than in producer-side context that only
+existed during the call. The producer therefore neither retries a deferral, nor
+escalates it, nor rewrites the proposal to avoid it, nor holds it to re-submit.
+
+**It is not durable today, and this ADR does not claim otherwise.** No component
+persists a deferred proposal: the ruling is reported on the observe outcome and
+the process then exits, so that particular deferral is gone. That is #423's gap,
+and closing it — deciding what a pending memory decision *is*, where it lives,
+and how a resolution flows back through the writer — is exactly ADR-0078's
+decision, which is why this ADR neither invents a store for it nor pretends the
+property exists. What this ADR does is make the deferral **visible** in the
+interim, where today it is invisible: the observe outcome carries, per deferred
+proposal, the candidate's content, its citations and the policy's stated reason —
+not merely a count and a `None` record id. That is enough for a user to act on it
+in the same session with the surfaces leg 1 already shipped (assert it themselves,
+or forget the belief it conflicts with), and it is deliberately not a queue.
 
 **Failure behaviour follows ADR-0022 §3's rule**, applied to an operation the
 user asked for:
@@ -436,18 +468,40 @@ floor the producer proposes nothing.
 **The floor is the producer's, not the gate's**, and this ADR says which is
 which, because two rules that look alike would otherwise drift:
 
-- **The policy rule** (in the shipped `DefaultMemoryPolicy`, the rule ADR-0072 §3
-  assigned to this lane): a proposal in the `DERIVED` band citing **no** evidence
-  is refused. It is band-wide and minimal, because the gate serves every producer
-  and cannot know which epistemic step a record took. **It exempts `EPISODIC`
-  records**, as ADR-0074 §4 binds it to — an episode's warrant is that it
-  happened, and requiring it to cite something would demand a regress. That
-  exemption guards a path nothing takes today (capture does not reach the gate,
-  ADR-0075 §1; and §2 above forbids the observer to propose an episode), and it
-  is written anyway so the rule is not one refactor away from making its own
-  substrate unwritable.
+- **The policy rule** — **emptiness**. `DefaultMemoryPolicy` gains a rule: a
+  proposal in the `DERIVED` band citing **no** evidence rules `REJECT`. This is
+  the rule ADR-0072 §3 assigned to this lane, at the enforcement point it named
+  ("the enforcement point is the `MemoryPolicy` gate, not the type… a policy can
+  state the rule for the band it is judging without constraining `EXTERNAL` or
+  `USER_ASSERTED` records that legitimately cite nothing"). It is band-wide and
+  minimal, because the gate serves every producer and cannot know which epistemic
+  step a record took. **It exempts `EPISODIC` records**, as ADR-0074 §4 binds it
+  to — an episode's warrant is that it happened, and requiring it to cite
+  something would demand a regress. That exemption guards a path nothing takes
+  today (capture does not reach the gate, ADR-0075 §1; and §2 above forbids the
+  observer to propose an episode), and it is written anyway so the rule is not one
+  refactor away from making its own substrate unwritable. It is listed among what
+  the implementing lane owes, with its tests (§9) — a rule this ADR ratifies and
+  nobody is obliged to build is not a rule.
+- **The writer floor** — **resolvability**, below. The two do not overlap: an
+  empty tuple names no record that fails to resolve, so it passes the writer and
+  is caught by the policy; a populated tuple naming a record the store does not
+  hold passes any policy and is caught by the writer.
 - **The producer floor** (`INFERRED` ≥ 2): the observer's own discipline, stated
   here so a second observer inherits it rather than reinventing a weaker one.
+
+**Why emptiness is not *also* a writer floor**, though the writer is the seam
+every producer crosses and a deployment injecting its own `MemoryPolicy` could
+therefore store an unsupported derived belief. That limit is accepted, named, and
+inherited rather than introduced: ADR-0072 §3 chose the policy seam deliberately,
+and the shape of a writer floor in this system is ADR-0045 §5 clause 1 — a
+refusal to *apply* a ruling the policy already made ("no fold of any kind onto a
+`USER_ASSERTED` target… remains an obligation on every writer"). A floor that
+pre-empted the ruling instead would make the policy's `REJECT` unreachable for
+the case, turning a reportable decision the user can read into an exception, and
+would put one rule in two places to drift. What a deployment's own policy permits
+is that deployment's floor to set; what it cannot escape is the resolvability
+check, because that one cannot live at the policy at all.
 
 **Confidence is computed by the producer, and never taken from the model.** It is
 a deterministic, pure function of the epistemic step and the number of distinct
@@ -704,33 +758,48 @@ class Observer(Protocol):
 **What the implementing lane owes** (stage 2; stage 1 is this ADR merging):
 
 1. The Protocol and the `Provenance` validator, plus the `MemoryWriter.ingest`
-   docstring restated as §5 rules it.
-2. **The shared conformance suite**, with a clause per obligation: every returned
+   docstring restated as §5 rules it, **and its conformance clause**: a `DERIVED`
+   proposal citing a record the store does not hold is refused with a
+   `ValueError`, nothing is written, and an `ASSERTED` or `EXTERNAL` proposal
+   citing nothing is unaffected.
+2. **The `DefaultMemoryPolicy` rule** (§5): a `DERIVED` proposal citing no
+   evidence rules `REJECT`, an `EPISODIC` record is **not** refused for citing
+   nothing, and `ASSERTED`/`EXTERNAL` proposals are untouched. Three tests, one
+   per clause. Without this the ADR's "every proposal cites" holds only for the
+   producer that happens to obey it.
+3. **The shared conformance suite**, with a clause per obligation: every returned
    proposal is in the `DERIVED` band; every proposal cites at least one id drawn
    from the batch it was given and none from outside it; an `INFERRED` proposal
    cites at least two distinct episodes; no proposal is `EPISODIC`; confidence is
    strictly below 1.0 and is the same for the same batch twice (the clause that
-   catches a producer passing the model's number through); the output is bounded;
-   an empty batch yields no proposals; input observation (ADR-0065) and
+   catches a producer passing the model's number through); **the returned count
+   never exceeds the configured maximum**; **a batch larger than the configured
+   maximum is refused with a `ValueError` rather than truncated** (§1 — the case
+   an implementation that silently slices passes every other clause on this
+   list); an empty batch yields no proposals; input observation (ADR-0065) and
    cancellation (ADR-0060).
-3. **The canonical fake** in `ai_assistant.testing`, plus the concrete
+4. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
-4. **The model-backed implementation** in `learning/`, with ADR-0047 §1's
+5. **The model-backed implementation** in `learning/`, with ADR-0047 §1's
    injected seams (`ModelProvider`, a guarded `Clock` per ADR-0026 §7, an
    `id_factory`), the prompt of §3, the label→id mapping of §5, and ADR-0071's
    extraction. The extraction helper stays in the producing subsystem: two
    implementations of one scan is cheaper than promoting a non-contract helper
    into `core` on speculation, and the third model-backed producer is the trigger
    to promote it — the discipline ADR-0028 §7 and ADR-0045 §1 each applied.
-5. **The `Settings` field** `observer_model`, defaulting to unset with §3's
+6. **Three `Settings` fields.** `observer_model`, defaulting to unset with §3's
    meaning, validated at load like every other spec, and the composition-root
    wiring that builds its route **without fallback** and requires its own
-   credential (ADR-0013 §6).
-6. **The `orchestration` stage and the façade operation** (§8), plus the
+   credential (ADR-0013 §6); `observation_batch_size` (positive, default 20, §1)
+   and `observation_max_proposals` (positive, default 5, §2), each refused at
+   load when non-positive, as every other bound there is.
+7. **The `orchestration` stage and the façade operation** (§8), plus the
    citation-resolving belief views (§6). The façade is concrete and not a
    contract (ADR-0042 §1), so those names are shape, not spelling (ADR-0073 §7).
-7. **The CLI**: the observe command, and the belief surfaces rendering
+   The stage selects **at most** `observation_batch_size` episodes, so the
+   producer's refusal (§1) guards a contract rather than a routine path.
+8. **The CLI**: the observe command, and the belief surfaces rendering
    tombstones, the adjusted confidence, and the all-unsupported state.
 
 **Tests the conformance suite cannot reach**, and which are therefore the stage's
@@ -753,8 +822,18 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
 - **A batch observed twice** — the second run reinforces rather than duplicating,
   and the belief's confidence does not rise (§8).
 - **A proposal that conflicts with a user assertion** — `ASK_USER`, nothing
-  stored, and the deferral **reported** on the outcome (§4). The assertion worth
-  making is that it is not silently dropped, which is #423's whole complaint.
+  stored, and the deferral **reported** on the outcome (§4) **carrying the
+  candidate's content, its citations and the policy's reason**, not merely a
+  count. The assertion worth making is that it is not silently dropped, which is
+  #423's whole complaint, and that what is reported is enough to act on.
+- **A batch larger than the configured maximum** — refused, with nothing
+  observed and no model call made (§1), and **an oversized *return* from the
+  model** — truncated to the configured maximum with the discard counted (§2).
+  The pair is what stops an implementation applying one bound and inheriting the
+  other by accident.
+- **Invalid limits** — a non-positive `observation_batch_size` or
+  `observation_max_proposals` fails at load as a `ConfigurationError` (§1, §2),
+  the posture every other tuning value in `Settings` already takes.
 - **A model failure and a malformed response**, asserting the two different
   behaviours §4 ratifies: propagate, versus degrade-and-count.
 - **An observation run with `observer_model` unset and set** — the same route as
@@ -796,6 +875,13 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   is the resident process; re-observation is safe without it.
 - **A pending-proposal queue for `ASK_USER`.** §4. That is ADR-0078's decision,
   and a second queue invented here would be the thing it has to supersede.
+- **A writer floor duplicating the policy's cites-something rule.** §5. It would
+  make the policy's `REJECT` unreachable for the case, turning a decision the
+  user can read into an exception, and would put one rule in two places to
+  drift — where ADR-0045 §5 clause 1's floor refuses to *apply* a ruling rather
+  than pre-empting one.
+- **Truncating an oversized batch.** §1. A silent truncation makes the caller's
+  bound unobservable and drops episodes the caller believed were observed.
 - **A sensitive-subject filter inside the observer.** §2.
 - **A `get_many` on `MemoryStore`.** §6. ADR-0074 §5 declined it; this ADR gives
   it a second consumer and leaves the decision where the hub will hold it.
@@ -810,9 +896,13 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
 - **Retiring a producer-set bounded validity window** (#306). Leg 4. The observer
   sets no bounded window today, and it is deliberately not the lane that decides
   what retiring one means.
-- **Scheduling, batching and volume.** Leg 5: the cadence, the durable cursor
-  (§8), and the process that runs an observation nobody asked for. Not
-  foreclosed — the façade operation is what the scheduler calls, unchanged.
+- **Cadence and aggregate volume.** Leg 5: how often observation runs, the
+  durable cursor that stops it re-reading what it has seen (§8), and the process
+  that runs it without being asked. **The per-call bounds are *not* deferred** —
+  §1 and §2 name them and their defaults, because a bound left to leg 5 is a
+  bound this producer ships without. What leg 5 decides is how many such calls
+  happen and when. Not foreclosed: the façade operation is what the scheduler
+  calls, unchanged.
 - **An on-device generative route** (§3). It needs a local runtime, a
   provisioning decision of the shape ADR-0024 made for the embedder, and endpoint
   configuration `Settings` does not have. Filed; the named setting is what makes
@@ -847,11 +937,12 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   band, its confidence and its evidence, and correctable by the user — which is
   the roadmap's exit test for leg 3 and the first time VISION §Principle 1's
   "built chiefly by observation" is true of anything in the tree.
-- **The contract cost is one Protocol and one validator**, because ADR-0005 typed
-  the proposal, ADR-0028 contracted the write path, ADR-0072 fixed what a derived
-  belief means, ADR-0073 built the surface and ADR-0074 built the substrate. The
-  heaviest design ADR of the arc adds the least contract surface of the four,
-  which is what contract-first was for.
+- **The contract cost is one Protocol and one validator** — everything else the
+  lane owes is a rule inside a concrete component, a `Settings` field or a test —
+  because ADR-0005 typed the proposal, ADR-0028 contracted the write path,
+  ADR-0072 fixed what a derived belief means, ADR-0073 built the surface and
+  ADR-0074 built the substrate. The heaviest design ADR of the arc adds the least
+  contract surface of the four, which is what contract-first was for.
 - **The gate holds where it matters most.** ADR-0075 exempted capture and named
   the observer as the paradigm case the gate exists for; this ADR keeps it
   inside, and the producer holds neither writer nor policy, so it cannot rule on
@@ -863,8 +954,10 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   on-device generative route is realizable in the installed artifact, and this ADR
   says so rather than implying a local default it cannot ship.
 - **`ASK_USER` becomes visible before it becomes resolvable.** Until ADR-0078
-  lands, a deferral is reported instead of vanishing — which is a smaller thing
-  than resolving it and a strictly better position than #423 describes.
+  lands, a deferral is reported — with the candidate, its citations and the
+  policy's reason — instead of vanishing. That is a smaller thing than resolving
+  it, and the ADR says so plainly: nothing persists the deferral, so it does not
+  survive the process, and #423 stays open until ADR-0078 closes it.
 - **A belief now outlives its evidence honestly.** The tombstone reveals *that*
   an evidence item existed and was destroyed, never what it was; the presented
   confidence falls; the stored record is untouched; retrieval is unmoved. The
