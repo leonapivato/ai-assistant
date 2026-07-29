@@ -1,6 +1,6 @@
 # 79. A correction resolves every conflict it is shown, or it does not land
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-28
 - **This ADR partially supersedes [ADR-0050](0050-resolving-the-full-contradiction-set.md)**,
   in the scope named in §5: **§1's over-limit surplus clause** (the paragraph
