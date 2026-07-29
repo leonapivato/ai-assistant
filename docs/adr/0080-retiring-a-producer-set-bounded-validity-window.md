@@ -494,8 +494,9 @@ the two could drift into disagreeing about whether a write is *possible*, which
    are outside the equality by the rule's own terms, and obligation 1 is what pins
    them. Since every member of obligation 2's planted set is such a record — a
    `valid_from`-only target and an open-window sibling, neither carrying an end —
-   the equality holds over the whole set there, which is what makes the
-   one-sampled-instant requirement observable at all.
+   the equality holds over the whole set there. It pins §1's *outcome*, one close
+   instant recorded across the set; it does not prove the writer took only one
+   clock **reading**, which the shared suite cannot see (below).
 
 **No writer clock is pinned, and `WriterFactory` gains nothing.** This is the
 constraint that shapes the obligations: the suite "deliberately does not pin
@@ -544,15 +545,29 @@ accepted:
   extend" does not catch a *premature* close — which this ADR does not make a
   violation: §1 fixes the end as a function of the writer's own clock, and the
   clock is exactly what the suite declines to pin.
+- **Obligation 3's equality pins the outcome, not the number of clock reads.**
+  A writer whose clock is constant — which every writer the suite drives today
+  effectively is — satisfies it even if it samples once per target, because both
+  samples return the same instant. So the assertion is necessary and not
+  sufficient for §1's one-*reading* rule.
+
+**The third gap is closed by a per-writer regression, and the lane owes it.**
+Each writer's own tests already inject a clock, so each gets a multi-target
+`SUPERSEDE` driven by an **advancing** clock — one that returns a later instant
+on each call — asserting that every retired record in the set carries the *same*
+`valid_until`. A writer re-sampling per target fails it; a writer sampling once
+passes whatever the clock does next. That is the deterministic form the shared
+suite cannot express without a clock seam it has ruled out, and it belongs beside
+the clamp and refusal regressions that are already there.
 
 Driving the exact clamp and the exact refusal against an **injected** clock is
 therefore the per-writer tests' job and stays there (`test_ingest.py`,
-`test_fake_writer.py`, which already do it). The shared obligations exist to stop
-the two writers **diverging** — the thing ADR-0079 §3 promoted an obligation for
-— not to re-derive each writer's clock discipline. Naming that bound is the same
-move ADR-0079 §1 makes about its own reach: not a hedge, because a suite claiming
-more than `FakeMemoryStore` and an unpinned clock can observe would be claiming
-something no conforming writer is held to.
+`test_fake_writer.py`, which already do the first two). The shared obligations
+exist to stop the two writers **diverging** — the thing ADR-0079 §3 promoted an
+obligation for — not to re-derive each writer's clock discipline. Naming that
+bound is the same move ADR-0079 §1 makes about its own reach: not a hedge,
+because a suite claiming more than `FakeMemoryStore` and an unpinned clock can
+observe would be claiming something no conforming writer is held to.
 
 So no clock seam is added, and the suite's standing refusal to pin the limit's
 value, the threshold, the tuning check and the clock all survive (ADR-0079 §4
@@ -569,9 +584,10 @@ same behaviour. The suite is what keeps the two honest.
 `_close_window` already computes `min(now, valid_until)` and refuses
 `end <= valid_from`, and `_apply_supersede` already closes every target up front,
 before any write. What the lane owes is the *record*: the `MemoryWriter.ingest`
-docstring, the three suite obligations, and re-homing the `#306` citations in
-`_close_window` and `testing/writer.py` to this ADR (the `#306` citations that
-refer to the read-time-relative hide move to **#460** instead). The per-writer
+docstring, the three suite obligations, the advancing-clock regression each
+writer owes (above), and re-homing the `#306` citations in `_close_window` and
+`testing/writer.py` to this ADR (the `#306` citations that refer to the
+read-time-relative hide move to **#460** instead). The existing per-writer
 regression tests stay where they are; the suite obligations do not replace them,
 they stop the two writers drifting apart.
 
