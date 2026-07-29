@@ -34,7 +34,10 @@ from ai_assistant.core.types import (
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
+    MemoryUpdateProposal,
+    ObservationOutcome,
     Provenance,
+    SemanticMemory,
 )
 from ai_assistant.orchestration import LearnDecision, ObservationReport, ObservationStage
 from ai_assistant.testing import (
@@ -51,11 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import MemoryWriter, Observer
-    from ai_assistant.core.types import (
-        MemoryIngestResult,
-        MemoryUpdateProposal,
-        ObservationOutcome,
-    )
+    from ai_assistant.core.types import MemoryIngestResult
 
 AT = datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 
@@ -717,3 +716,80 @@ async def test_a_dropped_proposal_tombstones_the_citation_that_went_away() -> No
     assert dropped.evidence[0].lost is True  # the one that went away
     assert dropped.evidence[0].content is None
     assert dropped.evidence[1].lost is False  # the one that survived, still readable
+
+
+async def test_a_proposal_citing_a_live_episode_outside_the_batch_is_refused() -> None:
+    """The scope limit, closed on the half the writer cannot see (ADR-0077 §1, §5).
+
+    A foreign id that happens to name a **live** record sails past the writer's
+    evidence check — it resolves — so only this stage can catch it. Left unchecked it
+    would be stored as a warrant and rendered as evidence, pulling content out of a
+    conversation the user never asked to observe: exactly the scope property §1 makes
+    a property of the seam rather than of one implementation's good behaviour.
+    """
+    harness = Harness()
+    observed = await harness.conversation_with(2)
+    elsewhere = await harness.conversation_with(1)
+    foreign = (await _batch_ids(harness, elsewhere))[0]
+    assert await harness.memory.get(foreign) is not None  # it really does resolve
+    harness.stage._observer = _CitingObserver(foreign)
+
+    with pytest.raises(ValueError, match="never handed"):
+        await harness.stage.observe(observed)
+
+
+async def test_nothing_is_written_when_any_proposal_cites_outside_the_batch() -> None:
+    """Checked over the whole return value **before** anything is ingested.
+
+    The check needs no store access, so interleaving it with the writes would buy
+    nothing and risk a partial write for a fault that was knowable up front. A good
+    proposal ahead of the offending one must therefore not have landed.
+    """
+    harness = Harness()
+    observed = await harness.conversation_with(2)
+    elsewhere = await harness.conversation_with(1)
+    foreign = (await _batch_ids(harness, elsewhere))[0]
+    harness.stage._observer = _CitingObserver(foreign, good_first=True)
+
+    with pytest.raises(ValueError, match="never handed"):
+        await harness.stage.observe(observed)
+
+    assert await harness.memory.get("rec-good") is None
+    assert await harness.memory.list_beliefs(kinds=[MemoryKind.SEMANTIC]) == []
+
+
+class _CitingObserver:
+    """An ``Observer`` that breaches §5's mapping rule, citing outside its batch.
+
+    Hand-rolled rather than scripted through :class:`FakeObserver`, which cannot
+    produce this shape by construction: it draws every citation from the batch it was
+    handed, which is precisely the clause under test. A non-conforming observer is
+    the only way to reach the stage's enforcement of it.
+    """
+
+    def __init__(self, foreign_id: str, *, good_first: bool = False) -> None:
+        self._foreign = foreign_id
+        self._good_first = good_first
+
+    async def observe(self, episodes: Sequence[EpisodicMemory]) -> ObservationOutcome:
+        """Propose one belief citing an id from outside ``episodes``."""
+        proposals = []
+        if self._good_first:
+            proposals.append(_proposal_citing("rec-good", (episodes[0].id,)))
+        proposals.append(_proposal_citing("rec-foreign", (self._foreign,)))
+        return ObservationOutcome(proposals=tuple(proposals))
+
+
+def _proposal_citing(record_id: str, evidence: tuple[str, ...]) -> MemoryUpdateProposal:
+    """A well-formed derived proposal citing exactly ``evidence``."""
+    return MemoryUpdateProposal(
+        proposed=SemanticMemory(
+            id=record_id,
+            content=f"a belief at {record_id}",
+            fact=f"a belief at {record_id}",
+            provenance=Provenance(
+                source=MemorySource.OBSERVED, confidence=0.6, evidence=evidence, last_updated=AT
+            ),
+        ),
+        rationale="the batch supports this",
+    )

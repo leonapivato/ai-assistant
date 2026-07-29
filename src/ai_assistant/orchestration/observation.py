@@ -37,7 +37,7 @@ from ai_assistant.core.types import EpisodicMemory, MemoryKind
 from ai_assistant.orchestration.engine import Evidence, LearnDecision, learn_decision
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.protocols import (
         ConversationStore,
@@ -82,6 +82,58 @@ def _check_batch_size(value: int) -> None:
         raise TypeError(msg)
     if not 1 <= value < 2**63:
         msg = f"batch_size must be at least 1 and below 2**63, got {value}"
+        raise ValueError(msg)
+
+
+def _check_citations(
+    proposals: Sequence[MemoryUpdateProposal], *, batch: Mapping[str, str]
+) -> None:
+    """Refuse a proposal citing an episode the producer was never handed (§1, §5).
+
+    **The scope limit, enforced where it is knowable.** ``Observer.observe`` owes
+    that "every cited id is drawn from ``episodes``, and none from outside it", and
+    the writer cannot enforce it: it sees a citation that *resolves* and has no idea
+    which episodes were selected. Only this stage knows the batch, so a foreign id
+    that happens to name a live record would otherwise be written as a warrant and
+    rendered as evidence — pulling content out of a conversation the user never
+    asked to observe, which is exactly the scope property ADR-0077 §1 makes a
+    property of the seam rather than of one implementation's good behaviour.
+
+    The unresolved half of the same fault already propagates through
+    :class:`~ai_assistant.core.errors.UnresolvedEvidenceError` (§5). This closes the
+    half the writer cannot see, so the fault behaves the same either way rather than
+    depending on whether the foreign id happened to point at something.
+
+    **Checked over the whole return value before anything is written.** It needs no
+    store access, so interleaving it with the writes would buy nothing and risk a
+    partial write for a fault that was knowable up front — and it is the producer's
+    own validate-then-apply ordering (§4) applied one layer out.
+
+    A ``ValueError`` rather than an ``AssistantError``, deliberately, and symmetric
+    with the contract's other direction: the producer raises ``ValueError`` when the
+    *stage* breaks the batch contract (an oversized batch, a repeated episode), and
+    this is the stage raising it when the *producer* does. Both are wiring faults in
+    an injected collaborator rather than conditions a user can act on — a conforming
+    ``Observer`` cannot reach either — so neither is dressed up as a runtime failure
+    to be rendered.
+
+    Raises:
+        ValueError: If any proposal cites an id outside ``batch``.
+    """
+    foreign = sorted(
+        {
+            cited
+            for proposal in proposals
+            for cited in proposal.proposed.provenance.evidence
+            if cited not in batch
+        }
+    )
+    if foreign:
+        msg = (
+            f"the observer cited {len(foreign)} episode(s) it was never handed "
+            f"({', '.join(foreign)}); every citation must be drawn from the batch, "
+            f"so nothing was ingested"
+        )
         raise ValueError(msg)
 
 
@@ -454,10 +506,13 @@ class ObservationStage:
                 indistinguishable from "nothing to learn" (ADR-0022 §3). The route
                 never falls back, so the failure ends the pass (ADR-0077 §3).
             ValueError: If the producer refuses the batch — larger than its
-                configured maximum, or carrying one episode twice. Both are wiring
-                faults rather than user input: this stage selects at most
-                ``batch_size`` distinct turns, so neither is reachable from a
-                composition root that gave the two bounds one value.
+                configured maximum, or carrying one episode twice — or if it
+                returns a proposal citing an episode it was never handed, which
+                this stage refuses before writing anything
+                (:func:`_check_citations`). All three are wiring faults in an
+                injected collaborator rather than user input: this stage selects at
+                most ``batch_size`` distinct turns, and a conforming ``Observer``
+                cites only what it was given.
         """
         target = await self._target(conversation_id)
         if target is None:
@@ -470,6 +525,11 @@ class ObservationStage:
         # so a proposal's warrant renders out of what was already read, with no
         # second pass over the store (ADR-0077 §5).
         batch = {episode.id: episode.content for episode in episodes}
+        # Every proposal is checked against the batch **before any is written**. The
+        # check needs no store access, so there is nothing to gain by interleaving it
+        # with the writes and a partial write to lose — and it mirrors the producer's
+        # own validate-then-apply ordering (§4).
+        _check_citations(outcome.proposals, batch=batch)
         proposals: list[ObservedProposal] = []
         dropped = 0
         for proposal in outcome.proposals:
@@ -544,13 +604,13 @@ class ObservationStage:
             unresolved = frozenset(exc.unresolved_ids)
             if not unresolved or not unresolved <= batch.keys():
                 raise
-            evidence = await self._evidence(proposal, batch=batch, unresolved=unresolved)
+            evidence = self._evidence(proposal, batch=batch, unresolved=unresolved)
             return ObservedProposal.unsupported(proposal, evidence)
-        evidence = await self._evidence(proposal, batch=batch, unresolved=frozenset())
+        evidence = self._evidence(proposal, batch=batch, unresolved=frozenset())
         return ObservedProposal.ruled(proposal, result, evidence)
 
-    async def _evidence(
-        self,
+    @staticmethod
+    def _evidence(
         proposal: MemoryUpdateProposal,
         *,
         batch: Mapping[str, str],
@@ -558,36 +618,25 @@ class ObservationStage:
     ) -> tuple[Evidence, ...]:
         """Render one proposal's citations as readable evidence (ADR-0077 §4, §5).
 
-        **Out of the batch, not out of the store.** Every citation is drawn from the
-        episodes this pass selected (ADR-0077 §5's mapping rule), so the content is
-        already in hand and resolving it costs no read at all — which matters because
-        this runs per proposal on a path that has just written to the store.
+        **Out of the batch, and only out of the batch.** Every citation is drawn from
+        the episodes this pass selected — the contract's own rule, and one
+        :func:`_check_citations` has already enforced before any write — so the
+        content is in hand, resolving it costs no read at all, and **no id outside
+        the batch can be dereferenced here.** That last part is the scope limit
+        ADR-0077 §1 makes a property of the seam rather than of an implementation: a
+        producer cannot reach an episode it was not handed, and it cannot reach one
+        through this report either.
 
         ``unresolved`` names the citations the writer refused the proposal for. Those
         render as **tombstones**, and that is the honest rendering rather than a
         convenient one: the record is gone, and echoing the copy still sitting in
         this pass's batch would print back content the user may have just destroyed
         with ``forget-conversation``.
-
-        A citation in neither — resolvable at the write yet absent from the batch —
-        is a producer that breached §5's mapping rule and got past the writer because
-        the id happened to name something. It is unreachable for a conforming
-        observer, and it is resolved through the store rather than guessed at,
-        because the two available guesses are both lies: a tombstone would claim it
-        was destroyed, and dropping it would hide a citation, which ADR-0073 §4's
-        floor forbids in as many words.
         """
-        items: list[Evidence] = []
-        for cited in proposal.proposed.provenance.evidence:
-            if cited in unresolved:
-                items.append(Evidence())
-                continue
-            content = batch.get(cited)
-            if content is None:
-                found = await self._memory.get(cited)
-                content = None if found is None else found.content
-            items.append(Evidence(content=content))
-        return tuple(items)
+        return tuple(
+            Evidence() if cited in unresolved else Evidence(content=batch[cited])
+            for cited in proposal.proposed.provenance.evidence
+        )
 
 
 __all__ = [
