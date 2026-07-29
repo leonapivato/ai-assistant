@@ -210,16 +210,30 @@ bound that cost, and together they are why it is the right rule:
   `valid_until` intact would leave the record live and contradicting the
   correction, which is the state ADR-0079 §1 exists to make unreachable.
 
-**The close instant is sampled once per ingest, for the whole set.** `now` is one
-guarded reading of the writer's injected clock (ADR-0026), taken before any write
-and shared by every member of the retirement set. It is not re-sampled per
-target. This is the same discipline `core/protocols.py`'s input-observation
-clause fixes for a call's inputs (ADR-0065) and ADR-0056 fixes for the store's
-write paths, applied to the one mutable input this rule reads: a per-target
-sample would let one atomic batch record two different instants for one ruling,
-so a reader could not say when the correction took effect. The clamp is otherwise
-a pure function of the record and that instant, and it reads nothing of the
-caller's proposal, so nothing here adds an observation point.
+**One close instant per ingest, for the whole set.** `now` is **one** instant,
+determined before any write and shared by every member of the retirement set. It
+is not re-determined per target. This is the same discipline
+`core/protocols.py`'s input-observation clause fixes for a call's inputs
+(ADR-0065) and ADR-0056 fixes for the store's write paths, applied to the one
+varying input this rule reads: a per-target instant would let one atomic batch
+record two different close times for one ruling, so a reader could not say when
+the correction took effect. The clamp is otherwise a pure function of the record
+and that instant, and it reads nothing of the caller's proposal, so nothing here
+adds an observation point.
+
+**How a writer obtains that instant is *not* contract, deliberately.** The clause
+above fixes that there is one instant and that the clamp and the refusal are
+computed from it; it does not require a clock, an injected clock, or any
+particular value — which is why §7 can state it without a conformance seam. That
+line is inherited, not invented: the shared `MemoryWriter` suite already excludes
+clock handling ("a writer with no clock at all conforms"), ADR-0028 §8 holds
+`MemoryIngestor`'s naive-clock guard to `test_ingest.py`, and ADR-0079 §3 drew
+the same boundary for its own ceiling — the behaviour at the boundary is
+contract, the number is the writer's. `MemoryIngestor`'s use of a **guarded,
+injected** clock (ADR-0026; ADR-0045 §4's "the ingestor's injected clock") is
+therefore that writer's own semantics and stands exactly as it is, pinned in
+`test_ingest.py` rather than in the Protocol. What this ADR adds to the contract
+is that whatever instant a writer arrives at, it arrives at *one* per ingest.
 
 ### 2. The rule does not split by band, because the band where it would is already unreachable
 
@@ -448,7 +462,9 @@ proposals are admissible*, so the three do not overlap.
   record a supersession retires is written back with its window closed at the
   **earlier** of the writer's close instant and the record's own `valid_until`,
   every other field preserved — so a retirement never extends a window and never
-  moves `valid_from`. One close instant serves the whole retirement set;
+  moves `valid_from`. One close instant serves the whole retirement set; how a
+  writer determines that instant is expressly not contract (§1), which is why
+  this clause needs no clock and the suite needs no seam for it;
 - **the raise clause**: `MemoryStoreError` when a record the ruling would retire
   carries a `valid_from` at or after that end, so the closed window would be
   empty or inverted — with nothing written, no window closed, and every record in
@@ -543,16 +559,19 @@ accepted:
   branches are reachable.
 - **Obligation 1 bounds the close from above and not from below.** "Never
   extend" does not catch a *premature* close — which this ADR does not make a
-  violation: §1 fixes the end as a function of the writer's own clock, and the
-  clock is exactly what the suite declines to pin.
-- **Obligation 3's equality pins the outcome, not the number of clock reads.**
-  A writer whose clock is constant — which every writer the suite drives today
-  effectively is — satisfies it even if it samples once per target, because both
-  samples return the same instant. So the assertion is necessary and not
-  sufficient for §1's one-*reading* rule.
+  violation: §1 fixes the end as a function of the writer's close instant, and
+  where that instant comes from is exactly what the suite declines to pin.
+- **Obligation 3's equality pins the outcome, not how it was arrived at.** A
+  writer whose close instant is constant — which every writer the suite drives
+  today effectively is — satisfies it even if it re-determines the instant per
+  target, because both determinations return the same value. So for a writer
+  that *does* have a clock, the assertion is necessary and not sufficient
+  evidence that the clock was read once.
 
-**The third gap is closed by a per-writer regression, and the lane owes it.**
-Each writer's own tests already inject a clock, so each gets a multi-target
+**The third gap is closed by a per-writer regression, and the lane owes it —
+which is the right home for it, since it is a claim about a clock the contract
+does not require.** Both writers do take an injected clock and their own tests
+already drive it, so each gets a multi-target
 `SUPERSEDE` driven by a **counting, advancing** clock — one that records every
 call and returns a later instant each time — asserting three things together:
 the clock was called **exactly once**, every retired record carries the *same*
