@@ -1,7 +1,36 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause)
 - Date: 2026-07-23
+- Note (2026-07-28): **§1's over-limit surplus clause no longer holds.** The
+  paragraph headed *"Full" is bounded by conflict detection; the over-limit
+  surplus is a filed residual*, the paragraph beginning *"The surplus does not
+  self-heal by re-proposal"*, and the Consequences restatement *"a surplus beyond
+  the cap stays live as a bounded, filed residual"* are replaced by
+  [ADR-0079](0079-a-correction-retires-every-belief-it-contradicts.md) §1, which
+  re-founds `conflict_limit` as a **ceiling rather than a truncation**: at or
+  below it the detected conflict set is complete, above it the ingest refuses and
+  writes nothing. So a correction no longer "retires exactly `conflict_limit` of
+  them and the surplus stays live" — there is no surplus, because the state that
+  produced one is refused (issue #313). ADR-0079 §5 names the exact scope
+  replaced and applies ADR-0070 §1's test to it.
+
+  **Everything else here stands and is strengthened, not replaced**: §1's ruling
+  that a `SUPERSEDE` retires the full supersedable conflict set rather than only
+  the named target, its precise definition of that set, the `_SUPERSEDABLE`
+  allow-list and the two sources held out of the widening, the
+  applier-rather-than-`target_ids` route, the single atomic batch; **all of §2**
+  (assertion-versus-assertion defers to the user); and §3's other deferrals. §1's
+  rejection of "an unbounded re-search" is honoured rather than overturned —
+  ADR-0079 §1 is a single bounded read with a refusing ceiling, not a sweep. §3's
+  reserved promotion to a universal `MemoryWriter` obligation (issue #314) is
+  *settled* by ADR-0079 §3, not superseded: this ADR filed it rather than ruling
+  against it.
+
+  ADR-0079 lands **in the same change as this note**, so this Status line never
+  names an ADR that does not exist — the hazard ADR-0070 §1 guards against — and
+  if that change does not land, neither does this. Appended note per ADR-0070 §1;
+  no text below it is rewritten.
 - **Not a contract change.** This is a policy-lane decision. It changes
   `DefaultMemoryPolicy` (`memory/policy.py`) and the `MemoryIngestor` supersession
   applier (`memory/ingest.py`) only; it adds no member, no field, and no method to
