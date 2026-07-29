@@ -13,7 +13,11 @@ script in ``pyproject.toml``.
 render what the engine already computed and destroy what the user names. The
 *band* on each row arrives on the DTO — :meth:`~ai_assistant.orchestration.Belief`
 is projected in the engine so ADR-0072 §1's classification never lands here — and
-this module reads no clock for them and re-filters nothing.
+this module reads no clock for them and re-filters nothing. The same holds for
+ADR-0077 §6's evidence: citations arrive already resolved to readable content or
+to a tombstone, and the confidence on the DTO is already the presented one, so
+nothing here resolves a citation, computes an adjustment, or ever sees an id it
+could pass off as a warrant.
 
 ``conversations`` and ``forget-conversation`` are the conversation surface
 (ADR-0074 §2, §8, §10), and ``ask --conversation`` is how a turn continues one.
@@ -1277,12 +1281,14 @@ def _why(belief: Belief) -> str:
     The answer is complete for one band and owed for two, and the wording keeps
     ADR-0073 §4's two floors:
 
-    * **Derived** — the citations are reported as a *count* and named as not yet
-      showable. They are never rendered as evidence, and never silently dropped;
-      the ids are not even carried to this module
-      (:class:`~ai_assistant.orchestration.Belief` holds only the count), so no
-      renderer here can pass one off as the warrant. Resolving them into readable
-      evidence is due with the first producer of derived beliefs (#431).
+    * **Derived** — the citations are counted, and the ones that no longer resolve
+      are counted **separately and out loud** (ADR-0077 §6). They are never rendered
+      as ids; the ids are not even carried to this module
+      (:class:`~ai_assistant.orchestration.Belief` holds resolved content or a
+      tombstone), so no renderer here can pass one off as the warrant. A belief whose
+      support is *entirely* gone says so, and says that it is still held — because it
+      is not retired, and a line implying otherwise would misdescribe what the user
+      can still do with it.
     * **Attested** — it is named as someone else's report, so it reads as neither
       the user's word nor the assistant's inference, and the line says outright that
       ``Last revised`` is the assistant's clock rather than the source's.
@@ -1293,10 +1299,19 @@ def _why(belief: Belief) -> str:
         case BeliefBand.DERIVED:
             if belief.evidence_count == 0:
                 return "I worked it out, and no supporting evidence was recorded."
-            return (
-                f"I worked it out from {belief.evidence_count} piece(s) of evidence, which "
-                "I cannot show you yet."
-            )
+            if belief.unsupported:
+                return (
+                    f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
+                    "none of which still exists. I still hold it — I have not unlearnt it "
+                    "because the evidence went — but nothing supports it any more."
+                )
+            if belief.lost_evidence:
+                return (
+                    f"I worked it out from {belief.evidence_count} piece(s) of evidence, "
+                    f"{belief.lost_evidence} of which no longer exists. The confidence "
+                    "below reflects what is left."
+                )
+            return f"I worked it out from {belief.evidence_count} piece(s) of evidence."
         case BeliefBand.ATTESTED:
             return (
                 "a source you connected reported it — neither your word nor my inference. "
@@ -1333,7 +1348,7 @@ def _forget_warning(band: BeliefBand) -> str:
             assert_never(band)
 
 
-def _render_belief(belief: Belief) -> None:
+def _render_belief(belief: Belief, *, evidence: bool = False) -> None:
     """Render one belief with everything ADR-0073 §4 requires it to convey.
 
     The band leads the row and is never left to be implied by position; confidence,
@@ -1342,9 +1357,22 @@ def _render_belief(belief: Belief) -> None:
     Every listed belief is live, so an *open* window carries no information and is
     not rendered as though it did.
 
-    Engine-supplied text — the content, the id — is neutralised for this terminal
-    like any other (``_safe``, ADR-0042 §4). The band and kind are this system's own
-    closed vocabularies, not carried data.
+    **The confidence shown is the presented one**, already lowered for support that
+    has gone (ADR-0077 §6). This module does not compute it and could not: the stored
+    number is not carried here at all, which is what stops two surfaces quoting
+    different figures for one belief.
+
+    ``evidence`` selects ADR-0077 §6's split between the two views. The **listing**
+    resolves existence and renders the counts and the adjusted confidence — the
+    ``Why`` line carries both — while the **single-belief view** renders the
+    surviving citations as readable evidence and the lost ones as tombstones.
+    Printing every citation for a fifty-belief page would bury the listing it is part
+    of; printing none of them where the user is about to destroy the belief would
+    hide the warrant they are judging.
+
+    Engine-supplied text — the content, the id, a citation's content — is neutralised
+    for this terminal like any other (``_safe``, ADR-0042 §4). The band and kind are
+    this system's own closed vocabularies, not carried data.
     """
     console.print(
         f"\n  [bold cyan]{belief.band.value}[/] · {belief.kind.value} · "
@@ -1352,10 +1380,32 @@ def _render_belief(belief: Belief) -> None:
     )
     console.print(f"  {_safe(belief.content)}")
     console.print(f"  [dim]Why:[/] {_why(belief)}")
+    if evidence:
+        _render_evidence(belief)
     console.print(f"  [dim]Last revised:[/] {_when(belief.last_updated)}")
     if belief.valid_until is not None:
         console.print(f"  [dim]Believed until:[/] {_when(belief.valid_until)}")
     console.print(f"  [dim]id:[/] {_safe(belief.id)}")
+
+
+def _render_evidence(belief: Belief) -> None:
+    """Render the citations behind one belief, tombstoning what is gone (ADR-0077 §6).
+
+    A citation that no longer resolves is **an explicit tombstone** — never a bare id,
+    never a silent gap (ADR-0073 §4's floor). The tombstone says an evidence item
+    stood here and is gone, and deliberately does not say what it was; it also does
+    not distinguish *deleted* from *expired*, because the read cannot tell them apart
+    and the user's question — "is there still something behind this?" — is answered
+    by absence either way.
+    """
+    if not belief.evidence:
+        return
+    console.print("  [dim]Because:[/]")
+    for item in belief.evidence:
+        if item.content is None:
+            console.print("    [yellow]—[/] [dim]an item of evidence stood here and is gone.[/]")
+        else:
+            console.print(f"    - {_safe(item.content)}")
 
 
 def _render_beliefs(page: tuple[Belief, ...], *, limit: int, offset: int) -> None:
@@ -1393,7 +1443,7 @@ def _render_forget_prompt(belief: Belief) -> None:
        offering both a correction and a deletion owes (ADR-0073 §6).
     """
     console.print("\n[bold yellow]About to forget this belief[/]")
-    _render_belief(belief)
+    _render_belief(belief, evidence=True)
     console.print(f"\n  [yellow]{_forget_warning(belief.band)}[/]")
     console.print(
         "  This destroys the record: nothing of it is kept, not even in an export. "

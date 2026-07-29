@@ -42,6 +42,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     Disposition,
     Engine,
+    Evidence,
     IngestSummary,
     LearnDecision,
     LearningLoop,
@@ -676,20 +677,34 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     belief_id: str = "rec-1",
     content: str = "the office is in Boston",
     confidence: float = 1.0,
-    evidence_count: int = 0,
+    evidence: tuple[Evidence, ...] = (),
     valid_until: datetime | None = None,
 ) -> Belief:
-    """One projected belief, as the façade hands it to the adapter."""
+    """One projected belief, as the façade hands it to the adapter.
+
+    ``confidence`` is the **presented** number: the engine has already adjusted it
+    for lost support (ADR-0077 §6), so a case scripting a tombstone also scripts the
+    lowered figure rather than expecting this module to compute one.
+    """
     return Belief(
         id=belief_id,
         band=band,
         kind=MemoryKind.SEMANTIC,
         content=content,
         confidence=confidence,
-        evidence_count=evidence_count,
+        evidence=evidence,
         last_updated=AT,
         valid_until=valid_until,
     )
+
+
+def _cited(*contents: str) -> tuple[Evidence, ...]:
+    """Citations that still resolve, one per content given."""
+    return tuple(Evidence(content=content) for content in contents)
+
+
+#: One citation that no longer resolves — a tombstone (ADR-0077 §6).
+_GONE = Evidence()
 
 
 def _flat(rendered: str) -> str:
@@ -762,24 +777,22 @@ def test_render_belief_neutralises_engine_supplied_text(output: StringIO) -> Non
     assert "[red]" in rendered  # shown literally, not interpreted as colour
 
 
-def test_why_reports_derived_evidence_as_a_count_and_says_it_cannot_be_shown(
-    output: StringIO,
-) -> None:
-    """ADR-0073 §4's derived floor: the citations are counted, and named as unshowable.
+def test_why_reports_how_much_evidence_a_derived_belief_rests_on(output: StringIO) -> None:
+    """ADR-0073 §4's derived floor, now that ADR-0077 §6 has discharged its gate.
 
-    A citation this surface cannot render as evidence is never rendered *as*
-    evidence and never silently dropped. The count says the warrant exists; the
-    wording says it cannot be displayed yet.
+    The citations are counted and — in the listing — reported as a count rather than
+    as ids. What has changed is that the surface no longer says it cannot show them:
+    it can, and the single-belief view does.
     """
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.62, evidence_count=3))
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.62, evidence=_cited("a", "b", "c")))
     rendered = _flat(output.getvalue())
     assert "3 piece(s) of evidence" in rendered
-    assert "which I cannot show you yet" in rendered
+    assert "cannot show you" not in rendered
 
 
 def test_why_does_not_claim_evidence_a_derived_belief_does_not_have(output: StringIO) -> None:
     """A derived belief with no recorded citation says so rather than implying one."""
-    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.4, evidence_count=0))
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.4))
     rendered = _flat(output.getvalue())
     assert "no supporting evidence was recorded" in rendered
     assert "piece(s) of evidence" not in rendered
@@ -1614,3 +1627,112 @@ async def test_an_observed_belief_is_immediately_inspectable(output: StringIO) -
 
     rendered = output.getvalue()
     assert "derived" in rendered, "an observed belief reads back in the derived band"
+
+
+# --- lost evidence, rendered (ADR-0077 §6, §9.8) ------------------------
+
+
+def test_the_listing_reports_lost_support_as_a_count_and_a_lowered_confidence(
+    output: StringIO,
+) -> None:
+    """The listing resolves *existence*: counts and the adjusted number (ADR-0077 §6).
+
+    Printing every citation for a fifty-belief page would bury the listing; what the
+    user needs there is that support has gone and that the confidence reflects it.
+    """
+    cli._render_belief(
+        _belief(BeliefBand.DERIVED, confidence=0.35, evidence=(_cited("they said so")[0], _GONE))
+    )
+    rendered = _flat(output.getvalue())
+    assert "2 piece(s) of evidence" in rendered
+    assert "1 of which no longer exists" in rendered
+    assert "confidence 0.35" in rendered
+    assert "Because:" not in rendered, "the listing does not print the citations themselves"
+
+
+def test_the_single_belief_view_shows_surviving_evidence_and_tombstones_the_rest(
+    output: StringIO,
+) -> None:
+    """A lost citation is an explicit tombstone — never an id, never a gap (§6).
+
+    ADR-0073 §4's floor, kept where the user is about to act on the belief: the
+    tombstone says an item stood here and is gone, and deliberately does not say what
+    it was, nor whether it was deleted or merely expired.
+    """
+    cli._render_belief(
+        _belief(
+            BeliefBand.DERIVED,
+            confidence=0.35,
+            evidence=(_cited("they asked for metric units")[0], _GONE),
+        ),
+        evidence=True,
+    )
+    rendered = _flat(output.getvalue())
+    assert "they asked for metric units" in rendered
+    assert "an item of evidence stood here and is gone" in rendered
+    assert "ep-" not in rendered, "no citation id reaches the terminal"
+
+
+def test_a_belief_with_no_support_left_says_so_and_says_it_is_still_held(
+    output: StringIO,
+) -> None:
+    """The all-unsupported state is named, and named as *held* (ADR-0077 §6).
+
+    It is not auto-retired, so a line implying the assistant had dropped it would
+    misdescribe what the user can still do with it — assert it themselves, or forget
+    it.
+    """
+    cli._render_belief(_belief(BeliefBand.DERIVED, confidence=0.1, evidence=(_GONE, _GONE)))
+    rendered = _flat(output.getvalue())
+    assert "none of which still exists" in rendered
+    assert "I still hold it" in rendered
+    assert "nothing supports it any more" in rendered
+
+
+def test_the_forget_prompt_shows_the_warrant_the_user_is_judging(output: StringIO) -> None:
+    """Show-then-confirm includes the evidence, tombstones and all (ADR-0073 §5, §6)."""
+    cli._render_forget_prompt(
+        _belief(
+            BeliefBand.DERIVED,
+            confidence=0.35,
+            evidence=(_cited("they asked for metric units")[0], _GONE),
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert "About to forget this belief" in rendered
+    assert "they asked for metric units" in rendered
+    assert "an item of evidence stood here and is gone" in rendered
+
+
+async def test_an_observed_belief_reads_back_with_the_episodes_behind_it(
+    output: StringIO,
+) -> None:
+    """End to end: observe, then read the belief's own evidence back (ADR-0077 §6, §9.8).
+
+    The claim the ``observe`` surface makes — that what it stored is immediately
+    inspectable — asserted against the citations, not merely the row. This is
+    ADR-0073 §4's gate discharged: a derived belief now reaches the user with the
+    warrant it was formed from.
+    """
+    engine, conversations = _conversation_engine()
+    try:
+        await cli._drive_turn(
+            engine, "hello", timeout=timedelta(seconds=5), approver=lambda _c: True
+        )
+        conversation = (await conversations.recent())[0].id
+        assert await cli._drive_observe(engine, conversation) == 0
+
+        # The command's own default: every kind except episodic, because an episode
+        # is the evidence a belief is made of rather than a belief (ADR-0074 §6).
+        page = await engine.beliefs(kinds=list(cli._DEFAULT_BELIEF_KINDS))
+        assert len(page) == 1
+        assert page[0].band is BeliefBand.DERIVED
+        assert page[0].evidence_count >= 1
+        assert page[0].lost_evidence == 0
+        assert page[0].unsupported is False
+
+        cli._render_belief(page[0], evidence=True)
+    finally:
+        await engine.aclose()
+
+    assert "Because:" in output.getvalue()

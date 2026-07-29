@@ -27,6 +27,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     CostBasis,
     DataTier,
+    EpisodicMemory,
     FeedbackEvent,
     FeedbackKind,
     Idempotency,
@@ -51,6 +52,7 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     Disposition,
     Engine,
+    Evidence,
     IngestSummary,
     LearnDecision,
     LearnOutcome,
@@ -60,6 +62,7 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
     TurnOutcome,
+    presented_confidence,
 )
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.testing import (
@@ -1553,18 +1556,21 @@ def test_from_record_carries_exactly_what_the_surface_must_convey() -> None:
     assert belief.valid_until == until
 
 
-def test_from_record_carries_evidence_as_a_count_and_never_as_ids() -> None:
+def test_from_record_carries_resolved_evidence_and_never_ids() -> None:
     """ADR-0073 §4's derived floor, made structural: the citations do not leave here.
 
     A citation the surface cannot render as evidence is never rendered *as* evidence
-    — "not as a reassuring id, not silently dropped". Carrying only the count is what
-    stops an adapter passing an id off as the warrant: it never receives one. That
-    the count is preserved is what stops the citations being silently dropped.
+    — "not as a reassuring id, not silently dropped". ADR-0077 §6 discharged the gate
+    on *resolving* them, so what the DTO now carries is readable content or an
+    explicit tombstone; what it still never carries is an id, which is what stops an
+    adapter passing one off as the warrant.
     """
     belief = Belief.from_record(
-        _record("rec-1", source=MemorySource.INFERRED, confidence=0.5, evidence=("ep-1", "ep-2"))
+        _record("rec-1", source=MemorySource.INFERRED, confidence=0.5, evidence=("ep-1", "ep-2")),
+        (Evidence(content="they said so"), Evidence()),
     )
     assert belief.evidence_count == 2
+    assert belief.lost_evidence == 1
     assert "ep-1" not in str(belief)  # no citation id is reachable from the DTO at all
 
 
@@ -2110,3 +2116,192 @@ def _recording_closer(closed: list[str]) -> Callable[[], Awaitable[None]]:
         closed.append("closed")
 
     return _close
+
+
+# --- lost evidence: tombstones and presented confidence (ADR-0077 §6) ----
+
+
+#: A derived belief's stored confidence, comfortably above the presentation floor.
+_STORED = 0.6
+
+
+async def _derived_with_two_episodes(harness: Harness) -> None:
+    """Store a derived belief citing two episodes that both resolve."""
+    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    await harness.memory.add(_episode_record("ep-2", "they asked again in metric"))
+    await harness.memory.add(
+        _record(
+            "rec-1",
+            source=MemorySource.INFERRED,
+            confidence=_STORED,
+            evidence=("ep-1", "ep-2"),
+            content="the user prefers metric units",
+        )
+    )
+
+
+def _episode_record(
+    episode_id: str, content: str, *, expires_at: datetime | None = None
+) -> EpisodicMemory:
+    """One captured episode, optionally with a retention deadline already passed."""
+    return EpisodicMemory(
+        id=episode_id,
+        content=content,
+        occurred_at=AT,
+        expires_at=expires_at,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+
+
+async def test_a_belief_whose_evidence_all_resolves_shows_the_stored_confidence() -> None:
+    """Nothing lost, nothing adjusted — the baseline the degradation is measured from."""
+    harness = Harness()
+    await _derived_with_two_episodes(harness)
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert belief.confidence == _STORED
+    assert belief.evidence_count == 2
+    assert belief.lost_evidence == 0
+    assert belief.unsupported is False
+    assert [item.content for item in belief.evidence] == [
+        "they asked for metric units",
+        "they asked again in metric",
+    ]
+
+
+async def test_a_deleted_citation_becomes_a_tombstone_without_touching_the_record() -> None:
+    """The rendering changes; the stored record does not (ADR-0077 §6).
+
+    The byte-identity assertion is what catches an implementation that "fixed" the
+    record instead of the rendering — the record graph is frozen (ADR-0068), and
+    losing evidence is not the producer changing its mind.
+    """
+    harness = Harness()
+    await _derived_with_two_episodes(harness)
+    before = await harness.memory.get("rec-1")
+    assert before is not None
+
+    assert await harness.memory.delete("ep-1") is True
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert belief.lost_evidence == 1
+    assert belief.evidence[0].lost is True
+    assert belief.evidence[0].content is None  # never the id, never a silent gap
+    assert belief.evidence[1].content == "they asked again in metric"
+    assert belief.confidence < _STORED  # presented, and strictly lower
+    # The record is untouched, and an export still carries the citation as written.
+    assert await harness.memory.get("rec-1") == before
+    exported = {record.id: record for record in await harness.memory.export()}
+    assert exported["rec-1"].provenance.evidence == ("ep-1", "ep-2")
+    assert exported["rec-1"].provenance.confidence == _STORED
+
+
+async def test_an_expired_citation_renders_exactly_as_a_deleted_one() -> None:
+    """Expiry is the *commoner* loss and has no event to hook (ADR-0077 §6).
+
+    Pinned deliberately: an implementation that hooked deletion only would pass every
+    deletion test above and silently leave every expired citation dangling, which is
+    §6's decisive argument against eager rewriting.
+    """
+    harness = Harness()
+    await harness.memory.add(
+        _episode_record("ep-1", "they asked for metric units", expires_at=AT - timedelta(days=1))
+    )
+    await harness.memory.add(_episode_record("ep-2", "they asked again in metric"))
+    await harness.memory.add(
+        _record(
+            "rec-1", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-1", "ep-2")
+        )
+    )
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert belief.lost_evidence == 1
+    assert belief.evidence[0].content is None
+    assert belief.confidence < _STORED
+
+
+async def test_a_belief_whose_evidence_is_all_gone_is_held_at_its_effective_floor() -> None:
+    """Marked, answerable, still live — **not** retired (ADR-0077 §6).
+
+    Auto-retiring would be the cascade under a softer name: it destroys a belief that
+    may be perfectly true, and makes deleting an old conversation silently undo an
+    accumulation the user never asked to lose.
+    """
+    harness = Harness()
+    await _derived_with_two_episodes(harness)
+    await harness.memory.delete("ep-1")
+    await harness.memory.delete("ep-2")
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert belief.unsupported is True
+    assert belief.lost_evidence == 2
+    assert belief.confidence == pytest.approx(0.1)  # the effective floor, not zero
+    # Still live, still listed, and still deletable by the user.
+    assert [one.id for one in await harness.engine.beliefs()] == ["rec-1"]
+    assert await harness.engine.forget("rec-1") is True
+
+
+async def test_a_belief_stored_below_the_floor_is_left_where_it_is() -> None:
+    """``min(stored, floor)``, not the floor itself — the whole of the edge case (§6).
+
+    ``Provenance.confidence`` permits ``0.0`` and only the observer is bound to a
+    positive ladder, so a belief can be stored beneath the floor — where an absolute
+    floor and "never above stored" have no value between them at all. The pair with
+    the case above is what pins ``min(stored, floor)`` rather than either half of it.
+    """
+    harness = Harness()
+    await harness.memory.add(_episode_record("ep-1", "a thin signal"))
+    await harness.memory.add(
+        _record("thin", source=MemorySource.INFERRED, confidence=0.05, evidence=("ep-1",))
+    )
+    await harness.memory.delete("ep-1")
+
+    belief = await harness.engine.belief("thin")
+
+    assert belief is not None
+    assert belief.unsupported is True
+    assert belief.confidence == 0.05  # unchanged: both bounds collapsed onto the stored value
+
+
+async def test_the_presented_confidence_falls_strictly_with_each_further_loss() -> None:
+    """Monotone above the floor, and bounded by the stored value (ADR-0077 §6).
+
+    Asserted on the function rather than through the store, because the property is
+    about the *function*: a pure map from the stored value and how much support
+    survives, with no clock and nothing read.
+    """
+    full = presented_confidence(_STORED, cited=3, resolved=3)
+    one_lost = presented_confidence(_STORED, cited=3, resolved=2)
+    two_lost = presented_confidence(_STORED, cited=3, resolved=1)
+    none_left = presented_confidence(_STORED, cited=3, resolved=0)
+
+    assert full == _STORED
+    assert _STORED > one_lost > two_lost > none_left
+    assert none_left == pytest.approx(0.1)
+    # An assertion cites nothing, and nothing about that is a loss.
+    assert presented_confidence(1.0, cited=0, resolved=0) == 1.0
+
+
+async def test_the_listing_and_the_single_belief_view_agree_on_the_number() -> None:
+    """Every surface that states a confidence states the adjusted one (ADR-0077 §6).
+
+    Two surfaces quoting different numbers for one belief would make the disclosure
+    rule meaningless, so the adjustment lives in the projection both go through.
+    """
+    harness = Harness()
+    await _derived_with_two_episodes(harness)
+    await harness.memory.delete("ep-1")
+
+    listed = await harness.engine.beliefs()
+    single = await harness.engine.belief("rec-1")
+
+    assert single is not None
+    assert [one.confidence for one in listed if one.id == "rec-1"] == [single.confidence]
+    assert single.confidence < _STORED
