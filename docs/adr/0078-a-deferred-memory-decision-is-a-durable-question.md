@@ -2062,11 +2062,13 @@ On ratification:
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
    ingest writes nothing and returns `ASK_USER`: the successor takes the
    **ordinary** path — no parent to link to and the cap applying — and the disposal
-   is reported rather than raised. **Driven three ways — room in the queue, queue
-   full, and the successor's key already held by a retained `REJECTED` row** —
-   since each produces a different `DeferralAdmission` and a different line, and
-   only the third shows a suppressed successor rendered as §7's guidance rather
-   than as an answerable follow-on. The two branches fail differently and only
+   is reported rather than raised. **Driven five ways — room in the queue; queue
+   full; and the successor's key already held by a `PENDING`, a `REJECTED`, or an
+   `APPLYING` row** — since each produces a different line, and a suite that drives
+   only the `REJECTED` suppression can render an `APPLYING` one as an answerable
+   follow-on and still pass, advertising a question the user cannot act on. Only
+   the `PENDING` case is a follow-on they can answer; the other two are §7's
+   recovery guidance wearing a suppression. The two branches fail differently and only
    one of them is the obvious case to write;
    §9's two-step recovery end to end — crash after `claim`, `delete`, then a
    re-`learn` that **admits a new question** rather than colliding with the
