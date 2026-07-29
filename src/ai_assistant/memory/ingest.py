@@ -22,8 +22,13 @@ from math import isfinite
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.errors import (
+    MemoryStoreConflictError,
+    MemoryStoreError,
+    UnresolvedEvidenceError,
+)
 from ai_assistant.core.types import (
+    BeliefBand,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
@@ -32,6 +37,7 @@ from ai_assistant.core.types import (
     MemoryWriteMode,
     Provenance,
     Validity,
+    band_of,
 )
 
 if TYPE_CHECKING:
@@ -42,7 +48,15 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import MemoryDecision, MemoryRecord, MemoryUpdateProposal
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
-_DEFAULT_CONFLICT_LIMIT = 5
+
+#: The **ceiling** on the conflicts one ingest resolves, not a truncation budget
+#: (ADR-0079 §1). At or below it the whole detected set reaches the policy and a
+#: ``SUPERSEDE`` retires all of it; above it the ingest refuses. That re-founding
+#: is why the value is 100 rather than ADR-0050's 5: a truncation budget wants to
+#: be small, a circuit breaker wants to be an order of magnitude past any ordinary
+#: correction — above 100 above-threshold same-kind conflicts the store is holding
+#: a runaway, and a correction is the wrong moment to discover that quietly.
+_DEFAULT_CONFLICT_LIMIT = 100
 
 #: How many times supersession re-mints a colliding id before giving up. A minted
 #: id (``uuid4``) collides with vanishing probability, so a handful of attempts is
@@ -240,6 +254,12 @@ def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list
     score), so the batch is deterministic. This needs no ``target_id`` widening in
     ``core`` — closing N windows is N atomic upserts, exactly what issue #244 and
     ADR-0045 §7 said the validity window makes possible without growing the contract.
+
+    Since ADR-0079 §3 this set is a **``MemoryWriter`` contract obligation** rather
+    than one implementation's habit, driven by the shared conformance suite and
+    matched by ``FakeMemoryWriter``. Nothing here changed with the promotion — and
+    nothing is discarded before this function any more either (ADR-0079 §1), so the
+    "full set" it retires is now the full set retrieval surfaced.
     """
     others = [
         conflict
@@ -250,41 +270,48 @@ def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list
 
 
 def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
-    """Return ``target`` with its validity window closed at ``now`` (ADR-0045 §4).
+    """Return ``target`` retired at the earlier of ``now`` and its own end (ADR-0080 §1).
 
     The target stays on disk — retained, off the read path — with
-    ``valid_until = now``; ``valid_from`` and every other field are preserved.
+    ``valid_until = end``; ``valid_from`` and every other field are preserved.
     Written with ``model_copy(update=...)``, so ``now`` must already be a guarded,
-    aware-UTC reading (the ingestor's :meth:`MemoryIngestor._now_utc`).
+    aware-UTC reading (the ingestor's :meth:`MemoryIngestor._now_utc`), and it is
+    **one instant for the whole retirement set** (ADR-0080 §1), sampled by
+    :meth:`MemoryIngestor._apply_supersede` before any close is computed.
 
-    Exactly ADR-0045 §4's "``valid_until = now``" for the only targets the applier
-    ever retires — records with an **open** window, since the envelope validity is
-    set *operationally* by supersession alone (ADR-0045 §2), so no in-scope producer
-    constructs a bounded-window record and a supersession only fires on a record its
-    own conflict search returned as *live*.
+    ADR-0080 §1 ratified the clamp these two lines had been carrying as unratified
+    "correctness floors", and partially superseded ADR-0045 §4 step 1's unqualified
+    ``valid_until = now`` in doing so:
 
-    **Two correctness floors, not a retirement policy.** ``model_copy(update=...)``
-    skips ``Validity``'s validator, so both are enforced here:
+    - **The clamp.** ``end = now`` where the window is unbounded at the end,
+      otherwise ``end = min(now, valid_until)``. A retirement never widens a window,
+      never moves its start, and never touches its content. Overwriting an earlier
+      producer-set end with a later ``now`` would push a self-closed belief back onto
+      the read path for ``[valid_until, now)``; retirement takes a belief *off* the
+      read path and never puts one back. Where the record has already ended by its
+      own terms the write back is a no-op on the window — which still counts as
+      resolved and still rides in the batch (ADR-0080 §6), so the applier branches on
+      nothing.
+    - **The refusal.** If the chosen end is at or before ``valid_from`` (empty or
+      inverted), refuse before the batch — including the **tie** ``end ==
+      valid_from``, which is the half-open interval ``[F, F)`` and live at no instant
+      (ADR-0080 §3). ``model_copy(update=...)`` skips ``Validity``'s validator, and
+      ``SqliteMemoryStore``'s decode re-runs it on load, so persisting such a window
+      would store a record the store cannot read back. Under a close-coherent
+      composition this fires only at that tie; anything else that reaches it is a
+      store read *ahead* of the writer's close, which is the clock-coherence gap
+      issue #460 carries.
 
-    - **Never extend (never resurrect).** If the target already self-closes *before*
-      ``now``, keep that earlier end — ``valid_until = min(now, existing)``.
-      Overwriting an earlier end with a later ``now`` would push a self-closed
-      belief back onto the read path for ``[existing, now)``; retirement only ever
-      takes a belief *off* the read path.
-    - **Never write an unrepresentable window.** If the chosen end is at or before
-      ``valid_from`` (empty or inverted), refuse before the batch: such an interval
-      is what ``SqliteMemoryStore``'s decode re-validation *rejects*, so persisting
-      it would corrupt reads. Fail closed with the target left live instead.
-
-    Both are unambiguous — ``min`` is the only non-resurrecting end, and an
-    unrepresentable window has no honest form — so they belong in the applier. What
-    remains genuinely undecided (whether the envelope window should be
-    producer-settable at all, and any richer retirement of a bounded window) stays
-    deferred to a follow-up ADR (issue #306).
+    The refusal is deliberately **not** hoisted into detection: a window that cannot
+    be closed is a problem only for a record a ruling actually retires, so refusing
+    earlier would fail ``ACCEPT`` and ``REINFORCE`` ingests that touch no window
+    (ADR-0080 §6). It raises plain ``MemoryStoreError`` and specifically **not**
+    ``UnresolvedEvidenceError``, which names a proposal whose *evidence* does not
+    resolve rather than a *target's* window (ADR-0080 §7).
 
     Raises:
         MemoryStoreError: If the chosen end is at or before ``valid_from`` (empty or
-            inverted); nothing is written and the target stays live.
+            inverted); nothing is written and every record in the set is unchanged.
     """
     window = target.validity
     end = now if window.valid_until is None else min(now, window.valid_until)
@@ -292,7 +319,7 @@ def _close_window(target: MemoryRecord, now: datetime) -> MemoryRecord:
         msg = (
             f"cannot retire {target.id!r}: a close at {end.isoformat()} is at or before its "
             f"valid_from {window.valid_from.isoformat()} — an unrepresentable window the store "
-            f"would reject (issue #306)"
+            f"would reject (ADR-0080 §3)"
         )
         raise MemoryStoreError(msg)
     return target.model_copy(update={"validity": window.model_copy(update={"valid_until": end})})
@@ -373,7 +400,10 @@ class MemoryIngestor:
             policy: The deterministic policy that rules on each proposal.
             conflict_threshold: Minimum retrieval score for an existing record to
                 count as conflicting with the proposal.
-            conflict_limit: Maximum number of conflict candidates to consider.
+            conflict_limit: The **ceiling** on the conflicts one ingest resolves
+                (ADR-0079 §1). At or below it the whole detected set reaches the
+                policy; above it :meth:`_detect_conflicts` refuses. Its value stays
+                tuning — only the behaviour at the boundary is contract.
             now: Clock used to stamp expiry on temporary stores and to close a
                 superseded target's window; injectable for deterministic tests.
                 Guarded by :func:`~ai_assistant.core.clock.checked_clock`, which is
@@ -447,11 +477,32 @@ class MemoryIngestor:
         therefore blocks other ingests. That is the cost of the guarantee, not
         an oversight.
 
+        **Three refusals precede or replace a ruling**, in the order they fire:
+
+        1. **Unresolvable evidence** (ADR-0077 §5): a ``DERIVED`` proposal citing a
+           record this store does not hold raises ``UnresolvedEvidenceError``
+           naming every such id, before conflict detection and before the policy is
+           asked (:meth:`_require_resolvable_evidence`).
+        2. **Over the conflict ceiling** (ADR-0079 §1): detection surfacing more
+           conflicts than :data:`_DEFAULT_CONFLICT_LIMIT` — whatever this ingestor
+           was tuned to — raises ``MemoryStoreError`` with nothing written and no
+           ruling sought (:meth:`_detect_conflicts`).
+        3. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
+           set holds a record whose window cannot be closed representably raises
+           ``MemoryStoreError`` before the atomic batch (:func:`_close_window`).
+
         Args:
             proposal: The memory update to rule on and persist.
 
         Returns:
             The policy's decision and the id written, if anything was written.
+
+        Raises:
+            UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
+                store does not hold; nothing is written and the policy is not asked.
+            MemoryStoreError: If detection surfaces more conflicts than this
+                ingestor will resolve in one ingest, if a retirement's window cannot
+                be closed, or on any other store or applier failure.
         """
         # One observation of the caller's proposal, taken on this coroutine's
         # first executed line — before the lock, which is `ingest`'s first await
@@ -472,6 +523,7 @@ class MemoryIngestor:
             return await self._ingest(observed)
 
     async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
+        await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._detect_conflicts(observed.proposed)
         # Shallow is right here: this copies the ingestor's *own* snapshot, whose
         # `proposed` no caller holds a reference to.
@@ -482,15 +534,82 @@ class MemoryIngestor:
         record_id = await self._apply(decision, observed.proposed, conflicts)
         return MemoryIngestResult(decision=decision, record_id=record_id)
 
+    async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
+        """Refuse a ``DERIVED`` proposal citing a record this store does not hold.
+
+        ADR-0077 §5's write-time resolvability floor, and the first thing an ingest
+        does: it runs **before** conflict detection and before the policy is asked,
+        because a proposal whose warrant does not exist is inadmissible rather than
+        rule-able. The refusal is a raise and not a fabricated ``REJECT`` — a ruling
+        is the policy's to make (ADR-0005 §3), and a writer inventing one would put
+        a decision nobody made into the ingest result.
+
+        Scoped to the ``DERIVED`` band, because that is the band ADR-0072 §3
+        obliges to cite. It is deliberately **not** a floor on citing *nothing*: an
+        empty tuple names no record that fails to resolve, so it passes here and is
+        the ``MemoryPolicy``'s to judge (``DefaultMemoryPolicy`` rule 2). Putting
+        one rule in two places is what ADR-0077 §5 exists to avoid.
+
+        The ids are reported **in citation order** and de-duplicated, so a caller
+        comparing them against the batch it selected reads each failure once
+        (:class:`~ai_assistant.core.errors.UnresolvedEvidenceError`). *Every*
+        unresolved id is named rather than the first: the stage's race-versus-bug
+        discrimination is a quantified statement over the whole set, and a partial
+        list would let a producer bug hide behind an expiry that accompanied it.
+
+        Raises:
+            UnresolvedEvidenceError: If any cited id names no record the store
+                returns; nothing is written and no ruling is sought.
+        """
+        if band_of(record.provenance.source) is not BeliefBand.DERIVED:
+            return
+        unresolved: list[str] = []
+        for cited in dict.fromkeys(record.provenance.evidence):
+            if await self._store.get(cited) is None:
+                unresolved.append(cited)
+        if unresolved:
+            msg = (
+                f"refusing to ingest {record.id!r}: its {record.provenance.source} provenance "
+                f"cites {len(unresolved)} record(s) this store does not hold — "
+                f"{', '.join(repr(cited) for cited in unresolved)} (ADR-0077 §5)"
+            )
+            raise UnresolvedEvidenceError(msg, unresolved)
+
     async def _detect_conflicts(self, record: MemoryRecord) -> list[MemoryRecord]:
-        # Over-fetch by one, because the store applies the limit before this
-        # method can drop the proposal's own record: a re-proposal would
-        # otherwise spend a slot on a record that is then discarded, hiding a
-        # genuine conflict ranked just below it. One extra suffices — ids are
-        # unique in a store, so at most one match can be the proposal itself.
+        """Return every conflict retrieval surfaced, or refuse above the ceiling.
+
+        ``conflict_limit`` is a **ceiling, not a truncation budget** (ADR-0079 §1):
+        at or below it the whole detected set is handed to the policy — nothing this
+        method holds is discarded — and above it the ingest refuses, writing nothing,
+        closing no window and asking for no ruling. Truncating instead would defeat
+        more than the retirement set: ``DefaultMemoryPolicy``'s two asserted-conflict
+        gates are predicates over the set they are *handed*, so an assertion ranked
+        past the cut would silently stop reaching them.
+
+        **Two rows of headroom over the ceiling, for two independent reasons.** One
+        is the standing over-fetch for the proposal's own record — the store applies
+        the limit before this method can drop it, so at ``conflict_limit=1`` a
+        re-proposal would otherwise spend its only slot on a record that is then
+        discarded, hiding a genuine conflict ranked just below (#110). One extra
+        suffices there: ids are unique in a store, so at most one match is the
+        proposal itself. The other is ADR-0079 §1's **overflow probe**: without a
+        row beyond the ceiling, "retrieval surfaced exactly ``conflict_limit``" and
+        "it surfaced more" are indistinguishable.
+
+        This is a bound, not a loop — one ranked read, as today, with a wider limit —
+        so it makes no claim that retrieval is exhaustive. ``search`` returns "the
+        records most relevant to ``query``, best first", which is what lets a row
+        scoring below the threshold prove no later returned row scores at or above
+        it; what it never surfaced is invisible here, and closing *that* is a
+        ``MemoryStore`` obligation filed as issue #457.
+
+        Raises:
+            MemoryStoreError: If retrieval surfaced more conflicts than this
+                ingestor will resolve in one ingest.
+        """
         matches = await self._store.search(
             record.content,
-            limit=self._conflict_limit + 1,
+            limit=self._conflict_limit + 2,
             kinds=[MemoryKind(record.kind)],
         )
         conflicts = [
@@ -498,7 +617,15 @@ class MemoryIngestor:
             for match in matches
             if match.id != record.id and (match.score or 0.0) >= self._conflict_threshold
         ]
-        return conflicts[: self._conflict_limit]
+        if len(conflicts) > self._conflict_limit:
+            msg = (
+                f"refusing to ingest {record.id!r}: conflict resolution surfaced more than "
+                f"{self._conflict_limit} conflicting records, more than one ingest resolves. "
+                f"Nothing was written and no ruling was sought — a correction resolves every "
+                f"conflict it is shown, or it does not land (ADR-0079 §1)"
+            )
+            raise MemoryStoreError(msg)
+        return conflicts
 
     async def _apply(
         self,
@@ -554,8 +681,13 @@ class MemoryIngestor:
         ``MemoryStoreError`` aborts with **every** target left **live and unchanged**,
         because the atomic batch rolls all the window-closes back together.
 
-        The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), so a
-        retired target leaves the read path once the *store's* read clock reaches it —
+        The close instant is **this ingestor's** clock (ADR-0045 §4, ADR-0026), read
+        **once** for the whole retirement set and never re-determined per target
+        (ADR-0080 §1): a per-target reading would let one atomic batch record two
+        different close times for one ruling, so a reader could not say when the
+        correction took effect. Each target's own end is then clamped against it
+        (:func:`_close_window`). A retired target leaves the read path once the
+        *store's* read clock reaches the close —
         the same read-time semantics ``expires_at`` has. In production the store and
         this ingestor each *independently sample* the real wall clock (neither is
         given a ``now`` in ``build_engine``), and a ``get`` after ``ingest`` returns
@@ -564,7 +696,8 @@ class MemoryIngestor:
         the close (an injected test clock, or the wall clock stepping backward between
         the two samples) keeps it briefly visible, exactly as a backward step
         un-expires an ``expires_at`` record — a read-time-filtering property, not a
-        supersession bug (issue #306 tracks an absolute guarantee).
+        supersession bug (issue #460 tracks an absolute, clock-coherence-independent
+        guarantee; ADR-0080 §9 leaves this semantics exactly as ADR-0045 §6 has it).
 
         Returns:
             The **live** record's id — the correction's freshly-minted id, not any
@@ -576,9 +709,13 @@ class MemoryIngestor:
                 bounded re-mint cannot find a free id, or on any other store failure —
                 in every case every target is left live and unchanged.
         """
-        # Close every target's window up front, before any write: a `_close_window`
-        # that refuses (a future-dated `valid_from`, issue #306) then aborts the whole
-        # supersession with nothing written and every target still live.
+        # One close instant for the whole set (ADR-0080 §1), and every target's end
+        # computed from it before any write: a `_close_window` that refuses (a
+        # `valid_from` at or after the chosen end, ADR-0080 §3) then aborts the whole
+        # supersession with nothing written and every record in the set unchanged.
+        # There is deliberately no "skip the awkward one and retire the rest" —
+        # that would commit a correction while leaving live a conflict the policy
+        # ruled on, ADR-0079 §1's defect one member deep (ADR-0080 §6).
         now = self._now_utc()
         closed = [_close_window(target, now) for target in targets]
         retired_ids = {target.id for target in targets}

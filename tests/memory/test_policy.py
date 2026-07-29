@@ -15,6 +15,7 @@ from memory_policy_contract import MemoryPolicyContract
 
 from ai_assistant.core.types import (
     DataTier,
+    EpisodicMemory,
     MemoryDecisionKind,
     MemoryRecord,
     MemorySource,
@@ -29,18 +30,39 @@ if TYPE_CHECKING:
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
+#: The episode a well-formed derived proposal cites. Since ADR-0077 §5 this policy
+#: rejects a ``DERIVED`` proposal citing **nothing**, so a case exercising any
+#: *other* rule has to cite something — otherwise it would be measuring the new
+#: rule instead. The cases that mean to measure it pass ``evidence=()``.
+_EPISODE = "episode-1"
+
 
 def _semantic(
     record_id: str,
     *,
     source: MemorySource = MemorySource.OBSERVED,
     confidence: float = 0.6,
+    evidence: tuple[str, ...] = (_EPISODE,),
 ) -> MemoryRecord:
     return SemanticMemory(
         id=record_id,
         content=record_id,
         fact=record_id,
-        provenance=Provenance(source=source, confidence=confidence, last_updated=_WHEN),
+        provenance=Provenance(
+            source=source, confidence=confidence, last_updated=_WHEN, evidence=evidence
+        ),
+    )
+
+
+def _episodic(record_id: str, *, evidence: tuple[str, ...] = ()) -> MemoryRecord:
+    """An episode: a record that something happened, whose warrant is that it did."""
+    return EpisodicMemory(
+        id=record_id,
+        content=record_id,
+        occurred_at=_WHEN,
+        provenance=Provenance(
+            source=MemorySource.OBSERVED, confidence=0.6, last_updated=_WHEN, evidence=evidence
+        ),
     )
 
 
@@ -66,6 +88,70 @@ async def test_secret_tier_defers_to_user() -> None:
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+# --- Rule 2: a derived belief must cite something (ADR-0077 §5, ADR-0072 §3) ---
+
+
+@pytest.mark.parametrize("source", [MemorySource.OBSERVED, MemorySource.INFERRED], ids=str)
+async def test_a_derived_proposal_citing_no_evidence_is_rejected(source: MemorySource) -> None:
+    # The gate's half of the evidence discipline, at the enforcement point
+    # ADR-0072 §3 named: a belief we worked out *from evidence*, carrying none,
+    # cannot answer "why do you believe that?" at all. Band-wide and minimal,
+    # because the gate serves every producer and cannot know which epistemic step
+    # a record took. Without it, ADR-0077's "every proposal cites" would hold only
+    # for the producer that happens to obey it.
+    proposal = _proposal(_semantic("unsupported", source=source, confidence=0.9, evidence=()))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.REJECT
+    assert decision.reason.strip()
+
+
+async def test_a_derived_proposal_citing_no_evidence_is_rejected_even_with_conflicts() -> None:
+    # Rule 2 precedes the conflict rules: an inadmissible proposal is not worth
+    # deferring to the user about, and it must not be folded into a live record
+    # either. A rule placed after rule 3 would rule ASK_USER here, and one placed
+    # after rule 7 would REINFORCE an unsupported belief onto a real one.
+    proposal = _proposal(_semantic("unsupported", confidence=0.9, evidence=()))
+    conflicts = [
+        _semantic("their-words", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        _semantic("our-guess", source=MemorySource.INFERRED),
+    ]
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=conflicts)
+
+    assert decision.kind is MemoryDecisionKind.REJECT
+
+
+async def test_an_episodic_record_is_not_rejected_for_citing_nothing() -> None:
+    # ADR-0074 §4 binds this policy: an episode's warrant is that it happened, and
+    # requiring it to cite something would demand a regress. The exemption guards a
+    # path nothing takes today — capture does not reach the gate (ADR-0075 §1) and
+    # ADR-0077 §2 forbids the observer to propose an episode — and is written
+    # anyway, so the rule is not one refactor away from making its own substrate
+    # unwritable.
+    proposal = _proposal(_episodic("what-happened"))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@pytest.mark.parametrize("source", [MemorySource.USER_ASSERTED, MemorySource.EXTERNAL], ids=str)
+async def test_an_asserted_or_external_proposal_citing_nothing_is_untouched(
+    source: MemorySource,
+) -> None:
+    # The rule is scoped to the band ADR-0072 §3 obliges to cite. The user's own
+    # word is its own warrant and an integration's report is that system's, so
+    # neither is constrained — which is exactly why ADR-0072 §3 put the rule at the
+    # policy gate rather than on the type.
+    proposal = _proposal(_semantic("stated", source=source, confidence=1.0, evidence=()))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
 
 
 async def test_inference_conflicting_with_asserted_defers_to_user() -> None:

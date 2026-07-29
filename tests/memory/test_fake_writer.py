@@ -8,7 +8,7 @@ as a stand-in for a real write path: it is held to the same contract as
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from memory_writer_contract import MemoryWriterContract, WriterFactory
@@ -61,12 +61,16 @@ class TestFakeMemoryWriterContract(MemoryWriterContract):
             policy: MemoryPolicy,
             *,
             id_factory: Callable[[], str] | None = None,
+            conflict_limit: int | None = None,
         ) -> MemoryWriter:
-            if id_factory is None:
-                return FakeMemoryWriter(store=store, policy=policy, now=_fixed_now)
-            return FakeMemoryWriter(
-                store=store, policy=policy, now=_fixed_now, id_factory=id_factory
-            )
+            # Each `None` leaves the fake's own default, which is what the suite's
+            # seams mean by "this obligation does not drive it".
+            seams: dict[str, Any] = {}
+            if id_factory is not None:
+                seams["id_factory"] = id_factory
+            if conflict_limit is not None:
+                seams["conflict_limit"] = conflict_limit
+            return FakeMemoryWriter(store=store, policy=policy, now=_fixed_now, **seams)
 
         return build
 
@@ -139,13 +143,27 @@ async def test_an_unrepresentable_temporary_ttl_is_the_subsystems_error() -> Non
     assert await store.export() == []
 
 
+def _inferred(record_id: str, *, validity: Validity | None = None) -> PreferenceMemory:
+    """A supersedable conflict for ``_proposal``'s content, optionally windowed."""
+    content = "prefers concise emails"
+    return PreferenceMemory(
+        id=record_id,
+        content=content,
+        preference=content,
+        validity=validity if validity is not None else Validity(),
+        provenance=Provenance(
+            source=MemorySource.INFERRED, confidence=0.6, last_updated=_fixed_now()
+        ),
+    )
+
+
 async def test_supersede_refuses_a_future_dated_target_without_writing() -> None:
-    """The fake carries the same data-integrity floor as ``MemoryIngestor``.
+    """The fake carries the same refusal as ``MemoryIngestor`` (ADR-0080 §3).
 
     A producer-set ``valid_from`` at or after the writer's clock would close to an
     empty/inverted window the durable store rejects on decode, so the fake refuses
     before the write rather than let a consumer's test pass on state the production
-    writer could not persist (issue #306).
+    writer could not persist.
     """
     store = FakeMemoryStore(now=lambda: datetime(2026, 10, 1, tzinfo=UTC))
     await store.add(
@@ -199,6 +217,81 @@ async def test_supersede_never_extends_a_targets_existing_window() -> None:
     assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
     retired = next(record for record in await store.export() if record.id == "existing")
     assert retired.validity.valid_until == already_closes  # not extended to the writer clock
+
+
+async def test_supersede_refuses_a_target_whose_window_opens_at_the_close() -> None:
+    """ADR-0080 §3's tie, on the fake: ``[F, F)`` is empty, so it refuses.
+
+    The future-dated case above plants ``valid_from`` strictly *after* the writer's
+    clock, so it still holds if the check is weakened from ``end <= valid_from`` to
+    ``end <``; under that weakening this one is *retained* carrying the empty window
+    — ``model_copy(update=...)`` builds it without re-running ``Validity``'s
+    validator — and a consumer's test would pass on a record SQLite could not decode.
+    A second, ordinary conflict is planted so the assertion is ADR-0080 §6's: every
+    record in the retirement set is byte-identical afterwards.
+    """
+    store = FakeMemoryStore(now=lambda: datetime(2026, 7, 1, tzinfo=UTC))
+    await store.add(_inferred("opens-at-close", validity=Validity(valid_from=_fixed_now())))
+    await store.add(_inferred("sibling"))
+    before = await store.export()
+    writer = FakeMemoryWriter(
+        store=store,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+        now=_fixed_now,
+        id_factory=lambda: "corrected",
+    )
+
+    with pytest.raises(MemoryStoreError, match="valid_from"):
+        await writer.ingest(_proposal("correction"))
+
+    assert await store.export() == before
+    assert await store.get("corrected") is None
+
+
+class _AdvancingClock:
+    """Records every reading and returns a later instant each time.
+
+    ADR-0080 §7's instrument for what the shared suite cannot express, since it
+    fixes no writer clock: that the close instant is read **once** per ingest.
+    Equality across the retired records alone is satisfied by a writer re-sampling a
+    *constant* clock; equality plus advancing is satisfied by one ignoring its
+    injected clock. The call count and the first-value identity rule out both.
+    """
+
+    def __init__(self) -> None:
+        self.readings: list[datetime] = []
+
+    def __call__(self) -> datetime:
+        reading = _fixed_now() + timedelta(hours=len(self.readings))
+        self.readings.append(reading)
+        return reading
+
+
+async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -> None:
+    """One close instant for the whole retirement set (ADR-0080 §1), on the fake.
+
+    A per-target reading would let one atomic batch record two different close
+    times for one ruling, and a fake that did it would diverge from
+    ``MemoryIngestor`` on exactly the axis ADR-0080 §7 promoted to the suite.
+    """
+    store = FakeMemoryStore(now=lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    for stale_id in ("first", "second", "third"):
+        await store.add(_inferred(stale_id))
+    clock = _AdvancingClock()
+    writer = FakeMemoryWriter(
+        store=store,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+        now=clock,
+        id_factory=lambda: "corrected",
+    )
+
+    result = await writer.ingest(_proposal("correction"))
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert len(clock.readings) == 1
+    exported = {record.id: record for record in await store.export()}
+    ends = {exported[stale_id].validity.valid_until for stale_id in ("first", "second", "third")}
+    assert ends == {clock.readings[0]}
 
 
 async def test_supersede_hiding_is_read_time_relative() -> None:

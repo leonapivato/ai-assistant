@@ -21,6 +21,24 @@ returns its id; ``STORE_TEMPORARY`` stores it with an expiry; ``REJECT`` and
 ``SUPERSEDE`` naming a target absent from the conflicts raises ``MemoryStoreError``
 rather than storing the proposal as new.
 
+Three refusals are pinned besides, each stated on what a writer can observe:
+
+* **Evidence must resolve** (ADR-0077 §5). A ``DERIVED`` proposal citing a record
+  the store does not hold raises ``UnresolvedEvidenceError`` naming the id, with
+  nothing written and no ruling sought. It is deliberately **not** a floor on
+  citing *nothing* — that rule is the ``MemoryPolicy``'s (ADR-0072 §3), so an
+  ``ASSERTED`` or ``EXTERNAL`` proposal citing nothing passes here untouched.
+  Because it *is* a floor on citing something absent, every derived proposal below
+  cites :data:`_CITED`, which :func:`_cite` plants.
+* **Resolve or refuse** (ADR-0079 §1). A writer's conflict limit is a ceiling, not
+  a truncation budget: above it ``ingest`` raises ``MemoryStoreError`` with nothing
+  written, no window closed, and the policy not asked. Stated relative to *the
+  writer's own* limit, which is why :class:`WriterFactory` carries the seam — the
+  suite sets one to make the boundary observable and asserts nothing about what
+  the value should be.
+* **An unrepresentable close refuses** (ADR-0080 §3), whole, leaving every record
+  in the retirement set byte-identical.
+
 ``REINFORCE`` and ``SUPERSEDE`` are pinned *differentially* (ADR-0040 §5a, as the
 mechanism half is rewritten by ADR-0045 §5):
 
@@ -29,7 +47,13 @@ mechanism half is rewritten by ADR-0045 §5):
 * ``SUPERSEDE`` (ADR-0045 §4/§5a) leaves the target **retained with a closed
   validity window** and writes the proposed record — carrying nothing of the
   target, with a **fresh open window** so the correction is live — at an id
-  **absent from the store**, so it overwrites no existing record.
+  **absent from the store**, so it overwrites no existing record. Since ADR-0079
+  §3 it retires **the whole ruled-on set**, not the named target alone: that
+  target — ``EXTERNAL`` included, where a policy names one explicitly — plus every
+  other conflict whose source is supersedable, with ``USER_ASSERTED`` and
+  ``EXTERNAL`` *siblings* left live. Each retirement **clamps** rather than
+  extends: the window closes at the earlier of the writer's close instant and the
+  record's own ``valid_until``, ``valid_from`` untouched (ADR-0080 §1).
   ``record_id`` is the **live record's** id, neither the target's nor any
   collided-with record's. The id is minted by an **injected id factory** and written
   insert-if-absent: a collision is re-minted (bounded), an always-colliding factory
@@ -46,7 +70,9 @@ mechanism half is rewritten by ADR-0045 §5):
   and ``test_fake_writer.py``). ``export`` keeps the target **regardless of its
   validity window**, but still only while non-expired (a record past ``expires_at``
   is excluded there too, ADR-0007 §3/ADR-0045 §6). An absolute,
-  clock-coherence-independent hide guarantee is deferred to issue #306.
+  clock-coherence-independent hide guarantee is deferred to issue #460 (split out
+  of #306 by ADR-0080 §9, which leaves this semantics exactly as ADR-0045 §6 has
+  it).
 
 Both must also refuse the unsafe folds (§5b as narrowed by ADR-0045 §5): **clause
 1** — any fold onto a ``USER_ASSERTED`` target — stays record-keyed for **both**
@@ -55,13 +81,24 @@ rulings; the **``EXTERNAL``** clause is **narrowed to ``REINFORCE``** — a
 the same *supersession* is now permitted and writes a new-id correction. Every
 other pairing is permitted, which the suite exercises as well as those it refuses.
 
-It deliberately does **not** pin the conflict threshold, the conflict limit, the
-constructor's tuning check, or — for ``REINFORCE`` — which content wins and how
-confidence combines: those are one implementation's tuning and `memory`'s
-semantics, and a suite that pinned them would stop being a contract. Nor does it
-pin clock handling: a writer with no clock at all conforms, so
+It deliberately does **not** pin the conflict threshold, the *value* of the
+conflict limit, the constructor's tuning check, or — for ``REINFORCE`` — which
+content wins and how confidence combines: those are one implementation's tuning
+and `memory`'s semantics, and a suite that pinned them would stop being a
+contract. Only the behaviour *at* the ceiling is contract, which is why the seam
+sets a limit and asserts nothing about it (ADR-0079 §3/§4).
+
+Nor does it pin clock handling: a writer with no clock at all conforms, so
 ``MemoryIngestor``'s naive-clock guard is asserted in ``test_ingest.py`` where it
-belongs (ADR-0028 §4b).
+belongs (ADR-0028 §4b). That constraint is what shapes the two ADR-0080
+obligations below — "never extend" is stated as an **inequality** against the
+planted end, which every conforming writer satisfies whatever its clock reads, and
+the unrepresentable close is stated as an observable **disjunction** rather than as
+a required raise (ADR-0080 §7). Two things follow and both are accepted: the suite
+cannot force the refusal branch, and it cannot see whether a stamped close instant
+*is* a writer's own reading of one. Driving the exact clamp and the exact refusal
+against an **injected** clock — the advancing-clock and tie regressions — is
+therefore each writer's own job, in ``test_ingest.py`` and ``test_fake_writer.py``.
 
 This module is intentionally not named ``test_*`` so pytest does not collect the
 abstract base directly; it is collected via a ``Test``-prefixed subclass.
@@ -76,13 +113,14 @@ from typing import TYPE_CHECKING, Protocol
 import pytest
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreError
+from ai_assistant.core.errors import MemoryStoreError, UnresolvedEvidenceError
 from ai_assistant.core.protocols import MemoryWriter
 from ai_assistant.core.types import (
     DataTier,
     EpisodicMemory,
     MemoryDecision,
     MemoryDecisionKind,
+    MemoryIngestResult,
     MemoryRecord,
     MemorySource,
     MemoryUpdateProposal,
@@ -102,16 +140,26 @@ if TYPE_CHECKING:
 
 
 class WriterFactory(Protocol):
-    """Builds the writer under test over the store, policy, and (optional) id factory.
+    """Builds the writer under test over the store, policy, and two optional knobs.
 
     A callable rather than a ready-made writer because a writer hides its own
-    store and policy (see the class docstring). The ``id_factory`` is keyword-only
-    and optional: most obligations do not care which id a ``SUPERSEDE`` mints, but
-    the four id-factory cases (ADR-0045 §5) drive it deterministically, so the
-    factory must reach the writer's constructor. ``None`` leaves the writer's own
-    default (random UUIDs). No clock seam is exposed — the suite deliberately does
-    not pin clock handling (a writer with no clock at all conforms), so the
-    bounded-window close tests live with each concrete writer, not here.
+    store and policy (see the class docstring). Both knobs are keyword-only and
+    optional, and ``None`` leaves the writer's own default in each case:
+
+    * ``id_factory`` — most obligations do not care which id a ``SUPERSEDE``
+      mints, but the id-factory cases (ADR-0045 §5) drive it deterministically, so
+      the factory must reach the writer's constructor.
+    * ``conflict_limit`` — the same argument, for the same reason (ADR-0079 §4):
+      the resolve-or-refuse obligation is not observable without it, and the
+      multi-conflict obligations need a ceiling above the set they plant. The
+      suite sets a limit to make a boundary observable; it asserts **nothing**
+      about what the value should be, so the limit stays tuning.
+
+    No clock seam is exposed — the suite deliberately does not pin clock handling
+    (a writer with no clock at all conforms). The obligations below are stated so
+    they need none: an inequality for the clamp, an observable disjunction for the
+    refusal (ADR-0080 §7). Driving the exact clamp and the exact refusal against an
+    **injected** clock is each concrete writer's own regression, not this suite's.
     """
 
     def __call__(
@@ -120,6 +168,7 @@ class WriterFactory(Protocol):
         policy: MemoryPolicy,
         *,
         id_factory: IdFactory | None = None,
+        conflict_limit: int | None = None,
     ) -> MemoryWriter: ...
 
 
@@ -150,6 +199,39 @@ _AFTER_CLOSE = datetime(2100, 1, 1, tzinfo=UTC)
 
 _CONTENT = "prefers concise emails"
 
+#: A producer-set end far past any plausible writer clock, so a target planted with
+#: it is a live conflict at ``_WHEN`` and its retirement can only clamp *downwards*
+#: (ADR-0080 §1). Read at exactly this instant the retired record is gone: the
+#: window is half-open, so ``valid_until`` itself is exclusive.
+_SELF_CLOSE = datetime(2050, 1, 1, tzinfo=UTC)
+
+#: A producer-set *start* after ``_fixed_now``-shaped writer clocks, so closing at
+#: the writer's instant would form the empty-or-inverted window ADR-0080 §3 refuses.
+_NOT_YET_OPEN = datetime(2026, 9, 1, tzinfo=UTC)
+
+#: A store read clock at or after :data:`_NOT_YET_OPEN`, so a record planted with
+#: that start is *live* and therefore surfaces as a conflict at all.
+_AT_OR_AFTER_F = datetime(2026, 10, 1, tzinfo=UTC)
+
+#: The record every ``DERIVED`` proposal below cites, planted by :func:`_cite`.
+#: ADR-0077 §5 refuses a derived proposal whose ``evidence`` names a record the
+#: store does not hold, so a suite driving derived proposals has to plant what they
+#: cite — otherwise it would be exercising the refusal rather than the obligation
+#: under test. It is ``EPISODIC``, so kind-scoped conflict detection never returns
+#: it as a conflict for the preference proposals below.
+_CITED = "cited-episode"
+
+#: How high the ceiling is set for the multi-conflict obligations: above the sets
+#: they plant, so the boundary those cases exercise is the *retirement* rule and
+#: not ADR-0079 §1's refusal. Nothing is asserted about the value (ADR-0079 §4).
+_ROOMY_CEILING = 10
+
+
+async def _cite(store: MemoryStore) -> str:
+    """Plant the episode a ``DERIVED`` proposal's ``evidence`` names, returning its id."""
+    await store.add(_episodic(_CITED, "the exchange a derived proposal rests on"))
+    return _CITED
+
 
 def _long_ago() -> datetime:
     return _LONG_AGO
@@ -157,6 +239,10 @@ def _long_ago() -> datetime:
 
 def _after_close() -> datetime:
     return _AFTER_CLOSE
+
+
+def _at_or_after_f() -> datetime:
+    return _AT_OR_AFTER_F
 
 
 def _episodic(record_id: str, content: str) -> MemoryRecord:
@@ -331,6 +417,59 @@ class _FoldToAbsentTargetPolicy:
         return MemoryDecision(kind=self._kind, target_id="ghost", reason="contract: misdirection")
 
 
+class _SupersedeNamingPolicy:
+    """Rules ``SUPERSEDE`` naming a chosen conflict, whatever retrieval ranked first.
+
+    ``FakeMemoryPolicy`` always names ``conflicts[0]``, which cannot express
+    ADR-0079 §4's obligation 1a — a ruling whose named target is the ``EXTERNAL``
+    record rather than the best-ranked one — nor pin which member of a retirement
+    set is the *named* target and which are swept in behind it.
+    """
+
+    def __init__(self, target_id: str) -> None:
+        self._target_id = target_id
+        self.calls = 0
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+    ) -> MemoryDecision:
+        """Supersede, naming the conflict this policy was built to name."""
+        self.calls += 1
+        return MemoryDecision(
+            kind=MemoryDecisionKind.SUPERSEDE,
+            target_id=self._target_id,
+            reason="contract: a named target",
+        )
+
+
+#: The ids :func:`_plant_conflict_set` gives the two supersedable siblings — the
+#: ones ADR-0050 §1's widening sweeps in behind whatever target a ruling names.
+_SWEPT_IN = ("sib-observed", "sib-inferred")
+
+#: And the two it holds out of the widening under every ruling (ADR-0050 §1): a
+#: record the user gave us, and one an integration reported.
+_HELD_OUT = ("sib-asserted", "sib-external")
+
+
+async def _plant_conflict_set(store: MemoryStore, *, target_source: MemorySource) -> None:
+    """Plant a five-record conflict set: a named ``target`` and one sibling per source.
+
+    Every record carries :data:`_CONTENT`, so all five are conflicts of the
+    proposals below and the ruling's reach — rather than retrieval's — is what the
+    obligations observe. ``target_source`` varies so the same shape drives both the
+    ordinary supersession and ADR-0079 §4's obligation 1a, where the *named* target
+    is ``EXTERNAL`` and its sibling must still be spared.
+    """
+    await store.add(_preference("target", source=target_source, evidence=("t-ev",)))
+    await store.add(_preference("sib-observed", source=MemorySource.OBSERVED))
+    await store.add(_preference("sib-inferred", source=MemorySource.INFERRED))
+    await store.add(_preference("sib-asserted", source=MemorySource.USER_ASSERTED))
+    await store.add(_preference("sib-external", source=MemorySource.EXTERNAL))
+
+
 #: How long :class:`_SuspendingPolicy` waits for ``decide`` to be reached before
 #: declaring the scenario broken. Generous — only hit when a case has already hung.
 _GATE_SECONDS = 5.0
@@ -501,19 +640,20 @@ class MemoryWriterContract:
         (ADR-0040 §5a).
         """
         store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
         await store.add(_preference("existing", evidence=("t-ev",)))
         writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.REINFORCE))
 
         result = await writer.ingest(
-            _proposal(_preference("new", confidence=0.9, evidence=("p-ev",)))
+            _proposal(_preference("new", confidence=0.9, evidence=(_CITED,)))
         )
 
         assert result.decision.kind is MemoryDecisionKind.REINFORCE
         assert result.record_id == "existing"
-        assert [record.id for record in await store.export()] == ["existing"]
+        assert {record.id for record in await store.export()} == {"existing", _CITED}
         stored = await store.get("existing")
         assert stored is not None
-        assert set(stored.provenance.evidence) == {"t-ev", "p-ev"}
+        assert set(stored.provenance.evidence) == {"t-ev", _CITED}
 
     async def test_supersede_retires_the_target_and_writes_a_new_id_correction(
         self, make_writer: WriterFactory
@@ -529,6 +669,7 @@ class MemoryWriterContract:
         equal the proposed record with only its id replaced.
         """
         store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
         # Target INFERRED (supersedable, so neither refusal fires); content a
         # superset of the proposal's terms, so the conflict is found; no expiry, so
         # the far-forward store clock does not retire it before the window does.
@@ -557,7 +698,7 @@ class MemoryWriterContract:
             provenance=Provenance(
                 source=MemorySource.OBSERVED,
                 confidence=0.6,
-                evidence=("p-ev",),
+                evidence=(_CITED,),
                 last_updated=datetime(2026, 2, 1, tzinfo=UTC),
             ),
         )
@@ -573,7 +714,7 @@ class MemoryWriterContract:
         # Target retained with a closed window: hidden from get, present in export.
         assert await store.get("existing") is None
         retained = {record.id: record for record in await store.export()}
-        assert set(retained) == {"existing", "corrected"}
+        assert set(retained) == {"existing", "corrected", _CITED}
         assert retained["existing"].validity.valid_until is not None
         assert retained["existing"].validity.live_at(_AFTER_CLOSE) is False
         # The rest of the target is otherwise untouched (only its window moved).
@@ -608,8 +749,9 @@ class MemoryWriterContract:
         live at the store's read clock regardless of what the proposal supplied.
         """
         store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
-        proposed = _preference("new", evidence=("p-ev",)).model_copy(
+        proposed = _preference("new", evidence=(_CITED,)).model_copy(
             update={"validity": proposal_window}
         )
         writer = make_writer(
@@ -625,7 +767,7 @@ class MemoryWriterContract:
         assert live is not None
         assert live.validity.valid_from is None
         assert live.validity.valid_until is None
-        assert "p-ev" in live.provenance.evidence
+        assert _CITED in live.provenance.evidence
 
     async def test_supersede_discards_the_proposal_id_and_clobbers_no_record_there(
         self, make_writer: WriterFactory
@@ -637,6 +779,7 @@ class MemoryWriterContract:
         silently clobber it (ADR-0045 §4).
         """
         store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
         occupant = _episodic("new", "an unrelated memory that happens to share the id")
         await store.add(occupant)
@@ -644,7 +787,7 @@ class MemoryWriterContract:
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
 
         assert result.record_id == "corrected"
         # The record at the proposal's id is untouched — not clobbered.
@@ -653,7 +796,7 @@ class MemoryWriterContract:
         assert await store.get("existing") is None
         live = await store.get("corrected")
         assert live is not None
-        assert "p-ev" in live.provenance.evidence
+        assert _CITED in live.provenance.evidence
 
     async def test_supersede_re_mints_a_colliding_id_then_succeeds(
         self, make_writer: WriterFactory
@@ -664,6 +807,7 @@ class MemoryWriterContract:
         rejected — never overwritten — and the correction lands at the next free id.
         """
         store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
         await store.add(_episodic("taken", "occupies the id the factory mints first"))
         writer = make_writer(
@@ -672,7 +816,7 @@ class MemoryWriterContract:
             id_factory=_scripted("taken", "free"),
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
 
         assert result.record_id == "free"  # the first mint collided, re-minted
         collided = await store.get("taken")
@@ -681,7 +825,7 @@ class MemoryWriterContract:
         assert await store.get("existing") is None  # target retired
         live = await store.get("free")
         assert live is not None
-        assert "p-ev" in live.provenance.evidence
+        assert _CITED in live.provenance.evidence
 
     async def test_supersede_re_mints_when_the_minted_id_is_the_target_itself(
         self, make_writer: WriterFactory
@@ -696,6 +840,7 @@ class MemoryWriterContract:
         it is — so the applier detects it up front and re-mints instead of aborting.
         """
         store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
         writer = make_writer(
             store,
@@ -703,15 +848,15 @@ class MemoryWriterContract:
             id_factory=_scripted("existing", "corrected"),
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
 
         assert result.record_id == "corrected"  # re-minted past the target's own id
         assert await store.get("existing") is None  # target retired, not clobbered
         retained = {record.id: record for record in await store.export()}
-        assert set(retained) == {"existing", "corrected"}
+        assert set(retained) == {"existing", "corrected", _CITED}
         live = await store.get("corrected")
         assert live is not None
-        assert "p-ev" in live.provenance.evidence
+        assert _CITED in live.provenance.evidence
 
     async def test_supersede_may_mint_the_proposal_id_when_it_is_absent(
         self, make_writer: WriterFactory
@@ -726,21 +871,22 @@ class MemoryWriterContract:
         where the proposal id *does* name a live record and so must be avoided.
         """
         store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
         # "new" (the proposal's id) names no stored record; the factory mints it.
         writer = make_writer(
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("new")
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=("p-ev",))))
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
 
         assert result.record_id == "new"  # permitted: nothing was stored at "new"
         assert await store.get("existing") is None  # target retired
         retained = {record.id: record for record in await store.export()}
-        assert set(retained) == {"existing", "new"}
+        assert set(retained) == {"existing", "new", _CITED}
         live = await store.get("new")
         assert live is not None
-        assert "p-ev" in live.provenance.evidence
+        assert _CITED in live.provenance.evidence
 
     async def test_supersede_with_an_always_colliding_factory_leaves_the_target_live(
         self, make_writer: WriterFactory
@@ -841,10 +987,14 @@ class MemoryWriterContract:
         # A far-forward store clock so a SUPERSEDE's window-close is observable
         # through get (the target's records carry no expiry to confound it).
         store = FakeMemoryStore(now=_after_close)
+        # Planted whatever the incoming source, so the setup is one shape: a
+        # derived proposal's citation must resolve (ADR-0077 §5), and an asserted
+        # or external one is unaffected by carrying a citation that does.
+        await _cite(store)
         await store.add(_preference("existing", source=target))
         writer = make_writer(store, FakeMemoryPolicy(kind))
         before = await store.export()
-        proposal = _proposal(_preference("new", source=incoming, evidence=("p-ev",)))
+        proposal = _proposal(_preference("new", source=incoming, evidence=(_CITED,)))
 
         if _fold_is_refused(kind, incoming, target):
             with pytest.raises(MemoryStoreError):
@@ -866,7 +1016,7 @@ class MemoryWriterContract:
             assert await store.get("new") is None
             stored = await store.get("existing")
             assert stored is not None
-            assert "p-ev" in stored.provenance.evidence
+            assert _CITED in stored.provenance.evidence
             return
 
         # SUPERSEDE: the target is retired (window closed, hidden from get, kept in
@@ -880,11 +1030,372 @@ class MemoryWriterContract:
         assert result.record_id != "existing"
         assert await store.get("existing") is None
         retained = {record.id: record for record in await store.export()}
-        assert set(retained) == {"existing", result.record_id}
+        assert set(retained) == {"existing", result.record_id, _CITED}
         assert retained["existing"].validity.valid_until is not None  # window closed
         live = await store.get(result.record_id)
         assert live is not None
-        assert "p-ev" in live.provenance.evidence
+        assert _CITED in live.provenance.evidence
+
+    # --- the full-conflict ruling and its ceiling (ADR-0079 §4) -------------
+
+    @pytest.mark.parametrize(
+        "target_source",
+        [MemorySource.INFERRED, MemorySource.EXTERNAL],
+        ids=["named-target-derived", "named-target-external"],
+    )
+    async def test_supersede_retires_the_whole_ruled_on_supersedable_set(
+        self, make_writer: WriterFactory, target_source: MemorySource
+    ) -> None:
+        """Obligations 1 and 1a: the named target *and* every supersedable sibling.
+
+        ADR-0079 §3 promotes ADR-0050 §1's retirement set into the contract, and
+        both halves of its phrasing are load-bearing. **The named target is
+        retired whatever its source** — ADR-0045 §5b permits a ``SUPERSEDE`` onto
+        an ``EXTERNAL`` record and ADR-0050 §1 rules that one a policy names
+        explicitly *is* retired — which the ``named-target-external`` case is here
+        to pin, because a promotion phrased as "every supersedable conflict" alone
+        would silently release a conforming writer from it. **The supersedable
+        siblings are retired too**, which is the widening itself: retiring only the
+        policy's best-ranked target leaves a second and third stale belief live on
+        the topic.
+
+        And the two held-out sources stay live under either ruling: topical
+        similarity may not retire a record the user gave us (ADR-0045 §5), and
+        adopting ``EXTERNAL`` supersession is a separate deferred policy choice —
+        so an ``EXTERNAL`` *sibling* survives even in the case where an
+        ``EXTERNAL`` *target* does not.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await _plant_conflict_set(store, target_source=target_source)
+        policy = _SupersedeNamingPolicy("target")
+        writer = make_writer(
+            store,
+            policy,
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        for retired_id in ("target", *_SWEPT_IN):
+            # Window closed: off the read path at a clock at or after the close,
+            # and still present in `export` (ADR-0045 §6).
+            assert await store.get(retired_id) is None
+            assert retained[retired_id].validity.valid_until is not None
+            assert retained[retired_id].validity.live_at(_AFTER_CLOSE) is False
+        for spared_id in _HELD_OUT:
+            spared = await store.get(spared_id)
+            assert spared is not None
+            assert spared.validity.valid_until is None
+        # The correction is a fresh record naming none of the retired ones.
+        assert result.record_id not in {"target", *_SWEPT_IN}
+        correction = await store.get("corrected")
+        assert correction is not None
+        assert _CITED in correction.provenance.evidence
+
+    async def test_an_unmintable_multi_target_supersede_leaves_every_target_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Obligation 2: all-or-nothing across the whole set, not just the target.
+
+        ADR-0045 §8's floor generalised to N. With an always-colliding id factory
+        the applier gives up after its bounded re-mints, and because the N window
+        closes and the correction's insert are **one** atomic batch, every record
+        in the set is left byte-identical — not some retired with no replacement.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await _plant_conflict_set(store, target_source=MemorySource.INFERRED)
+        await store.add(_episodic("wall", "always in the way"))
+        before = await store.export()
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_always("wall"),
+            conflict_limit=_ROOMY_CEILING,
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert await store.export() == before
+        for record_id in ("target", *_SWEPT_IN):
+            live = await store.get(record_id)
+            assert live is not None
+            assert live.validity.valid_until is None
+
+    async def test_supersede_re_mints_when_the_minted_id_names_a_swept_in_conflict(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Obligation 3: the minted id may name **no** retired record, not just the target.
+
+        The existing "re-mints when the minted id is the target itself" case,
+        generalised to the widened set. Every retired record is *stored*, so the
+        correction written beside them may name none of them: a repeated id in the
+        batch is ``write_atomic``'s hard error (ADR-0046 §3), not the retryable
+        conflict a re-mint handles, so an applier that only checked the named
+        target would abort a supersession the ADR requires it to retry.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await _plant_conflict_set(store, target_source=MemorySource.INFERRED)
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_scripted("sib-inferred", "corrected"),
+            conflict_limit=_ROOMY_CEILING,
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"  # re-minted past a swept-in conflict
+        retained = {record.id: record for record in await store.export()}
+        # The record whose id was minted is retired, not clobbered by the correction.
+        assert retained["sib-inferred"].validity.valid_until is not None
+        assert retained["sib-inferred"].content == _CONTENT
+        assert await store.get("sib-inferred") is None
+        assert await store.get("corrected") is not None
+
+    async def test_a_conflict_set_above_the_writers_ceiling_refuses_before_any_ruling(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Obligation 4: resolve or refuse — a correction resolves every conflict it is shown.
+
+        Stated relative to *the writer's own* limit, so no value is pinned: the
+        seam drives one low and plants more conflicts than that. The refusal fires
+        in conflict resolution, before any ruling is sought, so the policy is not
+        asked at all — which is what makes it a statement about the ingest's
+        *inputs* rather than an outcome a policy weighed.
+
+        And it is stated on the conflicts the writer's own retrieval **surfaced**,
+        which is all a suite running over ``FakeMemoryStore`` can observe; whether
+        a durable store's retrieval is itself threshold-complete is a different
+        obligation with a different owner (issue #457).
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        for index in range(3):
+            await store.add(_preference(f"existing-{index}", source=MemorySource.INFERRED))
+        before = await store.export()
+        policy = FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE)
+        writer = make_writer(store, policy, conflict_limit=2)
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert policy.call_count == 0  # no ruling was sought
+        assert await store.export() == before  # nothing written, no window closed
+        for index in range(3):
+            live = await store.get(f"existing-{index}")
+            assert live is not None
+            assert live.validity.valid_until is None
+
+    # --- the retirement clamp (ADR-0080 §7) ---------------------------------
+
+    async def test_a_retirement_never_extends_the_targets_own_window(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Obligation 1: the close is never *later* than the record's own end.
+
+        ADR-0080 §1's clamp, stated as an **inequality** against the planted end
+        rather than as an equality against a close instant — which is what lets it
+        hold for every conforming writer whatever its clock reads, in a suite that
+        deliberately pins no writer clock. Writing ``now`` over an earlier
+        producer-set end would push a self-closed belief back onto the read path
+        for ``[valid_until, now)``: retirement takes a belief off the read path and
+        never puts one back.
+
+        ``valid_from`` is asserted too, because §1 preserves *every* other field: a
+        retirement narrows one end of the envelope and moves nothing else.
+        """
+        read_at = [_WHEN]  # store read clock, mutable; starts before the planted end
+        store = FakeMemoryStore(now=lambda: read_at[0])
+        await _cite(store)
+        await store.add(
+            PreferenceMemory(
+                id="existing",
+                content=_CONTENT,
+                preference=_CONTENT,
+                validity=Validity(valid_until=_SELF_CLOSE),
+                provenance=Provenance(
+                    source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN
+                ),
+            )
+        )
+        writer = make_writer(
+            store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
+        )
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        end = retained["existing"].validity.valid_until
+        assert end is not None
+        assert end <= _SELF_CLOSE  # never extended past the producer's own end
+        assert retained["existing"].validity.valid_from is None  # the start did not move
+        # Read at the planted end: off the read path, still in `export`.
+        read_at[0] = _SELF_CLOSE
+        assert await store.get("existing") is None
+        assert all(record.id != "existing" for record in await store.search(_CONTENT))
+        live = await store.get("corrected")
+        assert live is not None
+        assert live.validity.valid_from is None
+        assert live.validity.valid_until is None
+
+    async def test_an_unrepresentable_close_refuses_whole_or_closes_lawfully(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Obligations 2 and 3: the exhaustive disjunction, with no third outcome.
+
+        A retirement set holding a target planted with ``valid_from = F`` **and**
+        an ordinary open-window sibling, read from a store clock at or after ``F``
+        so both are live conflicts. ADR-0080 §7 states this as a disjunction rather
+        than as a required raise, because the suite fixes no writer clock and a
+        writer whose close instant falls after ``F`` lawfully succeeds:
+
+        - **either** ``ingest`` raised and **every** record in the set is
+          byte-identical to what was planted — no window closed, no correction
+          written, no id minted (§3, §6);
+        - **or** it succeeded, and both planted records — neither of which carries
+          a ``valid_until`` of its own, so §1's clamp leaves both at the writer's
+          own end — were retired with the **same** ``valid_until``, and that
+          instant is strictly after ``F``, which is exactly the case where the
+          window was representable.
+
+        Both conjuncts on the success branch are load-bearing. Requiring one shared
+        end rules out per-target clock sampling — a writer that closed the
+        future-dated target before ``F`` (persisting the inverted window ``[F,
+        earlier)``, which ``model_copy(update=...)`` constructs without re-running
+        ``Validity``'s validator) and then sampled again past ``F`` for the sibling
+        would satisfy a weaker assertion about the sibling alone. Requiring each
+        retired window to be well-formed rules that persisted inversion out
+        directly rather than by inference, which the suite must do itself: it runs
+        over ``FakeMemoryStore``, so ``SqliteMemoryStore``'s decode re-validation is
+        not there to catch it.
+
+        What this cannot reach is stated rather than implied: it cannot force the
+        refusal branch, and it cannot see that a stamped instant is a writer's own
+        reading of a clock. The clock-injected clamp, refusal and tie regressions
+        are each writer's own (§7).
+        """
+        store = FakeMemoryStore(now=_at_or_after_f)
+        await _cite(store)
+        await store.add(
+            PreferenceMemory(
+                id="future",
+                content=_CONTENT,
+                preference=_CONTENT,
+                validity=Validity(valid_from=_NOT_YET_OPEN),
+                provenance=Provenance(
+                    source=MemorySource.INFERRED, confidence=0.6, last_updated=_WHEN
+                ),
+            )
+        )
+        await store.add(_preference("sibling", source=MemorySource.INFERRED))
+        before = await store.export()
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("sibling"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+        )
+        proposal = _proposal(_preference("new", evidence=(_CITED,)))
+
+        # Captured rather than asserted in the handler, so which branch the writer
+        # took is decided once, below, where both branches read side by side.
+        outcome: MemoryIngestResult | None = None
+        refusal: MemoryStoreError | None = None
+        try:
+            outcome = await writer.ingest(proposal)
+        except MemoryStoreError as raised:
+            refusal = raised
+
+        if refusal is not None:
+            # ADR-0080 §7: this refusal is about a *target's window*, never an
+            # evidence failure, so it must not arrive as the subclass ADR-0077 §5
+            # took for that other question.
+            assert not isinstance(refusal, UnresolvedEvidenceError)
+            assert await store.export() == before
+            assert await store.get("corrected") is None
+            return
+
+        assert outcome is not None
+        retained = {record.id: record for record in await store.export()}
+        assert outcome.record_id == "corrected"
+        ends = {retained[record_id].validity.valid_until for record_id in ("future", "sibling")}
+        assert len(ends) == 1  # one close instant recorded across the whole set
+        (shared_end,) = ends
+        assert shared_end is not None
+        assert shared_end > _NOT_YET_OPEN  # the window was representable after all
+        for record_id in ("future", "sibling"):
+            window = retained[record_id].validity
+            assert window.valid_until is not None
+            if window.valid_from is not None:
+                assert window.valid_until > window.valid_from  # well-formed, never inverted
+
+    # --- evidence must resolve (ADR-0077 §5) --------------------------------
+
+    async def test_a_derived_proposal_citing_a_record_the_store_lacks_is_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """The writer's floor: a citation that does not resolve refuses the ingest.
+
+        A raise rather than a fabricated ``REJECT``, because a ruling is the
+        policy's to make (ADR-0005 §3) — which is why the policy must not have been
+        asked. The named subclass carries the unresolved ids, so a stage can
+        compare them against the batch it selected and tell an evidence record that
+        went away under it from a producer citing something it was never handed.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        before = await store.export()
+        policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+        writer = make_writer(store, policy)
+
+        with pytest.raises(UnresolvedEvidenceError) as caught:
+            await writer.ingest(_proposal(_preference("new", evidence=("gone",))))
+
+        assert "gone" in caught.value.unresolved_ids
+        assert policy.call_count == 0  # refused before any ruling was sought
+        assert await store.export() == before
+        assert await store.get("new") is None
+
+    async def test_a_derived_proposal_whose_citations_resolve_is_unaffected(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """The other side of the floor: a citation the store holds passes untouched."""
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.ACCEPT))
+
+        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert result.record_id == "new"
+        assert await store.get("new") is not None
+
+    @pytest.mark.parametrize("source", [MemorySource.USER_ASSERTED, MemorySource.EXTERNAL], ids=str)
+    async def test_an_asserted_or_external_proposal_citing_nothing_is_unaffected(
+        self, make_writer: WriterFactory, source: MemorySource
+    ) -> None:
+        """The floor is scoped to the ``DERIVED`` band, and to citing *absently*.
+
+        ADR-0072 §3 put the emptiness rule at the ``MemoryPolicy`` gate precisely
+        so the writer would not constrain records that legitimately cite nothing:
+        the user's own word is its own warrant, and an integration's report is
+        that system's. An empty tuple also names no record that fails to resolve,
+        so it has nothing for this check to refuse.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.ACCEPT))
+
+        result = await writer.ingest(_proposal(_preference("new", source=source)))
+
+        assert result.record_id == "new"
+        assert await store.get("new") is not None
 
     # --- input observation (ADR-0065) ---------------------------------------
 

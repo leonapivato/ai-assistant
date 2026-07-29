@@ -10,7 +10,7 @@ binding.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from memory_writer_contract import MemoryWriterContract, WriterFactory
@@ -37,10 +37,16 @@ class TestMemoryIngestorContract(MemoryWriterContract):
             policy: MemoryPolicy,
             *,
             id_factory: Callable[[], str] | None = None,
+            conflict_limit: int | None = None,
         ) -> MemoryWriter:
-            if id_factory is None:
-                return MemoryIngestor(store=store, policy=policy, now=_fixed_now)
-            return MemoryIngestor(store=store, policy=policy, now=_fixed_now, id_factory=id_factory)
+            # Each `None` leaves the ingestor's own default, which is what the
+            # suite's seams mean by "this obligation does not drive it".
+            seams: dict[str, Any] = {}
+            if id_factory is not None:
+                seams["id_factory"] = id_factory
+            if conflict_limit is not None:
+                seams["conflict_limit"] = conflict_limit
+            return MemoryIngestor(store=store, policy=policy, now=_fixed_now, **seams)
 
         return build
 

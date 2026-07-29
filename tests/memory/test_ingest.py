@@ -11,6 +11,7 @@ import pytest
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     DataTier,
+    EpisodicMemory,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryRecord,
@@ -57,8 +58,42 @@ def _prov(
     )
 
 
-def _semantic(record_id: str, content: str, *, confidence: float = 0.6) -> MemoryRecord:
-    return SemanticMemory(id=record_id, content=content, fact=content, provenance=_prov(confidence))
+#: The episode a well-formed derived proposal cites. Two ratified rules make it
+#: necessary rather than decorative, and they are different rules with different
+#: owners (ADR-0077 §5): ``DefaultMemoryPolicy`` **rejects** a ``DERIVED`` proposal
+#: citing nothing, and ``MemoryIngestor`` **refuses** one citing a record the store
+#: does not hold. So a derived proposal that means to exercise anything else has to
+#: cite an episode, and the store has to be holding it (:func:`_plant_episodes`).
+_EPISODE = "episode-1"
+
+
+async def _plant_episodes(store: MemoryStore, *episode_ids: str) -> None:
+    """Store the episodes the proposals below cite, so their citations resolve.
+
+    ``EPISODIC``, so kind-scoped conflict detection never returns one as a conflict
+    for the semantic and preference proposals these tests drive.
+    """
+    for episode_id in episode_ids:
+        await store.add(
+            EpisodicMemory(
+                id=episode_id,
+                content=f"the exchange {episode_id} records",
+                occurred_at=_WHEN,
+                provenance=_prov(0.6),
+            )
+        )
+
+
+def _semantic(
+    record_id: str,
+    content: str,
+    *,
+    confidence: float = 0.6,
+    evidence: tuple[str, ...] = (),
+) -> MemoryRecord:
+    return SemanticMemory(
+        id=record_id, content=content, fact=content, provenance=_prov(confidence, evidence)
+    )
 
 
 def _preference(
@@ -111,9 +146,10 @@ def _ingestor(store: MemoryStore) -> MemoryIngestor:
 
 async def test_accepts_and_stores_a_novel_memory() -> None:
     store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
 
     result = await _ingestor(store).ingest(
-        _proposal(_semantic("1", "unique gardening fact", confidence=0.9))
+        _proposal(_semantic("1", "unique gardening fact", confidence=0.9, evidence=(_EPISODE,)))
     )
 
     assert result.decision.kind is MemoryDecisionKind.ACCEPT
@@ -135,6 +171,7 @@ async def test_secret_proposal_is_deferred_and_not_stored() -> None:
 
 async def test_conflicting_proposal_merges_into_existing() -> None:
     store = InMemoryMemoryStore()
+    await _plant_episodes(store, "ev1", "ev2")
     await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
 
     result = await _ingestor(store).ingest(
@@ -308,17 +345,18 @@ async def test_a_multi_target_supersede_that_cannot_mint_leaves_every_target_liv
             store.close()
 
 
-async def test_a_correction_retires_at_most_the_conflict_limit_leaving_a_bounded_surplus() -> None:
-    # ADR-0050 §1's honest bound: "full set" means the full *detected* set, which
-    # `_detect_conflicts` caps at `conflict_limit`. With more matching inferences than
-    # the cap, one supersession retires exactly `conflict_limit` of them and the
-    # surplus stays live — a bounded residual, still a strict improvement over
-    # retiring only the best-ranked (issue #244 was 1-of-N; this is cap-of-N). Pinned
-    # so the boundary is documented and honest, not accidental. The residual is
-    # filed, not claimed converged: a re-proposal would itself see the landed
-    # correction as an asserted conflict and defer (ASK_USER, §2).
+async def test_a_correction_above_the_conflict_ceiling_refuses_and_writes_nothing() -> None:
+    # The same boundary this file used to pin, with the opposite ratified outcome.
+    # ADR-0050 §1 accepted a bounded surplus above `conflict_limit`: one supersession
+    # retired exactly the cap and the rest stayed live. ADR-0079 §1 partially
+    # supersedes that clause and re-founds the limit as a *ceiling*: a correction
+    # resolves every conflict it is shown, or it does not land. Above it the ingest
+    # refuses — nothing written, no window closed, no ruling sought — because the
+    # surplus never drained (a re-proposal sees the landed correction as an asserted
+    # conflict and defers, ADR-0050 §2) and because the same truncation could hide an
+    # asserted conflict from the policy's own gates.
     store = InMemoryMemoryStore()
-    stale_ids = ("s1", "s2", "s3")  # three matching inferences, cap set to two below
+    stale_ids = ("s1", "s2", "s3")  # three matching inferences, ceiling set to two below
     for stale_id in stale_ids:
         await store.add(
             _preference(
@@ -337,16 +375,17 @@ async def test_a_correction_retires_at_most_the_conflict_limit_leaving_a_bounded
         id_factory=lambda: "corrected",
     )
 
-    result = await ingestor.ingest(
-        _proposal(_asserted("correction", "user prefers afternoon meetings"))
-    )
+    with pytest.raises(MemoryStoreError, match="surfaced more than"):
+        await ingestor.ingest(_proposal(_asserted("correction", "user prefers afternoon meetings")))
 
-    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
-    retired = [sid for sid in stale_ids if await store.get(sid) is None]
-    live = [sid for sid in stale_ids if await store.get(sid) is not None]
-    assert len(retired) == 2  # exactly the cap
-    assert len(live) == 1  # the surplus beyond the cap
-    assert await store.get("corrected") is not None  # the correction is live
+    # Every contradicting inference is still live with an open window, and the
+    # correction did not land: the store is exactly as it was.
+    for stale_id in stale_ids:
+        record = await store.get(stale_id)
+        assert record is not None
+        assert record.validity.valid_until is None
+    assert await store.get("corrected") is None
+    assert {record.id for record in await store.export()} == set(stale_ids)
 
 
 async def test_a_correction_that_contradicts_an_assertion_defers_and_writes_nothing() -> None:
@@ -388,7 +427,8 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
     # transiently still returns it. That transient visibility is a property of
     # read-time filtering, not a bug — documented here, not "fixed". An absolute,
     # clock-coherence-independent guarantee (a store-authoritative retirement instant)
-    # is a MemoryStore contract change deferred to issue #306. Run over SQLite too,
+    # is a MemoryStore contract change deferred to issue #460, which ADR-0080 §9 split
+    # out of #306 and left unclosed. Run over SQLite too,
     # where the hide rides the `valid_until` pre-filter column the batch UPSERT must
     # write alongside the JSON blob (ADR-0045 §9), not only the in-memory dict.
     read_at = [datetime(2026, 1, 1, tzinfo=UTC)]  # store read clock, mutable; starts BEHIND close
@@ -434,13 +474,15 @@ async def test_a_superseded_targets_hiding_is_read_time_relative(
 
 
 async def test_superseding_a_target_never_extends_its_existing_window() -> None:
-    # Retirement takes a belief *off* the read path — it never resurrects one.
-    # A target that already self-closes *before* the ingestor's clock keeps that
-    # earlier end (`_close_window` takes the min), so a supersession cannot push a
-    # self-closed belief back onto the read path for [existing-end, now). No invalid
-    # interval or clock skew is needed — just a producer-set `valid_until` earlier
-    # than the writer clock, with the store reading before it so it is a live
-    # conflict. The full question of producer-settable windows is deferred to #306.
+    # ADR-0080 §1's clamp: retirement takes a belief *off* the read path and never
+    # resurrects one. A target that already self-closes *before* the ingestor's
+    # clock keeps that earlier end (`_close_window` takes the min), so a
+    # supersession cannot push a self-closed belief back onto the read path for
+    # [existing-end, now). No invalid interval or clock skew is needed — just a
+    # producer-set `valid_until` earlier than the writer clock, with the store
+    # reading before it so it is a live conflict. This is the clock-injected form
+    # the shared suite cannot express, which states the clamp as an inequality
+    # because it pins no writer clock (ADR-0080 §7).
     already_closes = datetime(2026, 3, 1, tzinfo=UTC)  # before the ingestor's 2026-06-01 clock
     store = InMemoryMemoryStore(now=lambda: datetime(2026, 2, 1, tzinfo=UTC))
     await store.add(
@@ -467,12 +509,12 @@ async def test_superseding_a_target_never_extends_its_existing_window() -> None:
 async def test_superseding_a_future_dated_target_refuses_without_corrupting(
     backend: str, tmp_path: Path
 ) -> None:
-    # The data-integrity floor in `_close_window`: a producer-set `valid_from` at or
-    # after the ingestor's clock would, closed at `now`, form an empty/inverted
-    # window that `SqliteMemoryStore`'s decode re-validation rejects — corrupting
-    # reads. The applier refuses before `write_atomic`, so *neither* backend
-    # persists it. Run over both because the corruption is backend-specific; the
-    # full retirement semantics for such a target is deferred to issue #306. The
+    # ADR-0080 §3's refusal, now ratified rather than an applier floor: a
+    # producer-set `valid_from` at or after the ingestor's clock would, closed at
+    # `now`, form an empty/inverted window that `SqliteMemoryStore`'s decode
+    # re-validation rejects — corrupting reads. The applier refuses before
+    # `write_atomic`, so *neither* backend persists it. Run over both because the
+    # corruption is backend-specific. The
     # target is a live conflict at the store's 2026-10-01 clock but its window would
     # invert against the ingestor's 2026-06-01 clock. Identical content makes it a
     # conflict under both the lexical (in-memory) and vector (SQLite) detectors.
@@ -510,6 +552,117 @@ async def test_superseding_a_future_dated_target_refuses_without_corrupting(
     finally:
         if isinstance(store, SqliteMemoryStore):
             store.close()
+
+
+@pytest.mark.parametrize("backend", ["in-memory", "sqlite"])
+async def test_superseding_a_target_whose_window_opens_at_the_close_refuses(
+    backend: str, tmp_path: Path
+) -> None:
+    # ADR-0080 §3's **tie**, which nothing pinned before it: `end == valid_from`
+    # gives the half-open interval [F, F) — empty, live at no instant — so there is
+    # no honest end to write and it falls on the refusing side rather than on a
+    # "close it at its own start" fallback. The sibling case above plants
+    # `valid_from` strictly *after* the writer's clock, so it still holds if the
+    # check is weakened from `end <= valid_from` to `end <`; under that weakening
+    # this one persists [F, F), which `model_copy(update=...)` constructs without
+    # re-running `Validity`'s validator and SQLite then cannot decode. A second,
+    # ordinary target is present so the assertion is ADR-0080 §6's: *every* record
+    # in the retirement set is byte-identical afterwards, not merely the awkward one
+    # — there is no "skip it and retire the rest".
+    close = _fixed_now()  # the ingestor's close instant, and the planted valid_from
+    store: MemoryStore
+    if backend == "in-memory":
+        store = InMemoryMemoryStore(now=lambda: datetime(2026, 7, 1, tzinfo=UTC))
+    else:
+        store = SqliteMemoryStore(
+            path=tmp_path / "memory.db",
+            embedder=HashingEmbedder(dimensions=32),
+            now=lambda: datetime(2026, 7, 1, tzinfo=UTC),
+        )
+    try:
+        await store.add(
+            PreferenceMemory(
+                id="opens-at-close",
+                content="user prefers morning meetings",
+                preference="morning",
+                validity=Validity(valid_from=close),  # live at the store's clock
+                provenance=_prov(0.6, source=MemorySource.INFERRED),
+            )
+        )
+        await store.add(
+            _preference(
+                "sibling",
+                "user prefers morning meetings",
+                confidence=0.6,
+                source=MemorySource.INFERRED,
+            )
+        )
+        before = {record.id: record for record in await store.export()}
+
+        with pytest.raises(MemoryStoreError, match="valid_from"):
+            await _ingestor(store).ingest(
+                _proposal(_asserted("correction", "user prefers morning meetings"))
+            )
+
+        assert {record.id: record for record in await store.export()} == before
+    finally:
+        if isinstance(store, SqliteMemoryStore):
+            store.close()
+
+
+class _AdvancingClock:
+    """Records every reading and returns a later instant each time.
+
+    ADR-0080 §7's instrument for the one thing the shared suite cannot express:
+    that a writer reads its close instant **once** per ingest. Equality across the
+    retired records alone is satisfied by a writer that re-samples a *constant*
+    clock; equality plus advancing is satisfied by one that ignores its injected
+    clock entirely. The call count and the first-value identity together rule out
+    both, and they are observable only because the test owns the clock.
+    """
+
+    def __init__(self) -> None:
+        self.readings: list[datetime] = []
+
+    def __call__(self) -> datetime:
+        reading = _fixed_now() + timedelta(hours=len(self.readings))
+        self.readings.append(reading)
+        return reading
+
+
+async def test_a_multi_target_supersede_reads_its_close_instant_exactly_once() -> None:
+    # ADR-0080 §1: `now` is one instant, determined before any write and shared by
+    # every member of the retirement set — never re-determined per target, which
+    # would let one atomic batch record two different close times for one ruling,
+    # so a reader could not say when the correction took effect.
+    store = InMemoryMemoryStore()
+    for stale_id in ("morning", "early", "dawn"):
+        await store.add(
+            _preference(
+                stale_id,
+                "user prefers morning meetings",
+                confidence=0.6,
+                source=MemorySource.INFERRED,
+            )
+        )
+    clock = _AdvancingClock()
+    ingestor = MemoryIngestor(
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=clock,
+        conflict_threshold=0.5,
+        id_factory=lambda: "corrected",
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert len(clock.readings) == 1
+    exported = {record.id: record for record in await store.export()}
+    ends = {exported[stale_id].validity.valid_until for stale_id in ("morning", "early", "dawn")}
+    assert ends == {clock.readings[0]}
 
 
 async def test_a_correction_survives_the_next_external_re_sync() -> None:
@@ -752,17 +905,45 @@ async def test_proposal_itself_does_not_consume_a_conflict_slot() -> None:
     assert policy.conflicts == [["rival"]]
 
 
-async def test_conflicts_offered_never_exceed_the_limit() -> None:
-    """Over-fetching to make room for the exclusion must not widen the limit."""
+async def test_the_whole_detected_conflict_set_reaches_the_policy_at_the_ceiling() -> None:
+    """At the ceiling, nothing detected is discarded before the ruling (ADR-0079 §1).
+
+    The over-fetch that makes room for excluding the proposal's own record must not
+    leak into what the policy sees either — the limit is a ceiling on the *ruled-on*
+    set, not on the rows retrieval was asked for.
+    """
     store = InMemoryMemoryStore()
     for index in range(3):
         await store.add(_preference(f"existing-{index}", "prefers concise emails"))
     policy = _RecordingPolicy()
-    ingestor = MemoryIngestor(store=store, policy=policy, conflict_limit=2, now=_fixed_now)
+    ingestor = MemoryIngestor(store=store, policy=policy, conflict_limit=3, now=_fixed_now)
 
     await ingestor.ingest(_proposal(_preference("new", "prefers concise emails")))
 
-    assert policy.conflicts == [["existing-0", "existing-1"]]
+    assert policy.conflicts == [["existing-0", "existing-1", "existing-2"]]
+
+
+async def test_a_conflict_set_above_the_ceiling_is_refused_before_the_policy_is_asked() -> None:
+    """One past the ceiling refuses rather than truncating (ADR-0079 §1).
+
+    The counterpart of the case above, and the reason the over-fetch is two rows
+    rather than one: without a probe past the ceiling, "retrieval surfaced exactly
+    the ceiling" and "it surfaced more" are indistinguishable, and a writer that
+    could not tell them apart would have to discard silently — the defect #313
+    reports.
+    """
+    store = InMemoryMemoryStore()
+    for index in range(4):
+        await store.add(_preference(f"existing-{index}", "prefers concise emails"))
+    before = await store.export()
+    policy = _RecordingPolicy()
+    ingestor = MemoryIngestor(store=store, policy=policy, conflict_limit=3, now=_fixed_now)
+
+    with pytest.raises(MemoryStoreError, match="surfaced more than"):
+        await ingestor.ingest(_proposal(_preference("new", "prefers concise emails")))
+
+    assert policy.conflicts == []  # the policy was never asked
+    assert await store.export() == before  # and nothing was written
 
 
 class _MergeToAbsentTargetPolicy:
@@ -817,8 +998,11 @@ async def test_low_confidence_is_stored_temporarily_with_expiry() -> None:
     # The store shares the ingestor's fixed clock, so the just-stamped expiry
     # (a week out) is still in the future and the record remains retrievable.
     store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store, _EPISODE)
 
-    result = await _ingestor(store).ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+    result = await _ingestor(store).ingest(
+        _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
+    )
 
     assert result.decision.kind is MemoryDecisionKind.STORE_TEMPORARY
     stored = await store.get("1")
@@ -861,6 +1045,9 @@ def test_tuning_that_would_silently_disable_a_stage_is_refused(
 async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) -> None:
     """0 and 1 bound the score range, and 1 is the smallest useful limit."""
     store = InMemoryMemoryStore()
+    # Kind-scoped detection keeps the cited episode out of a semantic proposal's
+    # conflicts, so it cannot consume the ceiling of 1 this case is pinning.
+    await _plant_episodes(store, _EPISODE)
     ingestor = MemoryIngestor(
         store=store,
         policy=DefaultMemoryPolicy(),
@@ -869,7 +1056,9 @@ async def test_tuning_accepts_the_boundary_values(threshold: float, limit: int) 
         now=_fixed_now,
     )
 
-    result = await ingestor.ingest(_proposal(_semantic("1", "unique fact", confidence=0.9)))
+    result = await ingestor.ingest(
+        _proposal(_semantic("1", "unique fact", confidence=0.9, evidence=(_EPISODE,)))
+    )
 
     assert result.record_id == "1"
 
@@ -917,6 +1106,7 @@ async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
     failure naming the seam.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store, _EPISODE)
     naive_clock = MemoryIngestor(
         store=store,
         policy=DefaultMemoryPolicy(),
@@ -924,7 +1114,9 @@ async def test_a_naive_clock_cannot_leak_a_naive_expiry() -> None:
     )
 
     with pytest.raises(MemoryStoreError, match="MemoryIngestor"):
-        await naive_clock.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+        await naive_clock.ingest(
+            _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
+        )
 
     assert await store.get("1") is None
 
@@ -938,13 +1130,16 @@ async def test_a_non_utc_clock_is_converted_not_merely_accepted() -> None:
     ``SqliteMemoryStore._add_sync``'s expiry index would then be computed from.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store, _EPISODE)
     berlin_clock = MemoryIngestor(
         store=store,
         policy=DefaultMemoryPolicy(),
         now=lambda: datetime(2026, 6, 1, 2, tzinfo=timezone(timedelta(hours=2))),
     )
 
-    await berlin_clock.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+    await berlin_clock.ingest(
+        _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
+    )
 
     stored = await store.get("1")
     assert stored is not None
@@ -1015,6 +1210,7 @@ async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -
     *describing* the reading cannot itself escape the translation.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store, _EPISODE)
     broken = MemoryIngestor(
         store=store,
         policy=DefaultMemoryPolicy(),
@@ -1022,7 +1218,9 @@ async def test_an_unusable_clock_reading_is_the_subsystems_error(zone: tzinfo) -
     )
 
     with pytest.raises(MemoryStoreError, match="MemoryIngestor"):
-        await broken.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+        await broken.ingest(
+            _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
+        )
 
     assert await store.get("1") is None
 
@@ -1043,6 +1241,7 @@ async def test_a_clock_whose_conversion_lies_cannot_install_a_naive_expiry() -> 
     persisting JSON that no longer decodes.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store, _EPISODE)
     lying = MemoryIngestor(
         store=store,
         policy=DefaultMemoryPolicy(),
@@ -1050,7 +1249,9 @@ async def test_a_clock_whose_conversion_lies_cannot_install_a_naive_expiry() -> 
     )
 
     with pytest.raises(MemoryStoreError, match="did not convert to UTC"):
-        await lying.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+        await lying.ingest(
+            _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
+        )
 
     assert await store.get("1") is None
 
@@ -1077,6 +1278,7 @@ async def test_a_clock_that_flips_its_offset_during_conversion_is_refused() -> N
     hours late, past a validator this write never reaches.
     """
     store = InMemoryMemoryStore(now=_fixed_now)
+    await _plant_episodes(store, _EPISODE)
     _FlipOnConvert.lie = timedelta(0)
     flipping = MemoryIngestor(
         store=store,
@@ -1086,7 +1288,9 @@ async def test_a_clock_that_flips_its_offset_during_conversion_is_refused() -> N
 
     try:
         with pytest.raises(MemoryStoreError, match="did not convert to UTC"):
-            await flipping.ingest(_proposal(_semantic("1", "weak signal", confidence=0.1)))
+            await flipping.ingest(
+                _proposal(_semantic("1", "weak signal", confidence=0.1, evidence=(_EPISODE,)))
+            )
     finally:
         _FlipOnConvert.lie = timedelta(0)
 
@@ -1144,6 +1348,9 @@ async def test_concurrent_merges_into_one_target_do_not_lose_a_write() -> None:
     """
     resume = asyncio.Event()
     store = _PauseOnFirstSearch(resume=resume)
+    # Planted before the harness arms: the evidence resolution both ingests do is a
+    # `get`, not a `search`, so it neither trips nor is tripped by the pause.
+    await _plant_episodes(store, "ev1", "evA", "evB")
     await store.add(_preference("e", "prefers concise emails", confidence=0.5, evidence=("ev1",)))
     ingestor = _ingestor(store)
 
