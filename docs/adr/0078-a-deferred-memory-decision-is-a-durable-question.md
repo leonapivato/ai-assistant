@@ -326,8 +326,18 @@ like every other, owing:
   reason: a row dropped mid-scan shifts every subsequent offset. Total order: by
   `deferred_at` **ascending**, `id` ascending as tie-break (§7 argues the
   direction). A row whose `expires_at` is `None` never lapses out of this read.
+
+  **`limit` and `offset` carry ADR-0073 §2's explicit range, `0 <= value < 2**63`,
+  refused at both ends before the first `await`.** Not a detail: `limit=-1` is
+  SQLite's spelling for *no limit*, so an unvalidated negative turns the bounded
+  read of a Tier 1 — sometimes Tier 0 — queue into an unbounded one, and a value
+  past the 64-bit bound surfaces a driver `OverflowError` instead of a
+  `DeferralStoreError`. ADR-0073 §8 makes the refusals at **both** ends a named
+  conformance obligation for `list_beliefs` for exactly these two reasons; this read
+  is the same shape and inherits them rather than rediscovering them.
 - **`interrupted(*, limit=50, offset=0) -> list[DeferredProposal]`** — the same
-  bounded, ordered enumeration over `APPLYING` rows. It exists because §8 requires
+  bounded, ordered enumeration over `APPLYING` rows, under the same order, the same
+  bounded default and the same argument range. It exists because §8 requires
   the surface to *show* an interrupted answer and §9 makes disposing of it the
   user's first recovery step, and after a restart the façade holds no id to `get`
   by: without this read the stranded question is unreachable, which is the vanishing
@@ -356,6 +366,16 @@ like every other, owing:
   `REINFORCE`/`SUPERSEDE` → `ACCEPTED` with the record id; `ASK_USER` →
   `REDEFERRED` with the successor's; `REJECT` → `REJECTED`; and the coordinator's
   own pre-ingest window check → `STALE` without an ingest at all (§6).
+
+  **Each terminal state carries its own required payload, and the other's is
+  forbidden**, in exactly the shape `MemoryDecision._outcome_fields_are_consistent`
+  (`types.py:696-719`) already enforces for a ruling: `ACCEPTED` requires
+  `record_id` and no successor; `REDEFERRED` requires `successor_id` and no record
+  id; `REJECTED` and `STALE` require neither and permit neither. Without it a valid
+  claim can resolve `ACCEPTED` with no record id at all, and the question then
+  renders as applied while naming nothing that was written — a terminal state that
+  lies, reached through the one call whose whole job is to record what happened.
+  A malformed combination is refused, not silently normalised.
 
   `False` from any other state, on a mismatched or absent `claim_id`, and on
   a second attempt. The `claim_id` is what keeps the bookkeeping bound to the apply
@@ -424,7 +444,7 @@ convention, **a binding for the production store too** — a suite bound only to
 fake certifies the double while the real store drifts.
 `tests/core/test_protocol_triad.py` enforces the first three mechanically.
 
-**Eight clauses the suite must carry are named here**, because they are the ones a
+**Eleven clauses the suite must carry are named here**, because they are the ones a
 suite of small explicit cases naturally omits and each is a claim this ADR makes
 that would otherwise be prose:
 
@@ -469,6 +489,21 @@ that would otherwise be prose:
    same bounded default as `pending`, and the two reads are **disjoint**: no row
    appears in both. A store that returned an interrupted question among the
    answerable ones would offer the user a claim that cannot be taken.
+9. **Both reads refuse `limit`/`offset` outside `0 <= value < 2**63`, at both
+   ends** (§2), and a **non-zero `offset` asserts the returned ids** rather than the
+   page length — ADR-0073 §8's own warning, that an implementation ignoring `offset`
+   returns a full ordered page every time and passes a length-only assertion for
+   good. And the **default `limit` is exercised with more than 50 matching rows**,
+   for §8's other reason: an implementation defaulting to unbounded satisfies every
+   explicit-limit case while breaking the bounded-default guarantee.
+10. **`resolve` refuses each malformed terminal payload** (§2): `ACCEPTED` without a
+    record id, `ACCEPTED` carrying a successor id, `REDEFERRED` without a successor
+    id, and `REJECTED`/`STALE` carrying either. Four cases, because the transition
+    tests pass against a store that writes whatever payload it is handed.
+11. **The key is computed by exclusion** (§7): two proposals differing *only* in
+    their `validity` window admit as separate questions, and two differing only in
+    `id` or `score` collide. The first is the case an enumerated key got wrong; the
+    second is what keeps the key from matching nothing at all.
 
 ### 3. The enqueue is the coordinator's, and two composition-root obligations come with it
 
@@ -803,24 +838,34 @@ The observer will produce proposals continuously and some fraction will be ruled
 `ASK_USER`. Three rules keep the queue dignified at that rate. None of them designs
 the observer.
 
-**Dedup on a `question_key`.** Proposal ids are minted per proposal, so id equality
-is useless. The key is derived deterministically from every input that makes two
-questions *materially* the same one: **the proposed record's `kind`, its canonical
-`content`, its `provenance.source`, the proposal's `sensitivity`, and the frozen
-conflict-id set.**
+**Dedup on a `question_key`, and the key is defined by exclusion rather than by a
+list.** The key is a deterministic digest over **the whole proposed
+`MemoryRecord` except `id` and `score`, plus the proposal's `sensitivity`, plus the
+frozen conflict-id set.**
 
-Source and sensitivity are on that list for a reason worth stating, because a key
-over content and conflicts alone looks sufficient and is not. An `OBSERVED`
-proposal and a later `USER_ASSERTED` proposal can carry identical content against
-identical conflicts and are **not** the same question: the first asks "shall I keep
-what I worked out?", the second is the user telling us directly. Collapsing them
-would show the user the observation, and accepting it would store an `OBSERVED`
-record at `confidence < 1.0` (ADR-0072 §3) while the assertion the user actually
-made was silently discarded — the exact drop this ADR exists to end, reintroduced
-by the mechanism meant to keep the queue tidy. Sensitivity rides along for the same
-reason at a smaller scale: a `SECRET` and a `PERSONAL` proposal ask different
-questions of the user even when the words match. A different conflict set is
-likewise a different question, and §5's bounded authority depends on it.
+Stating it as "everything but two fields" is the decision, not a shorthand. An
+enumerated list of the fields that matter looked sufficient in an earlier revision
+and was not: it named kind, content and provenance source, and omitted the
+`validity` window — so two proposals with identical words, one expiring tomorrow
+and one open-ended, collapsed into one question, and answering it stored a belief
+that dies tomorrow while the durable one was never asked about. That was not a
+missing entry, it was the wrong shape of rule: **anything that changes what
+accepting would store changes what the user is being asked**, and a list has to be
+extended by whoever adds the next field, in a file they are not editing. The
+exclusions are the two fields that cannot mean anything here — `id` is minted per
+proposal, so including it makes the key match nothing, and `score` is `None` on a
+stored record and populated only by retrieval (ADR-0005 §1).
+
+Two consequences of the rule are worth naming because they are the cases that
+motivated it. An `OBSERVED` proposal and a later `USER_ASSERTED` one with identical
+content are **not** the same question — the first asks "shall I keep what I worked
+out?", the second is the user telling us directly, and collapsing them would show
+the user the observation while silently discarding the assertion, which is the drop
+this ADR exists to end reintroduced by the mechanism meant to keep the queue tidy.
+And a `SECRET` and a `PERSONAL` proposal ask different questions even when the words
+match, which is why `sensitivity` is in the key although it is not part of the
+record. A different conflict set is likewise a different question, and §5's bounded
+authority depends on it.
 
 `defer` is idempotent on the key (§2): a second arrival returns the existing
 deferral's id and **does not refresh its deadline**. Refreshing would let a chatty
@@ -831,10 +876,26 @@ of a lifetime.
 something the user declined gets no new question. This is the one place this ADR
 deliberately does *not* surface something, and the distinction matters: the
 question **reached the user and was answered**. Asking again is not honesty, it is
-nagging. The window is bounded — it is §6's retention, one lifetime — so a genuine
-change of mind is reachable by waiting, and an immediate one is reachable by
-`learn`, which proposes afresh and is the ratified correction path (ADR-0073 §6:
-"inspection adds no second correction path"; nor does this).
+nagging.
+
+**Suppression is reported, not silent, and that is what makes it reversible.**
+`defer` returns the id of the deferral the key spoke for (§2), so the coordinator
+can always tell whether it admitted a question or was handed an existing one, and
+which. When it was handed one, the caller is told **which prior question stands in
+the way and how to clear it** — for a `REJECTED` row, "you declined this on
+<date>; forget that question to be asked again"; for an `APPLYING` one, §9's first
+recovery step. `learn` renders that line, so the user is never left holding a
+correction the system quietly swallowed.
+
+That is a correction to an earlier revision of this section, which claimed an
+immediate change of mind was "reachable by `learn`". It is not, for an *identical*
+re-proposal: `learn` produces the same key, `defer` hands back the rejected row, and
+that row is not `PENDING` so it cannot be answered — permanently, under
+`deferral_ttl=None`. The reversal path is therefore **stated as two steps, the same
+shape as §9's**: forget the prior question, then `learn` again. Waiting out the
+retention works too, when there is one. `learn` remains the only correction path
+(ADR-0073 §6: "inspection adds no second correction path"; nor does this) — what
+changes is that the surface says what is standing in its way.
 
 **A cap that refuses new questions and keeps old ones — and it is strictly
 positive.** A cap of `0` is at capacity before its first admission, so every
@@ -1110,11 +1171,16 @@ On ratification:
    the assertion that would have caught the stranded-claim hole, so it is named
    rather than left to be inferred from the first.
 
-   **And one for the outcome mapping's totality**: an accept driven through a
-   `MemoryWriter` whose injected policy rules `REJECT` resolves the claim to
-   `REJECTED` rather than leaving it `APPLYING` (§2). A conforming policy that is
-   not `DefaultMemoryPolicy` is the only thing that reaches it, which is exactly
-   why it needs a test rather than an argument.
+   **And two more.** One for the outcome mapping's totality: an accept driven
+   through a `MemoryWriter` whose injected policy rules `REJECT` resolves the claim
+   to `REJECTED` rather than leaving it `APPLYING` (§2) — a conforming policy that
+   is not `DefaultMemoryPolicy` is the only thing that reaches it, which is exactly
+   why it needs a test rather than an argument. One for §7's reversal path, end to
+   end and under `deferral_ttl=None`: reject a question, `learn` the identical
+   correction, assert the user is **told which prior question stands in the way**,
+   forget it, `learn` again, and assert a fresh question is admitted. That is the
+   claim an earlier revision made and could not keep, so it is pinned rather than
+   described.
 4. A production `DeferralStore` alongside the existing SQLite stores, under the
    same `data_dir` plumbing and file permissions (ADR-0004), wired in the
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
