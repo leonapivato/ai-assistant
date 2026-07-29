@@ -678,10 +678,25 @@ conforming to the words. It owes:
   `interrupted` publishes every `APPLYING` deferral's id — so a caller reads an id,
   guesses the token, and resolves someone else's claim or spends its cap exemption.
   A capability anyone can guess is a parameter with extra steps. So: **unique among
-  live claims** (below), and drawn from a **cryptographically unpredictable** source
-  — `secrets`, not a counter and not a clock — **injected** like every other
-  non-determinism in this codebase, so a test can fix it and a deployment cannot
-  accidentally weaken it.
+  live claims** (below), and drawn from a **cryptographically unpredictable**
+  source of at least 128 bits.
+
+  **The source is defaulted, not merely injectable, and that split is the
+  decision.** Injection exists for determinism in tests — the convention every
+  other non-deterministic seam here follows — but injection alone would let a
+  composition root wire a counter and satisfy every word above, which is the same
+  hole one paragraph up in a different costume. So the store's token source
+  **defaults to a `secrets`-backed factory** and a caller has to go out of its way
+  to replace it. That the production wiring keeps the default is a
+  **composition-root obligation** with an assertion, in the form ADR-0028 §4 uses
+  for its same-store rule — no type expresses it, so a test does.
+
+  A conformance suite cannot establish this: handed an arbitrary callable it can
+  observe that two values differ, and unpredictability is not a property of a
+  finite sample. §10's clause therefore drops the "refuse a sequential store" case
+  an earlier revision asked for, which no suite could honestly implement, and keeps
+  what a suite *can* pin — that no read exposes the token, and that a live
+  collision redraws.
 
   **Uniqueness is guaranteed among *live* claims and is otherwise a property of the
   draw — stated at that width deliberately.** `claim` detects a token already held
@@ -921,10 +936,10 @@ that would otherwise be prose:
    than that, because §2 does not promise uniqueness after a resolution or a
    deletion, and a clause demanding it would force the historical ledger §11
    declines. The one that actually bites is that it is **not derivable from
-   anything a read exposes**:
-   driven by asserting the token is absent from `get`, `pending`, `interrupted` and
-   `export`, and by refusing a store whose tokens are sequential. A suite that only
-   checks "two claims differ" certifies a counter. **And the live-collision path**, via an injected
+   anything a read exposes**: driven by asserting the token is absent from `get`,
+   `pending`, `interrupted` and `export`. Unpredictability itself is **not** a suite
+   clause — no finite sample establishes it — and lives instead in §2's defaulted
+   source and its composition-root assertion. **And the live-collision path**, via an injected
    source: one duplicate of a **currently held** token then a distinct value
    re-draws and claims normally; an always-duplicate source exhausts the budget and
    raises with the deferral left `PENDING`. Both are about live claims, which is
@@ -2207,28 +2222,31 @@ On ratification:
    forget it, `learn` again, and assert a fresh question is admitted. That is the
    claim an earlier revision made and could not keep, so it is pinned rather than
    described.
-4. A production `DeferralStore` alongside the existing SQLite stores, under the
+4. **The `secrets`-backed token source as the store's default** (§2), with a
+   composition-root test asserting the built store carries it — the assertion that
+   keeps "unpredictable" from being a word in an ADR.
+5. A production `DeferralStore` alongside the existing SQLite stores, under the
    same `data_dir` plumbing and file permissions (ADR-0004), wired in the
    composition root and joined to the façade's ordered shutdown (ADR-0042 §2).
-5. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7), the cap
+6. `deferral_ttl` and the queue cap in `core.config.Settings` (§6, §7), the cap
    `gt=0` and both refused at load, with load-time tests for zero and negative
    values as `confirmation_ttl` already has, **and a test pinning the 30-day
    default** — the value §6 argues for, which no invalid-value test can assert. Both reach the **store's constructor**,
    validated there in the `_check_tuning` shape (§2), so they are read once per
    store and stamped onto each record as `retention`/`expires_at`; no operation
    consults them again.
-6. The façade methods, the `Question` DTO and the CLI commands (§8), including the
+7. The façade methods, the `Question` DTO and the CLI commands (§8), including the
    separate interrupted enumeration, the `APPLYING` rendering and the disposal
    verb (§9), the re-deferred `AnswerOutcome` that hands the user the successor
    question, and no verb that claims to retry an apply. **A restart test**: the
    stranded question is reachable through `interrupted_questions` in a process that
    never held its id.
-7. A home for `purge`. It does not get a new one: the roadmap's leg 5 already names
+8. A home for `purge`. It does not get a new one: the roadmap's leg 5 already names
    the hub's internal scheduler as "the home for `purge_expired` (ADR-0007),
    confirmation deadlines (ADR-0059)…", so this store's purge is wired wherever
    `purge_expired` is wired and inherits the same fate. Inventing a second sweeping
    mechanism for one store would be the thing that has to be undone at leg 5.
-8. **The `learn` rendering, which this decision makes false.**
+9. **The `learn` rendering, which this decision makes false.**
    `interfaces/cli.py:109` says the deferral "cannot be done from here yet" and the
    comment above it (`cli.py:104-108`) states no flow exists. Both must change in the
    same lane, and the test asserting the current wording
