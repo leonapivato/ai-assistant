@@ -2047,10 +2047,12 @@ On ratification:
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
-   ingest writes nothing and returns `ASK_USER`: the successor is still admitted,
-   as an ordinary question with no parent to link to, and the disposal is reported
-   rather than raised. The two branches fail differently and only one of them is
-   the obvious case to write;
+   ingest writes nothing and returns `ASK_USER`: the successor takes the
+   **ordinary** path — no parent to link to and the cap applying — and the disposal
+   is reported rather than raised. **Driven with room in the queue and with the
+   queue full**, since only the second shows a `REFUSED` successor reported as
+   refused rather than as a re-deferral. The two branches fail differently and only
+   one of them is the obvious case to write;
    §9's two-step recovery end to end — crash after `claim`, `delete`, then a
    re-`learn` that **admits a new question** rather than colliding with the
    stranded key; an accept whose proposal's validity window has closed before
