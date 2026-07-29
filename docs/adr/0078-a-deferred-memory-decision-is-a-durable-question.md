@@ -474,22 +474,25 @@ like every other, owing:
   (above). A row is purgeable when:
 
   - it is **terminal** and `answered_at + deferral_ttl <= now`; or
-  - it is **`PENDING`** and `expires_at is not None and expires_at + deferral_ttl
-    <= now`.
+  - it is **`PENDING`** and `expires_at is not None and expires_at <= now`.
 
-  Both are inclusive at the instant, which is the same rule as answerability seen
-  from the other side: a question stops being answerable *at* `expires_at`, and its
-  content stops being kept *at* one lifetime past that. Two anchors rather than one
-  because the two rows finished for different reasons and at different times, and a
-  single "older than the lifetime" phrase — the earlier revision's — named neither
-  and settled no equality, so one backend could hide a lapsed question while
-  keeping its secret-tier content a moment longer than the other.
+  Both are inclusive at the instant, the same rule as answerability seen from the
+  other side. **The two anchors are different on purpose, and the asymmetry is the
+  decision.** A *terminal* row is retained for one further lifetime because
+  something depends on it surviving: §7's no-nagging rule reads a `REJECTED` key to
+  refuse re-asking, and that is the whole retention argument. A *lapsed* row has no
+  such dependant — its key stopped speaking the instant it lapsed (§2), so nothing
+  reads it and nothing is served by keeping it. Giving it the same
+  `+ deferral_ttl` grace, as an earlier revision did by symmetry, held an unanswered
+  secret-tier proposal for **twice** the configured lifetime while §1 called that
+  lifetime the cap on how long unresolved sensitive content sits. Retention has to
+  be argued per state, not applied uniformly because the two lines look alike.
 
-  The `PENDING` clause is the one a purge naturally omits: an unanswered question
-  never transitions (expiry is not a state, above), so a purge keyed on terminal
-  states alone would keep a lapsed secret-tier proposal on disk forever while §1
-  and §6 promise the opposite. A `PENDING` row with `expires_at=None` is never
-  purgeable, because it has no anchor — §6's "ask me forever", carried through.
+  So the `PENDING` clause is what makes §1's cap true, and it is the one a purge
+  naturally omits: an unanswered question never transitions (expiry is not a state,
+  above), so a purge keyed on terminal states alone keeps a lapsed secret-tier
+  proposal forever. A `PENDING` row with `expires_at=None` is never purgeable,
+  because it has no anchor — §6's "ask me forever", carried through.
   **It never removes an `APPLYING` row, at any age.** That row is the only durable
   record that an answer was begun; destroying it while its `ingest` is still
   running — a slow embed, a stalled store — would let the memory write commit
@@ -544,12 +547,14 @@ that would otherwise be prose:
    (an accept that skipped its claim must not commit bookkeeping for an apply
    nothing authorised), and an `APPLYING` row addressed with a stale or absent
    `claim_id`.
-6. **`purge` removes an expired-and-unanswered `PENDING` deferral** — seeded
-   through an injected clock, not merely a `REJECTED` one — **and leaves an
-   `APPLYING` one however old it is, while `delete` removes that same row.** The
-   three pull in different directions, which is exactly why an implementation gets
-   one of them wrong: the first is §6's exposure cap, the second is §9's guard on
-   the record of an answer, and the third is ADR-0007's unconditional data right.
+6. **`purge` removes a lapsed `PENDING` deferral at `expires_at`** — seeded through
+   an injected clock — **retains a `REJECTED` one until `answered_at +
+   deferral_ttl`, leaves an `APPLYING` one however old it is, and `delete` removes
+   that same `APPLYING` row.** Four cases pulling in different directions, which is
+   exactly why an implementation gets one wrong: the first is §1's exposure cap, the
+   second is §7's no-nagging rule, the third is §9's guard on the record of an
+   answer, and the fourth is ADR-0007's unconditional data right. A suite that
+   applies one grace to every finished row passes the second and fails the first.
 7. **`defer` collides on the key and only on the key.** Two proposals differing
    *only* in `provenance.source`, and two differing only in `sensitivity`, must both
    admit as separate questions (§7), while an identical repeat collides and does not
@@ -567,11 +572,10 @@ that would otherwise be prose:
     listed clock cases otherwise step well past the deadline and never touch the
     comparison that two backends actually spell differently. **And `purge`'s own two
     boundaries at their instants** (§2): a terminal row exactly at
-    `answered_at + deferral_ttl`, and a `PENDING` row exactly at
-    `expires_at + deferral_ttl`, each purged at equality and each retained one
-    instant before. A boundary rule stated for five operations and driven for four
-    is a rule with a hole in it, and the hole would be the one that keeps
-    secret-tier content.
+    `answered_at + deferral_ttl`, and a lapsed `PENDING` row exactly at
+    `expires_at` — each purged at equality and each retained one instant before.
+    The two anchors differ, so a suite that drives one and infers the other proves
+    nothing about the one that carries §1's exposure cap.
 10. **A deferral with `expires_at=None` never lapses** (§6): `pending` returns it
    after any clock advance, `claim` takes it, its key still collides, and `purge`
    leaves it. Four assertions, because an implementation that coerces `None` to a
@@ -1022,14 +1026,22 @@ question **reached the user and was answered**. Asking again is not honesty, it 
 nagging.
 
 **Suppression is reported, not silent, and that is what makes it reversible.**
-`defer` returns the deferral the key spoke for (§2), so the coordinator can tell
-in one call whether it admitted a question or was handed an existing one — the id
-differs from the one it minted — and, from the same record, which state that
-existing question is in. The caller is then told **which prior question stands in
-the way and how to clear it**: for a `REJECTED` row, "you declined this on <date>;
-forget that question to be asked again"; for an `APPLYING` one, §9's first recovery
-step. `learn` renders that line, so the user is never left holding a correction the
-system quietly swallowed.
+`defer` returns a `DeferralAdmission` (§2), and the coordinator branches on its
+`outcome` — never on an id comparison, which is the shape §2 rejects:
+
+- **admitted** — the question was parked; render that, with its id.
+- **suppressed** — an existing question stands in the way, and the admission's
+  `deferral` says **which and in what state**: for a `REJECTED` row, "you declined
+  this on <date>; forget that question to be asked again"; for an `APPLYING` one,
+  §9's first recovery step.
+- **refused** — the queue is full and there is **no deferral to read at all**. The
+  line names the queue rather than a question: answer or clear some of what is
+  waiting, and re-submit. Reaching for `admission.deferral` here is the dereference
+  the three-shape validator exists to make impossible to write by accident.
+
+`learn` renders whichever line applies, so the user is never left holding a
+correction the system quietly swallowed — and that includes the full-queue case,
+which is the one an implementation is most likely to leave as a silent no-op.
 
 That is a correction to an earlier revision of this section, which claimed an
 immediate change of mind was "reachable by `learn`". It is not, for an *identical*
@@ -1057,9 +1069,9 @@ The **answerable** queue —
 `PENDING` and before `expires_at`, the same set `pending` returns — is bounded by
 a configured maximum. Lapsed and resolved rows awaiting `purge` do not count
 against it, so a queue cannot be held shut by questions nobody can answer. At the
-cap `defer` returns `None` and the proposal is not
-enqueued; the refusal is **reported, not swallowed** — it reaches the caller, so
-`learn` renders it and the surface can say the queue is full. Eviction is rejected:
+cap `defer` returns a **refused** `DeferralAdmission` carrying no deferral, and the
+proposal is not enqueued; the refusal is **reported, not swallowed** — it reaches
+the caller, so `learn` renders it and the surface says the queue is full. Eviction is rejected:
 dropping the oldest question to make room for a newer one is the silent vanishing
 this ADR exists to end, performed by the mechanism meant to prevent it. Refusing the
 *new* one is safe in a way evicting the old one is not, because the producer still
@@ -1291,7 +1303,7 @@ On ratification:
    composition-root obligations enforced by a test rather than requested in prose —
    the standard ADR-0028 §4 set when it made
    `test_a_learned_preference_is_reused_on_a_later_turn` carry its same-store rule.
-   **Six integration assertions come with the answer path**, all on injected
+   **Seven integration assertions come with the answer path**, all on injected
    clocks and deterministic suspension rather than timing. The first is the one the
    rest depend on and the one no store or writer test can reach: **a `learn` whose
    proposal conflicts with a prior user assertion produces a question that shows
@@ -1307,8 +1319,11 @@ On ratification:
    (§2, §9);
    §9's two-step recovery end to end — crash after `claim`, `delete`, then a
    re-`learn` that **admits a new question** rather than colliding with the
-   stranded key; and an accept whose proposal's validity window has closed before
-   the answer writes nothing and stamps `STALE` (§6). None belongs in the store's
+   stranded key; an accept whose proposal's validity window has closed before
+   the answer writes nothing and stamps `STALE` (§6); and a `learn` against a
+   **full queue**, asserting the user is told the queue is full rather than getting
+   silence — the `refused` branch of §7, which is the one an implementation is most
+   likely to leave as a no-op because nothing raises. None belongs in the store's
    conformance suite — they are properties of the sequence, and the sequence lives
    here.
 
