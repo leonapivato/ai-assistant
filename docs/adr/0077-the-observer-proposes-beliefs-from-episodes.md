@@ -5,7 +5,9 @@
 - **This is a contract change.** §9 adds **one** Protocol — `Observer` — to
   `core/protocols.py`; **one** type — `ObservationOutcome` — and **one**
   source-conditional validator on `Provenance`, both in `core/types.py` (§7); and
-  **one** error class, `UnresolvedEvidenceError`, to `core/errors.py` (§5). Golden rule 5 therefore applies: this ADR ships as
+  **one** error class, `UnresolvedEvidenceError(MemoryStoreError)`, to
+  `core/errors.py` (§5) — the distinguishable subclass ADR-0079 §4 left open.
+  Golden rule 5 therefore applies: this ADR ships as
   **its own docs-only PR**, is reviewed while still `Proposed` so a finding can
   still change the decision, and is flipped to `Accepted` on merge
   (`CONTRIBUTING.md`, "Contract ADRs land before their implementation";
@@ -100,7 +102,9 @@
   exemption is one producer wide and **does not reach the observer**), §5 (the
   sensitivity question handed here); #431 (the owner direction §6 ratifies), #432
   (§7 half-closes), #441 (the constraints §1 and §3 carry), #423 (ADR-0078, in
-  flight), #313/#314 (ADR-0079, in flight), #306, #104, #248, #425.
+  flight); **ADR-0079** §3 and §4 (merged Accepted — the two obligations §5's
+  third clause stacks on, its `MemoryStoreError` convention at this seam, and the
+  distinguishable subclass it left open), #306, #104, #248, #425.
 
 ## Context
 
@@ -396,8 +400,9 @@ non-asserted proposal with conflicts rules `REINFORCE`, and one whose conflicts
 include an assertion rules `ASK_USER`. `REJECT` likewise has no rule that reaches
 it there. The table is the contract's vocabulary, not a prediction of what today's
 policy emits: the stage handles all six because the policy is injected and a
-deployment may run a stricter one, and because ADR-0079 and leg 4 are due to
-change what a conflict-heavy ruling does. What the observer must never do is
+deployment may run a stricter one, and because ADR-0079 has already changed what
+a conflict-heavy ruling does — a correction now resolves every conflict it is
+shown or refuses to land. What the observer must never do is
 depend on a ruling being unreachable.
 
 **`ASK_USER` is the observer's most likely deferral, and its resolution is
@@ -597,32 +602,51 @@ that has a producer capable of breaching it"), and it is what makes §6's
 tombstone unambiguous: **every citation resolved once**, so a citation that stops
 resolving is *loss*, never a producer bug. Two clauses fix its shape:
 
-- **The refusal is nameable, because the stage cannot otherwise tell a race
-  from a bug.** An episode is selected while live (§1) and the model call
-  suspends for a round trip, so a citation can expire under ADR-0074 §7's horizon
-  — or be deleted with its conversation — between selection and the write. That
-  is an *ordinary* outcome of a finite retention horizon, not a producer fault,
-  and an undifferentiated refusal would force the stage to choose between
-  aborting a batch that is working and swallowing real faults to avoid it. So
-  `core/errors.py` gains `UnresolvedEvidenceError`, a subclass of the `ValueError`
-  the refusal already is — additive in the shape ADR-0076 §2 gave
-  `UnknownConversationError` for the identical dilemma, so every existing
-  `except ValueError` still catches it and §5's rule stands as written.
+- **It refuses rather than rules, and it raises what every other
+  writer-boundary refusal raises.** The writer does not return a fabricated
+  `REJECT`: a decision is the policy's to make (ADR-0005 §3), and a writer
+  inventing one would put a ruling nobody made into the ingest result. The
+  refusal is a **`MemoryStoreError`** — the class `MemoryWriter.ingest` already
+  documents and the one ADR-0079 §4 chose, days ago, for the other refusal at
+  this seam, on the ground that it "is what every other writer-boundary refusal
+  raises (`_refuse_unsafe_fold`, `_close_window`, `_checked_id`)". A `ValueError`
+  was the wrong instrument for a second reason: `AssistantError` is the CLI's
+  runtime failure boundary, and an error that escapes it surfaces to the user as
+  a crash rather than as a rendered failure.
+- **It is a *named* refusal, because the stage cannot otherwise tell a race from
+  a bug.** An episode is selected while live (§1) and the model call suspends for
+  a round trip, so a citation can expire under ADR-0074 §7's horizon — or be
+  deleted with its conversation — between selection and the write. That is an
+  ordinary outcome of a finite retention horizon, not a producer fault, and an
+  undifferentiated refusal forces the stage to choose between aborting a batch
+  that is working and swallowing real faults to avoid it. So `core/errors.py`
+  gains **`UnresolvedEvidenceError(MemoryStoreError)`**, **carrying the
+  unresolved ids**. This is precisely the subclass ADR-0079 §4 named and left
+  open — "a distinguishable subclass… is **not** decided here; adding one later
+  is additive under `except MemoryStoreError` and needs no decision reversed" —
+  taken by the lane that has the consumer, in the shape ADR-0076 §2 gave
+  `UnknownConversationError` for the identical dilemma.
 
-  **The stage drops that proposal, counts it, and carries on with the rest.**
-  It is worthless anyway: a belief whose citation no longer resolves cannot
-  answer "why do you believe that?" for the only support it had, and storing it
-  would manufacture at birth the all-tombstoned state §6 handles for beliefs that
-  earned their evidence first. Any *other* `ValueError` from `ingest` propagates,
-  because that one is a producer emitting a citation it never read. This is the
-  boundary that keeps §5's guarantee — **nothing unsupported is ever stored** —
-  from turning an expiry into a failed operation.
-- **It refuses rather than rules.** The writer raises rather than returning a
-  fabricated `REJECT`: a decision is the policy's to make (ADR-0005 §3), and a
-  writer inventing one would put a ruling nobody made into the ingest result. The
-  refusal is a `ValueError` — a malformed argument at a seam, refused rather than
-  clamped, the posture ADR-0073 §2 already set for out-of-range reads — and it is
-  not a `MemoryStoreError`, which ADR-0028 §5 reserves for a store fault.
+  **The stage drops that proposal, counts it, and carries on with the rest —
+  but only for ids it selected.** The writer sees "this id does not resolve" and
+  cannot tell an expiry from a producer typo, so the discrimination belongs to
+  the one component that knows: the stage compares the unresolved ids against the
+  batch it selected. **In the batch** — the evidence went away under it, which is
+  the race — the proposal is dropped and counted, and the remaining proposals are
+  still ingested. **Not in the batch** — the producer cited something it was
+  never handed, which is the fault §5's mapping rule exists to prevent — the
+  error propagates. The dropped proposal is worthless anyway: a belief whose only
+  support no longer resolves cannot answer "why do you believe that?", and
+  storing it would manufacture at birth the all-tombstoned state §6 handles for
+  beliefs that earned their evidence first. This is what keeps §5's guarantee —
+  **nothing unsupported is ever stored** — from turning an expiry into a failed
+  operation.
+
+  **The count is the stage's, not the producer's** (§9). `ObservationOutcome`'s
+  two counts are exhaustive over the entries the *model* emitted (§4) and must
+  stay that way; a proposal the producer legitimately made and the writer then
+  refused is a different fact, and folding it into either count would misreport
+  the model's output.
 - **It is a check, not a guarantee.** An episode deleted between the check and
   the write leaves a citation that no longer resolves, and no seam closes that:
   it is the same two-store race ADR-0074 §8 accepted and bounded, arriving from
@@ -835,13 +859,18 @@ ever existed.
   returns a named value rather than a tuple. The proposal, the episode and the
   record kinds already exist, which is why the cost is one type rather than a
   family.
-- **`MemoryWriter.ingest`'s documented semantics** gain §5's refusal clause. No
-  signature change.
-- **`core/errors.py`** gains **one** class, `UnresolvedEvidenceError`, a
-  `ValueError` subclass carrying §5's refusal so an evidence race is separable
-  from a producer bug. Nothing else: a model failure is a `ModelError`, a store
-  failure a `MemoryStoreError` (ADR-0028 §5), and a malformed model response is a
-  degradation rather than an exception (§4).
+- **`MemoryWriter.ingest`'s documented semantics** gain §5's refusal clause —
+  a **third** obligation on that method, stacked on the two ADR-0079 §4 landed
+  days ago (the full-set `SUPERSEDE`, and the over-ceiling refusal) and
+  conflicting with neither: both of those are about the *conflict* set, this one
+  about the *evidence* set. No signature change.
+- **`core/errors.py`** gains **one** class,
+  `UnresolvedEvidenceError(MemoryStoreError)`, carrying the unresolved ids so an
+  evidence race is separable from a producer bug (§5). It is additive under
+  `except MemoryStoreError`, so ADR-0079 §4's raise clause and every existing
+  handler are untouched. Nothing else: a model failure is a `ModelError`, a store
+  failure the base `MemoryStoreError` (ADR-0028 §5), and a malformed model
+  response is a degradation rather than an exception (§4).
 
 An illustrative signature, in ADR-0073 §1's form — the semantics above are the
 contract, the spelling is the lane's:
@@ -857,9 +886,12 @@ class Observer(Protocol):
 1. The Protocol, `ObservationOutcome`, `UnresolvedEvidenceError`, and the
    `Provenance` validator, plus the `MemoryWriter.ingest` docstring restated as
    §5 rules it, **and its conformance clause**: a `DERIVED` proposal citing a
-   record the store does not hold is refused with an `UnresolvedEvidenceError`,
-   nothing is written, and an `ASSERTED` or `EXTERNAL` proposal citing nothing is
-   unaffected.
+   record the store does not hold is refused with an `UnresolvedEvidenceError`
+   naming that id, nothing is written, and an `ASSERTED` or `EXTERNAL` proposal
+   citing nothing is unaffected. It joins the clauses ADR-0079 §3 promoted, and
+   `FakeMemoryWriter` matches it for that ADR's reason: a fake that stores what
+   production refuses lets a consumer's test pass on state the real writer would
+   never produce.
 2. **The `DefaultMemoryPolicy` rule** (§5): a `DERIVED` proposal citing no
    evidence rules `REJECT`, an `EPISODIC` record is **not** refused for citing
    nothing, and `ASSERTED`/`EXTERNAL` proposals are untouched. Three tests, one
@@ -933,6 +965,17 @@ class Observer(Protocol):
    contract (ADR-0042 §1), so those names are shape, not spelling (ADR-0073 §7).
    The stage selects **at most** `observation_batch_size` episodes, so the
    producer's refusal (§1) guards a contract rather than a routine path.
+
+   **Its result is an `orchestration` type beside `LearnOutcome`**, not a `core`
+   one — it crosses no subsystem boundary, only `interfaces` (ADR-0022 §2's
+   reasoning for `TurnResult`) — and it carries four things, deliberately kept
+   apart: the per-proposal `MemoryIngestResult`s (so an `ASK_USER` is visible with
+   its candidate, §4); the producer's two counts **relayed unchanged**; a
+   **separate count of proposals dropped at the write for unresolved evidence**
+   (§5); and the model route that read the episodes (§3). The separation is the
+   decision: `ObservationOutcome`'s invariant is over the entries the model
+   emitted, so a post-observation drop has to be counted somewhere else or that
+   invariant becomes a lie.
 8. **The CLI**: the observe command, and the belief surfaces rendering
    tombstones, the adjusted confidence, and the all-unsupported state.
 
@@ -964,6 +1007,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   the belief's confidence does not rise (§8). Scripted, because the property
   under test is the *fold*, not the model: an observer free to answer differently
   would make the assertion about the provider.
+- **An observer citing an id that was never in its batch** — the writer's
+  refusal **propagates**; it is not swallowed as a race (§5). The pair with the
+  expiry case above is the whole of the discrimination, and an implementation
+  that catches `UnresolvedEvidenceError` without checking the batch passes the
+  expiry test and hides a producer bug forever.
 - **A proposal that conflicts with a user assertion** — `ASK_USER`, nothing
   stored, and the deferral **reported** on the outcome (§4) **carrying the
   candidate's content, its citations and the policy's reason**, not merely a
@@ -1050,8 +1098,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
 - **How an `ASK_USER` ruling is resolved.** ADR-0078 (#423), in flight. This ADR
   states only what a deferred proposal owes it (§4).
 - **What happens to the conflicts beyond `conflict_limit`** when a correction
-  contradicts more inferences than the cap. ADR-0079 (#313/#314), in flight, and
-  it becomes reachable in practice on the day this producer runs.
+  contradicts more inferences than the cap. Already decided: ADR-0079 (#313/#314)
+  is merged and Accepted — a correction resolves every conflict it is shown or
+  refuses to land — which is the ruling this producer makes reachable in
+  practice, and §5's third clause on `MemoryWriter.ingest` is stacked on its two
+  without touching either.
 - **Retiring a producer-set bounded validity window** (#306). Leg 4. The observer
   sets no bounded window today, and it is deliberately not the lane that decides
   what retiring one means.
