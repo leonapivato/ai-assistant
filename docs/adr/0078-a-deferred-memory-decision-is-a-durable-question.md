@@ -70,7 +70,7 @@ of them have an effect. The fifth has never had a resolution path, and no ADR ev
 decided what one would look like.
 
 **The drop site, traced.** `MemoryIngestor._apply`
-(`src/ai_assistant/memory/ingest.py:503-533`) matches on the ruling. `ACCEPT`,
+(`src/ai_assistant/memory/ingest.py:630-660`) matches on the ruling. `ACCEPT`,
 `STORE_TEMPORARY`, `REINFORCE` and `SUPERSEDE` each write; the wildcard arm is the
 terminus:
 
@@ -79,15 +79,15 @@ terminus:
                 return None
 ```
 
-— `ingest.py:532-533`. `_ingest` (`ingest.py:474-483`) then returns
+— `ingest.py:659-660`. `_ingest` (`ingest.py:525-535`) then returns
 `MemoryIngestResult(decision=decision, record_id=None)`, and the proposal object
 goes out of scope. `LearningLoop.learn` (`orchestration/loop.py:287-324`) does not
 inspect the ruling at all — `loop.py:324` is
 `return tuple([await self._writer.ingest(proposal) for proposal in proposals])` —
-and `Engine._learn` (`orchestration/engine.py:1627-1630`) translates the ruling to
-`LearnDecision.DEFERRED` (`engine.py:363-364`) for rendering. **Nothing anywhere
+and `Engine._learn` (`orchestration/engine.py:1849`) translates the ruling to
+`LearnDecision.DEFERRED` (`engine.py:378-379`) for rendering. **Nothing anywhere
 retains the proposal.** The CLI says so in a comment that is the honest confession
-of a dead end (`interfaces/cli.py:91-96`):
+of a dead end (`interfaces/cli.py:104-109`):
 
 ```python
     # ASK_USER writes nothing, and there is no memory-confirmation flow yet (memory
@@ -100,10 +100,10 @@ of a dead end (`interfaces/cli.py:91-96`):
 
 **Two producers already reach that arm**, and they ask different questions.
 `DefaultMemoryPolicy.decide` defers **secret-tier data** unconditionally
-(`memory/policy.py:155-159`, "secret-tier data requires explicit user
+(`memory/policy.py:39-60`, "secret-tier data requires explicit user
 confirmation") and defers a **non-asserted proposal that contradicts an assertion**
-(`policy.py:164-168`). `_rule_on_assertion` (`policy.py:36`) defers an **assertion
-contradicting a prior assertion** (`policy.py:73`, "contradicts a prior user
+(`policy.py:238-242`). `_rule_on_assertion` (`policy.py:103`) defers an **assertion
+contradicting a prior assertion** (`policy.py:140`, "contradicts a prior user
 assertion; defer to the user (ADR-0050)"). The first asks "may I keep this?"; the
 other two ask "which of these two do you hold?".
 
@@ -145,7 +145,7 @@ would need a result type that can say 'not yet' and this one cannot."
   design.
 - The apply is not free. The answer "yes, the new one holds" must retire a
   `USER_ASSERTED` record, and the writer floor forbids exactly that today
-  (`ingest.py:111-151`, clause 1: "nothing, of any source, under either ruling,
+  (`ingest.py:125-165`, clause 1: "nothing, of any source, under either ruling,
   may fold onto an assertion"). The confirmation gate ADR-0045 §7 named is the
   only ratified way through it, and nobody has built it.
 - New contract surface is expensive and a new store is heavier still. It has to
@@ -224,7 +224,7 @@ posture [ADR-0055](0055-context-source-name-is-safe-to-log.md) sets for a
 comparable question about what is safe to emit).
 
 **A `DataTier.SECRET` proposal is therefore never queued, and the record type
-refuses one.** This is the one arm of the policy (`policy.py:155-159`) this
+refuses one.** This is the one arm of the policy (`policy.py:39-60`) this
 mechanism does **not** close, and it is excluded on ratified grounds rather than
 by omission. ADR-0004 §3 is unconditional: "Tier 0 secrets are stored in the **OS
 keyring** via the `keyring` library — never in the memory database, never in a
@@ -249,7 +249,7 @@ enqueues one (§3).
 
 **That leaves one `ASK_USER` this ADR does not make answerable, and the honest
 thing is to name it rather than let the title cover it.** ADR-0005 §3 defines the
-ruling as "defer for confirmation", and `policy.py:155-159` emits it saying
+ruling as "defer for confirmation", and `policy.py:39-60` emits it saying
 "secret-tier data requires explicit user confirmation" — so after this ADR one arm
 still asks a question the user cannot answer. It is a real residue of #423, not a
 technicality, and this ADR closes the two arms that motivated the issue (an
@@ -277,7 +277,7 @@ merely in what they are allowed. Filed in §11 with that gate.
 **Until then the surface must not imply otherwise.** A secret-tier deferral renders
 the honest line the CLI carries today — not stored, and not answerable from here —
 while the arms this ADR closes render the new one (§8, §10). One message for two
-outcomes would be the exact dishonesty `cli.py:91-96` was written to avoid, arriving
+outcomes would be the exact dishonesty `cli.py:104-109` was written to avoid, arriving
 from the other direction.
 
 ### 2. The contract surface owed, stated precisely
@@ -326,7 +326,7 @@ from the other direction.
   `None` in either field is the user's deliberate "ask me forever" (§6): the
   question never lapses and its record is never purged, the way `episode_retention`
   reads `None` as "keep forever… the user's deliberate choice"
-  (`core/config.py:382-384`).
+  (`core/config.py:414-416`).
 
   Then: `state`; once
   claimed, `claimed_at` — but **not** the claim token, which no read republishes
@@ -434,11 +434,11 @@ from the other direction.
   The key covers both layers, so it cannot.
 - **The writer can recompute it, and where it looks is the load-bearing detail.**
   `MemoryIngestor` overwrites its own copy's `conflicts` with the *live* set before
-  the policy rules (`ingest.py:478-480`), so a check run against that copy would
+  the policy rules (`ingest.py:530-532`), so a check run against that copy would
   compare the wrong set. The key is recomputed from the proposal **as handed to
   `ingest`** — whose `conflicts` are the frozen ids the question was asked about
   (§3's snapshot) — before conflict resolution replaces them. That is available:
-  `ingest` receives the caller's proposal and copies it (`ingest.py:470`).
+  `ingest` receives the caller's proposal and copies it (`ingest.py:521`).
 - Binding on the key also binds to *what was asked* rather than to a minted
   identifier — a proposal's record `id` is caller-minted and unique only once
   stored, so two unpersisted proposals with different content can carry the same
@@ -767,7 +767,7 @@ conforming to the words. It owes:
   rule `REJECT` on a confirmed proposal — the writer's own contract lists it
   (ADR-0028 §8). An accept whose ingest returns `REJECT` then has no legal
   transition and strands forever. So the mapping from ingest outcome to terminal
-  state is **total**, in the shape `_learn_decision` (`engine.py:345-366`) already
+  state is **total**, in the shape `learn_decision` (`engine.py:355-380`) already
   uses for the same class of exhaustiveness: `ACCEPT`/`STORE_TEMPORARY`/
   `REINFORCE`/`SUPERSEDE` → `ACCEPTED` with the record id; `ASK_USER` →
   `REDEFERRED` with the successor's; `REJECT` → `REJECTED`; and the coordinator's
@@ -814,7 +814,7 @@ conforming to the words. It owes:
 - **`export() -> list[DeferredProposal]`** — ADR-0004 §6. A plain list of the frozen
   type the caller serialises with `model_dump(mode="json")`, matching
   `MemoryStore.export` (`protocols.py:463`) and `AuditTrail.export`
-  (`protocols.py:1463`) rather than minting a bespoke export type: this store has
+  (`protocols.py:1507`) rather than minting a bespoke export type: this store has
   one collection, so `PlanExport`/`ConversationExport`'s reason for existing does
   not apply.
 - **`purge() -> int`** — shaped as `MemoryStore.purge_expired`
@@ -1069,7 +1069,7 @@ is reported and nothing is persisted, which is what happens today.
 
 **What it enqueues is a snapshot, not the proposal it was handed, and the
 difference is the whole point of §4.** `MemoryIngestor` resolves conflicts onto its
-*own* copy (`ingest.py:478-480`), so the caller's proposal still carries an empty
+*own* copy (`ingest.py:530-532`), so the caller's proposal still carries an empty
 `conflicts` when `ingest` returns. The stage must therefore build the
 `DeferredProposal` around a proposal whose `conflicts` is **exactly
 `result.conflicts`** — the ids the policy actually ruled against (§4). Enqueuing
@@ -1132,7 +1132,7 @@ what the answer authorises*, so the ids are load-bearing for correctness, not
 decoration.
 
 The value already exists one frame in. `MemoryIngestor._ingest` resolves conflicts
-and stamps them onto its own copy of the proposal (`ingest.py:478-480`) before
+and stamps them onto its own copy of the proposal (`ingest.py:530-532`) before
 calling the policy — but that copy is local and the result carries only `decision`
 and `record_id`, so the caller's proposal still has an empty `conflicts`. Nothing
 new is computed; a value that already crosses the policy seam now also crosses the
@@ -1188,17 +1188,28 @@ restated:
 **Two narrowings are needed, and each is the discharge of a stated deferral rather
 than a new liberty.**
 
-**(a) `DefaultMemoryPolicy` gains one rule, ahead of every existing rule but
-one.** The **secret-tier check keeps its place at the front**
-(`policy.py:155-159`): a confirmed proposal is judged only after it. Putting the
+**(a) `DefaultMemoryPolicy` gains one rule, ahead of every conflict rule but
+behind the admissibility floor.** That floor is `_rule_on_admissibility`
+(`policy.py:39-60`), which landed with ADR-0077's producer and holds two rulings
+that "precede any conflict reasoning" — the secret-tier deferral and ADR-0077 §5's
+rejection of a derived belief citing no evidence. **A confirmed proposal is judged
+only after it.**
+
+Behind the floor rather than in front of it, for the reason the floor exists:
+both its rulings are "properties of the proposal alone" and neither commits
+anything, so nothing a confirmation says can make either safe to skip. The second
+cannot arise on this path anyway — a derived belief citing nothing is rejected at
+its first ingest, so it is never deferred and never confirmed — but the ordering is
+stated rather than left to that argument, because a floor that holds only while a
+coincidence holds is not a floor. Putting the
 confirmed rule first, as an earlier revision did, let a `DataTier.SECRET` proposal
 carrying a `confirmation` and conflicting with a live assertion reach step 2, rule
 `SUPERSEDE`, pass the writer exception, and land secret payload in the
 `MemoryStore` — ADR-0004 §3's "never in the memory database", defeated through the
 one path built to respect the user's word.
 
-It costs nothing to keep the order, because **the combination cannot legitimately
-arise**: §1 refuses to queue a secret-tier proposal, so no deferral exists for one,
+It costs nothing to keep the secret gate ahead of the confirmed rule, because
+**the combination cannot legitimately arise**: §1 refuses to queue a secret-tier proposal, so no deferral exists for one,
 so no confirmation can have been issued for one. That makes it a contradiction
 rather than a case, and `MemoryUpdateProposal`'s validator says so — a
 `confirmation` on a `DataTier.SECRET` proposal is refused at construction (§2), so
@@ -1258,8 +1269,8 @@ the conflicts, and authorising its retirement does not make the default policy
 adopt `EXTERNAL` supersession. That choice stays where ADR-0045 §7 left it, and a
 policy that does adopt it later inherits this path unchanged.
 
-The rule must come **first** because the assertion arms
-(`policy.py:73`, `policy.py:164-168`) would otherwise re-defer the answer to the
+The rule must come ahead of the **conflict** rules because the assertion arms
+(`policy.py:140`, `policy.py:238-242`) would otherwise re-defer the answer to the
 question they just asked, forever. Step 1 is what keeps
 that precedence from becoming a blanket override: the confirmed path skips the
 questions already answered, not the ones not yet asked.
@@ -1273,7 +1284,7 @@ it would commit part of a correction the user has not yet confirmed.
 
 **(b) `_refuse_unsafe_fold` clause 1 is narrowed by exception, not lifted.** Today
 it refuses any fold onto a `USER_ASSERTED` target unconditionally
-(`ingest.py:111-151`), because "the conflict signal is topical similarity, not
+(`ingest.py:125-165`), because "the conflict signal is topical similarity, not
 contradiction… and is too weak to retire a record the user gave us". That
 justification is exactly and only about the *signal*. Clause 1 therefore stands
 verbatim in every case except one: **a `SUPERSEDE` whose target id appears in the
@@ -1335,7 +1346,7 @@ lives at the writer boundary precisely so that it does not depend on anyone's go
 behaviour: "a policy reaches the ingestor through an injected seam and any
 conforming implementation may rule differently. The refusal therefore lives here,
 at the boundary that performs the write, rather than in the policy that recommends
-it" (`ingest.py:135-139`). A gate that opens on an unexamined field hands that
+it" (`ingest.py:149-153`). A gate that opens on an unexamined field hands that
 guarantee back. So the exception carries six checks of its own, all of them
 performable at the boundary with what the writer already holds:
 
@@ -1345,7 +1356,7 @@ performable at the boundary with what the writer already holds:
    not a boundary: `model_construct` and `model_copy(update=...)` both skip
    validation, and this repository already treats a definition "tampered past
    ``frozen=True`` with ``object.__setattr__``" as inside its threat model
-   (`types.py:2362`, ADR-0018 §3, ADR-0021 §4). Without it every check below can
+   (`types.py:2458`, ADR-0018 §3, ADR-0021 §4). Without it every check below can
    pass on a validator-bypassing secret proposal under an injected `SUPERSEDE`
    policy, and the writer persists a secret to `MemoryStore` — ADR-0004 §3's
    "never in the memory database", reached through the one seam whose whole job is
@@ -1361,7 +1372,7 @@ performable at the boundary with what the writer already holds:
    load-bearing and an earlier revision got each wrong in turn:
 
    - **Not inside `_refuse_unsafe_fold`**, which `ingest` reaches only for
-     `REINFORCE` and `SUPERSEDE` (`ingest.py:503-533`). That is the obvious reading
+     `REINFORCE` and `SUPERSEDE` (`ingest.py:630-660`). That is the obvious reading
      of §10's "the refusal helper's signature widens", and it lets an injected
      policy ruling `ACCEPT` or `STORE_TEMPORARY` write the secret straight through
      `_apply`.
@@ -1481,9 +1492,9 @@ suite drives the case (§10).
 
 **The lifetime is finite by default, and that is the whole decision.** The codebase
 holds both shapes and the choice between them is exactly the mistake ADR-0074 §7
-warned about in `core/config.py:373-385`: `confirmation_ttl` defaults to `None`
-(`config.py:361-365`), meaning a parked confirmation never goes stale, while
-`episode_retention` defaults to `timedelta(days=30)` (`config.py:393-401`) because
+warned about in `core/config.py:405-417`: `confirmation_ttl` defaults to `None`
+(`config.py:393-397`), meaning a parked confirmation never goes stale, while
+`episode_retention` defaults to `timedelta(days=30)` (`config.py:425-433`) because
 the `None` default "would mean unbounded episodic retention". A memory deferral
 belongs with the second. A permission confirmation gates an action **the user just
 asked for** and is worthless once stale; a memory deferral is generated **by the
@@ -1501,7 +1512,7 @@ Left unstated, one implementation would store a sentinel far-future instant and
 another a `None`, and two conforming stores would disagree about whether a question
 still exists; §2 makes the field optional and this the rule, and the conformance
 suite drives the `None` case through all four. The consequence is the one the user
-chose, in the same words `core/config.py:382-384` already uses for
+chose, in the same words `core/config.py:414-416` already uses for
 `episode_retention`: `None` means keep it forever, and it is deliberate. §1's
 exposure cap is a promise about the *default*, and it says so.
 
@@ -1841,7 +1852,7 @@ answer would be a second correction path wearing a confirmation's clothes.
    own scenario: the user submits feedback, is told it is deferred, and is pointed
    at the answer. It requires the façade's learn DTO to carry the deferral id —
    an `orchestration` widening, not a contract change (ADR-0042 §1) — and it makes
-   `cli.py:96`'s "which cannot be done from here yet" false, which §10 lists as an
+   `cli.py:109`'s "which cannot be done from here yet" false, which §10 lists as an
    obligation.
 2. **On demand**, by the listing command. This is the only reach for a question
    raised by the observer, where no `learn` call was in flight to render anything.
@@ -2026,7 +2037,7 @@ On ratification:
    they imply (§4, §5).
 2. `DefaultMemoryPolicy`'s confirmation rule and the `_refuse_unsafe_fold`
    narrowing (§5). The refusal helper's signature widens to see the proposal's
-   confirmation, not only the incoming record (`ingest.py:111-113`). **Check 0 is
+   confirmation, not only the incoming record (`ingest.py:125-127`). **Check 0 is
    the exception and does not go in that helper**: it gates writes, so it sits
    between the policy's ruling and the write dispatch — reached by every
    write-producing ruling, and by no ruling that writes nothing.
@@ -2148,8 +2159,8 @@ On ratification:
    `purge_expired` is wired and inherits the same fate. Inventing a second sweeping
    mechanism for one store would be the thing that has to be undone at leg 5.
 8. **The `learn` rendering, which this decision makes false.**
-   `interfaces/cli.py:96` says the deferral "cannot be done from here yet" and the
-   comment above it (`cli.py:91-95`) states no flow exists. Both must change in the
+   `interfaces/cli.py:109` says the deferral "cannot be done from here yet" and the
+   comment above it (`cli.py:104-108`) states no flow exists. Both must change in the
    same lane, and the test asserting the current wording
    (`tests/interfaces/test_cli.py:596`,
    `test_render_learn_marks_a_deferred_ruling_as_not_stored`) inverts with them.
@@ -2293,7 +2304,7 @@ test of whether `DeferralStore` encodes a contract or one policy's outcome.
 - **Carry `confirmation` as trusted metadata and check nothing at the writer.**
   Rejected (§5): it was this ADR's own earlier draft, and it misread what
   `_refuse_unsafe_fold` is for. The floor exists because "any conforming
-  implementation may rule differently" (`ingest.py:135-139`); a gate that opens on
+  implementation may rule differently" (`ingest.py:149-153`); a gate that opens on
   an unexamined field returns that guarantee to the caller's good intentions. The
   six checks §5 requires are what a boundary can actually verify, and §5 is
   explicit about what remains beyond them.
