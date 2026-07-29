@@ -776,10 +776,14 @@ Four reasons, in the order they bind:
 
 **There is no durable cursor, and re-observation is safe by construction.** No
 state records which episodes have been observed. A second run over the same
-episodes re-proposes the same beliefs, and the gate folds each into a `REINFORCE`
-on the existing record rather than writing a duplicate (§4) — while §5's
-deterministic confidence means the fold finds nothing higher to take, so repeated
-observation cannot inflate a belief it keeps re-deriving. What a re-run does cost
+episodes re-proposes much the same beliefs, and the gate folds each into a
+`REINFORCE` on the existing record rather than writing a duplicate (§4) — while
+§5's confidence function **closes the repetition route to inflation**: the same
+belief on the same support scores the same however many times it is derived, so a
+fold that takes the maximum finds nothing higher. It does not make the model
+deterministic, and it is not meant to: a second run that reads more support out of
+the same episodes legitimately scores higher, which is reinforcement working
+rather than a number drifting upward for being asked twice. What a re-run does cost
 is a model call and a moved `provenance.last_updated`, which reorders the
 inspection listing (ADR-0073 §2's sort key). That is accepted and named: it is
 a true statement — the assistant did re-derive the belief today — and a cursor
@@ -843,8 +847,8 @@ class Observer(Protocol):
    the `DERIVED` band; every proposal cites at least one id drawn from the batch
    it was given and none from outside it; an `INFERRED` proposal cites at least
    two **distinct** episode ids; no proposal is `EPISODIC`; confidence is
-   strictly below 1.0 and is the same for the same batch twice (the clause that
-   catches a producer passing a model's number through); **the returned proposal
+   strictly below 1.0, and two proposals **in one outcome** sharing an epistemic
+   step and a distinct-support count carry the same confidence; **the returned proposal
    count never exceeds the configured maximum**; **a batch larger than that
    maximum is refused with a `ValueError` rather than truncated** (§1 — the case
    an implementation that silently slices passes every other clause on this
@@ -866,7 +870,14 @@ class Observer(Protocol):
    forbidden kind, more usable entries than the bound, an unusable entry sitting
    past the bound (asserting it counts once and the bound still fills from behind
    it), and a response that does not decode at all (asserting exactly one
-   unusable discard, and no second call to the model).
+   unusable discard, and no second call to the model). **Confidence determinism
+   belongs here too**: the same scripted response twice yields byte-identical
+   confidences. It cannot be a suite clause phrased as "the same batch twice",
+   because a conforming model-backed observer may legitimately return a different
+   belief on a second call — an `OBSERVED` proposal citing one episode, then an
+   `INFERRED` one citing two — and a suite asserting equal confidence across two
+   calls would fail it for doing nothing wrong. What §5 fixes is the *function*,
+   not the model.
 4. **The canonical fake** in `ai_assistant.testing`, plus the concrete
    `Test…Contract` subclass that runs it through the suite — without which the
    triad check fails, naming what is missing (`CONTRIBUTING.md`).
@@ -919,8 +930,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   nothing stored (§5).
 - **A model response citing a label outside the batch** — the citation is
   dropped, and a proposal left with none is discarded rather than repaired (§5).
-- **A batch observed twice** — the second run reinforces rather than duplicating,
-  and the belief's confidence does not rise (§8).
+- **A batch observed twice, through an observer scripted to return the same
+  proposal both times** — the second run reinforces rather than duplicating, and
+  the belief's confidence does not rise (§8). Scripted, because the property
+  under test is the *fold*, not the model: an observer free to answer differently
+  would make the assertion about the provider.
 - **A proposal that conflicts with a user assertion** — `ASK_USER`, nothing
   stored, and the deferral **reported** on the outcome (§4) **carrying the
   candidate's content, its citations and the policy's reason**, not merely a
