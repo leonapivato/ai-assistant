@@ -671,3 +671,87 @@ def test_the_observation_bounds_parse_from_the_environment(
     settings = load_settings()
     assert settings.observation_batch_size == 4
     assert settings.observation_max_proposals == 2
+
+
+# --- deferred questions: the lifetime and the cap (ADR-0078 §6, §7) ---------
+
+
+def test_deferral_ttl_defaults_to_thirty_days() -> None:
+    # The value ADR-0078 §6 argues for, and the one no invalid-value test can
+    # assert. "Finite" alone admits a one-microsecond default that expires every
+    # question before a user can list it and a decades-long one that keeps
+    # unanswered Tier 1 content for a working lifetime — both conforming, neither
+    # intended. Thirty days is `episode_retention`'s own horizon, deliberately: a
+    # deferred question is about a belief, and for an observed one the evidence is
+    # episodes on that clock, so a question outliving them would ask the user to
+    # adjudicate something the system can no longer explain.
+    assert Settings().deferral_ttl == timedelta(days=30)
+
+
+def test_deferral_ttl_accepts_an_explicit_none_as_ask_me_forever() -> None:
+    # `None` is a real value with stated behaviour, not a gap: the question never
+    # lapses and its record is never purged (ADR-0078 §6). It is the user's
+    # deliberate choice, in the same words `episode_retention` already uses.
+    assert Settings(deferral_ttl=None).deferral_ttl is None
+
+
+def test_deferral_ttl_is_disabled_from_the_environment_by_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The default is finite, so omitting the variable can never reach `None` and no
+    # duration literal spells it: without the sentinel "ask me forever" would be
+    # unreachable from a deployment.
+    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", "none")
+    assert load_settings().deferral_ttl is None
+
+
+def test_deferral_ttl_parses_an_iso_duration_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", "P7D")
+    assert load_settings().deferral_ttl == timedelta(days=7)
+
+
+@pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1)])
+def test_a_non_positive_deferral_ttl_is_rejected(value: timedelta) -> None:
+    # A zero or negative lifetime lapses every question the instant it is admitted:
+    # never answerable, immediately purgeable, its content dropped in silence.
+    with pytest.raises(ValidationError):
+        Settings(deferral_ttl=value)
+
+
+@pytest.mark.parametrize("value", ["PT0S", "-PT1H"])
+def test_load_settings_rejects_a_non_positive_deferral_ttl(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("ASSISTANT_DEFERRAL_TTL", value)
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
+
+
+def test_the_deferral_queue_limit_defaults_to_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    # It matches `DeferralStore.pending`'s bounded default, so the whole answerable
+    # queue fits one page and ADR-0078 §7's "the cap is legible from the first page"
+    # is true in the strongest sense.
+    monkeypatch.delenv("ASSISTANT_DEFERRAL_QUEUE_LIMIT", raising=False)
+    assert Settings().deferral_queue_limit == 50
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_non_positive_deferral_queue_limit_is_rejected(value: int) -> None:
+    # A cap of 0 is at capacity before its first admission, so every `ASK_USER`
+    # proposal is refused and the drop ADR-0078 exists to end returns in full, by
+    # configuration, while the system reports health. Exactly the class of value
+    # ADR-0022 §4a refuses at construction. There is no "unlimited" spelling either:
+    # an uncapped queue is what §7 exists to prevent.
+    with pytest.raises(ValidationError):
+        Settings(deferral_queue_limit=value)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_load_settings_rejects_a_non_positive_deferral_queue_limit(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("ASSISTANT_DEFERRAL_QUEUE_LIMIT", value)
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()

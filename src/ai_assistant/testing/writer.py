@@ -181,7 +181,13 @@ class FakeMemoryWriter:
         )
         decision = await self._policy.decide(observed, conflicts=conflicts)
         record_id = await self._apply(decision, observed.proposed, conflicts)
-        return MemoryIngestResult(decision=decision, record_id=record_id)
+        # The resolved ids come back on **every** ruling (ADR-0078 §4), exactly as
+        # they do from ``MemoryIngestor``: a fake that dropped them would let a
+        # consumer's test pass while the real writer's caller enqueues a question
+        # showing the user no conflicting assertion at all.
+        return MemoryIngestResult(
+            decision=decision, record_id=record_id, conflicts=observed.conflicts
+        )
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record the store does not hold.

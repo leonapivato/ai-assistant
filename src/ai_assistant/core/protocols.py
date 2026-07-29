@@ -116,6 +116,10 @@ if TYPE_CHECKING:
         ConversationExport,
         ConversationTurn,
         CurrentContext,
+        DeferralAdmission,
+        DeferralClaim,
+        DeferralState,
+        DeferredProposal,
         Embedding,
         EpisodicMemory,
         ExecutionState,
@@ -2148,5 +2152,654 @@ class ConversationStore(Protocol):
         Raises:
             ConversationStoreError: If the store cannot be read, or a stored row
                 is corrupt.
+        """
+        ...
+
+
+@runtime_checkable
+class DeferralStore(Protocol):
+    """The durable queue of memory questions the user has not answered (ADR-0078 §2).
+
+    An ``ASK_USER`` ruling produces a **question about a candidate belief**, and
+    until this store existed nothing retained one: the ruling was reported and the
+    proposal went out of scope. This is where a deferred proposal waits.
+
+    **What it holds is a question, not a belief** (§1). ``band_of`` applied to a
+    held proposal says only which band its record *would* enter if accepted, never
+    what the system holds — so three properties follow, and each is a way the queue
+    could otherwise leak into the user model:
+
+    * it is **never returned by retrieval** — it is not in the ``MemoryStore``, so
+      ``search`` cannot reach it and no plan or prompt is assembled from it;
+    * it is **never listed as a belief** — a pending question appearing in belief
+      inspection would claim the system holds something it explicitly declined to
+      hold (ADR-0073 §3);
+    * it **contributes no confidence and no evidence** to anything. A question is
+      not weak evidence for its own answer.
+
+    **A Tier 1 store, and Tier 1 only.** The proposal carries the user's own words,
+    so this store inherits every obligation the ``MemoryStore`` carries under
+    ADR-0004 and ADR-0007 — the same data directory and file permissions, inclusion
+    in ``export``, destructible on request. A ``DataTier.SECRET`` proposal is
+    therefore **never held**: ADR-0004 §3 is unconditional that Tier 0 secrets live
+    in the OS keyring, "never in the memory database, never in a committed file",
+    and a durable queue is a file. :class:`~ai_assistant.core.types.DeferredProposal`
+    refuses one, so no conforming store can hold one however it is called.
+    Deferral *content* is never logged; a log line names the deferral id.
+
+    **The lifetime is load-bearing rather than tidy.** ``retention`` is a cap on how
+    long unresolved personal content sits unanswered — a tighter guarantee than
+    accepting the proposal would have given — and it holds for every state but one:
+    an ``APPLYING`` row is never swept at any age, because sweeping it can orphan a
+    committed memory write. Such a row is instead *shown* until the user disposes of
+    it, which is a worse guarantee stated honestly rather than a better one claimed
+    falsely.
+
+    **The store produces every record; a caller hands none in.** Every instant on a
+    :class:`~ai_assistant.core.types.DeferredProposal` is stamped from this store's
+    own injected clock and ``retention`` from the lifetime it was constructed with,
+    because each of those instants decides something a caller would otherwise decide
+    for itself (§2). And **every state after ``PENDING`` is reached by a transition
+    this Protocol owns** — :meth:`claim` and :meth:`resolve` — never by being
+    handed in.
+
+    **The lifetime and the queue cap are constructor parameters, validated at
+    construction**, the ``_check_tuning`` arrangement ADR-0022 §4a ratified and for
+    its reason: a bad value here disables a stage while the system reports health,
+    so it is refused when the store is built rather than per call. It also means the
+    lifetime is read **once per store**, never per operation, which is the other
+    half of the rule that live configuration never reaches back into a question
+    already asked.
+
+    **The deadline is half-open, and the boundary instant is fixed by the record
+    rather than by each backend.** A question is answerable while
+    ``now < expires_at``; **at** ``expires_at`` it is not — ``Validity.live_at``'s
+    own convention, adopted for consistency rather than preference, because two
+    deadline notions in one memory system that disagree at the instant they name is
+    a defect waiting for the first test that lands exactly on it. Every operation
+    that consults the deadline uses
+    :meth:`~ai_assistant.core.types.DeferredProposal.is_answerable_at` and its two
+    siblings rather than spelling the comparison again: :meth:`pending`,
+    :meth:`claim`, the cap count, the key's reach, and :meth:`purge`.
+
+    **Volume is governed by three rules** (§7), and none of them designs the
+    producer. Questions dedup on
+    :attr:`~ai_assistant.core.types.MemoryUpdateProposal.question_key`. The
+    answerable queue is bounded by a configured maximum, at which :meth:`defer`
+    **refuses the new question rather than evicting an old one** — the producer
+    still holds what it proposed and can re-propose, whereas an evicted question is
+    gone with nobody left to notice. And both enumerations order **oldest first**,
+    by ``deferred_at`` ascending with ``id`` ascending as tie-break, so the question
+    whose admission is blocking a newer one is on the first page.
+
+    **No *continuation* of a destroyed row may recreate it.** A continuation is a
+    write that mutates a row it has already observed — a :meth:`claim` on a deferral
+    it read as ``PENDING``, a :meth:`resolve` on one it holds a claim or a state
+    for. Every destructive operation — :meth:`delete`, :meth:`clear`, :meth:`purge`
+    — **linearizes against every continuation**, and a continuation landing after
+    one finds nothing, does nothing, and reports what it found. Stated over that
+    class rather than over one method, and over *continuations* rather than writes in
+    general: :meth:`defer` is not a continuation, it **creates**, and this contract
+    deliberately permits a new question to reuse the id of a deleted one. Creating
+    at a free id and resurrecting a destroyed row are different acts that happen to
+    touch the same key, and only the second is forbidden.
+
+    **Every read returns a detached snapshot** of frozen models, and **no read
+    republishes a claim token** — :meth:`claim` is the only place one appears.
+
+    Every method raises
+    :class:`~ai_assistant.core.errors.DeferralStoreError` for a store fault. Where a
+    method has a spelling for absence or refusal — a ``None`` from :meth:`get` and
+    :meth:`claim`, the ``bool`` of :meth:`resolve` and :meth:`delete` — that
+    spelling is used and nothing is raised. A malformed paging argument is a
+    ``ValueError``, ADR-0073 §2's posture inherited rather than restated.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060). Input observation (ADR-0065) binds it too and is vacuous in
+    practice: every argument this seam takes is immutable — a ``str``, an ``int``,
+    an enum member, or a frozen model — so there is no second observation to
+    disagree with the first.
+    """
+
+    async def defer(
+        self,
+        *,
+        deferral_id: str,
+        proposal: MemoryUpdateProposal,
+        decision: MemoryDecision,
+        predecessor_id: str | None = None,
+        successor_to_claim: str | None = None,
+    ) -> DeferralAdmission:
+        """Admit a question, reporting **what happened and which deferral holds it**.
+
+        **The arguments are exactly what the store cannot know and nothing else.**
+        The caller brings the question — its id, the proposal, the ruling, and the
+        parent link when it has one — and the store brings everything that is its
+        own: ``deferred_at`` from its injected clock, ``retention`` from the
+        lifetime it was constructed with, ``expires_at`` derived from the two, and
+        ``state=PENDING``. It is not handed a ``DeferredProposal``; it **builds**
+        one.
+
+        **Key-idempotent.** If a deferral **the key still speaks for** carries the
+        same ``question_key``, nothing is inserted and the admission is
+        ``SUPPRESSED``, carrying that deferral — the reconciliation ADR-0052 §2
+        ratified for parked confirmations, where "a binding already named by an
+        entry reuses that entry's handle instead of minting a second". A key speaks
+        for a deferral that is answerable, ``APPLYING``, or ``REJECTED`` within its
+        retention (see
+        :meth:`~ai_assistant.core.types.DeferredProposal.speaks_for_its_key_at`).
+        A key whose only match is lapsed-and-unanswered, ``ACCEPTED``, ``STALE`` or
+        ``REDEFERRED`` does **not** collide: the question lapsed, was settled, or
+        was replaced by the successor it names, and a fresh proposal deserves a
+        fresh question. An ``APPLYING`` key blocks until its row is **deleted**, and
+        only until then — :meth:`purge` never removes one — because a twin question
+        admitted while an apply may still be running would let its later answer
+        write the second correction the claim exists to prevent.
+
+        **The deadline of a suppressing question is not refreshed.** Refreshing
+        would let a chatty producer keep a question alive indefinitely by
+        re-proposing, which is the opposite of a lifetime.
+
+        **An id already present is a hard error, not an overwrite.** ``defer``
+        inserts only if the id is absent, where "absent" is *physical presence* in
+        ADR-0046 §3's sense — a resolved or lapsed row still blocks the id — and
+        otherwise raises
+        :class:`~ai_assistant.core.errors.DeferralIdConflictError`, committing
+        nothing. Without that a dict-backed store silently overwrites someone
+        else's pending question while a SQL one raises, and the two disagree about
+        whether a question still exists.
+
+        **A retry of the same question under the same id is not a collision**, and
+        it is the one stated exception. If the stored row's ``question_key`` equals
+        the incoming one **and still speaks for it**, the id names a question that
+        is still open — what a caller retrying an uncertain admission produces — so
+        the key-idempotent path runs and the admission is ``SUPPRESSED``. If the key
+        no longer speaks, the exception does not apply and the id raises: that
+        question is finished, and a fresh question gets a fresh id. **Otherwise the
+        id check comes first**, and the precedence is stated because the two rules
+        can both fire: a call carrying id ``a`` and key ``K2``, against a store
+        holding ``(a, K1)`` and ``(b, K2)``, is simultaneously a key duplicate of
+        ``b`` and a physical collision on ``a``. The id collision wins, because it
+        is a caller-side minting fault and the suppression path would hide it —
+        handing the caller back a different question, under an id it believes it
+        just minted.
+
+        **A re-deferral does not consult the cap, and the exemption is held by a
+        capability rather than named by an id.** ``successor_to_claim`` is the
+        **parent's ``claim_id``**; when it is given the cap is not consulted.
+        Naming the parent by its deferral id alone would not have worked:
+        :meth:`interrupted` publishes the ids of ``APPLYING`` rows to any caller, so
+        an id proves only that *some* answer is in flight, not that this caller is
+        the one applying it. The token is minted by :meth:`claim`, returned to that
+        caller alone, and on no other read — holding it is holding the claim. And
+        because a capability alone still leaves the store unable to tell *which*
+        question a successor belongs to, the link is on the record: the successor
+        supplies ``predecessor_id``, and the token says the caller may.
+
+        All of it is validated in the same atomic operation as the admission, and
+        the first question asked is about the **parent**, not the token:
+
+        * **``predecessor_id`` names no stored deferral.** The parent was destroyed
+          by the user mid-apply, so there is no claimed answer to strand and no
+          bookkeeping to record. The successor is admitted as an **ordinary
+          question** — no cap bypass, no link, no ``successor_id`` stamped — and
+          nothing raises. The exemption exists to protect a waiting parent and
+          there is none.
+        * **``predecessor_id`` names a stored deferral and the token does not match
+          that deferral's claim.** This **raises**, changing nothing. The parent is
+          alive and waiting; admitting an unlinked successor would leave it with no
+          ``successor_id`` to name and its ``resolve(REDEFERRED)`` would fail
+          forever.
+
+        The remaining conditions are faults too and raise: that deferral is no
+        longer ``APPLYING``, or it already carries a ``successor_id``. The two
+        arguments must also agree on presence — a ``predecessor_id`` without a
+        token, or a token without one, is a malformed call.
+
+        On success the store stamps the parent's ``successor_id`` in the same
+        commit, which is what makes the last condition enforceable and gives
+        :meth:`resolve`'s ``REDEFERRED`` transition durable state to check rather
+        than the caller's word. **Dedup still applies to a successor, and a
+        suppressed one still links**: the successor's key differs from its parent's
+        by construction, but not necessarily from some *other* pending question, and
+        when the admission is ``SUPPRESSED`` the parent is still stamped — with the
+        **existing** question's id. Without that the parent has no successor to
+        name and a legitimately claimed answer strands ``APPLYING`` forever. So the
+        pair is symmetric only when the successor was newly admitted; on the
+        suppressed path the parent names the existing question and that question
+        does not name back, because it has its own origin and rewriting its
+        ``predecessor_id`` would falsify where it came from.
+
+        One successor per claim, one claim per question, and every other question
+        admitted under the cap — so the answerable queue can exceed its configured
+        maximum only by the number of answers currently in flight, and it returns
+        under it as each resolves.
+
+        **Admission is one atomic operation**: the key lookup, the answerable-count
+        check and the insert commit or fail together. Left non-atomic, two
+        concurrent producers each see room at capacity-minus-one and the cap is
+        exceeded, or two same-key calls each see no match and the queue holds the
+        same question twice. A background producer is precisely a concurrent
+        producer, so this is a live condition rather than a theoretical one.
+
+        Args:
+            deferral_id: The id the caller minted for this question. Caller-minted
+                as a ``MemoryRecord``'s is, with retry-on-collision at the minting
+                site.
+            proposal: The deferred proposal, whose ``conflicts`` must be the ids the
+                policy actually ruled against (§3, §4) — the frozen set this
+                question is asked about, and the exact scope an answer to it will
+                authorise.
+            decision: The ``ASK_USER`` ruling that deferred it.
+            predecessor_id: The question this one succeeds, on the re-deferral path;
+                ``None`` for an ordinary admission.
+            successor_to_claim: The parent's ``claim_id``, which authorises the link
+                and the cap bypass; ``None`` for an ordinary admission.
+
+        Returns:
+            An admission whose ``outcome`` says which of the three things happened
+            and whose ``deferral`` is the question it is about (``None`` only when
+            the queue refused).
+
+        Raises:
+            DeferralIdConflictError: If ``deferral_id`` names a stored row carrying
+                a different question, or one whose key no longer speaks for it.
+                Nothing was committed; re-mint and retry.
+            DeferralStoreError: If ``predecessor_id`` names a live deferral the
+                token does not claim, one that is not ``APPLYING``, or one that
+                already names a successor; if the two exemption arguments disagree
+                about being present; or if the store cannot be written. Nothing is
+                committed in any of those cases.
+            ValueError: If ``proposal`` is a ``DataTier.SECRET`` proposal or
+                ``decision`` is not an ``ASK_USER`` ruling — the record type refuses
+                both, and the store is left unchanged.
+        """
+        ...
+
+    async def get(self, deferral_id: str) -> DeferredProposal | None:
+        """Return the deferral with ``deferral_id``, or ``None``.
+
+        Whatever its state, including one whose deadline has passed: expiry is
+        read-time-relative and never stamped, so a lapsed question is still a
+        stored row a surface can explain. ``deferral_id`` is untrusted input from an
+        adapter and is treated as such — never rendered back into a message except
+        through :func:`~ai_assistant.core.types.describe_untrusted`.
+
+        Raises:
+            DeferralStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def claim(self, deferral_id: str) -> DeferralClaim | None:
+        """Take a question from ``PENDING`` to ``APPLYING``, minting its token (§2, §9).
+
+        A compare-and-set atomic with its own read, refusing a deferral past
+        ``expires_at``. It stamps ``claimed_at`` and returns the claimed deferral
+        **and** the token; ``None`` when the deferral is absent, lapsed, or not
+        ``PENDING``.
+
+        **Nothing may apply an answer without holding a claim.** This is what makes
+        an answer apply at most once under concurrency: without it two concurrent
+        answers both read a ``PENDING`` deferral, both ingest, and **both write**,
+        with only one winning the terminal compare-and-set while the loser's memory
+        mutation stands — a duplicate correction with no crash anywhere, produced by
+        ordinary concurrent use. It is ADR-0044 §2's "a binding resolves once"
+        moved one step earlier so that it covers the *apply*, not only the
+        bookkeeping.
+
+        **The token is unpredictable, unique among live claims, and minted from an
+        injected source.** "Fresh" is not enough: a store handing out ``"1"``,
+        ``"2"``, ``"3"`` mints a fresh token every time and satisfies the word,
+        while :meth:`interrupted` publishes every ``APPLYING`` deferral's id — so a
+        caller reads an id, guesses the token, and resolves someone else's claim or
+        spends its cap exemption. A capability anyone can guess is a parameter with
+        extra steps. So the token is drawn from a **cryptographically unpredictable**
+        source of at least 128 bits, and the source is **defaulted, not merely
+        injectable**: injection exists for determinism in tests, but injection alone
+        would let a composition root wire a counter and satisfy every word above, so
+        a conforming store defaults to a ``secrets``-backed factory and a caller has
+        to go out of its way to replace it.
+
+        Uniqueness is guaranteed among **live** claims and is otherwise a property of
+        the draw, stated at that width deliberately. A token already held by a live
+        claim is detected and re-drawn, bounded, raising on exhaustion having changed
+        nothing. Uniqueness across the store's whole history is **not** promised:
+        closing that would need a durable ledger of every token ever issued,
+        surviving ``delete`` and ``clear`` — storage of exactly what the user asked
+        to destroy — to defend against a source repeating a 128-bit draw. A source
+        that repeats is a fault to fix, not a state to reconcile.
+
+        **There is no ``release``, and its absence is a decision.** A claim is never
+        returned to ``PENDING`` — not on a timeout, not on request. An operation
+        that re-opened a claim would have to be callable by something that is *not*
+        the claim holder, since the holder of a crashed claim is gone; and a caller
+        who can re-open a claim can re-open a **live** one, letting a third party
+        apply the same answer while the first apply is still in flight. A process
+        that dies between ``claim`` and ``resolve`` therefore leaves the deferral
+        ``APPLYING`` forever: it is absent from :meth:`pending`, unclaimable, never
+        swept, and reachable through :meth:`interrupted` so the user can dispose of
+        it. The design trades recovery for the guarantee, and the cost is paid where
+        it can be seen.
+
+        Args:
+            deferral_id: The question to claim.
+
+        Returns:
+            The claim — the now-``APPLYING`` deferral and its token — or ``None``
+            when the question is not open.
+
+        Raises:
+            DeferralStoreError: If the bounded token re-mint was exhausted (nothing
+                changed, and the deferral is left ``PENDING``), or the store cannot
+                be written.
+        """
+        ...
+
+    async def pending(self, *, limit: int = 50, offset: int = 0) -> list[DeferredProposal]:
+        """Enumerate the **answerable** questions, oldest first (§2, §7).
+
+        ``state is PENDING`` **and** before ``expires_at``, judged against this
+        store's own clock reading, read-time-relatively as every ``MemoryStore``
+        read is (ADR-0045 §6). A row whose ``expires_at`` is ``None`` never lapses
+        out of it.
+
+        **One page is judged against one clock reading** — ADR-0073 §8's clause,
+        and it matters here for the same reason: a row dropped mid-scan shifts
+        every subsequent offset.
+
+        Bounded by default, for ADR-0073 §8's reason — it "keeps an unbounded read
+        of a Tier 1 store from being what a caller gets by saying nothing". Total
+        order: ``deferred_at`` ascending, ``id`` ascending as tie-break. **Oldest
+        first**, because the head of the queue is the question whose admission is
+        blocking a newer one, so a full cap is legible from the first page rather
+        than discoverable only by paging to the end. It is an *admission* order, not
+        an urgency order, and the two diverge only when the configured lifetime
+        changed between admissions — ``retention`` is stamped per question and never
+        recomputed — which this read follows rather than claiming an urgency it does
+        not deliver.
+
+        Args:
+            limit: Maximum rows to return. An ``int`` in ``[0, 2**63)``.
+            offset: How many matching rows to skip. An ``int`` in ``[0, 2**63)``.
+
+        Returns:
+            Up to ``limit`` answerable questions, in the total order above.
+
+        Raises:
+            ValueError: If either argument is not an ``int`` — a ``bool`` is not a
+                count, and a ``float`` satisfies the range while no two backends
+                agree what it means — or is outside ``[0, 2**63)``. Refused at both
+                ends and before the first ``await``: ``limit=-1`` is SQLite's
+                spelling for *no limit*, so an unvalidated negative turns the
+                bounded read of a Tier 1 queue into an unbounded one.
+            DeferralStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def interrupted(self, *, limit: int = 50, offset: int = 0) -> list[DeferredProposal]:
+        """Enumerate the ``APPLYING`` questions, in :meth:`pending`'s order (§2, §9).
+
+        An answer was begun and its outcome is not recorded. This read exists
+        because the surface must *show* such a question and disposing of it is the
+        user's first recovery step, and after a restart nothing holds an id to
+        :meth:`get` by — without it the stranded question is unreachable, which is
+        the vanishing this contract is about, one state along.
+
+        A **second enumeration** rather than a state filter on :meth:`pending`,
+        following ADR-0076's precedent for exactly this shape and ADR-0073 §9's
+        reason for declining an ``include_retired`` axis: two different questions
+        behind one flag is one argument doing two jobs, and the answerable queue is
+        the read every caller wants by default. The two reads are **disjoint** — a
+        store that returned an interrupted question among the answerable ones would
+        offer the user a claim that cannot be taken.
+
+        Same bounded default, same total order, same argument range as
+        :meth:`pending`.
+
+        Args:
+            limit: Maximum rows to return. An ``int`` in ``[0, 2**63)``.
+            offset: How many matching rows to skip. An ``int`` in ``[0, 2**63)``.
+
+        Returns:
+            Up to ``limit`` interrupted questions, oldest first.
+
+        Raises:
+            ValueError: If either argument is not an ``int`` or is out of range,
+                exactly as :meth:`pending` refuses them.
+            DeferralStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def resolve(
+        self,
+        deferral_id: str,
+        *,
+        claim_id: str | None,
+        state: DeferralState,
+        record_id: str | None = None,
+        successor_id: str | None = None,
+    ) -> bool:
+        """Record a question's outcome: the terminal compare-and-set (§2, §9).
+
+        Atomic with its own read. It succeeds from ``APPLYING`` to **any** terminal
+        state — ``ACCEPTED``, ``REJECTED``, ``STALE`` or ``REDEFERRED`` — **only
+        when ``claim_id`` matches the token :meth:`claim` minted for it**, and from
+        ``PENDING`` to ``REJECTED`` with ``claim_id=None``, since an unclaimed
+        rejection writes nothing and so needs no claim.
+
+        **Every terminal state must be reachable from ``APPLYING``, including
+        ``REJECTED``.** A ``MemoryWriter`` takes an injected policy, and a
+        conforming policy that is not the default one may rule ``REJECT`` on a
+        confirmed proposal, so an accept whose ingest returns ``REJECT`` would
+        otherwise have no legal transition and strand forever. The mapping from
+        ingest outcome to terminal state is therefore **total**:
+        ``ACCEPT``/``STORE_TEMPORARY``/``REINFORCE``/``SUPERSEDE`` → ``ACCEPTED``
+        with the record id; ``ASK_USER`` → ``REDEFERRED`` with the successor's;
+        ``REJECT`` → ``REJECTED``; and a coordinator's own pre-ingest window check
+        → ``STALE`` without an ingest at all.
+
+        **``answered_at`` is stamped by the store, not passed in** — for a reason
+        stronger than symmetry with :meth:`claim`: that instant is a **retention
+        anchor**, so a caller that supplied it would decide how long its own
+        rejection suppresses the next honest proposal. Resolve ``REJECTED`` with an
+        instant in 1970 and the record is swept at once, so the user is re-asked
+        something they just declined; supply one far in the future and the same key
+        stays suppressed long past the retention it was admitted under. A validator
+        requiring only that the stamp *exists* catches neither, so the parameter is
+        absent rather than checked.
+
+        **Each terminal state carries its own required payload and forbids the
+        other's**, in the shape
+        :meth:`~ai_assistant.core.types.MemoryDecision._outcome_fields_are_consistent`
+        already enforces for a ruling: ``ACCEPTED`` requires ``record_id`` and no
+        successor; ``REDEFERRED`` requires ``successor_id`` and no record id;
+        ``REJECTED`` and ``STALE`` require neither and permit neither. Without it a
+        valid claim can resolve ``ACCEPTED`` naming nothing that was written — a
+        terminal state that lies, reached through the one call whose whole job is to
+        record what happened. A malformed combination is **refused, not silently
+        normalised**. The two ids are separate parameters rather than one overloaded
+        slot so that each of those cases is expressible rather than ambiguous, and a
+        ``REDEFERRED`` resolution's ``successor_id`` must equal the one the store
+        stamped when it admitted that successor, so the transition is checked
+        against durable state rather than the caller's word.
+
+        **An unclaimed rejection is subject to the deadline too.** ``PENDING →
+        REJECTED`` carries the same ``now < expires_at`` predicate every other
+        operation does and fails past it. Without that, a client that displayed the
+        question a moment before it lapsed could reject it a moment after, and the
+        lapsed row would become a retained ``REJECTED`` key that suppresses a fresh
+        identical proposal — the one outcome a lapsed key must not have. A question
+        that is no longer answerable is no longer *rejectable*; the two are the same
+        statement.
+
+        **A resolve that linearizes after a destruction writes nothing at all.**
+        "Atomic with its own read" bounds this call against another ``resolve`` and
+        says nothing about a :meth:`delete`, a :meth:`clear` or a :meth:`purge`
+        landing between that read and its write — so a read-then-write backend would
+        put its stale terminal row back, **resurrecting Tier 1 content the user
+        destroyed** through the call whose only job is bookkeeping. It returns
+        ``False`` instead, and the row stays gone, absent from :meth:`get` and
+        :meth:`export`, whichever way the race fell. A caller reading that ``False``
+        after a disposal learns one thing — the question is gone — and reports the
+        outcome it already holds from the ingest rather than inferring one from the
+        failure.
+
+        Args:
+            deferral_id: The question to resolve.
+            claim_id: The token :meth:`claim` returned, or ``None`` for the one
+                unclaimed transition (``PENDING`` → ``REJECTED``).
+            state: The terminal state to record.
+            record_id: The record an accepted apply left live. Required for
+                ``ACCEPTED``, forbidden otherwise.
+            successor_id: The question a re-deferred answer raised. Required for
+                ``REDEFERRED`` and must equal the id the store already stamped;
+                forbidden otherwise.
+
+        Returns:
+            ``True`` if this call recorded the outcome. ``False`` from any other
+            state, on a mismatched or absent ``claim_id``, on a second attempt, and
+            when the row was destroyed before this call's write landed. The
+            ``claim_id`` is what keeps the bookkeeping bound to the apply that
+            actually ran: without it a caller who never applied anything could
+            stamp a question ``ACCEPTED``.
+
+            ``False`` too where the record's own stamped ``successor_id`` disagrees
+            with the transition: a ``REDEFERRED`` resolution naming some *other*
+            question, and any non-``REDEFERRED`` state on a row that already raised
+            one. Both are compare-and-set preconditions judged against durable
+            state, so they answer in the same shape as a stale ``claim_id`` rather
+            than raising — the malformed-*payload* refusals, which need no state to
+            detect, are the ``ValueError``s below. A row that raised a successor
+            therefore has exactly one outcome available to it, and recording any
+            other would store a record the type forbids.
+
+        Raises:
+            ValueError: If ``state`` is not a terminal state, or the payload is
+                malformed for it. Nothing is written.
+            DeferralStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def delete(self, deferral_id: str) -> bool:
+        """Destroy one question and everything it holds — **unconditionally** (§2).
+
+        ADR-0007's data right, shaped as ``MemoryStore.delete``. **No state refuses
+        it**, including ``APPLYING``: ADR-0073 §9 declines a *band*-conditional
+        delete because "it makes a data right conditional on a classification the
+        system assigned", and a state-conditional one is the same mistake with an
+        internal label instead of a band. ADR-0073 §6 already rules the consequence
+        — "the record is *destroyed*, unconditionally… losing the history is what
+        they asked for".
+
+        That an ``APPLYING`` row is deletable while :meth:`purge` may never touch
+        one is not an inconsistency; **the difference is who is acting, and it is
+        the whole distinction.** If an in-flight ingest then commits, its
+        :meth:`resolve` finds nothing and returns ``False`` — which after a delete
+        means *the question was disposed of while the answer was being applied*, a
+        true statement the caller reports, and after a sweep would mean *the system
+        quietly destroyed the only record that an answer was ever given*. The first
+        is a consequence the user chose; the second is one nobody chose.
+
+        Deleting destroys the ``question_key`` with the row, which is what makes the
+        two-step recovery reachable: while a stranded row lives it holds its key, so
+        a re-proposal of the same correction would collide with it and be handed
+        back an id nothing can claim.
+
+        Args:
+            deferral_id: The question to destroy.
+
+        Returns:
+            ``True`` if a row was removed, ``False`` if the id named nothing.
+
+        Raises:
+            DeferralStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Destroy every question, whatever its state (§2, ADR-0007).
+
+        The sweep half of the data right, shaped as ``MemoryStore.clear`` and
+        unconditional in the same way :meth:`delete` is — an implementation that
+        cleared the answerable queue and left the rest would pass every other
+        clause here, so "unconditional" is stated rather than implied.
+
+        Returns:
+            How many rows were destroyed.
+
+        Raises:
+            DeferralStoreError: If the store cannot be written.
+        """
+        ...
+
+    async def export(self) -> list[DeferredProposal]:
+        """Return every stored question, for the user's own data export (ADR-0004 §6).
+
+        A plain list of the frozen record type, which the caller serialises with
+        ``model_dump(mode="json")`` — matching ``MemoryStore.export`` and
+        ``AuditTrail.export`` rather than minting a bespoke export type, because
+        this store has one collection and ``PlanExport``'s reason for existing does
+        not apply.
+
+        Every state is included, lapsed and terminal alike: the content is the
+        user's and the export is theirs. **No claim token appears**, in this or any
+        other read — a capability is not the user's data, and an export carrying one
+        would hand the ability to resolve a live claim to anything that reads the
+        file.
+
+        Raises:
+            DeferralStoreError: If the store cannot be read, or a stored row is
+                corrupt.
+        """
+        ...
+
+    async def purge(self) -> int:
+        """Sweep the rows whose own stamped deadline has passed (§2, §6).
+
+        Shaped as ``MemoryStore.purge_expired``, with **two named anchors and the
+        same "a deadline is reached at the instant it names" convention** the
+        answerability comparison uses from the other side
+        (:meth:`~ai_assistant.core.types.DeferredProposal.is_purgeable_at`). A row
+        is purgeable when it is **terminal**, its ``retention`` is not ``None``, and
+        ``answered_at + retention <= now``; or when it is **``PENDING``**, its
+        ``expires_at`` is not ``None``, and ``expires_at <= now``.
+
+        **Both read the record, never the live setting.** ``retention`` is the
+        duration stamped at admission, so a configuration change never reaches back
+        and shortens or extends a question already asked. And ``retention is None``
+        is a complete answer rather than an undefined expression: **a row admitted
+        under "ask me forever" is never purged**, which is the same choice its
+        ``PENDING`` sibling makes and the same one the user made.
+
+        **The two anchors are different on purpose, and the asymmetry is the
+        decision.** A terminal row is retained for one further lifetime because
+        something depends on it surviving — a ``REJECTED`` key is read to refuse
+        re-asking, and that is the whole retention argument. A lapsed row has no
+        such dependant: its key stopped speaking the instant it lapsed, so nothing
+        reads it and nothing is served by keeping it. Giving it the same grace by
+        symmetry would hold an unanswered Tier 1 proposal for **twice** the
+        configured lifetime, while that lifetime is what §1 calls the cap on how
+        long unresolved sensitive content sits. The ``PENDING`` clause is therefore
+        what makes that cap true, and it is the one a purge naturally omits: an
+        unanswered question never transitions, so a sweep keyed on terminal states
+        alone keeps the user's own words on disk forever.
+
+        **It never removes an ``APPLYING`` row, at any age.** That row is the only
+        durable record that an answer was begun; destroying it while its ingest is
+        still running — a slow embed, a stalled store — would let the memory write
+        commit against a question that no longer exists, so the bookkeeping fails
+        and the fact that an answer was given survives nowhere. A sweep may not make
+        that decision; a user may, and does, through :meth:`delete`. Correctness
+        does not depend on ``purge`` running, but the exposure cap does, for every
+        state except that one.
+
+        Returns:
+            How many rows were removed.
+
+        Raises:
+            DeferralStoreError: If the store cannot be written.
         """
         ...

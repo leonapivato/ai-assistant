@@ -234,6 +234,60 @@ class UnknownConversationError(ConversationStoreError):
     """
 
 
+class DeferralStoreError(AssistantError):
+    """Reading from or writing to the deferred-question queue failed (ADR-0078 §2).
+
+    Its own class in the :class:`AssistantError` hierarchy for the reason
+    :class:`ConversationStoreError` is one: a deferred question is none of the
+    things the existing errors name — not memory, not planning, not context, not
+    audit. It is a *question about* a candidate belief, deliberately not a belief
+    of any band (ADR-0078 §1), and it lives in a store of its own.
+
+    It covers a store fault, an exhausted claim-token re-mint, and every
+    caller-side fault around the re-deferral exemption: a ``predecessor_id``
+    naming a live deferral whose claim the supplied token does not match, one that
+    is no longer ``APPLYING`` or already names a successor, and a
+    ``predecessor_id`` and a token that disagree about being present. Each of those
+    would otherwise strand a claimed answer with no successor to name, which is the
+    class of fault to surface rather than absorb.
+
+    A malformed *argument* is not this error: a paging value out of range is a
+    ``ValueError``, inherited from ADR-0073 §2 unchanged rather than restated.
+    Where a method already has a spelling for absence or refusal — a ``None``
+    return from ``get``/``claim``, the ``bool`` of ``resolve``/``delete`` — that
+    spelling is used and nothing is raised.
+    """
+
+
+class DeferralIdConflictError(DeferralStoreError):
+    """A ``defer`` supplied an id a stored row already carries (ADR-0078 §2).
+
+    Nothing was committed; the caller minted a colliding id and should re-mint and
+    retry. "Already carries" is *physical presence* in ADR-0046 §3's sense rather
+    than read-visibility, so a resolved or lapsed row still blocks the id.
+
+    Narrowed out of :class:`DeferralStoreError` for one caller and one question:
+    **a re-mint is the only correct response to this and the wrong response to
+    everything else.** A caller that retried on an exhausted token draw or on a
+    stranded-parent refusal would loop on a fault that will not change; one that
+    did not re-mint here would drop a question over a bad dice roll.
+
+    It is deliberately **not** what a same-question retry produces. Key idempotency
+    is about the *question*: if the stored row's ``question_key`` equals the
+    incoming one and still speaks for it, the id names a question that is still
+    open — which is exactly what an uncertain admission retried under the same id
+    produces — so the admission is suppressed instead. This error is for one id
+    naming **two different questions**, which is the minting fault, and it takes
+    precedence over suppression when both apply: a fault that is reported can be
+    fixed, and one absorbed into a plausible-looking success is found later, by
+    someone else.
+
+    Subclasses :class:`DeferralStoreError`, so every ``except DeferralStoreError``
+    still catches it — the shape :class:`MemoryStoreConflictError` has under
+    :class:`MemoryStoreError`, for the reason recorded there.
+    """
+
+
 class ContextError(AssistantError):
     """Situational context could not be assembled (e.g. a source-wiring bug)."""
 

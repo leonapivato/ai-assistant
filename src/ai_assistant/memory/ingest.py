@@ -532,7 +532,21 @@ class MemoryIngestor:
         )
         decision = await self._policy.decide(observed, conflicts=conflicts)
         record_id = await self._apply(decision, observed.proposed, conflicts)
-        return MemoryIngestResult(decision=decision, record_id=record_id)
+        # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
+        # declined this and named the exact condition for revisiting — a consumer
+        # that needs to *show* the user what a proposal contradicted — and a
+        # deferred question is that consumer, at a higher stake than presentation:
+        # the shown set is the bound on what an answer to the question authorises
+        # (ADR-0078 §5). Nothing new is computed; the value the copy above already
+        # carries across the policy seam now crosses the writer seam too, so a
+        # coordinator can enqueue a question about the conflicts the policy actually
+        # saw instead of re-deriving `_detect_conflicts` in `orchestration` (the
+        # duplication ADR-0028 §4 deleted) or re-detecting at answer time, by which
+        # point the set has moved and the user would have authorised something other
+        # than what they were shown.
+        return MemoryIngestResult(
+            decision=decision, record_id=record_id, conflicts=observed.conflicts
+        )
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record this store does not hold.

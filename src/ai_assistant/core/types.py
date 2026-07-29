@@ -263,6 +263,96 @@ follows. The exemption set that enumerated them is gone, and
 """
 
 
+# --- the other scalar refinements, and the one canonical encoding -------------
+# ``Identifier``, ``Sha256Hex`` and the canonical-JSON encoding sit **here**,
+# beside :data:`UtcInstant`, because they are the same kind of thing: pure
+# refinements of a scalar that every section of this module may reach for. They
+# used to live further down, next to their first consumer in `permissions`, which
+# was fine while there was one consumer. ADR-0078 gives the memory section a
+# second: a deferred question is identified, digested and keyed, and
+# :class:`MemoryUpdateProposal` is declared long before the permission types. A
+# forward reference plus ``model_rebuild`` would have kept the old positions at
+# the cost of making two `core` types depend on an import-order side effect, so
+# the primitives moved instead of the models. Nothing about them changed.
+
+
+def _non_blank(value: str) -> str:
+    """Reject a blank identifier, returning it stripped.
+
+    An empty ``approval_ref`` or ``bound_tool`` is worse than a missing one: it
+    satisfies "a reference is present" while identifying nothing, so a step
+    could look authorised and audited while being neither.
+    """
+    stripped = value.strip()
+    if not stripped:
+        msg = "identifier must not be blank"
+        raise ValueError(msg)
+    return stripped
+
+
+type Identifier = Annotated[str, AfterValidator(_non_blank)]
+"""A non-blank, stripped identifier."""
+
+
+#: A SHA-256 digest rendered as lowercase hex is exactly this long.
+_SHA256_HEX_LENGTH = 64
+
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _sha256_hex(value: str) -> str:
+    """Require a lowercase SHA-256 hex digest.
+
+    :attr:`PermissionDecision.parameters_digest` is filled by
+    :meth:`PermissionDecision.from_request` from
+    :attr:`ActionRequest.parameters_digest`, which always produces this shape —
+    but the field is a plain ``str``, so a hand-constructed decision could carry
+    anything, including text with no UTF-8 encoding. That is the last field of a
+    decision that could break ADR-0021 §4's requirement that a record reload,
+    and unlike the others it has an exact form to check rather than merely a
+    property.
+
+    :attr:`UserConfirmation.question_key` is the second field of this shape
+    (ADR-0078 §2), and it is the sharper case: the key is *authority*, so a value
+    that is not a digest at all would be compared against one that is and refuse
+    every honest answer.
+
+    Lowercase specifically: ``hexdigest()`` emits lowercase, so accepting
+    uppercase would admit a second spelling of the same digest that compares
+    unequal — a false mismatch at execution, which reads as an attack rather
+    than as a bug.
+
+    Raises:
+        ValueError: If the value is not 64 lowercase hex digits.
+    """
+    if len(value) != _SHA256_HEX_LENGTH or not _HEX_DIGITS.issuperset(value):
+        described = describe_untrusted(value)
+        msg = f"a sha-256 digest must be {_SHA256_HEX_LENGTH} lowercase hex digits, got {described}"
+        raise ValueError(msg)
+    return value
+
+
+type Sha256Hex = Annotated[str, AfterValidator(_sha256_hex)]
+"""A lowercase SHA-256 digest in hex — the form :func:`hashlib.sha256` emits."""
+
+
+def _canonical_bytes(payload: object) -> bytes:
+    """Render ``payload`` in the exact JSON form ADR-0021 §1 pins for a digest.
+
+    ``ensure_ascii=False``, UTF-8, keys ordered, no incidental whitespace — the
+    one encoding every digest in this module hashes, so two digests over the same
+    facts cannot disagree because they were spelled differently.
+    :func:`_canonical_json` narrows this to a validated parameter payload; ADR-0078
+    §7's proposal fingerprint hashes a projection of a memory record through it.
+
+    ``payload`` must already be JSON-encodable — a ``model_dump(mode="json")``
+    result, or a value :func:`_thaw_json` has flattened. Anything else raises out
+    of :func:`json.dumps`, at the boundary that produced it.
+    """
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return text.encode("utf-8")
+
+
 # --- conversation: the provider-independent turn -----------------------------
 # `models/` maps these onto whatever an SDK wants; no SDK's own vocabulary
 # crosses into `core` (golden rule 4).
@@ -654,6 +744,76 @@ class DataTier(StrEnum):
 # the target record, never the write that relation causes (ADR-0040 §1).
 
 
+#: The record fields ADR-0078 §7 excludes from the proposal fingerprint: each is
+#: bookkeeping *about* the record rather than part of the belief it states, and
+#: including any of them would make a question's identity change without the
+#: question changing. ``provenance.last_updated`` is the third and is removed one
+#: level in, inside the nested projection.
+_FINGERPRINT_EXCLUDED_RECORD_FIELDS: frozenset[str] = frozenset({"id", "score"})
+
+
+def _canonical_members(values: Sequence[str]) -> list[str]:
+    """Normalise a collection that is a *set in meaning* (ADR-0078 §7).
+
+    Sorted **and deduplicated**, because for a bag of references membership is the
+    content and position is an artefact of how they were gathered. Deduplication
+    is the same argument rather than an extra one: ``("e1",)`` and ``("e1", "e1")``
+    state the same support, and sorting without deduplicating would let a repeated
+    id admit a second question for a set the user has already been asked about.
+    """
+    return sorted(set(values))
+
+
+class UserConfirmation(BaseModel):
+    """The authority a user's answer to a deferred question carries (ADR-0078 §2, §5).
+
+    A value rather than a naked field on the proposal, **because it is authority,
+    and authority that can be inspected is authority that can be bounded**. It
+    says three things and no more: which question was answered, what that question
+    *was*, and exactly which records the answer authorises retiring.
+
+    ``retires`` is the whole of that authority. It is set to the conflict ids the
+    question froze and the surface actually showed (ADR-0078 §5), so the answer
+    can never reach a record the user was not shown — which is what turns "explicit
+    user confirmation" (ADR-0045 §7) into a bound rather than a blanket.
+
+    ``question_key`` is what **binds the authority to the question it was given
+    for**. Without it a confirmation is a bearer token any proposal presenting it
+    could spend: two questions can share a proposal exactly and be shown different
+    conflicts, and a confirmation bound only to the proposal would carry one
+    question's broader ``retires`` into the other's apply, retiring an assertion
+    that user never saw. It is :attr:`MemoryUpdateProposal.question_key`, so it
+    covers *what was proposed* and *what it was proposed against* together — and it
+    binds to what was asked rather than to a minted id, which a caller invents and
+    which is unique only once stored.
+
+    **The answer path is its only legitimate producer**, and only from a deferral
+    it has claimed (ADR-0078 §3). No type expresses that; it is a
+    composition-root obligation with a structural test behind it, and it is the
+    obligation this value's whole bound rests on.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    deferral_id: Identifier = Field(
+        description="The deferred question this answer is for (ADR-0078 §2)."
+    )
+    question_key: Sha256Hex = Field(
+        description=(
+            "The answered question's ``MemoryUpdateProposal.question_key`` — what binds "
+            "this authority to that question rather than to any proposal presenting it."
+        ),
+    )
+    confirmed_at: UtcInstant = Field(description="When the user's answer was given (tz-aware).")
+    retires: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Record ids this answer authorises retiring: exactly the conflicts the "
+            "question froze and the surface showed (ADR-0078 §5). Nothing else."
+        ),
+    )
+
+
 class MemoryUpdateProposal(BaseModel):
     """A proposed change to memory, awaiting a policy decision.
 
@@ -673,6 +833,130 @@ class MemoryUpdateProposal(BaseModel):
         default=(),
         description="Ids of existing records this proposal contradicts (from the conflict check).",
     )
+    confirmation: UserConfirmation | None = Field(
+        default=None,
+        description=(
+            "The authority a user's answer to a deferred question carries, when this "
+            "proposal is one being re-submitted under it (ADR-0078 §2, §5); None otherwise."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _secret_data_carries_no_confirmation(self) -> MemoryUpdateProposal:
+        """Refuse a confirmation on a ``DataTier.SECRET`` proposal (ADR-0078 §1, §5a).
+
+        A confirmation exists only because a question was queued, claimed and
+        answered — and a secret-tier proposal is **never queued**: ADR-0004 §3 puts
+        Tier 0 content in the OS keyring and forbids it a committed file, so
+        :class:`DeferredProposal` refuses one and the write stage never offers it
+        one. There is therefore no deferral for such a proposal, no claim over it,
+        and no answer to it. The pairing is a *contradiction*, not a case the
+        applier should be left to rule on, so it is unconstructable rather than
+        merely refused downstream — the one half of ADR-0078's belt-and-braces
+        that a bypass cannot get past.
+        """
+        if self.confirmation is not None and self.sensitivity is DataTier.SECRET:
+            msg = (
+                "a DataTier.SECRET proposal cannot carry a confirmation: secret-tier data is "
+                "never queued as a question, so no answer to one can exist (ADR-0078 §1)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def proposal_fingerprint(self) -> Sha256Hex:
+        """A stable digest of *what is being proposed* (ADR-0078 §7).
+
+        SHA-256 over :func:`_canonical_bytes`' ADR-0021 §1 encoding of a
+        **canonical projection** of :attr:`proposed`, plus :attr:`sensitivity`.
+        A property on the model that owns the data rather than a field each caller
+        filled in, for the reason :attr:`ActionRequest.parameters_digest` is one:
+        two callers' canonicalisations that disagreed would produce a false
+        mismatch, and here the symptom is that **no asserted conflict is ever
+        confirmable** — the coordinator digests at admission and the writer
+        recomputes at answer time, so a digest that can come apart from itself
+        refuses every honest answer.
+
+        **The projection is the whole record minus the three fields that are
+        bookkeeping about the record rather than the belief it states**, and the
+        criterion decides the next one rather than an inventory having to be
+        extended by whoever adds it:
+
+        * ``id`` — identity, minted per proposal, so including it makes the key
+          match nothing at all.
+        * ``score`` — populated only by retrieval (ADR-0005 §1); it says how a
+          search ranked something, not what is believed.
+        * ``provenance.last_updated`` — **transaction time** (ADR-0045 §3): when
+          the record was written, not what it says. Two identical observations a
+          minute apart would otherwise be two questions, and the user would be
+          nagged by the mechanism whose job is to stop that.
+
+        Everything else stays in, including ``validity`` (a belief expiring
+        tomorrow and an open-ended one are different things to be asked to accept),
+        ``confidence`` (weakly and strongly offered are different offers,
+        ADR-0072 §6) and ``provenance.source``. :attr:`rationale` is out because
+        the projection is over the record and the tier; :attr:`confirmation` is out
+        because it is authority rather than content, which is also what lets the
+        writer recompute the key of a proposal it has just attached one to.
+
+        **Collections that are *sets in meaning* are sorted and deduplicated;
+        every other order is preserved.** The criterion is whether reordering the
+        members changes what the record says. ``Provenance.evidence`` is a bag of
+        references — "references (e.g. episode ids) supporting this record" — where
+        membership is the content, and conflict detection ranks by score, so two
+        equal-scored gatherings come back in either order; digesting the raw
+        sequence would mint two keys for one question. ``ProceduralMemory.steps``
+        is the opposite: a workflow *is* its order, and "back up the database, then
+        delete it" must never suppress "delete the database, then back it up". For
+        a genuinely ambiguous field ADR-0078 §7 decides the tie explicitly —
+        **preserve the order** — because the cost of preserving it is a duplicate
+        question the user can dismiss, and the cost of normalising it wrongly is a
+        question they never see. ``EpisodicMemory.participants`` is that case and
+        keeps its order.
+        """
+        return sha256(_canonical_bytes(self._fingerprint_projection())).hexdigest()
+
+    @property
+    def question_key(self) -> Sha256Hex:
+        """A stable digest of *what is being proposed, against what* (ADR-0078 §7).
+
+        ``digest(proposal_fingerprint, canonical conflict ids)`` — the outer of the
+        two layers, and the one the deferral queue dedups on and a
+        :class:`UserConfirmation` binds to. A question is not merely a proposal: it
+        is a proposal shown **against a particular conflict set**, so two questions
+        can share a fingerprint exactly and still be different questions. The
+        conflict ids are canonicalised the way ``evidence`` is — sorted and
+        deduplicated — because membership is the content there too, and a repeated
+        or reordered id would otherwise admit a second question for a set the user
+        has already been asked about.
+
+        A property, not a field, so the question's identity is a function of the
+        proposal that holds it and the two cannot disagree — which is why
+        :class:`DeferredProposal` carries no key of its own.
+        """
+        payload = {
+            "proposal_fingerprint": self.proposal_fingerprint,
+            "conflicts": _canonical_members(self.conflicts),
+        }
+        return sha256(_canonical_bytes(payload)).hexdigest()
+
+    def _fingerprint_projection(self) -> dict[str, object]:
+        """The canonical projection :attr:`proposal_fingerprint` digests.
+
+        Built from ``model_dump(mode="json")`` rather than from the live objects,
+        so a record reconstructed field-by-field from a serialised form projects
+        identically to the one it was serialised from (ADR-0078 §10's parity
+        clause) — the failure that clause guards is not a mismatch on some input
+        but a mismatch on *every* input.
+        """
+        record: dict[str, Any] = self.proposed.model_dump(mode="json")
+        for excluded in _FINGERPRINT_EXCLUDED_RECORD_FIELDS:
+            record.pop(excluded, None)
+        provenance: dict[str, Any] = dict(record["provenance"])
+        provenance.pop("last_updated", None)
+        provenance["evidence"] = _canonical_members(provenance.get("evidence") or ())
+        record["provenance"] = provenance
+        return {"proposed": record, "sensitivity": self.sensitivity.value}
 
 
 class MemoryDecisionKind(StrEnum):
@@ -753,7 +1037,23 @@ class MemoryDecision(BaseModel):
 
 
 class MemoryIngestResult(BaseModel):
-    """The outcome of ingesting a :class:`MemoryUpdateProposal`."""
+    """The outcome of ingesting a :class:`MemoryUpdateProposal`.
+
+    ``conflicts`` is what the ruling was ruled **against** (ADR-0078 §4). ADR-0028
+    §3 declined it and named the exact condition for revisiting — "if a consumer
+    ever needs to *show* a user what a proposal contradicted, that is a change to
+    the result type, decided then, with a use case in hand" — and a deferred
+    question is that consumer. It is stronger than presentation: the shown set is
+    the **bound on what an answer authorises** (ADR-0078 §5), so the ids are
+    load-bearing for correctness rather than decoration.
+
+    Nothing new is computed for it. The writer already resolves conflicts onto its
+    own copy of the proposal before the policy rules; the value simply now crosses
+    the writer seam as well as the policy one, which is what lets a coordinator
+    enqueue a question showing the conflicts the policy actually saw instead of
+    re-deriving them (the duplication ADR-0028 §4 deleted) or re-detecting them at
+    answer time, by which point the set has moved.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -766,6 +1066,562 @@ class MemoryIngestResult(BaseModel):
             "of the record now holding the live belief (ADR-0045 §4)."
         ),
     )
+    conflicts: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Ids of the existing records this ingest resolved and the policy ruled "
+            "against, on every ruling (ADR-0078 §4). Empty when nothing conflicted."
+        ),
+    )
+
+
+# --- memory: the deferred question, and the answer that resolves it (ADR-0078) -
+# An `ASK_USER` ruling produces a *question about a candidate belief*, not a
+# belief of any band: it is never returned by retrieval, never listed as a
+# belief, and contributes no confidence and no evidence to anything (§1). These
+# are the types the durable queue that holds one exchanges.
+
+
+class DeferralState(StrEnum):
+    """Where a deferred question stands (ADR-0078 §2).
+
+    **There is no ``EXPIRED`` member, and its absence is the decision.** Expiry is
+    read-time-relative and never stamped, exactly as ``MemoryRecord.expires_at``
+    is (ADR-0007 §3, ADR-0045 §6): past its deadline a question is simply not
+    presented and not claimable, so nothing has to run for it to stop being
+    answerable and there is no sweep whose failure re-opens one. ``STALE`` *is*
+    stored, because it records something that happened — a person answered and the
+    system declined to act — where a question nobody answered records nothing.
+    """
+
+    PENDING = "pending"
+    """Answerable: nobody has begun an answer, and the deadline has not passed."""
+
+    APPLYING = "applying"
+    """An answer was claimed and may be committing right now (ADR-0078 §9).
+
+    One-way: there is no ``release``, no lease and no timeout, because anything
+    that could re-open a *stranded* claim could re-open a **live** one, and the
+    second apply is the duplicate correction the claim exists to prevent. A row
+    left here by a crash is disposed of by the user, never swept.
+    """
+
+    ACCEPTED = "accepted"
+    """The answer was applied; the record it left live is named on the deferral."""
+
+    REJECTED = "rejected"
+    """The user declined. Nothing was written, and the record is **retained**.
+
+    Retention is what makes dedup honest (ADR-0078 §6, §7): without it a chatty
+    producer re-proposes tomorrow and the user is asked something they already
+    declined. Asking again is not honesty, it is nagging.
+    """
+
+    STALE = "stale"
+    """The answer arrived, and the belief it was about no longer applied.
+
+    The proposal's own validity window was closed at the answer instant, so
+    accepting would have written a record every later read hides — a belief born
+    dead. Distinct from a lapsed deadline: that says *the question* went
+    unanswered too long, and telling a user who answered promptly they were too
+    slow would be the wrong sentence (ADR-0078 §6).
+    """
+
+    REDEFERRED = "redeferred"
+    """The answer was used, and raised a further question the record names.
+
+    Reached when re-ingesting the answered proposal surfaced an assertion the user
+    was never shown: nothing was written, a successor question was admitted, and
+    this record names it so the chain is walkable. A completed answer, not a
+    failed one — without this state a re-deferred answer has no legal transition
+    out of ``APPLYING`` and strands forever (ADR-0078 §5a, §9).
+    """
+
+
+#: The states a deferred question can finish in. Every one of them requires
+#: ``answered_at``: reaching any means an answer arrived and was recorded.
+TERMINAL_DEFERRAL_STATES: frozenset[DeferralState] = frozenset(
+    {
+        DeferralState.ACCEPTED,
+        DeferralState.REJECTED,
+        DeferralState.STALE,
+        DeferralState.REDEFERRED,
+    }
+)
+
+
+class DeferralAdmissionOutcome(StrEnum):
+    """What happened when a question was offered to the queue (ADR-0078 §2, §7).
+
+    A closed set with a name rather than three strings described in prose,
+    because the coordinator branches on it **exhaustively** and an exhaustive
+    ``match`` needs a type that can be exhausted. Left as free-form text, two
+    conforming stores spell the same outcome differently and no consumer can
+    depend on either.
+    """
+
+    ADMITTED = "admitted"
+    """The question was parked, and the admission carries the new deferral."""
+
+    SUPPRESSED = "suppressed"
+    """An existing question the key still speaks for stands in the way.
+
+    Nothing was inserted and the admission carries **that** deferral, so a caller
+    can say which question it was and in what state — a rejected one to forget, or
+    an interrupted answer to dispose of. Both this and ``ADMITTED`` are successes,
+    and a caller must be able to tell them apart to say anything honest at all.
+    """
+
+    REFUSED = "refused"
+    """The answerable queue was at its cap; nothing was admitted and there is no
+    deferral to read.
+
+    A cap that refuses the *new* question rather than evicting an old one: the
+    producer still holds what it proposed and can re-propose, whereas an evicted
+    question is gone with nobody left to notice (ADR-0078 §7).
+    """
+
+
+class DeferredProposal(BaseModel):
+    """A memory proposal the policy deferred, held as a durable question (ADR-0078 §2).
+
+    **It is a question, not a belief.** ``band_of`` applied to its proposal says
+    only which band the record *would* enter if accepted, never what the system
+    holds — so a pending question is absent from retrieval, absent from belief
+    inspection, and contributes no confidence and no evidence to anything (§1).
+
+    **A record the store produces, never one a caller hands in.** Every instant on
+    it is stamped by the store from its own injected clock and ``retention`` from
+    the lifetime it was constructed with, because each of those instants decides
+    something a caller would otherwise be deciding for itself: ``answered_at`` is
+    a retention anchor, so a caller supplying it chooses how long its own rejection
+    suppresses the next honest proposal, and ``deferred_at``/``expires_at`` are the
+    lifetime, so a caller supplying them admits a question already lapsed or one
+    that holds the queue and its Tier 1 content for decades. Neither is caught by
+    a validator that only checks the fields agree with each other — 1970 and 2100
+    are both perfectly self-consistent. Likewise **every state after ``PENDING``
+    is reached by a transition the ``DeferralStore`` Protocol owns**, never by
+    being handed in.
+
+    The validator below still enforces the whole record, because the type crosses
+    the Protocol boundary on every read: its invariants belong on the model rather
+    than in one implementation's care, the same reason
+    :meth:`MemoryDecision._outcome_fields_are_consistent` is a validator and not a
+    comment.
+
+    **The duration is stored as well as the instant, and that is not redundancy.**
+    ``expires_at`` answers "is this still answerable?" and is fixed at admission
+    (ADR-0059 §1's ruling that a confirmation's lifetime rides on the record
+    rather than being recomputed from a live setting). The *other* deadline — how
+    long a resolved question's record is kept — is anchored on ``answered_at``,
+    which is not known until the answer arrives, so it can only be computed later:
+    defer under a 30-day lifetime, reject tomorrow, shorten the setting to a day,
+    and a live-setting computation drops the rejected key 29 days early and re-asks
+    a question the user already declined. So the duration rides on the record and
+    the sweep reads it there. Live configuration governs questions admitted from
+    now on; it never reaches back.
+
+    ``None`` in ``retention`` and ``expires_at`` is the user's deliberate "ask me
+    forever" (§6): the question never lapses and its record is never purged, the
+    way ``episode_retention`` reads ``None`` as "keep forever… the user's
+    deliberate choice".
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The question's own id, minted by the coordinator.")
+    proposal: MemoryUpdateProposal = Field(
+        description=(
+            "The deferred proposal verbatim, *including* the ``conflicts`` ids resolved at "
+            "ruling time — the frozen set the question was asked about (ADR-0078 §3, §4)."
+        ),
+    )
+    decision: MemoryDecision = Field(
+        description=(
+            "The ``ASK_USER`` ruling that deferred it; its non-optional ``reason`` is what "
+            "a surface renders as why the user is being asked."
+        ),
+    )
+    state: DeferralState = Field(description="Where the question stands (ADR-0078 §2).")
+    deferred_at: UtcInstant = Field(description="When the question was admitted (tz-aware).")
+    retention: timedelta | None = Field(
+        description=(
+            "The lifetime in force *at admission*, stamped once and never recomputed; "
+            "None is the deliberate 'ask me forever' (ADR-0078 §2, §6)."
+        ),
+    )
+    expires_at: UtcInstant | None = Field(
+        description=(
+            "The answerability deadline: ``deferred_at + retention``, or None when the "
+            "question never lapses. Half-open — answerable while ``now < expires_at``."
+        ),
+    )
+    claimed_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When an answer was begun, once claimed. The claim **token** is deliberately "
+            "not a field here: no read may republish a capability (ADR-0078 §2)."
+        ),
+    )
+    predecessor_id: Identifier | None = Field(
+        default=None,
+        description=(
+            "The question this one succeeds, when it was raised by a re-deferral; None "
+            "otherwise. The child names its parent so a token authorises rather than "
+            "identifies (ADR-0078 §2)."
+        ),
+    )
+    answered_at: UtcInstant | None = Field(
+        default=None,
+        description=(
+            "When the answer was recorded, once resolved. A retention anchor, which is "
+            "why the store stamps it and no call can supply it."
+        ),
+    )
+    outcome_record_id: Identifier | None = Field(
+        default=None,
+        description="The record an accepted apply left live; set on ACCEPTED and nothing else.",
+    )
+    successor_id: Identifier | None = Field(
+        default=None,
+        description=(
+            "The question a REDEFERRED answer raised — or the already-open one it "
+            "collapsed onto. Set on REDEFERRED, and stamped on a parent when its "
+            "successor is admitted (ADR-0078 §2)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _is_a_coherent_question(self) -> DeferredProposal:
+        """Enforce the whole record: its tier, its ruling, its deadlines, its lifecycle.
+
+        Four groups, each of which admits a perfectly well-typed record that
+        defeats something this queue promises (ADR-0078 §2):
+
+        * **The sensitivity.** A ``DataTier.SECRET`` proposal is refused. ADR-0004
+          §3 is unconditional — Tier 0 secrets live in the OS keyring, "never in
+          the memory database, never in a committed file" — and a durable queue is
+          a file. Today the secret-tier arm of the policy is precisely what keeps
+          such content *out* of storage, so persisting it here would open a gap
+          rather than close one. The write stage filters those out before it calls
+          ``defer``; this is the rule that holds however the store is called.
+        * **The ruling.** ``decision.kind`` **is** ``ASK_USER``. A record built
+          around an ``ACCEPT`` or a ``SUPERSEDE`` is not a question at all — it is
+          a durable pending entry for a proposal nobody deferred, which a surface
+          would present and an answer path would re-ingest as though a user had
+          been asked. A public type may not rely on its one honest caller.
+        * **The deadlines.** ``retention`` is positive or ``None``; ``retention``
+          and ``expires_at`` are ``None`` together or not at all; and when both are
+          set, ``expires_at`` is exactly ``deferred_at + retention``. Without this a
+          question is admissible with a one-day ``retention`` and no
+          ``expires_at``, and a literal implementation keeps it answerable forever
+          and never purges it — §1's finite exposure cap defeated by a record the
+          contract accepted.
+        * **The lifecycle.** Each state requires its own stamps and forbids the
+          others'. ``REJECTED`` is the one terminal state legal both with and
+          without ``claimed_at``, because an unclaimed rejection writes nothing and
+          so needs no claim; every other terminal state requires one, or an apply
+          would be recorded as claim-protected when no claim ever covered it.
+
+        Raises:
+            ValueError: If any of the four groups is violated.
+        """
+        self._check_sensitivity()
+        self._check_ruling()
+        self._check_deadlines()
+        self._check_lifecycle()
+        return self
+
+    def _check_sensitivity(self) -> None:
+        """Refuse a Tier 0 proposal: ADR-0004 §3 forbids it a committed file."""
+        if self.proposal.sensitivity is DataTier.SECRET:
+            msg = (
+                "a DataTier.SECRET proposal may not be deferred: Tier 0 secrets live in the OS "
+                "keyring, never in a database or a committed file (ADR-0004 §3, ADR-0078 §1)"
+            )
+            raise ValueError(msg)
+
+    def _check_ruling(self) -> None:
+        """Refuse a record built around a ruling that is not a question."""
+        if self.decision.kind is not MemoryDecisionKind.ASK_USER:
+            msg = (
+                f"a deferred proposal must carry an ASK_USER ruling, got "
+                f"{self.decision.kind}: nothing else is a question the user can answer "
+                f"(ADR-0078 §2)"
+            )
+            raise ValueError(msg)
+
+    def _check_deadlines(self) -> None:
+        """Refuse a lifetime that is non-positive, half-set, or inconsistent."""
+        if self.retention is not None and self.retention <= timedelta(0):
+            msg = f"retention must be a strictly positive duration or None, got {self.retention}"
+            raise ValueError(msg)
+        if (self.retention is None) != (self.expires_at is None):
+            msg = (
+                "retention and expires_at are None together or not at all: a half-set "
+                "lifetime keeps a question answerable forever and never purges it "
+                "(ADR-0078 §2)"
+            )
+            raise ValueError(msg)
+        if (
+            self.retention is not None
+            and self.expires_at is not None
+            and self.expires_at != self.deferred_at + self.retention
+        ):
+            msg = (
+                f"expires_at must be exactly deferred_at + retention, got {self.expires_at} "
+                f"for {self.deferred_at} + {self.retention}"
+            )
+            raise ValueError(msg)
+
+    def _check_lifecycle(self) -> None:
+        """Refuse stamps and payload that do not belong to the state.
+
+        ``successor_id`` is deliberately **not** treated as terminal payload on an
+        ``APPLYING`` row: the store stamps it when it admits the successor, in the
+        same commit, so a parent legitimately carries one while its own answer is
+        still in flight — that is the state a cancellation caught after the
+        successor's admission leaves behind, and ADR-0078 §9 names it explicitly.
+        What ``APPLYING`` forbids is an *outcome*: ``answered_at`` and
+        ``outcome_record_id``, neither of which exists until the answer is recorded.
+        """
+        if self.state is DeferralState.PENDING:
+            if self.claimed_at is not None or self.answered_at is not None:
+                msg = "a PENDING deferral carries neither claimed_at nor answered_at"
+                raise ValueError(msg)
+            if self.outcome_record_id is not None or self.successor_id is not None:
+                msg = "a PENDING deferral carries no terminal payload"
+                raise ValueError(msg)
+            return
+        if self.state is DeferralState.APPLYING:
+            if self.claimed_at is None:
+                msg = "an APPLYING deferral requires claimed_at: it is a claim in flight"
+                raise ValueError(msg)
+            if self.answered_at is not None or self.outcome_record_id is not None:
+                msg = "an APPLYING deferral records no outcome: no answer has been recorded yet"
+                raise ValueError(msg)
+            return
+        self._check_terminal()
+
+    def _check_terminal(self) -> None:
+        """Refuse a terminal record whose stamps or ids are not that state's."""
+        if self.answered_at is None:
+            msg = f"a {self.state} deferral requires answered_at: an answer was recorded"
+            raise ValueError(msg)
+        # `REJECTED` is the one terminal state reachable without a claim (an
+        # unclaimed rejection writes nothing, so it needs no claim); every other
+        # terminal state means an apply ran under one.
+        if self.claimed_at is None and self.state is not DeferralState.REJECTED:
+            msg = (
+                f"a {self.state} deferral requires claimed_at: only an unclaimed REJECTED "
+                f"resolution reaches a terminal state without a claim (ADR-0078 §2)"
+            )
+            raise ValueError(msg)
+        if self.state is DeferralState.ACCEPTED:
+            if self.outcome_record_id is None:
+                msg = "an ACCEPTED deferral requires outcome_record_id: it names what was written"
+                raise ValueError(msg)
+            if self.successor_id is not None:
+                msg = "an ACCEPTED deferral raised no successor question"
+                raise ValueError(msg)
+            return
+        if self.state is DeferralState.REDEFERRED:
+            if self.successor_id is None:
+                msg = "a REDEFERRED deferral requires successor_id: it names the question it raised"
+                raise ValueError(msg)
+            if self.outcome_record_id is not None:
+                msg = "a REDEFERRED deferral wrote no record"
+                raise ValueError(msg)
+            return
+        if self.outcome_record_id is not None or self.successor_id is not None:
+            msg = f"a {self.state} deferral carries neither a record id nor a successor id"
+            raise ValueError(msg)
+
+    def is_answerable_at(self, now: datetime) -> bool:
+        """Whether this question can still be answered at ``now`` (ADR-0078 §2).
+
+        ``PENDING`` **and** before ``expires_at``. The comparison is **half-open**
+        — answerable while ``now < expires_at``, and **at** ``expires_at`` it is
+        not — which is ``Validity.live_at``'s own convention, adopted for
+        consistency rather than preference: two deadline notions in one memory
+        system that disagree at the instant they name is a defect waiting for the
+        first test that lands exactly on it. Defined once here, on the type, so
+        every operation that consults the deadline spells it the same way rather
+        than one backend writing ``<=`` and another ``<``.
+
+        A question whose ``expires_at`` is ``None`` never lapses out of this.
+
+        Args:
+            now: The instant to judge against; the caller reads its own guarded
+                clock and passes the reading.
+
+        Returns:
+            ``True`` iff the question is ``PENDING`` and ``now < expires_at``.
+        """
+        return self.state is DeferralState.PENDING and (
+            self.expires_at is None or now < self.expires_at
+        )
+
+    def speaks_for_its_key_at(self, now: datetime) -> bool:
+        """Whether this record still holds its ``question_key`` at ``now`` (ADR-0078 §2, §7).
+
+        A key "still speaks for" a deferral that is **answerable** (``PENDING``,
+        before its deadline), **being applied** (``APPLYING``), or **``REJECTED``
+        within its retention** — the three states in which a fresh arrival of the
+        same question deserves no new entry. Each is a different sentence to the
+        user: "you can answer this", "an answer to that may be committing right
+        now", and "we asked and you declined".
+
+        A key whose only match is *lapsed-and-unanswered*, ``ACCEPTED``, ``STALE``
+        or ``REDEFERRED`` does **not** speak: the question lapsed, was settled, or
+        was replaced by the successor it names, and a fresh proposal deserves a
+        fresh question. A lapsed row in particular must not suppress anything —
+        it is the one outcome a question nobody could answer must not have.
+
+        Args:
+            now: The instant to judge against.
+
+        Returns:
+            ``True`` iff a fresh arrival of the same question would be suppressed.
+        """
+        if self.state is DeferralState.APPLYING:
+            return True
+        if self.state is DeferralState.REJECTED:
+            return not self._retention_elapsed_at(now)
+        return self.is_answerable_at(now)
+
+    def is_purgeable_at(self, now: datetime) -> bool:
+        """Whether a sweep may destroy this record at ``now`` (ADR-0078 §2).
+
+        **Two anchors, and the asymmetry is the decision.** A *terminal* row is
+        retained for one further lifetime because something depends on it
+        surviving: a ``REJECTED`` key is read to refuse re-asking, and that is the
+        whole retention argument. A *lapsed* ``PENDING`` row has no such dependant
+        — its key stopped speaking the instant it lapsed, so nothing reads it —
+        and giving it the same grace would hold an unanswered Tier 1 proposal for
+        **twice** the configured lifetime, while ADR-0078 §1 calls that lifetime
+        the cap on how long unresolved sensitive content sits. So:
+
+        * terminal, ``retention`` is not ``None``, and ``answered_at + retention
+          <= now``; or
+        * ``PENDING``, ``expires_at`` is not ``None``, and ``expires_at <= now``.
+
+        Both are inclusive at the instant they name — answerability seen from the
+        other side. ``retention is None`` is a complete answer rather than an
+        undefined expression: **a row admitted under "ask me forever" is never
+        purged**, in either half, which is the same choice the user made.
+
+        **An ``APPLYING`` row is never purgeable, at any age.** It is the only
+        durable record that an answer was begun, and destroying it while its
+        ingest may still be running would let the memory write commit against a
+        question that no longer exists, so the bookkeeping fails and the fact that
+        an answer was given survives nowhere. A sweep may not make that decision; a
+        user may, and does, through ``delete``.
+
+        Args:
+            now: The instant to judge against.
+
+        Returns:
+            ``True`` iff a sweep may remove this record.
+        """
+        if self.state in TERMINAL_DEFERRAL_STATES:
+            return self._retention_elapsed_at(now)
+        return (
+            self.state is DeferralState.PENDING
+            and self.expires_at is not None
+            and self.expires_at <= now
+        )
+
+    def _retention_elapsed_at(self, now: datetime) -> bool:
+        """Whether a terminal row's post-answer retention has run out at ``now``.
+
+        ``False`` when ``retention`` is ``None`` ("keep forever") or when no answer
+        has been recorded, so the two halves of :meth:`is_purgeable_at` and
+        :meth:`speaks_for_its_key_at` read one definition of the anchor.
+        """
+        if self.retention is None or self.answered_at is None:
+            return False
+        return self.answered_at + self.retention <= now
+
+
+class DeferralClaim(BaseModel):
+    """A claimed deferral and the token that authorises acting on it (ADR-0078 §2).
+
+    One value rather than two strings a caller could swap, the reason
+    :class:`ParkedBinding` is one. The token is **the capability**: minted by
+    ``claim``, returned to that caller alone, and — the part that makes it worth
+    anything — **on no other read**. ``get``, ``pending``, ``interrupted`` and
+    ``export`` return :class:`DeferredProposal`s, which carry ``claimed_at`` so a
+    surface can say *when* an answer was begun, and never the token. Holding the
+    token is holding the claim, and an export that carried one would hand the
+    ability to resolve a live claim to anything that reads the file.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    deferral: DeferredProposal = Field(description="The deferral, now APPLYING.")
+    claim_id: Identifier = Field(
+        description=(
+            "The freshly minted, cryptographically unpredictable token that authorises "
+            "resolving this claim and spending its successor exemption (ADR-0078 §2)."
+        ),
+    )
+
+
+class DeferralAdmission(BaseModel):
+    """What offering a question to the queue produced (ADR-0078 §2, §7).
+
+    **Exactly three shapes, one per outcome**, pinned by the validator the way
+    :meth:`MemoryDecision._outcome_fields_are_consistent` pins a ruling's:
+    ``ADMITTED`` carries the new deferral, ``SUPPRESSED`` carries the existing one
+    the key spoke for, and ``REFUSED`` carries nothing and means the answerable
+    queue was at its cap. A physical id collision is not among them — it raises,
+    rather than returning a fourth shape nobody would check for.
+
+    The disposition is carried **explicitly** rather than left to be inferred. Two
+    weaker shapes were tried and both are wrong: a bare id makes an admission and
+    a suppression indistinguishable, and comparing the returned id to the one the
+    caller minted fails the moment a caller *retries with the same id* — a
+    legitimate pattern after an uncertain failure — because the key-idempotent path
+    then returns a row whose id equals the supplied one while being ``REJECTED`` or
+    ``APPLYING``, and the caller would announce a newly parked question over a
+    suppressed one.
+
+    Reaching for :attr:`deferral` on a ``REFUSED`` admission is the dereference
+    the validator exists to make impossible to write by accident.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: DeferralAdmissionOutcome = Field(description="What the store did with the question.")
+    deferral: DeferredProposal | None = Field(
+        default=None,
+        description=(
+            "The admitted question, or the existing one that suppressed it; None when "
+            "the queue refused it, because there is no question to read."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _outcome_carries_its_own_shape(self) -> DeferralAdmission:
+        """Require a deferral on the two successes and forbid one on the refusal.
+
+        Raises:
+            ValueError: If ``ADMITTED``/``SUPPRESSED`` carries no deferral, or
+                ``REFUSED`` carries one.
+        """
+        if self.outcome is DeferralAdmissionOutcome.REFUSED:
+            if self.deferral is not None:
+                msg = (
+                    "a REFUSED admission carries no deferral: the queue was full, so no "
+                    "question stands in the way and none was created (ADR-0078 §7)"
+                )
+                raise ValueError(msg)
+            return self
+        if self.deferral is None:
+            msg = f"a {self.outcome} admission requires the deferral it is about"
+            raise ValueError(msg)
+        return self
 
 
 # --- observation: what one pass over a batch of episodes produced (ADR-0077) --
@@ -1092,24 +1948,6 @@ type FrozenJsonMapping = Annotated[
 """A string-keyed mapping of :data:`FrozenJson` values, frozen on validation."""
 
 _EMPTY_PARAMS: Mapping[str, FrozenJson] = FrozenDict()
-
-
-def _non_blank(value: str) -> str:
-    """Reject a blank identifier, returning it stripped.
-
-    An empty ``approval_ref`` or ``bound_tool`` is worse than a missing one: it
-    satisfies "a reference is present" while identifying nothing, so a step
-    could look authorised and audited while being neither.
-    """
-    stripped = value.strip()
-    if not stripped:
-        msg = "identifier must not be blank"
-        raise ValueError(msg)
-    return stripped
-
-
-type Identifier = Annotated[str, AfterValidator(_non_blank)]
-"""A non-blank, stripped identifier."""
 
 
 # --- planning: goals, and the frozen plan (ADR-0014 §§1-2) -------------------
@@ -2605,42 +3443,6 @@ type DurableIdentifier = Annotated[Identifier, AfterValidator(_durable_identifie
 """An :data:`Identifier` that survives serialisation — for fields a record keeps."""
 
 
-#: A SHA-256 digest rendered as lowercase hex is exactly this long.
-_SHA256_HEX_LENGTH = 64
-
-_HEX_DIGITS = frozenset("0123456789abcdef")
-
-
-def _sha256_hex(value: str) -> str:
-    """Require a lowercase SHA-256 hex digest.
-
-    :attr:`PermissionDecision.parameters_digest` is filled by
-    :meth:`PermissionDecision.from_request` from
-    :attr:`ActionRequest.parameters_digest`, which always produces this shape —
-    but the field is a plain ``str``, so a hand-constructed decision could carry
-    anything, including text with no UTF-8 encoding. That is the last field of a
-    decision that could break ADR-0021 §4's requirement that a record reload,
-    and unlike the others it has an exact form to check rather than merely a
-    property.
-
-    Lowercase specifically: ``hexdigest()`` emits lowercase, so accepting
-    uppercase would admit a second spelling of the same digest that compares
-    unequal — a false mismatch at execution, which reads as an attack rather
-    than as a bug.
-
-    Raises:
-        ValueError: If the value is not 64 lowercase hex digits.
-    """
-    if len(value) != _SHA256_HEX_LENGTH or not _HEX_DIGITS.issuperset(value):
-        msg = f"parameters_digest must be {_SHA256_HEX_LENGTH} lowercase hex digits, got {value!r}"
-        raise ValueError(msg)
-    return value
-
-
-type Sha256Hex = Annotated[str, AfterValidator(_sha256_hex)]
-"""A lowercase SHA-256 digest in hex — the form :func:`hashlib.sha256` emits."""
-
-
 # --- the binding: detachment, and the canonical digest (ADR-0021 §1) ---------
 # What makes "by value" true rather than nominal. `_canonical_json` is shared
 # by the validator and by the digest, so "accepted" and "digestible" are one
@@ -2698,11 +3500,14 @@ def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
     predicate by construction, rather than two enumerations that can disagree —
     and disagreeing means a request a policy can rule on but no decision can be
     recorded about.
+
+    The encoding itself is :func:`_canonical_bytes`; this is the thaw that gets a
+    validated payload into a shape ``json.dumps`` accepts. Delegating rather than
+    repeating the ``dumps`` call is what keeps ADR-0078 §7's fingerprint hashing
+    the *same* form this one does — two spellings of "canonical" is precisely the
+    hazard that section is written about.
     """
-    text = json.dumps(
-        _thaw_json(parameters), sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
-    return text.encode("utf-8")
+    return _canonical_bytes(_thaw_json(parameters))
 
 
 # --- permissions: the request, the ruling, their binding (ADR-0021) ----------

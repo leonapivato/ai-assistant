@@ -473,6 +473,71 @@ class Settings(BaseSettings):
         description="The most beliefs one observation pass may propose; excess is discarded.",
     )
 
+    # --- Deferred questions (ADR-0078) -----------------------------------
+    # The two tunings the deferral queue is built with. Both reach the store's
+    # **constructor** and are validated there in the `_check_tuning` shape
+    # (ADR-0022 §4a), so each is read once per store and never per operation — which
+    # is the other half of ADR-0078 §2's rule that live configuration never reaches
+    # back into a question already asked. `deferral_ttl` is stamped onto each record
+    # as its `retention`/`expires_at` at admission; nothing consults the setting
+    # again, so shortening it tomorrow cannot drop a rejected key 29 days early and
+    # re-ask a question the user already declined.
+    #
+    # `deferral_ttl` is parsed from an ISO-8601 duration or `HH:MM:SS` string
+    # (`ASSISTANT_DEFERRAL_TTL=P7D`), and **defaults to a finite 30 days, which is
+    # the whole decision** (ADR-0078 §6). The codebase holds both shapes and the
+    # choice between them is the mistake ADR-0074 §7 warned about:
+    # `confirmation_ttl` above defaults to `None`, which there means a parked
+    # confirmation never goes stale, and here would mean a never-expiring queue of
+    # machine-asked questions — precisely the undignified pile §7 exists to prevent.
+    # A permission confirmation gates an action the user just asked for and is
+    # worthless once stale; a memory deferral is generated *by the system*, at
+    # whatever rate the observer runs. So this belongs with `episode_retention`, and
+    # 30 days is deliberately that field's horizon: a deferred question is about a
+    # belief, and for an observed one the *evidence* is episodes on that clock, so a
+    # question outliving them would ask the user to adjudicate something the system
+    # can no longer explain. `None` — reachable only through the disable sentinel —
+    # is the user's deliberate "ask me forever": the question never lapses and its
+    # record is never purged, in the same words `episode_retention` already uses.
+    #
+    # `deferral_queue_limit` bounds the **answerable** queue (`PENDING` and before
+    # its deadline); lapsed and resolved rows awaiting a sweep do not count against
+    # it, so a queue cannot be held shut by questions nobody can answer. At the cap
+    # `defer` refuses the new question rather than evicting an old one, and the
+    # refusal is reported to whoever proposed. It is **strictly positive with no
+    # "unlimited" spelling**: a cap of 0 is at capacity before its first admission,
+    # so every `ASK_USER` proposal is refused and the drop ADR-0078 exists to end
+    # returns in full, by configuration, while the system reports health — exactly
+    # the class of value ADR-0022 §4a refuses at construction, and the reason
+    # `confirmation_ttl` and `conversation_tombstone_grace` both carry their own
+    # positive bound. An *uncapped* queue is what §7 exists to prevent, and
+    # `deferral_ttl`'s `None` is already the deliberate escape at the other axis.
+    # The default matches the bounded default page size of `DeferralStore.pending`,
+    # so the whole answerable queue fits one page and §7's "the cap is legible from
+    # the first page" is true in the strongest sense — and fifty unanswered
+    # machine-asked questions is already past dignified. `lt=2**63` keeps it inside
+    # the integer domain every count in these backends lives in, as
+    # `observation_batch_size` does for its own.
+    deferral_ttl: _OptionalDuration = Field(
+        default=timedelta(days=30),
+        gt=timedelta(0),
+        description=(
+            "How long a deferred memory question stays answerable, stamped onto each "
+            "question at admission (ADR-0078 §6). Finite by default; set it to 'none' to "
+            "be asked forever, which also stops those questions ever being purged."
+        ),
+    )
+    deferral_queue_limit: int = Field(
+        default=50,
+        gt=0,
+        lt=2**63,
+        description=(
+            "The most answerable deferred questions the queue holds; beyond it a new "
+            "question is refused rather than an old one evicted (ADR-0078 §7). Positive, "
+            "with no unlimited spelling."
+        ),
+    )
+
     # --- Permissions -----------------------------------------------------
     # The four thresholds ThresholdActionPolicy gates on (ADR-0036 §1). These are
     # the *user's* configuration, not the contract's — ADR-0021 §5 records that
