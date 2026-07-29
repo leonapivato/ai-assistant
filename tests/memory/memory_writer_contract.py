@@ -1346,20 +1346,40 @@ class MemoryWriterContract:
 
         A raise rather than a fabricated ``REJECT``, because a ruling is the
         policy's to make (ADR-0005 §3) — which is why the policy must not have been
-        asked. The named subclass carries the unresolved ids, so a stage can
-        compare them against the batch it selected and tell an evidence record that
-        went away under it from a producer citing something it was never handed.
+        asked.
+
+        **Every** unresolved id is named, **in the order it was cited**, and that
+        exactness is the whole point of the named subclass rather than decoration.
+        ``UnresolvedEvidenceError`` documents both, and the consumer ADR-0077 §5
+        built it for depends on them: the ingesting stage compares the reported ids
+        against the batch it selected, drops the proposal when *every* one is a
+        selected episode that expired under it (the race), and **propagates** when
+        *any* is an id the producer was never handed (the fault). A writer
+        reporting only the first failure would let a foreign id hide behind an
+        expiry that happened to be cited before it — burying a producer bug under
+        the race that accompanied it, which is the one confusion the quantifier
+        exists to remove.
+
+        So three citations, deliberately ordered: a missing one, a resolvable one
+        between them, and a second missing one. The exact tuple pins completeness
+        and order together, and rules out a writer that reports the first, sorts,
+        or includes the citation that resolved. It does **not** pin
+        de-duplication — no ADR states it, so a writer reporting a repeated
+        citation twice conforms and the suite plants no duplicate.
         """
         store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
         before = await store.export()
         policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
         writer = make_writer(store, policy)
+        # Cited in an order no sort reproduces: "gone-later" precedes "gone-early".
+        cited = ("gone-later", _CITED, "gone-early")
 
         with pytest.raises(UnresolvedEvidenceError) as caught:
-            await writer.ingest(_proposal(_preference("new", evidence=("gone",))))
+            await writer.ingest(_proposal(_preference("new", evidence=cited)))
 
-        assert "gone" in caught.value.unresolved_ids
+        assert tuple(caught.value.unresolved_ids) == ("gone-later", "gone-early")
         assert policy.call_count == 0  # refused before any ruling was sought
         assert await store.export() == before
         assert await store.get("new") is None
