@@ -34,9 +34,11 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import UnresolvedEvidenceError
 from ai_assistant.core.types import EpisodicMemory, MemoryKind
-from ai_assistant.orchestration.engine import LearnDecision, learn_decision
+from ai_assistant.orchestration.engine import Evidence, LearnDecision, learn_decision
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
@@ -97,9 +99,17 @@ class ObservedProposal:
     a ruling and a record id and nothing else, and for an ``ASK_USER`` that id is
     ``None`` — so an entry built from the result alone would render a deferral as a
     bare ruling with nothing to show, which is precisely the visibility ADR-0077 §4
-    promises while ADR-0078 is unbuilt. Carrying the candidate's own content, its
-    citation count and the policy's reason is what makes a deferral actionable with
-    the surfaces leg 1 already shipped.
+    promises while ADR-0078 is unbuilt.
+
+    **The citations travel with it, resolved, and not as a count.** ADR-0077 §4 is
+    explicit that the outcome carries "the candidate's content, its citations and
+    the policy's stated reason — not merely a count and a ``None`` record id", and
+    the reason is structural rather than stylistic: **nothing persists a deferred
+    proposal**, so there is no later belief-detail view through which its warrant
+    could ever be inspected. A count here would be the last word on a belief the
+    user is being asked to act on. They are resolved to readable content — or to a
+    tombstone where the citation is exactly what went away — and never to an id,
+    which is ADR-0073 §4's floor applying here as it does on the inspection surface.
 
     Attributes:
         content: The canonical text rendering of the belief that was proposed.
@@ -110,8 +120,13 @@ class ObservedProposal:
             (ADR-0072 §3). Both land in the ``DERIVED`` band, so the band carries
             no information here and the *step* is the informative half.
         confidence: How strongly the producer proposed holding it, always strictly
-            below 1.0 — the standing only the user's own word carries.
-        evidence_count: How many episodes it cites. At least one, and at least two
+            below 1.0 — the standing only the user's own word carries. Unadjusted,
+            unlike a presented belief's: this is the number the producer proposed
+            and the write path has only just ruled on, so there is no lost support
+            for it to have fallen with.
+        evidence: The episodes it cites, in the order the proposal wrote them,
+            each resolved to readable content — or a tombstone where that citation
+            is the one that stopped resolving. At least one entry, and at least two
             distinct ones for an ``INFERRED`` belief (ADR-0077 §5).
         rationale: The producer's own statement of why the batch justifies it.
         decision: How memory folded it, or ``None`` when **no ruling was ever
@@ -132,29 +147,54 @@ class ObservedProposal:
     kind: MemoryKind
     step: MemorySource
     confidence: float
-    evidence_count: int
     rationale: str
     decision: LearnDecision | None
     record_id: str | None
     reason: str
+    evidence: tuple[Evidence, ...] = ()
 
     @property
     def stored(self) -> bool:
         """Whether the write left a record live in memory."""
         return self.record_id is not None
 
+    @property
+    def evidence_count(self) -> int:
+        """How many episodes it cites."""
+        return len(self.evidence)
+
+    @property
+    def inspectable(self) -> bool:
+        """Whether a later read can still show this belief and its warrant.
+
+        ``False`` for everything the write path did not leave a record for — a
+        deferral, a rejection, a drop. Those have **no** later belief-detail view
+        (nothing persists a deferred proposal, ADR-0077 §4), so this report is the
+        only place their evidence is ever shown, and a surface renders it here or
+        nowhere.
+        """
+        return self.record_id is not None
+
     @classmethod
-    def ruled(cls, proposal: MemoryUpdateProposal, result: MemoryIngestResult) -> ObservedProposal:
+    def ruled(
+        cls,
+        proposal: MemoryUpdateProposal,
+        result: MemoryIngestResult,
+        evidence: tuple[Evidence, ...] = (),
+    ) -> ObservedProposal:
         """Pair a proposal with the ruling the write path returned for it."""
         return cls._project(
             proposal,
             decision=learn_decision(result.decision.kind),
             record_id=result.record_id,
             reason=result.decision.reason,
+            evidence=evidence,
         )
 
     @classmethod
-    def unsupported(cls, proposal: MemoryUpdateProposal) -> ObservedProposal:
+    def unsupported(
+        cls, proposal: MemoryUpdateProposal, evidence: tuple[Evidence, ...] = ()
+    ) -> ObservedProposal:
         """Record a proposal the write path refused for unresolved evidence.
 
         Reported rather than dropped in silence: a belief whose support went away
@@ -162,7 +202,13 @@ class ObservedProposal:
         between an outcome the user can read and a count that went missing
         (ADR-0077 §5).
         """
-        return cls._project(proposal, decision=None, record_id=None, reason=_UNSUPPORTED_REASON)
+        return cls._project(
+            proposal,
+            decision=None,
+            record_id=None,
+            reason=_UNSUPPORTED_REASON,
+            evidence=evidence,
+        )
 
     @classmethod
     def _project(
@@ -172,6 +218,7 @@ class ObservedProposal:
         decision: LearnDecision | None,
         record_id: str | None,
         reason: str,
+        evidence: tuple[Evidence, ...],
     ) -> ObservedProposal:
         """Read the candidate half of a proposal, and pair it with an outcome.
 
@@ -181,6 +228,11 @@ class ObservedProposal:
         :meth:`~ai_assistant.orchestration.engine.LearnOutcome.from_results` holds
         that boundary on the learn path (ADR-0042 §1). Both entry points go through
         it, so a dropped proposal is rendered as fully as a ruled one.
+
+        ``evidence`` is resolved by the stage rather than here, because resolving it
+        is a read over the batch (and, on one unreachable path, over the store) while
+        this is a pure projection — the same split :meth:`Belief.from_record` makes.
+        It must carry one entry per citation, in order.
         """
         record = proposal.proposed
         provenance = record.provenance
@@ -189,11 +241,11 @@ class ObservedProposal:
             kind=MemoryKind(record.kind),
             step=provenance.source,
             confidence=provenance.confidence,
-            evidence_count=len(provenance.evidence),
             rationale=proposal.rationale,
             decision=decision,
             record_id=record_id,
             reason=reason,
+            evidence=evidence,
         )
 
 
@@ -414,11 +466,14 @@ class ObservationStage:
         if not episodes:
             return ObservationReport(conversation_id=target)
         outcome = await self._observer.observe(episodes)
-        selected = frozenset(episode.id for episode in episodes)
+        # The batch *is* the evidence: every citation is drawn from it by contract,
+        # so a proposal's warrant renders out of what was already read, with no
+        # second pass over the store (ADR-0077 §5).
+        batch = {episode.id: episode.content for episode in episodes}
         proposals: list[ObservedProposal] = []
         dropped = 0
         for proposal in outcome.proposals:
-            entry = await self._ingest(proposal, selected=selected)
+            entry = await self._ingest(proposal, batch=batch)
             if entry.decision is None:
                 dropped += 1
             proposals.append(entry)
@@ -470,7 +525,7 @@ class ObservationStage:
         return tuple(episodes)
 
     async def _ingest(
-        self, proposal: MemoryUpdateProposal, *, selected: frozenset[str]
+        self, proposal: MemoryUpdateProposal, *, batch: Mapping[str, str]
     ) -> ObservedProposal:
         """Put one proposal through the write path, discriminating race from bug.
 
@@ -487,10 +542,52 @@ class ObservationStage:
             result = await self._writer.ingest(proposal)
         except UnresolvedEvidenceError as exc:
             unresolved = frozenset(exc.unresolved_ids)
-            if not unresolved or not unresolved <= selected:
+            if not unresolved or not unresolved <= batch.keys():
                 raise
-            return ObservedProposal.unsupported(proposal)
-        return ObservedProposal.ruled(proposal, result)
+            evidence = await self._evidence(proposal, batch=batch, unresolved=unresolved)
+            return ObservedProposal.unsupported(proposal, evidence)
+        evidence = await self._evidence(proposal, batch=batch, unresolved=frozenset())
+        return ObservedProposal.ruled(proposal, result, evidence)
+
+    async def _evidence(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        batch: Mapping[str, str],
+        unresolved: frozenset[str],
+    ) -> tuple[Evidence, ...]:
+        """Render one proposal's citations as readable evidence (ADR-0077 §4, §5).
+
+        **Out of the batch, not out of the store.** Every citation is drawn from the
+        episodes this pass selected (ADR-0077 §5's mapping rule), so the content is
+        already in hand and resolving it costs no read at all — which matters because
+        this runs per proposal on a path that has just written to the store.
+
+        ``unresolved`` names the citations the writer refused the proposal for. Those
+        render as **tombstones**, and that is the honest rendering rather than a
+        convenient one: the record is gone, and echoing the copy still sitting in
+        this pass's batch would print back content the user may have just destroyed
+        with ``forget-conversation``.
+
+        A citation in neither — resolvable at the write yet absent from the batch —
+        is a producer that breached §5's mapping rule and got past the writer because
+        the id happened to name something. It is unreachable for a conforming
+        observer, and it is resolved through the store rather than guessed at,
+        because the two available guesses are both lies: a tombstone would claim it
+        was destroyed, and dropping it would hide a citation, which ADR-0073 §4's
+        floor forbids in as many words.
+        """
+        items: list[Evidence] = []
+        for cited in proposal.proposed.provenance.evidence:
+            if cited in unresolved:
+                items.append(Evidence())
+                continue
+            content = batch.get(cited)
+            if content is None:
+                found = await self._memory.get(cited)
+                content = None if found is None else found.content
+            items.append(Evidence(content=content))
+        return tuple(items)
 
 
 __all__ = [

@@ -1332,24 +1332,34 @@ async def test_forget_conversation_declines_an_id_it_cannot_show(output: StringI
 # --- observe: the accumulation surface (ADR-0077 §8, §9.8) ---------------
 
 
+#: The citations behind the default scripted proposal, resolved.
+_TWO_EPISODES = _cited("they asked for metric", "they asked for metric again")
+
+
 def _proposal(
     *,
     decision: LearnDecision | None = LearnDecision.STORED,
     record_id: str | None = "rec-9",
     content: str = "the user prefers metric units",
     reason: str = "fake: configured decision",
+    evidence: tuple[Evidence, ...] = _TWO_EPISODES,
 ) -> ObservedProposal:
-    """One entry of an observation report, as the stage builds it."""
+    """One entry of an observation report, as the stage builds it.
+
+    ``evidence`` defaults to two resolved citations, because a proposal citing
+    nothing is not a shape a conforming observer can produce (ADR-0077 §5's floor is
+    a minimum of one, two for an ``INFERRED`` belief).
+    """
     return ObservedProposal(
         content=content,
         kind=MemoryKind.SEMANTIC,
         step=MemorySource.OBSERVED,
         confidence=0.6,
-        evidence_count=2,
         rationale="they said so twice",
         decision=decision,
         record_id=record_id,
         reason=reason,
+        evidence=evidence,
     )
 
 
@@ -1736,3 +1746,86 @@ async def test_an_observed_belief_reads_back_with_the_episodes_behind_it(
         await engine.aclose()
 
     assert "Because:" in output.getvalue()
+
+
+def test_a_deferral_shows_the_episodes_it_rests_on(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0077 §4: a reported deferral carries the candidate, **its citations**, the reason.
+
+    The citations have to be *here* because nothing persists a deferred proposal —
+    there is no later belief-detail view through which its warrant could ever be
+    inspected, so a count would be the last word on a belief the user is being asked
+    to act on. Resolved content, never an id (ADR-0073 §4's floor).
+    """
+    report = _observed_report(
+        proposals=(
+            _proposal(
+                decision=LearnDecision.DEFERRED,
+                record_id=None,
+                content="the user works from Lisbon",
+                reason="fake: an inference never silently overrides an assertion",
+                evidence=_cited("I'm in Lisbon this month", "the Lisbon office again"),
+            ),
+        )
+    )
+    _wire(monkeypatch, _RecordingObserveEngine(report))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = _flat(output.getvalue())
+    assert "I'm in Lisbon this month" in rendered
+    assert "the Lisbon office again" in rendered
+    assert "rec-" not in rendered, "no citation id reaches the terminal"
+
+
+def test_a_dropped_proposal_tombstones_the_evidence_that_went_away(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The citation that vanished is why nothing was stored, so it is shown as gone.
+
+    Echoing the copy still sitting in the pass's batch would print back content the
+    user may have just destroyed with ``forget-conversation``; dropping it would hide
+    a citation, which ADR-0073 §4's floor forbids. A tombstone is the only honest
+    third option.
+    """
+    report = _observed_report(
+        proposals=(
+            _proposal(
+                decision=None,
+                record_id=None,
+                reason="the evidence it cited went away between selection and the write",
+                evidence=(_cited("a surviving episode")[0], _GONE),
+            ),
+        ),
+        dropped_unsupported=1,
+    )
+    _wire(monkeypatch, _RecordingObserveEngine(report))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = _flat(output.getvalue())
+    assert "a surviving episode" in rendered
+    assert "an episode stood here and is gone" in rendered
+
+
+def test_a_stored_belief_points_at_its_own_view_rather_than_reprinting_the_transcript(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept belief has a later detail view; a deferral does not — hence the split.
+
+    Printing every episode behind every accepted belief would reprint the transcript
+    the observation was distilled *from*, which is the opposite of what a summary is
+    for. The id and ``assistant beliefs`` are the route to the warrant instead.
+    """
+    _wire(monkeypatch, _RecordingObserveEngine(_observed_report()))
+
+    result = CliRunner().invoke(cli.app, ["observe"])
+
+    assert result.exit_code == 0
+    rendered = _flat(output.getvalue())
+    assert "they asked for metric" not in rendered, "a stored belief does not reprint its episodes"
+    assert "rec-9" in rendered
+    assert "assistant beliefs" in rendered

@@ -1213,8 +1213,20 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
     while ``observed`` versus ``inferred`` is the difference between "your own words
     show this" and "I generalised from them" (ADR-0072 §3).
 
-    Engine-supplied text — the content, the rationale, the policy's reason, the id —
-    is neutralised for this terminal like any other (``_safe``, ADR-0042 §4).
+    **The citations are printed for whatever the write path did not keep** — a
+    deferral, a rejection, a drop. ADR-0077 §4 requires a reported deferral to carry
+    "the candidate's content, its citations and the policy's stated reason", and the
+    reason it must be *here* is that nothing persists a deferred proposal: there is
+    no later belief-detail view through which its warrant could be inspected, so
+    this rendering is the only one there will ever be. A **stored** belief is not
+    printed with its evidence, because it has that later view — ``assistant
+    beliefs`` lists it and the forget ceremony shows the warrant in full — and
+    echoing every episode behind every accepted belief would reprint the transcript
+    the observation was distilled *from*.
+
+    Engine-supplied text — the content, the rationale, the policy's reason, the id,
+    a citation's content — is neutralised for this terminal like any other
+    (``_safe``, ADR-0042 §4).
     """
     console.print(
         f"\n  [bold cyan]{proposal.step.value}[/] · {proposal.kind.value} · "
@@ -1223,6 +1235,8 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
     )
     console.print(f"  {_safe(proposal.content)}")
     console.print(f"  [dim]Why:[/] {_safe(proposal.rationale)}")
+    if not proposal.inspectable:
+        _render_citations(proposal)
     if proposal.decision is None:
         console.print(f"  [yellow]Not stored:[/] {_safe(proposal.reason)}.")
         return
@@ -1237,6 +1251,24 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
         )
     if proposal.record_id is not None:
         console.print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
+
+
+def _render_citations(proposal: ObservedProposal) -> None:
+    """Render the episodes one proposal rests on (ADR-0077 §4).
+
+    A citation the stage could not resolve is a **tombstone**, exactly as on the
+    inspection surface (:func:`_render_evidence`) and for ADR-0073 §4's reason: never
+    a bare id, never a silent gap. Here it means the evidence went away between
+    selection and the write, which is also why nothing was stored.
+    """
+    if not proposal.evidence:
+        return
+    console.print("  [dim]From:[/]")
+    for item in proposal.evidence:
+        if item.content is None:
+            console.print("    [yellow]—[/] [dim]an episode stood here and is gone.[/]")
+        else:
+            console.print(f"    - {_safe(item.content)}")
 
 
 def _render_observation_discards(report: ObservationReport) -> None:
