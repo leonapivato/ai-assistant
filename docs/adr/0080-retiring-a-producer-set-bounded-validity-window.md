@@ -260,14 +260,27 @@ have to be justified by a case the standing exclusions leave open. There is none
 valid_from`, so the window would be empty or inverted — the applier raises
 `MemoryStoreError` **before** the atomic batch. Nothing is written, no window is
 closed, the correction does not land, and **every** record in the retirement set
-is left live and unchanged (§6).
+is left **unchanged** (§6).
+
+**"Unchanged", not "left live", and the distinction is load-bearing here.** The
+refusal writes nothing, so each record's liveness afterwards is exactly what it
+was before the ingest — which for a record carrying its own bounded window is not
+necessarily *live*. A target whose `valid_until` has already passed at the
+reader's clock was retrieved as a conflict from a store clock before that end and
+is not live at a later one, refusal or no refusal. So the guarantee this ADR can
+make, and the one §7 states, is that **no window is closed and no record is
+written**; visibility is then whatever ADR-0045 §6's read-time predicate says at
+the reader's own clock. ADR-0079 §4's obligation 2 phrases the same all-or-nothing
+property as "every target is left live and unchanged" because its targets are
+ordinary open-window records, for which the two coincide; under this ADR they
+need not, so the weaker, exact form is used.
 
 This is not a second retirement rule. It is the acknowledgement that for such a
 record there is no representable retirement at all: `Validity`'s validator
 rejects the interval, `SqliteMemoryStore`'s decode re-runs that validator on
 load, and a store that accepted the write would hold a record it could not read
-back. Failing closed with the target live is the only outcome that leaves the
-store consistent.
+back. Failing closed, with the record left exactly as it was, is the only outcome
+that leaves the store consistent.
 
 **Two edges, named so the lane cannot get them wrong.**
 
@@ -426,7 +439,8 @@ Two clauses:
 - **the raise clause**: `MemoryStoreError` when a record the ruling would retire
   carries a `valid_from` at or after that end, so the closed window would be
   empty or inverted — with nothing written, no window closed, and every record in
-  the set left live and unchanged. This is flagged under golden rule 5 as a
+  the set left **unchanged**, so each one's liveness is exactly what it was
+  before the ingest (§3). This is flagged under golden rule 5 as a
   semantics widening rather than waved through as a no-op, the treatment ADR-0074
   §9 gave `Planner.plan`'s `memories` parameter and ADR-0079 §4 its own raise
   clause.
@@ -448,31 +462,56 @@ the two could drift into disagreeing about whether a write is *possible*, which
    in `export` (ADR-0045 §6); the correction lands at a fresh id with a fresh open
    window and `record_id` names it.
 2. **An unrepresentable close refuses, and writes nothing.** A `SUPERSEDE` over a
-   target planted with a `valid_from` after the writer's close, read from a store
-   clock at or after that `valid_from` so it is a live conflict. Pinned:
-   `ingest` raises `MemoryStoreError`, nothing is written, and no window is
-   closed.
-3. **All-or-nothing across a mixed set.** The same shape with at least one
-   ordinary open-window sibling in the retirement set. Pinned: on the refusal
-   **every** target is left live and unchanged — the §6 clause, and the
-   generalisation of ADR-0079 §4's obligation 2 from the id-factory failure to
-   this one.
+   retirement set holding a target planted with `valid_from = F` **and** at least
+   one ordinary open-window sibling, read from a store clock at or after `F` so
+   both are live conflicts. Pinned as the exhaustive disjunction below: either
+   the ingest raised and nothing in the set moved, or it succeeded and did so
+   lawfully. There is no third outcome, and in particular no outcome in which a
+   record is stored carrying an unrepresentable window.
+3. **All-or-nothing across the set, and one close instant for it.** On the
+   refusal branch of obligation 2, **every** record in the set is left
+   byte-identical to what was planted — no window closed, no correction written,
+   no id minted — which is the §6 clause and the generalisation of ADR-0079 §4's
+   obligation 2 from the id-factory failure to this one. On the success branch,
+   **every** retired record carries the *same* `valid_until` (§1's one-instant
+   rule) and each retired record's window is **well-formed** — `valid_until`
+   strictly greater than `valid_from` wherever `valid_from` is set.
 
-**Both are stated so no writer clock is pinned, and `WriterFactory` gains
-nothing.** This is the constraint that shapes the obligations: the suite
-"deliberately does not pin clock handling (a writer with no clock at all
-conforms)", which is why the bounded-window tests have lived per-writer until
-now. Obligation 1 needs no clock because "never extend" is an **inequality**
-against the planted end, which every conforming writer satisfies whatever its
-clock reads. Obligations 2 and 3 are stated as a **disjunction** the suite can
-observe: either the ingest refused with nothing written, **or** it succeeded and
-an open-window sibling's stamped `valid_until` — which *is* the writer's close
-instant — is at or after the planted `valid_from`, in which case the window was
-representable and the close was lawful. So no clock seam is added, and the
-suite's standing refusal to pin the limit's value, the threshold, the tuning
-check and the clock all survive (ADR-0079 §4 needed a seam for its obligation;
-this one does not). The `WriterFactory` docstring's line that "the bounded-window
-close tests live with each concrete writer, not here" is what the lane updates.
+**No writer clock is pinned, and `WriterFactory` gains nothing.** This is the
+constraint that shapes the obligations: the suite "deliberately does not pin
+clock handling (a writer with no clock at all conforms)", which is why the
+bounded-window tests have lived per-writer until now. Obligation 1 needs no clock
+because "never extend" is an **inequality** against the planted end, which every
+conforming writer satisfies whatever its clock reads. Obligations 2 and 3 are
+stated as a **disjunction** the suite can observe:
+
+- **either** `ingest` raised `MemoryStoreError` and no record in the set changed
+  and no correction was written — the branch a writer whose close instant is at
+  or before `F` owes;
+- **or** `ingest` succeeded, **and** every retired record — the future-dated
+  target included — carries the same `valid_until`, **and** that instant is
+  strictly after `F`. Which is exactly the case where the window *was*
+  representable, so the close was lawful and no refusal was owed.
+
+**The success branch's two conjuncts are what make the disjunction airtight, and
+neither is decorative.** A weaker form — asserting only that the *sibling's*
+stamped close is at or after `F` — is satisfiable by a writer that violates both
+§1 and §3: sample the clock once per target, close the future-dated target at an
+instant before `F` (persisting the inverted window `[F, earlier)`, which
+`model_copy(update=...)` constructs without re-running `Validity`'s validator),
+then sample again past `F` for the sibling. Requiring the retired records to
+share one `valid_until` rules out the per-target sampling that makes the
+divergence possible, and requiring each retired window to be well-formed rules
+out the persisted inversion directly rather than by inference. Both must be
+asserted in the suite rather than left to the store: the shared suite runs over
+`FakeMemoryStore`, so `SqliteMemoryStore`'s decode re-validation — which would
+reject such a row on read — is not there to catch it.
+
+So no clock seam is added, and the suite's standing refusal to pin the limit's
+value, the threshold, the tuning check and the clock all survive (ADR-0079 §4
+needed a seam for its obligation; this one does not). The `WriterFactory`
+docstring's line that "the bounded-window close tests live with each concrete
+writer, not here" is what the lane updates.
 
 **`src/ai_assistant/testing/writer.py` — `FakeMemoryWriter` matches**, by the
 standing rule that it duplicates `_close_window` rather than importing it: the
@@ -613,7 +652,8 @@ sibling deferral of #306's absolute-hide half is likewise honoured, not absorbed
 - **A correction can now fail on a clock disagreement.** §3's refusal is a real
   user-visible failure mode: an ingest raises and the user's correction does not
   land. It is bounded to a state a coherent composition cannot produce (§3), it
-  is loud rather than silent, and it leaves every target live — but it is a second
+  is loud rather than silent, and it leaves every record in the set exactly as it
+  was — but it is a second
   way for a correction to refuse, alongside ADR-0079 §1's ceiling, and both are
   `MemoryStoreError` today.
 - **The suite gains three obligations and no seam.** The reviewable unit is one
