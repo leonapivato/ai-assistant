@@ -1583,11 +1583,26 @@ discovered.
 
 **A re-deferral is a completed answer, not a failed one.** When the re-ingest
 surfaces a `USER_ASSERTED` conflict outside the answer's authority, the policy rules
-`ASK_USER`, nothing is written, and the coordinator **enqueues the successor first
-— the successor carrying `predecessor_id` set to the question being answered, and
-`defer(successor, successor_to_claim=<the token `claim` gave it>)`, §2 — and then
-resolves the original to `REDEFERRED` naming it**. It already holds that token; the
-whole sequence runs inside one claim. That order
+`ASK_USER`, nothing is written, and the coordinator **enqueues the successor first,
+then resolves the original to `REDEFERRED` naming it**. In §2's signature, every
+argument accounted for:
+
+```text
+defer(
+    deferral_id       = a freshly minted id,
+    proposal          = the snapshot §3 requires — the same proposal, its
+                        `conflicts` set to this ingest's `result.conflicts`,
+                        which is the new set the successor asks about,
+    decision          = the `ASK_USER` the re-ingest just returned, whose
+                        `reason` is what the user will be shown,
+    predecessor_id    = the question being answered,
+    successor_to_claim= the token `claim` returned for it,
+)
+```
+
+Nothing there has to be recovered: the coordinator holds the claim, the proposal
+and the result already, because the whole sequence runs inside one claim. That
+order
 matters for the same reason step 2 precedes step 3 everywhere else: a crash after
 resolving but before enqueuing would leave a question marked handled with no
 successor, which is the silent drop wearing a terminal state. Crashing the other way
@@ -1728,7 +1743,10 @@ On ratification:
    **Two more cover the re-deferral path** (§5a step 1, §9), which is the one with
    no legal transition before this revision: an accept whose re-ingest meets a
    newly-appeared unshown `USER_ASSERTED` conflict **writes nothing**, enqueues a
-   successor, and resolves the original `REDEFERRED` naming it; and **the same case
+   successor **through §9's exact call** — minted id, snapshot proposal carrying
+   this ingest's `result.conflicts`, the returned `ASK_USER` decision,
+   `predecessor_id`, claim token — and resolves the original `REDEFERRED` naming it;
+   and **the same case
    with the answerable queue already full** still admits the successor and still
    resolves, because a re-deferral does not consult the cap (§2). The second is
    the assertion that would have caught the stranded-claim hole, so it is named
