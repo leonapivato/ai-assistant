@@ -597,13 +597,22 @@ conforming to the words. It owes:
   (below) — which is what makes the chain walkable for the surface without
   claiming an origin a question does not have.
 
-  The store validates all of it in the same atomic operation as the admission,
-  raising `DeferralStoreError` and changing nothing if any condition fails: the
-  token must name a stored claim; **that claim's deferral must be the one
-  `deferred.predecessor_id` names**; the deferral must still be **`APPLYING`**; and
-  it must not already carry a `successor_id`. The two arguments must also agree on
-  presence — a `predecessor_id` without a token, or a token without one, is a
-  malformed call and raises. On success the store stamps that `successor_id` in the
+  The store validates all of it in the same atomic operation as the admission.
+  **A token naming no stored claim is not a fault** — it is the deleted-parent
+  case, and it admits the successor as an **ordinary question**: no cap bypass, no
+  link, no `successor_id` stamped. That is the right outcome and not a fallback.
+  The parent has been destroyed by the user mid-apply (§2's `delete`), so there is
+  no claimed answer to strand and no bookkeeping to record; the exemption exists to
+  protect a waiting parent, and there is none. It is also safe against a forged
+  token, which then buys exactly what passing no token buys.
+
+  The remaining conditions are faults and **raise `DeferralStoreError`, changing
+  nothing**: the claim the token names is on a deferral **other than** the one
+  `deferred.predecessor_id` names; that deferral is no longer `APPLYING`; or it
+  already carries a `successor_id`. Each is a caller that holds a real token and
+  is using it wrongly. The two arguments must also agree on presence — a
+  `predecessor_id` without a token, or a token without one, is a malformed call and
+  raises. On success the store stamps that `successor_id` in the
   same commit, which is what makes the last condition enforceable and gives
   `resolve`'s `REDEFERRED` transition durable state to check rather than the
   caller's word.
@@ -896,14 +905,16 @@ that would otherwise be prose:
    and stamps that parent's `successor_id` — **and a successor whose key collides
    with a question already pending is `SUPPRESSED` and stamps the parent with
    *that* question's id**, which is the case that otherwise strands a claimed
-   answer and the one a suite never reaches unless it seeds the collision first. Six refusals, each changing nothing: an
-   **unknown token**; a token whose parent has since been **resolved**; a token
-   whose parent **already carries a successor**; a **well-formed token for another
-   live claim** — two questions claimed concurrently, the successor naming one and
-   the token naming the other; a `predecessor_id` **with no token**; and a token
-   **with no `predecessor_id`**. The fourth is the one a suite naturally omits and
-   the one the two arguments exist together to catch: a suite that only ever passes
-   the token it just received, for the parent it just claimed, certifies neither.
+   answer and the one a suite never reaches unless it seeds the collision first. An **unknown token** — the deleted-parent case — admits
+   the successor as an ordinary question, subject to the cap and linked to nothing,
+   and does **not** raise. Five refusals, each changing nothing: a token whose
+   parent has since been **resolved**; one whose parent **already carries a
+   successor**; a **well-formed token for another live claim** — two questions
+   claimed concurrently, the successor naming one and the token naming the other; a
+   `predecessor_id` **with no token**; and a token **with no `predecessor_id`**.
+   The third is the one a suite naturally omits and the one the two arguments exist
+   together to catch: a suite that only ever passes the token it just received, for
+   the parent it just claimed, certifies neither.
 6. **`resolve` refuses every state but the one it names, and every `claim_id` but
    the one the record carries** — a second attempt, an `ACCEPTED` from `PENDING`
    (an accept that skipped its claim must not commit bookkeeping for an apply
@@ -1624,9 +1635,26 @@ queue is itself the signal the user must act on.
 
 **Oldest first.** `pending` orders by `deferred_at` ascending, `id` ascending as
 tie-break (a total order, as ADR-0073 §2 requires of an enumeration). The head of
-the queue is then the question closest to expiring and the one whose admission is
-blocking a newer one, so the cap and the lifetime are both legible from the first
-page rather than discoverable only by paging to the end.
+the queue is the question whose admission is blocking a newer one, so the cap is
+legible from the first page rather than discoverable only by paging to the end.
+
+**It is an admission order, not an urgency order, and the difference only appears
+when lifetimes differ.** Under one `deferral_ttl` — the normal case, since it is
+one setting — every question has the same lifetime, so oldest-admitted *is*
+nearest-expiring and the two coincide. They diverge when the setting changed
+between admissions, because `retention` is stamped per question and never
+recomputed (§2): fifty questions admitted under "ask me forever" sit ahead of one
+admitted the next day under a one-day lifetime, and the first page shows the fifty
+rather than the one about to lapse. This read follows admission order in that case,
+and says so rather than claiming an urgency it does not deliver.
+
+Ordering by `expires_at` instead is **declined**, not overlooked: it puts
+never-expiring questions permanently last, which is the wrong end for a queue whose
+oldest entries are the ones the cap is holding the door against, and it makes the
+order depend on a field that is `None` for a legitimate configuration. A separate
+imminent-expiry view is a second ordering axis for a UI nobody has designed —
+ADR-0073 §9's reason for declining `include_retired` — and is filed (§11) rather
+than built.
 
 ### 8. How the question reaches the user, and how the hub adds push without a contract change
 
@@ -1813,7 +1841,11 @@ The surface states both steps on the stranded question itself, because a recover
 the user has to infer from a Protocol's dedup rule is not a recovery.
 
 **A `resolve` that finds nothing is reported, not raised — and what it reports
-comes from the ingest, not from the failure.** If the question was deleted while
+comes from the ingest, not from the failure.** The same holds one step earlier on
+the re-deferral branch: if the parent was deleted while its answer was being
+applied, the successor's `defer` finds no claim, admits an ordinary question, and
+the sequence continues to a `resolve` that returns `False`. Nothing on this path
+raises for a disposal the user asked for. If the question was deleted while
 its answer was being applied, `resolve` returns `False`. The coordinator still
 holds the `MemoryIngestResult`, and **that** is what it reports: the record written
 and its id, or that the answer was re-deferred, or that nothing was written. The
@@ -1879,7 +1911,11 @@ On ratification:
    runs still finds its row and resolves against it (§2's `APPLYING` exclusion); an
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
-   (§2, §9);
+   (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
+   ingest writes nothing and returns `ASK_USER`: the successor is still admitted,
+   as an ordinary question with no parent to link to, and the disposal is reported
+   rather than raised. The two branches fail differently and only one of them is
+   the obvious case to write;
    §9's two-step recovery end to end — crash after `claim`, `delete`, then a
    re-`learn` that **admits a new question** rather than colliding with the
    stranded key; an accept whose proposal's validity window has closed before
@@ -1993,6 +2029,10 @@ On ratification:
   ADR-0045 §10's item; untouched.
 - **Whether `DefaultMemoryPolicy` adopts `EXTERNAL` supersession.** Untouched;
   still ADR-0045 §5/§7's deferred choice.
+- **An urgency-ordered or imminent-expiry view of the queue** (§7). The one read
+  orders by admission; under a single lifetime that is also expiry order, and under
+  mixed lifetimes it is not. Filed with the queue's other presentation questions,
+  for a client that has a reason to sort differently.
 - **Surfacing a pending-question count on every turn** (§8). Declined for now
   rather than refused; revisit when the hub can push, at which point the question
   is what a spoke shows, not what `respond` returns. Filed.
