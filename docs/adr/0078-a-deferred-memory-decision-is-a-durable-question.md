@@ -982,17 +982,23 @@ that would otherwise be prose:
    the one CAS the accept-path concurrency clauses never exercise, because they all
    go through `claim` first — and a read-then-write store lets both rejections
    succeed and reports the question answered twice.
-4. **A destruction racing an in-flight `resolve` leaves the row gone**, driven with
-   the store suspended inside `resolve`, across the product of two axes: the
-   destruction is a `delete` **or a `clear`**, and the resolution is a claimed
-   terminal transition **or the unclaimed rejection**. Four cases, because the two
-   destructions have different scopes and the two resolutions enter from different
-   states, and a rule about one of them says nothing about the others. Either the
-   resolution linearizes first and the destruction then removes a terminal row, or
-   the destruction wins and the resolution returns `False` **without recreating
-   anything**; every case ends with the row absent from `get` and `export`. A
-   read-then-write store passes every sequential clause and fails only these, and
-   what it fails at is restoring data a user destroyed.
+4. **A destruction racing an in-flight continuation leaves the row gone**, driven
+   with the store suspended inside the continuation, **across the full product** the
+   rule names: each of `claim`, a claimed `resolve`, and the unclaimed rejection
+   `resolve`, against each of `delete`, `clear`, and expiry-driven `purge`. Nine
+   cases, stated as a product rather than a list because a rule quantified over two
+   classes and tested on one pair is how this clause has already drifted twice. The
+   axes are not interchangeable: the three destructions differ in scope and in who
+   triggers them, `claim` recreates a row as `APPLYING` where `resolve` recreates it
+   terminal, and `purge` is the only one driven by a clock rather than a caller —
+   suspend `claim` on a live `PENDING` row, advance the injected clock past
+   `expires_at`, let `purge` remove it, and a read-then-write backend brings it
+   back. Either the continuation linearizes first and the destruction then removes
+   what it wrote, or the destruction wins and the continuation returns its
+   no-row result **without recreating anything**; every case ends with the row
+   absent from `get` and `export`. A read-then-write store passes every sequential
+   clause and fails only these, and what it fails at is restoring data that was
+   destroyed.
 5. **`defer`'s admission is atomic**, driven the same way: two concurrent
    same-key calls leave **one** row, and two concurrent distinct calls at
    capacity-minus-one admit exactly one. A sequential test passes against a
