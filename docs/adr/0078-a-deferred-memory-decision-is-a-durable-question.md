@@ -245,9 +245,40 @@ forbids.
 So the exclusion is **enforced, not requested**: `DeferredProposal`'s validator
 refuses a proposal whose `sensitivity is DataTier.SECRET` (§2), which means no
 conforming store can hold one however it is called, and the write stage never
-enqueues one (§3). The secret-tier arm keeps exactly today's behaviour — reported
-in the moment, nothing persisted — and §11 files the gap with its owner rather
-than letting it look closed.
+enqueues one (§3).
+
+**That leaves one `ASK_USER` this ADR does not make answerable, and the honest
+thing is to name it rather than let the title cover it.** ADR-0005 §3 defines the
+ruling as "defer for confirmation", and `policy.py:155-159` emits it saying
+"secret-tier data requires explicit user confirmation" — so after this ADR one arm
+still asks a question the user cannot answer. It is a real residue of #423, not a
+technicality, and this ADR closes the two arms that motivated the issue (an
+assertion contradicting a prior assertion, and a derived belief contradicting one)
+while leaving the third open.
+
+**Two obvious ways to close it are both wrong here.** Building the keyring-backed
+design means inventing the `SecretStore` seam, its coordinated read/export/delete
+across two stores, and a `core` Protocol — for a producer that does not exist,
+since nothing in this codebase constructs a `DataTier.SECRET` proposal. That is
+scope this lane cannot carry and contract surface golden rule 5 says arrives on its
+own ADR. And giving secret-tier a *distinct, non-confirmable outcome* would rewrite
+what the policy means: ADR-0005 §3's five outcomes are ratified, `ASK_USER` is the
+right ruling for data that genuinely needs the user's word, and swapping it for a
+refusal would answer a storage problem by changing a judgement.
+
+**The shape it actually needs is different from this one, and that is the useful
+observation.** A durable queue exists because a question must outlive the process —
+the observer's questions, raised while nobody is watching. A secret-tier proposal
+arrives from a `learn` **the user just typed**, so its confirmation wants an
+*in-turn prompt*, the shape ADR-0042 §4 already gives the permission side, not a
+durable record it is forbidden to keep. The two arms differ in what they need, not
+merely in what they are allowed. Filed in §11 with that gate.
+
+**Until then the surface must not imply otherwise.** A secret-tier deferral renders
+the honest line the CLI carries today — not stored, and not answerable from here —
+while the arms this ADR closes render the new one (§8, §10). One message for two
+outcomes would be the exact dishonesty `cli.py:91-96` was written to avoid, arriving
+from the other direction.
 
 ### 2. The contract surface owed, stated precisely
 
@@ -1835,8 +1866,15 @@ On ratification:
    same lane, and the test asserting the current wording
    (`tests/interfaces/test_cli.py:596`,
    `test_render_learn_marks_a_deferred_ruling_as_not_stored`) inverts with them.
-   Leaving an honest
-   message that has become a lie is the specific failure ADR-0019 is about.
+   Leaving an honest message that has become a lie is the specific failure ADR-0019
+   is about.
+
+   **But only for the arms this ADR closes.** A secret-tier deferral is still not
+   answerable (§1), so it keeps the existing line and the existing reason. One
+   message covering both outcomes would be the same dishonesty arriving from the
+   other side — a user told to go answer a question that was never queued. The
+   distinguishing fact reaches the adapter as part of the learn result, since the
+   façade already knows whether a deferral id exists.
 
 ### 11. What this ADR does not decide
 
