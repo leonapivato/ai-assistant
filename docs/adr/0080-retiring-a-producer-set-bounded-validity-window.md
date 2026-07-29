@@ -56,9 +56,11 @@
   ADR-0074 §9 and ADR-0073 §1 (the level of precision this ADR states its surface
   at); ADR-0070 §1/§3/§4 (the amend-versus-supersede test, partial supersession,
   the status vocabulary); ADR-0075 (its adjudication of a reinterpretation,
-  applied in §8); ADR-0015 §5 (contract ADRs land before their implementation).
-  In flight in parallel lanes and designed by neither this ADR nor them:
-  **ADR-0077** (the observer) and **ADR-0078** (`ASK_USER` resolution, #423).
+  applied in §8); ADR-0015 §5 (contract ADRs land before their implementation);
+  **ADR-0077** (merged Accepted — the observer, its third documented clause on
+  `MemoryWriter.ingest`, and `UnresolvedEvidenceError`), whose §11 defers #306 to
+  this lane in terms. In flight in a parallel lane and designed by neither this
+  ADR nor it: **ADR-0078** (`ASK_USER` resolution, #423).
 
 ## Context
 
@@ -125,11 +127,14 @@ retirement ADR-0079 closed.
 
 **The producer population is about to grow.** Every record in the store today
 comes from a small, known set of producers, none of which stamps an envelope
-window. The observer (leg 3, ADR-0077, in flight in a parallel lane) is a
-model-backed producer of `OBSERVED`/`INFERRED` beliefs at volume, and leg 4
-deliberately precedes it. A rule that is unratified while its trigger is
-unreachable becomes a bug the first time a producer stamps `valid_from` or
-`valid_until` because the belief it recorded genuinely has a shape.
+window. The observer (leg 3, **ADR-0077**, merged Accepted) is a model-backed
+producer of `DERIVED`-band beliefs, and it sets no bounded window — ADR-0077 §11
+says so and files #306 here, "Leg 4", rather than deciding it. That is the right
+split and it is also the reason not to wait: the producer population stops being
+small and known with the observer, and a rule that is unratified while its
+trigger is unreachable becomes a bug the first time a producer stamps
+`valid_from` or `valid_until` because the belief it recorded genuinely has a
+shape.
 
 **ADR-0045 §6 already ruled the read side and left the write side open.** §6 is
 explicit that a producer-set `valid_from` is a real case the contract must
@@ -432,7 +437,12 @@ semantics below are the contract and the spelling is the implementing lane's
 
 **`core/protocols.py` — `MemoryWriter.ingest`, documented semantics only.** No
 signature change, no member, no new Protocol, no `core` type, no new error class.
-Two clauses:
+Two clauses, **stacked on** what that docstring already carries and touching none
+of it: ADR-0079 §4's `SUPERSEDE` obligation and its over-ceiling raise clause,
+and ADR-0077 §5's refusal of a `DERIVED` proposal whose evidence names no record
+the store holds. The clauses below narrow *how a retirement writes a window*;
+ADR-0079's decide *which records a ruling reaches*, and ADR-0077's decides *which
+proposals are admissible*, so the three do not overlap.
 
 - **the clamp**, attached to the `SUPERSEDE` obligation ADR-0079 §4 states: each
   record a supersession retires is written back with its window closed at the
@@ -539,10 +549,19 @@ refer to the read-time-relative hide move to **#460** instead). The per-writer
 regression tests stay where they are; the suite obligations do not replace them,
 they stop the two writers drifting apart.
 
-**No new error class.** The refusal raises `MemoryStoreError`, which is what
-every other writer-boundary refusal raises. A distinguishable subclass is
-ADR-0079 §6's standing deferral and stays deferred; adding one later is additive
-under `except MemoryStoreError`.
+**No new error class, and deliberately not the one ADR-0077 just added.** §3's
+refusal raises plain `MemoryStoreError`, which is what every other
+writer-boundary refusal raises. ADR-0077 §5 has since taken the distinguishable
+subclass ADR-0079 §4 left open — `UnresolvedEvidenceError(MemoryStoreError)`,
+carrying the unresolved evidence ids — and it is emphatically **not** the class
+for this refusal: it names a proposal whose *evidence* does not resolve, whereas
+§3 refuses over a *target's* window, and the observer stage discriminates it
+precisely to tell a retention race from a producer bug. §3's refusal has no such
+consumer: nothing distinguishes it from a backend failure today, and ADR-0077's
+own reasoning — the subclass is "taken by the lane that has the consumer" — is
+the reason to leave it plain. If an interface ever needs to render "this target's
+window cannot be closed" differently, a subclass is additive under `except
+MemoryStoreError` and reverses nothing here.
 
 ### 8. How this stands to ADR-0045 and ADR-0028 under ADR-0070 §1
 
@@ -637,13 +656,17 @@ sibling deferral of #306's absolute-hide half is likewise honoured, not absorbed
 - **The `ASK_USER` resolution mechanism** (issue #423). **ADR-0078**'s, in flight
   in a parallel lane; §6 states only what any resolution committing a
   `SUPERSEDE` inherits.
-- **What the observer produces, and at what volume.** **ADR-0077**'s, in flight
-  in a parallel lane, with ADR-0072 §3 already fixing the band and confidence
-  obligations it produces under. This ADR only makes the write path ready for a
-  producer that stamps windows.
-- **A distinguishable error subclass for either refusal** (ADR-0079 §6). Still
-  deferred, plausibly with ADR-0078's surface; §3's refusal joins the existing
-  `MemoryStoreError`.
+- **What the observer produces, and at what volume.** **ADR-0077**'s, merged
+  Accepted, with ADR-0072 §3 fixing the band and confidence obligations it
+  produces under and ADR-0077 §11 deferring #306 here in terms — "the observer
+  sets no bounded window today, and it is deliberately not the lane that decides
+  what retiring one means." This ADR is the reciprocal: it makes the write path
+  ready for a producer that stamps windows without deciding that any producer
+  should.
+- **A distinguishable error subclass for §3's refusal.** Not taken (§7). ADR-0079
+  §6's deferral was closed for a *different* refusal by ADR-0077 §5's
+  `UnresolvedEvidenceError`; this one has no consumer that discriminates it, so it
+  stays plain `MemoryStoreError` until one exists.
 - **Narrowing `_refuse_unsafe_fold` clause 1**, so a supersession could reach an
   `USER_ASSERTED` target's window. Untouched (ADR-0045 §5, ADR-0050 §2); §2
   depends on it standing but does not argue about it.
