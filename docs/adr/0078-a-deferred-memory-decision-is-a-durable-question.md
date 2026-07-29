@@ -449,7 +449,10 @@ from the other direction.
 change is additive and no existing producer moves:
 
 - `MemoryUpdateProposal.confirmation: UserConfirmation | None = None` (beside
-  `conflicts`, `types.py:672-675`).
+  `conflicts`, `types.py:672-675`), with a validator refusing it on a
+  `DataTier.SECRET` proposal: §1 never queues one, so no deferral and no
+  confirmation for one can exist, and the pairing is a contradiction rather than a
+  case (§5a).
 - `MemoryIngestResult.conflicts: tuple[str, ...] = ()` (`types.py:755`) — §4.
 
 **And two computed properties on `MemoryUpdateProposal`** — `proposal_fingerprint`
@@ -863,7 +866,10 @@ this ADR cannot exempt a new Protocol from it.
 **`core/errors.py` gains `DeferralStoreError`** in the `AssistantError` hierarchy,
 for the reason ADR-0074 §9 added `ConversationStoreError`: every seam raises from
 it and no existing class fits — a question is not memory, planning, context or
-audit.
+audit. **And one subclass, `DeferralIdConflictError`**, for the physical id
+collision alone (§2) — the shape `MemoryStoreConflictError` has under
+`MemoryStoreError` — because a caller must re-mint and retry on that one and must
+not retry on any other.
 
 **The triad is owed by the implementing change, not by this one.** Per
 `CONTRIBUTING.md` → "Adding a Protocol", in one change: the Protocol; a shared
@@ -888,7 +894,8 @@ that would otherwise be prose:
    same-key calls leave **one** row, and two concurrent distinct calls at
    capacity-minus-one admit exactly one. A sequential test passes against a
    read-then-insert implementation and certifies nothing.
-3. **`defer` raises on a physical id collision and mutates nothing** — a new
+3. **`defer` raises `DeferralIdConflictError` on a physical id collision and
+   mutates nothing** — a new
    deferral whose `id` matches a stored row carrying a **different** key, checked
    against a `PENDING` row and against a terminal one — **and does not raise when
    the key is the same **and still speaks**, which is clause 4's retry and the
@@ -1181,8 +1188,27 @@ restated:
 **Two narrowings are needed, and each is the discharge of a stated deferral rather
 than a new liberty.**
 
-**(a) `DefaultMemoryPolicy` gains one rule, ahead of every existing rule.** A
-proposal carrying a `confirmation` is judged in three steps, in this order:
+**(a) `DefaultMemoryPolicy` gains one rule, ahead of every existing rule but
+one.** The **secret-tier check keeps its place at the front**
+(`policy.py:155-159`): a confirmed proposal is judged only after it. Putting the
+confirmed rule first, as an earlier revision did, let a `DataTier.SECRET` proposal
+carrying a `confirmation` and conflicting with a live assertion reach step 2, rule
+`SUPERSEDE`, pass the writer exception, and land secret payload in the
+`MemoryStore` — ADR-0004 §3's "never in the memory database", defeated through the
+one path built to respect the user's word.
+
+It costs nothing to keep the order, because **the combination cannot legitimately
+arise**: §1 refuses to queue a secret-tier proposal, so no deferral exists for one,
+so no confirmation can have been issued for one. That makes it a contradiction
+rather than a case, and `MemoryUpdateProposal`'s validator says so — a
+`confirmation` on a `DataTier.SECRET` proposal is refused at construction (§2), so
+the combination cannot be built, let alone ruled on. The policy ordering and the
+writer floor are then belt and braces over something already unconstructable,
+which is the right amount of care for a rule whose failure mode is a credential in
+a database.
+
+A proposal carrying a `confirmation` is otherwise judged in three steps, in this
+order:
 
 1. If the live conflict set holds a `USER_ASSERTED` record **not** named in
    `confirmation.retires`, rule `ASK_USER` — an assertion the user was never shown
@@ -1969,6 +1995,9 @@ On ratification:
    `answer(id, accept=True)` calls leave **one** correction in the store and report
    the loser as not-open (§9); an accept suspended inside `ingest` while a `purge`
    runs still finds its row and resolves against it (§2's `APPLYING` exclusion); an
+   a successor admission whose **minted id collides** — forced — is re-minted and
+   retried, so the parent still resolves `REDEFERRED` naming a reachable successor
+   rather than stranding `APPLYING`;
    accept suspended inside `ingest` while `forget_question` deletes the same
    deferral commits its memory write, reports the disposal, and **does not raise**
    (§2, §9) — **and the same interleaving on the re-deferral branch**, where the
@@ -1998,8 +2027,11 @@ On ratification:
    the assertion that would have caught the stranded-claim hole, so it is named
    rather than left to be inferred from the first.
 
-   **And one for the arm this ADR does not close** (§1): a `learn` whose proposal
-   is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
+   **And two for the arm this ADR does not close** (§1). A `DataTier.SECRET`
+   proposal carrying a `confirmation` is **unconstructable**, and a `SUPERSEDE`
+   driven from one is refused at the writer floor — the belt and braces §5a
+   describes, asserted because the failure it guards is a credential in the memory
+   database. And a `learn` whose proposal is `DataTier.SECRET` **queues nothing** — no deferral in the store, no id on the
    result — **raises nothing**, and renders the *existing* non-answerable message
    rather than the new one. All three halves are needed. Without the first an
    implementation calls `defer` and surfaces its validation failure as an error on
