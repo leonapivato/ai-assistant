@@ -1,7 +1,52 @@
 # 45. Memory records carry a validity window: invalidate, don't delete
 
-- Status: Accepted, §10's #248 conclusion narrowed by ADR-0046
+- Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window)
 - Date: 2026-07-22
+- Note (2026-07-28): **§4 step 1's window-close instruction no longer holds for a
+  target whose producer already bounded its window.** The step headed *Close
+  `T`'s window* — "Write `T` back with `validity.valid_until = now`, where `now`
+  is the ingestor's injected clock (ADR-0026)" — is replaced, in that scope, by
+  [ADR-0080](0080-retiring-a-producer-set-bounded-validity-window.md) §1 and §3:
+  the retirement closes at the **earlier** of the writer's close instant and the
+  record's own `valid_until` (so it never extends a window and never resurrects a
+  self-closed belief), preserving `valid_from` and every other field; and where
+  the record's `valid_from` is at or after that end — an empty or inverted
+  interval `Validity` and `SqliteMemoryStore`'s decode both reject — the ingest
+  **refuses** with `MemoryStoreError`, nothing written and every target left
+  live. For a target with an open-ended window, which is every target this ADR's
+  own mechanisms produce, ADR-0080 §1 writes `valid_until = now` exactly as this
+  step says. ADR-0080 §8 names the exact scope replaced and applies ADR-0070 §1's
+  test to it.
+
+  **Everything else here stands and is untouched**: §1's single-axis staging;
+  §2's `Validity` value object, its liveness predicate, its placement on
+  `MemoryBase` and its distinction from `SemanticMemory.valid_until`; §3; §4's
+  *shape* — the target is retained on disk with a closed window rather than
+  overwritten — and its steps 2 and 3 (the correction written at a fresh, absent
+  id with a fresh open window, and that id returned); **all of §5** (both
+  conformance rewrites, the `EXTERNAL` narrowing, and clause 1 left in force);
+  **all of §6**, whose ruling that the `valid_from` end is "enforced, not assumed
+  away … a producer *may* [set it], and the store must honour the contract
+  regardless" ADR-0080 §5 depends on rather than weakens; §7; §8's atomicity
+  floor; §9's migration; and §10's deferrals.
+
+  **The Status line is reformatted, not stripped.** ADR-0070 §4 requires a
+  supersession to lead (so a prefix match on `Accepted` cannot read a replaced
+  clause as live) and forbids an `ADR-NNNN` token inside a scope, so the previous
+  value `Accepted, §10's #248 conclusion narrowed by ADR-0046` cannot carry the
+  new pair. Nothing is lost: an amendment "is not a status token and never bears
+  on this read" (ADR-0070 §4), and the ADR-0046 narrowing is recorded in full in
+  the `Amended: 2026-07-23 by ADR-0046` note below, which stands unchanged.
+
+  ADR-0080 lands **in the same change as this note**, so this Status line never
+  names an ADR that does not exist — the hazard ADR-0070 §1 guards against — and
+  if that change does not land, neither does this. While ADR-0080 is still
+  `Proposed`, this line names a supersession that is drafted rather than
+  ratified, which is the form ADR-0075 established and `main` carries three times
+  over (ADR-0005 carried `Partially superseded by ADR-0075` while ADR-0075 was
+  `Proposed`, as ADR-0076's header records; ADR-0074/ADR-0076 and
+  ADR-0050/ADR-0079 are the same pair shape); the `Proposed` → `Accepted` flip is
+  the ratifying edit at merge (ADR-0015 §5).
 - Amended: 2026-07-23 by ADR-0046 — §10's statement that '#104 closes [#248]
   alongside the atomicity primitive' is narrowed by ADR-0046: #104 delivers the
   atomic write-set §8 requires, but that primitive does not subsume #248's
