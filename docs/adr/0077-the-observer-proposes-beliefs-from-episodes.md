@@ -1044,7 +1044,12 @@ class Observer(Protocol):
    promises while ADR-0078 is unbuilt. Then: the producer's two counts **relayed
    unchanged**; a
    **separate count of proposals dropped at the write for unresolved evidence**
-   (§5); and the model route that read the episodes (§3). The separation is the
+   (§5); and the model route that read the episodes (§3), **which is absent when
+   none did**. A window whose turns have all lost their episodes selects an empty
+   batch, and the stage then **does not call the observer at all**: there is
+   nothing to observe, no provider is reached, and naming a route would claim a
+   read that never happened — the one thing §3's reporting exists to make
+   truthful. The separation is the
    decision: `ObservationOutcome`'s invariant is over the entries the model
    emitted, so a post-observation drop has to be counted somewhere else or that
    invariant becomes a lie.
@@ -1118,7 +1123,9 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   later implementer does not invent the partial-result transport this ADR
   declines.
 - **A window containing a turn whose episode never landed** — the batch is the
-  episodes that resolved, one short, and the observation runs normally (§8). An
+  episodes that resolved, one short, and the observation runs normally (§8).
+  **And a window where none resolved** — no provider is called, no proposals, no
+  discards, and the outcome names **no** route (§9). An
   implementation that raised, or that reached further back to fill the batch,
   would change which transcript reaches the model between two runs over one
   conversation.
