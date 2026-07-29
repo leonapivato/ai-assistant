@@ -1,7 +1,45 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause)
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause); §1's `USER_ASSERTED` hold-out amended by ADR-0078
 - Date: 2026-07-23
+- Note (2026-07-29): **§1's `USER_ASSERTED` hold-out from the retirement set is
+  narrowed to one exception.** The bullet headed *"`USER_ASSERTED` conflicts are
+  never swept in"* stands for every conflict swept in on similarity;
+  [ADR-0078](0078-a-deferred-memory-decision-is-a-durable-question.md) §5b adds
+  that an asserted conflict **named in the incoming proposal's
+  `confirmation.retires`** is in the retirement set, so a confirmation covering
+  two prior assertions retires both in the one atomic batch. This is the same
+  exception ADR-0078 makes to `_refuse_unsafe_fold` clause 1 (ADR-0045 §5),
+  arriving on the applier side: the applier still never sweeps an assertion in on
+  topical similarity — the widening reaches an assertion only where the user's own
+  answer named it, and the named target stays the primary the ruling audits.
+
+  **§2 is unchanged, and now has a mechanism behind it.** Its ruling that
+  `ASK_USER` writes nothing, "so the earlier assertion stays live and the incoming
+  one is held pending the user's answer, not dropped", was a claim about a hold
+  with nothing durable holding it. ADR-0078 §1 supplies that: the held proposal
+  becomes a durable question in a `DeferralStore`, which the user later answers.
+  §2's precedence rule — "the later assertion supersedes the earlier, closing its
+  window and keeping it in `export`" — is the ruling ADR-0078 §5 *causes* rather
+  than invents. The confirmation-driven flow §2 declined to implement and §3
+  deferred as spanning "interfaces/permissions; out of the memory lane" is decided
+  there, not here.
+
+  **Untouched by this amendment**: §1's `EXTERNAL` hold-out — ADR-0078 §5 rules
+  that an `EXTERNAL` id in `retires` "is simply not acted on", leaving whether the
+  default policy adopts `EXTERNAL` supersession exactly where ADR-0045 §5/§7 left
+  it; §1's `conflict_limit` bound and the residual filed as #313, which this
+  amendment does not reach and whose live form is ADR-0079's, as the 2026-07-28
+  note below records; §1's full-set ruling, its precise definition of the
+  conflicting set, the `_SUPERSEDABLE` allow-list, the
+  applier-rather-than-`target_ids` route and the single atomic batch; and all of
+  §3's other deferrals.
+
+  **The Status line accumulates; it does not replace.** ADR-0079's partial
+  supersession keeps the leading token ADR-0070 §4 requires, and this
+  qualification is appended beside it rather than over it — the two record
+  different things about different scopes, and dropping either would lose a live
+  pointer. Appended note per ADR-0070 §1; no text below it is rewritten.
 - Note (2026-07-28): **§1's over-limit surplus clause no longer holds.** The
   paragraph headed *"Full" is bounded by conflict detection; the over-limit
   surplus is a filed residual*, the paragraph beginning *"The surplus does not

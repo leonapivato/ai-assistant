@@ -1,7 +1,43 @@
 # 28. The memory write path is a contract: `MemoryWriter`
 
-- Status: Accepted, §8 amended by ADR-0040 and ADR-0045
+- Status: Accepted, §8 amended by ADR-0040, ADR-0045 and ADR-0078
 - Date: 2026-07-21
+- Note (2026-07-29): **§8's conformance suite gains two clauses**, one from each
+  of [ADR-0078](0078-a-deferred-memory-decision-is-a-durable-question.md)'s §4
+  and §5.
+
+  **First (§4): `ingest` returns the conflict ids it resolved, on every ruling.**
+  `MemoryIngestResult` gains `conflicts: tuple[str, ...]`, defaulting to `()`, so
+  an implementation that computes those ids internally and drops them fails the
+  suite. This is §3's own condition for revisiting, met rather than overridden:
+  §3 declined the field and named the exact trigger — "If a consumer ever needs to
+  *show* a user what a proposal contradicted, that is a change to the result type,
+  decided then, with a use case in hand" — and ADR-0078 §4 is that use case,
+  stronger than presentation, since its §5 makes the shown set the **bound on what
+  a confirmed answer authorises**. Nothing new is computed: the value already
+  crosses the policy seam and now also crosses the writer seam. It is **not** a
+  claim about *which* records conflict — that stays `MemoryIngestor`'s tuning and
+  stays excluded.
+
+  **Second (§5): a `SUPERSEDE` naming a `USER_ASSERTED` target raises unless a
+  covering `UserConfirmation` passes all six of ADR-0078 §5's checks**, and
+  **applies** only when all six hold. The clause is driven in six parts: with no
+  `confirmation`; with one whose `retires` does not name that target; with one
+  whose named target is absent from the conflicts *this ingest* resolved; with one
+  whose named target is absent from the **frozen** conflicts the proposal arrived
+  carrying; and with a confirmation issued for a **different question** in each of
+  the two shapes that matter — same proposed record id with different content, and
+  an identical proposal shown a different frozen conflict set. The same clause
+  pins *which* record a confirmed `SUPERSEDE` retires (ADR-0078 §5a): an
+  `EXTERNAL` record and a prior assertion both named in `retires` retires the
+  **assertion** and leaves the external record live; a `retires` naming two live
+  prior assertions retires **both** in one batch; and a question whose shown
+  assertion was retired or deleted before the answer arrives still supersedes the
+  live derived conflict rather than accepting beside it.
+
+  **§8's other exclusions stand**, as do the two amendments recorded below and
+  every remaining `MemoryWriter` obligation. The §8 text below is unchanged
+  (ADR-0070 §1; ADR-0001 append-only).
 - Amended: 2026-07-23 by ADR-0045 — §8's conformance list is touched a second time,
   for the two `MemoryWriter` fold clauses ADR-0040 §5a/§5b added. **§5a's id clause
   is rewritten:** a `SUPERSEDE` leaves the target **retained with a closed validity

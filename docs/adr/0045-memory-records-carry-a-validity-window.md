@@ -1,7 +1,42 @@
 # 45. Memory records carry a validity window: invalidate, don't delete
 
-- Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window)
+- Status: Partially superseded by ADR-0080 (§4's window-close instruction for a target carrying a producer-set bounded window); §5 clause 1 amended by ADR-0078
 - Date: 2026-07-22
+- Note (2026-07-29): **§5 clause 1 is narrowed by exception, not lifted.** Its
+  refusal — *"no fold of any kind onto a `USER_ASSERTED` target"* — stands
+  **verbatim in every case except one**:
+  [ADR-0078](0078-a-deferred-memory-decision-is-a-durable-question.md) §5b permits
+  a `SUPERSEDE` whose target id appears in the incoming proposal's
+  `confirmation.retires`. That exception is the gate **§7 itself named** as one of
+  the two acceptable ones — a narrowing of clause 1 "gated on a real contradiction
+  signal (**or explicit user confirmation**)" — so clause 1's surviving
+  justification is not weakened but honoured: §5's *signal-strength* objection is,
+  as ADR-0078 §5b reads it, "exactly and only about the *signal*", and on the
+  confirmed path the signal is not topical similarity but the user's answer —
+  which §5's own two justifications never spoke to. Wherever no confirmation covers
+  the target, §5's ruling that topical similarity "still cannot authorise retiring
+  an assertion" applies unchanged. ADR-0078 §5b names the exact scope amended and
+  its §10 records this note as owed at ratification.
+
+  **Clause 2 and everything else stand.** Clause 2 (a `USER_ASSERTED` proposal
+  onto an `EXTERNAL` target, `REINFORCE` only) is untouched. Clause 1 is also
+  untouched for `REINFORCE`, which stays refused onto an assertion whatever the
+  confirmation says (ADR-0078 §5, check 1) — folding at the target's id would
+  rewrite the user's own words, which no answer authorises. §5's two conformance
+  rewrites and its `EXTERNAL` narrowing, §7's dispositions of #254 and #244, §6's
+  read semantics, §8's atomicity floor and §9's migration all stand. §10's
+  reservation of "#245's policy behaviour and any narrowing of
+  `_refuse_unsafe_fold` clause 1 … decided in the policy lane on a contradiction
+  signal, not here" is **discharged** by ADR-0078 — which is that lane — rather
+  than overturned; whether the *default policy* adopts `EXTERNAL` supersession
+  stays deferred exactly where §5/§7 left it, since ADR-0078 §5 rules that an
+  `EXTERNAL` id in `retires` "is simply not acted on".
+
+  **The Status line accumulates; it does not replace.** ADR-0080's partial
+  supersession keeps the leading token ADR-0070 §4 requires, and this
+  qualification is appended beside it rather than over it — the two record
+  different things about different scopes, and dropping either would lose a live
+  pointer. Appended note per ADR-0070 §1; no text below it is rewritten.
 - Note (2026-07-28): **§4 step 1's window-close instruction no longer holds for a
   target whose producer already bounded its window.** The step headed *Close
   `T`'s window* — "Write `T` back with `validity.valid_until = now`, where `now`
