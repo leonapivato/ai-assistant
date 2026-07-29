@@ -831,6 +831,17 @@ conversation as the unit, everything is reachable — `assistant conversations`
 lists them and the user can name any one — and the selection is deterministic
 enough to test.
 
+**A turn in the window whose episode does not resolve is skipped, and the batch
+is not backfilled.** ADR-0074 §3 makes the index entry durable and the episode
+best-effort, so a turn can sit in the log with no episode — from a capture
+failure, an expiry, or a `forget` — and ADR-0074 §5 already rules what a reader
+does with one: "an id that does not resolve is **skipped, not an error**". The
+stage applies that rule unchanged, and stops there. Backfilling to fill the batch
+would make the window's *span* depend on how many gaps it contains, so two runs
+over one conversation would read different stretches of it and the bound would
+stop meaning a fixed number of recent turns. A short batch is the honest
+consequence of a gap, and §1's bound is a maximum rather than a quota.
+
 **This does not make the producer conversation-shaped.** The Protocol still takes
 episodes and the producer still never asks where they came from (§1). What is
 conversation-scoped is *today's only selector*, in the stage that holds both
@@ -1106,6 +1117,11 @@ and the surface's, in `tests/orchestration/` and `tests/interfaces/`:
   later reader finds it in the suite instead of mistaking it for a bug, and a
   later implementer does not invent the partial-result transport this ADR
   declines.
+- **A window containing a turn whose episode never landed** — the batch is the
+  episodes that resolved, one short, and the observation runs normally (§8). An
+  implementation that raised, or that reached further back to fill the batch,
+  would change which transcript reaches the model between two runs over one
+  conversation.
 - **Two conversations in the store, observed in two runs** — the unscoped run
   selects the **most recently active** one, and a second run **naming the other**
   observes that one's episodes (§8). The pair pins the selector in both
