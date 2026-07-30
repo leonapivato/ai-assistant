@@ -331,6 +331,21 @@ class SqliteAuditTrail:
         this process cannot restrict is a Tier 1 file it is about to write through, so
         that failure propagates and the open fails.
 
+        A *symlink* under a sidecar's name is skipped rather than followed. ``chmod``
+        follows links, and ``os.chmod(follow_symlinks=False)`` is unsupported on
+        Linux, so restricting one would silently narrow a file that holds none of
+        this store's data and that this store has no business modifying.
+
+        Skipping it strands no page anywhere this method could not reach, because
+        SQLite does not follow such a link either (verified against 3.53.1, and
+        asserted in the conversation store's tests): a symlinked ``-journal`` is not
+        a hot journal, so SQLite unlinks *the link* at the first statement and writes
+        a real file in its place — which inherits the ``0600`` set just above — and a
+        symlinked ``-wal`` on a WAL-mode database is refused outright rather than
+        written through. What is left is a check-then-chmod race, and winning it
+        needs write access to the database's own directory, which is already past
+        ADR-0004 §4 by routes this method could never close.
+
         A no-op in memory, where there is no file to restrict.
         """
         if self._path == ":memory:":
@@ -338,8 +353,11 @@ class SqliteAuditTrail:
         database = Path(self._path)
         database.chmod(_OWNER_ONLY)
         for suffix in _SIDECARS:
+            sidecar = database.with_name(database.name + suffix)
+            if sidecar.is_symlink():
+                continue
             with contextlib.suppress(FileNotFoundError):
-                database.with_name(database.name + suffix).chmod(_OWNER_ONLY)
+                sidecar.chmod(_OWNER_ONLY)
 
     def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
         """Refuse a labelled schema this code cannot read; say whether one is labelled.
