@@ -569,9 +569,12 @@ class MemoryWriter(Protocol):
         ``provenance.evidence`` names is **refused**: nothing is written, no window
         is closed, and no decision is returned. A write *installs* when it stores
         the proposal's content at an id — ``ACCEPT`` and ``STORE_TEMPORARY`` at the
-        proposed record's own id, ``REINFORCE`` at the ruling's ``target_id``,
-        where a fold would union the target's id into the evidence of the record it
-        writes *at* that id. It holds **whether or not** a record already stands
+        proposed record's own id, ``REINFORCE`` at the fold target it names, where
+        a fold would union the target's id into the evidence of the record it
+        writes *at* that id. A ``REINFORCE`` naming a ``target_id`` that is **not
+        among the conflicts** installs nothing and is unaffected: it still raises
+        on that standing ground instead, since this rule adds one refusal to the
+        writer and subtracts none. It holds **whether or not** a record already stands
         there, and for **every** band, not only ``DERIVED``: the defect is a belief
         standing as its own warrant, and an ``ASSERTED`` or ``EXTERNAL`` record can
         reach it with nothing destroyed at all. The refusal keys on ids and write

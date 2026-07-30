@@ -336,7 +336,9 @@ def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposa
         raise MemoryStoreError(msg)
 
 
-def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | None:
+def _installed_at(
+    decision: MemoryDecision, proposed: MemoryRecord, *, resolved: tuple[str, ...]
+) -> str | None:
     """The id this ruling would **install** the proposal at, if any (ADR-0081 §1).
 
     A write *installs* when it stores the proposal's content at an id: whatever
@@ -354,9 +356,26 @@ def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | Non
       refusing (ADR-0081 §2's "two evaluation points, one rule", §4). Its
       retirement-set writes retire rather than install and are never refused by
       this rule.
+    - a ``REINFORCE`` whose ``target_id`` is **not among the conflicts this ingest
+      resolved**. ADR-0081 §6 defines the fold's write id as "its fold target,
+      which is **drawn from the conflicts** and therefore always stored", so a
+      ruling naming anything else has no destination at all: it installs nothing,
+      and the standing "not among the conflicts" refusal in
+      :meth:`MemoryIngestor._apply` is what applies — which is what §6 means by "a
+      ``REINFORCE`` naming a target absent from the conflicts still raises the
+      existing not-among-the-conflicts error". Reading the ruling's ``target_id``
+      as a destination without that test would let this rule pre-empt a standing
+      refusal, and ADR-0081 §4 is explicit that it "adds one refusal to the writer
+      and subtracts none".
 
-    The distinction is a property of the **write**, not of what the store happens
-    to hold, which is what keeps the predicate free of any store read.
+    ``resolved`` is therefore an input, and it costs nothing: it is the tuple
+    :meth:`MemoryIngestor._ingest` already computed from the conflict search
+    *before* the policy was asked, fixed inside the ingestor's lock. So the
+    predicate still performs **no store read** of its own, adds no I/O, and cannot
+    be raced (ADR-0081 §1) — it reads a value the call is already holding.
+
+    The install/retire distinction is a property of the **write**, not of what the
+    store happens to hold, which is what keeps the predicate free of any store read.
     """
     match decision.kind:
         case MemoryDecisionKind.ACCEPT | MemoryDecisionKind.STORE_TEMPORARY:
@@ -365,8 +384,10 @@ def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | Non
             # The fold lands at the *target's* id, which the ruling supplies —
             # never at `proposed.id`. `_merge` writes there and unions both
             # evidence tuples, so a proposal citing its own fold target would end
-            # up standing as its own warrant with nothing destroyed at all.
-            return decision.target_id
+            # up standing as its own warrant with nothing destroyed at all. A
+            # target outside the resolved set is no destination: nothing is folded
+            # onto it, and `_apply` refuses it on the standing ground.
+            return decision.target_id if decision.target_id in resolved else None
         case MemoryDecisionKind.SUPERSEDE:
             return None
         case MemoryDecisionKind.REJECT | MemoryDecisionKind.ASK_USER:
@@ -378,7 +399,9 @@ def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | Non
     assert_never(decision.kind)
 
 
-def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+def _refuse_self_consuming_write(
+    decision: MemoryDecision, proposal: MemoryUpdateProposal, *, resolved: tuple[str, ...]
+) -> None:
     """Refuse a write that would land at an id the proposal cites (ADR-0081 §1).
 
     The fourth obligation on ``MemoryWriter.ingest``, stacked on ADR-0079 §4's two
@@ -408,8 +431,9 @@ def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdat
       self-citing proposal the policy declines should be a ``REJECT`` the user can
       read, not an exception (ADR-0080 §3 declined the same hoist).
 
-    **It reads nothing from the store.** Its inputs are the observed proposal and
-    the ruling, both already fixed and private to this call, so it costs no ``get``,
+    **It reads nothing from the store.** Its inputs are the observed proposal, the
+    ruling, and the conflict ids this ingest already resolved — all fixed and
+    private to this call before it is reached, so it costs no ``get``,
     adds no I/O inside the ingestor's lock, and — unlike ADR-0077 §5's
     resolvability check — cannot itself be raced. It is therefore never a race and
     always a producer fault, which is why the refusal earns **no** new error class
@@ -435,13 +459,20 @@ def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdat
     nothing satisfies it trivially, while band-scoping would leave ``ASSERTED`` and
     ``EXTERNAL`` free to fabricate their own warrant.
 
+    Args:
+        decision: The ruling the policy made.
+        proposal: The proposal as this call observed it.
+        resolved: The conflict ids this ingest resolved — what makes a
+            ``REINFORCE``'s ``target_id`` a destination rather than an invalid
+            ruling (ADR-0081 §6).
+
     Raises:
         MemoryStoreError: If the ruling would install the proposal at an id the
             proposal cites. Nothing is written, no window is closed, and no
             decision is returned.
     """
     proposed = proposal.proposed
-    destination = _installed_at(decision, proposed)
+    destination = _installed_at(decision, proposed, resolved=resolved)
     if destination is not None and destination in proposed.provenance.evidence:
         msg = (
             f"refusing to write {proposed.id!r}: a {decision.kind} ruling would install it at "
@@ -868,7 +899,7 @@ class MemoryIngestor:
         # property of the *write*, so it belongs after the ruling that determines the
         # write set and before the dispatch that performs it. `SUPERSEDE`'s minted
         # destination does not exist yet and is tested in `_apply_supersede` (§2).
-        _refuse_self_consuming_write(decision, observed)
+        _refuse_self_consuming_write(decision, observed, resolved=resolved)
         record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
         # declined this and named the exact condition for revisiting — a consumer

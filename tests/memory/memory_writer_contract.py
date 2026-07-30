@@ -1866,32 +1866,39 @@ class MemoryWriterContract:
         assert await store.export() == before
 
     @pytest.mark.parametrize("kind", _FOLD_KINDS, ids=str)
-    async def test_a_fold_naming_an_absent_target_the_proposal_also_cites_is_refused(
+    async def test_a_fold_naming_an_absent_target_the_proposal_cites_keeps_that_error(
         self, make_writer: WriterFactory, kind: MemoryDecisionKind
     ) -> None:
-        """The overlap of the two refusals — and **which** one fires is not pinned.
+        """The overlap: the **standing** refusal keeps precedence over this rule.
 
-        Both are ``MemoryStoreError`` and both write nothing, so the two orderings
-        are indistinguishable to every caller: ADR-0081 §9 declines a conformance
-        clause pinning the exception *message*, which is the only thing that differs.
-        What **is** contract is asserted here — the ingest refuses, and the store is
-        left byte-for-byte unchanged.
+        The sharp case, and the one a writer reading §1 alone gets wrong. The ruling
+        names ``"ghost"`` as its fold target *and* the proposal cites ``"ghost"``, so
+        a writer that read ``decision.target_id`` as a destination without checking
+        it would refuse on ADR-0081's ground and pre-empt a standing refusal.
 
-        Why the ordering is deliberately left open rather than pinned to the
-        existing refusal: ADR-0081 §2 rules that all three installing rulings "are
-        decided at the seam above", taking their destination from the proposal or
-        from the ruling — so a writer following §2 tests ``target_id`` before
-        ``_apply`` resolves it against the conflicts, and this rule fires first.
-        Deferring the ``REINFORCE`` arm until target membership were established
-        would place half the rule after the fold helper §2 rules out **by name**,
-        and split one rule across two seams. A writer that instead validates the
-        target first also conforms; both refuse, and nothing observable separates
-        them.
+        ADR-0081 §6 settles it in the sentence that defines the destination:
+        ``REINFORCE``'s write id is "its fold target, which is **drawn from the
+        conflicts** and therefore always stored". A ``target_id`` outside the
+        resolved set is therefore no destination at all — the ruling installs
+        nothing, so there is nothing for this rule to refuse, and §6's "a
+        ``REINFORCE`` naming a target absent from the conflicts still raises the
+        existing not-among-the-conflicts error" holds. That also keeps §4's promise
+        exact: this rule "adds one refusal to the writer and subtracts none".
+
+        The membership test costs no store read and so does not weaken §1's
+        cannot-be-raced property: the conflict ids were resolved before the policy
+        was asked and are fixed for the rest of the call.
+
+        The message fragment is the discriminator because both refusals raise
+        ``MemoryStoreError``, and precedence between two same-class refusals is not
+        observable any other way — the same way the suite already tells check 0
+        apart (``match="secret-tier"``). What stays unpinned is this rule's *own*
+        message, which ADR-0081 §9 declines to make contract.
         """
         store = FakeMemoryStore(now=_long_ago)
         writer = make_writer(store, _FoldToAbsentTargetPolicy(kind))
 
-        with pytest.raises(MemoryStoreError):
+        with pytest.raises(MemoryStoreError, match="not among the conflicts"):
             await writer.ingest(
                 _proposal(_preference("new", source=MemorySource.EXTERNAL, evidence=("ghost",)))
             )
