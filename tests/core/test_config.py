@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from pydantic import ValidationError
@@ -755,3 +755,96 @@ def test_load_settings_rejects_a_non_positive_deferral_queue_limit(
     monkeypatch.setenv("ASSISTANT_DEFERRAL_QUEUE_LIMIT", value)
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
+
+
+# --- a flag is not a count: every integer setting refuses a bool (#471) -----
+#
+# Discovered from the model rather than listed, so a new `int` field is covered
+# the day it is added instead of the day someone remembers this file. A field
+# annotated `int` appears here whether or not it carries `_IntegerSetting` —
+# pydantic reports the annotation as `int` either way and files the
+# `BeforeValidator` under `metadata` — so an unguarded new field fails these
+# tests rather than slipping past them.
+_INTEGER_FIELDS: Final = tuple(
+    name for name, field in Settings.model_fields.items() if field.annotation is int
+)
+
+
+def _settings_with(name: str, value: object) -> Settings:
+    """Construct ``Settings`` with the one field ``name`` set to ``value``.
+
+    The dynamic keyword is the point of the tests below — they parametrise over
+    the *real* field names so a new integer setting is covered without anyone
+    editing this file — and it is the one thing mypy cannot check, since it sees
+    a single ``**dict`` offered against every field's own type at once. Confining
+    the ``Any`` to this helper keeps that gap one line wide.
+    """
+    kwargs: dict[str, Any] = {name: value}
+    return Settings(**kwargs)
+
+
+def test_every_integer_setting_is_discovered() -> None:
+    """Pin the discovery, so the parametrised tests below cannot pass vacuously.
+
+    A helper that quietly returned nothing would turn every ``parametrize`` over
+    it into zero cases and a green run. This is also the tripwire #471 asks for:
+    a new integer setting fails here until it is acknowledged, which is the
+    moment to give it the alias too.
+    """
+    assert set(_INTEGER_FIELDS) == {
+        "model_max_attempts",
+        "working_hours_start",
+        "working_hours_end",
+        "observation_batch_size",
+        "observation_max_proposals",
+        "deferral_queue_limit",
+    }
+
+
+@pytest.mark.parametrize("name", _INTEGER_FIELDS)
+@pytest.mark.parametrize("value", [True, False])
+def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
+    """``Settings(observation_batch_size=True)`` is a mistake, not a one-item batch.
+
+    Pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
+    ``bool`` is an ``int`` subclass, and ``1`` satisfies every bound these fields
+    carry — so without this the flag loads as a plausible value and nothing
+    downstream can tell. The guards *below* settings already refuse it
+    (``ObservationStage._check_batch_size``, ``LearningLoop._check_tuning``,
+    ``Engine.__init__``, ``ModelBackedObserver._check_bound``), but ``Settings``
+    hands them an already-coerced integer, so on the settings path they can never
+    fire. This is the configuration layer stating the rule the four layers under
+    it already state (#471).
+
+    The message is asserted, not just the refusal: ``False`` and ``True`` land on
+    ``0`` and ``1``, which some of these fields' range bounds would reject anyway,
+    so a test that only asserted "raises" would pass for the wrong reason on those
+    fields and prove nothing about the ones where ``1`` is in range.
+    """
+    with pytest.raises(ValidationError, match="a flag is not a count"):
+        _settings_with(name, value)
+
+
+@pytest.mark.parametrize("name", _INTEGER_FIELDS)
+def test_every_integer_setting_still_accepts_its_own_default(name: str) -> None:
+    """The bool refusal narrows nothing else: a real integer is still a real integer."""
+    default = Settings.model_fields[name].default
+    assert getattr(_settings_with(name, default), name) == default
+
+
+@pytest.mark.parametrize("name", _INTEGER_FIELDS)
+def test_every_integer_setting_still_parses_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The operator-facing path is untouched, which rules out a strict-type guard.
+
+    #471 is reachable only from untyped code constructing ``Settings`` directly —
+    ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails int parsing at load —
+    so the fix must refuse ``bool`` and nothing else. An implementation that
+    demanded an exact ``int`` (as ``_split_model_specs`` does for its own,
+    different reason) would break *every* integer setting in the environment,
+    where values arrive as strings.
+    """
+    default = Settings.model_fields[name].default
+    monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(default))
+    assert getattr(load_settings(), name) == default
