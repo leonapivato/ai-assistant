@@ -22,7 +22,7 @@ from conversation_store_contract import (
     MovableClock,
 )
 
-from ai_assistant.core.errors import ConversationStoreError
+from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import ParkedBinding
 from ai_assistant.memory.conversation_store import SqliteConversationStore
 
@@ -57,6 +57,78 @@ def _journal_mode(database: Path) -> int | None:
     """The mode of the rollback journal beside ``database``, or ``None`` if absent."""
     journal = Path(f"{database}-journal")
     return _mode_of(journal) if journal.exists() else None
+
+
+#: The conversation id the orphan rows below name, which no record ever carries.
+_ABSENT = "no-such-conversation"
+
+#: The turn columns, in the order every insert here binds them.
+_TURN_COLUMNS = "conversation_id, ordinal, episode_id, occurred_at, execution_id, step_id"
+
+
+def _cascading_keys_of(database: Path) -> list[tuple[object, ...]]:
+    """The cascading foreign keys ``turns`` carries, read as the store reads them."""
+    raw = sqlite3.connect(database)
+    try:
+        return [
+            row
+            for row in raw.execute("PRAGMA foreign_key_list(turns)")
+            if row[2] == "conversations" and row[3] == "conversation_id" and row[4] == "id"
+            if str(row[6]).upper() == "CASCADE"
+        ]
+    finally:
+        raw.close()
+
+
+def _insert_orphan_turn(database: Path, *, binding: ParkedBinding) -> str:
+    """Write a turn naming a conversation that does not exist, and return its episode id.
+
+    Through a raw connection, because that is the only writer that can produce one:
+    ``PRAGMA foreign_keys`` is per connection and off unless asked for, so a tool
+    that never asked can still land the row the store's own connection refuses.
+    That asymmetry is precisely why the constraint is not enough on its own and the
+    reads have to report what they find (#452).
+    """
+    episode_id = f"conv:{_ABSENT}:1"
+    raw = sqlite3.connect(database)
+    try:
+        raw.execute(
+            f"INSERT INTO turns({_TURN_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",  # noqa: S608 — literals
+            (_ABSENT, 1, episode_id, 0, binding.execution_id, binding.step_id),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    return episode_id
+
+
+def _strip_the_foreign_key(database: Path) -> None:
+    """Rewrite ``turns`` back to the unconstrained shape a pre-#452 store wrote.
+
+    The file is produced by the *current* store and then walked backwards, rather
+    than assembled from a hand-written legacy schema: everything but the one column
+    constraint under test is then authentic, and a legacy database in the wild is
+    exactly this file.
+    """
+    raw = sqlite3.connect(database, isolation_level=None)
+    try:
+        raw.execute(
+            "CREATE TABLE turns_legacy(conversation_id TEXT NOT NULL, ordinal INTEGER NOT NULL, "
+            "episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, execution_id TEXT, "
+            "step_id TEXT, PRIMARY KEY(conversation_id, ordinal))"
+        )
+        raw.execute(
+            f"INSERT INTO turns_legacy({_TURN_COLUMNS}) SELECT {_TURN_COLUMNS} FROM turns"  # noqa: S608 — literals
+        )
+        raw.execute("DROP TABLE turns")
+        raw.execute("ALTER TABLE turns_legacy RENAME TO turns")
+        raw.execute("CREATE UNIQUE INDEX turns_episode ON turns(episode_id)")
+        raw.execute(
+            "CREATE UNIQUE INDEX turns_binding ON turns(execution_id, step_id) "
+            "WHERE execution_id IS NOT NULL"
+        )
+    finally:
+        raw.close()
 
 
 class TestSqliteConversationStoreContract(ConversationStoreContract):
@@ -511,6 +583,193 @@ async def test_an_episode_id_that_is_not_the_derived_one_is_refused(tmp_path: Pa
             await store.episodes_to_purge(conversation.id)
     finally:
         store.close()
+
+
+# --- the turn index cannot name a conversation that is absent (#452) --------
+
+
+@pytest.mark.integration
+async def test_the_store_enforces_foreign_keys_on_its_own_connection(tmp_path: Path) -> None:
+    """``PRAGMA foreign_keys`` is off by default and per connection, so it is asked for.
+
+    Read off the connection because there is no black-box observation to make, and
+    that is the finding rather than a weakness of the test: every statement this
+    module issues is already referentially clean — the one ``INSERT`` into ``turns``
+    proves the parent exists in the same transaction, and the drop deletes the index
+    explicitly — so switching enforcement off changes nothing the store itself does.
+    Its whole effect is on a writer that is not this module, which is what the
+    constraint exists for. Without this case, deleting the pragma would break no test.
+    """
+    store = SqliteConversationStore(path=tmp_path / "conversations.db", now=_fixed_now)
+    try:
+        assert store._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.integration
+async def test_the_schema_refuses_a_turn_that_names_no_conversation(tmp_path: Path) -> None:
+    """The constraint is in the schema, so any writer that enforces it is held to it."""
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    store.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            raw.execute(
+                f"INSERT INTO turns({_TURN_COLUMNS}) VALUES (?, ?, ?, ?, NULL, NULL)",  # noqa: S608
+                (_ABSENT, 1, f"conv:{_ABSENT}:1", 0),
+            )
+    finally:
+        raw.close()
+
+
+@pytest.mark.integration
+async def test_deleting_a_conversation_row_cascades_to_its_turns(tmp_path: Path) -> None:
+    """``ON DELETE CASCADE``, so a foreign writer's delete cannot manufacture an orphan.
+
+    The store's own :meth:`drop_if_eligible` does not rely on this — it deletes the
+    index explicitly, because the pragma is per connection and a cascade it depended
+    on would silently stop happening on a connection that had not enabled it. The
+    cascade is the backstop for everyone else, and this is what pins it.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW)
+    finally:
+        store.close()
+
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("PRAGMA foreign_keys = ON")
+        raw.execute("DELETE FROM conversations WHERE id = ?", (conversation.id,))
+        raw.commit()
+        assert raw.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 0
+    finally:
+        raw.close()
+
+
+@pytest.mark.integration
+async def test_a_turn_naming_no_conversation_is_reported_rather_than_joined_away(
+    tmp_path: Path,
+) -> None:
+    """#452: the inner joins hid an orphan from every read instead of reporting it.
+
+    A row a foreign writer landed is structurally valid and names nothing. Both
+    reverse lookups and the export used to answer "no such turn" for it — the same
+    answer they owe for a conversation deliberately withheld behind a tombstone — so
+    the fault was indistinguishable from correct behaviour. And it is not merely
+    hidden: the purge walk needs the *conversation* record to enumerate anything, so
+    nothing could ever reach the episode this row names to destroy it.
+    """
+    path = tmp_path / "conversations.db"
+    binding = ParkedBinding(execution_id="exec-orphan", step_id="step-orphan")
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        live = await store.start()
+        await store.append(live.id, occurred_at=_NOW)
+    finally:
+        store.close()
+
+    episode_id = _insert_orphan_turn(path, binding=binding)
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
+            await reopened.turn_of_episode(episode_id)
+        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
+            await reopened.turn_of_binding(binding)
+        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
+            await reopened.export()
+        # The other half of why hiding it was the wrong answer: there is no record
+        # to enumerate it under, so the episode it names is unreachable.
+        with pytest.raises(UnknownConversationError):
+            await reopened.episodes_to_purge(_ABSENT)
+        # A tombstone is still withheld rather than reported, which is the
+        # distinction the left join exists to preserve.
+        sound = await reopened.turns(live.id)
+        assert await reopened.turn_of_episode(sound[0].episode_id) == sound[0]
+        assert await reopened.stamp_deleted(live.id) is True
+        assert await reopened.turn_of_episode(sound[0].episode_id) is None
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+async def test_a_legacy_database_without_the_foreign_key_is_rebuilt(tmp_path: Path) -> None:
+    """``CREATE TABLE IF NOT EXISTS`` binds fresh databases only, so a rebuild is owed.
+
+    SQLite has no ``ADD CONSTRAINT``, so the only way an existing file starts
+    carrying the key is the table rebuild ``SqliteMemoryStore._migrate_records``
+    already establishes as this repo's shape. What the case has to prove beyond
+    "the key is there" is that nothing was lost on the way: the rows, their
+    ordinals, and the two unique indexes ``DROP TABLE`` takes with it.
+    """
+    path = tmp_path / "conversations.db"
+    binding = ParkedBinding(execution_id="exec-1", step_id="step-1")
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        first = await store.append(conversation.id, occurred_at=_NOW)
+        parked = await store.append(conversation.id, occurred_at=_NOW, parked=binding)
+    finally:
+        store.close()
+
+    _strip_the_foreign_key(path)
+    assert not _cascading_keys_of(path), "the legacy file must really carry no key"
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert _cascading_keys_of(path), "opening the store should have rebuilt the table"
+        assert await reopened.turns(conversation.id) == [first, parked]
+        assert await reopened.turn_of_binding(binding) == parked
+        # The ordinal is read back from the migrated index, not from process state.
+        following = await reopened.append(conversation.id, occurred_at=_NOW)
+        assert following.ordinal == parked.ordinal + 1
+        # And the uniqueness invariants the schema *proves* came back with it: the
+        # rebuild drops the table, and its indexes go with it (ADR-0074 §9.1).
+        with pytest.raises(ConversationStoreError, match="already parked"):
+            await reopened.append(conversation.id, occurred_at=_NOW, parked=binding)
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+async def test_a_legacy_orphan_survives_the_rebuild_and_is_reported(tmp_path: Path) -> None:
+    """The copy runs with enforcement still off, deliberately.
+
+    A legacy file may already hold an orphan. Enforcing during the rebuild would
+    refuse it and make that file *unopenable* — no read could reach the sound rows
+    beside the broken one, and the fault would surface as a failure to construct the
+    store rather than as the report the contract owes. So the row is carried across
+    and named by the reads that would otherwise join it away.
+    """
+    path = tmp_path / "conversations.db"
+    binding = ParkedBinding(execution_id="exec-orphan", step_id="step-orphan")
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        live = await store.start()
+        turn = await store.append(live.id, occurred_at=_NOW)
+    finally:
+        store.close()
+
+    _strip_the_foreign_key(path)
+    episode_id = _insert_orphan_turn(path, binding=binding)
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert _cascading_keys_of(path), "the rebuild should have happened anyway"
+        assert await reopened.turns(live.id) == [turn], "the sound rows are still readable"
+        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
+            await reopened.turn_of_episode(episode_id)
+        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
+            await reopened.export()
+    finally:
+        reopened.close()
 
 
 @pytest.mark.integration

@@ -21,6 +21,28 @@ The database file is created with owner-only permissions (ADR-0004 §4). Every
 mutation runs inside one ``BEGIN IMMEDIATE`` transaction, which is how the
 per-conversation exclusion ADR-0074 §8 puts on the *seam* holds across processes
 as well as across coroutines — a lock inside one engine would not.
+
+**A turn cannot name a conversation that does not exist** (#452). ``turns``
+carries a foreign key to ``conversations`` with ``ON DELETE CASCADE``, and
+enforcement is switched on for the connection at open — ``PRAGMA foreign_keys``
+is off by default and is *per connection*, so it has to be. Two consequences the
+statements below are written against:
+
+* The only ``INSERT`` into ``turns`` already proves the parent exists inside the
+  same ``IMMEDIATE`` transaction, so the constraint never fires on this
+  module's own writes; it is there for a writer that is not this module. Were it
+  ever to fire, the ``IntegrityError`` reaches the caller as this seam's error
+  like any other backend failure.
+* :meth:`SqliteConversationStore.drop_if_eligible` keeps deleting the index
+  rows *explicitly* before the record, rather than leaning on the cascade —
+  see the comment there for why the pragma's per-connection scope makes that the
+  safer of the two.
+
+The constraint binds a database written before it existed only after a rebuild,
+which :meth:`SqliteConversationStore._migrate_turns` performs at open. An orphan
+that predates all of this is *reported* rather than repaired: the two reverse
+lookups and the export left-join the conversation so a turn naming nothing
+surfaces as ``ConversationStoreError`` instead of vanishing from every read.
 """
 
 from __future__ import annotations
@@ -87,6 +109,21 @@ _START_RETRY_BUDGET = 8
 _EPISODE_NAMESPACE = "conv"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+#: The columns of the ``turns`` table, foreign key and all — held in one place so
+#: the fresh-database path and :meth:`SqliteConversationStore._migrate_turns`'
+#: rebuild cannot drift apart. Two spellings of one schema is how a migration
+#: ends up producing a table subtly unlike the one a fresh open produces.
+_TURNS_COLUMNS = (
+    "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
+    "ordinal INTEGER NOT NULL, episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, "
+    "execution_id TEXT, step_id TEXT, PRIMARY KEY(conversation_id, ordinal)"
+)
+
+#: The turn columns every read selects, aliased to ``t`` for the joins.
+_TURN_SELECT = (
+    "t.conversation_id, t.ordinal, t.episode_id, t.occurred_at, t.execution_id, t.step_id"
+)
 
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
@@ -359,12 +396,11 @@ class SqliteConversationStore:
                 "id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, "
                 "last_active_at INTEGER NOT NULL, last_turn_at INTEGER, deleted_at INTEGER)"
             )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS turns("
-                "conversation_id TEXT NOT NULL, ordinal INTEGER NOT NULL, "
-                "episode_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, "
-                "execution_id TEXT, step_id TEXT, PRIMARY KEY(conversation_id, ordinal))"
-            )
+            conn.execute("CREATE TABLE IF NOT EXISTS turns(" + _TURNS_COLUMNS + ")")
+            # Before the indexes, because the rebuild drops the table and takes
+            # them with it, and before enforcement is switched on, because a
+            # legacy file may already hold a row the constraint would refuse.
+            self._migrate_turns(conn)
             # The two uniqueness invariants the store *proves* rather than asks a
             # caller to keep (ADR-0074 §9.1): one turn per episode id, and one turn
             # per parked binding. In the schema, so a second writer racing the
@@ -378,11 +414,122 @@ class SqliteConversationStore:
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
                 "ON conversations(last_active_at DESC, id)"
             )
-        except (sqlite3.Error, OSError) as exc:
+            self._enable_foreign_keys(conn)
+        except ConversationStoreError:
             conn.close()  # never leak the connection when opening fails
+            raise
+        except (sqlite3.Error, OSError) as exc:
+            conn.close()
             msg = f"failed to open conversation store at {self._path!r}: {exc}"
             raise ConversationStoreError(msg) from exc
         return conn
+
+    @staticmethod
+    def _enable_foreign_keys(conn: sqlite3.Connection) -> None:
+        """Turn foreign key enforcement on for this connection, and prove it took.
+
+        ``PRAGMA foreign_keys`` is **off by default and per connection**, so this
+        is what makes the constraint in :data:`_TURNS_COLUMNS` mean anything at
+        all — a schema carrying a key nobody enforces is documentation.
+
+        The reading back is the point of the method rather than a flourish: the
+        statement is a **silent no-op** both in a build compiled with
+        ``SQLITE_OMIT_FOREIGN_KEY`` and inside an open transaction, and either way
+        the store would go on believing an invariant it was not keeping. It is
+        issued here, at open, where nothing has begun a transaction yet.
+
+        Raises:
+            ConversationStoreError: If enforcement could not be switched on.
+        """
+        conn.execute("PRAGMA foreign_keys = ON")
+        enabled = conn.execute("PRAGMA foreign_keys").fetchone()
+        if not enabled or enabled[0] != 1:
+            msg = (
+                "this SQLite build does not enforce foreign keys, so a turn could not be "
+                "kept from naming a conversation that does not exist"
+            )
+            raise ConversationStoreError(msg)
+
+    @staticmethod
+    def _turns_reference_conversations(conn: sqlite3.Connection) -> bool:
+        """Whether ``turns`` already carries the cascading key to ``conversations``.
+
+        Read off ``PRAGMA foreign_key_list`` rather than the stored DDL text,
+        because the whole *shape* is what decides whether a rebuild is owed: the
+        right child column, the right parent column, and ``ON DELETE CASCADE``. A
+        substring match on ``sqlite_master`` would accept a key pointing at the
+        right table through the wrong column, and skip the migration that would
+        have fixed it.
+        """
+        return any(
+            row[2] == "conversations"
+            and row[3] == "conversation_id"
+            and row[4] == "id"
+            and str(row[6]).upper() == "CASCADE"
+            for row in conn.execute("PRAGMA foreign_key_list(turns)")
+        )
+
+    def _migrate_turns(self, conn: sqlite3.Connection) -> None:
+        """Rebuild a pre-existing ``turns`` table that carries no foreign key (#452).
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op against a file whose ``turns``
+        table already exists, so the constraint above binds **fresh databases
+        only**; a store opened over a database written before it would go on
+        accepting rows that name nothing. SQLite has no ``ADD CONSTRAINT``, so
+        making it bind an existing file is a table rebuild — the shape
+        ``SqliteMemoryStore._migrate_records`` already carries in this repo.
+
+        The copy runs with enforcement still **off** — :meth:`_enable_foreign_keys`
+        is called only after this returns — and that ordering is deliberate. A
+        legacy file may already hold an orphan, and enforcing during the copy
+        would make that file *unopenable* rather than readable: no read could
+        reach the sound rows beside the broken one, and the fault would surface as
+        a failure to construct the store rather than as the report the contract
+        owes. The orphan therefore survives the rebuild and is named by the reads
+        that would otherwise join it away.
+
+        No ``rowid`` is carried forward, unlike the memory store's rebuild: nothing
+        joins ``turns`` by rowid, and a turn's identity is its
+        ``(conversation_id, ordinal)`` pair.
+
+        It runs in an **explicit** transaction, because SQLite auto-commits a bare
+        DDL statement in autocommit mode (issue #289's review): without the
+        ``BEGIN``, a failure during the row copy would leave the table swapped and
+        the rows lost — permanently, since a later open would find the foreign key
+        and skip the migration. ``DROP TABLE`` takes the table's indexes with it,
+        which is why this runs *before* the ``CREATE ... IF NOT EXISTS`` index
+        statements that put them back.
+        """
+        if self._turns_reference_conversations(conn):
+            return  # already on the constrained schema; nothing to do
+        conn.execute("BEGIN")
+        try:
+            conn.execute("CREATE TABLE turns_migrated(" + _TURNS_COLUMNS + ")")
+            # Streamed through a dedicated read cursor rather than ``fetchall()``,
+            # so migrating a long history does not materialise the whole table at
+            # once. Reads come from ``turns`` and writes go to ``turns_migrated``,
+            # a different table, so the scan cursor stays valid across the inserts.
+            read = conn.execute(
+                "SELECT conversation_id, ordinal, episode_id, occurred_at, execution_id, step_id "
+                "FROM turns"
+            )
+            for row in read:
+                conn.execute(
+                    "INSERT INTO turns_migrated(conversation_id, ordinal, episode_id, "
+                    "occurred_at, execution_id, step_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+            conn.execute("DROP TABLE turns")
+            conn.execute("ALTER TABLE turns_migrated RENAME TO turns")
+            conn.execute("COMMIT")
+        except BaseException:
+            # The whole rewrite, DDL included, has to come undone: a reopen then
+            # re-attempts a clean migration instead of finding a half-swapped
+            # schema. A crash mid-rebuild is covered too — SQLite discards the
+            # uncommitted transaction on the next open.
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
 
     def _restrict_permissions(self) -> None:
         if self._path != ":memory:":
@@ -565,6 +712,49 @@ class SqliteConversationStore:
             (conversation_id,),
         )
         return rows[0] if rows else None
+
+    @staticmethod
+    def _orphan(conversation_id: object) -> ConversationStoreError:
+        """The fault a turn naming no conversation is (#452).
+
+        The base class and not :meth:`_unknown`'s subclass: the caller named
+        something the store *does* hold a turn for, so this is not "another sweeper
+        already finished this id" (ADR-0076 §2) — it is the index disagreeing with
+        itself, which is a store fault.
+        """
+        described = describe_untrusted(conversation_id)
+        return ConversationStoreError(
+            f"a stored turn names a conversation that is absent: {described}"
+        )
+
+    def _presented_turn(self, rows: Sequence[Any]) -> ConversationTurn | None:
+        """Decode a reverse lookup's row: report an orphan, withhold a tombstone.
+
+        The two lookups **left**-join the conversation rather than requiring it,
+        because an inner join answers "no such turn" for two rows that are nothing
+        alike: one whose conversation is stamped, withheld on purpose (ADR-0074
+        §9), and one whose conversation does not exist at all, which is corruption
+        the contract owes an error for. Joining the second away is the worst of the
+        options — the row is invisible to every read *and* unreachable by the purge
+        walk, which needs the conversation record to enumerate anything, so the
+        episode it names could never be destroyed (#452).
+
+        ``c.id IS NULL`` is an unambiguous "no parent row" here even though SQLite
+        tolerates a ``NULL`` in a ``TEXT PRIMARY KEY``: the join predicate is
+        ``c.id = t.conversation_id``, and a ``NULL`` id matches nothing.
+
+        Raises:
+            ConversationStoreError: If the turn names a conversation the store does
+                not hold, or the row itself does not decode.
+        """
+        if not rows:
+            return None
+        row = rows[0]
+        if row[6] is None:
+            raise self._orphan(row[0])
+        if row[7] is not None:
+            return None
+        return self._decode_turn(row)
 
     @staticmethod
     def _unknown(conversation_id: str) -> UnknownConversationError:
@@ -988,45 +1178,56 @@ class SqliteConversationStore:
         )
 
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
-        """Return the turn an episode records, or ``None`` if absent or stamped."""
+        """Return the turn an episode records, or ``None`` if absent or stamped.
+
+        Raises:
+            ConversationStoreError: If the turn names a conversation the store does
+                not hold, or the stored row is corrupt.
+        """
         async with self._lock:
             rows = await _run_to_completion(self._turn_of_episode_sync, episode_id)
-        return self._decode_turn(rows[0]) if rows else None
+        return self._presented_turn(rows)
 
     async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
-        """Return the turn that parked on ``binding``, or ``None`` if absent or stamped."""
+        """Return the turn that parked on ``binding``, or ``None`` if absent or stamped.
+
+        Raises:
+            ConversationStoreError: If the turn names a conversation the store does
+                not hold, or the stored row is corrupt.
+        """
         async with self._lock:
             rows = await _run_to_completion(
                 self._turn_of_binding_sync, binding.execution_id, binding.step_id
             )
-        return self._decode_turn(rows[0]) if rows else None
+        return self._presented_turn(rows)
 
     def _turn_of_episode_sync(self, episode_id: str) -> list[Any]:
-        """Resolve an episode id, hiding a turn whose conversation is stamped.
+        """Resolve an episode id, carrying enough to withhold a stamped turn.
 
-        The join is the whole of the rule: a caller holding an episode id from
-        before a deletion must not get back the ordinal, timestamp and binding
-        metadata every presenting read withholds (ADR-0074 §9).
+        Withholding is the whole of ADR-0074 §9's rule here: a caller holding an
+        episode id from before a deletion must not get back the ordinal, timestamp
+        and binding metadata every presenting read withholds. The filter is applied
+        in :meth:`_presented_turn` rather than in the ``WHERE`` clause, over a
+        **left** join, so that a turn naming no conversation at all is reported
+        instead of being indistinguishable from a stamped one (#452).
         """
         return self._fetch(
             self._conn,
             "resolve an episode id",
-            "SELECT t.conversation_id, t.ordinal, t.episode_id, "
-            "t.occurred_at, t.execution_id, t.step_id "
-            "FROM turns t JOIN conversations c ON c.id = t.conversation_id "
-            "WHERE t.episode_id = ? AND c.deleted_at IS NULL",
+            "SELECT " + _TURN_SELECT + ", c.id, c.deleted_at "
+            "FROM turns t LEFT JOIN conversations c ON c.id = t.conversation_id "
+            "WHERE t.episode_id = ?",
             (episode_id,),
         )
 
     def _turn_of_binding_sync(self, execution_id: str, step_id: str) -> list[Any]:
-        """Resolve a parked binding, hiding a turn whose conversation is stamped."""
+        """Resolve a parked binding, on the same left join for the same reason."""
         return self._fetch(
             self._conn,
             "resolve a parked binding",
-            "SELECT t.conversation_id, t.ordinal, t.episode_id, "
-            "t.occurred_at, t.execution_id, t.step_id "
-            "FROM turns t JOIN conversations c ON c.id = t.conversation_id "
-            "WHERE t.execution_id = ? AND t.step_id = ? AND c.deleted_at IS NULL",
+            "SELECT " + _TURN_SELECT + ", c.id, c.deleted_at "
+            "FROM turns t LEFT JOIN conversations c ON c.id = t.conversation_id "
+            "WHERE t.execution_id = ? AND t.step_id = ?",
             (execution_id, step_id),
         )
 
@@ -1091,6 +1292,15 @@ class SqliteConversationStore:
                 )
             if not eligible:
                 return False
+            # The index rows go first and **explicitly**, with ``ON DELETE
+            # CASCADE`` behind them as a backstop rather than as the mechanism
+            # (#452). ``PRAGMA foreign_keys`` is per connection and off by
+            # default, so a cascade this module *relied* on would stop happening
+            # on any connection that had not enabled it — and the failure mode is
+            # the silent one: every drop would leave the turns behind as orphans,
+            # unreachable by the very sweep that had just run. Deleting them here
+            # makes the drop correct whatever the pragma says; the cascade then
+            # only ever fires for a writer that is not this module.
             conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
             return True
@@ -1105,8 +1315,8 @@ class SqliteConversationStore:
         missed.
 
         Raises:
-            ConversationStoreError: If the store cannot be read, or a stored row
-                is corrupt.
+            ConversationStoreError: If the store cannot be read, a stored row is
+                corrupt, or any turn names a conversation the store does not hold.
         """
         async with self._lock:
             exported_at, conversation_rows, turn_rows = await _run_to_completion(self._export_sync)
@@ -1119,6 +1329,20 @@ class SqliteConversationStore:
     def _export_sync(self) -> tuple[datetime, list[Any], list[Any]]:
         with self._transaction("export conversations", immediate=False) as conn:
             exported_at = self._now()
+            # Probed before either half is materialised, and over the whole table
+            # rather than only the rows this export would present: the snapshot is
+            # the store's account of itself, so a turn naming nothing is a fault to
+            # report and not a row to leave out. The query the turns are read with
+            # below is an inner join and would silently drop it (#452).
+            orphaned = self._fetch(
+                conn,
+                "export conversation turns",
+                "SELECT t.conversation_id FROM turns t "
+                "LEFT JOIN conversations c ON c.id = t.conversation_id "
+                "WHERE c.id IS NULL LIMIT 1",
+            )
+            if orphaned:
+                raise self._orphan(orphaned[0][0])
             conversations = self._fetch(
                 conn,
                 "export conversations",
