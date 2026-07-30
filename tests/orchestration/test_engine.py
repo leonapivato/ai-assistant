@@ -1670,15 +1670,68 @@ async def test_beliefs_selects_nothing_for_an_explicitly_empty_filter() -> None:
 
 
 async def test_beliefs_snapshots_its_filters_so_a_caller_cannot_change_the_page() -> None:
-    """The filters are materialised before the awaiting task reads them (ADR-0065)."""
-    harness = Harness(memory=RecordingBeliefStore(now=lambda: AT))
-    store = harness.memory
-    assert isinstance(store, RecordingBeliefStore)
+    """The filters are materialised before the awaiting task reads them (ADR-0065).
+
+    The mutation lands **mid-flight** — while the store is suspended inside
+    ``list_beliefs``, before it has read the sequence it was handed — and not after
+    the call returned. That is the difference between proving snapshot *isolation*
+    and proving *when* the snapshot was taken, which is what ADR-0065 §3's discharge
+    is about.
+
+    Mutating afterwards instead does catch a façade that relays the caller's list
+    verbatim — but only by accident of this seam: the recorder happens to keep the
+    raw object, and a ``list`` never equals a ``tuple``. Let the recorder normalise
+    its capture on entry, an unremarkable thing for a recorder to do, and the
+    after-the-fact form goes green against a façade that materialises nothing, while
+    this form still fails. A property that rests on the recorder's choice of
+    representation is not the property the docstring claims, so it is asserted where
+    no later copy can rescue it: after the store already holds the argument.
+
+    The gated-collaborator idiom is the one
+    ``test_learn_is_drained_before_shutdown_closes_resources`` uses.
+    ``RecordingBeliefStore`` is the seam, subclassed so it reads its own ``bands``
+    argument *after* the release — standing in for a store that observes its input
+    late, which is the only kind of store that can tell the two façades apart.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class GatedBeliefStore(RecordingBeliefStore):
+        """Holds ``list_beliefs`` open, then reads ``bands`` only once released."""
+
+        #: ``bands`` as it read after resuming, or ``None`` if it was given none.
+        observed_on_resume: tuple[BeliefBand, ...] | None = None
+
+        async def list_beliefs(
+            self,
+            *,
+            bands: Sequence[BeliefBand] | None = None,
+            kinds: Sequence[MemoryKind] | None = None,
+            limit: int = 50,
+            offset: int = 0,
+        ) -> list[MemoryRecord]:
+            entered.set()
+            await release.wait()
+            self.observed_on_resume = None if bands is None else tuple(bands)
+            return await super().list_beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
+
+    store = GatedBeliefStore(now=lambda: AT)
+    harness = Harness(memory=store)
 
     bands = [BeliefBand.ASSERTED]
-    await harness.engine.beliefs(bands=bands)
-    bands.append(BeliefBand.DERIVED)  # mutating the caller's list afterwards
-    assert store.calls[-1][0] == (BeliefBand.ASSERTED,)  # the store saw the snapshot
+    call = asyncio.ensure_future(harness.engine.beliefs(bands=bands))
+    await entered.wait()
+
+    bands.append(BeliefBand.DERIVED)  # the caller mutates while the read is in flight
+    release.set()
+    await call
+
+    # One coherent snapshot: what the store was handed and what it read on resuming
+    # are both the filter as it stood when the call was made, not as the caller left
+    # it. The second assertion is the original after-the-fact property, kept — it is
+    # implied here but costs nothing and names the weaker half explicitly.
+    assert store.observed_on_resume == (BeliefBand.ASSERTED,)
+    assert store.calls[-1][0] == (BeliefBand.ASSERTED,)
 
 
 async def test_beliefs_relays_an_out_of_range_page_refusal() -> None:
