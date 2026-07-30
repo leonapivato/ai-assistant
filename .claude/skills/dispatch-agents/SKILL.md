@@ -237,7 +237,8 @@ either overrides the test by eye or resets by hand:
 
 ```bash
 git -C "$clone" switch main --quiet && git -C "$clone" pull --ff-only
-if git -C "$clone" cherry main <area>/<slug> | grep -q '^+'; then
+cherry=$(git -C "$clone" cherry main <area>/<slug>) || { echo "cherry failed"; exit 1; }
+if [[ $cherry == *"+ "* ]]; then
   echo "unmerged commits — leave the branch alone and find out why"
 else
   git -C "$clone" branch -D <area>/<slug>
@@ -251,14 +252,25 @@ on a lane that *did* land — which trains you to reach for `-D` reflexively, an
 patch ids instead, so it answers the question ancestry cannot: did this work
 reach `main` in any form?
 
-**Read its output by prefix, not by emptiness.** `cherry` prints one line per
-commit on the branch: `-` where an equivalent patch is already upstream, `+`
-where none is. A rebase-merged lane therefore prints a `-` line per commit rather
-than nothing at all, so "it printed nothing" is the wrong test — **a single `+`
-line means unmerged work, and nothing may delete that branch.** That is why the
-guard above is a conditional and not three sequential commands: `-D` is
-unrecoverable, and this is the one snippet here where getting it wrong destroys a
-lane's work rather than merely failing.
+**Test for the absence of `+`, not for empty output.** Verified on git 2.53:
+`cherry` omits a commit whose patch is already upstream, so a fully landed lane
+prints nothing and only unmerged commits appear, each prefixed `+`. The two tests
+therefore agree today — but they stop agreeing the moment any commit on the branch
+*is* unmerged, and `+` is the property that actually matters: **a single `+` line
+means unmerged work, and nothing may delete that branch.** Emptiness is a
+side-effect of the current output format; `+` is the question.
+
+That is also why the guard is a conditional rather than three sequential
+commands. `-D` is unrecoverable, and this is the one snippet here where getting it
+wrong destroys a lane's work rather than merely failing.
+
+For the same reason it **captures `cherry` and matches the variable**, instead of
+piping into `grep -q`. Two ways a pipeline reaches the delete branch by accident:
+`grep -q` exits at its first match and leaves `git cherry` writing into a closed
+pipe, which under `set -o pipefail` makes the whole pipeline non-zero and sends a
+branch full of `+` lines down the `else`; and a `git cherry` that *fails* — a
+mistyped branch name — prints nothing at all, which any "did it match?" test reads
+as "nothing unmerged." Every default here has to fail toward keeping the branch.
 
 **Renaming a clone breaks its `.venv`** (absolute paths): `rm -rf .venv && just
 setup` after. Never rename a clone an agent is running in.
