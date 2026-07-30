@@ -14,9 +14,10 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from conversation_store_contract import (
@@ -625,60 +626,125 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
 
 # --- the exclusion across *processes* (#446) ---------------------------------
 
+#: How long a child holds the critical section open once it has announced itself.
+#: A *bound* on how long the engine behind it is given to arrive and collide, not a
+#: synchronisation primitive — the ordering the cases below depend on comes from the
+#: announcement, not from this.
+_HOLD_SECONDS = 0.3
 
-def _run_gated(run: Callable[[], str], gate_fd: int, write_fd: int) -> None:
+
+def _store_holding_its_ordinal_read(
+    path: Path, *, announce: Callable[[], None], hold: float
+) -> SqliteConversationStore:
+    """A store whose first ordinal allocation announces itself and then waits inside.
+
+    The rendezvous the cross-process claim actually needs. Starting two children
+    together only makes them *runnable*: the OS may run one through all its work
+    before scheduling the other, and in that execution a deferred read-then-write
+    allocates dense ordinals too — so a test without this can pass on the very bug it
+    exists to catch. The wait is placed after the competing read and before the write,
+    which is precisely the window ``BEGIN IMMEDIATE`` is there to close.
+
+    ``_fetch`` is shadowed on the instance and keyed on the human label the store
+    already passes it, so the hook names the read it means rather than matching SQL.
+    """
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    original = SqliteConversationStore._fetch
+    announced = False
+
+    def fetch(
+        conn: sqlite3.Connection, what: str, sql: str, params: Sequence[object] = ()
+    ) -> list[Any]:
+        nonlocal announced
+        rows = original(conn, what, sql, params)
+        if what == "allocate an ordinal" and not announced:
+            announced = True
+            announce()
+            time.sleep(hold)
+        return rows
+
+    # Shadowed on the instance, which is what keeps the hook to this store's reads.
+    # `_append_sync` reaches it as `self._fetch`; `_row_of` is a classmethod and
+    # resolves on the class, so the liveness read stays unhooked.
+    store._fetch = fetch  # type: ignore[method-assign]  # a per-instance test hook
+    return store
+
+
+def _run_child(
+    run: Callable[[Callable[[], None]], str], gate_fd: int, signal_fd: int, write_fd: int
+) -> None:
     """Wait at the gate, do the work, report through the pipe — in the child.
 
-    Never returns, and never lets an exception out: a traceback in a forked child
-    is invisible to pytest, so a failure becomes a report the parent asserts on
-    rather than a silent pass.
+    Never returns, and never lets an exception out: a traceback in a forked child is
+    invisible to pytest, so a failure becomes a report the parent asserts on rather
+    than a silent pass. It announces itself unconditionally on the way out too, so a
+    child that died before reaching its critical section still releases the one
+    waiting behind it.
     """
+
+    def announce() -> None:
+        with contextlib.suppress(OSError):
+            os.write(signal_fd, b"s")
+
     try:
         with os.fdopen(gate_fd, "rb") as gate:
             gate.read(1)
-        message = run()
+        message = run(announce)
     except BaseException as exc:  # a forked child cannot raise into pytest
         message = f"ERROR {exc!r}"
+    announce()
     with contextlib.suppress(OSError), os.fdopen(write_fd, "w") as pipe:
         pipe.write(message)
     os._exit(0)
 
 
-def _in_forked_children(work: Sequence[Callable[[], str]]) -> list[str]:
-    """Run each callable in its own forked process, started together, and collect its report.
+def _in_staged_children(work: Sequence[Callable[[Callable[[], None]], str]]) -> list[str]:
+    """Fork each callable into its own process, releasing each once the last announced.
 
-    A gate pipe per child, written only once every child exists, so the processes
-    genuinely overlap: an exclusion claim about two processes is not tested by two
-    processes that never met. The children are reaped in a ``finally`` and any gate
-    still unwritten is closed there first, so a failing assertion cannot leave a
-    process parked at the gate forever.
+    Staged rather than simultaneous, because simultaneous is not a rendezvous — see
+    :func:`_store_holding_its_ordinal_read`. Each child is released only after its
+    predecessor has announced that it is *inside* the critical section, so the overlap
+    the cases are about is guaranteed rather than merely likely.
+
+    Pipes are created immediately before each fork, so no child inherits a later
+    child's, and every parent-side end is closed in the child (and every child-side
+    end in the parent) — an inherited write end would keep a report pipe from ever
+    reaching end-of-file. Children are reaped in a ``finally`` that first releases
+    every gate still unwritten, so a failing assertion cannot leave one parked.
     """
     pids: list[int] = []
     gates: list[int] = []
+    signals: list[int] = []
     reads: list[int] = []
     reports: list[str] = []
     try:
         for run in work:
             gate_read, gate_write = os.pipe()
+            signal_read, signal_write = os.pipe()
             read_fd, write_fd = os.pipe()
             pid = os.fork()
             if pid == 0:  # child
-                os.close(gate_write)
-                os.close(read_fd)
-                _run_gated(run, gate_read, write_fd)
-            os.close(gate_read)  # parent
-            os.close(write_fd)
+                for parent_end in (gate_write, signal_read, read_fd):
+                    os.close(parent_end)
+                _run_child(run, gate_read, signal_write, write_fd)
+            for child_end in (gate_read, signal_write, write_fd):
+                os.close(child_end)
             pids.append(pid)
             gates.append(gate_write)
+            signals.append(signal_read)
             reads.append(read_fd)
-        for gate_write in gates:
+        for index, gate_write in enumerate(gates):
             os.write(gate_write, b"g")
+            if index + 1 < len(gates):
+                # Blocks until that child is inside — or has exited, which closes the
+                # write end, so a child that died cannot strand the one behind it.
+                os.read(signals[index], 1)
         for read_fd in reads:
             with os.fdopen(read_fd) as pipe:
                 reports.append(pipe.read())
         reads.clear()
     finally:
-        for leftover in (*gates, *reads):
+        for leftover in (*gates, *signals, *reads):
             with contextlib.suppress(OSError):
                 os.close(leftover)
         for pid in pids:
@@ -694,14 +760,18 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
     """The module's claim is about *processes*, and only processes can test it.
 
     Every other concurrency case is one process. Even the two-connection case above
-    is: each store's own ``asyncio.Lock`` serialises its connection before SQLite
-    ever sees the contention, so none of them can tell ``BEGIN IMMEDIATE`` from a
-    deferred read-then-write. Two engines really running at once can — a deferred
-    transaction lets both read the same highest ordinal and allocate it twice.
+    is: each store's own ``asyncio.Lock`` serialises its connection before SQLite ever
+    sees the contention, so none of them can tell ``BEGIN IMMEDIATE`` from a deferred
+    read-then-write. Two engines really running at once can — a deferred transaction
+    lets both read the same highest ordinal and go on to allocate it twice.
 
-    Each child drives ``_append_sync`` on a store it opened itself: the parent's
-    event loop is copied into a forked child and must not be reused, and a
-    ``sqlite3`` connection must not be shared across a fork either.
+    The first child holds its transaction open across the read, and the second is
+    released only once it is in there, so the collision is *attempted* on every run
+    rather than whenever the scheduler happens to arrange it.
+
+    Each child drives ``_append_sync`` on a store it opened itself: the parent's event
+    loop is copied into a forked child and must not be reused, and a ``sqlite3``
+    connection must not be shared across a fork either.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -710,10 +780,18 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
     finally:
         store.close()
 
-    each = 8
+    each = 4
     total = 2 * each
 
-    def _append_many() -> str:
+    def _hold_then_append(announce: Callable[[], None]) -> str:
+        child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
+        try:
+            allocated = [child._append_sync(conversation.id, _NOW, None)[1] for _ in range(each)]
+        finally:
+            child.close()
+        return ",".join(str(one) for one in allocated)
+
+    def _append(announce: Callable[[], None]) -> str:
         child = SqliteConversationStore(path=path, now=_fixed_now)
         try:
             allocated = [child._append_sync(conversation.id, _NOW, None)[1] for _ in range(each)]
@@ -721,7 +799,7 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
             child.close()
         return ",".join(str(one) for one in allocated)
 
-    reports = _in_forked_children([_append_many, _append_many])
+    reports = _in_staged_children([_hold_then_append, _append])
 
     allocated: list[int] = []
     for report in reports:
@@ -743,14 +821,21 @@ async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
 
 @pytest.mark.integration
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
-async def test_a_capture_and_a_deletion_in_two_processes_serialise(tmp_path: Path) -> None:
+async def test_a_capture_holds_off_a_deletion_in_another_process(tmp_path: Path) -> None:
     """ADR-0074 §8's other conjunction, across the boundary the clause is written for.
 
     "A caller-held lock does not survive a second caller" is the whole reason the
-    exclusion is on the seam, so the shared suite's capture-and-deletion case is
-    asserted here between two engines: whichever landed first, the outcome is one of
-    exactly two consistent states — never a turn recorded *into* a stamped
-    conversation, and never a stamp that lost a turn it should have named.
+    exclusion sits on the seam, so the shared suite's capture-and-deletion case is
+    driven here between two engines. The suite's version accepts *either* consistent
+    outcome, because in one process it cannot say which lands first. Staged across two
+    processes it can, and the determinism is the discriminating power: the append is
+    inside its transaction before the deletion is released, so ``BEGIN IMMEDIATE``
+    makes the deletion wait, the turn is recorded, and the stamp then names both turns.
+
+    Both weakenings fail it. A deferred *append* lets the stamp reach the row during
+    the hold, and the append's write is then refused as busy; a deferred *stamp*
+    reaches its update while the append holds the write lock, and it is refused
+    instead. Neither leaves the determined outcome below.
     """
     path = tmp_path / "conversations.db"
     store = SqliteConversationStore(path=path, now=_fixed_now)
@@ -760,8 +845,8 @@ async def test_a_capture_and_a_deletion_in_two_processes_serialise(tmp_path: Pat
     finally:
         store.close()
 
-    def _append_once() -> str:
-        child = SqliteConversationStore(path=path, now=_fixed_now)
+    def _hold_then_append(announce: Callable[[], None]) -> str:
+        child = _store_holding_its_ordinal_read(path, announce=announce, hold=_HOLD_SECONDS)
         try:
             return str(child._append_sync(conversation.id, _NOW, None)[1])
         except UnknownConversationError:
@@ -769,27 +854,27 @@ async def test_a_capture_and_a_deletion_in_two_processes_serialise(tmp_path: Pat
         finally:
             child.close()
 
-    def _stamp() -> str:
+    def _stamp(announce: Callable[[], None]) -> str:
         child = SqliteConversationStore(path=path, now=_fixed_now)
         try:
             return str(child._stamp_deleted_sync(conversation.id))
         finally:
             child.close()
 
-    appended, stamped = _in_forked_children([_append_once, _stamp])
+    appended, stamped = _in_staged_children([_hold_then_append, _stamp])
 
+    assert appended == "2", (
+        f"the append held the write lock across the window, so the deletion had to "
+        f"queue behind it and the turn had to be recorded: {appended}"
+    )
     assert stamped == "True", f"the deletion is unconditional and must have happened: {stamped}"
+
     reopened = SqliteConversationStore(path=path, now=_fixed_now)
     try:
         named = await reopened.episodes_to_purge(conversation.id)
-        if appended == "REFUSED":
-            assert named == [f"conv:{conversation.id}:1"], named
-        else:
-            assert appended.isdigit(), appended
-            assert f"conv:{conversation.id}:{appended}" in named, (
-                "the append succeeded, so the index the sweep reads must name its episode"
-            )
-            assert len(named) == 2, named
+        assert named == [f"conv:{conversation.id}:1", f"conv:{conversation.id}:2"], (
+            "the append succeeded, so the index the sweep reads must name its episode"
+        )
     finally:
         reopened.close()
 
@@ -976,8 +1061,61 @@ async def test_a_legacy_database_without_the_foreign_key_is_rebuilt(tmp_path: Pa
 
 
 @pytest.mark.integration
+async def test_a_legacy_orphan_migrates_even_where_enforcement_starts_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enforcement being off is a *compile-time* default, so the rebuild says ``OFF``.
+
+    A driver built with ``SQLITE_DEFAULT_FOREIGN_KEYS`` hands out connections with
+    enforcement already on. A rebuild that merely ran *before* the store switched it
+    on would, on such a build, refuse the legacy orphan mid-copy and leave the file
+    unopenable — the outcome the migration exists to avoid, unreachable on the
+    machine running this and reachable on somebody else's. Simulated by handing the
+    store the kind of connection such a build produces.
+    """
+    path = tmp_path / "conversations.db"
+    binding = ParkedBinding(execution_id="exec-orphan", step_id="step-orphan")
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        live = await store.start()
+        turn = await store.append(live.id, occurred_at=_NOW)
+    finally:
+        store.close()
+
+    _strip_the_foreign_key(path)
+    episode_id = _insert_orphan_turn(path, binding=binding)
+
+    real_connect = sqlite3.connect
+
+    # Typed to the one call the store makes, rather than to `connect`'s overloads:
+    # the double stands in for a driver default, not for the whole function.
+    def connect_enforcing(
+        database: str, *, check_same_thread: bool, isolation_level: None
+    ) -> sqlite3.Connection:
+        conn = real_connect(
+            database, check_same_thread=check_same_thread, isolation_level=isolation_level
+        )
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    # Scoped to the constructor, which is the only call that has to meet the
+    # simulated driver — the helpers below open their own ordinary connections.
+    with monkeypatch.context() as patched:
+        patched.setattr(sqlite3, "connect", connect_enforcing)
+        reopened = SqliteConversationStore(path=path, now=_fixed_now)
+
+    try:
+        assert _cascading_keys_of(path), "the rebuild should have happened anyway"
+        assert await reopened.turns(live.id) == [turn], "the sound rows are still readable"
+        with pytest.raises(ConversationStoreError, match="names a conversation that is absent"):
+            await reopened.turn_of_episode(episode_id)
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
 async def test_a_legacy_orphan_survives_the_rebuild_and_is_reported(tmp_path: Path) -> None:
-    """The copy runs with enforcement still off, deliberately.
+    """The copy runs with enforcement switched off, deliberately.
 
     A legacy file may already hold an orphan. Enforcing during the rebuild would
     refuse it and make that file *unopenable* — no read could reach the sound rows

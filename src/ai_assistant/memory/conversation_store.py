@@ -398,7 +398,7 @@ class SqliteConversationStore:
             )
             conn.execute("CREATE TABLE IF NOT EXISTS turns(" + _TURNS_COLUMNS + ")")
             # Before the indexes, because the rebuild drops the table and takes
-            # them with it, and before enforcement is switched on, because a
+            # them with it. It switches enforcement off for itself, because a
             # legacy file may already hold a row the constraint would refuse.
             self._migrate_turns(conn)
             # The two uniqueness invariants the store *proves* rather than asks a
@@ -414,7 +414,7 @@ class SqliteConversationStore:
                 "CREATE INDEX IF NOT EXISTS conversations_activity "
                 "ON conversations(last_active_at DESC, id)"
             )
-            self._enable_foreign_keys(conn)
+            self._set_foreign_keys(conn, enforced=True)
         except ConversationStoreError:
             conn.close()  # never leak the connection when opening fails
             raise
@@ -425,28 +425,51 @@ class SqliteConversationStore:
         return conn
 
     @staticmethod
-    def _enable_foreign_keys(conn: sqlite3.Connection) -> None:
-        """Turn foreign key enforcement on for this connection, and prove it took.
+    def _set_foreign_keys(conn: sqlite3.Connection, *, enforced: bool) -> None:
+        """Set foreign key enforcement for this connection, and prove the setting took.
 
-        ``PRAGMA foreign_keys`` is **off by default and per connection**, so this
-        is what makes the constraint in :data:`_TURNS_COLUMNS` mean anything at
-        all — a schema carrying a key nobody enforces is documentation.
+        ``PRAGMA foreign_keys`` is **per connection**, so switching it on here is
+        what makes the constraint in :data:`_TURNS_COLUMNS` mean anything at all — a
+        schema carrying a key nobody enforces is documentation.
 
-        The reading back is the point of the method rather than a flourish: the
-        statement is a **silent no-op** both in a build compiled with
-        ``SQLITE_OMIT_FOREIGN_KEY`` and inside an open transaction, and either way
-        the store would go on believing an invariant it was not keeping. It is
-        issued here, at open, where nothing has begun a transaction yet.
+        **Both** directions are set rather than assumed. Enforcement being off is
+        the documented default, but it is a *compile-time* default: a driver built
+        with ``SQLITE_DEFAULT_FOREIGN_KEYS`` starts with it on, and
+        :meth:`_migrate_turns` copying a legacy orphan under enforcement would fail
+        and make that file unopenable — the exact outcome the migration is written
+        to avoid. Saying so explicitly makes the rebuild's semantics independent of
+        how the driver happens to have been compiled.
+
+        Reading the setting back is the point of the method rather than a flourish:
+        the statement is a **silent no-op** in a build compiled with
+        ``SQLITE_OMIT_FOREIGN_KEY`` and inside an open transaction alike, and either
+        way the store would go on believing something about a setting it had not
+        changed. Both calls are issued at open, where nothing has begun one.
+
+        A build that omits foreign keys altogether reads back ``0`` whatever is
+        asked of it, so it satisfies the ``enforced=False`` call and fails the
+        ``enforced=True`` one — loudly, at construction, which is where to discover
+        that this store cannot keep its own invariant.
 
         Raises:
-            ConversationStoreError: If enforcement could not be switched on.
+            ConversationStoreError: If the setting did not take.
         """
-        conn.execute("PRAGMA foreign_keys = ON")
-        enabled = conn.execute("PRAGMA foreign_keys").fetchone()
-        if not enabled or enabled[0] != 1:
+        statement, wanted = (
+            ("PRAGMA foreign_keys = ON", 1)
+            if enforced
+            else (
+                "PRAGMA foreign_keys = OFF",
+                0,
+            )
+        )
+        conn.execute(statement)
+        reading = conn.execute("PRAGMA foreign_keys").fetchone()
+        if not reading or reading[0] != wanted:
             msg = (
                 "this SQLite build does not enforce foreign keys, so a turn could not be "
                 "kept from naming a conversation that does not exist"
+                if enforced
+                else "foreign key enforcement could not be switched off for the schema rebuild"
             )
             raise ConversationStoreError(msg)
 
@@ -479,14 +502,18 @@ class SqliteConversationStore:
         making it bind an existing file is a table rebuild — the shape
         ``SqliteMemoryStore._migrate_records`` already carries in this repo.
 
-        The copy runs with enforcement still **off** — :meth:`_enable_foreign_keys`
-        is called only after this returns — and that ordering is deliberate. A
-        legacy file may already hold an orphan, and enforcing during the copy
-        would make that file *unopenable* rather than readable: no read could
-        reach the sound rows beside the broken one, and the fault would surface as
-        a failure to construct the store rather than as the report the contract
-        owes. The orphan therefore survives the rebuild and is named by the reads
-        that would otherwise join it away.
+        The copy runs with enforcement **switched off, explicitly**, and that is
+        deliberate rather than a reliance on the default. A legacy file may already
+        hold an orphan, and enforcing during the copy would make that file
+        *unopenable* rather than readable: no read could reach the sound rows
+        beside the broken one, and the fault would surface as a failure to
+        construct the store rather than as the report the contract owes. The orphan
+        therefore survives the rebuild and is named by the reads that would
+        otherwise join it away. Saying ``OFF`` rather than trusting the ordering
+        against :meth:`_set_foreign_keys` matters because "off" is only a
+        *compile-time* default — a driver built with ``SQLITE_DEFAULT_FOREIGN_KEYS``
+        starts with it on, and this rebuild would refuse the very row it exists to
+        carry across.
 
         No ``rowid`` is carried forward, unlike the memory store's rebuild: nothing
         joins ``turns`` by rowid, and a turn's identity is its
@@ -502,6 +529,8 @@ class SqliteConversationStore:
         """
         if self._turns_reference_conversations(conn):
             return  # already on the constrained schema; nothing to do
+        # Outside the `BEGIN` below, where the pragma would be a silent no-op.
+        self._set_foreign_keys(conn, enforced=False)
         conn.execute("BEGIN")
         try:
             conn.execute("CREATE TABLE turns_migrated(" + _TURNS_COLUMNS + ")")
