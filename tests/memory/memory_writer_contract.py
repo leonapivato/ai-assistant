@@ -126,6 +126,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     PreferenceMemory,
     Provenance,
+    UserConfirmation,
     Validity,
 )
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
@@ -536,6 +537,162 @@ class _SuspendingPolicy:
     def release(self) -> None:
         """Let the writer finish; idempotent."""
         self._released.set()
+
+
+# --- ADR-0078 §5's confirmation gate: the six inputs it must tell apart ------
+
+#: The frozen conflict set a question is asked about in these cases. Held as data
+#: rather than inlined because check 4 recomputes the ``question_key`` from *exactly*
+#: this, so every honest confirmation below has to be issued against the same set the
+#: proposal carries — which is what makes the two mismatch shapes expressible.
+_FROZEN = ("asserted", "external")
+
+
+def _confirmed(
+    record: MemoryRecord, *, retires: tuple[str, ...], frozen: tuple[str, ...] = ("asserted",)
+) -> MemoryUpdateProposal:
+    """A proposal carrying an **honest** confirmation for its own question.
+
+    Honest means the whole binding holds by construction, exactly as the coordinator
+    builds it (ADR-0078 §5): the ``conflicts`` the proposal arrives with are the ids
+    the question froze, and the ``question_key`` is recomputed from that very
+    proposal, so checks 4 and 5 pass and only the check under test can fail.
+
+    ``frozen`` is the set the question was asked about, and it is a parameter rather
+    than a constant because check 5 bounds the authority by it: a case naming two
+    assertions in ``retires`` has to have shown the user both, or it is testing
+    check 5 by accident instead of the clause it means to.
+    """
+    proposal = MemoryUpdateProposal(
+        proposed=record,
+        rationale="because",
+        sensitivity=DataTier.PERSONAL,
+        conflicts=frozen,
+    )
+    return proposal.model_copy(update={"confirmation": _authority(proposal, retires)})
+
+
+def _authority(proposal: MemoryUpdateProposal, retires: tuple[str, ...]) -> UserConfirmation:
+    """The authority a claim would mint for ``proposal``'s own question."""
+    return UserConfirmation(
+        deferral_id="q-1",
+        question_key=proposal.question_key,
+        confirmed_at=_WHEN,
+        retires=retires,
+    )
+
+
+#: How one case mangles the honest proposal, so the six inputs read as a table
+#: rather than as six near-identical bodies.
+type _Mangle = Callable[[MemoryRecord], MemoryUpdateProposal]
+
+
+def _no_confirmation(record: MemoryRecord) -> MemoryUpdateProposal:
+    """No confirmation at all: clause 1 stands verbatim."""
+    return _proposal(record)
+
+
+def _retires_elsewhere(record: MemoryRecord) -> MemoryUpdateProposal:
+    """Check 2: a confirmation whose ``retires`` does not name the target."""
+    return _confirmed(record, retires=("external",), frozen=_FROZEN)
+
+
+def _target_outside_the_live_set(record: MemoryRecord) -> MemoryUpdateProposal:
+    """Check 3: the named target is not among the conflicts *this ingest* resolved.
+
+    Driven by naming a record the store does not hold: it is in ``retires`` and in the
+    frozen set, so only the live-set check can refuse it. A confirmation cannot
+    authorise retiring a record the current ruling was not even made against.
+    """
+    proposal = MemoryUpdateProposal(
+        proposed=record, rationale="because", conflicts=("asserted", "gone")
+    )
+    return proposal.model_copy(update={"confirmation": _authority(proposal, ("gone",))})
+
+
+def _target_outside_the_frozen_set(record: MemoryRecord) -> MemoryUpdateProposal:
+    """Check 5: every id in ``retires`` must have been among the conflicts *shown*.
+
+    Check 3 requires a target to be in the live set; this requires it to have been in
+    the set the user saw. Both, because the two can differ in either direction and the
+    authority is bounded by the smaller one.
+    """
+    proposal = MemoryUpdateProposal(proposed=record, rationale="because", conflicts=())
+    return proposal.model_copy(update={"confirmation": _authority(proposal, ("asserted",))})
+
+
+def _a_different_question_same_id(record: MemoryRecord) -> MemoryUpdateProposal:
+    """Check 4, shape one: **same proposed record id, different content**.
+
+    The input an *id*-based binding waves through. A suite that varied the id instead
+    would pass against exactly the weaker binding ADR-0078 rejected, because a
+    proposal's record id is caller-minted and unique only once stored.
+    """
+    elsewhere = MemoryUpdateProposal(
+        proposed=_preference(record.id, _UNRELATED), rationale="because", conflicts=_FROZEN[:1]
+    )
+    honest = MemoryUpdateProposal(proposed=record, rationale="because", conflicts=_FROZEN[:1])
+    return honest.model_copy(update={"confirmation": _authority(elsewhere, ("asserted",))})
+
+
+def _a_different_question_same_proposal(record: MemoryRecord) -> MemoryUpdateProposal:
+    """Check 4, shape two: **identical proposal, different frozen conflict set**.
+
+    Two questions with the same fingerprint, shown different conflicts, one's
+    confirmation presented against the other's apply. The input a *fingerprint*
+    binding waves through — and invisible to a suite that varies content, which is
+    every natural way to write the case above.
+    """
+    broader = MemoryUpdateProposal(proposed=record, rationale="because", conflicts=_FROZEN)
+    honest = MemoryUpdateProposal(proposed=record, rationale="because", conflicts=_FROZEN[:1])
+    assert broader.proposal_fingerprint == honest.proposal_fingerprint
+    assert broader.question_key != honest.question_key
+    return honest.model_copy(update={"confirmation": _authority(broader, ("asserted",))})
+
+
+class _RulesExactly:
+    """A policy that rules exactly what it was told to, secret-tier included.
+
+    ``FakeMemoryPolicy`` deliberately overrides a secret-tier proposal to ``ASK_USER``
+    "because a fake that could be configured into violating its own conformance suite
+    would be a trap" — which is right, and which makes it unable to express the input
+    check 0 exists for. A ``MemoryPolicy`` reaches the writer through an injected seam
+    and any conforming implementation may rule differently, so the boundary has to
+    hold against one that does (ADR-0078 §5b).
+    """
+
+    def __init__(self, kind: MemoryDecisionKind) -> None:
+        self._kind = kind
+
+    async def decide(
+        self, proposal: MemoryUpdateProposal, *, conflicts: Sequence[MemoryRecord]
+    ) -> MemoryDecision:
+        """Rule the configured kind, naming a target where the kind requires one."""
+        if self._kind in {MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE}:
+            return MemoryDecision(
+                kind=self._kind, target_id=conflicts[0].id, reason="contract: an injected ruling"
+            )
+        if self._kind is MemoryDecisionKind.STORE_TEMPORARY:
+            return MemoryDecision(
+                kind=self._kind, ttl=timedelta(days=1), reason="contract: an injected ruling"
+            )
+        return MemoryDecision(kind=self._kind, reason="contract: an injected ruling")
+
+
+def _bypassed_secret(record: MemoryRecord) -> MemoryUpdateProposal:
+    """A ``DataTier.SECRET`` proposal built **past** its own validator.
+
+    ``model_construct`` skips validation, which is the whole point of check 0: a
+    validator is not a boundary, and the refusal that survives a bypass is the one at
+    the seam that performs the write (ADR-0078 §5b).
+    """
+    return MemoryUpdateProposal.model_construct(
+        proposed=record,
+        rationale="because",
+        sensitivity=DataTier.SECRET,
+        conflicts=(),
+        confirmation=None,
+    )
 
 
 class MemoryWriterContract:
@@ -1512,3 +1669,261 @@ class MemoryWriterContract:
         retained = {record.id: record for record in await store.export()}
         assert set(retained) == {"existing", "corrected"}
         assert retained["existing"].validity.live_at(_AFTER_CLOSE) is False
+
+    # --- ADR-0028 §8's second clause: the confirmation gate (ADR-0078 §5) ----
+
+    @pytest.mark.parametrize(
+        ("mangle", "label"),
+        [
+            (_no_confirmation, "no confirmation at all"),
+            (_retires_elsewhere, "a confirmation that does not name the target"),
+            (
+                _target_outside_the_live_set,
+                "a target absent from the conflicts this ingest resolved",
+            ),
+            (
+                _target_outside_the_frozen_set,
+                "a target absent from the conflicts the user was shown",
+            ),
+            (
+                _a_different_question_same_id,
+                "a confirmation for a different question, same record id",
+            ),
+            (
+                _a_different_question_same_proposal,
+                "a confirmation for a question shown other conflicts",
+            ),
+        ],
+        ids=[
+            "uncovered",
+            "retires-elsewhere",
+            "outside-the-live-set",
+            "outside-the-frozen-set",
+            "another-question-same-id",
+            "another-question-same-conflicts",
+        ],
+    )
+    async def test_a_supersede_onto_an_assertion_raises_unless_a_confirmation_covers_it(
+        self, make_writer: WriterFactory, mangle: _Mangle, label: str
+    ) -> None:
+        """ADR-0028 §8's second clause, in six parts (ADR-0078 §5b).
+
+        Clause 1 refuses any fold onto a ``USER_ASSERTED`` target because "the
+        conflict signal is topical similarity, not contradiction… and is too weak to
+        retire a record the user gave us" — a justification about the *signal*. The
+        exception is narrow and **verified rather than trusted**, because the floor
+        exists precisely so that it does not depend on anyone's good behaviour: a
+        policy reaches the writer through an injected seam and any conforming
+        implementation may rule differently.
+
+        Two of these are the shapes that would otherwise go untested, and each
+        defeats a weaker binding ADR-0078 rejected:
+
+        * **same proposed record id, different content** — the input an *id*-based
+          binding waves through, and a suite that varied the id instead would pass
+          against exactly that weaker binding;
+        * **identical proposal, different frozen conflict set** — the input a
+          *fingerprint* binding waves through, and invisible to a suite that varies
+          content, which is every natural way to write the case above.
+
+        A suite asserting only the refusal certifies the gate as shut; one omitting
+        either mismatch shape certifies a bearer token rather than a bound authority.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(_preference("asserted", source=MemorySource.USER_ASSERTED))
+        writer = make_writer(store, _SupersedeNamingPolicy("asserted"))
+
+        with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
+            await writer.ingest(mangle(_preference("new")))
+
+        assert label
+        retained = await store.export()
+        assert [record.id for record in retained] == ["asserted"], "nothing was written"
+        assert retained[0].validity.live_at(_LONG_AGO), "and the assertion is still live"
+
+    async def test_a_covered_confirmation_supersedes_the_assertion_it_names(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """It **applies** only when every check holds — the other half of the gate.
+
+        A suite asserting only the refusals certifies nothing about the pass, and the
+        pass is the whole point: this is the confirmation gate ADR-0045 §7 named, and
+        two ADRs deferred assertion-versus-assertion resolution to it.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("asserted", source=MemorySource.USER_ASSERTED))
+        writer = make_writer(
+            store, _SupersedeNamingPolicy("asserted"), id_factory=_scripted("corrected")
+        )
+
+        result = await writer.ingest(_confirmed(_preference("new"), retires=("asserted",)))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"asserted", "corrected"}
+        assert not retained["asserted"].validity.live_at(_AFTER_CLOSE), "retired, not destroyed"
+        assert retained["corrected"].validity.live_at(_AFTER_CLOSE)
+
+    async def test_a_confirmed_reinforce_onto_an_assertion_stays_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Check 1: the ruling must be ``SUPERSEDE`` (ADR-0078 §5b).
+
+        A ``REINFORCE`` folds at the *target's* id, so it would rewrite the user's own
+        words — which no answer authorises, whatever the confirmation says.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("asserted", source=MemorySource.USER_ASSERTED))
+        policy = FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
+        writer = make_writer(store, policy)
+
+        with pytest.raises(MemoryStoreError, match="refusing to fold onto"):
+            await writer.ingest(_confirmed(_preference("new"), retires=("asserted",)))
+
+        assert [record.id for record in await store.export()] == ["asserted"]
+
+    async def test_a_confirmed_supersede_retires_the_assertion_and_leaves_an_external_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """The ordering case that would otherwise adopt ``EXTERNAL`` supersession (§5).
+
+        Both records are named in ``retires``, and the one retired is the
+        **assertion**: that is what the confirmation is *for*, and targeting the
+        external record instead would adopt a still-deferred policy choice (ADR-0045
+        §5/§7) by accident *and* leave live the assertion the user actually confirmed
+        retiring, because the applier's widening sweeps only supersedable siblings.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("asserted", source=MemorySource.USER_ASSERTED))
+        await store.add(_preference("external", source=MemorySource.EXTERNAL))
+        writer = make_writer(
+            store, _SupersedeNamingPolicy("asserted"), id_factory=_scripted("corrected")
+        )
+
+        await writer.ingest(
+            _confirmed(_preference("new"), retires=("asserted", "external"), frozen=_FROZEN)
+        )
+
+        retained = {record.id: record for record in await store.export()}
+        assert not retained["asserted"].validity.live_at(_AFTER_CLOSE), "the assertion is retired"
+        assert retained["external"].validity.live_at(_AFTER_CLOSE), "the external record is not"
+
+    async def test_a_confirmation_naming_two_assertions_retires_both_in_one_batch(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0078 §5b's narrowing of ADR-0050 §1's hold-out, at width.
+
+        Every confirmed *asserted* conflict is retired, not only the named one: the
+        named target is the primary the ruling audits, and the rest ride the same
+        widening the derived siblings already do — in the one atomic batch.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("asserted-a", source=MemorySource.USER_ASSERTED))
+        await store.add(_preference("asserted-b", source=MemorySource.USER_ASSERTED))
+        writer = make_writer(
+            store, _SupersedeNamingPolicy("asserted-a"), id_factory=_scripted("corrected")
+        )
+
+        await writer.ingest(
+            _confirmed(
+                _preference("new"),
+                retires=("asserted-a", "asserted-b"),
+                frozen=("asserted-a", "asserted-b"),
+            )
+        )
+
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"asserted-a", "asserted-b", "corrected"}
+        assert not retained["asserted-a"].validity.live_at(_AFTER_CLOSE)
+        assert not retained["asserted-b"].validity.live_at(_AFTER_CLOSE), (
+            "both, not only the named one"
+        )
+
+    async def test_a_confirmed_supersede_still_retires_a_live_inference(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """§5a step 3's fall-through, seen from the applier (ADR-0078 §5).
+
+        The shown assertion has been retired before the answer arrives, leaving a live
+        derived conflict. The correction still supersedes that inference rather than
+        landing beside it: the confirmed path exists to override the arms that would
+        *re-defer an answered question*, not the arms ADR-0038 entitles an assertion to
+        overturn without asking.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("inferred", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store, _SupersedeNamingPolicy("inferred"), id_factory=_scripted("corrected")
+        )
+
+        result = await writer.ingest(_confirmed(_preference("new"), retires=("asserted-gone",)))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        assert not retained["inferred"].validity.live_at(_AFTER_CLOSE)
+
+    # --- check 0: no write of secret-tier data, however the ruling arrives ---
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            MemoryDecisionKind.ACCEPT,
+            MemoryDecisionKind.STORE_TEMPORARY,
+            MemoryDecisionKind.REINFORCE,
+            MemoryDecisionKind.SUPERSEDE,
+        ],
+        ids=["accept", "store-temporary", "reinforce", "supersede"],
+    )
+    async def test_no_write_producing_ruling_persists_secret_tier_data(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """Check 0 (ADR-0078 §5b), parametrised over the set rather than sampled from it.
+
+        Each omission is a live hole. ``ACCEPT`` and ``STORE_TEMPORARY`` never reach
+        the fold helper, so a check placed there passes ``SUPERSEDE`` and writes the
+        secret on them; ``REINFORCE`` reaches the merge-and-add path against a
+        non-asserted target, so a gate written for the three that came up in discussion
+        persists the secret through the fourth.
+
+        The proposal is built past its own validator with ``model_construct``, which is
+        the point: a validator is **not a boundary**. ``model_construct`` and
+        ``model_copy(update=...)`` both skip validation, and this repository already
+        treats a model tampered past ``frozen=True`` as inside its threat model
+        (ADR-0018 §3, ADR-0021 §4). This is the half of the belt and braces that
+        survives a bypass, and the failure it guards is a credential in the memory
+        database.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(_preference("inferred", source=MemorySource.INFERRED))
+        writer = make_writer(store, _RulesExactly(kind), id_factory=_scripted("corrected"))
+
+        with pytest.raises(MemoryStoreError, match="secret-tier"):
+            await writer.ingest(_bypassed_secret(_preference("new")))
+
+        assert [record.id for record in await store.export()] == ["inferred"]
+
+    @pytest.mark.parametrize(
+        "kind",
+        [MemoryDecisionKind.ASK_USER, MemoryDecisionKind.REJECT],
+        ids=["ask-user", "reject"],
+    )
+    async def test_a_ruling_that_writes_nothing_on_secret_tier_data_raises_nothing(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """The negative half of check 0, and the other way to implement it wrongly.
+
+        ADR-0004 §3 forbids a secret **in the database**, not a secret being *judged*.
+        An unconditional refusal before the policy runs would turn the ordinary
+        secret-tier path into an error: today a secret ``learn`` reaches the policy, is
+        ruled ``ASK_USER``, writes nothing and raises nothing (ADR-0078 §1), and that
+        behaviour is what ADR-0078 preserves. Refusing here would break the one path it
+        promised not to touch.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, _RulesExactly(kind))
+
+        result = await writer.ingest(_bypassed_secret(_preference("new")))
+
+        assert result.decision.kind is kind
+        assert result.record_id is None
+        assert await store.export() == []

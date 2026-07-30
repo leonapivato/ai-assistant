@@ -35,9 +35,10 @@ from ai_assistant.core.types import (
     SemanticMemory,
     TimeOfDay,
 )
-from ai_assistant.orchestration import LearningLoop
+from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
 from ai_assistant.testing import (
     FakeContextProvider,
+    FakeDeferralStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -56,7 +57,12 @@ if TYPE_CHECKING:
         MemoryWriter,
         Planner,
     )
-    from ai_assistant.core.types import ActionPlan, Goal, MemoryIngestResult, MemoryRecord
+    from ai_assistant.core.types import (
+        ActionPlan,
+        Goal,
+        MemoryIngestResult,
+        MemoryRecord,
+    )
 
 _NOW = datetime(2026, 6, 3, 10, 0, tzinfo=UTC)
 
@@ -106,6 +112,17 @@ class _FailingPlanner:
         raise PlanningError(msg)
 
 
+def _writes(writer: MemoryWriter) -> MemoryWriteStage:
+    """Wrap a writer in the write stage the loop now holds (ADR-0078 §3).
+
+    The loop reaches memory through the *stage* rather than through a
+    ``MemoryWriter`` of its own, so a proposal the policy defers parks a durable
+    question instead of vanishing. Each stage gets a fresh ``FakeDeferralStore``;
+    the tests that assert what the queue did build their own and read it back.
+    """
+    return MemoryWriteStage(writer=writer, deferrals=FakeDeferralStore(now=_clock))
+
+
 def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all optional
     *,
     context: ContextProvider | None = None,
@@ -131,8 +148,9 @@ def _loop(  # noqa: PLR0913  # one parameter per injected collaborator, all opti
     return LearningLoop(
         context=context or FakeContextProvider(),
         memory=store,
-        writer=writer
-        or FakeMemoryWriter(store=store, policy=policy or FakeMemoryPolicy(), now=_clock),
+        writes=_writes(
+            writer or FakeMemoryWriter(store=store, policy=policy or FakeMemoryPolicy(), now=_clock)
+        ),
         planner=planner or FakePlanner(now=_clock),
         feedback=feedback or FakeFeedbackProcessor(),
         now=_clock,
@@ -171,17 +189,17 @@ async def test_a_learned_preference_is_reused_on_a_later_turn() -> None:
     assert planner.calls[0][2] == ()
 
     [outcome] = await loop.learn(_preference_feedback())
-    assert outcome.decision.kind is MemoryDecisionKind.ACCEPT
-    assert outcome.record_id is not None
+    assert outcome.result.decision.kind is MemoryDecisionKind.ACCEPT
+    assert outcome.result.record_id is not None
 
     second = await loop.respond("draft a concise reply to Dana")
 
-    assert [record.id for record in second.memories] == [outcome.record_id]
+    assert [record.id for record in second.memories] == [outcome.result.record_id]
     learned = second.memories[0]
     assert isinstance(learned, PreferenceMemory)
     assert learned.preference == "prefers concise replies"
     # The planner did not merely have it available — it was handed it.
-    assert [record.id for record in planner.calls[1][2]] == [outcome.record_id]
+    assert [record.id for record in planner.calls[1][2]] == [outcome.result.record_id]
     assert not second.memory_degraded
 
 
@@ -257,7 +275,7 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock),
+        writes=_writes(FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=2,
@@ -311,8 +329,8 @@ async def test_learn_writes_an_accepted_proposal() -> None:
 
     [outcome] = await loop.learn(_preference_feedback())
 
-    assert outcome.record_id is not None
-    assert await memory.get(outcome.record_id) is not None
+    assert outcome.result.record_id is not None
+    assert await memory.get(outcome.result.record_id) is not None
 
 
 async def test_learn_writes_nothing_when_the_processor_proposes_nothing() -> None:
@@ -329,8 +347,8 @@ async def test_learn_reports_a_rejection_without_writing() -> None:
 
     [outcome] = await loop.learn(_preference_feedback())
 
-    assert outcome.decision.kind is MemoryDecisionKind.REJECT
-    assert outcome.record_id is None
+    assert outcome.result.decision.kind is MemoryDecisionKind.REJECT
+    assert outcome.result.record_id is None
     assert await memory.export() == []
 
 
@@ -348,8 +366,8 @@ async def test_learn_stamps_expiry_on_a_temporary_store() -> None:
 
     [outcome] = await loop.learn(_preference_feedback())
 
-    assert outcome.record_id is not None
-    stored = await memory.get(outcome.record_id)
+    assert outcome.result.record_id is not None
+    stored = await memory.get(outcome.result.record_id)
     assert stored is not None
     assert stored.expires_at == _NOW + ttl
 
@@ -375,9 +393,9 @@ async def test_learn_applies_a_reinforce_through_the_writer() -> None:
 
     [outcome] = await loop.learn(_preference_feedback())
 
-    assert outcome.decision.kind is MemoryDecisionKind.REINFORCE
-    assert outcome.decision.target_id == "pref-existing"
-    assert outcome.record_id == "pref-existing"  # the target's id, not a new one
+    assert outcome.result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert outcome.result.decision.target_id == "pref-existing"
+    assert outcome.result.record_id == "pref-existing"  # the target's id, not a new one
     assert [record.id for record in await memory.export()] == ["pref-existing"]
     merged = await memory.get("pref-existing")
     assert merged is not None
@@ -437,7 +455,7 @@ async def test_learn_applies_every_proposal_in_order() -> None:
 
     outcomes = await loop.learn(_preference_feedback())
 
-    assert [outcome.record_id for outcome in outcomes] == ["pref-0", "pref-1", "pref-2"]
+    assert [outcome.result.record_id for outcome in outcomes] == ["pref-0", "pref-1", "pref-2"]
 
 
 async def test_learn_propagates_a_store_failure() -> None:
@@ -472,7 +490,7 @@ async def test_learn_resolves_a_repeated_record_id_last_write_wins() -> None:
 
     outcomes = await loop.learn(_preference_feedback())
 
-    assert [outcome.record_id for outcome in outcomes] == ["pref-same", "pref-same"]
+    assert [outcome.result.record_id for outcome in outcomes] == ["pref-same", "pref-same"]
     stored = await memory.get("pref-same")
     assert stored is not None
     assert stored.content == "prefers very short replies"
@@ -611,7 +629,7 @@ def _loop_with(*, retrieval_limit: int) -> LearningLoop:
     return LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock),
+        writes=_writes(FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=retrieval_limit,
@@ -631,7 +649,7 @@ async def test_a_naive_clock_is_the_reading_stages_error() -> None:
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock),
+        writes=_writes(FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)),
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         now=lambda: naive_now,

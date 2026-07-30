@@ -39,9 +39,15 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
 )
-from ai_assistant.orchestration import LearnDecision, ObservationReport, ObservationStage
+from ai_assistant.orchestration import (
+    LearnDecision,
+    MemoryWriteStage,
+    ObservationReport,
+    ObservationStage,
+)
 from ai_assistant.testing import (
     FakeConversationStore,
+    FakeDeferralStore,
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
@@ -146,14 +152,31 @@ class Harness:
         self.real_writer = FakeMemoryWriter(store=self.memory, policy=self.policy, now=lambda: AT)
         self.writer: MemoryWriter = writer if writer is not None else self.real_writer
         self.observer: Observer = observer if observer is not None else FakeObserver()
+        # The stage reaches memory through the orchestration **write stage** rather
+        # than through a `MemoryWriter` of its own (ADR-0078 §3), so an observed
+        # proposal the policy defers parks a durable question. The queue is held here
+        # so a case can read back what was parked.
+        self.deferrals = FakeDeferralStore(now=lambda: AT)
+        self.writes = MemoryWriteStage(writer=self.writer, deferrals=self.deferrals)
         self.stage = ObservationStage(
             observer=self.observer,
             conversations=self.conversations,
             memory=self.memory,
-            writer=self.writer,
+            writes=self.writes,
             batch_size=batch_size,
             route=ROUTE,
         )
+
+    def swap_writer(self, writer: MemoryWriter) -> None:
+        """Put a scripted writer behind the stage's write stage.
+
+        The stage holds the orchestration write stage rather than a ``MemoryWriter``
+        (ADR-0078 §3), so a case that scripts the *writer* replaces the stage's
+        writer by rebuilding the wrapper around it — over the **same** deferral queue,
+        so nothing about what was parked changes with the swap.
+        """
+        self.writes = MemoryWriteStage(writer=writer, deferrals=self.deferrals)
+        self.stage._writes = self.writes
 
     @property
     def fake(self) -> FakeObserver:
@@ -439,7 +462,7 @@ async def test_a_writer_failure_on_the_second_of_three_leaves_the_first_stored()
             ]
         )
     )
-    harness.stage._writer = _FailingWriter(harness.real_writer, fail_on=2)
+    harness.swap_writer(_FailingWriter(harness.real_writer, fail_on=2))
     conversation = await harness.conversation_with(2)
 
     with pytest.raises(MemoryStoreError):
@@ -476,7 +499,7 @@ async def test_an_episode_that_expires_mid_batch_drops_one_proposal_and_keeps_th
     )
     conversation = await harness.conversation_with(2)
     selected = await _batch_ids(harness, conversation)
-    harness.stage._writer = _RacingWriter(harness.real_writer, unresolved={"rec-2": (selected[0],)})
+    harness.swap_writer(_RacingWriter(harness.real_writer, unresolved={"rec-2": (selected[0],)}))
 
     report = await harness.stage.observe(conversation)
 
@@ -495,8 +518,8 @@ async def test_a_citation_the_batch_never_contained_propagates_as_a_producer_fau
     """An observer citing an id it was never handed is a bug, not a race (§5)."""
     harness = Harness(observer=FakeObserver([ObservedBelief(content="first", record_id="rec-1")]))
     conversation = await harness.conversation_with(2)
-    harness.stage._writer = _RacingWriter(
-        harness.real_writer, unresolved={"rec-1": ("conv:elsewhere#1",)}
+    harness.swap_writer(
+        _RacingWriter(harness.real_writer, unresolved={"rec-1": ("conv:elsewhere#1",)})
     )
 
     with pytest.raises(UnresolvedEvidenceError):
@@ -514,8 +537,8 @@ async def test_a_fault_accompanied_by_an_expiry_is_still_a_fault() -> None:
     harness = Harness(observer=FakeObserver([ObservedBelief(content="first", record_id="rec-1")]))
     conversation = await harness.conversation_with(2)
     selected = await _batch_ids(harness, conversation)
-    harness.stage._writer = _RacingWriter(
-        harness.real_writer, unresolved={"rec-1": (selected[0], "conv:elsewhere#1")}
+    harness.swap_writer(
+        _RacingWriter(harness.real_writer, unresolved={"rec-1": (selected[0], "conv:elsewhere#1")})
     )
 
     with pytest.raises(UnresolvedEvidenceError):
@@ -531,7 +554,7 @@ async def test_a_refusal_naming_no_ids_at_all_propagates() -> None:
     """
     harness = Harness(observer=FakeObserver([ObservedBelief(content="first", record_id="rec-1")]))
     conversation = await harness.conversation_with(2)
-    harness.stage._writer = _RacingWriter(harness.real_writer, unresolved={"rec-1": ()})
+    harness.swap_writer(_RacingWriter(harness.real_writer, unresolved={"rec-1": ()}))
 
     with pytest.raises(UnresolvedEvidenceError):
         await harness.stage.observe(conversation)
@@ -586,7 +609,7 @@ def test_a_batch_size_the_conversation_store_would_refuse_is_refused_here(bad: i
             observer=harness.observer,
             conversations=harness.conversations,
             memory=harness.memory,
-            writer=harness.writer,
+            writes=harness.writes,
             batch_size=bad,
             route=ROUTE,
         )
@@ -601,7 +624,7 @@ def test_a_non_integer_batch_size_is_a_type_error(bad: object) -> None:
             observer=harness.observer,
             conversations=harness.conversations,
             memory=harness.memory,
-            writer=harness.writer,
+            writes=harness.writes,
             batch_size=bad,  # type: ignore[arg-type]  # the point of the test
             route=ROUTE,
         )

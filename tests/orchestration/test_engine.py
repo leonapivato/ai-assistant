@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     MemoryIngestResult,
     MemoryKind,
     MemorySource,
+    MemoryUpdateProposal,
     PlanStep,
     Provenance,
     Reversibility,
@@ -47,6 +48,7 @@ from ai_assistant.core.types import (
     Validity,
 )
 from ai_assistant.orchestration import (
+    AnswerKind,
     Belief,
     ContinuationToken,
     ConversationLifecycle,
@@ -56,12 +58,17 @@ from ai_assistant.orchestration import (
     IngestSummary,
     LearnDecision,
     LearnOutcome,
+    MemoryWriteStage,
     ObservationReport,
     ObservationStage,
     ObservedProposal,
+    QuestionStage,
+    QuestionState,
+    QueueOutcome,
     StepExecutor,
     StepRunner,
     TurnOutcome,
+    WriteOutcome,
     presented_confidence,
 )
 from ai_assistant.orchestration.loop import LearningLoop
@@ -70,6 +77,7 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeContextProvider,
     FakeConversationStore,
+    FakeDeferralStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -87,7 +95,6 @@ if TYPE_CHECKING:
         CurrentContext,
         Goal,
         MemoryRecord,
-        MemoryUpdateProposal,
         MemoryWrite,
     )
 
@@ -224,6 +231,7 @@ class Harness:
         loop_id_factory: Callable[[], str] | None = None,
         feedback: object | None = None,
         observer: object | None = None,
+        queue_limit: int = 50,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -249,22 +257,31 @@ class Harness:
         self.policy_for_writer = FakeMemoryPolicy()
 
         writer = FakeMemoryWriter(store=self.memory, policy=self.policy_for_writer, now=lambda: AT)
-        # The observation stage over the *same* store and writer, as the composition
-        # root wires it (ADR-0077 §8). Kept on the harness so a test can read what
-        # batch reached the producer.
+        # **One** write stage over that writer and one deferral queue, shared by both
+        # producers' stages, as the composition root wires it (ADR-0078 §3). Both are
+        # kept on the harness: a learn test reads back what was parked, and the
+        # question surface answers it.
+        self.deferrals = FakeDeferralStore(now=lambda: AT, queue_limit=queue_limit)
+        self.writes = MemoryWriteStage(writer=writer, deferrals=self.deferrals)
+        self.questions = QuestionStage(
+            writer=writer, deferrals=self.deferrals, memory=self.memory, now=lambda: AT
+        )
+        # The observation stage over the *same* store and write stage, as the
+        # composition root wires it (ADR-0077 §8). Kept on the harness so a test can
+        # read what batch reached the producer.
         self.observer = observer if observer is not None else FakeObserver()
         self.observation = ObservationStage(
             observer=self.observer,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
             conversations=self.conversation_store,
             memory=self.memory,
-            writer=writer,
+            writes=self.writes,
             batch_size=OBSERVATION_BATCH,
             route=OBSERVER_ROUTE,
         )
         loop = LearningLoop(
             context=FakeContextProvider(),
             memory=self.memory,
-            writer=writer,
+            writes=self.writes,
             planner=planner if planner is not None else OneStepPlanner(),  # type: ignore[arg-type]
             feedback=self.feedback,  # type: ignore[arg-type]
             now=lambda: AT,
@@ -289,6 +306,7 @@ class Harness:
             memory=self.memory,
             conversations=self.conversations,
             observation=self.observation,
+            questions=self.questions,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
         )
@@ -477,6 +495,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
     )
 
@@ -586,6 +605,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -640,6 +660,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=1,
     )
@@ -686,6 +707,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
     )
     first = await facade.converse("send it", timeout=PATIENT)  # park g-1 in facade._parked
@@ -819,6 +841,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
     )
     facade._plans = _GateFirstGetPlan(harness.plans)  # type: ignore[assignment]  # test double
@@ -1200,6 +1223,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # tighten for the test
     )
@@ -1262,6 +1286,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         memory=harness.memory,
         conversations=harness.conversations,
         observation=harness.observation,
+        questions=harness.questions,
         id_factory=lambda: next(harness.handles),
         max_outstanding_confirmations=2,  # ceiling of two, three concurrent turns
     )
@@ -1290,6 +1315,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             memory=harness.memory,
             conversations=harness.conversations,
             observation=harness.observation,
+            questions=harness.questions,
             max_outstanding_confirmations=0,
         )
 
@@ -1307,6 +1333,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             memory=harness.memory,
             conversations=harness.conversations,
             observation=harness.observation,
+            questions=harness.questions,
             max_outstanding_confirmations=bad,  # type: ignore[arg-type]  # the point of the test
         )
 
@@ -1422,7 +1449,9 @@ def test_from_results_maps_every_decision_kind(
     """Every ``core`` ruling has a faithful orchestration echo (§1, exhaustive)."""
     decision = _decision(kind)
     stored = None if kind in {MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER} else "rec-1"
-    outcome = LearnOutcome.from_results((MemoryIngestResult(decision=decision, record_id=stored),))
+    outcome = LearnOutcome.from_results(
+        (_write_outcome(MemoryIngestResult(decision=decision, record_id=stored)),)
+    )
     summary = outcome.results[0]
     assert summary.decision is expected
     assert summary.record_id == stored
@@ -1433,12 +1462,27 @@ def test_from_results_maps_every_decision_kind(
 def test_from_results_preserves_order_across_multiple_results() -> None:
     """One summary per result, in the order the loop applied them (§1)."""
     results = (
-        MemoryIngestResult(decision=_decision(MemoryDecisionKind.ACCEPT), record_id="rec-1"),
-        MemoryIngestResult(decision=_decision(MemoryDecisionKind.REJECT), record_id=None),
+        _write_outcome(
+            MemoryIngestResult(decision=_decision(MemoryDecisionKind.ACCEPT), record_id="rec-1")
+        ),
+        _write_outcome(
+            MemoryIngestResult(decision=_decision(MemoryDecisionKind.REJECT), record_id=None)
+        ),
     )
     outcome = LearnOutcome.from_results(results)
     assert [s.decision for s in outcome.results] == [LearnDecision.STORED, LearnDecision.REJECTED]
     assert outcome.stored == 1
+
+
+def _write_outcome(result: MemoryIngestResult) -> WriteOutcome:
+    """A write outcome carrying ``result`` and no admission.
+
+    ``admission=None`` is what a ruling that raised no question produces — and, for
+    an ``ASK_USER``, what secret-tier data produces, which is the case these mapping
+    tests happen to drive (ADR-0078 §1). The admission's *own* translation is pinned
+    separately, on ``QueuedQuestion.from_admission``.
+    """
+    return WriteOutcome(result=result)
 
 
 def _decision(kind: MemoryDecisionKind) -> MemoryDecision:
@@ -2305,3 +2349,127 @@ async def test_the_listing_and_the_single_belief_view_agree_on_the_number() -> N
     assert single is not None
     assert [one.confidence for one in listed if one.id == "rec-1"] == [single.confidence]
     assert single.confidence < _STORED
+
+
+# --- the deferred-question surface, through the façade (ADR-0078 §8, §9) ----
+
+
+async def test_learn_parks_a_deferred_question_the_facade_can_list_and_answer() -> None:
+    """The façade's whole leg 4 reach, in one pass (ADR-0078 §8 reaches 1 and 2).
+
+    ``learn`` says the question was parked **and carries its id**, which is the reach
+    that closes issue #423's own scenario; ``questions`` lists it for the case where no
+    ``learn`` was in flight to render anything; and ``answer`` commits it. Nothing here
+    reaches a store: the façade is the only surface `interfaces` has (ADR-0042 §1).
+    """
+    harness = Harness()
+    harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
+
+    learned = await harness.engine.learn(feedback())
+
+    [summary] = learned.results
+    assert summary.decision is LearnDecision.DEFERRED
+    assert summary.record_id is None
+    assert summary.queued is not None
+    assert summary.queued.outcome is QueueOutcome.QUEUED
+    assert summary.queued.question_id is not None
+    assert summary.queued.question_state is QuestionState.OPEN
+
+    [question] = await harness.engine.questions()
+    assert question.id == summary.queued.question_id
+    assert question.state is QuestionState.OPEN
+    assert await harness.engine.interrupted_questions() == (), "the two reads are disjoint"
+
+    harness.policy_for_writer.kind = MemoryDecisionKind.ACCEPT
+    answered = await harness.engine.answer(question.id, accept=True)
+
+    assert answered.kind is AnswerKind.APPLIED
+    assert answered.record_id is not None
+    assert await harness.engine.belief(answered.record_id) is not None
+    assert await harness.engine.questions() == (), "and it is no longer waiting"
+
+
+async def test_learn_against_a_full_queue_tells_the_user_rather_than_going_silent() -> None:
+    """§7's refused branch, end to end through the façade (§10 item 3).
+
+    "The refusal is **reported, not swallowed**" — and nothing raises, so this is the
+    branch an implementation is most likely to leave as a no-op. A cap of one makes it
+    observable without depending on the configured default.
+    """
+    harness = Harness(queue_limit=1)
+    harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
+    first = await harness.engine.learn(feedback(content="the office is in Boston"))
+    assert first.results[0].queued is not None
+    assert first.results[0].queued.outcome is QueueOutcome.QUEUED
+
+    second = await harness.engine.learn(feedback(content="the office moved to Lisbon"))
+
+    [summary] = second.results
+    assert summary.queued is not None
+    assert summary.queued.outcome is QueueOutcome.QUEUE_FULL
+    assert summary.queued.question_id is None, "there is no question to name"
+    assert len(await harness.engine.questions()) == 1
+
+
+async def test_a_secret_tier_learn_queues_nothing_and_says_it_is_not_answerable() -> None:
+    """§1's residue at the façade (§10 item 3's third half, §10 item 9).
+
+    "Without the third it routes every ``ASK_USER`` through the queued-question line
+    and tells the user to go answer something that was never queued — and every other
+    listed test still passes, because they all drive the arms that *are* closed."
+    """
+    harness = Harness(feedback=FakeFeedbackProcessor([_secret_proposal()]))
+
+    learned = await harness.engine.learn(feedback())
+
+    [summary] = learned.results
+    assert summary.decision is LearnDecision.DEFERRED
+    assert summary.queued is not None
+    assert summary.queued.outcome is QueueOutcome.NOT_QUEUABLE
+    assert summary.queued.question_id is None
+    assert await harness.engine.questions() == (), "nothing was queued"
+
+
+async def test_forget_question_relays_the_disposal_and_reports_an_unknown_id() -> None:
+    """§9's first recovery step, relayed unconditionally (ADR-0007)."""
+    harness = Harness()
+    harness.policy_for_writer.kind = MemoryDecisionKind.ASK_USER
+    learned = await harness.engine.learn(feedback())
+    queued = learned.results[0].queued
+    assert queued is not None
+    assert queued.question_id is not None
+
+    assert await harness.engine.forget_question(queued.question_id) is True
+    assert await harness.engine.forget_question(queued.question_id) is False
+    assert await harness.engine.questions() == ()
+
+
+async def test_the_question_surface_is_refused_while_the_engine_is_shutting_down() -> None:
+    """Every façade method rejects new work once ``aclose`` has been entered (§2)."""
+    harness = Harness()
+    await harness.engine.aclose()
+
+    for call in (
+        harness.engine.questions(),
+        harness.engine.interrupted_questions(),
+        harness.engine.answer("q-1", accept=True),
+        harness.engine.forget_question("q-1"),
+    ):
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await call
+
+
+def _secret_proposal() -> MemoryUpdateProposal:
+    """A ``DataTier.SECRET`` proposal — the one ``ASK_USER`` nothing may queue."""
+    return MemoryUpdateProposal(
+        proposed=SemanticMemory(
+            id="secret-1",
+            content="the api key is hunter2",
+            fact="the api key is hunter2",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+            ),
+        ),
+        rationale="the user pasted a credential",
+        sensitivity=DataTier.SECRET,
+    )

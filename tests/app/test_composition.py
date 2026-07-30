@@ -8,12 +8,14 @@ or API key is needed.
 
 from __future__ import annotations
 
+import ast
 import stat
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
+import ai_assistant
 from ai_assistant.app import build_engine
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -32,9 +34,6 @@ from ai_assistant.orchestration import Engine
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.tools import InMemoryToolRegistry
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 async def test_build_engine_returns_a_ready_engine(tmp_path: Path) -> None:
@@ -89,7 +88,7 @@ async def test_build_engine_wires_one_memory_store_into_both_the_loop_and_the_wr
     try:
         memory = engine._loop._memory
         assert isinstance(memory, SqliteMemoryStore)
-        writer = engine._loop._writer
+        writer = engine._loop._writes._writer
         assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
         assert writer._store is memory
     finally:
@@ -506,7 +505,7 @@ async def test_build_engine_wires_the_observation_stage_over_the_one_memory_stor
         memory = engine._loop._memory
         stage = engine._observation
         assert stage._memory is memory
-        assert stage._writer is engine._loop._writer
+        assert stage._writes is engine._loop._writes
         # The same conversation index the capture stage appends turns to, or the
         # selection would look for a conversation nothing ever recorded.
         assert stage._conversations is engine._conversations._conversations
@@ -659,3 +658,91 @@ async def test_the_deferral_queue_joins_the_ordered_shutdown(
 
     with pytest.raises(DeferralStoreError):
         await built[0].export()
+
+
+async def test_build_engine_gives_the_write_stage_and_the_answer_path_one_queue(
+    tmp_path: Path,
+) -> None:
+    """ADR-0078 §3's **first** composition-root obligation, enforced rather than asked.
+
+    "The ``DeferralStore`` the write stage enqueues into is the **same instance** the
+    façade enumerates from. A second instance queues questions nobody can answer."
+    No type expresses it — a ``DeferralStore`` exposes no identity and the two stages
+    are wired independently — so identity here is the only way to check it, exactly as
+    ADR-0028 §4's writer/store rule is checked.
+
+    The observation stage is included because it is the *second* producer and reaches
+    memory through the same stage: a second write stage over a second queue would park
+    an observed question the question surface cannot show, which is the drop ADR-0078
+    ends restored by a wiring mistake.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        writes = engine._loop._writes
+        assert engine._observation._writes is writes, "one write stage, both producers"
+        assert engine._questions._deferrals is writes._deferrals
+        assert isinstance(writes._deferrals, SqliteDeferralStore)
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_gives_the_answer_path_the_writer_and_store_learn_uses(
+    tmp_path: Path,
+) -> None:
+    """ADR-0078 §3's **second** obligation: ADR-0028 §4's rule at a second place.
+
+    "The ``MemoryWriter`` an answer applies through writes to the **same**
+    ``MemoryStore`` whose records the question's frozen conflict set names… applying a
+    confirmed retirement against a different store would retire nothing while
+    reporting success." The answer path also *reads* that store directly, to resolve
+    what accepting would retire — so a second store would show the user conflicts the
+    apply cannot reach.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        memory = engine._loop._memory
+        assert engine._questions._writer is engine._loop._writes._writer
+        assert engine._questions._memory is memory
+        writer = engine._questions._writer
+        assert isinstance(writer, MemoryIngestor)  # narrows the Protocol-typed seam
+        assert writer._store is memory
+    finally:
+        await engine.aclose()
+
+
+def test_no_production_code_sweeps_either_store() -> None:
+    """ADR-0078 §10 item 8 discharged, and it discharges to **nothing**.
+
+    "A home for ``purge``. It does not get a new one… this store's purge is wired
+    wherever ``purge_expired`` is wired and inherits the same fate. Inventing a second
+    sweeping mechanism for one store would be the thing that has to be undone at
+    leg 5." ``MemoryStore.purge_expired`` has no caller in this repository — leg 5's
+    scheduler is where both get one — so the deferral queue's ``purge`` has none
+    either.
+
+    An *absence* is the only shape a "do not invent a mechanism" instruction can be
+    pinned in, and it has to be pinned statically: a runtime test could only prove that
+    the handful of operations it happened to call do not sweep, which is not the claim.
+    Reading the source proves the claim, and it fails the day someone adds the timer
+    leg 5 would have to remove.
+
+    Correctness does not depend on either sweep running; ADR-0078 §1's *exposure cap*
+    does, and it is tracked with the scheduler rather than bought here.
+    """
+    swept: list[str] = []
+    root = Path(ai_assistant.__file__).resolve().parent
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"purge", "purge_expired"}
+            ):
+                swept.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert swept == [], (
+        f"something in production code now sweeps a store: {swept}. ADR-0078 §10 item 8 "
+        f"forbids a second sweeping mechanism — both purges get one home, leg 5's "
+        f"scheduler, at the same time."
+    )

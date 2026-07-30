@@ -35,7 +35,9 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     Engine,
     LearningLoop,
+    MemoryWriteStage,
     ObservationStage,
+    QuestionStage,
     StepExecutor,
     StepRunner,
 )
@@ -71,6 +73,11 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
       directory and owner-only file mode as the other Tier 1 stores, and joined to
       the façade's ordered shutdown — with its claim-token source left at its
       ``secrets``-backed **default**, which is the guarantee rather than a detail;
+    * **one** :class:`MemoryWriteStage` over that writer and that queue is shared by
+      the learn leg and the observation stage, and the :class:`QuestionStage` that
+      answers a question is given the very same queue, writer and store — which is
+      how two of ADR-0078 §3's three composition-root obligations are discharged
+      here rather than hoped for (the third is structural);
     * one :class:`SqlitePlanStore` is shared by the runner, the executor, and
       the façade, and one :class:`SqliteAuditTrail` by the runner and the façade
       — the façade reads the trail (query-only) to recover a durably-parked
@@ -232,10 +239,24 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
 
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4).
         writer = MemoryIngestor(store=memory, policy=DefaultMemoryPolicy())
+        # **One** write stage, over that writer and that deferral queue, shared by
+        # every producer's stage (ADR-0078 §3). Two of the three composition-root
+        # obligations are discharged by this single object existing: the queue the
+        # write stage enqueues into is the same instance the question surface
+        # enumerates from — a second one would queue questions nobody can answer —
+        # and the writer an answer applies through writes to the same `MemoryStore`
+        # whose records a question's frozen conflict set names, which is ADR-0028
+        # §4's same-store rule reaching a second place. The third (that the answer
+        # path is the only producer of a `UserConfirmation`) is structural rather
+        # than wiring, and a structural test holds it.
+        writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
         loop = LearningLoop(
             context=context,
             memory=memory,
-            writer=writer,
+            # The write stage, not a `MemoryWriter` of the loop's own: a producer's
+            # stage holding the writer directly gets the ratified policy and applier
+            # and silently loses the queue, which is the drop ADR-0078 ends.
+            writes=writes,
             planner=ModelBackedPlanner(model),
             feedback=RuleBasedFeedbackProcessor(),
         )
@@ -293,20 +314,38 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 ),
                 conversations=conversations,
                 memory=memory,
-                writer=writer,
+                # The same write stage the learn leg uses, so an observed proposal
+                # the policy defers parks a question the user can answer rather than
+                # being reported to a stage nobody is watching and dropped.
+                writes=writes,
                 batch_size=settings.observation_batch_size,
                 route=observer_route,
             ),
+            # The answer path (ADR-0078 §8, §9), over the *same* deferral queue the
+            # write stage above enqueues into, the *same* writer an ordinary `learn`
+            # applies through, and the *same* memory store — so a question the user
+            # is shown resolves its conflicts against the records an answer to it
+            # would actually retire.
+            questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory),
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),
                 _as_async(plans.close),
                 _as_async(conversations.close),
                 # The deferral queue joins the façade's ordered shutdown (ADR-0042
-                # §2, ADR-0078 §10 item 5). Nothing enqueues into it yet — the write
-                # stage and the answer path are the next lane's — but a store this
-                # layer opens is a resource this layer owns, and one left out of the
-                # shutdown path is a connection leaked on every session.
+                # §2, ADR-0078 §10 item 5).
+                #
+                # **Its `purge` is deliberately wired nowhere** (ADR-0078 §10 item
+                # 8): "it does not get a new one… this store's purge is wired
+                # wherever `purge_expired` is wired and inherits the same fate.
+                # Inventing a second sweeping mechanism for one store would be the
+                # thing that has to be undone at leg 5." `MemoryStore.purge_expired`
+                # has no caller in this repository — leg 5's scheduler is where both
+                # get one — so this store's `purge` has none either. That is the
+                # instruction discharged, not an omission: correctness does not
+                # depend on either sweep running, only ADR-0078 §1's exposure cap
+                # does, and buying it with a bespoke timer here would cost more to
+                # remove than it buys.
                 _as_async(deferrals.close),
             ],
         )

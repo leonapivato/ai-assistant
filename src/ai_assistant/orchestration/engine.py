@@ -66,11 +66,19 @@ import structlog
 
 from ai_assistant.core.errors import ConversationStoreError, PlanningError
 from ai_assistant.core.types import (
+    DeferralAdmissionOutcome,
     MemoryDecisionKind,
     MemoryKind,
     ParkedBinding,
     StepStatus,
     band_of,
+)
+from ai_assistant.orchestration.questions import (
+    DEFAULT_QUESTION_PAGE,
+    AnswerOutcome,
+    Question,
+    QuestionState,
+    question_state,
 )
 from ai_assistant.orchestration.runner import Disposition
 
@@ -82,10 +90,10 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         BeliefBand,
         Conversation,
+        DeferralAdmission,
         ExecutionState,
         FeedbackEvent,
         FrozenJsonMapping,
-        MemoryIngestResult,
         MemoryRecord,
         PermissionDecision,
     )
@@ -95,7 +103,9 @@ if TYPE_CHECKING:
     )
     from ai_assistant.orchestration.loop import LearningLoop, TurnResult
     from ai_assistant.orchestration.observation import ObservationReport, ObservationStage
+    from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
+    from ai_assistant.orchestration.writes import WriteOutcome
 
 _log = structlog.get_logger(__name__)
 
@@ -279,6 +289,100 @@ class LearnDecision(StrEnum):
     """A memory was written with a retention window (``STORE_TEMPORARY``)."""
 
 
+class QueueOutcome(StrEnum):
+    """What became of the question a deferred ruling raised (ADR-0078 §7, §10 item 9).
+
+    The ``orchestration``-level echo of
+    :class:`~ai_assistant.core.types.DeferralAdmissionOutcome`, plus the one arm
+    ADR-0078 deliberately does **not** close. A closed set with a name because the
+    surface must say a *different sentence* for each — and because a single "not
+    stored, go answer it" line covering all four would tell a user to answer a
+    question that was never queued, which is the same dishonesty ``cli.py``'s old
+    comment was written to avoid, arriving from the other direction.
+    """
+
+    QUEUED = "queued"
+    """The question was parked, and ``question_id`` names it."""
+
+    ALREADY_ASKED = "already_asked"
+    """An existing question the key still speaks for stands in the way, and
+    ``question_id`` and ``question_state`` say **which and in what state** — a
+    declined one to forget, an interrupted answer to dispose of, or one still
+    waiting (ADR-0078 §7)."""
+
+    QUEUE_FULL = "queue_full"
+    """The answerable queue was at its cap, so nothing was queued and there is no
+    question to read. The refusal is **reported, not swallowed**: the cap refuses
+    the *new* question rather than evicting an old one, which is safe only because
+    the producer still holds what it proposed and can re-propose."""
+
+    NOT_QUEUABLE = "not_queuable"
+    """Secret-tier data, which is never queued at all (ADR-0078 §1). ADR-0004 §3
+    puts Tier 0 content in the OS keyring and forbids it a committed file, and a
+    durable queue is a file — so today's deferral is precisely what keeps such
+    content out of storage. This is the one ``ASK_USER`` ADR-0078 leaves
+    unanswerable, and it keeps the existing non-answerable line and the existing
+    reason."""
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedQuestion:
+    """Where a deferred proposal's question went (ADR-0078 §7, §8 reach 1).
+
+    Carried on :class:`IngestSummary` so ``learn`` can point the user at the
+    question in the moment they submitted the correction — the reach that closes
+    issue #423's own scenario. An ``orchestration`` widening, not a contract change
+    (ADR-0042 §1).
+
+    Attributes:
+        outcome: Which of the four things happened.
+        question_id: The question parked, or the existing one standing in the way.
+            ``None`` for ``QUEUE_FULL`` and ``NOT_QUEUABLE``, where there is no
+            question to name.
+        question_state: The state of the question ``question_id`` names, for the
+            same reason :class:`~ai_assistant.orchestration.questions.SuccessorLink`
+            carries one: "you declined this" and "an answer to this may be
+            committing right now" are different sentences, and naming a question
+            without its state would render one as the other.
+    """
+
+    outcome: QueueOutcome
+    question_id: str | None = None
+    question_state: QuestionState | None = None
+
+    @classmethod
+    def from_admission(cls, admission: DeferralAdmission) -> QueuedQuestion:
+        """Translate a ``core`` admission into the surface's own echo.
+
+        The one place a :class:`~ai_assistant.core.types.DeferralAdmission` is read
+        on the learn path, exactly as :meth:`LearnOutcome.from_results` is the one
+        place a ``MemoryIngestResult`` is (ADR-0042 §1). It branches on the
+        ``outcome`` and **never on an id comparison**, which is the shape ADR-0078 §2
+        rejects: comparing the returned id to the one the coordinator minted fails
+        the moment a caller retries with the same id, and the surface would announce
+        a newly parked question over a suppressed one.
+        """
+        match admission.outcome:
+            case DeferralAdmissionOutcome.ADMITTED:
+                outcome = QueueOutcome.QUEUED
+            case DeferralAdmissionOutcome.SUPPRESSED:
+                outcome = QueueOutcome.ALREADY_ASKED
+            case DeferralAdmissionOutcome.REFUSED:
+                # No deferral to read at all — reaching for one here is the
+                # dereference the three-shape validator exists to prevent.
+                return cls(outcome=QueueOutcome.QUEUE_FULL)
+            case _:  # pragma: no cover — exhaustive over the enum
+                assert_never(admission.outcome)
+        deferral = admission.deferral
+        if deferral is None:  # pragma: no cover — the validator pins the shapes
+            return cls(outcome=outcome)
+        return cls(
+            outcome=outcome,
+            question_id=deferral.id,
+            question_state=question_state(deferral.state),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class IngestSummary:
     """What became of one proposal folded from a piece of feedback (ADR-0042 §1).
@@ -296,11 +400,16 @@ class IngestSummary:
         reason: The policy's own human-readable justification for the ruling,
             surfaced for transparency — as a confirmation carries its ruling's
             ``reason`` (ADR-0042 §4).
+        queued: Where the question a ``DEFERRED`` ruling raised went, and ``None``
+            on every other ruling. Present on **every** deferral, including the
+            secret-tier one nothing queues, because the distinguishing fact has to
+            reach the adapter for it to say anything honest (ADR-0078 §10 item 9).
     """
 
     decision: LearnDecision
     record_id: str | None
     reason: str
+    queued: QueuedQuestion | None = None
 
     @property
     def stored(self) -> bool:
@@ -334,24 +443,45 @@ class LearnOutcome:
         return sum(1 for summary in self.results if summary.stored)
 
     @classmethod
-    def from_results(cls, results: tuple[MemoryIngestResult, ...]) -> LearnOutcome:
-        """Translate the loop's raw ingest results into an orchestration summary.
+    def from_results(cls, outcomes: tuple[WriteOutcome, ...]) -> LearnOutcome:
+        """Translate the write stage's outcomes into an orchestration summary.
 
         The one place a ``core``
-        :class:`~ai_assistant.core.types.MemoryIngestResult` is read on the learn
+        :class:`~ai_assistant.core.types.MemoryIngestResult` or
+        :class:`~ai_assistant.core.types.DeferralAdmission` is read on the learn
         path; everything an adapter sees downstream is ``orchestration``-level
         (ADR-0042 §1).
         """
         return cls(
             results=tuple(
                 IngestSummary(
-                    decision=learn_decision(result.decision.kind),
-                    record_id=result.record_id,
-                    reason=result.decision.reason,
+                    decision=learn_decision(outcome.result.decision.kind),
+                    record_id=outcome.result.record_id,
+                    reason=outcome.result.decision.reason,
+                    queued=_queued(outcome),
                 )
-                for result in results
+                for outcome in outcomes
             )
         )
+
+
+def _queued(outcome: WriteOutcome) -> QueuedQuestion | None:
+    """Where one write outcome's deferred question went, or ``None`` (ADR-0078 §10.9).
+
+    Three cases, and the third is the one that must not collapse into the others:
+
+    * not a deferral at all — no question was raised, so there is nothing to say;
+    * a deferral the stage offered to the queue — the admission says what happened;
+    * a deferral the stage never offered, because it is secret-tier (ADR-0078 §1).
+      The stage returns no admission for it, and reading that absence as "nothing to
+      say" would route every ``ASK_USER`` through the queued-question line and tell
+      the user to go answer something that was never queued.
+    """
+    if outcome.result.decision.kind is not MemoryDecisionKind.ASK_USER:
+        return None
+    if outcome.admission is None:
+        return QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE)
+    return QueuedQuestion.from_admission(outcome.admission)
 
 
 def learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
@@ -731,6 +861,7 @@ class Engine:
         memory: MemoryStore,
         conversations: ConversationLifecycle,
         observation: ObservationStage,
+        questions: QuestionStage,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
@@ -800,6 +931,21 @@ class Engine:
                 be built without it is an engine whose ``observe`` silently does
                 nothing, and this operation is the *only* thing that fills the
                 derived band.
+            questions: The deferred-question stage (ADR-0078 §8, §9) — the third
+                two-store owner, and the one that also **writes** through both: it
+                claims a question, re-submits its proposal through the same write
+                path ``learn`` uses, and records the outcome. Three
+                composition-root obligations ride on it, all argued on its own
+                constructor: its ``DeferralStore`` must be the very instance the
+                write stage behind ``loop`` and ``observation`` enqueues into (a
+                second one queues questions nobody can answer), its writer must
+                write to the same ``MemoryStore`` passed above (applying a confirmed
+                retirement against a different store would retire nothing while
+                reporting success), and it is the **only** producer of a
+                ``UserConfirmation``. Required rather than optional, for the reason
+                ``conversations`` is: an engine that could be built without it is an
+                engine where a deferred question reaches nobody, which is the exact
+                failure ADR-0078 exists to end.
             closers: The resources the façade owns, as async close callables, in
                 the order :meth:`aclose` must run them. The composition root hands
                 these over so the façade is the defined owner that releases every
@@ -857,6 +1003,7 @@ class Engine:
         self._memory = memory
         self._conversations = conversations
         self._observation = observation
+        self._questions = questions
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
@@ -1245,6 +1392,150 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._memory.delete(record_id))
+
+    async def questions(
+        self, *, limit: int = DEFAULT_QUESTION_PAGE, offset: int = 0
+    ) -> tuple[Question, ...]:
+        """List the deferred questions awaiting an answer (ADR-0078 §8 reach 2).
+
+        The reach for a question no ``learn`` call was in flight to render, which is
+        every question a background producer raises. Relayed to the question stage
+        and returned as :class:`~ai_assistant.orchestration.questions.Question`
+        DTOs, which is where ``band_of`` is applied — once, here — so no adapter
+        classifies anything (ADR-0073 §7).
+
+        **Answerable questions only.** One whose answer was begun and never recorded
+        is a different question and comes back from
+        :meth:`interrupted_questions`; the two never merge into one list, because
+        offering an interrupted question beside the answerable ones would present a
+        claim that cannot be taken.
+
+        **No total count is offered**, for ADR-0073 §7's reason: "is there more" is
+        answered by asking for the next page.
+
+        Args:
+            limit: Page size, bounded by default (ADR-0073 §2, §8).
+            offset: How many ordered rows to skip.
+
+        Returns:
+            The page, oldest first — the head of the queue being the question whose
+            admission is blocking a newer one.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``limit`` or ``offset`` falls outside ``[0, 2**63)``, as
+                the store refuses rather than clamps. Not an ``AssistantError``, so
+                an adapter that lets a user supply either must refuse an
+                out-of-range value at its own parse boundary.
+            DeferralStoreError: If the queue cannot be read.
+            MemoryStoreError: If a conflict's content cannot be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._questions.questions(limit=limit, offset=offset))
+
+    async def interrupted_questions(
+        self, *, limit: int = DEFAULT_QUESTION_PAGE, offset: int = 0
+    ) -> tuple[Question, ...]:
+        """List the questions whose answer was begun and never recorded (§8, §9).
+
+        A **second enumeration**, separate all the way to the surface. It exists
+        because a process that died inside a claim leaves the question ``APPLYING``
+        forever — unclaimable, never swept, and, after a restart, holding no id
+        anything could look it up by. Without this read the stranded question is
+        unreachable, which is the vanishing ADR-0078 is about, one state along.
+
+        What the surface must say about one of these is that **an answer was begun
+        and its outcome is not recorded** — not that it failed and not that it can be
+        retried, because the system does not know whether the memory write landed.
+        The recovery is two steps in order: :meth:`forget_question`, then read the
+        belief (:meth:`beliefs`) and ``learn`` it again if it is missing.
+
+        Args:
+            limit: Page size, bounded by default as :meth:`questions` is.
+            offset: How many ordered rows to skip.
+
+        Returns:
+            The page, in :meth:`questions`' order and disjoint from it.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: As :meth:`questions` refuses a malformed page argument.
+            DeferralStoreError: If the queue cannot be read.
+            MemoryStoreError: If a conflict's content cannot be read.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            self._questions.interrupted_questions(limit=limit, offset=offset)
+        )
+
+    async def answer(self, question_id: str, *, accept: bool) -> AnswerOutcome:
+        """Answer one deferred question (ADR-0078 §5, §9).
+
+        The write half of the deferred-question surface. An accept **claims** the
+        question, re-submits its proposal through the same write path ``learn`` uses
+        — carrying the authority the claim mints, which is what lets it retire an
+        assertion the ordinary path may not — and records the outcome. A rejection
+        needs no claim, because it writes nothing.
+
+        **Answering is binary, and there is no third "neither — here's the real
+        answer".** An amendment is a new proposal and ``learn`` already is one
+        (ADR-0073 §6), so a free-text answer would be a second correction path
+        wearing a confirmation's clothes. There is likewise **no retry verb**
+        anywhere on this surface (ADR-0078 §2, §8).
+
+        Args:
+            question_id: The question the user named, taken as opaque.
+            accept: The user's answer. ``True`` re-submits the proposal under the
+                claim's authority; ``False`` declines it and retains the record so
+                the same question is not asked again.
+
+        Returns:
+            An :class:`~ai_assistant.orchestration.questions.AnswerOutcome` saying
+            which of the five outcomes happened — including a re-deferral, which
+            carries the successor question so the user is handed the next question
+            rather than being told their answer went nowhere.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            MemoryStoreError: If the write path failed. The claim is left
+                ``APPLYING`` and reachable through :meth:`interrupted_questions`;
+                nothing is "repaired", because the engine cannot tell whether the
+                write landed and stamping a terminal state would be a lie.
+            UnresolvedEvidenceError: If the proposal's cited evidence was deleted
+                between the question and the answer. Likewise stranding.
+            DeferralStoreError: If the queue cannot be read or written.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._questions.answer(question_id, accept=accept))
+
+    async def forget_question(self, question_id: str) -> bool:
+        """Destroy one deferred question (ADR-0078 §8, §9; ADR-0007).
+
+        Relays ``DeferralStore.delete``. **Unconditional**, like every other
+        deletion on this façade — including on a question whose answer is in flight,
+        because a data right conditional on an internal state the system assigned is
+        the mistake ADR-0073 §9 declines with a different label, and a refusal would
+        be *permanent* for a stranded claim.
+
+        It is also step 1 of the recovery a stranded answer has, and the ordering is
+        the whole point: while the row lives it holds its question key, so a
+        re-``learn`` of the same correction would collide with it and be handed back
+        an id nothing can claim. Deleting destroys the key with the content.
+
+        Args:
+            question_id: The question the user named, taken as opaque.
+
+        Returns:
+            ``True`` if a question was destroyed, ``False`` if the id named nothing
+            — which the adapter renders and maps to an exit code, exactly as
+            :meth:`forget` does for a belief.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            DeferralStoreError: If the queue cannot be written.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._questions.forget_question(question_id))
 
     async def recent_conversations(
         self, *, limit: int = _DEFAULT_CONVERSATION_PAGE, offset: int = 0
@@ -1847,9 +2138,9 @@ class Engine:
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
-        """Delegate to the loop and translate its ingest results (ADR-0042 §1)."""
-        results = await self._loop.learn(event)
-        return LearnOutcome.from_results(results)
+        """Delegate to the loop and translate its write outcomes (ADR-0042 §1)."""
+        outcomes = await self._loop.learn(event)
+        return LearnOutcome.from_results(outcomes)
 
     async def _beliefs(
         self,
@@ -2030,6 +2321,8 @@ __all__ = [
     "IngestSummary",
     "LearnDecision",
     "LearnOutcome",
+    "QueueOutcome",
+    "QueuedQuestion",
     "StepOutcome",
     "TurnOutcome",
     "presented_confidence",
