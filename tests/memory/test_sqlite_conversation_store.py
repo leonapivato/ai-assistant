@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sqlite3
 import stat
 import threading
@@ -30,7 +31,7 @@ from ai_assistant.memory.conversation_store import SqliteConversationStore
 from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.testing.cancellation import SuspendedCall
@@ -620,6 +621,177 @@ async def test_two_stores_over_one_file_serialise_their_mutations(tmp_path: Path
     finally:
         first.close()
         second.close()
+
+
+# --- the exclusion across *processes* (#446) ---------------------------------
+
+
+def _run_gated(run: Callable[[], str], gate_fd: int, write_fd: int) -> None:
+    """Wait at the gate, do the work, report through the pipe — in the child.
+
+    Never returns, and never lets an exception out: a traceback in a forked child
+    is invisible to pytest, so a failure becomes a report the parent asserts on
+    rather than a silent pass.
+    """
+    try:
+        with os.fdopen(gate_fd, "rb") as gate:
+            gate.read(1)
+        message = run()
+    except BaseException as exc:  # a forked child cannot raise into pytest
+        message = f"ERROR {exc!r}"
+    with contextlib.suppress(OSError), os.fdopen(write_fd, "w") as pipe:
+        pipe.write(message)
+    os._exit(0)
+
+
+def _in_forked_children(work: Sequence[Callable[[], str]]) -> list[str]:
+    """Run each callable in its own forked process, started together, and collect its report.
+
+    A gate pipe per child, written only once every child exists, so the processes
+    genuinely overlap: an exclusion claim about two processes is not tested by two
+    processes that never met. The children are reaped in a ``finally`` and any gate
+    still unwritten is closed there first, so a failing assertion cannot leave a
+    process parked at the gate forever.
+    """
+    pids: list[int] = []
+    gates: list[int] = []
+    reads: list[int] = []
+    reports: list[str] = []
+    try:
+        for run in work:
+            gate_read, gate_write = os.pipe()
+            read_fd, write_fd = os.pipe()
+            pid = os.fork()
+            if pid == 0:  # child
+                os.close(gate_write)
+                os.close(read_fd)
+                _run_gated(run, gate_read, write_fd)
+            os.close(gate_read)  # parent
+            os.close(write_fd)
+            pids.append(pid)
+            gates.append(gate_write)
+            reads.append(read_fd)
+        for gate_write in gates:
+            os.write(gate_write, b"g")
+        for read_fd in reads:
+            with os.fdopen(read_fd) as pipe:
+                reports.append(pipe.read())
+        reads.clear()
+    finally:
+        for leftover in (*gates, *reads):
+            with contextlib.suppress(OSError):
+                os.close(leftover)
+        for pid in pids:
+            os.waitpid(pid, 0)
+    return reports
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
+async def test_two_processes_over_one_file_allocate_dense_distinct_ordinals(
+    tmp_path: Path,
+) -> None:
+    """The module's claim is about *processes*, and only processes can test it.
+
+    Every other concurrency case is one process. Even the two-connection case above
+    is: each store's own ``asyncio.Lock`` serialises its connection before SQLite
+    ever sees the contention, so none of them can tell ``BEGIN IMMEDIATE`` from a
+    deferred read-then-write. Two engines really running at once can — a deferred
+    transaction lets both read the same highest ordinal and allocate it twice.
+
+    Each child drives ``_append_sync`` on a store it opened itself: the parent's
+    event loop is copied into a forked child and must not be reused, and a
+    ``sqlite3`` connection must not be shared across a fork either.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+    finally:
+        store.close()
+
+    each = 8
+    total = 2 * each
+
+    def _append_many() -> str:
+        child = SqliteConversationStore(path=path, now=_fixed_now)
+        try:
+            allocated = [child._append_sync(conversation.id, _NOW, None)[1] for _ in range(each)]
+        finally:
+            child.close()
+        return ",".join(str(one) for one in allocated)
+
+    reports = _in_forked_children([_append_many, _append_many])
+
+    allocated: list[int] = []
+    for report in reports:
+        assert not report.startswith("ERROR"), report
+        allocated.extend(int(one) for one in report.split(",") if one)
+    assert sorted(allocated) == list(range(1, total + 1)), (
+        "two processes over one file allocated a conflicting ordinal, so the "
+        "per-conversation exclusion is not holding across processes"
+    )
+
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        recorded = await reopened.turns(conversation.id, limit=total)
+        assert [turn.ordinal for turn in recorded] == list(range(1, total + 1))
+        assert len({turn.episode_id for turn in recorded}) == total
+    finally:
+        reopened.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="platform has no fork")
+async def test_a_capture_and_a_deletion_in_two_processes_serialise(tmp_path: Path) -> None:
+    """ADR-0074 §8's other conjunction, across the boundary the clause is written for.
+
+    "A caller-held lock does not survive a second caller" is the whole reason the
+    exclusion is on the seam, so the shared suite's capture-and-deletion case is
+    asserted here between two engines: whichever landed first, the outcome is one of
+    exactly two consistent states — never a turn recorded *into* a stamped
+    conversation, and never a stamp that lost a turn it should have named.
+    """
+    path = tmp_path / "conversations.db"
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        conversation = await store.start()
+        await store.append(conversation.id, occurred_at=_NOW)
+    finally:
+        store.close()
+
+    def _append_once() -> str:
+        child = SqliteConversationStore(path=path, now=_fixed_now)
+        try:
+            return str(child._append_sync(conversation.id, _NOW, None)[1])
+        except UnknownConversationError:
+            return "REFUSED"
+        finally:
+            child.close()
+
+    def _stamp() -> str:
+        child = SqliteConversationStore(path=path, now=_fixed_now)
+        try:
+            return str(child._stamp_deleted_sync(conversation.id))
+        finally:
+            child.close()
+
+    appended, stamped = _in_forked_children([_append_once, _stamp])
+
+    assert stamped == "True", f"the deletion is unconditional and must have happened: {stamped}"
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        named = await reopened.episodes_to_purge(conversation.id)
+        if appended == "REFUSED":
+            assert named == [f"conv:{conversation.id}:1"], named
+        else:
+            assert appended.isdigit(), appended
+            assert f"conv:{conversation.id}:{appended}" in named, (
+                "the append succeeded, so the index the sweep reads must name its episode"
+            )
+            assert len(named) == 2, named
+    finally:
+        reopened.close()
 
 
 @pytest.mark.integration
