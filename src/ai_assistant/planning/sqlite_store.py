@@ -307,6 +307,15 @@ class SqlitePlanStore:
             msg = f"failed to open the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
         try:
+            # Restricted *before* the first statement, not after the schema is
+            # created. SQLite copies the database file's mode onto every rollback
+            # journal it creates for it, so a journal opened while the file still
+            # carried the process umask is world-readable too — and an interrupted
+            # write leaves it on disk holding Tier 1 pages (ADR-0004 §1, §4). The
+            # `BEGIN IMMEDIATE` below is exactly such a write. `connect` creates
+            # the file, so there is something to restrict by the time this runs
+            # (#451; `SqliteConversationStore._setup` has the same ordering).
+            self._restrict_permissions()
             # Per-connection, not persisted: the referential-integrity guard of
             # ADR-0049 §1 is only in force while this pragma is on.
             conn.execute("PRAGMA foreign_keys = ON")
@@ -334,8 +343,6 @@ class SqlitePlanStore:
                 # applied to the second marker this store backfills; it is also what
                 # puts `executions` in scope for the corroboration.
                 self._reconcile_high_water(conn, counter, mark)
-            if self._path != ":memory:":
-                Path(self._path).chmod(_OWNER_ONLY)
         except PlanningError:
             conn.close()  # never leak the connection when opening fails
             raise
@@ -344,6 +351,11 @@ class SqlitePlanStore:
             msg = f"failed to initialise the plan store at {self._path!r}: {exc}"
             raise PlanningError(msg) from exc
         return conn
+
+    def _restrict_permissions(self) -> None:
+        """Make the database file owner-only (ADR-0004 §4); a no-op in memory."""
+        if self._path != ":memory:":
+            Path(self._path).chmod(_OWNER_ONLY)
 
     def _verify_or_init_meta(self, conn: sqlite3.Connection) -> tuple[int, int | None]:
         """Write the version and counter on a fresh DB, or refuse any other version.

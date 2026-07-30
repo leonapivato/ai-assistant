@@ -39,6 +39,12 @@ def _fixed_now() -> datetime:
     return datetime(2026, 6, 1, tzinfo=UTC)
 
 
+def _journal_mode(database: Path) -> int | None:
+    """The permission bits of the rollback journal beside ``database``, or ``None``."""
+    journal = database.with_name(f"{database.name}-journal")
+    return journal.stat().st_mode & 0o777 if journal.exists() else None
+
+
 async def _seed_and_start(store: SqlitePlanStore, plan_id: str = "p1") -> str:
     """Save a goal+plan and start one execution, returning its id."""
     await store.save_goal(_goal())
@@ -1537,6 +1543,47 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
         assert (path.stat().st_mode & 0o777) == 0o600
     finally:
         store.close()
+
+
+async def test_a_journal_opened_during_setup_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0004 §4 reaches the sidecars, and reaches them from the first write (#451).
+
+    SQLite copies the *database file's* mode onto every rollback journal it creates
+    for it, so restricting the file after the schema is created leaves every journal
+    opened in between carrying the process umask — and an interrupted write leaves
+    that journal on disk holding Tier 1 pages beside a ``0600`` base file. Setup's
+    ``BEGIN IMMEDIATE`` is exactly such a write.
+
+    Observed **inside** ``_setup`` rather than after it, because that is the only
+    place the difference is visible: by the time the constructor returns the
+    transaction has committed, and a journal provoked afterwards inherits ``0600``
+    under either ordering. The hook is ``_verify_or_init_meta``, which runs inside
+    that transaction; on the unfixed ordering the journal is ``0644`` there.
+
+    The file is pre-created ``0644`` so the case does not depend on the runner's
+    umask — and because reopening an existing store is the common path anyway.
+    """
+    path = tmp_path / "plans.db"
+    path.touch()
+    path.chmod(0o644)
+    observed: list[int | None] = []
+    original = SqlitePlanStore._verify_or_init_meta
+
+    def observing(store: SqlitePlanStore, conn: sqlite3.Connection) -> tuple[int, int | None]:
+        result = original(store, conn)
+        observed.append(_journal_mode(path))
+        return result
+
+    monkeypatch.setattr(SqlitePlanStore, "_verify_or_init_meta", observing)
+
+    opened = SqlitePlanStore(path=path, now=_fixed_now)
+    try:
+        assert observed[0] is not None, "setup should have opened a journal"
+        assert observed == [0o600]
+    finally:
+        opened.close()
 
 
 async def _spin(iterations: int = 50) -> None:
