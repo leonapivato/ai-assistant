@@ -1865,6 +1865,39 @@ class MemoryWriterContract:
 
         assert await store.export() == before
 
+    @pytest.mark.parametrize("kind", _FOLD_KINDS, ids=str)
+    async def test_a_fold_naming_an_absent_target_the_proposal_also_cites_is_refused(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """The overlap of the two refusals — and **which** one fires is not pinned.
+
+        Both are ``MemoryStoreError`` and both write nothing, so the two orderings
+        are indistinguishable to every caller: ADR-0081 §9 declines a conformance
+        clause pinning the exception *message*, which is the only thing that differs.
+        What **is** contract is asserted here — the ingest refuses, and the store is
+        left byte-for-byte unchanged.
+
+        Why the ordering is deliberately left open rather than pinned to the
+        existing refusal: ADR-0081 §2 rules that all three installing rulings "are
+        decided at the seam above", taking their destination from the proposal or
+        from the ruling — so a writer following §2 tests ``target_id`` before
+        ``_apply`` resolves it against the conflicts, and this rule fires first.
+        Deferring the ``REINFORCE`` arm until target membership were established
+        would place half the rule after the fold helper §2 rules out **by name**,
+        and split one rule across two seams. A writer that instead validates the
+        target first also conforms; both refuse, and nothing observable separates
+        them.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, _FoldToAbsentTargetPolicy(kind))
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(
+                _proposal(_preference("new", source=MemorySource.EXTERNAL, evidence=("ghost",)))
+            )
+
+        assert await store.export() == []
+
     async def test_supersede_re_mints_past_a_cited_id_and_lands(
         self, make_writer: WriterFactory
     ) -> None:
