@@ -410,9 +410,42 @@ class FakeDeferralStore:
             state=DeferralState.PENDING,
             deferred_at=now,
             retention=self._retention,
-            expires_at=None if self._retention is None else now + self._retention,
+            expires_at=self._expiry_from(now),
             predecessor_id=predecessor_id,
         )
+
+    def _expiry_from(self, now: datetime) -> datetime | None:
+        """The answerability deadline for a question admitted at ``now`` (ADR-0078 §2).
+
+        ``None`` under "ask me forever". Otherwise ``now + retention`` — and where
+        that is not a representable instant, the admission is refused with **this
+        seam's own error**, rather than letting a raw ``OverflowError`` cross a
+        boundary that documents ``DeferralStoreError`` and would escape an adapter's
+        ``AssistantError`` handler as a traceback.
+
+        Refused here rather than at construction, and that placement is the
+        decision: it is **not a property of the tuning alone**. A five-thousand-year
+        lifetime yields a perfectly good deadline in 2026 and an unrepresentable one
+        in 7026, so whether it works depends on *when* the question is admitted.
+        ADR-0022 §4a's argument for refusing at construction covers values that are
+        bad whatever the clock says — a non-positive lifetime, a cap of zero — and
+        those are refused there; this one cannot honestly join them.
+
+        Raises:
+            DeferralStoreError: If the deadline is not representable. Nothing is
+                admitted.
+        """
+        if self._retention is None:
+            return None
+        try:
+            return now + self._retention
+        except (OverflowError, ValueError) as exc:
+            msg = (
+                f"a question admitted at {now.isoformat()} under a lifetime of "
+                f"{self._retention} has no representable deadline: the configured "
+                f"deferral lifetime is too large for this clock"
+            )
+            raise DeferralStoreError(msg) from exc
 
     def _admit(
         self, candidate: DeferredProposal, key: str, *, exempt: bool, now: datetime
