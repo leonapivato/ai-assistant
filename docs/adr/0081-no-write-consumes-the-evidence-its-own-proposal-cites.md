@@ -1,6 +1,6 @@
 # 81. No write consumes the evidence its own proposal cites
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-29
 - **This is a contract change, of the semantics-only kind.**
   `MemoryWriter.ingest` gains one refusal clause (§1): a ruling that would
