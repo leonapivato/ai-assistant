@@ -389,17 +389,21 @@ def test_a_sidecar_that_was_already_there_is_restricted_at_open(tmp_path: Path) 
     assert [_mode_of(each) for each in sidecars] == [0o600, 0o600]
 
 
+#: What the symlink cases below plant, and expect to find untouched afterwards.
+_NOT_OURS = "held by something else"
+
+
 @pytest.mark.integration
-def test_a_symlink_under_a_sidecar_name_is_left_alone(tmp_path: Path) -> None:
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_a_symlink_under_a_sidecar_name_is_never_followed(tmp_path: Path, suffix: str) -> None:
     """The restriction narrows this store's own files, and only those (#501's review).
 
     ``chmod`` follows symlinks and ``os.chmod(follow_symlinks=False)`` is unsupported
     on Linux, so a link planted under a sidecar's name would otherwise make the open
     silently set ``0600`` on a file holding none of this store's data — adding owner
     write to something deliberately read-only, or breaking a file another program
-    reads. Skipping it exposes nothing extra: SQLite would follow the same link when
-    it opened the sidecar for real, so a directory an adversary can write to is
-    already past ADR-0004 §4 by a route this method could not close.
+    reads. Both the mode *and* the contents are asserted, because "left alone" is the
+    whole claim.
 
     Asserted for one store rather than five: the five copies of the loop are pinned
     by the ``-wal``/``-shm`` case each module carries, and this is a property of the
@@ -407,13 +411,50 @@ def test_a_symlink_under_a_sidecar_name_is_left_alone(tmp_path: Path) -> None:
     """
     path = tmp_path / "conversations.db"
     unrelated = tmp_path / "not-ours.txt"
-    unrelated.write_text("held by something else")
+    unrelated.write_text(_NOT_OURS)
     unrelated.chmod(0o644)
-    Path(f"{path}-wal").symlink_to(unrelated)
+    Path(f"{path}{suffix}").symlink_to(unrelated)
 
     SqliteConversationStore(path=path, now=_fixed_now).close()
 
     assert _mode_of(unrelated) == 0o644
+    assert unrelated.read_text() == _NOT_OURS
+
+
+@pytest.mark.integration
+def test_sqlite_discards_a_symlinked_journal_rather_than_writing_through_it(
+    tmp_path: Path,
+) -> None:
+    """Skipping the link leaves no Tier 1 page anywhere it could not reach (#501's review).
+
+    The worry the case above does not answer on its own: if this store declines to
+    restrict a symlinked sidecar and SQLite then *followed* that link when it opened
+    the sidecar for real, pages would land in a world-readable file the store had
+    deliberately left alone — a worse outcome than the chmod it stopped doing.
+
+    It does not happen, and this pins the behaviour rather than trusting it, because
+    it belongs to another project's file layer. A ``-journal`` that is a symlink is
+    not a hot journal, so SQLite unlinks *the link* at the first statement and writes
+    a real file in its place — one that inherits the database's ``0600``, which the
+    ordering cases above already assert. The target is never opened. (A symlinked
+    ``-wal`` on a WAL-mode database is refused outright, which surfaces through each
+    store's existing ``sqlite3.Error`` arm; nothing in this codebase sets
+    ``journal_mode``, so that path is #505's to decide, not this module's to drive.)
+    """
+    path = tmp_path / "conversations.db"
+    unrelated = tmp_path / "not-ours.txt"
+    unrelated.write_text(_NOT_OURS)
+    unrelated.chmod(0o644)
+    journal = Path(f"{path}-journal")
+    journal.symlink_to(unrelated)
+
+    store = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        assert not journal.is_symlink(), "SQLite should have unlinked the planted link"
+        assert unrelated.read_text() == _NOT_OURS
+        assert _mode_of(unrelated) == 0o644
+    finally:
+        store.close()
 
 
 @pytest.mark.integration
