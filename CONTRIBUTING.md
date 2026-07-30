@@ -180,8 +180,14 @@ the artifact, which a moved base fails.
 ### Stop when the required reviews are green
 
 **Every review the change requires coming back green is a terminal state, not a
-checkpoint.** Adversarial alone for most changes; adversarial *and* architecture
-for a contract-surface one (ADR-0015 §1). When the required set is green, ship —
+checkpoint.** The required set follows the shape of the diff, and this is the
+sentence that owns it: **adversarial alone for most changes; adversarial *and*
+architecture for a contract-surface one** (ADR-0015 §1). A change is
+contract-surface when it touches `core/protocols.py` or `core/types.py` — **or
+when it is the ADR deciding that surface**, even though such a PR is prose only
+(see "Contract ADRs land before their implementation"). Adversarial is in every
+required set, which is why `ship` can demand it unconditionally. When the
+required set is green, ship —
 do not commit again to improve wording, because that destroys the records and
 starts a fresh round.
 
@@ -218,7 +224,16 @@ still `Proposed`, so a finding can still change the decision:
 
 ```bash
 just review-codex architecture      # on the branch holding the drafted ADR
+just review-codex adversarial       # both — see below
 ```
+
+**Run both on an ADR PR.** Architecture is the review that earns its keep on a
+decision; adversarial is required as well, and not only because `ship` enforces
+it (above). A contract ADR is where the edge cases get decided — what happens on
+conflict, on cancellation, on an empty or oversized input — and those are
+answerable from the prose, before an implementation has committed to an answer.
+A finding there costs a paragraph; the same finding after the triad lands costs a
+supersession.
 
 Triage the findings, fold real ones into the draft, flip the ADR to `Accepted`,
 merge that PR, then build against it. This is advisory like all review: the
