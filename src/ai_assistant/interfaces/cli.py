@@ -1596,25 +1596,18 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
         f"  [dim]Memory:[/] {_observed_message(proposal.decision)} "
         f"[dim]({_safe(proposal.reason)})[/]"
     )
-    if proposal.decision is LearnDecision.DEFERRED:
-        # Since ADR-0078 the write stage usually parks this question, so the old note
-        # here — "nothing has recorded this proposal, so it is gone when this command
-        # ends" — became false and had to go (ADR-0019).
-        #
-        # What replaces it must claim nothing about *which* of the queue's outcomes
-        # happened, and must not read as though it did. An observation's refusals are
-        # "reported to the observing stage and no further" (ADR-0078 §7), so this
-        # report deliberately does not carry the admission — widening it is ADR-0077's
-        # call, not this lane's — which means a full queue and a parked question look
-        # identical from here. So the line **names both**: pointing at the listing
-        # while implying this proposal is on it would be a promise this adapter cannot
-        # keep, and staying silent would drop ADR-0078 §8's reach 2, which is the only
-        # reach an observer-raised question has.
-        console.print(
-            "  [yellow]Not stored:[/] this needs your answer. "
-            "[bold]assistant questions[/] lists what is waiting — and if this one is "
-            "not there, the queue was full, so clear some of it and observe again."
-        )
+    # A deferral gets **no extra note here, and the absence is the decision**
+    # (ADR-0019, ADR-0078 §7). The old note said the proposal was "gone when this
+    # command ends", which was true and became false the moment the write stage
+    # started parking one. Nothing may replace it, because there is nothing further
+    # this adapter can honestly say: an observer's refusals stay at the observing
+    # stage "and no further", so `ObservationReport` deliberately does not carry the
+    # admission — widening it is ADR-0077's call, not this lane's — and every
+    # replacement tried was a claim about state the report does not hold. "Go answer
+    # it" is false when the queue refused it; "the queue was full" is false when the
+    # question was parked on page two, answered, or lapsed. The ruling line above
+    # says the one thing that holds on every branch — nothing was stored and an
+    # answer is owed — and `assistant questions` documents itself.
     if proposal.record_id is not None:
         console.print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
 

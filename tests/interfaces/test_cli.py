@@ -1602,18 +1602,22 @@ def test_observe_shows_each_belief_with_its_step_evidence_and_ruling(
     assert "assistant beliefs" in rendered
 
 
-def test_observe_renders_a_deferral_in_full_and_points_at_the_question_surface(
+def test_observe_renders_a_deferral_in_full_and_claims_nothing_about_the_queue(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**Inverted by ADR-0078**: a deferred proposal is now parked, so the old line went.
+    """**Inverted by ADR-0078**, and inverted to *silence* rather than a new promise.
 
     It used to say the proposal was "gone when this command ends", which was true —
     nothing recorded one (ADR-0077 §4, #423). The write stage now parks it, so that
-    sentence became a lie and had to go (ADR-0019). What replaces it claims nothing
-    about *which* of the queue's outcomes happened, because an observation reports its
-    refusals to its own stage and no further (ADR-0078 §7) and this report
-    deliberately does not carry the admission: it says only what holds on every
-    branch — nothing was stored, and the question surface is where an answer is owed.
+    sentence became a lie and had to go (ADR-0019).
+
+    **Nothing replaces it**, because there is nothing further this adapter can
+    honestly say. An observer's refusals stay at the observing stage "and no further"
+    (ADR-0078 §7), so ``ObservationReport`` deliberately does not carry the admission,
+    and every candidate replacement is a claim about state it does not hold: "go
+    answer it" is false when the queue refused it, and "the queue was full" is false
+    when the question was parked on a later page, answered, or lapsed. The ruling line
+    says the one thing true on every branch — nothing was stored, an answer is owed.
 
     The candidate, its evidence and the policy's reason are still rendered in full,
     for ADR-0077 §4's reason and one ADR-0078 does not remove: resolving
@@ -1639,15 +1643,13 @@ def test_observe_renders_a_deferral_in_full_and_points_at_the_question_surface(
     rendered = " ".join(output.getvalue().split())
     assert "the user works from Lisbon" in rendered  # the candidate, not just a ruling
     assert "an inference never silently overrides an assertion" in rendered
-    assert "Not stored" in rendered
+    assert "Not stored — it needs your answer" in rendered
     assert "gone when this command ends" not in rendered, "that claim is false since ADR-0078"
-    assert "assistant questions" in rendered, "the surface names where the answer is owed"
-    # And it does **not** claim this proposal is on that list. The report does not
-    # carry the admission — ADR-0078 §7 keeps an observer's refusals at the observing
-    # stage "and no further", and widening the report is ADR-0077's call, not this
-    # lane's — so a parked question and a full queue look identical from here. The
-    # line therefore names both outcomes rather than promising the first.
-    assert "if this one is not there, the queue was full" in rendered
+    # Every claim about *what became of the question* is absent, because the report
+    # does not carry it and each one is false on some branch.
+    assert "assistant questions" not in rendered, "it may not be on that list"
+    assert "queue was full" not in rendered, "and it may not have been"
+    assert "go answer" not in rendered
 
 
 def test_observe_reports_a_proposal_the_write_path_refused_for_lost_evidence(
