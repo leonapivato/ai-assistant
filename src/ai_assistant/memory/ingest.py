@@ -29,6 +29,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     BeliefBand,
+    DataTier,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
@@ -75,6 +76,18 @@ def _uuid() -> str:
 # hold at the boundary that performs the write rather than at the one that
 # recommends it.
 _SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+
+#: The rulings that dispatch a write. Check 0 (:func:`_refuse_secret_write`) gates
+#: exactly these and nothing else, because ADR-0004 §3 forbids a secret **in the
+#: database** rather than a secret being judged: ``ASK_USER`` and ``REJECT`` write
+#: nothing, so refusing them would break the ordinary secret-tier path ADR-0078 §1
+#: promises to preserve. Derived as a complement rather than listed, so a sixth
+#: write-producing ruling joins the gate rather than slipping past a list nobody
+#: updated.
+_WRITE_PRODUCING_KINDS = frozenset(MemoryDecisionKind) - {
+    MemoryDecisionKind.ASK_USER,
+    MemoryDecisionKind.REJECT,
+}
 
 
 def _utcnow() -> datetime:
@@ -123,7 +136,11 @@ def _check_tuning(*, conflict_threshold: float, conflict_limit: int) -> None:
 
 
 def _refuse_unsafe_fold(
-    target: MemoryRecord, incoming: MemoryRecord, kind: MemoryDecisionKind
+    target: MemoryRecord,
+    proposal: MemoryUpdateProposal,
+    kind: MemoryDecisionKind,
+    *,
+    resolved: tuple[str, ...],
 ) -> None:
     """Refuse a fold that would destroy data, gated on the ruling where it must be.
 
@@ -137,34 +154,54 @@ def _refuse_unsafe_fold(
       *destroys* the assertion, but the conflict signal is topical similarity, not
       contradiction (ADR-0038 §5), and is too weak to retire a record the user
       gave us — a justification the window does not touch. So nothing, of any
-      source, under either ruling, may fold onto an assertion.
+      source, under either ruling, may fold onto an assertion — **except** under a
+      confirmation that covers this very target (:func:`_confirmation_covers`,
+      ADR-0078 §5b). There the signal is not topical similarity: it is the user's
+      answer, which ADR-0045 §7 named as one of the two acceptable gates. The
+      clause is therefore **narrowed by exception, not lifted**, and it stands
+      verbatim in every other case.
     - **Clause 2 — a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target,
       ``REINFORCE`` only.** The external id is that system's idempotency key. A
       ``REINFORCE`` still inherits it, so the correction is overwritten by the next
       routine sync (ADR-0038 §2a) — the refusal stays. A ``SUPERSEDE`` now gets a
       *fresh* id (ADR-0045 §4), so that hazard is gone and an ``EXTERNAL``
       supersession is permitted at the writer boundary (ADR-0045 §5b). The arm is
-      therefore **narrowed to ``REINFORCE``**, not removed.
+      therefore **narrowed to ``REINFORCE``**, not removed. Untouched by ADR-0078.
 
-    ``DefaultMemoryPolicy`` proposes none of these — rule 2 defers, and rule 3
+    ``DefaultMemoryPolicy`` proposes none of these — its rule 4 defers, and rule 6
     supersedes only ``OBSERVED``/``INFERRED`` — but a policy reaches the
     ingestor through an injected seam and any conforming implementation may rule
     differently. The refusal therefore lives here, at the boundary that performs
-    the write, rather than in the policy that recommends it.
+    the write, rather than in the policy that recommends it. That is also why the
+    exception is **verified rather than trusted**: a gate that opened on an
+    unexamined field would hand that guarantee back to the caller's good
+    intentions (ADR-0078 §5b).
 
     Fail-closed rather than silently downgrading, for the reason that already
     makes an absent fold target raise instead of falling back to storing the
     proposal as new: a write that loses data while reporting success is worse
     than one that stops.
 
+    Args:
+        target: The conflict the ruling names.
+        proposal: The proposal **as handed to ``ingest``** — whose ``conflicts``
+            are the frozen ids the question was asked about, read *before*
+            conflict resolution replaced them (ADR-0078 §5b check 4).
+        kind: The ruling being applied.
+        resolved: The conflict ids *this* ingest resolved — the live set.
+
     Raises:
-        MemoryStoreError: If the fold is one of the two above.
+        MemoryStoreError: If the fold is one of the two above and no covering
+            confirmation permits it.
     """
-    if target.provenance.source is MemorySource.USER_ASSERTED:
+    incoming = proposal.proposed
+    if target.provenance.source is MemorySource.USER_ASSERTED and not _confirmation_covers(
+        target, proposal, kind, resolved=resolved
+    ):
         msg = (
             f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
             f"be folded onto a user-asserted one, whose belief it would overwrite "
-            f"(ADR-0038 §3, ADR-0045 §5)"
+            f"(ADR-0038 §3, ADR-0045 §5, narrowed by ADR-0078 §5b)"
         )
         raise MemoryStoreError(msg)
     if (
@@ -177,6 +214,124 @@ def _refuse_unsafe_fold(
             f"{target.provenance.source} record, whose id it would inherit and the next sync "
             f"overwrite — only OBSERVED and INFERRED beliefs may be reinforced this way "
             f"(ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _confirmation_covers(
+    target: MemoryRecord,
+    proposal: MemoryUpdateProposal,
+    kind: MemoryDecisionKind,
+    *,
+    resolved: tuple[str, ...],
+) -> bool:
+    """Whether a confirmation authorises retiring ``target`` (ADR-0078 §5b).
+
+    Clause 1's one exception, and **five checks stand behind it**, all of them
+    performable at this boundary with what the writer already holds. (The sixth,
+    check 0, gates the *write* rather than the ruling and so cannot live here —
+    ``ingest`` reaches this helper only for ``REINFORCE`` and ``SUPERSEDE``, which
+    would let an injected policy ruling ``ACCEPT`` write a secret straight through;
+    it sits between the ruling and the write dispatch instead,
+    :func:`_refuse_secret_write`.)
+
+    1. **The ruling is ``SUPERSEDE``.** A ``REINFORCE`` onto an assertion stays
+       refused whatever the confirmation says: folding at the target's id would
+       rewrite the user's own words, which no answer authorises.
+    2. **The target id is in ``confirmation.retires``.**
+    3. **The target id is also among the conflicts this very ingest resolved.** A
+       confirmation cannot authorise retiring a record the current ruling was not
+       even made against.
+    4. **``confirmation.question_key`` equals the key recomputed from the proposal
+       as handed to ``ingest``.** This is the check that stops the value being a
+       bearer token, and it took ADR-0078 two revisions to get right: checks 1-3 all
+       pass when a confirmation given for Q1 is presented with a *different*
+       proposal that happens to conflict with the same assertion, and binding on the
+       proposal alone still left the narrower hole open — two questions can share a
+       proposal **exactly** and have been shown different conflict sets, so Q1's
+       broader ``retires`` would spend itself inside Q2's apply and retire an
+       assertion Q2's user never saw. The key covers *what was proposed* and *what
+       it was proposed against* together, so the two questions differ and the
+       confirmation does not travel. Recomputed from the **frozen** conflicts the
+       proposal arrived carrying — not the live set the ingestor stamped onto its own
+       copy, which would compare the wrong set on every input.
+    5. **Every id in ``confirmation.retires`` is among those frozen conflicts.**
+       Check 3 requires a target to be in the *live* set; this requires it to have
+       been among the ones the user was *shown*. Both, because the two sets can
+       differ in either direction and the authority is bounded by the smaller one.
+
+    **What none of this claims.** It does not make the confirmation unforgeable —
+    any subsystem holding the injected ``MemoryStore`` can call ``write_atomic``
+    directly, and a floor on the writer is not a security boundary against
+    arbitrary in-process code. What it *is* is a guarantee that no ruling reaches a
+    user assertion by inference: not from a policy's judgement, not from topical
+    similarity, and not from a confirmation belonging to another question. That a
+    confirmation corresponds to a deferral a user actually answered is enforced one
+    layer up, by `orchestration`'s claim (ADR-0078 §3, §9).
+
+    Args:
+        target: The conflict the ruling names.
+        proposal: The proposal as handed to ``ingest``.
+        kind: The ruling being applied.
+        resolved: The conflict ids this ingest resolved.
+
+    Returns:
+        ``True`` iff all five checks hold, and the fold is therefore the user's
+        own answer rather than a similarity signal.
+    """
+    confirmation = proposal.confirmation
+    if confirmation is None or kind is not MemoryDecisionKind.SUPERSEDE:
+        return False
+    frozen = set(proposal.conflicts)
+    return (
+        target.id in confirmation.retires
+        and target.id in resolved
+        and confirmation.question_key == proposal.question_key
+        and frozen.issuperset(confirmation.retires)
+    )
+
+
+def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+    """Refuse any *write* of a ``DataTier.SECRET`` proposal (ADR-0078 §5b check 0).
+
+    **A refusal at the writer boundary, independent of the model validator**
+    ``DeferredProposal`` and ``MemoryUpdateProposal`` carry, because a validator is
+    not a boundary: ``model_construct`` and ``model_copy(update=...)`` both skip
+    validation, and this repository already treats a definition "tampered past
+    ``frozen=True`` with ``object.__setattr__``" as inside its threat model
+    (ADR-0018 §3, ADR-0021 §4). Without this, every check in
+    :func:`_confirmation_covers` can pass on a validator-bypassing secret proposal
+    under an injected ``SUPERSEDE`` policy and the writer persists a secret to the
+    ``MemoryStore`` — ADR-0004 §3's "never in the memory database", reached through
+    the one seam whose whole job is to refuse writes nobody authorised.
+
+    **It gates the write, not the ruling, and the placement follows from that.** It
+    runs *after* the policy has ruled and *before* any write is dispatched, so it
+    reaches every write-producing ruling and no ruling that writes nothing. Both
+    ends are load-bearing:
+
+    - **Not inside** :func:`_refuse_unsafe_fold`, which ``ingest`` reaches only for
+      ``REINFORCE`` and ``SUPERSEDE`` — that would let an injected policy ruling
+      ``ACCEPT`` or ``STORE_TEMPORARY`` write the secret straight through
+      :meth:`MemoryIngestor._apply`.
+    - **Not at the top of ``ingest`` either.** An unconditional refusal *before* the
+      policy runs would turn the ordinary secret-tier path into an error: today a
+      secret ``learn`` reaches ``DefaultMemoryPolicy``, is ruled ``ASK_USER``,
+      writes nothing and raises nothing (ADR-0078 §1), and that behaviour is what
+      ADR-0078 preserves. ADR-0004 §3 forbids a secret *in the database*, not a
+      secret being *judged*.
+
+    So ``ASK_USER`` and ``REJECT`` return normally, because neither writes anything.
+
+    Raises:
+        MemoryStoreError: If the ruling would write and the proposal is Tier 0.
+            Nothing is written.
+    """
+    if decision.kind in _WRITE_PRODUCING_KINDS and proposal.sensitivity is DataTier.SECRET:
+        msg = (
+            f"refusing to write {proposal.proposed.id!r}: a {decision.kind} ruling on secret-tier "
+            f"data would put Tier 0 content in the memory database, which lives in the OS keyring "
+            f"and never in a database or a committed file (ADR-0004 §3, ADR-0078 §5b)"
         )
         raise MemoryStoreError(msg)
 
@@ -221,7 +376,13 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
     return minted
 
 
-def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list[MemoryRecord]:
+def _retirement_set(
+    target: MemoryRecord,
+    conflicts: list[MemoryRecord],
+    *,
+    proposal: MemoryUpdateProposal,
+    resolved: tuple[str, ...],
+) -> list[MemoryRecord]:
     """The full set of conflicting beliefs a ``SUPERSEDE`` retires (ADR-0050 §1, #244).
 
     A ``SUPERSEDE`` names the *relation* — the proposal overturns the belief the
@@ -236,11 +397,25 @@ def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list
     :data:`_SUPERSEDABLE` (``OBSERVED``/``INFERRED``) — the derived beliefs a
     correction may displace. Two sources are held out of the *widening* on purpose:
 
-    - ``USER_ASSERTED`` conflicts are never swept in — clause 1 stands, record-keyed,
-      for both rulings (ADR-0045 §5): topical similarity may not retire a record the
-      user gave us. ``DefaultMemoryPolicy`` never even reaches ``SUPERSEDE`` with an
-      asserted conflict present (it rules ``ASK_USER``, ADR-0050 §2), but the applier
-      excludes them regardless, since it takes rulings from any injected policy.
+    - ``USER_ASSERTED`` conflicts are never swept in **on similarity** — clause 1
+      stands, record-keyed, for both rulings (ADR-0045 §5): topical similarity may
+      not retire a record the user gave us. ``DefaultMemoryPolicy`` never even
+      reaches ``SUPERSEDE`` with an asserted conflict present unless the user
+      confirmed it (it rules ``ASK_USER``, ADR-0050 §2), but the applier excludes
+      them regardless, since it takes rulings from any injected policy.
+
+      **The one exception is the user's own answer** (ADR-0078 §5b's narrowing of
+      ADR-0050 §1's hold-out): an asserted conflict the incoming proposal's
+      ``confirmation`` genuinely covers *is* retired, so a confirmation naming two
+      prior assertions retires both in the one atomic batch. It is verified per
+      record through the same five checks the named target passes
+      (:func:`_confirmation_covers`) rather than inferred from the target having
+      passed them, because under an injected policy a confirmation can arrive with
+      an *inference* named as the target while a live assertion sits in ``retires``
+      — and the widening would then act on an authority nothing had checked.
+      ``EXTERNAL`` conflicts stay held out even when ``retires`` names one: a
+      ``retires`` is a ceiling, not an instruction, and adopting ``EXTERNAL``
+      supersession is still ADR-0045 §5/§7's deferred choice.
     - ``EXTERNAL`` conflicts are not auto-retired even though ADR-0045 §5b now permits
       an ``EXTERNAL`` supersession at the writer floor. Adopting ``EXTERNAL``
       supersession is a separate, still-deferred policy choice (ADR-0045 §5/§7); the
@@ -264,7 +439,16 @@ def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list
     others = [
         conflict
         for conflict in conflicts
-        if conflict.id != target.id and conflict.provenance.source in _SUPERSEDABLE
+        if conflict.id != target.id
+        and (
+            conflict.provenance.source in _SUPERSEDABLE
+            or (
+                conflict.provenance.source is MemorySource.USER_ASSERTED
+                and _confirmation_covers(
+                    conflict, proposal, MemoryDecisionKind.SUPERSEDE, resolved=resolved
+                )
+            )
+        )
     ]
     return [target, *others]
 
@@ -477,7 +661,7 @@ class MemoryIngestor:
         therefore blocks other ingests. That is the cost of the guarantee, not
         an oversight.
 
-        **Three refusals precede or replace a ruling**, in the order they fire:
+        **Four refusals precede or replace a ruling**, in the order they fire:
 
         1. **Unresolvable evidence** (ADR-0077 §5): a ``DERIVED`` proposal citing a
            record this store does not hold raises ``UnresolvedEvidenceError``
@@ -487,9 +671,19 @@ class MemoryIngestor:
            conflicts than :data:`_DEFAULT_CONFLICT_LIMIT` — whatever this ingestor
            was tuned to — raises ``MemoryStoreError`` with nothing written and no
            ruling sought (:meth:`_detect_conflicts`).
-        3. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
+        3. **A secret-tier write** (ADR-0078 §5b check 0): once the policy has ruled
+           and before any write is dispatched, a write-producing ruling on a
+           ``DataTier.SECRET`` proposal raises ``MemoryStoreError``
+           (:func:`_refuse_secret_write`). ``ASK_USER`` and ``REJECT`` return
+           normally, which is what preserves the ordinary secret-tier path.
+        4. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
            set holds a record whose window cannot be closed representably raises
            ``MemoryStoreError`` before the atomic batch (:func:`_close_window`).
+
+        And one **refusal at the fold** (ADR-0045 §5, narrowed by ADR-0078 §5b): a
+        fold onto a ``USER_ASSERTED`` target raises unless the proposal carries a
+        confirmation that genuinely covers that target
+        (:func:`_confirmation_covers`).
 
         Args:
             proposal: The memory update to rule on and persist.
@@ -501,8 +695,11 @@ class MemoryIngestor:
             UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
                 store does not hold; nothing is written and the policy is not asked.
             MemoryStoreError: If detection surfaces more conflicts than this
-                ingestor will resolve in one ingest, if a retirement's window cannot
-                be closed, or on any other store or applier failure.
+                ingestor will resolve in one ingest, if a write-producing ruling
+                landed on a ``DataTier.SECRET`` proposal, if a fold onto a
+                ``USER_ASSERTED`` target is not covered by a confirmation, if a
+                retirement's window cannot be closed, or on any other store or
+                applier failure.
         """
         # One observation of the caller's proposal, taken on this coroutine's
         # first executed line — before the lock, which is `ingest`'s first await
@@ -525,13 +722,23 @@ class MemoryIngestor:
     async def _ingest(self, observed: MemoryUpdateProposal) -> MemoryIngestResult:
         await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._detect_conflicts(observed.proposed)
+        resolved = tuple(record.id for record in conflicts)
         # Shallow is right here: this copies the ingestor's *own* snapshot, whose
-        # `proposed` no caller holds a reference to.
-        observed = observed.model_copy(
-            update={"conflicts": tuple(record.id for record in conflicts)}
-        )
-        decision = await self._policy.decide(observed, conflicts=conflicts)
-        record_id = await self._apply(decision, observed.proposed, conflicts)
+        # `proposed` no caller holds a reference to. `observed` is deliberately
+        # **kept** rather than rebound: its `conflicts` are the frozen ids the
+        # question was asked about, and ADR-0078 §5b check 4 recomputes the
+        # `question_key` from exactly those — comparing against the live set below
+        # would refuse every honest answer (ADR-0078 §7's "no asserted conflict
+        # ever confirmable").
+        ruled = observed.model_copy(update={"conflicts": resolved})
+        decision = await self._policy.decide(ruled, conflicts=conflicts)
+        # Check 0, between the ruling and the write dispatch (ADR-0078 §5b): it
+        # gates every write-producing ruling and no ruling that writes nothing, so
+        # it belongs neither inside `_refuse_unsafe_fold` (which `ACCEPT` never
+        # reaches) nor at the top of `ingest` (which would break the ordinary
+        # secret-tier path §1 preserves).
+        _refuse_secret_write(decision, observed)
+        record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
         # declined this and named the exact condition for revisiting — a consumer
         # that needs to *show* the user what a proposal contradicted — and a
@@ -544,9 +751,7 @@ class MemoryIngestor:
         # duplication ADR-0028 §4 deleted) or re-detecting at answer time, by which
         # point the set has moved and the user would have authorised something other
         # than what they were shown.
-        return MemoryIngestResult(
-            decision=decision, record_id=record_id, conflicts=observed.conflicts
-        )
+        return MemoryIngestResult(decision=decision, record_id=record_id, conflicts=resolved)
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record this store does not hold.
@@ -644,9 +849,12 @@ class MemoryIngestor:
     async def _apply(
         self,
         decision: MemoryDecision,
-        proposed: MemoryRecord,
+        proposal: MemoryUpdateProposal,
         conflicts: list[MemoryRecord],
+        *,
+        resolved: tuple[str, ...],
     ) -> str | None:
+        proposed = proposal.proposed
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
                 return await self._store.add(proposed)
@@ -661,14 +869,17 @@ class MemoryIngestor:
                     # fold was meant to prevent, while reporting success.
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
-                _refuse_unsafe_fold(target, proposed, decision.kind)
+                _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
                 # Past the refusal, the ruling names the relation, so the ingestor
                 # no longer reads provenance to recover it (ADR-0040 §3): SUPERSEDE
                 # retires the contradicted belief (window-close) and writes the
                 # correction as a new record, REINFORCE folds the two at the target's
                 # id.
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    return await self._apply_supersede(_retirement_set(target, conflicts), proposed)
+                    return await self._apply_supersede(
+                        _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
+                        proposed,
+                    )
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None

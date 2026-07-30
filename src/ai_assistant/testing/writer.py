@@ -38,6 +38,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     BeliefBand,
+    DataTier,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
@@ -78,6 +79,15 @@ def _uuid() -> str:
 # internals (golden rule 1) while honouring the same refusals the production
 # writer does (ADR-0040 §5b).
 _SUPERSEDABLE = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
+
+#: The rulings that dispatch a write, and therefore the ones check 0 gates
+#: (:func:`_refuse_secret_write`, ADR-0078 §5b). Derived as a complement rather
+#: than listed, so a sixth write-producing ruling joins the gate rather than
+#: slipping past a list nobody updated. Duplicated from ``MemoryIngestor``.
+_WRITE_PRODUCING_KINDS = frozenset(MemoryDecisionKind) - {
+    MemoryDecisionKind.ASK_USER,
+    MemoryDecisionKind.REJECT,
+}
 
 
 def _utcnow() -> datetime:
@@ -154,40 +164,46 @@ class FakeMemoryWriter:
         mutate what it reads there, so the call log gets its own; the working
         snapshot stays private to this call.
 
-        The three refusals ``MemoryIngestor`` carries are carried here too, in the
+        The four refusals ``MemoryIngestor`` carries are carried here too, in the
         same order and for the same reason the fold refusals already are — a fake
         that stored what production refuses lets a consumer's test pass on state the
         real writer would never produce. Unresolvable ``DERIVED`` evidence
         (ADR-0077 §5) fires first, before detection and before the policy; a
         conflict set above the ceiling (ADR-0079 §1) fires in detection, before any
-        ruling; and an unrepresentable window close (ADR-0080 §3) fires in the
-        applier, before the atomic batch.
+        ruling; a write-producing ruling on secret-tier data (ADR-0078 §5b check 0)
+        fires between the ruling and the write dispatch; and an unrepresentable
+        window close (ADR-0080 §3) fires in the applier, before the atomic batch.
 
         Raises:
             UnresolvedEvidenceError: If a ``DERIVED`` proposal cites a record the
                 store does not hold; nothing is written and the policy is not asked.
             MemoryStoreError: If conflict resolution surfaces more conflicts than
-                this writer resolves in one ingest, if a retirement's window cannot
-                be closed, or on any other store or applier failure.
+                this writer resolves in one ingest, if a write-producing ruling
+                landed on a ``DataTier.SECRET`` proposal, if a fold onto a
+                ``USER_ASSERTED`` target is not covered by a confirmation, if a
+                retirement's window cannot be closed, or on any other store or
+                applier failure.
         """
         observed = proposal.model_copy(deep=True)
         self.calls.append(observed.model_copy(deep=True))
         await self._require_resolvable_evidence(observed.proposed)
         conflicts = await self._conflicts_for(observed.proposed)
+        resolved = tuple(record.id for record in conflicts)
         # Shallow is right here: it copies this writer's own snapshot, whose
-        # ``proposed`` no caller holds a reference to.
-        observed = observed.model_copy(
-            update={"conflicts": tuple(record.id for record in conflicts)}
-        )
-        decision = await self._policy.decide(observed, conflicts=conflicts)
-        record_id = await self._apply(decision, observed.proposed, conflicts)
+        # ``proposed`` no caller holds a reference to. ``observed`` is deliberately
+        # kept rather than rebound: its ``conflicts`` are the frozen ids the question
+        # was asked about, which is the set ADR-0078 §5b check 4 recomputes the
+        # ``question_key`` from — comparing against the live set would refuse every
+        # honest answer.
+        ruled = observed.model_copy(update={"conflicts": resolved})
+        decision = await self._policy.decide(ruled, conflicts=conflicts)
+        _refuse_secret_write(decision, observed)
+        record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4), exactly as
         # they do from ``MemoryIngestor``: a fake that dropped them would let a
         # consumer's test pass while the real writer's caller enqueues a question
         # showing the user no conflicting assertion at all.
-        return MemoryIngestResult(
-            decision=decision, record_id=record_id, conflicts=observed.conflicts
-        )
+        return MemoryIngestResult(decision=decision, record_id=record_id, conflicts=resolved)
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record the store does not hold.
@@ -255,9 +271,12 @@ class FakeMemoryWriter:
     async def _apply(
         self,
         decision: MemoryDecision,
-        proposed: MemoryRecord,
+        proposal: MemoryUpdateProposal,
         conflicts: list[MemoryRecord],
+        *,
+        resolved: tuple[str, ...],
     ) -> str | None:
+        proposed = proposal.proposed
         match decision.kind:
             case MemoryDecisionKind.ACCEPT:
                 return await self._store.add(proposed)
@@ -270,9 +289,12 @@ class FakeMemoryWriter:
                 if target is None:
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
-                _refuse_unsafe_fold(target, proposed, decision.kind)
+                _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
-                    return await self._apply_supersede(_retirement_set(target, conflicts), proposed)
+                    return await self._apply_supersede(
+                        _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
+                        proposed,
+                    )
                 return await self._store.add(_merge(target, proposed))
             case _:  # REJECT, ASK_USER — nothing is written.
                 return None
@@ -376,17 +398,24 @@ class FakeMemoryWriter:
 
 
 def _refuse_unsafe_fold(
-    target: MemoryRecord, incoming: MemoryRecord, kind: MemoryDecisionKind
+    target: MemoryRecord,
+    proposal: MemoryUpdateProposal,
+    kind: MemoryDecisionKind,
+    *,
+    resolved: tuple[str, ...],
 ) -> None:
     """Refuse a fold that would destroy data, as ``MemoryIngestor`` does.
 
-    Contract, not tuning (ADR-0040 §5b, as narrowed by ADR-0045 §5). Two refusals,
-    differing in whether the ruling matters because ADR-0045 §4 made only
-    ``SUPERSEDE`` mint a new id:
+    Contract, not tuning (ADR-0040 §5b, as narrowed by ADR-0045 §5 and ADR-0078
+    §5b). Two refusals, differing in whether the ruling matters because ADR-0045 §4
+    made only ``SUPERSEDE`` mint a new id:
 
     - **Clause 1 — any fold onto a ``USER_ASSERTED`` target**, under either ruling.
       Kept record-keyed: the conflict signal is too weak to retire a record the
-      user gave us, which the window does not change (ADR-0045 §5).
+      user gave us, which the window does not change (ADR-0045 §5). **Narrowed by
+      exception**: a ``SUPERSEDE`` whose target the proposal's ``confirmation``
+      genuinely covers is permitted, because there the signal is the user's own
+      answer (:func:`_confirmation_covers`, ADR-0078 §5b).
     - **Clause 2 — a ``USER_ASSERTED`` proposal onto an ``EXTERNAL`` target,
       ``REINFORCE`` only.** A ``REINFORCE`` still inherits the external id and is
       overwritten by the next sync (ADR-0038 §2a); a ``SUPERSEDE`` now gets a fresh
@@ -398,12 +427,17 @@ def _refuse_unsafe_fold(
     have refused.
 
     Raises:
-        MemoryStoreError: If the fold is one of the two above.
+        MemoryStoreError: If the fold is one of the two above and no covering
+            confirmation permits it.
     """
-    if target.provenance.source is MemorySource.USER_ASSERTED:
+    incoming = proposal.proposed
+    if target.provenance.source is MemorySource.USER_ASSERTED and not _confirmation_covers(
+        target, proposal, kind, resolved=resolved
+    ):
         msg = (
             f"refusing to fold onto {target.id!r}: a {incoming.provenance.source} record may not "
-            f"be folded onto a user-asserted one (ADR-0038 §3, ADR-0045 §5)"
+            f"be folded onto a user-asserted one (ADR-0038 §3, ADR-0045 §5, narrowed by "
+            f"ADR-0078 §5b)"
         )
         raise MemoryStoreError(msg)
     if (
@@ -415,6 +449,80 @@ def _refuse_unsafe_fold(
             f"refusing to reinforce onto {target.id!r}: a user assertion may not be reinforced "
             f"onto a {target.provenance.source} record whose id it would inherit — only OBSERVED "
             f"and INFERRED beliefs (ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _confirmation_covers(
+    target: MemoryRecord,
+    proposal: MemoryUpdateProposal,
+    kind: MemoryDecisionKind,
+    *,
+    resolved: tuple[str, ...],
+) -> bool:
+    """Whether a confirmation authorises retiring ``target`` (ADR-0078 §5b).
+
+    Clause 1's one exception, with the same five checks ``MemoryIngestor`` performs
+    and for the same reason a fake owes every other refusal: the exception is
+    **verified, not trusted**, because a gate that opened on an unexamined field
+    would hand the writer boundary's guarantee back to the caller's good intentions.
+    (Check 0 is not among them: it gates the *write* rather than the fold, so it
+    sits between the ruling and the write dispatch —
+    :func:`_refuse_secret_write`.)
+
+    1. the ruling is ``SUPERSEDE`` — a ``REINFORCE`` onto an assertion would rewrite
+       the user's own words at the target's id, which no answer authorises;
+    2. the target id is in ``confirmation.retires``;
+    3. the target id is among the conflicts *this* ingest resolved;
+    4. ``confirmation.question_key`` equals the key recomputed from the proposal
+       **as handed to ``ingest``**, whose ``conflicts`` are the frozen ids the
+       question was asked about. This is what stops the value being a bearer token
+       a different question's apply could spend;
+    5. every id in ``confirmation.retires`` was among those frozen conflicts, so the
+       authority is bounded by what the user was *shown* as well as by what is live.
+
+    Duplicated from ``MemoryIngestor`` rather than imported (golden rule 1).
+
+    Returns:
+        ``True`` iff all five hold.
+    """
+    confirmation = proposal.confirmation
+    if confirmation is None or kind is not MemoryDecisionKind.SUPERSEDE:
+        return False
+    frozen = set(proposal.conflicts)
+    return (
+        target.id in confirmation.retires
+        and target.id in resolved
+        and confirmation.question_key == proposal.question_key
+        and frozen.issuperset(confirmation.retires)
+    )
+
+
+def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+    """Refuse any *write* of a ``DataTier.SECRET`` proposal (ADR-0078 §5b check 0).
+
+    A refusal at the writer boundary, independent of the model validators, because a
+    validator is not a boundary: ``model_construct`` and ``model_copy(update=...)``
+    both skip validation, and this repository treats a model tampered past
+    ``frozen=True`` as inside its threat model (ADR-0018 §3, ADR-0021 §4). Without
+    it every check above can pass on a validator-bypassing secret proposal under an
+    injected ``SUPERSEDE`` policy and Tier 0 content lands in the ``MemoryStore`` —
+    ADR-0004 §3's "never in the memory database".
+
+    **It gates the write, not the ruling.** It runs after the policy has ruled and
+    before any write is dispatched, so it reaches every write-producing ruling and
+    no ruling that writes nothing: ``ASK_USER`` and ``REJECT`` return normally,
+    which is what preserves the ordinary secret-tier path ADR-0078 §1 keeps.
+    Duplicated from ``MemoryIngestor`` (golden rule 1).
+
+    Raises:
+        MemoryStoreError: If the ruling would write and the proposal is Tier 0.
+    """
+    if decision.kind in _WRITE_PRODUCING_KINDS and proposal.sensitivity is DataTier.SECRET:
+        msg = (
+            f"refusing to write {proposal.proposed.id!r}: a {decision.kind} ruling on secret-tier "
+            f"data would put Tier 0 content in the memory database, which lives in the OS keyring "
+            f"and never in a database or a committed file (ADR-0004 §3, ADR-0078 §5b)"
         )
         raise MemoryStoreError(msg)
 
@@ -450,15 +558,27 @@ def _checked_id(id_factory: Callable[[], str], *, owner: str) -> str:
     return minted
 
 
-def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list[MemoryRecord]:
+def _retirement_set(
+    target: MemoryRecord,
+    conflicts: list[MemoryRecord],
+    *,
+    proposal: MemoryUpdateProposal,
+    resolved: tuple[str, ...],
+) -> list[MemoryRecord]:
     """The full set of beliefs a ``SUPERSEDE`` retires (ADR-0050 §1, ADR-0079 §3).
 
     The named ``target`` — whatever its source, so an ``EXTERNAL`` record a policy
     named explicitly *is* retired (ADR-0045 §5b) — plus every other conflict whose
-    source is in :data:`_SUPERSEDABLE`. ``USER_ASSERTED`` and ``EXTERNAL``
-    *siblings* are never swept in: topical similarity may not retire a record the
-    user gave us (ADR-0045 §5), and adopting ``EXTERNAL`` supersession is a separate
-    deferred policy choice (ADR-0045 §5/§7).
+    source is in :data:`_SUPERSEDABLE`. ``EXTERNAL`` *siblings* are never swept in,
+    even when ``retires`` names one: adopting ``EXTERNAL`` supersession is a separate
+    deferred policy choice (ADR-0045 §5/§7) and ``retires`` is a ceiling rather than
+    an instruction. ``USER_ASSERTED`` siblings are never swept in **on similarity**
+    (ADR-0045 §5), and are swept in **only** where the proposal's ``confirmation``
+    genuinely covers them (ADR-0078 §5b's narrowing of the hold-out) — so a
+    confirmation naming two prior assertions retires both in the one batch. Checked
+    per record rather than inferred from the named target, because under an injected
+    policy a confirmation can arrive naming an *inference* while a live assertion
+    sits in ``retires``.
 
     ``target`` leads; order among the rest follows ``conflicts``, so the batch is
     deterministic. Duplicated from ``MemoryIngestor`` rather than imported (golden
@@ -470,7 +590,16 @@ def _retirement_set(target: MemoryRecord, conflicts: list[MemoryRecord]) -> list
     others = [
         conflict
         for conflict in conflicts
-        if conflict.id != target.id and conflict.provenance.source in _SUPERSEDABLE
+        if conflict.id != target.id
+        and (
+            conflict.provenance.source in _SUPERSEDABLE
+            or (
+                conflict.provenance.source is MemorySource.USER_ASSERTED
+                and _confirmation_covers(
+                    conflict, proposal, MemoryDecisionKind.SUPERSEDE, resolved=resolved
+                )
+            )
+        )
     ]
     return [target, *others]
 
