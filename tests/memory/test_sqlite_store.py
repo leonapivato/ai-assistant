@@ -1055,6 +1055,35 @@ def test_a_journal_opened_during_setup_is_owner_only(
     assert observed == [0o600]
 
 
+def test_a_sidecar_that_was_already_there_is_restricted_at_open(
+    make_store: Callable[..., SqliteMemoryStore], tmp_path: Path
+) -> None:
+    """ADR-0004 §4 reaches a sidecar this process did not create (#490).
+
+    SQLite copies the database file's mode onto a sidecar **it creates**, which is
+    what makes restricting the file before the first statement enough for those. It
+    does nothing for one already on disk: a ``-wal``/``-shm`` left by a process that
+    put this file into WAL mode keeps its own mode across a reopen and then takes
+    Tier 1 pages.
+
+    Planted at ``0644`` and asserted after a *reopen*, because that is the only shape
+    that can fail: a sidecar SQLite makes for an already-``0600`` file is ``0600``
+    however this store is written. Nothing in this codebase sets ``journal_mode``, so
+    SQLite neither reads nor writes these two — the mode asserted is this store's own
+    chmod and nothing else.
+    """
+    path = tmp_path / "memory.db"
+    make_store().close()
+    sidecars = [Path(f"{path}{suffix}") for suffix in ("-wal", "-shm")]
+    for sidecar in sidecars:
+        sidecar.touch()
+        sidecar.chmod(0o644)
+
+    make_store()
+
+    assert [each.stat().st_mode & 0o777 for each in sidecars] == [0o600, 0o600]
+
+
 class TestSqliteMemoryStoreContract(MemoryStoreContract):
     """Runs SqliteMemoryStore through the shared MemoryStore conformance suite.
 

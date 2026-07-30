@@ -77,6 +77,33 @@ def _journal_mode(database: Path) -> int | None:
     return _mode_of(journal) if journal.exists() else None
 
 
+def _watch_the_journal(monkeypatch: pytest.MonkeyPatch, database: Path) -> list[int | None]:
+    """Record the journal's mode at the start of every statement the store runs.
+
+    ``SqliteConversationStore`` has no method running inside ``_setup``'s transaction
+    to hook, the way the memory, plan and audit stores are hooked on
+    ``_verify_or_init_meta`` / ``_check_schema_version``. So the observation goes on
+    the connection itself at ``connect`` — the earliest point that is inside
+    ``_setup`` and still ahead of the first statement, which is exactly the window
+    the ordering under test lives in. The trace callback fires as each statement
+    *starts*, so it sees both a journal opened by the previous statement of an open
+    transaction and one that was already on disk before any statement ran.
+
+    Returns:
+        The modes observed, in statement order; ``None`` where no journal existed.
+    """
+    observed: list[int | None] = []
+    real_connect = sqlite3.connect
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn: sqlite3.Connection = real_connect(*args, **kwargs)
+        conn.set_trace_callback(lambda _statement: observed.append(_journal_mode(database)))
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return observed
+
+
 #: The conversation id the orphan rows below name, which no record ever carries.
 _ABSENT = "no-such-conversation"
 
@@ -267,35 +294,99 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-async def test_a_rollback_journal_is_owner_only_too(tmp_path: Path) -> None:
-    """ADR-0004 §4 reaches the sidecars, not only the database file.
+def test_a_journal_opened_during_setup_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0004 §4 reaches the sidecars, and reaches them from the first write (#491).
 
-    SQLite copies the database file's mode onto a rollback journal it creates
-    for it, so the restriction has to land before the first write rather than
-    after the schema is built. A journal written in between would carry the
-    process umask, and an interrupted write leaves it on disk holding Tier 1
-    pages — a base file at ``0600`` beside a world-readable copy of its pages.
+    SQLite copies the database file's mode onto every rollback journal it creates
+    for it, so restricting the file after the schema is built leaves every journal
+    opened in between carrying the process umask — and an interrupted write leaves
+    it on disk holding Tier 1 pages beside a ``0600`` base file.
 
-    The journal is provoked through a raw connection because the store never
-    leaves one behind: it commits every transaction it opens.
+    Observed **inside** ``_setup`` rather than after it, because that is the only
+    place the difference is visible. The case this replaces provoked a journal
+    through a raw connection *after* the constructor returned, by which point the
+    file is ``0600`` under either ordering — so it passed on the unfixed code and
+    was no evidence for the fix it was named for (#491).
+
+    The file is walked back to the pre-#452 shape so that :meth:`_migrate_turns`
+    runs: it is the one part of setup with an explicit ``BEGIN``, so its journal
+    stays open across statement boundaries where the trace callback can read it —
+    and it is also the write most exposed here, since it copies every turn. The
+    file is left ``0644`` beforehand so the case does not depend on the runner's
+    umask, and because reopening an existing store is the common path anyway.
     """
     path = tmp_path / "conversations.db"
-    store = SqliteConversationStore(path=path, now=_fixed_now)
-    try:
-        await store.start()
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    _strip_the_foreign_key(path)
+    path.chmod(0o644)
 
-        raw = sqlite3.connect(path)
-        try:
-            raw.execute("BEGIN IMMEDIATE")
-            raw.execute("UPDATE conversations SET last_active_at = last_active_at")
-            mode = _journal_mode(path)
-            assert mode is not None, "the write should have opened a rollback journal"
-            assert mode == 0o600
-            raw.execute("ROLLBACK")
-        finally:
-            raw.close()
+    observed = _watch_the_journal(monkeypatch, path)
+    reopened = SqliteConversationStore(path=path, now=_fixed_now)
+    try:
+        journals = [mode for mode in observed if mode is not None]
+        assert journals, "the rebuild should have run with a journal open"
+        assert set(journals) == {0o600}
     finally:
-        store.close()
+        reopened.close()
+
+
+@pytest.mark.integration
+def test_a_stale_journal_is_restricted_before_any_statement_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0004 §4 reaches a ``-journal`` this process did not create either (#490).
+
+    A crash leaves one behind, and it keeps its own mode across the reopen: SQLite
+    copies the database file's mode onto a sidecar it *creates*, never onto one that
+    is already there. Asserted from inside ``_setup`` because SQLite discards a
+    non-hot journal during the first statement, so there is nothing left to look at
+    once the constructor returns — the ``-wal``/``-shm`` cases beside this one, which
+    SQLite never touches in the default journal mode, carry the after-the-fact form.
+
+    One store covers the ``-journal`` name for all five: they share the restriction's
+    shape line for line, and each has its own ``-wal``/``-shm`` case.
+    """
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    journal = Path(f"{path}-journal")
+    journal.touch()
+    journal.chmod(0o644)
+
+    observed = _watch_the_journal(monkeypatch, path)
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+
+    assert observed, "setup should have run at least one statement"
+    assert observed[0] == 0o600
+
+
+@pytest.mark.integration
+def test_a_sidecar_that_was_already_there_is_restricted_at_open(tmp_path: Path) -> None:
+    """ADR-0004 §4 reaches a sidecar this process did not create (#490).
+
+    SQLite copies the database file's mode onto a sidecar **it creates**, which is
+    what makes restricting the file before the first statement enough for those. It
+    does nothing for one already on disk: a ``-wal``/``-shm`` left by a process that
+    put this file into WAL mode keeps its own mode across a reopen and then takes
+    Tier 1 pages.
+
+    Planted at ``0644`` and asserted after a *reopen*, because that is the only shape
+    that can fail: a sidecar SQLite makes for an already-``0600`` file is ``0600``
+    however this store is written. Nothing in this codebase sets ``journal_mode``, so
+    SQLite neither reads nor writes these two — the mode asserted is this store's own
+    chmod and nothing else.
+    """
+    path = tmp_path / "conversations.db"
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+    sidecars = [Path(f"{path}{suffix}") for suffix in ("-wal", "-shm")]
+    for sidecar in sidecars:
+        sidecar.touch()
+        sidecar.chmod(0o644)
+
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+
+    assert [_mode_of(each) for each in sidecars] == [0o600, 0o600]
 
 
 @pytest.mark.integration
