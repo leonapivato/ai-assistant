@@ -237,16 +237,28 @@ either overrides the test by eye or resets by hand:
 
 ```bash
 git -C "$clone" switch main --quiet && git -C "$clone" pull --ff-only
-git -C "$clone" cherry main <area>/<slug>        # any '+' line = not upstream yet
-git -C "$clone" branch -D <area>/<slug>          # only once that prints nothing
+if git -C "$clone" cherry main <area>/<slug> | grep -q '^+'; then
+  echo "unmerged commits — leave the branch alone and find out why"
+else
+  git -C "$clone" branch -D <area>/<slug>
+fi
 ```
 
 **Check with `cherry`, not `branch -d`.** Rebase-merge rewrites the commits, so
 the local tip is never an ancestor of `main` and the ancestry-based `-d` refuses
 on a lane that *did* land — which trains you to reach for `-D` reflexively, and
 `-D` on a lane that did *not* land discards it silently. `git cherry` compares
-patch ids instead, so it answers the question that ancestry cannot: did this
-work reach `main` in any form? Empty output means yes.
+patch ids instead, so it answers the question ancestry cannot: did this work
+reach `main` in any form?
+
+**Read its output by prefix, not by emptiness.** `cherry` prints one line per
+commit on the branch: `-` where an equivalent patch is already upstream, `+`
+where none is. A rebase-merged lane therefore prints a `-` line per commit rather
+than nothing at all, so "it printed nothing" is the wrong test — **a single `+`
+line means unmerged work, and nothing may delete that branch.** That is why the
+guard above is a conditional and not three sequential commands: `-D` is
+unrecoverable, and this is the one snippet here where getting it wrong destroys a
+lane's work rather than merely failing.
 
 **Renaming a clone breaks its `.venv`** (absolute paths): `rm -rf .venv && just
 setup` after. Never rename a clone an agent is running in.
