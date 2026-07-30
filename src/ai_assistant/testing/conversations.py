@@ -18,6 +18,14 @@ suite by accident — nothing in it ever awaits, so nothing can interleave — a
 the suite's serialisation clauses would be vacuous against exactly the
 implementation they most need to hold for. With it, dropping the lock makes those
 cases fail here as they would against a real store.
+
+**Its mutations pass through a modelled resource**, a
+:class:`~ai_assistant.testing.cancellation.SuspendableResource` entered inside the
+exclusion. A dict needs no serialising, so without one this fake could only opt out
+of ADR-0060's cancellation clause — and the suite's case would then run solely
+against the ``sqlite3`` store, which is the implementation that already got it
+right. Uncontended, entering it does not yield, so it adds no interleaving point
+that was not there before; under contention it only reinforces the exclusion.
 """
 
 from __future__ import annotations
@@ -40,12 +48,14 @@ from ai_assistant.core.types import (
     ConversationTurn,
     describe_untrusted,
 )
+from ai_assistant.testing.cancellation import SuspendableResource
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.types import ParkedBinding
+    from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: One past the largest value a paging argument accepts — the signed 64-bit
 #: ceiling a SQLite bind parameter tops out at (ADR-0073 §2). Duplicated from the
@@ -214,6 +224,25 @@ class FakeConversationStore:
         #: :meth:`_exclusive` discards an entry once nobody holds it (#453).
         self._locks: dict[str, _Exclusion] = {}
         self._start_lock = asyncio.Lock()
+        self._resource = SuspendableResource()
+
+    def suspend_next_write(self) -> LoopSuspension:
+        """Hold the next mutation open *inside* the resource it acquired (ADR-0060 §3).
+
+        The hook ``ConversationStoreContract``'s cancellation case takes. Test-only,
+        and deliberately not on the ``ConversationStore`` seam: the Protocol grows no
+        affordance for this, so the suite asks the *subject* it was handed rather
+        than the contract every consumer depends on.
+
+        Returns:
+            The handle to wait on and release.
+        """
+        return self._resource.suspend_next()
+
+    @property
+    def resource_log(self) -> ResourceLog:
+        """When each call was inside the modelled resource (ADR-0060's case reads it)."""
+        return self._resource.log
 
     # --- internals -----------------------------------------------------------
 
@@ -266,7 +295,7 @@ class FakeConversationStore:
             self._locks[conversation_id] = exclusion
         exclusion.holders += 1
         try:
-            async with exclusion.lock:
+            async with exclusion.lock, self._resource.held():
                 await asyncio.sleep(0)
                 yield
         finally:
@@ -340,7 +369,7 @@ class FakeConversationStore:
             ConversationStoreError: If the retry budget is exhausted, or the id
                 factory produced something that is not a usable identifier.
         """
-        async with self._start_lock:
+        async with self._start_lock, self._resource.held():
             await asyncio.sleep(0)
             for _ in range(_START_RETRY_BUDGET):
                 minted = self._new_id()

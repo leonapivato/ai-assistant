@@ -9,8 +9,10 @@ own error rather than as a raw ``sqlite3`` failure.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import stat
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,16 +27,30 @@ from conversation_store_contract import (
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import ParkedBinding
 from ai_assistant.memory.conversation_store import SqliteConversationStore
+from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from ai_assistant.core.protocols import ConversationStore
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 #: The store's own defaults, restated here rather than imported (see the fake's
 #: binding for why).
 _TAIL_DEFAULT = 20
 _PURGE_DEFAULT = 100
+
+#: The private method each locked mutation does its SQL in, which ADR-0060's hook
+#: wraps to park a worker thread inside the connection's turn. Spelled out rather
+#: than derived, because ``start``'s is ``_insert_sync`` — the method is named for
+#: what it writes, not for the contract method that calls it.
+_SYNC_METHODS = {
+    "start": "_insert_sync",
+    "mark_active": "_mark_active_sync",
+    "append": "_append_sync",
+    "stamp_deleted": "_stamp_deleted_sync",
+    "drop_if_eligible": "_drop_if_eligible_sync",
+}
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
@@ -183,6 +199,55 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
     @pytest.fixture
     def purge_default(self) -> int:
         return _PURGE_DEFAULT
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[SuspendedMidWrite[ConversationStore]]:
+        """Park a named mutation's worker thread inside the connection's turn.
+
+        ``arm(operation)`` wraps that operation's ``_..._sync`` — inside
+        ``async with self._lock`` and inside the worker thread the event loop
+        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
+        first worker to reach it blocks and every later one runs free. Blocking
+        there is what makes the case deterministic: left to run, the transaction
+        finishes in microseconds and whether the second caller arrives while the
+        worker still holds the connection would be a race, so the invariant would
+        be exercised only sometimes.
+
+        Its own store on its own connection, not the ``store`` fixture's: the
+        suspended worker is parked for the length of the case, and sharing would
+        make an unrelated failure hang instead of fail.
+        """
+        store = SqliteConversationStore(path=":memory:", now=_fixed_now)
+        log = ResourceLog()
+        suspension = ThreadSuspension()
+
+        def arm(operation: str) -> SuspendedCall:
+            attribute = _SYNC_METHODS[operation]
+            original = getattr(store, attribute)
+            armed = threading.Event()
+
+            def blocking(*args: object) -> object:
+                with log.inside():  # the span the connection is genuinely in use for
+                    if not armed.is_set():  # the first worker only; later ones run free
+                        armed.set()
+                        suspension.hold()
+                    return original(*args)
+
+            setattr(store, attribute, blocking)
+            return suspension
+
+        try:
+            yield SuspendedMidWrite(store=store, log=log, arm=arm)
+        finally:
+            suspension.release()
+            # An implementation that released the connection early leaves a worker
+            # still using it; closing under that is a native crash rather than a
+            # reported failure, so give the worker a turn to unwind and let the
+            # assertion in the suite be the thing that speaks.
+            await asyncio.sleep(0.05)
+            store.close()
 
 
 @pytest.mark.integration
