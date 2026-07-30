@@ -195,6 +195,33 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_a_sidecar_that_was_already_there_is_restricted_at_open(tmp_path: Path) -> None:
+    """ADR-0004 §4 reaches a sidecar this process did not create (#490).
+
+    SQLite copies the database file's mode onto a sidecar **it creates**, which is
+    what makes restricting the file before the first statement enough for those. It
+    does nothing for one already on disk: a ``-wal``/``-shm`` left by a process that
+    put this file into WAL mode keeps its own mode across a reopen and then takes
+    Tier 1 pages.
+
+    Planted at ``0644`` and asserted after a *reopen*, because that is the only shape
+    that can fail: a sidecar SQLite makes for an already-``0600`` file is ``0600``
+    however this store is written. Nothing in this codebase sets ``journal_mode``, so
+    SQLite neither reads nor writes these two — the mode asserted is this store's own
+    chmod and nothing else.
+    """
+    path = tmp_path / "deferrals.db"
+    SqliteDeferralStore(path=path, now=_fixed_now).close()
+    sidecars = [path.with_name(f"{path.name}{suffix}") for suffix in ("-wal", "-shm")]
+    for sidecar in sidecars:
+        sidecar.touch()
+        sidecar.chmod(0o644)
+
+    SqliteDeferralStore(path=path, now=_fixed_now).close()
+
+    assert [stat.S_IMODE(each.stat().st_mode) for each in sidecars] == [0o600, 0o600]
+
+
 async def test_a_question_survives_a_reopen(tmp_path: Path) -> None:
     """The whole point of a durable queue: a question outlives the process.
 

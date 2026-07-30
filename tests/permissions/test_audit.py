@@ -38,6 +38,12 @@ if TYPE_CHECKING:
     from ai_assistant.testing.cancellation import SuspendedCall
 
 
+def _journal_mode(database: Path) -> int | None:
+    """The permission bits of the rollback journal beside ``database``, or ``None``."""
+    journal = database.with_name(f"{database.name}-journal")
+    return journal.stat().st_mode & 0o777 if journal.exists() else None
+
+
 @pytest.fixture
 def ephemeral() -> Iterator[SqliteAuditTrail]:
     """An in-memory trail, closed after the test."""
@@ -935,30 +941,74 @@ async def test_the_database_file_is_owner_only(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-def test_the_rollback_journal_is_owner_only_too(tmp_path: Path) -> None:
-    """A sidecar holds the same Tier 1 pages the database does.
+def test_a_journal_opened_during_setup_is_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0004 §1, §4 reach the sidecars, and reach them from the first write (#489).
 
-    A rollback journal created at the ambient umask would expose recorded
-    decisions to any local account that can traverse the directory, for as long
-    as a write transaction is open. It does not happen — SQLite gives a journal
-    the mode of the database file it belongs to, and the chmod above runs before
-    any write — but that is a property of another project's file layer, so it is
-    asserted rather than assumed.
+    SQLite copies the *database file's* mode onto every rollback journal it creates
+    for it, so restricting the file after the schema is built and migrated leaves
+    every journal opened in between carrying the process umask — and an interrupted
+    write leaves that journal on disk holding Tier 1 pages beside a ``0600`` base
+    file. Setup's ``BEGIN IMMEDIATE`` is exactly such a write, and :meth:`_migrate`
+    inside it can rewrite the whole ``decisions`` table.
+
+    Observed **inside** ``_setup`` rather than after it, because that is the only
+    place the difference is visible: by the time the constructor returns the
+    transaction has committed, and a journal provoked afterwards inherits ``0600``
+    under either ordering — which is why the case this replaces passed on the
+    unfixed code. The hook is ``_check_schema_version``, which runs inside that
+    transaction, after the ``meta`` schema has already forced a page write.
+
+    The file is pre-created ``0644`` so the case does not depend on the runner's
+    umask — and because reopening an existing trail is the common path anyway.
     """
     path = tmp_path / "audit.db"
-    trail = SqliteAuditTrail(path=path)
-    try:
-        trail._conn.execute("BEGIN IMMEDIATE")
-        trail._conn.execute(
-            "INSERT INTO decisions(id, decided_at_us, resolves, data) VALUES (?, ?, ?, ?)",
-            ("d-1", 0, None, decision("d-1").model_dump_json()),
-        )
-        sidecars = [each for each in tmp_path.iterdir() if each != path]
-        assert sidecars, "expected a rollback journal while a write is open"
-        assert all(each.stat().st_mode & 0o777 == 0o600 for each in sidecars)
-        trail._conn.rollback()
-    finally:
-        trail.close()
+    path.touch()
+    path.chmod(0o644)
+    observed: list[int | None] = []
+    original = SqliteAuditTrail._check_schema_version
+
+    def observing(trail: SqliteAuditTrail, conn: sqlite3.Connection) -> bool:
+        labelled = original(trail, conn)
+        observed.append(_journal_mode(path))
+        return labelled
+
+    monkeypatch.setattr(SqliteAuditTrail, "_check_schema_version", observing)
+
+    SqliteAuditTrail(path=path).close()
+
+    assert observed[0] is not None, "setup should have opened a journal"
+    assert observed == [0o600]
+
+
+@pytest.mark.integration
+def test_a_sidecar_that_was_already_there_is_restricted_at_open(tmp_path: Path) -> None:
+    """ADR-0004 §4 reaches a sidecar this process did not create either (#490).
+
+    SQLite copies the database file's mode onto a sidecar **it creates**, which is
+    what makes restricting the file before the first statement enough for those. It
+    does nothing for one that is already on disk: a ``-wal``/``-shm`` left by a
+    process that put this file into WAL mode, or a ``-journal`` left by a crash,
+    keeps its own mode across a reopen and then takes Tier 1 pages.
+
+    Planted at ``0644`` and asserted after a *reopen*, because that is the only
+    shape that can fail: a sidecar SQLite makes for an already-``0600`` file is
+    ``0600`` however this store is written. Nothing in this codebase sets
+    ``journal_mode``, so in the default rollback-journal mode SQLite neither reads
+    nor writes these two — the mode asserted is this store's own chmod and nothing
+    else.
+    """
+    path = tmp_path / "audit.db"
+    SqliteAuditTrail(path=path).close()
+    sidecars = [path.with_name(f"{path.name}{suffix}") for suffix in ("-wal", "-shm")]
+    for sidecar in sidecars:
+        sidecar.touch()
+        sidecar.chmod(0o644)
+
+    SqliteAuditTrail(path=path).close()
+
+    assert [each.stat().st_mode & 0o777 for each in sidecars] == [0o600, 0o600]
 
 
 @pytest.mark.integration
