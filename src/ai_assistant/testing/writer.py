@@ -201,7 +201,7 @@ class FakeMemoryWriter:
         ruled = observed.model_copy(update={"conflicts": resolved})
         decision = await self._policy.decide(ruled, conflicts=conflicts)
         _refuse_secret_write(decision, observed)
-        _refuse_self_consuming_write(decision, observed)
+        _refuse_self_consuming_write(decision, observed, resolved=resolved)
         record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4), exactly as
         # they do from ``MemoryIngestor``: a fake that dropped them would let a
@@ -546,24 +546,32 @@ def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposa
         raise MemoryStoreError(msg)
 
 
-def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | None:
+def _installed_at(
+    decision: MemoryDecision, proposed: MemoryRecord, *, resolved: tuple[str, ...]
+) -> str | None:
     """The id this ruling would **install** the proposal at, as ``MemoryIngestor`` has it.
 
     A write *installs* when it stores the proposal's content at an id; it *retires*
     when it stores an existing record back with only its window narrowed (ADR-0080
     §1), which lands nothing of the proposal anywhere. ``None`` means this ruling
     installs nothing at an id known at the seam: ``REJECT`` and ``ASK_USER`` write
-    nothing, and a ``SUPERSEDE``'s destination does not exist until
+    nothing; a ``SUPERSEDE``'s destination does not exist until
     :meth:`FakeMemoryWriter._apply_supersede` mints it, so its candidate is tested
-    there and a hit re-mints (ADR-0081 §2/§4). Duplicated from ``MemoryIngestor``
-    rather than imported (golden rule 1).
+    there and a hit re-mints (ADR-0081 §2/§4); and a ``REINFORCE`` naming a target
+    outside ``resolved`` has no destination at all, since ADR-0081 §6 draws the
+    fold's write id **from the conflicts** — that ruling installs nothing and keeps
+    the standing not-among-the-conflicts refusal. ``resolved`` costs no store read:
+    it is the tuple :meth:`FakeMemoryWriter.ingest` already computed before the
+    policy was asked. Duplicated from ``MemoryIngestor`` rather than imported
+    (golden rule 1).
     """
     match decision.kind:
         case MemoryDecisionKind.ACCEPT | MemoryDecisionKind.STORE_TEMPORARY:
             return proposed.id
         case MemoryDecisionKind.REINFORCE:
-            # The fold lands at the *target's* id, never at `proposed.id`.
-            return decision.target_id
+            # The fold lands at the *target's* id, never at `proposed.id` — and only
+            # a target among the resolved conflicts is a destination at all.
+            return decision.target_id if decision.target_id in resolved else None
         case MemoryDecisionKind.SUPERSEDE:
             return None
         case MemoryDecisionKind.REJECT | MemoryDecisionKind.ASK_USER:
@@ -573,7 +581,9 @@ def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | Non
     assert_never(decision.kind)
 
 
-def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+def _refuse_self_consuming_write(
+    decision: MemoryDecision, proposal: MemoryUpdateProposal, *, resolved: tuple[str, ...]
+) -> None:
     """Refuse a write landing at an id the proposal cites (ADR-0081 §1).
 
     The fourth obligation on ``MemoryWriter.ingest``, and one a fake owes for
@@ -584,20 +594,26 @@ def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdat
     :func:`_refuse_unsafe_fold`, which ``ACCEPT`` and ``STORE_TEMPORARY`` never
     reach (ADR-0081 §2).
 
-    It reads nothing from the store: its inputs are the observed proposal and the
-    ruling, so it is never a race and always a producer fault, which is why it
+    It reads nothing from the store: its inputs are the observed proposal, the
+    ruling, and the conflict ids already resolved before the policy was asked, so
+    it is never a race and always a producer fault, which is why it
     raises plain ``MemoryStoreError`` and specifically **not**
     ``UnresolvedEvidenceError`` — the evidence resolves; the write would consume it
     (§3). Scoped to no band (§1b), and quantified over **this proposal's** evidence
     rather than the tuple :func:`_merge` unions (§1a). Duplicated from
     ``MemoryIngestor`` (golden rule 1).
 
+    Args:
+        decision: The ruling the policy made.
+        proposal: The proposal as this call observed it.
+        resolved: The conflict ids this ingest resolved.
+
     Raises:
         MemoryStoreError: If the ruling would install the proposal at an id the
             proposal cites; nothing is written and no window is closed.
     """
     proposed = proposal.proposed
-    destination = _installed_at(decision, proposed)
+    destination = _installed_at(decision, proposed, resolved=resolved)
     if destination is not None and destination in proposed.provenance.evidence:
         msg = (
             f"refusing to write {proposed.id!r}: a {decision.kind} ruling would install it at "
