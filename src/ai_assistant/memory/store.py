@@ -227,13 +227,21 @@ class InMemoryMemoryStore:
         Returns:
             Matching records, highest score first, each carrying its relevance
             ``score``, truncated to ``limit``.
+
+        Note:
+            ``kinds`` is materialised on the coroutine's **first executed line**, as
+            in ``list_beliefs`` below and for the same reason: this method never
+            suspends, so ADR-0065's clause is vacuous here, but the snapshot keeps
+            the three implementations one shape and keeps the discharge from
+            resting on the absence of a suspension point a later revision could
+            add (#436).
         """
+        wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
             return []
 
         now = self._now_utc()  # one reading for the whole search, not one per record
-        wanted = {str(kind) for kind in kinds} if kinds is not None else None
         scored = [
             record.model_copy(update={"score": score}, deep=True)
             for record in self._records.values()

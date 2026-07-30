@@ -99,10 +99,18 @@ class FakeMemoryStore:
     def suspend_next_write(self) -> LoopSuspension:
         """Hold the next :meth:`add` or :meth:`write_atomic` open inside the store.
 
-        The hook ``MemoryStoreContract``'s cancellation case takes (ADR-0060 §3).
-        Test-only, and not part of the ``MemoryStore`` contract: the Protocol
+        The hook ``MemoryStoreContract``'s cancellation case takes (ADR-0060 §3),
+        and its write-side input-observation cases with it (ADR-0065 §3), since the
+        fake enters the modelled resource at exactly the boundary both clauses turn
+        on. Test-only, and not part of the ``MemoryStore`` contract: the Protocol
         deliberately grows no affordance for this, so the suite asks the *subject*
         it was handed rather than the seam every consumer depends on.
+
+        There is no read-side counterpart, and that is a declaration rather than an
+        omission: ``search`` and ``list_beliefs`` reach their filters with no
+        ``await`` in between, so the suite's read cases reduce to a post-call
+        assertion (``reads_without_suspending``). Inventing an ``await`` inside a
+        read to gate would model a suspension this fake does not have (#436).
 
         Returns:
             The handle to wait on and release.
@@ -232,12 +240,17 @@ class FakeMemoryStore:
         record's content. Non-matching records, expired records, records not live
         at now (a closed or not-yet-open validity window, both ends — ADR-0045
         §6), an empty query, and a non-positive ``limit`` all yield nothing.
+
+        ``kinds`` is materialised on the coroutine's **first executed line**, as in
+        ``list_beliefs`` below and for the same reason: this method never suspends,
+        so ADR-0065's clause is vacuous here, but the snapshot keeps the fake the
+        same shape as ``SqliteMemoryStore``, where the discharge is real (#436).
         """
+        wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
             return []
         now = self._now_utc()  # one reading for the whole search, not one per record
-        wanted = {str(kind) for kind in kinds} if kinds is not None else None
         scored: list[MemoryRecord] = []
         for record in self._records.values():
             if not self._is_readable(record, now) or (

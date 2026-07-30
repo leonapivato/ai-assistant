@@ -638,13 +638,22 @@ class SqliteMemoryStore:
         Raises:
             MemoryStoreError: If the embedder fails or returns a wrong-sized
                 query vector.
+
+        Note:
+            ``kinds`` is materialised on the coroutine's **first executed line**
+            and only the copy is read thereafter — ADR-0065 §3's second discharge,
+            as ``list_beliefs`` takes. It used to be materialised inside
+            :meth:`_search_sync`, past the embedder's ``await`` and the lock's, so
+            a caller mutating the list it passed while the embedding was in flight
+            was answered from the later version (#436).
         """
+        wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         if limit <= 0 or not query.strip():
             return []
         vector = await self._embed_one(query)
         async with self._lock:
             rows = await _run_to_completion(
-                self._search_sync, vector, limit, kinds, self._now_micros()
+                self._search_sync, vector, limit, wanted, self._now_micros()
             )
         return [self._decode(data).model_copy(update={"score": score}) for data, score in rows]
 
@@ -652,10 +661,9 @@ class SqliteMemoryStore:
         self,
         vector: Embedding,
         limit: int,
-        kinds: Sequence[MemoryKind] | None,
+        wanted: frozenset[str] | None,
         now: int,
     ) -> list[tuple[str, float]]:
-        wanted = {str(kind) for kind in kinds} if kinds is not None else None
         # Over-fetch to leave room for kind-, expiry-, and window-filtered rows,
         # clamped to sqlite-vec's KNN ``k`` ceiling so an over-large ``limit``
         # serves a (possibly short) result instead of raising (see _VEC_KNN_MAX_K).
@@ -727,8 +735,10 @@ class SqliteMemoryStore:
         Both ``Sequence`` filters are materialised on the coroutine's **first
         executed line**, before the lock await, and only the copies are read
         thereafter: ADR-0065 §3's second discharge, required of this method by
-        ADR-0073 §8. Deliberately unlike :meth:`_search_sync`, which materialises
-        ``kinds`` only after two suspension points (#436).
+        ADR-0073 §8. :meth:`search` now does the same; it used to materialise
+        ``kinds`` only after two suspension points, which is what #436 fixed, and
+        both discharges are proved by ``MemoryStoreContract`` rather than left to
+        review.
 
         Args:
             bands: Belief bands to include; ``None`` is every band, ``()`` none.

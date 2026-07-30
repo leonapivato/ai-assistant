@@ -131,6 +131,11 @@ _TORN_INPUT = (
     "caller's mid-flight mutation reached part of what was committed and not the "
     "rest, so no single version of the argument describes the result"
 )
+_LATE_FILTER = (
+    "the read answered from a version of its filter that did not exist when the "
+    "work began: a caller's mid-flight mutation widened the result, so the filter "
+    "was observed after the first await rather than before it (ADR-0065 §1)"
+)
 
 
 @contextlib.asynccontextmanager
@@ -676,17 +681,12 @@ class MemoryStoreContract:
     # a page (an implementation defaulting to 100, or to unbounded, satisfies
     # every explicit-limit case while breaking the bounded default).
     #
-    # There is deliberately **no input-observation clause** for this read.
-    # ``store_suspended_at_its_first_await`` suspends the next ``add`` or
-    # ``write_atomic`` and nothing else, and widening it is #436's business — a gap
-    # ``search`` already has in shipped code, so it is closed for both reads at
-    # once or not at all (ADR-0073 §8). The stimulus is also not available in a
-    # weaker form: this read derives one result from one filter, so an
-    # implementation that re-read ``bands`` after suspending would return the
-    # *later* version's answer whole — coherent, and therefore not a tear ADR-0065
-    # can see. What the ADR requires is the implementation shape (materialise both
-    # filters before the first await), which each implementation documents.
-    # Likewise no cancellation clause: ``_CANCELLATION_OPS`` is write-scoped and
+    # Its **input-observation** clause is not here but with the other three, under
+    # "input observation (ADR-0065)" below, because what it asserts only makes sense
+    # beside them. ADR-0073 §8 left this obligation stated and unproven — the
+    # suspension hook named only writes, so no case could position a mutation inside
+    # a read — and #436 closed it for both reads at once, which is the condition §8
+    # set. No cancellation clause, though: ``_CANCELLATION_OPS`` is write-scoped and
     # the locked read paths are tracked separately (#397).
 
     async def test_list_beliefs_returns_live_beliefs(self, store: MemoryStore) -> None:
@@ -1272,27 +1272,49 @@ class MemoryStoreContract:
     #: may well be vacuous under one and live under the other.
     writes_without_suspending: bool = False
 
+    #: The same declaration for the **read** side: whether ``search`` and
+    #: ``list_beliefs`` perform no ``await`` between the coroutine's first executed
+    #: line and the point their ``Sequence`` filters are read. A separate axis from
+    #: :attr:`writes_without_suspending` because the two halves of a store diverge
+    #: — the dict-backed implementations reach their filters with no ``await`` at
+    #: all, while ``SqliteMemoryStore`` embeds the query and takes its lock first,
+    #: which is exactly where #436 lived. Left ``False``, the suite requires the
+    #: read window to be opened through the hook below.
+    reads_without_suspending: bool = False
+
     def store_suspended_at_its_first_await(
         self,
-    ) -> AbstractAsyncContextManager[tuple[MemoryStore, SuspendedCall]]:
-        """Supply a store whose next write stops at **its own first ``await``**.
+    ) -> AbstractAsyncContextManager[tuple[MemoryStore, Callable[[str], SuspendedCall]]]:
+        """Supply a store whose next call to a **named operation** stops at its first ``await``.
 
-        Override unless :attr:`writes_without_suspending` is set. The next
-        :meth:`~ai_assistant.core.protocols.MemoryStore.add` or
-        :meth:`~ai_assistant.core.protocols.MemoryStore.write_atomic` must suspend
-        there and stay suspended until the case releases it; later calls run free,
-        because the cases go on to read the store back.
+        Override unless both :attr:`writes_without_suspending` and
+        :attr:`reads_without_suspending` are set. The suite runs any preconditions
+        the operation needs, then calls the returned ``arm(operation)`` to get the
+        :class:`SuspendedCall` lever back — after the preconditions, so a store
+        arming its one collaborator suspends the operation under test rather than a
+        setup write. The named call must suspend at its own first ``await`` and stay
+        there until the case releases it; later calls run free, because the cases go
+        on to read the store back.
+
+        **Naming the operation is what makes the hook reach reads** (#436). It
+        originally suspended "the next write", which no read-side case could
+        position a mutation inside — so ADR-0073 §8 had to state the
+        materialise-before-the-first-await discharge as an obligation while
+        recording that the suite would not prove it. The four operations the cases
+        below arm are ``add``, ``write_atomic``, ``search`` and ``list_beliefs``;
+        which collaborator stops each one is the implementation's business, and for
+        one store they are not all the same collaborator.
 
         **The position is part of the hook's contract, not the implementer's
         choice** (ADR-0065 §3). A hook fired at method *entry* would let the
         mutation land before the method had read anything, so the store would
         observe one coherent mutated version, the case would pass, and a tear at
         the real window would survive untested. The first ``await`` is exactly the
-        boundary the clause draws: a conforming write has taken its one observation
-        before that point and cannot be reached by the mutation, while a write that
-        reads its argument again afterwards is torn by it. It is also well-defined
-        for a *non*-conforming implementation, which matters — a conforming one has
-        no second read to position a hook against.
+        boundary the clause draws: a conforming call has taken its one observation
+        before that point and cannot be reached by the mutation, while a call that
+        reads its argument afterwards answers from the later version. It is also
+        well-defined for a *non*-conforming implementation, which matters — a
+        conforming one has no later read to position a hook against.
 
         What to suspend on is implementation-specific — a store's injected
         collaborator, a fake's modelled resource — which is why this is a hook and
@@ -1306,20 +1328,23 @@ class MemoryStoreContract:
         raise NotImplementedError
 
     @contextlib.asynccontextmanager
-    async def _write_subject(
-        self, store: MemoryStore
-    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall | None]]:
-        """The store the two cases below drive, and the gate holding its next write.
+    async def _observation_subject(
+        self, store: MemoryStore, *, vacuous: bool
+    ) -> AsyncIterator[tuple[MemoryStore, Callable[[str], SuspendedCall] | None]]:
+        """The store the four cases below drive, and the lever arming one of its calls.
 
-        ``None`` for the gate where the implementation declares
-        :attr:`writes_without_suspending`; the ``store`` fixture is then the
-        subject, since there is no window to open and nothing to build.
+        ``None`` for the lever where the implementation declares its axis
+        non-suspending (:attr:`writes_without_suspending` for the two writes,
+        :attr:`reads_without_suspending` for the two reads); the ``store`` fixture
+        is then the subject, since there is no window to open and nothing to build.
+        The caller arms *after* its own preconditions, which is why the lever is
+        handed out rather than the gate.
         """
-        if self.writes_without_suspending:
+        if vacuous:
             yield store, None
             return
-        async with self.store_suspended_at_its_first_await() as (subject, gate):
-            yield subject, gate
+        async with self.store_suspended_at_its_first_await() as (subject, arm):
+            yield subject, arm
 
     async def test_add_cannot_tear_on_a_mid_flight_mutation_of_its_record(
         self, store: MemoryStore
@@ -1336,7 +1361,11 @@ class MemoryStoreContract:
         :meth:`test_write_atomic_derives_everything_from_one_observation_of_its_batch`
         still exercises through the caller-owned, mutable list.
         """
-        async with self._write_subject(store) as (subject, gate):
+        async with self._observation_subject(store, vacuous=self.writes_without_suspending) as (
+            subject,
+            arm,
+        ):
+            gate = None if arm is None else arm("add")
             record = _semantic("obs-add", "alpha alpha alpha")
             async with _held_at_its_first_await(gate, subject.add(record)) as call:
                 # The tear needed these two rewrites mid-flight; the frozen record
@@ -1373,7 +1402,11 @@ class MemoryStoreContract:
         three-element one, and what it commits matches what it returns — never a
         mix of the two observations.
         """
-        async with self._write_subject(store) as (subject, gate):
+        async with self._observation_subject(store, vacuous=self.writes_without_suspending) as (
+            subject,
+            arm,
+        ):
+            gate = None if arm is None else arm("write_atomic")
             first = _semantic("obs-batch-1", "alpha alpha alpha")
             second = _semantic("obs-batch-2", "bravo bravo bravo")
             writes = [MemoryWrite(record=first), MemoryWrite(record=second)]
@@ -1389,3 +1422,91 @@ class MemoryStoreContract:
             # both correspond to a single reading of the caller's list.
             assert returned == committed, _TORN_INPUT
             assert committed in (before, after), _TORN_INPUT
+
+    # The read side of the same clause (#436). The two cases below assert a
+    # *stronger* thing than the two above, and the difference is worth stating
+    # because it is not obvious from the clause's wording.
+    #
+    # A write derives several things from its argument — what it returns, what it
+    # persists, what it indexes — so "one observation" is checkable by comparing
+    # them, and either version may be the one observed: the cases above accept
+    # ``before`` or ``after`` and reject a mix. A read derives *one* answer from
+    # *one* filter. There is nothing to compare it against, so an implementation
+    # that took its only observation late would return the later version's answer
+    # whole — coherent, and invisible to a mix-detecting case. That is why an
+    # earlier revision of this file recorded that no read-side clause was
+    # available "in a weaker form".
+    #
+    # What makes them checkable is the *position* the clause fixes rather than the
+    # coherence it guarantees. ADR-0065 §1 offers three discharges — do not
+    # suspend, do not read the argument after suspending, snapshot on the
+    # coroutine's first executed line — and every one of them yields the answer for
+    # the filter **as it stood when the work began**. ADR-0073 §8 already required
+    # exactly that of ``list_beliefs``, naming ``SqliteMemoryStore.search``'s
+    # materialisation "after two suspension points" as the practice that did not
+    # supply it. So these cases assert the pre-mutation answer, which is what the
+    # ratified position amounts to observationally, and a store that reads its
+    # filter only after suspending fails them.
+
+    async def test_search_observes_its_kinds_filter_before_its_first_await(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``search``'s ``kinds`` (ADR-0065, #436).
+
+        ``kinds`` is a caller-owned ``Sequence`` — the weaker of the two shapes
+        ADR-0065's Context names, a mutable container of immutable elements: a
+        re-read cannot tear a single value but it can change *which* values the
+        call sees. Growing the list while the call is suspended must not widen the
+        answer, because a conforming ``search`` has observed the filter before it
+        suspended.
+
+        Both seeded records match the query, so the filter is the only thing
+        deciding the result and a late read is the only way the second one can
+        appear in it.
+        """
+        async with self._observation_subject(store, vacuous=self.reads_without_suspending) as (
+            subject,
+            arm,
+        ):
+            await subject.add(_semantic("obs-search-s", "gamma gamma gamma"))
+            await subject.add(_preference("obs-search-p", "gamma gamma gamma"))
+            kinds = [MemoryKind.SEMANTIC]
+            # Armed after the seeding writes, so the collaborator that stops the
+            # read is not spent on a precondition.
+            gate = None if arm is None else arm("search")
+            async with _held_at_its_first_await(gate, subject.search("gamma", kinds=kinds)) as call:
+                kinds.append(MemoryKind.PREFERENCE)  # grow the caller's own list mid-flight
+            found = {record.id for record in await call}
+
+            assert found == {"obs-search-s"}, _LATE_FILTER
+
+    async def test_list_beliefs_observes_its_filters_before_its_first_await(
+        self, store: MemoryStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``list_beliefs`` (ADR-0065, ADR-0073 §8).
+
+        ADR-0073 §8 states the obligation — materialise ``bands`` **and** ``kinds``
+        before the first ``await`` — and records that the suite of the day could not
+        prove it, because the suspension hook named only writes. It can now, so both
+        filters are exercised: the two extra records are excluded one by each, so a
+        store that re-read either one after suspending returns a wider page.
+        """
+        async with self._observation_subject(store, vacuous=self.reads_without_suspending) as (
+            subject,
+            arm,
+        ):
+            await subject.add(_semantic("obs-list-kept", "epsilon"))
+            # Excluded by ``kinds`` alone, and by ``bands`` alone, respectively.
+            await subject.add(_preference("obs-list-kind", "epsilon"))
+            await subject.add(_semantic("obs-list-band", "epsilon", source=MemorySource.EXTERNAL))
+            bands = [BeliefBand.DERIVED]
+            kinds = [MemoryKind.SEMANTIC]
+            gate = None if arm is None else arm("list_beliefs")
+            async with _held_at_its_first_await(
+                gate, subject.list_beliefs(bands=bands, kinds=kinds)
+            ) as call:
+                bands.append(BeliefBand.ATTESTED)
+                kinds.append(MemoryKind.PREFERENCE)
+            listed = {record.id for record in await call}
+
+            assert listed == {"obs-list-kept"}, _LATE_FILTER

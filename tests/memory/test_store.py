@@ -256,6 +256,13 @@ class TestInMemoryMemoryStoreContract(MemoryStoreContract):
     #: clauses are different axes, and this store happens to be vacuous under both.
     writes_without_suspending = True
 
+    #: ``search`` and ``list_beliefs`` contain no ``await`` either — both filter a
+    #: dict in place — so there is no window between reading the caller's ``kinds``
+    #: or ``bands`` and answering from it (#436). Both materialise on their first
+    #: executed line anyway, so the discharge does not rest on the absence of a
+    #: suspension point a later revision could add.
+    reads_without_suspending = True
+
     @pytest.fixture
     def store(self) -> MemoryStore:
         return InMemoryMemoryStore(now=_fixed_now)
