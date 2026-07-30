@@ -196,6 +196,57 @@ def _split_model_specs(value: object) -> object:
 _ModelSpec = Annotated[str, AfterValidator(_model_spec_is_well_formed)]
 
 
+def _not_a_flag(value: object) -> object:
+    """Refuse a ``bool`` where an integer setting is expected.
+
+    pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
+    ``bool`` is an ``int`` subclass, so ``Settings(observation_batch_size=True)``
+    loads a one-item batch instead of refusing a flag where a count belongs — and
+    every bound the field carries (``ge``, ``le``, ``lt``) is satisfied by the
+    ``1`` that arrives, so nothing downstream can tell the difference.
+
+    The code **below** settings already refuses this, on the stated ground that a
+    flag is not a count: ``ObservationStage._check_batch_size``,
+    ``LearningLoop._check_tuning``, ``Engine.__init__``, and
+    ``ModelBackedObserver._check_bound`` each exclude ``bool`` before their range
+    check. Because :class:`Settings` hands them an *already coerced* integer,
+    those guards can never fire on the settings path; they only ever protect the
+    constructor seam a test or a second composition root reaches directly. This
+    validator makes the configuration layer state the same rule the four layers
+    under it already state, rather than leaving it the one layer that does not
+    (issue #471).
+
+    **Reachable only from untyped code constructing** :class:`Settings`
+    **directly** — the same reachability :func:`_split_model_specs`' exact-type
+    guard was written for (#359). The operator-facing path is unaffected in both
+    directions: ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails int
+    parsing at load, and this refuses only ``bool`` and leaves every other value
+    to the field's ordinary validation, so an environment variable and a ``.env``
+    entry still arrive as a ``str`` and are still parsed as one.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is a ``bool``.
+    """
+    if isinstance(value, bool):
+        msg = f"expected an integer, got the flag {value!r}: a flag is not a count"
+        raise ValueError(msg)
+    return value
+
+
+#: An integer-valued setting, which a ``bool`` is not: see :func:`_not_a_flag`.
+#: Applied to **every** ``int``-typed field on :class:`Settings`, including the two
+#: hour-of-day ordinals, because the defect is a property of the type rather than
+#: of any one field and fixing a subset would leave the model inconsistent with
+#: itself (#471). ``tests/core/test_config.py`` pins that coverage per field.
+_IntegerSetting = Annotated[int, BeforeValidator(_not_a_flag)]
+
+
 class EmbedderKind(StrEnum):
     """Which :class:`~ai_assistant.core.protocols.Embedder` the app wires (ADR-0006 §2).
 
@@ -328,7 +379,7 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         description="Deadline for a single model attempt, in seconds.",
     )
-    model_max_attempts: int = Field(
+    model_max_attempts: _IntegerSetting = Field(
         default=3, ge=1, description="Total model attempts, including the first. 1 disables retry."
     )
     model_backoff_base_seconds: float = Field(
@@ -369,10 +420,10 @@ class Settings(BaseSettings):
     # IANA name; working hours are a local-time window, end-exclusive. Both are
     # validated here, so a malformed value fails at load rather than per request.
     timezone: str = Field(default="UTC", description="IANA timezone for local-time context.")
-    working_hours_start: int = Field(
+    working_hours_start: _IntegerSetting = Field(
         default=9, ge=0, le=23, description="First hour of the working-hours window (local)."
     )
-    working_hours_end: int = Field(
+    working_hours_end: _IntegerSetting = Field(
         default=17,
         ge=1,
         le=24,
@@ -461,13 +512,13 @@ class Settings(BaseSettings):
     # and the episodes remain in the store for a later pass). Five is ADR-0077 §2's
     # selectivity bar in numbers — a batch that genuinely yields more durable
     # beliefs than that is a batch worth observing twice.
-    observation_batch_size: int = Field(
+    observation_batch_size: _IntegerSetting = Field(
         default=20,
         ge=1,
         lt=2**63,
         description=("How many of a conversation's most recent turns one observation pass reads."),
     )
-    observation_max_proposals: int = Field(
+    observation_max_proposals: _IntegerSetting = Field(
         default=5,
         ge=1,
         description="The most beliefs one observation pass may propose; excess is discarded.",
@@ -527,7 +578,7 @@ class Settings(BaseSettings):
             "be asked forever, which also stops those questions ever being purged."
         ),
     )
-    deferral_queue_limit: int = Field(
+    deferral_queue_limit: _IntegerSetting = Field(
         default=50,
         gt=0,
         lt=2**63,
