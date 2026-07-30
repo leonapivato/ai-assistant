@@ -860,6 +860,32 @@ def test_every_integer_setting_refuses_a_convertible_non_integer(name: str, valu
         _settings_with(name, value)
 
 
+def test_a_value_that_cannot_describe_itself_is_still_a_validation_error() -> None:
+    """The diagnostic must not be able to destroy the diagnosis.
+
+    The refusal above builds its message from the offered value, and this branch
+    is reached by *arbitrary* objects. A ``__repr__`` that raises would replace
+    the ``ValueError`` pydantic converts into a ``ValidationError`` with whatever
+    it threw — escaping the seam ``load_settings`` promises to report as a
+    ``ConfigurationError``. Pydantic renders such an input as
+    ``<unprintable ... object>`` unaided, so the guard must not be the one link in
+    the chain that cannot survive being told about it. ``describe_untrusted``
+    (``core.types``) is the shared helper written for exactly this, and this is
+    the test that it is actually used.
+
+    One field, not all six: the message is built once in a field-independent
+    helper, and the parametrised cases above already prove every field reaches it.
+    """
+
+    class Unprintable:
+        def __repr__(self) -> str:
+            msg = "this value refuses to describe itself"
+            raise RuntimeError(msg)
+
+    with pytest.raises(ValidationError, match="expected an integer"):
+        _settings_with("observation_batch_size", Unprintable())
+
+
 @pytest.mark.parametrize("name", _INTEGER_FIELDS)
 def test_every_integer_setting_still_accepts_its_own_default(name: str) -> None:
     """The refusal narrows nothing legitimate: a real integer is still a real integer."""
