@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import ast
 import stat
+import sys
 from datetime import timedelta
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -219,6 +221,10 @@ def test_build_engine_reports_an_unimportable_on_device_runtime_as_config_error(
     Simulated by removing the ``FastEmbedEmbedder`` name from its module so the lazy
     ``from ... import FastEmbedEmbedder`` raises ``ImportError`` (cannot import name),
     which needs neither uninstalling fastembed nor loading ONNX.
+
+    This covers the ``ImportError`` half of the handler only; its ``OSError`` half is
+    a separate arm with its own case below, because a handler narrowed to one of them
+    still passes the other's test.
     """
     from ai_assistant.models import fastembed_embedder  # noqa: PLC0415
 
@@ -230,6 +236,58 @@ def test_build_engine_reports_an_unimportable_on_device_runtime_as_config_error(
     with pytest.raises(ConfigurationError, match="on-device embedding runtime"):
         build_engine(Settings(), data_dir=absent)
 
+    assert not absent.exists()
+
+
+def test_build_engine_reports_an_unloadable_on_device_runtime_as_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``OSError`` half of that same handler: a native library that will not load.
+
+    ``_build_embedder`` catches ``(ImportError, OSError)``, and the two are disjoint
+    types — ``ImportError`` does not inherit from ``OSError`` — so the sibling case
+    above cannot reach this arm. Dropping ``OSError`` from the handler leaves that
+    case green while the raw ``OSError`` escapes the composition root, outside the
+    ``AssistantError`` hierarchy an adapter's boundary catches. This is the case that
+    goes red for it.
+
+    The realistic fault is a present-but-unloadable ONNX shared object: the import
+    machinery reaches the module and the *dynamic loader* fails, which surfaces as an
+    ``OSError`` rather than an ``ImportError``. Reproduced deterministically by
+    standing a stub module in ``sys.modules`` whose attribute access raises
+    ``OSError``, so the lazy ``from ... import FastEmbedEmbedder`` raises one — no
+    uninstall, no ONNX load, and the real module is left untouched (``monkeypatch``
+    restores the entry).
+
+    The dunder guard matters: the import machinery probes ``__spec__``/``__path__``
+    on the way through, and those probes must answer normally so the ``OSError``
+    arises where a loader failure really would — on the name being imported.
+    """
+
+    class _UnloadableRuntime(ModuleType):
+        """A module whose one public name cannot be loaded."""
+
+        def __getattr__(self, name: str) -> object:
+            if name.startswith("__"):
+                raise AttributeError(name)
+            msg = "libonnxruntime_providers_shared.so: cannot open shared object file"
+            raise OSError(msg)
+
+    module_name = "ai_assistant.models.fastembed_embedder"
+    monkeypatch.setitem(sys.modules, module_name, _UnloadableRuntime(module_name))
+
+    absent = tmp_path / "state"
+    assert not absent.exists()
+
+    with pytest.raises(ConfigurationError, match="on-device embedding runtime") as raised:
+        build_engine(Settings(), data_dir=absent)
+
+    # Pins the arm rather than just the message: an ``ImportError`` cause would mean
+    # the sibling case was re-run under a new name. ``ImportError`` is not an
+    # ``OSError``, so this one assertion separates them.
+    assert isinstance(raised.value.__cause__, OSError)
+
+    # Above disk, like the other two on-device failures (#372/#403).
     assert not absent.exists()
 
 
