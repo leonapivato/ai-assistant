@@ -1229,6 +1229,36 @@ class DeferralStoreContract:
         assert held is not None
         assert held.state is DeferralState.APPLYING
 
+    @pytest.mark.parametrize(
+        "state",
+        [None, "accepted", "pending", 1],
+        ids=["none", "the-value-of-a-terminal-member", "a-state-name", "an-int"],
+    )
+    async def test_resolve_refuses_a_state_that_is_not_a_deferral_state(
+        self, factory: DeferralStoreFactory, state: object
+    ) -> None:
+        """The annotation is not a runtime guard, and two backends diverge without it.
+
+        ``"accepted"`` satisfies membership in the terminal set — a ``StrEnum`` member
+        compares *and hashes* equal to its value — after which a dict-backed store
+        lets pydantic coerce it into the record while a SQL one reaches for
+        ``.value`` and raises ``AttributeError``, outside the ``ValueError`` this call
+        documents. ``None`` fails membership and then has no ``.name``. ADR-0078 §2
+        makes exactly this argument for the paging arguments: a value that passes one
+        check while meaning something no two backends agree on is refused on its
+        type, before any state is read.
+        """
+        store = _build(factory)
+        await _admit(store, "d1")
+        token = await _claim(store, "d1")
+
+        with pytest.raises(ValueError, match="DeferralState"):
+            await store.resolve("d1", claim_id=token, state=state)  # type: ignore[arg-type]
+
+        held = await store.get("d1")
+        assert held is not None
+        assert held.state is DeferralState.APPLYING
+
     @pytest.mark.parametrize("state", [DeferralState.PENDING, DeferralState.APPLYING])
     async def test_resolve_refuses_a_state_that_is_not_terminal(
         self, factory: DeferralStoreFactory, state: DeferralState
@@ -1849,6 +1879,46 @@ class DeferralStoreContract:
             state=DeferralState.REDEFERRED,
             successor_id="already-open",
         )
+
+    async def test_a_successor_may_not_be_the_question_it_succeeds(
+        self, factory: DeferralStoreFactory
+    ) -> None:
+        """A self-referential link is refused, changing nothing (§2, §9).
+
+        Reachable only through a caller that re-offers the parent's **own** proposal:
+        the key then collides with the parent, the suppression names it, and stamping
+        would leave a row whose ``successor_id`` is itself — a ``REDEFERRED``
+        resolution naming no answerable question at all, which is the silent drop
+        wearing a terminal state. A successor's conflict set differs from its
+        parent's by construction (§3's snapshot carries *this* ingest's
+        ``result.conflicts``), so reaching here means the coordinator failed to build
+        that snapshot; a public Protocol may not rely on its one honest caller, and a
+        fault that would strand a real answer is the kind to surface rather than
+        absorb.
+
+        The parent is left ``APPLYING`` and reachable through ``interrupted``, which
+        is the honest residue: an answer was begun and its outcome is not recorded.
+        """
+        store = _build(factory)
+        proposal = _proposal("the parent question", conflicts=("c1",))
+        await _admit(store, "parent", proposal)
+        token = await _claim(store, "parent")
+
+        with pytest.raises(DeferralStoreError):
+            await store.defer(
+                deferral_id="child",
+                proposal=proposal,
+                decision=_ASK,
+                predecessor_id="parent",
+                successor_to_claim=token,
+            )
+
+        parent = await store.get("parent")
+        assert parent is not None
+        assert parent.successor_id is None
+        assert parent.state is DeferralState.APPLYING
+        assert _ids(await store.interrupted()) == ["parent"]
+        assert await store.get("child") is None
 
     async def test_a_successor_whose_parent_is_gone_is_admitted_as_an_ordinary_question(
         self, factory: DeferralStoreFactory

@@ -395,6 +395,23 @@ class FakeDeferralStore:
             )
             admission = self._admit(linked, key, exempt=parent is not None, now=now)
             if parent is not None and admission.deferral is not None:
+                if admission.deferral.id == parent.id:
+                    # A successor may not be the question it succeeds. Reachable only
+                    # through a caller that re-offered the parent's *own* proposal: the
+                    # key then collides with the parent, the suppression names it, and
+                    # stamping would leave a row whose `successor_id` is itself — a
+                    # `REDEFERRED` resolution that names no answerable question, which is
+                    # the silent drop wearing a terminal state that ADR-0078 §9 forbids.
+                    # A successor's conflict set differs from its parent's by construction
+                    # (§2), so this is the coordinator having failed to build §3's
+                    # snapshot; it raises and changes nothing, leaving the parent APPLYING
+                    # and reachable through `interrupted`.
+                    described = describe_untrusted(parent.id)
+                    msg = (
+                        f"a successor may not be the question it succeeds: the offered "
+                        f"proposal is the same question as the parent deferral {described}"
+                    )
+                    raise DeferralStoreError(msg)
                 self._rows[parent.id] = _transition(parent, successor_id=admission.deferral.id)
             return admission
 
@@ -676,9 +693,7 @@ class FakeDeferralStore:
             return len(doomed)
 
 
-def _check_terminal_payload(
-    state: DeferralState, record_id: str | None, successor_id: str | None
-) -> None:
+def _check_terminal_payload(state: object, record_id: str | None, successor_id: str | None) -> None:
     """Refuse a resolution whose state is not terminal or whose payload is not its.
 
     Each terminal state requires its own payload and forbids the other's, in the
@@ -688,10 +703,25 @@ def _check_terminal_payload(
     job is to record what happened. Duplicated in the production store rather than
     shared, for the reason given on :data:`_PAGE_BOUND`.
 
+    ``state`` is typed ``object`` deliberately, the way ``_check_page_bound``'s
+    value is: the annotation on the seam is not a runtime guard, and this is the one
+    place that can hold the type.
+
     Raises:
-        ValueError: If ``state`` is not terminal, or the two ids do not match what
-            it requires and forbids.
+        ValueError: If ``state`` is not a :class:`DeferralState` at all, if it is not
+            terminal, or if the two ids do not match what it requires and forbids.
     """
+    if not isinstance(state, DeferralState):
+        # The annotation is not a runtime guard, and the two backends disagree
+        # without this one: ``"accepted"`` satisfies membership in the terminal set
+        # (a ``StrEnum`` member compares and hashes equal to its value), after which
+        # a dict-backed store lets pydantic coerce it into the record while a SQL one
+        # reaches for ``.value`` and raises ``AttributeError`` — outside the
+        # ``ValueError`` this call documents. ADR-0078 §2 makes the same argument for
+        # the paging arguments: a value that passes one check while meaning something
+        # no two backends agree on is refused on its type.
+        msg = f"resolve records a DeferralState, got {describe_untrusted(state)}"
+        raise ValueError(msg)
     if state not in TERMINAL_DEFERRAL_STATES:
         msg = f"resolve records a terminal state, got {state.name}"
         raise ValueError(msg)
