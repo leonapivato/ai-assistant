@@ -17,7 +17,12 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import ConfigurationError, MemoryStoreError, PlanningError
+from ai_assistant.core.errors import (
+    ConfigurationError,
+    DeferralStoreError,
+    MemoryStoreError,
+    PlanningError,
+)
 from ai_assistant.core.types import (
     ActionPlan,
     BeliefBand,
@@ -36,6 +41,8 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
+    AnswerKind,
+    AnswerOutcome,
     Belief,
     Confirmation,
     ContinuationToken,
@@ -47,11 +54,19 @@ from ai_assistant.orchestration import (
     LearnDecision,
     LearningLoop,
     LearnOutcome,
+    MemoryWriteStage,
     ObservationReport,
     ObservationStage,
     ObservedProposal,
+    Question,
+    QuestionStage,
+    QuestionState,
+    QueuedQuestion,
+    QueueOutcome,
+    Retirement,
     StepExecutor,
     StepRunner,
+    SuccessorLink,
     TurnOutcome,
 )
 from ai_assistant.testing import (
@@ -59,6 +74,7 @@ from ai_assistant.testing import (
     FakeAuditTrail,
     FakeContextProvider,
     FakeConversationStore,
+    FakeDeferralStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -143,7 +159,7 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
 
 
 def _observation(
-    conversations: FakeConversationStore, memory: FakeMemoryStore, writer: FakeMemoryWriter
+    conversations: FakeConversationStore, memory: FakeMemoryStore, writes: MemoryWriteStage
 ) -> ObservationStage:
     """The observation stage over the same stores the rest of the engine holds.
 
@@ -155,7 +171,7 @@ def _observation(
         observer=FakeObserver(),
         conversations=conversations,
         memory=memory,
-        writer=writer,
+        writes=writes,
         batch_size=20,
         route=OBSERVER_ROUTE,
     )
@@ -173,10 +189,12 @@ def _engine(
     invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools])
     memory = FakeMemoryStore(now=lambda: AT)
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
+    deferrals = FakeDeferralStore(now=lambda: AT)
+    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=writer,
+        writes=writes,
         planner=_OneStepPlanner(),
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
@@ -205,7 +223,8 @@ def _engine(
             retention=timedelta(days=30),
             now=lambda: AT,
         ),
-        observation=_observation(conversations, memory, writer),
+        observation=_observation(conversations, memory, writes),
+        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         closers=closers,
     )
 
@@ -625,21 +644,135 @@ def test_render_learn_reports_when_nothing_was_proposed(output: StringIO) -> Non
     assert "nothing" in output.getvalue().lower()
 
 
-def test_render_learn_marks_a_deferred_ruling_as_not_stored(output: StringIO) -> None:
-    """An ASK_USER ruling wrote nothing and has no confirmation flow — say so honestly.
+def test_render_learn_points_a_queued_deferral_at_the_question_it_parked(
+    output: StringIO,
+) -> None:
+    """**Inverted by ADR-0078** (§8 reach 1, §10 item 9), and this is the inversion.
 
-    The CLI must not imply a follow-up that does not exist (memory decisions are not
-    what ``assistant resume`` recovers; #422 review): the line names it as not stored
-    and does not promise it can be confirmed.
+    It used to assert the line "cannot be done from here yet", which was honest: no
+    memory-confirmation flow existed, so implying a follow-up would have promised
+    something that did not. ADR-0078 builds the flow, which makes that line false for
+    the arms it closes — and "leaving an honest message that has become a lie is the
+    specific failure ADR-0019 is about".
+
+    So the line now names the question and the verb that answers it. This is the reach
+    that closes issue #423's own scenario: the user submits feedback, is told it is
+    deferred, and is pointed at the answer.
     """
     outcome = LearnOutcome(
-        results=(IngestSummary(LearnDecision.DEFERRED, None, "conflicts with a prior assertion"),)
+        results=(
+            IngestSummary(
+                LearnDecision.DEFERRED,
+                None,
+                "conflicts with a prior assertion",
+                queued=QueuedQuestion(
+                    outcome=QueueOutcome.QUEUED,
+                    question_id="q-7",
+                    question_state=QuestionState.OPEN,
+                ),
+            ),
+        )
     )
     cli._render_learn(outcome)
-    rendered = output.getvalue()
-    assert "Not stored" in rendered
-    assert "0 stored" in rendered  # the header count excludes it
-    assert "conflicts with a prior" in rendered  # the reason is surfaced (Rich may wrap it)
+    rendered = " ".join(output.getvalue().split())
+    assert "Not stored yet" in rendered
+    assert "q-7" in rendered, "the user is pointed at the question, not left guessing"
+    assert "assistant questions" in rendered
+    assert "cannot be done from here" not in rendered, "that claim is now false"
+    assert "0 stored" in rendered  # the header count still excludes it
+    assert "conflicts with a prior" in rendered  # the reason is surfaced
+
+
+def test_render_learn_keeps_the_non_answerable_line_for_a_secret_tier_deferral(
+    output: StringIO,
+) -> None:
+    """And **only** for the arms ADR-0078 closes (§1, §10 item 9).
+
+    A secret-tier deferral is still not answerable: ADR-0004 §3 forbids Tier 0 content
+    a durable file, so nothing was queued and there is nothing to answer. It keeps the
+    existing line and the existing reason, because "one message covering both outcomes
+    would be the same dishonesty arriving from the other side — a user told to go
+    answer a question that was never queued".
+    """
+    outcome = LearnOutcome(
+        results=(
+            IngestSummary(
+                LearnDecision.DEFERRED,
+                None,
+                "secret-tier data requires explicit user confirmation",
+                queued=QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE),
+            ),
+        )
+    )
+    cli._render_learn(outcome)
+    rendered = " ".join(output.getvalue().split())
+    assert "cannot be done from here" in rendered
+    assert "assistant questions" not in rendered, "there is no question to answer"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (QuestionState.OPEN, "already waiting for your answer"),
+        (QuestionState.DECLINED, "already declined"),
+        (QuestionState.INTERRUPTED, "was already begun"),
+    ],
+    ids=["waiting", "declined", "interrupted"],
+)
+def test_render_learn_says_which_question_stands_in_the_way_and_in_what_state(
+    output: StringIO, state: QuestionState, expected: str
+) -> None:
+    """§7's suppression guidance, per state — and the state is what decides the line.
+
+    "The admission's ``deferral`` says **which and in what state**: for a ``REJECTED``
+    row, 'you declined this on <date>; forget that question to be asked again'; for an
+    ``APPLYING`` one, §9's first recovery step." Rendering an interrupted answer as an
+    answerable follow-up would advertise a question the user cannot act on.
+    """
+    outcome = LearnOutcome(
+        results=(
+            IngestSummary(
+                LearnDecision.DEFERRED,
+                None,
+                "conflicts with a prior assertion",
+                queued=QueuedQuestion(
+                    outcome=QueueOutcome.ALREADY_ASKED,
+                    question_id="q-3",
+                    question_state=state,
+                ),
+            ),
+        )
+    )
+    cli._render_learn(outcome)
+    rendered = " ".join(output.getvalue().split())
+    assert expected in rendered
+    assert "q-3" in rendered
+
+
+def test_render_learn_reports_a_full_queue_rather_than_saying_nothing(
+    output: StringIO,
+) -> None:
+    """§7's refused branch — the one an implementation leaves silent (§10 item 3).
+
+    Nothing raises, so a surface that said nothing here would swallow the correction
+    the user just typed. The line names the **queue** rather than a question, because
+    there is no question to read: reaching for one is the dereference the admission's
+    three-shape validator exists to prevent.
+    """
+    outcome = LearnOutcome(
+        results=(
+            IngestSummary(
+                LearnDecision.DEFERRED,
+                None,
+                "conflicts with a prior assertion",
+                queued=QueuedQuestion(outcome=QueueOutcome.QUEUE_FULL),
+            ),
+        )
+    )
+    cli._render_learn(outcome)
+    rendered = " ".join(output.getvalue().split())
+    assert "queue is full" in rendered
+    assert "assistant questions" in rendered, "and says what to do about it"
 
 
 def test_render_learn_neutralises_a_reason_for_the_terminal(output: StringIO) -> None:
@@ -1105,11 +1238,13 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     invoker = FakeToolInvoker([])
     memory = FakeMemoryStore(now=lambda: AT)
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
+    deferrals = FakeDeferralStore(now=lambda: AT)
+    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
     goals = iter(f"g-{n}" for n in range(1, 20))
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=writer,
+        writes=writes,
         planner=_NoStepPlanner(),
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
@@ -1137,7 +1272,8 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
             retention=timedelta(days=30),
             now=lambda: AT,
         ),
-        observation=_observation(conversations, memory, writer),
+        observation=_observation(conversations, memory, writes),
+        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
     )
     return engine, conversations
 
@@ -1466,16 +1602,23 @@ def test_observe_shows_each_belief_with_its_step_evidence_and_ruling(
     assert "assistant beliefs" in rendered
 
 
-def test_observe_renders_a_deferral_in_full_and_says_it_is_not_queued(
+def test_observe_renders_a_deferral_in_full_and_points_at_the_question_surface(
     output: StringIO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``ASK_USER`` is **visible, not persisted** — the ratified interim (ADR-0077 §4).
+    """**Inverted by ADR-0078**: a deferred proposal is now parked, so the old line went.
 
-    Nothing records a deferred proposal (#423 stays open until ADR-0078 closes it),
-    so this rendering is the whole of it: the candidate, its evidence, the policy's
-    reason, and an explicit statement that it is gone when the command ends. A bare
-    ruling with no candidate would leave the user nothing to act on, which is #423's
-    complaint one level down.
+    It used to say the proposal was "gone when this command ends", which was true —
+    nothing recorded one (ADR-0077 §4, #423). The write stage now parks it, so that
+    sentence became a lie and had to go (ADR-0019). What replaces it claims nothing
+    about *which* of the queue's outcomes happened, because an observation reports its
+    refusals to its own stage and no further (ADR-0078 §7) and this report
+    deliberately does not carry the admission: it says only what holds on every
+    branch — nothing was stored, and the question surface is where an answer is owed.
+
+    The candidate, its evidence and the policy's reason are still rendered in full,
+    for ADR-0077 §4's reason and one ADR-0078 does not remove: resolving
+    ``Provenance.evidence`` into readable text is #431's open half, so this is still
+    the only place a deferred proposal's *warrant* is shown.
     """
     report = _observed_report(
         proposals=(
@@ -1497,8 +1640,8 @@ def test_observe_renders_a_deferral_in_full_and_says_it_is_not_queued(
     assert "the user works from Lisbon" in rendered  # the candidate, not just a ruling
     assert "an inference never silently overrides an assertion" in rendered
     assert "Not stored" in rendered
-    assert "gone when this command ends" in rendered
-    assert "assistant learn" in rendered, "the surface names what the user can do instead"
+    assert "gone when this command ends" not in rendered, "that claim is false since ADR-0078"
+    assert "assistant questions" in rendered, "the surface names where the answer is owed"
 
 
 def test_observe_reports_a_proposal_the_write_path_refused_for_lost_evidence(
@@ -1829,3 +1972,388 @@ def test_a_stored_belief_points_at_its_own_view_rather_than_reprinting_the_trans
     assert "they asked for metric" not in rendered, "a stored belief does not reprint its episodes"
     assert "rec-9" in rendered
     assert "assistant beliefs" in rendered
+
+
+# --- the deferred-question surface (ADR-0078 §8, §9) ----------------------
+
+
+class _QuestionEngine:
+    """A stand-in façade over two fixed question lists and one answer."""
+
+    def __init__(
+        self,
+        *,
+        waiting: tuple[Question, ...] = (),
+        stranded: tuple[Question, ...] = (),
+        answer: AnswerOutcome | None = None,
+        forgotten: bool = True,
+    ) -> None:
+        self._waiting = waiting
+        self._stranded = stranded
+        self._answer = answer
+        self._forgotten = forgotten
+        self.answered: list[tuple[str, bool]] = []
+        self.disposed: list[str] = []
+
+    async def questions(self, *, limit: int = 50, offset: int = 0) -> tuple[Question, ...]:
+        """The answerable page, ignoring paging (the façade's own contract covers it)."""
+        return self._waiting
+
+    async def interrupted_questions(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> tuple[Question, ...]:
+        """The interrupted page, which is a *separate* read all the way to here."""
+        return self._stranded
+
+    async def answer(self, question_id: str, *, accept: bool) -> AnswerOutcome:
+        """Record the relayed answer and return the scripted outcome."""
+        self.answered.append((question_id, accept))
+        assert self._answer is not None
+        return self._answer
+
+    async def forget_question(self, question_id: str) -> bool:
+        """Record the disposal and report whether anything was there."""
+        self.disposed.append(question_id)
+        return self._forgotten
+
+    async def start(self) -> None:
+        """The start-up sweeps, which this stand-in has no stores to sweep."""
+
+    async def aclose(self) -> None:
+        """Nothing to release: this stand-in owns no resource."""
+
+
+def _question(
+    question_id: str = "q-1",
+    *,
+    state: QuestionState = QuestionState.OPEN,
+    retires: tuple[Retirement, ...] = (),
+    successor: SuccessorLink | None = None,
+) -> Question:
+    return Question(
+        id=question_id,
+        state=state,
+        content="the user works from Lisbon",
+        kind=MemoryKind.SEMANTIC,
+        band=BeliefBand.ASSERTED,
+        rationale="they said so",
+        reason="contradicts a prior user assertion",
+        retires=retires,
+        asked_at=AT,
+        expires_at=AT,
+        successor=successor,
+    )
+
+
+def test_questions_renders_the_question_the_band_it_would_enter_and_what_it_retires(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Everything ADR-0078 §8 requires per question, and the band as a **conditional**.
+
+    A pending question is not a belief of any band (§1): ``band_of`` applied to its
+    proposal says only where the record *would* land if accepted, so the surface must
+    not word it as something held. And what accepting would retire is the exact scope
+    the answer authorises, not decoration — a conflict retired since the question was
+    asked renders as *no longer held* rather than being omitted.
+    """
+    engine = _QuestionEngine(
+        waiting=(
+            _question(
+                retires=(
+                    Retirement(record_id="live-1", content="the user works from Madrid"),
+                    Retirement(record_id="gone-1", content=None),
+                ),
+            ),
+        )
+    )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["questions"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "q-1" in rendered
+    assert "the user works from Lisbon" in rendered
+    assert "Would be held as" in rendered, "a conditional, never a belief held"
+    assert "not held yet" in rendered
+    assert "contradicts a prior user assertion" in rendered, "why the user is being asked"
+    assert "the user works from Madrid" in rendered, "resolved to content, not an id alone"
+    assert "no longer held" in rendered, "and one that has gone says so"
+    assert "assistant answer q-1" in rendered
+
+
+def test_questions_says_nothing_is_waiting_when_both_lists_are_empty(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty surface says so rather than printing an empty heading."""
+    _wire(monkeypatch, _QuestionEngine())
+
+    result = CliRunner().invoke(cli.app, ["questions"])
+
+    assert result.exit_code == 0
+    assert "Nothing is waiting" in output.getvalue()
+
+
+def test_questions_keeps_the_interrupted_list_separate_and_offers_no_retry(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§8's two enumerations stay separate, and §9's rendering is the honest one.
+
+    An interrupted question is **not answerable**, so it must not be offered beside the
+    ones that are. What it says is that an answer was begun and its outcome is not
+    recorded — the actual epistemic situation — plus §9's two recovery steps in order.
+    There is deliberately **no verb that claims to retry an apply**: the system does not
+    know whether the write landed, and a verb implying it does would be the one
+    dishonest line on this surface.
+    """
+    engine = _QuestionEngine(
+        waiting=(_question("q-open"),),
+        stranded=(_question("q-stuck", state=QuestionState.INTERRUPTED),),
+    )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["questions"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "1 question(s) waiting" in rendered
+    assert "1 interrupted answer(s)" in rendered, "a separate section, not one merged list"
+    assert "outcome was never recorded" in rendered
+    assert "nothing to retry" in rendered
+    assert "assistant forget-question q-stuck" in rendered, "step 1, named"
+    assert "assistant learn" in rendered, "step 2, named"
+    assert "assistant answer q-stuck" not in rendered, "an interrupted question is not answerable"
+    assert "assistant answer q-open" in rendered, "the answerable one still is"
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (QuestionState.OPEN, "which is waiting"),
+        (QuestionState.DECLINED, "already declined"),
+        (QuestionState.INTERRUPTED, "another interrupted answer"),
+        (QuestionState.APPLIED, "since settled"),
+    ],
+    ids=["waiting", "declined", "interrupted", "settled"],
+)
+def test_questions_renders_a_stranded_parents_successor_by_that_rows_own_state(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, state: QuestionState, expected: str
+) -> None:
+    """§9's cancellation residue, rendered honestly per state.
+
+    Where the parent already names a successor — a cancellation caught after the
+    re-deferral admitted one — "the surface shows that row too, rendered by its own
+    state: a ``PENDING`` one is the question their answer raised and they can go answer
+    it; a ``REJECTED`` or ``APPLYING`` one is not, and says what it needs instead."
+    Naming it without its state would advertise something the user cannot act on.
+    """
+    engine = _QuestionEngine(
+        stranded=(
+            _question(
+                "q-stuck",
+                state=QuestionState.INTERRUPTED,
+                successor=SuccessorLink(id="q-next", state=state),
+            ),
+        )
+    )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["questions"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "q-next" in rendered
+    assert expected in rendered
+
+
+def test_questions_reports_a_read_failure_with_a_nonzero_exit(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One error boundary per command, mapped to an exit code (ADR-0042 §7)."""
+
+    class _Failing(_QuestionEngine):
+        async def questions(self, *, limit: int = 50, offset: int = 0) -> tuple[Question, ...]:
+            msg = "the queue would not open"
+            raise DeferralStoreError(msg)
+
+    _wire(monkeypatch, _Failing())
+
+    result = CliRunner().invoke(cli.app, ["questions"])
+
+    assert result.exit_code == 1
+    assert "would not open" in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("flag", "accept"), [("--accept", True), ("--reject", False)], ids=["accept", "reject"]
+)
+def test_answer_relays_the_binary_choice_untouched(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, flag: str, accept: bool
+) -> None:
+    """The adapter conveys consent and authors nothing (ADR-0042 §6, ADR-0078 §8).
+
+    Binary on purpose: an amendment is a new proposal and ``learn`` already is one, so
+    a free-text answer here would be a second correction path wearing a confirmation's
+    clothes.
+    """
+    engine = _QuestionEngine(
+        answer=AnswerOutcome(kind=AnswerKind.APPLIED, question_id="q-1", record_id="rec-9")
+        if accept
+        else AnswerOutcome(kind=AnswerKind.REJECTED, question_id="q-1")
+    )
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["answer", "q-1", flag])
+
+    assert result.exit_code == 0
+    assert engine.answered == [("q-1", accept)]
+
+
+def test_answer_requires_an_explicit_choice() -> None:
+    """Neither flag is a usage error: there is no default answer to a question."""
+    result = CliRunner().invoke(cli.app, ["answer", "q-1"])
+
+    assert result.exit_code == 2
+
+
+def test_answer_renders_an_applied_correction_with_the_record_it_left_live(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit test's last mile, at the surface."""
+    _wire(
+        monkeypatch,
+        _QuestionEngine(
+            answer=AnswerOutcome(kind=AnswerKind.APPLIED, question_id="q-1", record_id="rec-9")
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "Applied" in rendered
+    assert "rec-9" in rendered
+
+
+def test_answer_renders_a_re_deferral_as_a_completed_answer_with_the_next_question(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§8: rendering a re-deferral as a failure "would be the same lie in a smaller place".
+
+    The answer *was* used — it raised a successor — so the user is handed the next
+    question rather than told their answer went nowhere.
+    """
+    _wire(
+        monkeypatch,
+        _QuestionEngine(
+            answer=AnswerOutcome(
+                kind=AnswerKind.REDEFERRED,
+                question_id="q-1",
+                successor=SuccessorLink(id="q-2", state=QuestionState.OPEN),
+            )
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "Your answer was used" in rendered
+    assert "Here is the follow-up" in rendered
+    assert "q-2" in rendered
+
+
+def test_answer_says_no_follow_up_could_be_queued_rather_than_naming_one(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one sentence ADR-0078 cannot write, refused at the surface (§9).
+
+    "Saying 're-deferred' there would claim a question was asked when none was." The
+    queue was full and this admission had no exemption to spend, so the line names the
+    queue.
+    """
+    _wire(
+        monkeypatch,
+        _QuestionEngine(
+            answer=AnswerOutcome(
+                kind=AnswerKind.REDEFERRED,
+                question_id="q-1",
+                successor=None,
+                successor_refused=True,
+                disposed=True,
+            )
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "queue is full" in rendered
+    assert "could not put the follow-up" in rendered
+    assert "destroyed while your answer was being applied" in rendered
+
+
+def test_answer_reports_a_stale_answer_without_calling_the_user_slow(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6: ``STALE`` is not a lapsed deadline, and the line must not read as one."""
+    _wire(
+        monkeypatch, _QuestionEngine(answer=AnswerOutcome(kind=AnswerKind.STALE, question_id="q-1"))
+    )
+
+    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
+
+    assert result.exit_code == 0
+    rendered = " ".join(output.getvalue().split())
+    assert "no longer applies" in rendered
+    assert "too slow" not in rendered
+
+
+def test_answer_reports_a_question_that_is_not_open_with_a_nonzero_exit(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An id naming nothing open is reported and mapped to an exit code (§7)."""
+    _wire(
+        monkeypatch,
+        _QuestionEngine(answer=AnswerOutcome(kind=AnswerKind.NOT_OPEN, question_id="q-1")),
+    )
+
+    result = CliRunner().invoke(cli.app, ["answer", "q-1", "--accept"])
+
+    assert result.exit_code == 1
+    assert "not open" in output.getvalue()
+
+
+def test_forget_question_destroys_it_and_says_what_it_does_not_undo(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9's first recovery step, and the honest half of what it does not do.
+
+    Destroying the question does not undo a memory write an interrupted answer may
+    already have made — and the surface cannot say whether one landed, so it points at
+    ``beliefs`` rather than guessing.
+    """
+    engine = _QuestionEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["forget-question", "q-1"])
+
+    assert result.exit_code == 0
+    assert engine.disposed == ["q-1"]
+    rendered = " ".join(output.getvalue().split())
+    assert "Forgotten" in rendered
+    assert "assistant beliefs" in rendered
+    assert "cannot tell you whether that write landed" in rendered
+
+
+def test_forget_question_reports_an_id_naming_nothing_with_a_nonzero_exit(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``False`` is rendered and mapped to an exit code, as ``forget`` does (§7)."""
+    _wire(monkeypatch, _QuestionEngine(forgotten=False))
+
+    result = CliRunner().invoke(cli.app, ["forget-question", "q-1"])
+
+    assert result.exit_code == 1
+    assert "Nothing to forget" in output.getvalue()

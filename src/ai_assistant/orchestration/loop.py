@@ -57,16 +57,15 @@ if TYPE_CHECKING:
         ContextProvider,
         FeedbackProcessor,
         MemoryStore,
-        MemoryWriter,
         Planner,
     )
     from ai_assistant.core.types import (
         ActionPlan,
         CurrentContext,
         FeedbackEvent,
-        MemoryIngestResult,
         MemoryRecord,
     )
+    from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 _log = structlog.get_logger(__name__)
 
@@ -162,7 +161,7 @@ class LearningLoop:
         *,
         context: ContextProvider,
         memory: MemoryStore,
-        writer: MemoryWriter,
+        writes: MemoryWriteStage,
         planner: Planner,
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
@@ -171,20 +170,25 @@ class LearningLoop:
     ) -> None:
         """Wire the loop from injected contracts.
 
-        **``writer`` must persist to ``memory``.** Nothing in the type system
-        can say so — a ``MemoryWriter`` exposes no store, deliberately — so it
-        is a composition-root obligation (ADR-0028 §4): whoever builds the loop
-        passes the same ``MemoryStore`` instance to it and to the writer. Wired
-        to two stores, learning reports a real record id and the next turn
-        retrieves nothing, with ``memory_degraded`` reading ``False`` — the
-        closed loop silently open.
+        **The writer behind ``writes`` must persist to ``memory``.** Nothing in
+        the type system can say so — a ``MemoryWriter`` exposes no store,
+        deliberately — so it is a composition-root obligation (ADR-0028 §4):
+        whoever builds the loop passes the same ``MemoryStore`` instance to it and
+        to the writer. Wired to two stores, learning reports a real record id and
+        the next turn retrieves nothing, with ``memory_degraded`` reading
+        ``False`` — the closed loop silently open.
 
         Args:
             context: Assembles the situational "right now" for each turn.
-            memory: Long-term memory, read for retrieval. The store ``writer``
-                writes to.
-            writer: The memory write path — conflicts, policy and persistence in
-                one call. It holds the policy; this loop does not.
+            memory: Long-term memory, read for retrieval. The store the write
+                stage's writer writes to.
+            writes: The orchestration **write stage** — the ratified memory write
+                path plus the durable queue a deferred question waits in
+                (ADR-0078 §3). This loop holds it rather than a ``MemoryWriter``
+                of its own, and that is the wiring choice the whole feature rests
+                on: a producer's stage holding the writer directly would get the
+                ratified policy and applier and silently lose the queue, which is
+                exactly the drop ADR-0078 ends.
             planner: Turns the turn's goal into an ``ActionPlan``.
             feedback: Turns a ``FeedbackEvent`` into memory-update proposals.
             retrieval_limit: How many memories a turn retrieves.
@@ -206,7 +210,7 @@ class LearningLoop:
         _check_tuning(retrieval_limit=retrieval_limit)
         self._context = context
         self._memory = memory
-        self._writer = writer
+        self._writes = writes
         self._planner = planner
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
@@ -284,15 +288,25 @@ class LearningLoop:
             memory_degraded=degraded or history_degraded,
         )
 
-    async def learn(self, event: FeedbackEvent) -> tuple[MemoryIngestResult, ...]:
+    async def learn(self, event: FeedbackEvent) -> tuple[WriteOutcome, ...]:
         """Fold one piece of feedback back into memory.
 
-        Process, then delegate: the feedback becomes proposals, and each is
-        handed to the injected :class:`~ai_assistant.core.protocols.MemoryWriter`
-        (ADR-0028 §4). Conflicts, the policy's ruling and the write itself all
-        happen behind that seam — including a ``REINFORCE`` or ``SUPERSEDE``,
-        which is *applied* by `memory`'s own fold rather than reported and
-        dropped. The model never writes memory directly (VISION §7).
+        Process, then delegate: the feedback becomes proposals, and each goes
+        through the injected **write stage** — the ratified
+        :class:`~ai_assistant.core.protocols.MemoryWriter` (ADR-0028 §4) plus the
+        durable queue an ``ASK_USER`` ruling parks its question in (ADR-0078 §3).
+        Conflicts, the policy's ruling and the write itself all happen behind that
+        seam — including a ``REINFORCE`` or ``SUPERSEDE``, which is *applied* by
+        `memory`'s own fold rather than reported and dropped. The model never
+        writes memory directly (VISION §7).
+
+        **A deferral no longer vanishes here.** Until ADR-0078 an ``ASK_USER``
+        ruling was reported and the proposal went out of scope, so ADR-0050 §2's
+        "the incoming one is held pending the user's answer, not dropped"
+        described nothing. Now the stage parks it and the outcome says what the
+        queue did with it, which is what lets a user who submitted a correction be
+        told where it went — including when the queue refused it, the case an
+        implementation is most likely to leave as a silent no-op (ADR-0078 §7).
 
         Proposals are applied in order and independently; there is no
         transaction, because ``MemoryStore`` offers none. Two consequences, both
@@ -311,17 +325,23 @@ class LearningLoop:
             event: The correction or stated preference the user gave.
 
         Returns:
-            One result per proposal, in the order they were proposed, each
-            carrying the policy's decision and the id written (``None`` when
-            nothing was).
+            One :class:`~ai_assistant.orchestration.writes.WriteOutcome` per
+            proposal, in the order they were proposed, each carrying the policy's
+            decision, the id written (``None`` when nothing was), and what the
+            queue did with a question the ruling deferred (``None`` when it raised
+            none).
 
         Raises:
             MemoryStoreError: If the writer failed to read conflicts or write a
                 record, or a ``REINFORCE`` or ``SUPERSEDE`` named a ``target_id``
                 that is not among them.
+            DeferralStoreError: If a deferred question could not be parked. The
+                ruling is already applied, so this surfaces rather than being
+                swallowed — with the earlier proposals applied, exactly as a store
+                failure leaves them.
         """
         proposals = await self._feedback.process(event)
-        return tuple([await self._writer.ingest(proposal) for proposal in proposals])
+        return tuple([await self._writes.write(proposal) for proposal in proposals])
 
     def _goal_from(self, utterance: str) -> Goal:
         """Mint the turn's goal from what the user said.

@@ -32,8 +32,21 @@ conversation from every read that presents one.
 read back one conversation's recent turns, and renders what was proposed, what the
 gate did with each proposal, and **which model route read the transcript**. It is
 explicit by design — nothing here polls, schedules, or observes as a side effect of
-another command — and it renders a deferred proposal in full, because nothing
-persists one yet (#423).
+another command — and it renders a deferred proposal's citations in full, because no
+later view resolves them (#431).
+
+``questions``, ``answer`` and ``forget-question`` are the deferred-question surface
+(ADR-0078 §8): a memory decision the gate would not make without the user's word now
+waits durably, and this is where it reaches them. The two enumerations stay
+**separate** — the answerable questions, and the ones whose answer was begun and whose
+outcome was never recorded — because an interrupted question is not answerable and
+offering it beside the others would present a claim that cannot be taken. Answering is
+binary; there is deliberately **no verb that claims to retry an apply**, because the
+system does not know whether the interrupted write landed and a verb implying it does
+would be the one dishonest line on this surface. This module renders what the engine
+computed and mints no authority: the ``UserConfirmation`` an accept carries is
+constructed in `orchestration`, from a claim, and an adapter can neither build one nor
+see one.
 
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
@@ -55,20 +68,30 @@ from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import BeliefBand, FeedbackEvent, FeedbackKind, MemoryKind
-from ai_assistant.orchestration import Disposition, LearnDecision
+from ai_assistant.orchestration import (
+    AnswerKind,
+    Disposition,
+    LearnDecision,
+    QuestionState,
+    QueueOutcome,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ai_assistant.orchestration import (
+        AnswerOutcome,
         Belief,
         Confirmation,
         ConversationDigest,
         ConversationSummary,
         Engine,
+        IngestSummary,
         LearnOutcome,
         ObservationReport,
         ObservedProposal,
+        Question,
+        QueuedQuestion,
         TurnOutcome,
     )
 
@@ -96,18 +119,51 @@ _DEFAULT_MEMORY_KIND = {
 #: One human-readable line per :class:`~ai_assistant.orchestration.LearnDecision`,
 #: rendered under a ``learn`` result. Exhaustive: every member has a message, so a
 #: new decision surfaces at type-check time rather than as a missing line.
+#:
+#: ``DEFERRED`` is deliberately **absent**, because one line cannot cover it any
+#: more (ADR-0078 §10 item 9). The deferral now usually parks a question the user
+#: can answer, sometimes collides with one already asked, sometimes finds the queue
+#: full, and — for secret-tier data — is still not answerable at all. Those are four
+#: different sentences and the fact that distinguishes them arrives on the result, so
+#: :func:`_deferred_message` reads it instead of a table looking it up.
 _LEARN_MESSAGES = {
     LearnDecision.STORED: "Stored a new memory.",
     LearnDecision.REINFORCED: "Reinforced an existing memory.",
     LearnDecision.SUPERSEDED: "Replaced a prior memory.",
     LearnDecision.REJECTED: "Rejected — nothing was stored.",
-    # ASK_USER writes nothing, and there is no memory-confirmation flow yet (memory
-    # decisions are not what `assistant resume` recovers — that is permission action
-    # confirmations, ADR-0052). So say plainly it was not stored and cannot be
-    # confirmed from here, rather than implying a follow-up that does not exist (#422
-    # review).
-    LearnDecision.DEFERRED: "Not stored — this needs review, which cannot be done from here yet.",
     LearnDecision.STORED_TEMPORARILY: "Stored temporarily.",
+}
+
+#: The line a deferral that **cannot** be answered from here keeps — the wording
+#: ``learn`` has carried since #422, retained verbatim for the one arm ADR-0078 does
+#: not close (§1, §10 item 9). ADR-0078 makes it false for a question that *is*
+#: queued, and it stays true for secret-tier data, which ADR-0004 §3 forbids a
+#: durable file: nothing was queued, so there is nothing to answer. Dropping "yet",
+#: which was a promise about a flow that has now arrived for every other arm.
+_NOT_ANSWERABLE = "Not stored — this needs review, which cannot be done from here."
+
+#: What a question in each state means for the user, at the moment ``learn`` tells
+#: them an existing one stood in the way of theirs (ADR-0078 §7). Total over
+#: :class:`~ai_assistant.orchestration.QuestionState` (:func:`_suppressor_message`),
+#: because the three states that can suppress a key each need a *different* sentence:
+#: rendering an interrupted answer as an answerable follow-up would advertise a
+#: question the user cannot act on.
+_SUPPRESSOR_MESSAGES = {
+    QuestionState.OPEN: ("Not stored yet — the same question is already waiting for your answer:"),
+    QuestionState.DECLINED: (
+        "Not stored — you already declined this question. Forget it to be asked again:"
+    ),
+    QuestionState.INTERRUPTED: (
+        "Not stored — an answer to this question was already begun and its outcome was "
+        "never recorded:"
+    ),
+    # A settled question's key no longer speaks for it, so it cannot suppress a fresh
+    # arrival (ADR-0078 §2). These three are unreachable through the queue's own
+    # rules and are given honest lines anyway, rather than a wildcard that would read
+    # as a decision nobody made.
+    QuestionState.APPLIED: "Not stored — a matching question was already answered:",
+    QuestionState.STALE: "Not stored — a matching question went stale:",
+    QuestionState.REDEFERRED: "Not stored — a matching question raised a follow-up:",
 }
 
 
@@ -447,6 +503,85 @@ def beliefs(
 
 
 @app.command()
+def questions(
+    limit: int = typer.Option(
+        50, "--limit", callback=_page_argument, help="How many questions to show at most."
+    ),
+    offset: int = typer.Option(
+        0,
+        "--offset",
+        callback=_page_argument,
+        help="How many questions to skip before the page begins.",
+    ),
+) -> None:
+    """List the questions I need you to answer before I change what I believe.
+
+    Some corrections cannot be applied without your word — most often because what
+    you told me contradicts something you told me earlier, and I may not quietly
+    throw either away. Each question shows what accepting it would have me believe,
+    why I am asking, and exactly what accepting would retire. Answer one with
+    ``assistant answer``.
+
+    A second list follows it where relevant: questions whose answer was **begun and
+    whose outcome was never recorded**, because a process died part-way. I do not
+    know whether those writes landed, so there is nothing to retry — each one says
+    what to do instead.
+
+    There is no total count — ask for the next page to find out whether there is
+    more.
+    """
+    code = asyncio.run(_list_questions(limit=limit, offset=offset))
+    raise typer.Exit(code)
+
+
+@app.command()
+def answer(
+    question_id: str = typer.Argument(..., help="The id of the question to answer."),
+    *,
+    accept: bool = typer.Option(
+        ...,
+        "--accept/--reject",
+        help="Whether to accept the proposed change (--accept) or decline it (--reject).",
+    ),
+) -> None:
+    """Answer one deferred question — accept the change, or decline it.
+
+    Accepting re-submits the proposal through the same gate ``assistant learn`` uses,
+    now carrying your authority for exactly what the question showed you: it may
+    retire an earlier thing you told me, and it may retire nothing else.
+
+    Declining writes nothing and is remembered, so the same question is not put to
+    you again. To change your mind later, forget the question
+    (``assistant forget-question``) and teach me the correction again.
+
+    The answer is binary on purpose. To say something different from either option,
+    use ``assistant learn`` — that is a new correction, not an answer to this one.
+    """
+    code = asyncio.run(_answer_question(question_id, accept=accept))
+    raise typer.Exit(code)
+
+
+@app.command("forget-question")
+def forget_question(
+    question_id: str = typer.Argument(..., help="The id of the question to destroy."),
+) -> None:
+    """Destroy one deferred question, answered or not.
+
+    Use this to dispose of a question whose answer was interrupted — it is the first
+    of the two recovery steps ``assistant questions`` prints, and it is what frees me
+    to ask again about the same thing. Use it too to be re-asked something you
+    declined earlier.
+
+    This destroys the question and the words it holds; it does **not** undo any
+    memory write an interrupted answer may already have made. Check with
+    ``assistant beliefs`` afterwards and use ``assistant learn`` if the correction is
+    missing.
+    """
+    code = asyncio.run(_forget_question(question_id))
+    raise typer.Exit(code)
+
+
+@app.command()
 def observe(
     conversation_id: str | None = typer.Argument(
         None,
@@ -693,6 +828,74 @@ async def _list_beliefs(
 
     try:
         code = await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _list_questions(*, limit: int, offset: int) -> int:
+    """Load settings, build the engine, list the questions, and close it (ADR-0078 §8).
+
+    The deferred-question counterpart to :func:`_list_beliefs`, with the same single
+    error boundary (ADR-0042 §7). The paging arguments were already checked against
+    the store's accepted range at parse time (:func:`_page_argument`), so the one
+    failure that is not an ``AssistantError`` cannot reach here.
+    """
+    try:
+        engine = await _open_engine()
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_questions(engine, limit=limit, offset=offset)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _answer_question(question_id: str, *, accept: bool) -> int:
+    """Load settings, build the engine, answer one question, and close it (§9).
+
+    The same single error boundary every other command has (ADR-0042 §7). The id is
+    relayed untouched: whether it names an open question is the engine's question,
+    and one that does not comes back as an ordinary outcome rather than an error.
+    """
+    try:
+        engine = await _open_engine()
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_answer(engine, question_id, accept=accept)
+    finally:
+        shutdown_code = await _close(engine)
+    return max(code, shutdown_code)
+
+
+async def _forget_question(question_id: str) -> int:
+    """Load settings, build the engine, destroy one question, and close it (§9 step 1).
+
+    **No show-then-confirm ceremony, and that is a deliberate difference from
+    ``forget``/``forget-conversation``.** Those destroy *beliefs* — what the assistant
+    holds about the user — so ADR-0073 §5 requires the thing be rendered before
+    consent is taken. A question is emphatically **not** a belief of any band
+    (ADR-0078 §1): nothing is being un-believed, the correction it holds is one the
+    user can simply re-`learn`, and ADR-0073 §6 names ``DeferralStore.delete`` as
+    exactly the verb for "destroy the record of having been asked". Showing it first
+    would also need a single-question read the façade does not have and ADR-0078 §8
+    does not name, and ``assistant questions`` has already rendered the question
+    together with the two recovery steps this call is step 1 of.
+    """
+    try:
+        engine = await _open_engine()
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    try:
+        code = await _drive_forget_question(engine, question_id)
     finally:
         shutdown_code = await _close(engine)
     return max(code, shutdown_code)
@@ -955,6 +1158,65 @@ async def _drive_observe(engine: Engine, conversation_id: str | None) -> int:
     return _EXIT_OK
 
 
+async def _drive_questions(engine: Engine, *, limit: int, offset: int) -> int:
+    """Ask the façade for the two question lists and render them (ADR-0078 §8).
+
+    **Two calls, two lists, never merged.** An interrupted question is not answerable,
+    so offering it beside the ones that are would present a claim that cannot be
+    taken — which is why the façade keeps two enumerations and why this renders two
+    sections rather than one table with a status column. They are both printed by one
+    command because ADR-0078 §9 makes disposing of a stranded question the user's
+    *first* recovery step, and a step behind a flag nobody knows to pass is a step
+    nobody takes.
+
+    The adapter re-filters nothing, re-orders nothing and reads no clock: membership
+    and order are the store's contract, each row's band was projected in the engine,
+    and every instant shown arrived on the DTO.
+    """
+    try:
+        waiting = await engine.questions(limit=limit, offset=offset)
+        stranded = await engine.interrupted_questions(limit=limit, offset=offset)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_questions(waiting, stranded, limit=limit, offset=offset)
+    return _EXIT_OK
+
+
+async def _drive_answer(engine: Engine, question_id: str, *, accept: bool) -> int:
+    """Relay one answer and render what it did (ADR-0078 §9, ADR-0042 §6).
+
+    The adapter conveys the user's yes/no and renders the engine's outcome; it authors
+    no memory write, mints no authority and reaches no subsystem. A question that is
+    not open is reported and exits non-zero, exactly as an id naming no belief does.
+    """
+    try:
+        outcome = await engine.answer(question_id, accept=accept)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    return _render_answer(outcome)
+
+
+async def _drive_forget_question(engine: Engine, question_id: str) -> int:
+    """Destroy one question and report whether anything was there (ADR-0078 §9)."""
+    try:
+        destroyed = await engine.forget_question(question_id)
+    except AssistantError as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    if not destroyed:
+        console.print("[yellow]Nothing to forget:[/] no question has that id.")
+        return _EXIT_ERROR
+    console.print(
+        "[green]Forgotten.[/] That question is destroyed. If an answer to it was "
+        "already in flight, check 'assistant beliefs' — I cannot tell you whether "
+        "that write landed — and use 'assistant learn' again if the correction is "
+        "missing."
+    )
+    return _EXIT_OK
+
+
 async def _drive_learn(engine: Engine, event: FeedbackEvent) -> int:
     """Submit one feedback event and render what memory did with it (ADR-0042 §3, §6).
 
@@ -1147,6 +1409,11 @@ def _render_learn(outcome: LearnOutcome) -> None:
     engine-supplied data, so it is neutralised for this terminal like any other
     (``_safe``, ADR-0042 §4). Feedback that proposed no update at all is reported as
     such rather than as a silent success.
+
+    A **deferral** gets its line from :func:`_deferred_message`, because since
+    ADR-0078 there is no single honest sentence for one: a question the user can go
+    and answer, a question already asked, a full queue, and secret-tier data that is
+    still not answerable are four outcomes, and the line has to say which.
     """
     if not outcome.results:
         console.print("[dim]Noted — nothing in that needed a memory update.[/]")
@@ -1156,7 +1423,72 @@ def _render_learn(outcome: LearnOutcome) -> None:
         f"({outcome.stored} stored)."
     )
     for summary in outcome.results:
-        console.print(f"  - {_LEARN_MESSAGES[summary.decision]} [dim]({_safe(summary.reason)})[/]")
+        console.print(f"  - {_message_for(summary)} [dim]({_safe(summary.reason)})[/]")
+
+
+def _message_for(summary: IngestSummary) -> str:
+    """The one line describing what became of one proposal (ADR-0078 §10 item 9)."""
+    if summary.decision is LearnDecision.DEFERRED:
+        return _deferred_message(summary.queued)
+    return _LEARN_MESSAGES[summary.decision]
+
+
+def _deferred_message(queued: QueuedQuestion | None) -> str:
+    """What a deferred ruling means for the user, by what the queue did (ADR-0078 §7).
+
+    Four sentences, and the split is the honesty rule this surface is built on. Until
+    ADR-0078 there was one line — "this needs review, which cannot be done from here
+    yet" — and it was true: nothing persisted a deferred proposal, so pointing the
+    user at a follow-up would have implied a flow that did not exist. That line is
+    now **false for the arms ADR-0078 closes** and still **true for the one it does
+    not**, so it is kept for exactly that one:
+
+    * **queued** — the question is waiting; name it and name the verb that answers it.
+      This is the reach that closes issue #423's own scenario: the user submits
+      feedback, is told it is deferred, and is pointed at the answer.
+    * **already asked** — an existing question stands in the way, and *which and in
+      what state* decides what to say (:data:`_SUPPRESSOR_MESSAGES`).
+    * **queue full** — there is no question to name, so the line names the **queue**:
+      answer or clear some of what is waiting, then submit again. Reported rather
+      than swallowed, which is the branch an implementation is most likely to leave
+      silent because nothing raises.
+    * **not queuable** — secret-tier data, which ADR-0004 §3 forbids a durable file,
+      so nothing was queued and there is nothing to answer. It keeps the existing
+      line and the existing reason: one message covering this and the cases above
+      would tell a user to go answer a question that was never asked.
+
+    ``None`` cannot arise for a deferral — the façade attaches a
+    :class:`~ai_assistant.orchestration.QueuedQuestion` to every one — and is
+    rendered as the honest non-answerable line rather than as an answerable one, so a
+    future gap fails safe.
+    """
+    if queued is None:
+        return _NOT_ANSWERABLE
+    match queued.outcome:
+        case QueueOutcome.NOT_QUEUABLE:
+            return _NOT_ANSWERABLE
+        case QueueOutcome.QUEUED:
+            return (
+                f"Not stored yet — I have a question for you: "
+                f"[bold cyan]{_safe(queued.question_id or '')}[/] "
+                f"[dim](see it with: assistant questions)[/]"
+            )
+        case QueueOutcome.ALREADY_ASKED:
+            state = queued.question_state
+            lead = (
+                _SUPPRESSOR_MESSAGES[state]
+                if state is not None
+                else "Not stored — a matching question stands in the way:"
+            )
+            return f"{lead} [bold cyan]{_safe(queued.question_id or '')}[/]"
+        case QueueOutcome.QUEUE_FULL:
+            return (
+                "Not stored — the question queue is full, so this could not be parked. "
+                "Answer or forget some of what is waiting ('assistant questions'), then "
+                "teach me this again."
+            )
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(queued.outcome)
 
 
 def _render_observation(report: ObservationReport) -> None:
@@ -1205,6 +1537,23 @@ def _render_observation(report: ObservationReport) -> None:
     _render_observation_discards(report)
 
 
+def _observed_message(decision: LearnDecision) -> str:
+    """The ruling line for one observed proposal (ADR-0077 §8, ADR-0078 §7).
+
+    :data:`_LEARN_MESSAGES` no longer carries ``DEFERRED``, because the ``learn``
+    surface says which of four things the queue did and reads that off the result. An
+    **observation** cannot: ADR-0078 §7 is explicit that "an observer proposal refused
+    at the cap is reported to the observing stage and no further; what that stage's
+    own result carries is ADR-0077's to decide, not this ADR's to specify from
+    outside", so ``ObservationReport`` is deliberately not widened here and this line
+    claims nothing about the admission. It says only what is true on every branch —
+    nothing was stored, and an answer is owed.
+    """
+    if decision is LearnDecision.DEFERRED:
+        return "Not stored — it needs your answer."
+    return _LEARN_MESSAGES[decision]
+
+
 def _render_observed_proposal(proposal: ObservedProposal) -> None:
     """Render one proposed belief and what the gate did with it.
 
@@ -1216,9 +1565,12 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
     **The citations are printed for whatever the write path did not keep** — a
     deferral, a rejection, a drop. ADR-0077 §4 requires a reported deferral to carry
     "the candidate's content, its citations and the policy's stated reason", and the
-    reason it must be *here* is that nothing persists a deferred proposal: there is
-    no later belief-detail view through which its warrant could be inspected, so
-    this rendering is the only one there will ever be. A **stored** belief is not
+    reason they must be *here* is that no later view resolves them. Since ADR-0078 a
+    deferred proposal **is** persisted and ``assistant questions`` shows its content,
+    the reason it was deferred and what accepting it would retire — but resolving
+    ``Provenance.evidence`` into readable text is ADR-0073 §10's open half of #431,
+    which ADR-0078 §11 deliberately leaves there. So this is still the only rendering
+    of a deferred proposal's *warrant*. A **stored** belief is not
     printed with its evidence, because it has that later view — ``assistant
     beliefs`` lists it and the forget ceremony shows the warrant in full — and
     echoing every episode behind every accepted belief would reprint the transcript
@@ -1241,13 +1593,20 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
         console.print(f"  [yellow]Not stored:[/] {_safe(proposal.reason)}.")
         return
     console.print(
-        f"  [dim]Memory:[/] {_LEARN_MESSAGES[proposal.decision]} [dim]({_safe(proposal.reason)})[/]"
+        f"  [dim]Memory:[/] {_observed_message(proposal.decision)} "
+        f"[dim]({_safe(proposal.reason)})[/]"
     )
     if proposal.decision is LearnDecision.DEFERRED:
+        # Since ADR-0078 the write stage parks this question, so the old note here —
+        # "nothing has recorded this proposal, so it is gone when this command ends"
+        # — became false and had to go (ADR-0019). What replaces it claims nothing
+        # about *which* of the queue's outcomes happened: an observation reports its
+        # refusals to its own stage and no further (ADR-0078 §7), so this report does
+        # not carry the admission and a line asserting "queued" could be wrong where
+        # the queue was full. Pointing at the listing is true either way.
         console.print(
-            "  [yellow]Shown here and nowhere else:[/] nothing has recorded this proposal, "
-            "so it is gone when this command ends. Assert it yourself with "
-            "[bold]assistant learn[/], or forget what it conflicts with."
+            "  [yellow]Waiting on you:[/] I have not stored this. See "
+            "[bold]assistant questions[/] for what needs an answer."
         )
     if proposal.record_id is not None:
         console.print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
@@ -1290,6 +1649,251 @@ def _render_observation_discards(report: ObservationReport) -> None:
         f"{report.discarded_over_limit} over the per-pass limit, "
         f"{report.dropped_unsupported} whose evidence went away before it could be stored.[/]"
     )
+
+
+def _render_questions(
+    waiting: tuple[Question, ...],
+    stranded: tuple[Question, ...],
+    *,
+    limit: int,
+    offset: int,
+) -> None:
+    """Render the answerable questions, then the interrupted ones (ADR-0078 §8).
+
+    Two sections, and the second is never folded into the first. **No total is shown**
+    and none is available: "is there more" is answered by asking for the next page,
+    exactly as the belief and conversation listings answer it.
+    """
+    if not waiting and not stranded:
+        console.print("[dim]Nothing is waiting on your answer.[/]")
+        return
+    if waiting:
+        console.print(f"[bold]{len(waiting)} question(s)[/] waiting on your answer, oldest first.")
+        for question in waiting:
+            _render_question(question)
+        if limit and len(waiting) == limit:
+            console.print(
+                f"\n[dim]That is a full page; there may be more — try --offset {offset + limit}.[/]"
+            )
+    if stranded:
+        console.print(
+            f"\n[bold yellow]{len(stranded)} interrupted answer(s).[/] "
+            "An answer to each of these was begun and its outcome was never recorded."
+        )
+        for question in stranded:
+            _render_question(question)
+
+
+def _render_question(question: Question) -> None:
+    """Render one question with everything ADR-0078 §8 requires it to convey.
+
+    Six things, and each is there because leaving it out would misrepresent what the
+    user is being asked:
+
+    * **what accepting would have the assistant believe**, and the band it *would*
+      enter — worded as a conditional, never as a belief held. A pending question is
+      not a belief of any band (§1), so "would be held as" rather than "is";
+    * **why the user is being asked** — the ruling's own non-optional reason;
+    * **what accepting would retire** (:func:`_render_retirements`), which is not
+      decoration but the exact scope the answer authorises;
+    * **when it was asked and when it stops being answerable**;
+    * for an interrupted question, that an answer was begun and its outcome is not
+      recorded, plus the two recovery steps **in order** — and deliberately not a
+      retry, because the system does not know whether the write landed and a verb
+      implying it does would be the one dishonest line on this surface;
+    * where an interrupted answer already raised a follow-up, that row **rendered by
+      its own state** (:func:`_render_successor`): only a waiting one is something the
+      user can go and answer.
+
+    Engine-supplied text is neutralised for this terminal (``_safe``, ADR-0042 §4).
+    The band, kind and state are this system's own closed vocabularies.
+    """
+    console.print(f"\n  [bold cyan]{_safe(question.id)}[/]")
+    console.print(f"  [bold]{_safe(question.content)}[/]")
+    console.print(
+        f"  [dim]Would be held as:[/] {question.band.value} {question.kind.value} "
+        f"[dim](not held yet — I am asking first)[/]"
+    )
+    console.print(f"  [dim]Why I am asking:[/] {_safe(question.reason)}")
+    console.print(f"  [dim]Proposed because:[/] {_safe(question.rationale)}")
+    _render_retirements(question)
+    console.print(f"  [dim]Asked:[/] {_when(question.asked_at)}")
+    if question.expires_at is None:
+        console.print("  [dim]Answerable:[/] indefinitely")
+    else:
+        console.print(f"  [dim]Answerable until:[/] {_when(question.expires_at)}")
+    if question.state is QuestionState.INTERRUPTED:
+        console.print(
+            "  [yellow]An answer to this was begun and its outcome was never recorded.[/] "
+            "I cannot tell you whether the change landed, so there is nothing to retry."
+        )
+        console.print(f"  [dim]1.[/] Dispose of it: assistant forget-question {_safe(question.id)}")
+        console.print(
+            "  [dim]2.[/] Check 'assistant beliefs', and use 'assistant learn' again if "
+            "the correction is missing."
+        )
+    else:
+        console.print(
+            f"  [dim]Answer with:[/] assistant answer {_safe(question.id)} "
+            f"--accept  [dim]|[/]  --reject"
+        )
+    _render_successor(question)
+
+
+def _render_retirements(question: Question) -> None:
+    """Render exactly what accepting a question would retire (ADR-0078 §8).
+
+    A conflict that has been retired since the question was asked does not resolve
+    and is rendered as **no longer held** rather than omitted: the user should be told
+    that the thing they would be overruling is already gone. Omitting it would
+    understate the answer's scope in one direction and overstate it in the other.
+    """
+    if not question.retires:
+        console.print("  [dim]Accepting would retire:[/] nothing")
+        return
+    console.print("  [dim]Accepting would retire:[/]")
+    for retirement in question.retires:
+        if retirement.content is None:
+            console.print(
+                f"    - [dim]{_safe(retirement.record_id)} — no longer held, so accepting "
+                f"would not touch it[/]"
+            )
+        else:
+            console.print(
+                f"    - {_safe(retirement.content)} [dim]({_safe(retirement.record_id)})[/]"
+            )
+
+
+def _render_successor(question: Question) -> None:
+    """Name the question an answer to this one already raised, with its state (§9).
+
+    Reached where a re-deferral admitted a successor and the answer was then
+    interrupted. **Rendered by the successor's own state**, because naming it without
+    one would be the failure ADR-0078 §9 warns about: only a waiting successor is a
+    question the user can go and answer, while a declined or interrupted one needs its
+    own handling and calling either "the follow-on question" would advertise something
+    they cannot act on.
+    """
+    successor = question.successor
+    if successor is None:
+        return
+    identifier = _safe(successor.id)
+    match successor.state:
+        case QuestionState.OPEN:
+            console.print(
+                f"  [dim]Your answer raised a further question, which is waiting:[/] "
+                f"[bold cyan]{identifier}[/]"
+            )
+        case QuestionState.DECLINED:
+            console.print(
+                f"  [dim]Your answer landed on a question you had already declined:[/] "
+                f"{identifier} [dim](forget it to be asked again)[/]"
+            )
+        case QuestionState.INTERRUPTED:
+            console.print(
+                f"  [dim]Your answer landed on another interrupted answer:[/] {identifier} "
+                f"[dim](dispose of that one too)[/]"
+            )
+        case QuestionState.APPLIED | QuestionState.STALE | QuestionState.REDEFERRED:
+            console.print(
+                f"  [dim]Your answer raised a further question, since settled:[/] {identifier}"
+            )
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(successor.state)
+
+
+def _render_answer(outcome: AnswerOutcome) -> int:
+    """Render what one answer did, and map it to an exit code (ADR-0078 §8, §9).
+
+    Five outcomes, and a **re-deferral is reported as a completed answer** carrying
+    the next question rather than as a failure: the answer was used, it raised
+    something new, and rendering that as "your answer went nowhere" would be the same
+    lie in a smaller place.
+
+    Two facts are reported *alongside* whichever outcome applies, never in place of
+    it. A question destroyed while its answer was being applied is a true statement
+    the user brought about, and what is said about the answer comes from the ingest
+    the engine still held — never inferred from the failed bookkeeping. And a
+    re-deferral that could queue no follow-up at all says so, because calling it
+    "re-deferred" would claim a question was asked when none was.
+    """
+    match outcome.kind:
+        case AnswerKind.APPLIED:
+            console.print(
+                f"[green]Applied.[/] That is what I believe now "
+                f"[dim]({_safe(outcome.record_id or '')})[/]"
+            )
+        case AnswerKind.REJECTED:
+            console.print(
+                "[green]Declined.[/] Nothing was written, and I will not ask you this again "
+                "— forget the question if you want to be asked."
+            )
+        case AnswerKind.STALE:
+            console.print(
+                "[yellow]Not applied.[/] What that question was about no longer applies, so "
+                "accepting it would have stored a belief that was already out of date."
+            )
+        case AnswerKind.NOT_OPEN:
+            console.print(
+                "[yellow]That question is not open.[/] It may never have existed, or it may "
+                "have lapsed, been answered, or have an answer already in flight — "
+                "'assistant questions' lists the ones that are still open."
+            )
+            return _EXIT_ERROR
+        case AnswerKind.REDEFERRED:
+            _render_redeferral(outcome)
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(outcome.kind)
+    if outcome.disposed:
+        console.print(
+            "[dim]Note: that question was destroyed while your answer was being applied, "
+            "so no record of the answer was kept.[/]"
+        )
+    return _EXIT_OK
+
+
+def _render_redeferral(outcome: AnswerOutcome) -> None:
+    """Render an answer that was used and raised a further question (§5a, §9).
+
+    The successor is rendered **by its state**, for :func:`_render_successor`'s reason.
+    Where no successor could be queued at all — the queue was full and this admission
+    had no exemption to spend — the line says exactly that rather than pointing at a
+    question that does not exist.
+    """
+    console.print(
+        "[yellow]Not applied yet.[/] Your answer was used, but it turned out to "
+        "contradict something else you told me that you had not been shown."
+    )
+    successor = outcome.successor
+    if successor is None:
+        if outcome.successor_refused:
+            console.print(
+                "  [yellow]The question queue is full, so I could not put the follow-up to "
+                "you.[/] Answer or forget some of what is waiting, then teach me the "
+                "correction again."
+            )
+        return
+    identifier = _safe(successor.id)
+    match successor.state:
+        case QuestionState.OPEN:
+            console.print(
+                f"  [dim]Here is the follow-up:[/] [bold cyan]{identifier}[/] "
+                f"[dim](assistant answer {identifier} --accept)[/]"
+            )
+        case QuestionState.DECLINED:
+            console.print(
+                f"  [dim]That raises a question you had already declined:[/] {identifier} "
+                f"[dim](forget it to be asked again)[/]"
+            )
+        case QuestionState.INTERRUPTED:
+            console.print(
+                f"  [dim]That raises a question whose own answer was interrupted:[/] "
+                f"{identifier} [dim](dispose of that one first)[/]"
+            )
+        case QuestionState.APPLIED | QuestionState.STALE | QuestionState.REDEFERRED:
+            console.print(f"  [dim]That raises a question already settled:[/] {identifier}")
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(successor.state)
 
 
 def _when(instant: datetime) -> str:

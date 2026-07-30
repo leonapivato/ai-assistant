@@ -36,7 +36,9 @@ from ai_assistant.orchestration import (
     ConversationLifecycle,
     Disposition,
     Engine,
+    MemoryWriteStage,
     ObservationStage,
+    QuestionStage,
     StepExecutor,
     StepRunner,
 )
@@ -47,6 +49,7 @@ from ai_assistant.testing import (
     FakeActionPolicy,
     FakeContextProvider,
     FakeConversationStore,
+    FakeDeferralStore,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -123,10 +126,12 @@ def _make_engine(
     """
     memory = FakeMemoryStore(now=lambda: AT)
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
+    deferrals = FakeDeferralStore(now=lambda: AT)
+    writes = MemoryWriteStage(writer=writer, deferrals=deferrals)
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=writer,
+        writes=writes,
         planner=_OneStepPlanner(),
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
@@ -161,10 +166,11 @@ def _make_engine(
             observer=FakeObserver(),
             conversations=conversations,
             memory=memory,
-            writer=writer,
+            writes=writes,
             batch_size=20,
             route="anthropic:claude-opus-4-8",
         ),
+        questions=QuestionStage(writer=writer, deferrals=deferrals, memory=memory, now=lambda: AT),
         closers=[_aclose(plans.close), _aclose(trail.close)],
     )
 

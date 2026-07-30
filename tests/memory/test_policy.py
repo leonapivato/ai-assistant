@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from memory_policy_contract import MemoryPolicyContract
+from pydantic import ValidationError
 
 from ai_assistant.core.types import (
     DataTier,
@@ -22,6 +23,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     Provenance,
     SemanticMemory,
+    UserConfirmation,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 
@@ -320,3 +322,215 @@ async def test_decision_carries_a_non_blank_reason() -> None:
     decision = await DefaultMemoryPolicy().decide(_proposal(_semantic("new")), conflicts=[])
 
     assert decision.reason.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Rule 3: the confirmation gate (ADR-0078 §5a)                                #
+# --------------------------------------------------------------------------- #
+
+
+def _confirmed(
+    record: MemoryRecord,
+    *,
+    retires: tuple[str, ...],
+    frozen: tuple[str, ...] | None = None,
+) -> MemoryUpdateProposal:
+    """A proposal carrying the authority a claimed answer mints (ADR-0078 §5).
+
+    Built the way the coordinator builds it: the ``conflicts`` the proposal arrives
+    with are the ids the question froze, and the key is that proposal's own. The
+    *policy* verifies none of that — the writer's floor does (ADR-0078 §5b) — so what
+    matters here is only that a confirmation is present and what it names.
+    """
+    proposal = MemoryUpdateProposal(
+        proposed=record,
+        rationale="because",
+        conflicts=retires if frozen is None else frozen,
+    )
+    return proposal.model_copy(
+        update={
+            "confirmation": UserConfirmation(
+                deferral_id="q-1",
+                question_key=proposal.question_key,
+                confirmed_at=_WHEN,
+                retires=retires,
+            )
+        }
+    )
+
+
+async def test_a_confirmed_proposal_supersedes_the_assertion_the_answer_named() -> None:
+    """Step 2, and the whole point of the gate (ADR-0078 §5a).
+
+    The rule that would otherwise re-defer the answer to the question it just asked,
+    forever. It comes ahead of the conflict rules for exactly that reason, and step 1
+    is what keeps that precedence from becoming a blanket override.
+    """
+    prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    proposal = _confirmed(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        retires=("prior",),
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[prior])
+
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "prior"
+
+
+async def test_a_confirmed_proposal_re_defers_on_an_assertion_it_was_never_shown() -> None:
+    """Step 1: an assertion outside the answer's authority blocks the apply.
+
+    Superseding the covered assertion while committing beside the uncovered one is the
+    #245 gap reached by a new path, and extending the user's answer to a record they
+    did not see would forge consent. So the answer becomes a **re-deferral**, and
+    nothing is retired on the way out (ADR-0079 §2: only a ``SUPERSEDE`` retires).
+    """
+    shown = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    unshown = _semantic("surprise", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    proposal = _confirmed(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        retires=("prior",),
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[shown, unshown])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert decision.target_id is None
+
+
+async def test_a_confirmed_proposal_targets_the_assertion_and_not_an_external_record() -> None:
+    """Step 2's qualifier, load-bearing in two directions (ADR-0078 §5a).
+
+    Without "whose source is ``USER_ASSERTED``", a set holding an ``EXTERNAL`` record
+    and an assertion — both named in ``retires``, the external one first — could target
+    the external record: which would adopt ``EXTERNAL`` supersession by accident
+    (still ADR-0045 §5/§7's deferred choice) *and* leave live the assertion the user
+    actually confirmed retiring, because the applier's widening sweeps only
+    supersedable siblings around the named target.
+    """
+    external = _semantic("ext", source=MemorySource.EXTERNAL)
+    prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    proposal = _confirmed(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        retires=("ext", "prior"),
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[external, prior])
+
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "prior", "an EXTERNAL id in `retires` is not acted on"
+
+
+async def test_a_confirmed_proposal_falls_through_and_still_retires_a_stale_inference() -> None:
+    """Step 3 **falls through** rather than accepting (ADR-0078 §5a).
+
+    The wrong reading — "otherwise ``ACCEPT``" — quietly disables the ordinary
+    supersession law for every confirmed proposal: freeze a question over an assertion
+    and an inference, let the assertion be retired or deleted before the answer
+    arrives, and a bare ``ACCEPT`` lands the correction **beside** the stale inference
+    the user just corrected. The confirmed path exists to override the arms that would
+    re-defer an answered question; it has no business overriding the arms ADR-0038
+    entitles an assertion to overturn without asking.
+    """
+    inference = _semantic("stale", source=MemorySource.INFERRED)
+    proposal = _confirmed(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+        retires=("gone",),
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[inference])
+
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert decision.target_id == "stale"
+
+
+async def test_a_confirmed_proposal_with_nothing_live_to_retire_is_accepted() -> None:
+    """Step 3's other fall-through arm: nothing supersedable, so the assertion lands.
+
+    ``retires`` may legitimately be empty — every conflict the user was shown has since
+    gone — and the answer then authorises a write and no retirement. That case must not
+    read as "no confirmation" under a truthiness check, which would re-defer an
+    answered question forever.
+    """
+    proposal = _confirmed(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0), retires=()
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_the_secret_gate_still_precedes_the_confirmed_rule() -> None:
+    """The confirmed rule sits **behind** the admissibility floor (ADR-0078 §5a).
+
+    Putting it first let a ``DataTier.SECRET`` proposal carrying a confirmation reach
+    step 2, rule ``SUPERSEDE``, pass the writer exception, and land secret payload in
+    the ``MemoryStore`` — ADR-0004 §3's "never in the memory database", defeated
+    through the one path built to respect the user's word.
+
+    The pairing is unconstructable through the model (asserted below), so this drives
+    it past the validator: a floor that holds only while a coincidence holds is not a
+    floor, and ADR-0078 wants the ordering stated rather than left to that argument.
+    """
+    prior = _semantic("prior", source=MemorySource.USER_ASSERTED, confidence=1.0)
+    honest = _confirmed(
+        _semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0), retires=("prior",)
+    )
+    bypassed = MemoryUpdateProposal.model_construct(
+        proposed=honest.proposed,
+        rationale=honest.rationale,
+        sensitivity=DataTier.SECRET,
+        conflicts=honest.conflicts,
+        confirmation=honest.confirmation,
+    )
+
+    decision = await DefaultMemoryPolicy().decide(bypassed, conflicts=[prior])
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
+    assert "secret-tier" in decision.reason
+
+
+async def test_a_secret_tier_proposal_cannot_carry_a_confirmation_at_all() -> None:
+    """The other half of the belt and braces (ADR-0078 §1, §5a).
+
+    §1 refuses to queue a secret-tier proposal, so no deferral exists for one, so no
+    confirmation can have been issued for one. That makes the combination a
+    *contradiction* rather than a case — and the model says so, which is what keeps the
+    policy ordering and the writer floor as belt and braces over something already
+    unconstructable.
+    """
+    # Constructed directly rather than through `_confirmed`, which reaches the field
+    # with `model_copy(update=...)` — and that skips validators, which is exactly why
+    # ADR-0078 §5b's check 0 exists at the writer boundary as well.
+    with pytest.raises(ValidationError, match="cannot carry a confirmation"):
+        MemoryUpdateProposal(
+            proposed=_semantic("new", source=MemorySource.USER_ASSERTED, confidence=1.0),
+            rationale="because",
+            sensitivity=DataTier.SECRET,
+            confirmation=UserConfirmation(
+                deferral_id="q-1",
+                question_key="0" * 64,
+                confirmed_at=_WHEN,
+                retires=("prior",),
+            ),
+        )
+
+
+async def test_a_confirmed_derived_proposal_citing_nothing_is_still_rejected() -> None:
+    """The floor's *other* ruling is not skippable either (ADR-0078 §5a).
+
+    Both of the floor's rulings are properties of the proposal alone and neither
+    commits anything, so nothing a confirmation says can make either safe to skip. This
+    arm cannot arise on the honest path — a derived belief citing nothing is rejected at
+    its first ingest, so it is never deferred and never confirmed — but the ordering is
+    stated rather than left to that argument.
+    """
+    proposal = _confirmed(
+        _semantic("new", source=MemorySource.INFERRED, evidence=()), retires=("prior",)
+    )
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[])
+
+    assert decision.kind is MemoryDecisionKind.REJECT

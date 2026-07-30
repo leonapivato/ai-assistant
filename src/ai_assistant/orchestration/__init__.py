@@ -48,6 +48,20 @@ conversation-scoped deletion, reclaiming what retention has emptied, and
 composing the export a user receives. ADR-0074 §9's coordinator ruling puts those
 here precisely because neither store may hold the other (golden rule 1).
 
+``MemoryWriteStage`` is the **write stage** (ADR-0078 §3): the one place a proposal
+reaches memory. It holds the ratified ``MemoryWriter`` *and* the ``DeferralStore``,
+so an ``ASK_USER`` ruling's question is parked durably instead of vanishing when the
+proposal goes out of scope — the drop issue #423 reports, closed by a wiring choice
+rather than by a new writer. Every producer's stage (``LearningLoop``,
+``ObservationStage``) writes through it rather than through a ``MemoryWriter`` handle
+of its own, which is the one obligation ADR-0078 §3 places on this lane.
+
+``QuestionStage`` is the **answer path** (ADR-0078 §8, §9): it enumerates the
+questions waiting, and the separate list of those whose answer was begun and never
+recorded, then runs ``claim`` → ``ingest`` → ``resolve`` to commit an answer. It is
+the *only* producer of a ``UserConfirmation``, and only from a deferral it has
+claimed — the one authority in this system that has never been delegable.
+
 ``ObservationStage`` is the **observation stage** (ADR-0077 §8), the second such
 two-store owner: it selects a bounded batch of a conversation's recent episodes,
 hands them to the injected ``Observer``, and puts every proposal that comes back
@@ -74,6 +88,8 @@ from ai_assistant.orchestration.engine import (
     IngestSummary,
     LearnDecision,
     LearnOutcome,
+    QueuedQuestion,
+    QueueOutcome,
     StepOutcome,
     TurnOutcome,
     presented_confidence,
@@ -85,9 +101,21 @@ from ai_assistant.orchestration.observation import (
     ObservationStage,
     ObservedProposal,
 )
+from ai_assistant.orchestration.questions import (
+    AnswerKind,
+    AnswerOutcome,
+    Question,
+    QuestionStage,
+    QuestionState,
+    Retirement,
+    SuccessorLink,
+)
 from ai_assistant.orchestration.runner import Disposition, StepDisposition, StepRunner
+from ai_assistant.orchestration.writes import MemoryWriteStage, WriteOutcome
 
 __all__ = [
+    "AnswerKind",
+    "AnswerOutcome",
     "AssembledHistory",
     "Belief",
     "CaptureReport",
@@ -104,14 +132,23 @@ __all__ = [
     "LearnDecision",
     "LearnOutcome",
     "LearningLoop",
+    "MemoryWriteStage",
     "ObservationReport",
     "ObservationStage",
     "ObservedProposal",
+    "Question",
+    "QuestionStage",
+    "QuestionState",
+    "QueueOutcome",
+    "QueuedQuestion",
+    "Retirement",
     "StepDisposition",
     "StepExecutor",
     "StepOutcome",
     "StepRunner",
+    "SuccessorLink",
     "TurnOutcome",
     "TurnResult",
+    "WriteOutcome",
     "presented_confidence",
 ]

@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ConversationStore,
         MemoryStore,
-        MemoryWriter,
         Observer,
     )
     from ai_assistant.core.types import (
@@ -50,6 +49,7 @@ if TYPE_CHECKING:
         MemorySource,
         MemoryUpdateProposal,
     )
+    from ai_assistant.orchestration.writes import MemoryWriteStage
 
 #: What :attr:`ObservedProposal.reason` says for a proposal the write path refused
 #: because the evidence it cited no longer resolves (ADR-0077 §5). The stage's own
@@ -378,7 +378,7 @@ class ObservationStage:
         observer: Observer,
         conversations: ConversationStore,
         memory: MemoryStore,
-        writer: MemoryWriter,
+        writes: MemoryWriteStage,
         batch_size: int,
         route: str,
     ) -> None:
@@ -387,7 +387,8 @@ class ObservationStage:
         Three obligations no type can express, so each is the composition root's
         (ADR-0028 §4's shape, applied three times):
 
-        * **``memory`` must be the store ``writer`` persists to**, and the store
+        * **``memory`` must be the store the write stage's writer persists to**,
+          and the store
           ``conversations`` names episodes in. Wired to a second store, the batch
           would be selected from records the write path cannot cite and every
           proposal would be refused for unresolved evidence.
@@ -414,12 +415,17 @@ class ObservationStage:
                 the most recently active conversation, and a conversation's most
                 recent turns.
             memory: Long-term memory, read to resolve each turn's episode. The same
-                store ``writer`` persists to.
-            writer: The memory write path — conflicts, the policy's ruling and the
-                write in one call. It holds the policy; this stage does not, and
-                must not: "the model proposes, a deterministic policy disposes" is
-                only true while the component selecting the batch cannot also rule
-                on what comes back (ADR-0005 §3, ADR-0075 §2).
+                store the write stage's writer persists to.
+            writes: The orchestration **write stage** — the memory write path
+                (conflicts, the policy's ruling and the write in one call) plus the
+                durable queue an ``ASK_USER`` ruling parks its question in
+                (ADR-0078 §3). It holds the policy; this stage does not, and must
+                not: "the model proposes, a deterministic policy disposes" is only
+                true while the component selecting the batch cannot also rule on
+                what comes back (ADR-0005 §3, ADR-0075 §2). It is the *stage* rather
+                than a ``MemoryWriter`` of this stage's own because a producer's
+                stage holding the writer directly would silently lose the queue —
+                the second producer honouring ADR-0078 §3's one obligation.
             batch_size: How many of a conversation's most recent turns one pass
                 reads. A **maximum, not a quota**: a window containing a turn whose
                 episode no longer resolves yields a shorter batch rather than
@@ -435,7 +441,7 @@ class ObservationStage:
         self._observer = observer
         self._conversations = conversations
         self._memory = memory
-        self._writer = writer
+        self._writes = writes
         self._batch_size = batch_size
         self._route = route
 
@@ -597,9 +603,13 @@ class ObservationStage:
                 quantifier as "every id was in the batch" would swallow exactly the
                 fault this discrimination exists to surface.
             MemoryStoreError: As the writer raises.
+            DeferralStoreError: If a deferred question could not be parked. An
+                observer's proposals reach nobody in the moment, so ADR-0078 §7
+                promises this path nothing beyond reporting the failure to its own
+                stage — which propagating does.
         """
         try:
-            result = await self._writer.ingest(proposal)
+            outcome = await self._writes.write(proposal)
         except UnresolvedEvidenceError as exc:
             unresolved = frozenset(exc.unresolved_ids)
             if not unresolved or not unresolved <= batch.keys():
@@ -607,7 +617,7 @@ class ObservationStage:
             evidence = self._evidence(proposal, batch=batch, unresolved=unresolved)
             return ObservedProposal.unsupported(proposal, evidence)
         evidence = self._evidence(proposal, batch=batch, unresolved=frozenset())
-        return ObservedProposal.ruled(proposal, result, evidence)
+        return ObservedProposal.ruled(proposal, outcome.result, evidence)
 
     @staticmethod
     def _evidence(

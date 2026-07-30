@@ -39,10 +39,11 @@ from ai_assistant.core.types import (
     TimeOfDay,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor, SqliteMemoryStore
-from ai_assistant.orchestration import LearningLoop
+from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
 from ai_assistant.planning import InMemoryPlanStore, PlanExecution
 from ai_assistant.testing import (
     FakeContextProvider,
+    FakeDeferralStore,
     FakeEmbedder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
@@ -174,7 +175,10 @@ async def _learning_loop(now: Clock) -> None:
     await LearningLoop(
         context=FakeContextProvider(),
         memory=memory,
-        writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
+        writes=MemoryWriteStage(
+            writer=FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: _AWARE),
+            deferrals=FakeDeferralStore(now=lambda: _AWARE),
+        ),
         planner=FakePlanner(now=lambda: _AWARE),
         feedback=FakeFeedbackProcessor(),
         now=now,
