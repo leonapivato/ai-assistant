@@ -390,6 +390,33 @@ def test_a_sidecar_that_was_already_there_is_restricted_at_open(tmp_path: Path) 
 
 
 @pytest.mark.integration
+def test_a_symlink_under_a_sidecar_name_is_left_alone(tmp_path: Path) -> None:
+    """The restriction narrows this store's own files, and only those (#501's review).
+
+    ``chmod`` follows symlinks and ``os.chmod(follow_symlinks=False)`` is unsupported
+    on Linux, so a link planted under a sidecar's name would otherwise make the open
+    silently set ``0600`` on a file holding none of this store's data — adding owner
+    write to something deliberately read-only, or breaking a file another program
+    reads. Skipping it exposes nothing extra: SQLite would follow the same link when
+    it opened the sidecar for real, so a directory an adversary can write to is
+    already past ADR-0004 §4 by a route this method could not close.
+
+    Asserted for one store rather than five: the five copies of the loop are pinned
+    by the ``-wal``/``-shm`` case each module carries, and this is a property of the
+    rule, not of any one store.
+    """
+    path = tmp_path / "conversations.db"
+    unrelated = tmp_path / "not-ours.txt"
+    unrelated.write_text("held by something else")
+    unrelated.chmod(0o644)
+    Path(f"{path}-wal").symlink_to(unrelated)
+
+    SqliteConversationStore(path=path, now=_fixed_now).close()
+
+    assert _mode_of(unrelated) == 0o644
+
+
+@pytest.mark.integration
 async def test_what_was_written_survives_a_reopen(tmp_path: Path) -> None:
     """The whole point of the persistent store: an id keeps working across a restart."""
     path = tmp_path / "conversations.db"
