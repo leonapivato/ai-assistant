@@ -1296,3 +1296,57 @@ async def test_a_declined_question_must_be_forgotten_before_it_is_asked_again() 
     assert reversed_.admission.outcome.value == "admitted"
     [asked_again] = await harness.questions.questions()
     assert asked_again.id != question_id
+
+
+async def test_a_proposal_mutated_mid_ingest_cannot_change_what_is_queued() -> None:
+    """ADR-0065 at the write stage, and the hole it closes is a credential (§1).
+
+    The tier check and the queued snapshot both happen *after* the ingest returns, so
+    an unsnapshotted stage reads the caller's object across an await. A model tampered
+    past ``frozen=True`` is inside this repository's threat model (ADR-0018 §3,
+    ADR-0021 §4) — it is the very threat check 0 exists for — and the writer's own
+    snapshot protects the *writer*, not this stage.
+
+    So: rule on a secret, flip ``sensitivity`` to ``PERSONAL`` while the ingest is in
+    flight, and let it return. An unsnapshotted stage queues the credential — ADR-0004
+    §3's "never in a database", reached through the one filter written to prevent it.
+    """
+    harness = Harness()
+    gated = _GatedWriter(harness.writer)
+    stage = MemoryWriteStage(writer=gated, deferrals=harness.deferrals)
+    secret = _proposal("secret-1", "the api key is hunter2", sensitivity=DataTier.SECRET)
+
+    writing = asyncio.ensure_future(stage.write(secret))
+    await gated.entered.wait()
+    object.__setattr__(secret, "sensitivity", DataTier.PERSONAL)  # past `frozen=True`
+    gated.proceed.set()
+    outcome = await writing
+
+    assert outcome.result.decision.kind is MemoryDecisionKind.ASK_USER
+    assert outcome.admission is None, "the tier the writer ruled on is the tier queued"
+    assert await harness.deferrals.export() == []
+
+
+async def test_a_content_mutation_mid_ingest_cannot_change_the_queued_question() -> None:
+    """The same window, seen on the ordinary path (ADR-0065).
+
+    Not only the tier: the whole snapshot is built after the await, so a mutation
+    landing there would park a question about words the policy never ruled on — and
+    the user would be asked to confirm something nobody proposed.
+    """
+    harness = Harness()
+    gated = _GatedWriter(harness.writer)
+    stage = MemoryWriteStage(writer=gated, deferrals=harness.deferrals)
+    await harness.memory.add(_record("live-1", _LISBON))
+    submitted = _proposal("new-1", _LISBON)
+
+    writing = asyncio.ensure_future(stage.write(submitted))
+    await gated.entered.wait()
+    object.__setattr__(submitted, "rationale", "something else entirely")
+    gated.proceed.set()
+    outcome = await writing
+
+    assert outcome.admission is not None
+    parked = outcome.admission.deferral
+    assert parked is not None
+    assert parked.proposal.rationale == "the user said so", "the version that was ruled on"
