@@ -47,6 +47,15 @@ if TYPE_CHECKING:
 
 _OWNER_ONLY = 0o600
 
+#: The sidecars SQLite may keep beside a database file. Each holds the same pages
+#: the database does, so ADR-0004 §4 reaches them too. SQLite copies the database
+#: file's mode onto a sidecar **it creates**, which is what makes restricting the
+#: file before the first statement sufficient for those — but that inheritance does
+#: not reach one that is *already there*: a ``-journal`` left behind by a crash, or
+#: a ``-wal``/``-shm`` from a process that put this file into WAL mode, keeps its
+#: own mode across a reopen and then takes Tier 1 pages (#490).
+_SIDECARS = ("-journal", "-wal", "-shm")
+
 
 async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     """Run ``fn`` in a worker thread, holding on until it *physically* finishes (ADR-0054).
@@ -268,6 +277,16 @@ class SqliteAuditTrail:
             msg = f"failed to open the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         try:
+            # Restricted *before* the first statement, not after the schema is
+            # built and migrated. SQLite copies the database file's mode onto every
+            # rollback journal it creates for it, so a journal opened while the
+            # file still carried the process umask is world-readable too — and an
+            # interrupted write leaves it on disk holding Tier 1 pages (ADR-0004
+            # §1, §4). The `BEGIN IMMEDIATE` below is exactly such a write, and
+            # `_migrate` inside it can rewrite the whole table. `connect` creates
+            # the file, so there is something to restrict by the time this runs
+            # (#489; the four other SQLite stores have the same ordering).
+            self._restrict_permissions()
             # `BEGIN IMMEDIATE` takes the write lock before the schema is
             # inspected, so the whole of create/migrate/index is **serialised
             # against another process opening the same file** — the same guard
@@ -292,8 +311,6 @@ class SqliteAuditTrail:
                     # back with it, leaving an untouched legacy database rather
                     # than one falsely labelled current.
                     conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
-            if self._path != ":memory:":
-                Path(self._path).chmod(_OWNER_ONLY)
         except AuditError:
             # A migration reporting a corrupt legacy row is already this layer's
             # error; it still leaves a connection to close before it propagates.
@@ -304,6 +321,25 @@ class SqliteAuditTrail:
             msg = f"failed to initialise the audit trail at {self._path!r}: {exc}"
             raise AuditError(msg) from exc
         return conn
+
+    def _restrict_permissions(self) -> None:
+        """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
+
+        A missing sidecar is the ordinary case rather than a fault — :data:`_SIDECARS`
+        names every file SQLite *may* keep, and a cleanly closed database has none of
+        them — so absence is tolerated one name at a time. Nothing else is: a sidecar
+        this process cannot restrict is a Tier 1 file it is about to write through, so
+        that failure propagates and the open fails.
+
+        A no-op in memory, where there is no file to restrict.
+        """
+        if self._path == ":memory:":
+            return
+        database = Path(self._path)
+        database.chmod(_OWNER_ONLY)
+        for suffix in _SIDECARS:
+            with contextlib.suppress(FileNotFoundError):
+                database.with_name(database.name + suffix).chmod(_OWNER_ONLY)
 
     def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
         """Refuse a labelled schema this code cannot read; say whether one is labelled.

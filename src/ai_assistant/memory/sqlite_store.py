@@ -55,6 +55,14 @@ _RESULT_OVERFETCH = 8
 # against — 4096 is the lower, operative ceiling, reached at ``limit > 512``.
 _VEC_KNN_MAX_K = 4096
 _OWNER_ONLY = 0o600
+#: The sidecars SQLite may keep beside a database file. Each holds the same pages
+#: the database does, so ADR-0004 §4 reaches them too. SQLite copies the database
+#: file's mode onto a sidecar **it creates**, which is what makes restricting the
+#: file before the first statement sufficient for those — but that inheritance does
+#: not reach one that is *already there*: a ``-journal`` left behind by a crash, or
+#: a ``-wal``/``-shm`` from a process that put this file into WAL mode, keeps its
+#: own mode across a reopen and then takes Tier 1 pages (#490).
+_SIDECARS = ("-journal", "-wal", "-shm")
 #: One past the largest value ``list_beliefs`` accepts for ``limit``/``offset``:
 #: the signed 64-bit ceiling a SQLite bind parameter tops out at (ADR-0073 §2).
 _PAGE_BOUND = 2**63
@@ -353,8 +361,23 @@ class SqliteMemoryStore:
                 raise MemoryStoreError(msg)
 
     def _restrict_permissions(self) -> None:
-        if self._path != ":memory:":
-            Path(self._path).chmod(_OWNER_ONLY)
+        """Make the database file and any sidecar beside it owner-only (ADR-0004 §4).
+
+        A missing sidecar is the ordinary case rather than a fault — :data:`_SIDECARS`
+        names every file SQLite *may* keep, and a cleanly closed database has none of
+        them — so absence is tolerated one name at a time. Nothing else is: a sidecar
+        this process cannot restrict is a Tier 1 file it is about to write through, so
+        that failure propagates and the open fails.
+
+        A no-op in memory, where there is no file to restrict.
+        """
+        if self._path == ":memory:":
+            return
+        database = Path(self._path)
+        database.chmod(_OWNER_ONLY)
+        for suffix in _SIDECARS:
+            with contextlib.suppress(FileNotFoundError):
+                database.with_name(database.name + suffix).chmod(_OWNER_ONLY)
 
     async def _embed_one(self, text: str) -> Embedding:
         """Embed a single text, mapping any embedder misbehaviour to our error.
