@@ -1642,6 +1642,12 @@ def test_observe_renders_a_deferral_in_full_and_points_at_the_question_surface(
     assert "Not stored" in rendered
     assert "gone when this command ends" not in rendered, "that claim is false since ADR-0078"
     assert "assistant questions" in rendered, "the surface names where the answer is owed"
+    # And it does **not** claim this proposal is on that list. The report does not
+    # carry the admission — ADR-0078 §7 keeps an observer's refusals at the observing
+    # stage "and no further", and widening the report is ADR-0077's call, not this
+    # lane's — so a parked question and a full queue look identical from here. The
+    # line therefore names both outcomes rather than promising the first.
+    assert "if this one is not there, the queue was full" in rendered
 
 
 def test_observe_reports_a_proposal_the_write_path_refused_for_lost_evidence(

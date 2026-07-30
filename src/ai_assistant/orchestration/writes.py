@@ -228,12 +228,28 @@ class MemoryWriteStage:
                 surfaces rather than being swallowed: a correction the user typed is
                 neither silently dropped nor half-written.
         """
-        result = await self._writer.ingest(proposal)
+        # One observation of the caller's proposal, on this coroutine's first
+        # executed line — before the ingest, which is this method's first await
+        # (ADR-0065). Everything below reads only this copy, exactly as
+        # `MemoryIngestor.ingest` does and for a sharper version of its reason.
+        #
+        # The tier check and the queued snapshot are **both** taken after the ingest
+        # returns, so reading the caller's object there would read it across an
+        # await. `MemoryUpdateProposal` is frozen, but a model tampered past
+        # `frozen=True` is inside this repository's threat model (ADR-0018 §3,
+        # ADR-0021 §4) — it is the very threat check 0 exists for — and the writer's
+        # own snapshot protects the writer, not this stage. Flip `sensitivity` from
+        # `SECRET` to `PERSONAL` while the ingest is in flight and an unsnapshotted
+        # stage rules on the secret (correctly, `ASK_USER`) and then queues the
+        # credential: ADR-0004 §3's "never in a database", reached through the one
+        # filter written to prevent it.
+        observed = proposal.model_copy(deep=True)
+        result = await self._writer.ingest(observed)
         if result.decision.kind is not MemoryDecisionKind.ASK_USER:
             return WriteOutcome(result=result)
-        if proposal.sensitivity is DataTier.SECRET:
+        if observed.sensitivity is DataTier.SECRET:
             return WriteOutcome(result=result)
-        snapshot = proposal.model_copy(update={"conflicts": result.conflicts, "confirmation": None})
+        snapshot = observed.model_copy(update={"conflicts": result.conflicts, "confirmation": None})
         admission = await admit_question(
             self._deferrals,
             id_factory=self._id_factory,

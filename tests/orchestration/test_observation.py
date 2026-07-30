@@ -30,7 +30,9 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    DeferralAdmissionOutcome,
     EpisodicMemory,
+    MemoryDecision,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
@@ -816,3 +818,51 @@ def _proposal_citing(record_id: str, evidence: tuple[str, ...]) -> MemoryUpdateP
         ),
         rationale="the batch supports this",
     )
+
+
+async def test_an_observed_deferral_against_a_full_queue_is_reported_and_raises_nothing() -> None:
+    """ADR-0078 §7's refused branch, on the path that has nobody watching.
+
+    "An observer proposal refused at the cap is reported to the observing stage and no
+    further; what that stage's own result carries is ADR-0077's to decide, not this
+    ADR's to specify from outside." So the report is **not** widened to carry the
+    admission — and this pins both halves of that: the pass still reports the proposal
+    and its deferred ruling, and nothing raises, so a full queue neither loses the
+    observation nor turns it into an error.
+
+    It is also the input the surface has to stay honest about: from a report that does
+    not carry the admission, a parked question and a full queue look identical, so a
+    line asserting "go answer this" would be false here (see the CLI's own case).
+    """
+    harness = Harness(
+        observer=FakeObserver([ObservedBelief(content="first", record_id="rec-1")]),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.ASK_USER),
+    )
+    # A cap of one, already spent by a question this pass did not raise.
+    harness.deferrals = FakeDeferralStore(now=lambda: AT, queue_limit=1)
+    harness.writes = MemoryWriteStage(writer=harness.writer, deferrals=harness.deferrals)
+    harness.stage._writes = harness.writes
+    filler = await harness.deferrals.defer(
+        deferral_id="already-asked",
+        proposal=MemoryUpdateProposal(
+            proposed=EpisodicMemory(
+                id="filler",
+                content="something else entirely",
+                occurred_at=AT,
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                ),
+            ),
+            rationale="a question that already holds the only slot",
+        ),
+        decision=MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="fake: the user decides"),
+    )
+    assert filler.outcome is DeferralAdmissionOutcome.ADMITTED
+    conversation = await harness.conversation_with(2)
+
+    report = await harness.stage.observe(conversation)
+
+    assert len(report.proposals) == 1, "the observation is reported, not lost"
+    assert report.proposals[0].decision is LearnDecision.DEFERRED
+    assert report.stored == 0
+    assert len(await harness.deferrals.pending()) == 1, "the cap held; nothing new was parked"

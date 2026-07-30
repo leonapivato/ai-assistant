@@ -1597,16 +1597,23 @@ def _render_observed_proposal(proposal: ObservedProposal) -> None:
         f"[dim]({_safe(proposal.reason)})[/]"
     )
     if proposal.decision is LearnDecision.DEFERRED:
-        # Since ADR-0078 the write stage parks this question, so the old note here —
-        # "nothing has recorded this proposal, so it is gone when this command ends"
-        # — became false and had to go (ADR-0019). What replaces it claims nothing
-        # about *which* of the queue's outcomes happened: an observation reports its
-        # refusals to its own stage and no further (ADR-0078 §7), so this report does
-        # not carry the admission and a line asserting "queued" could be wrong where
-        # the queue was full. Pointing at the listing is true either way.
+        # Since ADR-0078 the write stage usually parks this question, so the old note
+        # here — "nothing has recorded this proposal, so it is gone when this command
+        # ends" — became false and had to go (ADR-0019).
+        #
+        # What replaces it must claim nothing about *which* of the queue's outcomes
+        # happened, and must not read as though it did. An observation's refusals are
+        # "reported to the observing stage and no further" (ADR-0078 §7), so this
+        # report deliberately does not carry the admission — widening it is ADR-0077's
+        # call, not this lane's — which means a full queue and a parked question look
+        # identical from here. So the line **names both**: pointing at the listing
+        # while implying this proposal is on it would be a promise this adapter cannot
+        # keep, and staying silent would drop ADR-0078 §8's reach 2, which is the only
+        # reach an observer-raised question has.
         console.print(
-            "  [yellow]Waiting on you:[/] I have not stored this. See "
-            "[bold]assistant questions[/] for what needs an answer."
+            "  [yellow]Not stored:[/] this needs your answer. "
+            "[bold]assistant questions[/] lists what is waiting — and if this one is "
+            "not there, the queue was full, so clear some of it and observe again."
         )
     if proposal.record_id is not None:
         console.print(f"  [dim]id:[/] {_safe(proposal.record_id)}")
