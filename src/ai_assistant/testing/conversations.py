@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -110,6 +111,26 @@ def _check_page_bound(name: str, value: object, *, floor: int = 0) -> None:
         raise ValueError(msg)
 
 
+@dataclass(slots=True)
+class _Exclusion:
+    """One conversation's mutation lock, and how many callers still need it.
+
+    The pair travels together so the two halves cannot be created or discarded
+    apart, which is the whole safety property :meth:`FakeConversationStore._exclusive`
+    depends on (#453).
+
+    Attributes:
+        lock: The mutation exclusion for one conversation id.
+        holders: How many callers are between entering ``_exclusive`` and leaving
+            it — waiting on the lock included. While it is above zero the entry
+            must not be discarded, because a caller arriving now has to be handed
+            *this* lock and not a fresh one.
+    """
+
+    lock: asyncio.Lock
+    holders: int = 0
+
+
 def _by_last_activity(conversations: list[Conversation]) -> list[Conversation]:
     """ADR-0074 §2's total order: ``last_active_at`` descending, ``id`` ascending.
 
@@ -189,7 +210,9 @@ class FakeConversationStore:
         self._turns: dict[str, list[ConversationTurn]] = {}
         self._by_episode: dict[str, ConversationTurn] = {}
         self._by_binding: dict[ParkedBinding, ConversationTurn] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        #: One entry per conversation currently being mutated, and only those:
+        #: :meth:`_exclusive` discards an entry once nobody holds it (#453).
+        self._locks: dict[str, _Exclusion] = {}
         self._start_lock = asyncio.Lock()
 
     # --- internals -----------------------------------------------------------
@@ -219,11 +242,37 @@ class FakeConversationStore:
         anything, so a second mutation of the same conversation really has to
         queue. Remove the lock and the shared suite's ordinal, serialisation and
         reclaim-race cases fail here rather than passing vacuously.
+
+        **The lock is taken before the body checks whether the id names anything**,
+        and that ordering is the reason a lock cannot simply be created on demand
+        and dropped on the way out: it is what stops a concurrent ``stamp_deleted``
+        and ``append`` both observing the conversation as live. So the entry is
+        reference-counted instead, and discarded only once nobody is left between
+        entering here and leaving (#453) — otherwise a long-running or fuzzing
+        process grows ``_locks`` for every id it was ever *asked* about, dropped
+        conversations and typos included.
+
+        Counting is safe without any lock of its own because the loop is
+        single-threaded and there is **no ``await`` between reading the entry and
+        incrementing it**: a caller that arrives while another is inside finds
+        ``holders`` above zero, so it finds that caller's lock object rather than a
+        second one. Handing two waiters two different locks for one id is the one
+        failure this fake must not have — the exclusion would go on being
+        *acquired* and silently stop *excluding*.
         """
-        lock = self._locks.setdefault(conversation_id, asyncio.Lock())
-        async with lock:
-            await asyncio.sleep(0)
-            yield
+        exclusion = self._locks.get(conversation_id)
+        if exclusion is None:
+            exclusion = _Exclusion(asyncio.Lock())
+            self._locks[conversation_id] = exclusion
+        exclusion.holders += 1
+        try:
+            async with exclusion.lock:
+                await asyncio.sleep(0)
+                yield
+        finally:
+            exclusion.holders -= 1
+            if not exclusion.holders:
+                del self._locks[conversation_id]
 
     def _live(self, conversation_id: str) -> Conversation:
         """Return a conversation that exists and is not stamped, or raise.
