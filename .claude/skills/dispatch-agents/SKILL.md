@@ -73,8 +73,12 @@ An under-specified brief is the largest source of rework. Each one carries:
   stale tree is not evidence, and Codex reads the working tree for context, so a
   stale branch makes it report other lanes' merged work as regressions.
 
-Say what the report must contain: PR number, what was verified and at which
-commit, what was waived and why, what was filed.
+The report contract itself lives in `worker.md` — do not restate it in the brief.
+What the brief owes it is **completeness**: a worker treats a missing fence, or a
+missing ADR number where the change needs one, as a STOP rather than as
+permission, because it cannot tell an omission from a deliberate blank. That is
+the cheapest place an under-specified brief gets caught, and it only works if you
+write every section rather than leaving the obvious ones implied.
 
 ## 3. Verify every report — assume nothing
 
@@ -90,12 +94,24 @@ gh pr view <n> --json comments --jq '.comments[].body' | grep -c "ship:$sha"
 ```
 
 `mergeStateStatus: BEHIND` means it was never gated against current `main`.
-Scope claims ("no `core/` change") are one command to confirm and have been
-wrong. The last line is the one nothing else covers: green CI and a clean diff
-say nothing about whether `just review-codex` and `just ship` ever ran, and a
-report claiming both is not evidence that either did. `ship.sh` tags its comment
-with the SHA it reviewed, so no tag for the current head means no review of the
-current head.
+The last line is the one nothing else covers: green CI and a clean diff say
+nothing about whether `just review-codex` and `just ship` ever ran, and a report
+claiming both is not evidence that either did. `ship.sh` tags its comment with the
+SHA it reviewed, so no tag for the current head means no review of the current
+head.
+
+**Check scope as a list against a list, not by eye.** `worker.md` requires the
+report to paste `git diff --name-only origin/main...HEAD`, so compare that against
+the fence you wrote and against `gh pr diff <n> --name-only`. Reading the diff and
+judging whether it "looks in scope" is the version of this check that has been
+wrong; two lists disagreeing is not.
+
+**Spend your attention on the right fields.** The gate's pytest line and the
+worker's own `gh pr checks` paste are provenance — `gh pr checks` above supersedes
+them, and the pytest line matters only as evidence the gate ran locally *before*
+the push, which CI cannot show. The fields that carry weight are the file list,
+the `ship:$sha` tag, the artifact verdict, the issue numbers, and what the worker
+says it did not do.
 
 **Before merging, diff the open PRs against each other** — two lanes editing one
 file is invisible in either PR alone:
@@ -122,6 +138,35 @@ resolve opposite ways when the governing authority differs — one structural
 finding against `CONTRIBUTING.md` was correctly overruled and the next correctly
 upheld. A skill that pre-decided them would be wrong half the time with full
 confidence.
+
+A STOP report carries the resolution the worker would take (`worker.md`), so most
+adjudications are a yes or a no rather than a re-brief. Rule on *that* — and where
+you overrule it, say which authority overrules it, because the worker read the
+same texts and will otherwise reach the same conclusion again.
+
+### Resume the lane; do not restart it
+
+A subagent has no channel to ask mid-run, so a STOP ends the run — but it does not
+end the *lane*. The clone still holds the branch, the commits, and the draft PR
+with the pre-flight in its description.
+
+- **Prefer `SendMessage` to the same agent.** Its context is intact: it knows its
+  clone, its fence, what it has already built, and why it stopped. A ruling plus
+  "continue" is a few hundred tokens.
+- **A fresh worker re-pays everything** — both standards documents, the issue, the
+  ADRs, its own pre-flight — before it writes a line. That is the expensive path,
+  so take it only when you must.
+- **You must, once the agent is unreachable** (a session restart loses its id). Then
+  the brief has to say it is *continuing, not starting*: the clone, the existing
+  branch and its HEAD, what is already committed and pushed, the PR number, and
+  the ruling. Without that, a worker following its own instructions branches from
+  `origin/main` in a clone that is neither on `main` nor clean, and either trips
+  the freshness test in §1 or quietly builds on the wrong base.
+
+An aborted lane that will not be resumed still needs releasing — §5's last step
+applies, except `git cherry` will show its commits as unmerged, which is the
+signal to close the PR and decide deliberately whether the work is discarded or
+becomes an issue. Then reset the clone so §1 sees it as free.
 
 ## 5. Merge
 
