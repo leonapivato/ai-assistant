@@ -8,6 +8,7 @@ is held to the same contract as ``SqliteConversationStore``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -20,10 +21,10 @@ from conversation_store_contract import (
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.testing import FakeConversationStore
-from ai_assistant.testing.cancellation import settle
+from ai_assistant.testing.cancellation import SuspendedMidWrite, settle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.protocols import ConversationStore
 
@@ -79,6 +80,27 @@ class TestFakeConversationStoreContract(ConversationStoreContract):
     @pytest.fixture
     def purge_default(self) -> int:
         return _PURGE_DEFAULT
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_mid_write(
+        self,
+    ) -> AsyncIterator[SuspendedMidWrite[ConversationStore]]:
+        """The fake models the resource it does not really own (ADR-0060 §3).
+
+        Dicts need no serialising, so without this the canonical fake could only opt
+        out — and ADR-0060's case would run solely against the ``sqlite3`` store,
+        the implementation that already holds the invariant. Every mutation passes
+        through the *one* modelled resource, so ``arm`` ignores which operation it
+        is handed: the parametrised cases (#370) exercise the same ``held()`` path
+        here and earn their keep on the ``sqlite3`` store, where each operation is a
+        separate lock site. Nothing to dispose of, hence the bare yield.
+        """
+        store = FakeConversationStore(now=_fixed_now)
+        yield SuspendedMidWrite(
+            store=store,
+            log=store.resource_log,
+            arm=lambda _operation: store.suspend_next_write(),
+        )
 
 
 async def test_no_lock_is_kept_for_a_conversation_the_store_does_not_hold() -> None:

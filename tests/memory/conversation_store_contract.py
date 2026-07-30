@@ -29,19 +29,22 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import FIRST_TURN_ORDINAL, ParkedBinding
+from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
+    from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import ConversationTurn
+    from ai_assistant.testing.cancellation import SuspendedMidWrite
 
 #: The instant every store fixture's clock starts at.
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -67,6 +70,12 @@ _INTERLEAVED = (
     "two mutations of one conversation interleaved: the store's per-conversation "
     "exclusion is not holding, so an append, an activity mark, a deletion stamp "
     "and a reclaim can each act on state another has already replaced"
+)
+
+#: What a failure of the cancellation case below means (ADR-0060 §3).
+_RELEASED_EARLY = (
+    "the cancelled call released its resource while its own work was still "
+    "running, so a second caller reached it before the first had finished"
 )
 
 
@@ -210,6 +219,193 @@ async def _stamp_many(store: ConversationStore, count: int) -> list[str]:
     for conversation in started:
         assert await store.stamp_deleted(conversation.id) is True
     return sorted(one.id for one in started)
+
+
+class _CancellationOp(Protocol):
+    """One locked ``ConversationStore`` mutation ADR-0060's case drives.
+
+    Every ``async with self._lock`` site is a separate place the resource could be
+    handed over early (#370), so the same cancelled-first / concurrent-second
+    scenario runs against each rather than only against ``append``. :meth:`first`
+    and :meth:`second` act on two *independent* subjects, because the clause's
+    third paragraph makes the cancelled call's effect indeterminate to the caller
+    — under ADR-0054's shield a cancelled write that reached its commit is durably
+    written — so only the second's outcome is assertable.
+    """
+
+    name: str
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Establish anything the operation needs before it can run."""
+        ...
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """The call the case suspends mid-write and then cancels."""
+        ...
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        ...
+
+    async def verify(self, store: ConversationStore) -> None:
+        """Assert the resource survived: the second call is whole and reads work."""
+        ...
+
+
+class _PairedOp:
+    """Two independent conversations, and one locked mutation driven against each."""
+
+    name = ""
+
+    def __init__(self) -> None:
+        self.left = ""
+        self.right = ""
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Start the two conversations the two calls act on."""
+        self.left = (await store.start()).id
+        self.right = (await store.start()).id
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """The call the case suspends mid-write and then cancels."""
+        raise NotImplementedError
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """The concurrent call barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, store: ConversationStore) -> None:
+        """Assert the resource survived."""
+        raise NotImplementedError
+
+
+class _StartOp(_PairedOp):
+    """``start`` — a locked mutation like the rest, and the only one with no subject."""
+
+    name = "start"
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Nothing to seed: ``start`` mints its own subject."""
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Mint a conversation — the call that is cancelled."""
+        return store.start()
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Mint another concurrently."""
+        return store.start()
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The concurrent conversation is there and every record still decodes."""
+        assert await store.recent(), "the concurrent start should have landed a conversation"
+
+
+class _MarkActiveOp(_PairedOp):
+    """``mark_active`` — ADR-0074 §9.4's activity stamp, its own lock site."""
+
+    name = "mark_active"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Mark the left conversation active — the call that is cancelled."""
+        return store.mark_active(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Mark the right one active concurrently."""
+        return store.mark_active(self.right)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """Both records are still readable, the concurrent one above all."""
+        assert await store.get(self.right) is not None
+        assert await store.get(self.left) is not None
+
+
+class _AppendOp(_PairedOp):
+    """``append`` — the ordinal allocation and the derived id, in one transaction."""
+
+    name = "append"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Record a turn on the left conversation — the call that is cancelled."""
+        return store.append(self.left, occurred_at=_NOW)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Record a turn on the right one concurrently."""
+        return store.append(self.right, occurred_at=_NOW)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The concurrent turn is whole and enumerable; the cancelled one is all-or-nothing.
+
+        Checked through the purge walk as well as through :meth:`turns`, because a
+        half-written turn that the reader shows and the sweep cannot find is the
+        shape that would leave an episode undestroyable (ADR-0074 §8).
+        """
+        recorded = await store.turns(self.right)
+        assert [turn.ordinal for turn in recorded] == [FIRST_TURN_ORDINAL]
+        assert recorded[0].episode_id.startswith(_EPISODE_PREFIX)
+        assert await store.episodes_to_purge(self.right) == [recorded[0].episode_id]
+        cancelled = await store.turns(self.left)
+        assert [turn.ordinal for turn in cancelled] in ([], [FIRST_TURN_ORDINAL])
+        assert [turn.episode_id for turn in cancelled] == await store.episodes_to_purge(self.left)
+
+
+class _StampDeletedOp(_PairedOp):
+    """``stamp_deleted`` — ADR-0074 §8's tombstone, its own lock site."""
+
+    name = "stamp_deleted"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Stamp the left conversation deleted — the call that is cancelled."""
+        return store.stamp_deleted(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Stamp the right one concurrently."""
+        return store.stamp_deleted(self.right)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """The concurrent stamp landed whole: withheld from reads *and* enumerable."""
+        assert await store.get(self.right) is None
+        assert self.right in await store.stamped_conversation_ids()
+
+
+class _DropIfEligibleOp(_PairedOp):
+    """``drop_if_eligible`` — a locked mutation whether or not it drops anything.
+
+    The two subjects are deliberately left **ineligible**. The hook builds its own
+    store with the implementation's own durations, and neither the suite nor the
+    hook can step a clock across the seam :class:`SuspendedMidWrite` exposes — but
+    that costs this case nothing, because eligibility is judged *inside* the
+    transaction the lock site opens, so an ineligible drop enters and holds the
+    resource exactly as an eligible one does. What a drop *does* is pinned by the
+    reclaim and tombstone cases above; what is pinned here is the resource.
+    """
+
+    name = "drop_if_eligible"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Try to reclaim the left conversation — the call that is cancelled."""
+        return store.drop_if_eligible(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Try to reclaim the right one concurrently."""
+        return store.drop_if_eligible(self.right)
+
+    async def verify(self, store: ConversationStore) -> None:
+        """Neither was eligible, so both records survive and reads still work."""
+        assert await store.get(self.right) is not None
+        assert {one.id for one in await store.recent()} >= {self.left, self.right}
+
+
+#: Every locked ``ConversationStore`` *mutation* ADR-0060's case is run against:
+#: each is a distinct ``async with self._lock`` site (#370). The locked *read*
+#: paths are the same invariant on a different axis and are tracked separately,
+#: as ``MemoryStore``'s are under #397.
+_CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
+    _StartOp,
+    _MarkActiveOp,
+    _AppendOp,
+    _StampDeletedOp,
+    _DropIfEligibleOp,
+)
 
 
 class ConversationStoreContract:
@@ -1315,3 +1511,109 @@ class ConversationStoreContract:
         """§7: ``None`` disables reclaim; zero is not a spelling for it."""
         with pytest.raises(ValueError, match="retention"):
             _build(factory, retention=timedelta(0))
+
+    # --- cancellation (ADR-0060) ---------------------------------------------
+
+    #: Whether this implementation acquires nothing whose safety outlives the
+    #: coroutine — no connection, lock, spawned task, file handle or transaction a
+    #: ``CancelledError`` could unwind past. ``core.protocols``' clause is then
+    #: vacuously satisfied and there is nothing for the case below to observe.
+    #: Left ``False``, the suite requires the implementation to *prove* the
+    #: invariant by overriding :meth:`store_suspended_mid_write`, so a new durable
+    #: backend that reintroduces ADR-0054's bug fails here rather than passing a
+    #: suite that never looked. Opting out is a visible declaration in the subclass.
+    acquires_no_shared_resource: bool = False
+
+    def store_suspended_mid_write(
+        self,
+    ) -> AbstractAsyncContextManager[SuspendedMidWrite[ConversationStore]]:
+        """Supply a store whose named locked mutation can be stopped *inside* its resource.
+
+        Override unless :attr:`acquires_no_shared_resource` is set. ADR-0074 §9.5
+        binds this store to ``core.protocols``' standing cancellation clause like
+        every other Protocol, and ADR-0060 §3 is explicit that asserting only that
+        ``CancelledError`` escapes is worthless — the *pre*-ADR-0054 code did that
+        correctly and released the connection anyway. So the case cancels a call
+        while it is held open inside the resource and watches what a second caller
+        can reach.
+
+        The returned :class:`SuspendedMidWrite` carries the store, its
+        ``ResourceLog``, and an ``arm(operation)`` lever the case calls — *after*
+        its preconditions, so a fake arming its single resource suspends the
+        operation under test rather than a setup write. Every distinct
+        ``async with self._lock`` site is a separate place the same regression can
+        reappear (#370), so ``arm`` is where the implementation says how it stops a
+        given one: a worker thread parked mid-SQL, a fake's modelled resource.
+
+        The ``ResourceLog`` is not redundant with the blocked-caller assertion. That
+        one is decisive only where queueing is loop-bound; a store whose work runs
+        on an executor can leave a second call pending for reasons that have nothing
+        to do with the resource, and the log settles it directly.
+        """
+        raise NotImplementedError
+
+    @pytest.mark.optional_obligation
+    @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
+    async def test_a_cancelled_mutation_holds_its_resource_until_the_work_finishes(
+        self, make_op: Callable[[], _CancellationOp]
+    ) -> None:
+        """``core.protocols``' cancellation clause, on every locked mutation (ADR-0074 §9.5).
+
+        A cancelled mutation must not hand the resource to the next caller while the
+        work it started is still using it. The second call is what makes this a test
+        of the invariant rather than of propagation: a single cancelled call in
+        isolation looks identical either way (ADR-0060 §3).
+
+        The first call's *effect* is deliberately not asserted (the op's ``verify``
+        pins only what a caller may rely on): the clause's third paragraph makes it
+        indeterminate, since under ADR-0054's shield a cancelled write that reached
+        its commit is durably written. What is pinned is that the second call is
+        whole and the store still serves reads.
+        """
+        if self.acquires_no_shared_resource:
+            pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
+
+        op = make_op()
+        async with self.store_suspended_mid_write() as harness:
+            store = harness.store
+            await op.prepare(store)
+            # Armed *after* the preconditions, so a fake arming its one resource
+            # suspends the operation under test rather than a setup write.
+            suspended = harness.arm(op.name)
+            visited_before = harness.log.visits
+
+            first = asyncio.ensure_future(op.first(store))
+            second: asyncio.Task[object] | None = None
+            try:
+                await suspended.reached()
+                first.cancel()
+                await settle()
+
+                second = asyncio.ensure_future(op.second(store))
+                await settle()
+                assert not second.done(), _RELEASED_EARLY
+
+                # Again, because deferring *one* cancellation is not the contract: a
+                # second delivered while the deferred wait runs must not escape and
+                # unwind out of the resource either (ADR-0054's helper loops on
+                # ``while not done.is_set()`` for exactly this).
+                first.cancel()
+                await settle()
+                assert not second.done(), _RELEASED_EARLY
+            finally:
+                suspended.release()
+
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert second is not None
+            await second
+
+            # Decisive where the blocked-caller check above is not: the two calls
+            # were never inside the resource at once. A delta, because a fake's
+            # preconditions pass through the same logged resource.
+            assert not harness.log.overlapped, _RELEASED_EARLY
+            assert harness.log.visits - visited_before == 2, (
+                "both calls should have reached the resource by now"
+            )
+
+            await op.verify(store)
