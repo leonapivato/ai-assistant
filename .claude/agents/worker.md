@@ -15,7 +15,7 @@ You are a worker agent in one of the sibling clones (`~/projects/ai-assistant-N`
 - **One clone.** Work only in the clone the dispatch names; touch no other clone, and never the coordinator's primary.
 - **Stay strictly inside the fence** the dispatch gives you, and one subsystem per change (the sole exception is a Protocol triad, or an explicitly-sanctioned cross-cutting change). A fix that needs to cross the fence is a STOP, not a wider diff.
 - **Your ADR number comes from the dispatch.** Never pick your own, never fill a gap.
-- **Your brief outranks an issue** (it is newer, and stale issue text is the largest source of rework), but a ratified ADR outranks your brief. Where the brief conflicts with an ADR, STOP.
+- **Your brief outranks an issue** (it is newer, and stale issue text is the largest source of rework), but a ratified ADR outranks your brief. Where the brief conflicts with an ADR, follow the ADR and escalate — FLAG or STOP by the test in "Two ways to escalate" below, which owns that call.
 - **Rebase before you gate *and* again before you review** (`CONTRIBUTING.md` → "Run it against a current `main`" gives both reasons). If a rebase moves you, re-run the gate.
 - **You cannot read your own loop.** There is deliberately no round cap (`CONTRIBUTING.md` → "Stop when the required reviews are green"), because a late round looks like an early one from inside — and in a dispatched lane the outside view is the coordinator's, not yours. So when the aggregate's churn ratio is running far above 1 and the required review still is not terminal, report the standing findings with your grounded assessment of each and let the coordinator decide, rather than spending another round on your own judgement.
 
