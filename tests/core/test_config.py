@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 
+import numpy
 import pytest
 from pydantic import ValidationError
 from pydantic_ai.models import known_model_names
@@ -757,7 +759,7 @@ def test_load_settings_rejects_a_non_positive_deferral_queue_limit(
         load_settings()
 
 
-# --- a flag is not a count: every integer setting refuses a bool (#471) -----
+# --- a flag is not a count: every integer setting refuses a non-integer (#471) ---
 #
 # Discovered from the model rather than listed, so a new `int` field is covered
 # the day it is added instead of the day someone remembers this file. A field
@@ -826,9 +828,43 @@ def test_every_integer_setting_refuses_a_bool(name: str, value: bool) -> None:
 
 
 @pytest.mark.parametrize("name", _INTEGER_FIELDS)
+@pytest.mark.parametrize(
+    "value",
+    [
+        # A flag that is not a `bool`. `numpy.bool_` is a direct dependency here
+        # (ADR-0024's embedder) and is *not* a `bool` subclass, so a guard written
+        # as a denylist of `bool` would let it through to the same coerced `1` —
+        # the very failure #471 is about, one type name away. This case is why the
+        # guard is an allowlist of what an integer setting may be.
+        numpy.bool_(True),
+        numpy.bool_(False),
+        # Numerics that convert without being integers. The layers below already
+        # refuse these — `RetryPolicy` checks `type(...) is not int`, and
+        # `_check_batch_size` refuses a float rather than comparing it — so
+        # accepting them here would leave the same one-layer inconsistency #471
+        # exists to end, just on a different axis.
+        1.0,
+        Decimal(1),
+        numpy.int64(1),
+    ],
+)
+def test_every_integer_setting_refuses_a_convertible_non_integer(name: str, value: object) -> None:
+    """Only an exact ``int`` or a ``str`` is an integer setting; nothing else is coerced.
+
+    The companion to the ``bool`` case above, and the reason the guard names what
+    it accepts rather than what it refuses: ``bool`` is not the only type pydantic
+    would turn into a plausible ``1``, so a denylist would have to grow a case for
+    every foreign scalar and would be wrong until it did.
+    """
+    with pytest.raises(ValidationError, match="expected an integer"):
+        _settings_with(name, value)
+
+
+@pytest.mark.parametrize("name", _INTEGER_FIELDS)
 def test_every_integer_setting_still_accepts_its_own_default(name: str) -> None:
-    """The bool refusal narrows nothing else: a real integer is still a real integer."""
+    """The refusal narrows nothing legitimate: a real integer is still a real integer."""
     default = Settings.model_fields[name].default
+    assert type(default) is int
     assert getattr(_settings_with(name, default), name) == default
 
 
@@ -836,14 +872,14 @@ def test_every_integer_setting_still_accepts_its_own_default(name: str) -> None:
 def test_every_integer_setting_still_parses_from_the_environment(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
-    """The operator-facing path is untouched, which rules out a strict-type guard.
+    """The operator-facing path is untouched, and this is what keeps it so.
 
     #471 is reachable only from untyped code constructing ``Settings`` directly —
-    ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails int parsing at load —
-    so the fix must refuse ``bool`` and nothing else. An implementation that
-    demanded an exact ``int`` (as ``_split_model_specs`` does for its own,
-    different reason) would break *every* integer setting in the environment,
-    where values arrive as strings.
+    ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails int parsing at load.
+    So the guard accepts a ``str`` alongside an exact ``int``: an environment
+    variable and a ``.env`` entry both arrive as one, and a guard that demanded an
+    exact ``int`` and nothing else would break *every* integer setting in every
+    deployment while fixing a seam no deployment can reach.
     """
     default = Settings.model_fields[name].default
     monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(default))
