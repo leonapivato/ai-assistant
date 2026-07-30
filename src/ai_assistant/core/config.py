@@ -196,12 +196,12 @@ def _split_model_specs(value: object) -> object:
 _ModelSpec = Annotated[str, AfterValidator(_model_spec_is_well_formed)]
 
 
-def _not_a_flag(value: object) -> object:
-    """Refuse a ``bool`` where an integer setting is expected.
+def _exactly_an_integer(value: object) -> object:
+    """Refuse a value that is not an integer but would be coerced into one.
 
     pydantic's non-strict ``int`` coercion accepts ``True`` as ``1`` because
     ``bool`` is an ``int`` subclass, so ``Settings(observation_batch_size=True)``
-    loads a one-item batch instead of refusing a flag where a count belongs — and
+    loaded a one-item batch instead of refusing a flag where a count belongs — and
     every bound the field carries (``ge``, ``le``, ``lt``) is satisfied by the
     ``1`` that arrives, so nothing downstream can tell the difference.
 
@@ -216,13 +216,39 @@ def _not_a_flag(value: object) -> object:
     under it already state, rather than leaving it the one layer that does not
     (issue #471).
 
+    An **allowlist of the two forms an integer setting is ever supplied in**, not
+    a denylist of ``bool``, and that is load-bearing: ``bool`` is not the only type
+    that converts to an integer while meaning something else. ``numpy.bool_`` is a
+    flag by any reading and is *not* a ``bool`` subclass, so a denylist named after
+    ``bool`` would let ``np.bool_(True)`` through to the same ``1`` — and ``numpy``
+    is a direct dependency here (ADR-0024's embedder), so that is a value this
+    codebase can actually produce. Naming what is accepted closes the class
+    completely, where a denylist would have to grow a case for every foreign
+    scalar; the same allowlist reasoning, for the same reason, as
+    :func:`_split_model_specs`.
+
+    The two forms:
+
+    - An **exact** ``int``. Exact, not ``isinstance``, because every value this
+      refuses — ``bool``, and any other ``int`` subclass whose instances mean
+      something other than their integer value — is precisely an ``isinstance``
+      match. A ``float``, a ``Decimal``, and a foreign numeric scalar are refused
+      with it, which is what the layers below already do: ``RetryPolicy`` checks
+      ``type(self.max_attempts) is not int``, and ``_check_batch_size`` refuses a
+      ``float`` "rather than compared, since a non-integral limit reaches
+      ``ConversationStore.turns`` and fails far from the mistake".
+    - A ``str``, which is what an environment variable and a ``.env`` entry are;
+      it falls through to the field's ordinary parsing, so the operator-facing
+      path is untouched. ``isinstance`` rather than exact here, deliberately: the
+      string is *re-parsed* into an integer rather than trusted for its identity,
+      so a subclass can misrepresent nothing by being one — unlike a ``str``
+      subclass in :func:`_split_model_specs`, which can override the ``split``
+      the fallback order rests on.
+
     **Reachable only from untyped code constructing** :class:`Settings`
-    **directly** — the same reachability :func:`_split_model_specs`' exact-type
-    guard was written for (#359). The operator-facing path is unaffected in both
-    directions: ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails int
-    parsing at load, and this refuses only ``bool`` and leaves every other value
-    to the field's ordinary validation, so an environment variable and a ``.env``
-    entry still arrive as a ``str`` and are still parsed as one.
+    **directly**, the same reachability :func:`_split_model_specs`' guard was
+    written for (#359): ``ASSISTANT_OBSERVATION_BATCH_SIZE=True`` already fails
+    int parsing at load, so no environment or ``.env`` value reaches this.
 
     Args:
         value: The raw configured value.
@@ -231,20 +257,34 @@ def _not_a_flag(value: object) -> object:
         ``value`` unchanged, for the field's own validation to judge.
 
     Raises:
-        ValueError: If ``value`` is a ``bool``.
+        ValueError: If ``value`` is neither an exact ``int`` nor a ``str``.
     """
+    # The allowlist below already refuses a ``bool`` — it is not an exact ``int``.
+    # This branch changes the *message*, not the outcome: ``bool`` is the case
+    # #471 was filed for and the one the four layers below name in their own
+    # errors, so it is worth saying in their words rather than as one more
+    # unaccepted type.
     if isinstance(value, bool):
         msg = f"expected an integer, got the flag {value!r}: a flag is not a count"
         raise ValueError(msg)
-    return value
+    if type(value) is int or isinstance(value, str):
+        return value
+    msg = (
+        f"expected an integer or its decimal spelling, got a {type(value).__name__} "
+        f"({value!r}); only an exact int or a str is accepted, so nothing that merely "
+        f"converts to an integer — a foreign boolean scalar, a float, a Decimal — is "
+        f"silently coerced into one"
+    )
+    raise ValueError(msg)
 
 
-#: An integer-valued setting, which a ``bool`` is not: see :func:`_not_a_flag`.
+#: An integer-valued setting: an exact ``int``, or the ``str`` an operator spells
+#: one as. See :func:`_exactly_an_integer` for what it refuses and why.
 #: Applied to **every** ``int``-typed field on :class:`Settings`, including the two
 #: hour-of-day ordinals, because the defect is a property of the type rather than
 #: of any one field and fixing a subset would leave the model inconsistent with
 #: itself (#471). ``tests/core/test_config.py`` pins that coverage per field.
-_IntegerSetting = Annotated[int, BeforeValidator(_not_a_flag)]
+_IntegerSetting = Annotated[int, BeforeValidator(_exactly_an_integer)]
 
 
 class EmbedderKind(StrEnum):
