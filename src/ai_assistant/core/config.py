@@ -27,7 +27,7 @@ from pydantic import (
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from ai_assistant.core.errors import ConfigurationError
-from ai_assistant.core.types import Reversibility, RiskLevel
+from ai_assistant.core.types import Reversibility, RiskLevel, describe_untrusted
 
 #: The string an operator sets a setting to in the environment to select its
 #: ``None`` value — "disable this entirely". Environment variables arrive as
@@ -265,15 +265,26 @@ def _exactly_an_integer(value: object) -> object:
     # errors, so it is worth saying in their words rather than as one more
     # unaccepted type.
     if isinstance(value, bool):
-        msg = f"expected an integer, got the flag {value!r}: a flag is not a count"
+        msg = (
+            f"expected an integer, got the flag {describe_untrusted(value)}: a flag is not a count"
+        )
         raise ValueError(msg)
     if type(value) is int or isinstance(value, str):
         return value
+    # `describe_untrusted` rather than `!r`, for both the value and its type: this
+    # branch is reached by *arbitrary* objects, and a `__repr__` that raises would
+    # otherwise replace the `ValueError` pydantic turns into a `ValidationError`
+    # with whatever it threw — the diagnostic destroying the diagnosis, which is
+    # the promise that helper exists to keep. Pydantic renders such an input as
+    # "<unprintable X object>" on its own, so without this the guard would be the
+    # only thing in the chain that could not survive being told about it. The bool
+    # branch above cannot be reached by one — `bool` has two values and a final
+    # type — but uses the same helper so this function has one rule, not two.
     msg = (
-        f"expected an integer or its decimal spelling, got a {type(value).__name__} "
-        f"({value!r}); only an exact int or a str is accepted, so nothing that merely "
-        f"converts to an integer — a foreign boolean scalar, a float, a Decimal — is "
-        f"silently coerced into one"
+        f"expected an integer or its decimal spelling, got {describe_untrusted(value)} "
+        f"of type {describe_untrusted(type(value))}; only an exact int or a str is "
+        f"accepted, so nothing that merely converts to an integer — a foreign boolean "
+        f"scalar, a float, a Decimal — is silently coerced into one"
     )
     raise ValueError(msg)
 
