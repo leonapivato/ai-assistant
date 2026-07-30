@@ -25,18 +25,32 @@ Read the fence, the issue text, and the governing ADRs against `origin/main`, th
 
 **Put it in the draft PR description**, as the first thing that PR carries — you are opening the draft at this same moment anyway (see "Finishing"). Not in your report alone: the PR outlives your run and the coordinator's session, so the reasoning stays legible weeks later, and a lane that stops on a STOP leaves behind *why* instead of taking it with it.
 
-Then proceed without waiting — **unless** the pre-flight hits one of the STOPs below. Catching one here costs minutes instead of an hour. Skip the pre-flight only for a purely mechanical lane against a settled contract.
+Then proceed without waiting — **unless** the pre-flight hits one of the STOPs below. Catching one here costs minutes instead of an hour, and this is where nearly all of them are catchable: a fence that cannot hold the work, a contract you would have to change, a premise that does not survive contact with `origin/main`. Skip the pre-flight only for a purely mechanical lane against a settled contract.
 
-## STOP and report, rather than guessing
+## Two ways to escalate: FLAG or STOP
 
-- A fix needs to cross your fence.
-- A `core/protocols.py` or `core/types.py` change you were not explicitly told to make (golden rule 5 — that needs its own ratified ADR merged first).
-- A design fork the ADRs do not settle.
-- Your brief conflicts with a ratified ADR.
+Pick by one test: **is proceeding under your own best reading safe?** If it is, FLAG and keep working. If it is not — because the ground may not be yours, or because no reading of the texts settles it — STOP. Defaulting everything to STOP is its own failure: `CONTRIBUTING.md` → "Report the review, then mark it ready" is explicit that an agent does not stop to ask, and that what warrants stopping is narrow.
+
+### FLAG — decide, proceed, and surface it
+
+Make the call, do the work, and record it in **both** the PR description and your report: what you decided, and why. No waiting; nobody needs to read a FLAG while you run, which is the point of it being a FLAG.
+
+- **Method.** You own *how*. Where the brief prescribes an approach and you judge a better one inside your fence, take the better one and say so — blind compliance with a worse plan is not obedience, it is a worse change. What the brief owns is scope and boundaries, not technique.
+- **A brief that contradicts a ratified ADR, where the ADR plainly governs and following it does not reshape the lane.** The hierarchy already decides this (`dispatch-agents` §4: ADRs and the golden rules > `CONTRIBUTING.md` > a reviewer; a brief outranks neither, so a brief that conflicts with one is the coordinator's error, not yours to follow). Follow the ADR and flag it. If following it *does* change the lane's shape or its exit criteria, that is a STOP instead.
+- **Any assumption you had to make** to keep moving on an ambiguity the texts do not resolve but that does not change the shape of the work.
+
+### STOP — halt and report
+
+- **A fix needs to cross your fence.** Never widen it and flag it afterwards: the fence exists because another lane may own that ground, and nothing mechanical detects two lanes colliding. Widening is the coordinator's call, always.
+- **A `core/protocols.py` or `core/types.py` change you were not explicitly told to make** (golden rule 5 — that needs its own ratified ADR merged first).
+- **A design fork the ADRs do not settle.**
+- **The task itself is wrong.** The brief rests on a false premise about the code, the work is already done, the acceptance criteria cannot be met as scoped, or this is plainly several lanes presented as one. `CONTRIBUTING.md` names discovering the task was wrong as legitimate grounds to stop; doing the wrong work well is the most expensive outcome available to you.
 - **The brief is missing something you need.** No fence, or no ADR number where the change plainly needs one, is a STOP — **not a permission**. You cannot tell "unrestricted" from "the coordinator forgot," and the two produce very different work. Likewise if the ADR number you were given is already taken by the time you write the file: you may never pick your own.
-- The review is not converging — churn ratio far above 1, required review still not terminal.
+- **The review is not converging** — churn ratio far above 1, required review still not terminal.
 
-**Every STOP report carries the resolution you would take, and why.** State the conflict, then state what you would do if told to proceed — the reading you think the ADRs support, the fence you think the work actually needs, the number you would use. The authority hierarchy (`dispatch-agents` §4: ADRs and the golden rules > `CONTRIBUTING.md` > a reviewer, and a brief outranks neither) usually determines the answer, so you generally know it; what you lack is the standing to act unilaterally. Reporting the answer with the problem turns the coordinator's reply into a yes or no instead of a fresh brief.
+**Every STOP report carries the resolution you would take, and why.** State the problem, then state what you would do if told to proceed — the reading you think the ADRs support, the fence you think the work actually needs, the number you would use. You generally know the answer; what you lack is the standing to act on it unilaterally. Reporting it with the problem turns the coordinator's reply into a yes or no instead of a fresh brief.
+
+Most of both lists should surface in the pre-flight, before you have written anything — that is what the pre-flight is for.
 
 ## Finishing
 
