@@ -9,10 +9,13 @@ permissions subsystem's internals* (CLAUDE.md golden rule 1).
 Both are held to their Protocol's shared conformance suite, which is what stops
 a fake drifting from the contract it stands in for.
 
-``FakeAuditTrail`` appends through a
+``FakeAuditTrail`` writes through a
 :class:`~ai_assistant.testing.cancellation.SuspendableResource` so it is a real
 subject for the cancellation clause ``core.protocols`` states (ADR-0060), rather
-than an implementation the obligation cannot reach.
+than an implementation the obligation cannot reach. **Every** mutating method
+enters it — ``record`` and ``clear`` alike — because the clause is stated per
+locked write, so a write that skipped the resource would be one the case could
+only opt out of (#396).
 """
 
 from __future__ import annotations
@@ -152,7 +155,8 @@ class FakeAuditTrail:
     :meth:`record`'s checks and its append are separated by no interleaving
     point, which is how the atomicity ADR-0021 §4 requires is obtained on a
     single event loop: two concurrent resolutions of one ``CONFIRM`` cannot both
-    observe an unresolved question. The append runs inside a
+    observe an unresolved question. The append — and :meth:`clear`, the other
+    locked write — runs inside a
     :class:`~ai_assistant.testing.cancellation.SuspendableResource` so the fake
     is a subject for ADR-0060's cancellation clause, and that does not weaken the
     argument: acquiring an uncontended :class:`asyncio.Lock` does not suspend, so
@@ -166,7 +170,10 @@ class FakeAuditTrail:
         self._resource = SuspendableResource()
 
     def suspend_next_write(self) -> LoopSuspension:
-        """Hold the next :meth:`record` open inside the trail.
+        """Hold the next write — :meth:`record` or :meth:`clear` — open inside the trail.
+
+        There is one modelled resource and both writes enter it, so this suspends
+        whichever of them is called next rather than a named operation.
 
         The hook ``AuditTrailContract``'s cancellation case takes (ADR-0060 §3).
         Test-only, and not part of the ``AuditTrail`` contract: the Protocol
@@ -429,9 +436,21 @@ class FakeAuditTrail:
         return [decision.model_copy(deep=True) for decision in self._ordered()]
 
     async def clear(self) -> int:
-        """Delete every decision, returning the number removed."""
-        removed = len(self._decisions)
-        self._decisions.clear()
+        """Delete every decision, returning the number removed.
+
+        The body runs inside the modelled resource for the reason :meth:`record`'s
+        does — it is the second locked write, and ADR-0060's clause is stated per
+        lock site — and for one of its own: the count returned must describe the
+        deletion that actually happened. Sizing the dict outside the resource and
+        emptying it inside would let a concurrent ``clear`` land between the two
+        and let both callers report removing the same entries.
+
+        Matches ``FakePlanStore.clear`` and ``FakeMemoryStore.clear``, which
+        already model it this way (#396).
+        """
+        async with self._resource.held():
+            removed = len(self._decisions)
+            self._decisions.clear()
         return removed
 
     def _ordered(self) -> list[PermissionDecision]:

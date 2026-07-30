@@ -28,12 +28,10 @@ if TYPE_CHECKING:
 class TestFakeAuditTrailContract(AuditTrailContract):
     """Runs FakeAuditTrail through the shared AuditTrail conformance suite."""
 
-    # ``FakeAuditTrail.clear`` empties a dict without entering the modelled
-    # resource its ``record`` uses, so the cancellation case has nothing to
-    # suspend on it — unlike the ``sqlite3`` trail, whose ``clear`` takes the
-    # connection lock and is exercised. Tracked in #396 (route the fake's ``clear``
-    # through the resource, as ``FakePlanStore``/``FakeMemoryStore`` already do).
-    operations_without_shared_resource = frozenset({"clear"})
+    # No ``operations_without_shared_resource`` opt-out: every locked write on this
+    # fake — ``record`` and ``clear`` alike — enters the one modelled resource, so
+    # ADR-0060's case runs against both lock sites rather than skipping ``clear``
+    # and leaving it proved only by the ``sqlite3`` trail (#396).
 
     @pytest.fixture
     def trail(self) -> AuditTrail:
