@@ -508,6 +508,31 @@ class DeferralStoreContract:
         assert admitted.retention is None
         assert admitted.expires_at is None
 
+    async def test_a_lifetime_with_no_representable_deadline_refuses_the_admission(
+        self, factory: DeferralStoreFactory
+    ) -> None:
+        """The overflow boundary, reported as this seam's own error.
+
+        ``deferral_ttl`` is bounded below and not above — a lifetime is a positive
+        duration, and no upper bound is meaningful in the abstract — so a
+        configuration can name one whose deadline falls past the representable
+        range. Whether it does depends on *when* the question is admitted, not on
+        the lifetime alone, so it cannot honestly be refused at construction; it is
+        refused at the admission instead, and refused as ``DeferralStoreError``
+        rather than as a raw ``OverflowError`` that would escape an adapter's
+        ``AssistantError`` handler as a traceback.
+
+        Nothing is admitted, which is the half that matters: a question half-written
+        under an unstampable deadline would be answerable forever and never purged.
+        """
+        store = _build(factory, retention=timedelta.max)
+
+        with pytest.raises(DeferralStoreError):
+            await store.defer(deferral_id="d1", proposal=_proposal(), decision=_ASK)
+
+        assert await store.export() == []
+        assert await store.get("d1") is None
+
     # --- clause 22: the record type refuses an inconsistent question --------
 
     async def test_a_secret_tier_proposal_is_refused_and_admits_nothing(
