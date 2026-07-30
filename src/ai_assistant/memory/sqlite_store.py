@@ -206,6 +206,16 @@ class SqliteMemoryStore:
             msg = f"failed to open memory store at {self._path!r}: {exc}"
             raise MemoryStoreError(msg) from exc
         try:
+            # Restricted *before* the first statement, not after the schema is
+            # built and migrated. SQLite copies the database file's mode onto every
+            # rollback journal it creates for it, so a journal opened while the
+            # file still carried the process umask is world-readable too — and an
+            # interrupted write leaves it on disk holding Tier 1 pages (ADR-0004
+            # §1, §4). `_migrate_records` below is the write most exposed to that:
+            # it runs an explicit `BEGIN` and can copy every row. `connect`
+            # creates the file, so there is something to restrict by the time this
+            # runs (#451; `SqliteConversationStore._setup` has the same ordering).
+            self._restrict_permissions()
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
@@ -225,7 +235,6 @@ class SqliteMemoryStore:
                 f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
             )
             conn.commit()
-            self._restrict_permissions()
         except MemoryStoreError:
             conn.close()  # never leak the connection when opening fails
             raise

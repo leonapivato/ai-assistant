@@ -58,6 +58,12 @@ def _fixed_now() -> datetime:
     return _NOW
 
 
+def _journal_mode(database: Path) -> int | None:
+    """The permission bits of the rollback journal beside ``database``, or ``None``."""
+    journal = database.with_name(f"{database.name}-journal")
+    return journal.stat().st_mode & 0o777 if journal.exists() else None
+
+
 def _provenance(
     *, source: MemorySource = MemorySource.OBSERVED, last_updated: datetime = _WHEN
 ) -> Provenance:
@@ -1006,6 +1012,47 @@ def test_database_file_is_owner_only(
     make_store()
     mode = (tmp_path / "memory.db").stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_a_journal_opened_during_setup_is_owner_only(
+    make_store: Callable[..., SqliteMemoryStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0004 §4 reaches the sidecars, and reaches them from the first write (#451).
+
+    SQLite copies the *database file's* mode onto every rollback journal it
+    creates for it, so restricting the file after the schema is built and migrated
+    leaves every journal opened in between carrying the process umask — and an
+    interrupted write leaves that journal on disk holding Tier 1 pages beside a
+    ``0600`` base file.
+
+    Observed **inside** ``_setup`` rather than after it, because that is the only
+    place the difference is visible: by the time the constructor returns, the
+    ordering has stopped mattering and a journal provoked afterwards inherits
+    ``0600`` under either one. The hook is ``_verify_or_init_meta``, whose ``meta``
+    insert opens the transaction whose journal is asserted here; on the unfixed
+    ordering that journal is ``0644``.
+
+    The file is pre-created ``0644`` so the case does not depend on the runner's
+    umask — and because reopening an existing store is the common path anyway.
+    """
+    path = tmp_path / "memory.db"
+    path.touch()
+    path.chmod(0o644)
+    observed: list[int | None] = []
+    original = SqliteMemoryStore._verify_or_init_meta
+
+    def observing(store: SqliteMemoryStore, conn: sqlite3.Connection) -> None:
+        original(store, conn)
+        observed.append(_journal_mode(path))
+
+    monkeypatch.setattr(SqliteMemoryStore, "_verify_or_init_meta", observing)
+
+    make_store()
+
+    assert observed[0] is not None, "setup should have opened a journal"
+    assert observed == [0o600]
 
 
 class TestSqliteMemoryStoreContract(MemoryStoreContract):
