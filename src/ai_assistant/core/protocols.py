@@ -544,16 +544,64 @@ class MemoryWriter(Protocol):
         raise rather than a fabricated ``REJECT`` because a ruling is the policy's
         to make (ADR-0005 §3).
 
-        This is a check, not a guarantee — an evidence record destroyed between
-        the check and the write leaves a citation that no longer resolves, and no
-        seam closes that. What it buys is that **every citation resolved once**,
-        so a citation that later stops resolving is *loss* rather than a producer
-        bug, and a surface presenting the belief can say so honestly.
+        This is a check, not a guarantee — an evidence record destroyed **by
+        another actor** between the check and the write leaves a citation that no
+        longer resolves, and no seam closes that. What it buys is that **every
+        citation resolved once**, so a citation that later stops resolving is
+        *loss* rather than a producer bug, and a surface presenting the belief can
+        say so honestly. That residue stands exactly as it did (ADR-0077 §5/§6): a
+        citation destroyed under the writer by someone else is *loss*, rendered as
+        a tombstone with the presented confidence lowered, and no writer refusal
+        closes it. What ADR-0081 §5 bounds is only the sentence's reach — a
+        destruction performed by **this call's own write** is not that residue and
+        is refused outright, below. ADR-0077 §5 is thereby **amended, not
+        superseded**: nothing it decided changes, and every mechanism §6 specifies
+        is keyed on a citation *failing* to resolve, which the refused case never
+        reaches.
 
         It is deliberately **not** a floor on citing *nothing*: an empty evidence
         tuple names no record that fails to resolve, so it passes here and is
         judged by the policy, which is where ADR-0072 §3 put that rule. The two do
         not overlap, and each lives in exactly one place.
+
+        **No write consumes the evidence its own proposal cites** (ADR-0081 §1).
+        A ruling that would **install** the proposal at an id that same proposal's
+        ``provenance.evidence`` names is **refused**: nothing is written, no window
+        is closed, and no decision is returned. A write *installs* when it stores
+        the proposal's content at an id — ``ACCEPT`` and ``STORE_TEMPORARY`` at the
+        proposed record's own id, ``REINFORCE`` at the ruling's ``target_id``,
+        where a fold would union the target's id into the evidence of the record it
+        writes *at* that id. It holds **whether or not** a record already stands
+        there, and for **every** band, not only ``DERIVED``: the defect is a belief
+        standing as its own warrant, and an ``ASSERTED`` or ``EXTERNAL`` record can
+        reach it with nothing destroyed at all. The refusal keys on ids and write
+        modes alone, so it reads nothing from the store and cannot be raced.
+
+        A ``SUPERSEDE`` **re-mints** instead. Its correction lands at a freshly
+        minted id, so where that candidate is one the proposal cites a conforming
+        writer mints another rather than installing there; where it cannot find a
+        free id within its own bound it refuses, with every target left live and
+        unchanged (ADR-0081 §4). Its retirement-set writes **retire** rather than
+        install — the record is written back with only its window narrowed and is
+        retained — so a ``SUPERSEDE`` retiring a record the proposal cites still
+        retires it and still lands. That is ADR-0077 §6's ratified residue, and
+        this rule adds no refusal to ``SUPERSEDE`` and removes none: every standing
+        refusal at this boundary keeps its precedence and its scope, and being
+        cited neither triggers one nor excuses one.
+
+        The rule is quantified over **this proposal's** evidence and **this
+        write's** destination, both in hand when each write is formed — never over
+        the tuple a ``REINFORCE`` unions (ADR-0081 §1a). A target that already
+        cited *itself* is therefore out of scope: the fold neither creates that
+        condition nor destroys the cited record, and refusing it would make such a
+        record permanently unfoldable while making the refusal depend on state read
+        from the store. ``REJECT`` and ``ASK_USER`` write nothing and are
+        unaffected — once the call reaches the policy, a self-citing proposal the
+        policy declines is reported as the decision the policy made rather than
+        converted into an exception. The refusals that already *precede* a ruling
+        keep that precedence: a self-citing proposal whose evidence does not
+        resolve, or whose conflict set is over the ceiling, is still refused before
+        any policy is asked.
 
         **A correction resolves every conflict it is shown, or it does not land**
         (ADR-0079 §1). A writer's conflict limit is a *ceiling*, not a truncation
@@ -611,12 +659,19 @@ class MemoryWriter(Protocol):
                 this writer will resolve in one ingest (ADR-0079 §1) — nothing
                 written, no ruling sought; if a record the ruling would retire has
                 no representable close (ADR-0080 §3) — nothing written, every
-                record in the set unchanged; if reading conflicts or writing a
-                record failed; or if a ``REINFORCE`` or ``SUPERSEDE`` named a
-                ``target_id`` that is not among the conflicts. Both new refusals
-                raise this class and **not** ``UnresolvedEvidenceError``, which
-                names an *evidence* failure rather than a conflict set or a
-                target's window (ADR-0080 §7).
+                record in the set unchanged; if a ruling would install the proposal
+                at an id the proposal cites, or a ``SUPERSEDE`` cannot mint an
+                uncited free id within its bound (ADR-0081 §1/§4) — nothing
+                written, every target live and unchanged; if reading conflicts or
+                writing a record failed; or if a ``REINFORCE`` or ``SUPERSEDE``
+                named a ``target_id`` that is not among the conflicts. Each of
+                those refusals raises this class and **not**
+                ``UnresolvedEvidenceError``, which names an *evidence* failure
+                rather than a conflict set, a target's window, or a write set
+                (ADR-0080 §7, ADR-0081 §3). The self-consuming-write refusal earns
+                no subclass of its own: it is a pure function of the proposal and
+                the ruling, so it is never a race and always a producer fault, and
+                no caller has a second branch to take.
         """
         ...
 

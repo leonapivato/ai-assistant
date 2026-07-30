@@ -19,7 +19,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from math import isfinite
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -332,6 +332,122 @@ def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposa
             f"refusing to write {proposal.proposed.id!r}: a {decision.kind} ruling on secret-tier "
             f"data would put Tier 0 content in the memory database, which lives in the OS keyring "
             f"and never in a database or a committed file (ADR-0004 §3, ADR-0078 §5b)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | None:
+    """The id this ruling would **install** the proposal at, if any (ADR-0081 §1).
+
+    A write *installs* when it stores the proposal's content at an id: whatever
+    stood there stops being retrievable and the id now names the belief the
+    proposal carries. A write *retires* when it stores an **existing** record back
+    with only its validity window narrowed (ADR-0080 §1) — the record is retained,
+    ``export`` still carries it, and nothing of the proposal lands at its id.
+
+    ``None`` means "this ruling installs nothing at an id known here":
+
+    - ``REJECT`` and ``ASK_USER`` write nothing at all.
+    - ``SUPERSEDE`` installs at a **freshly minted** id that does not exist until
+      :meth:`MemoryIngestor._apply_supersede` mints it, so its candidate is tested
+      *there*, inside the bounded re-mint loop, and a hit re-mints rather than
+      refusing (ADR-0081 §2's "two evaluation points, one rule", §4). Its
+      retirement-set writes retire rather than install and are never refused by
+      this rule.
+
+    The distinction is a property of the **write**, not of what the store happens
+    to hold, which is what keeps the predicate free of any store read.
+    """
+    match decision.kind:
+        case MemoryDecisionKind.ACCEPT | MemoryDecisionKind.STORE_TEMPORARY:
+            return proposed.id
+        case MemoryDecisionKind.REINFORCE:
+            # The fold lands at the *target's* id, which the ruling supplies —
+            # never at `proposed.id`. `_merge` writes there and unions both
+            # evidence tuples, so a proposal citing its own fold target would end
+            # up standing as its own warrant with nothing destroyed at all.
+            return decision.target_id
+        case MemoryDecisionKind.SUPERSEDE:
+            return None
+        case MemoryDecisionKind.REJECT | MemoryDecisionKind.ASK_USER:
+            return None
+    # No `case _`: with every member named, mypy narrows the fall-through to
+    # `Never`, so a *new* `MemoryDecisionKind` fails the type check here rather
+    # than silently acquiring an unguarded write (the fail-closed shape
+    # `_WRITE_PRODUCING_KINDS` gets from being a complement).
+    assert_never(decision.kind)
+
+
+def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+    """Refuse a write that would land at an id the proposal cites (ADR-0081 §1).
+
+    The fourth obligation on ``MemoryWriter.ingest``, stacked on ADR-0079 §4's two
+    and ADR-0077 §5's one and conflicting with none of them. Those are about the
+    *conflict* set and about the evidence set's *existence*; this one is about the
+    write set's **disjointness** from the evidence set. ADR-0077 §5's check buys
+    "every citation resolved once" — a write that consumes its own citation makes
+    that promise true and useless in the same instant, and leaves a belief standing
+    as its own warrant.
+
+    **It gates the write, not the ruling**, so it sits between the policy's ruling
+    and the write dispatch — the seam :func:`_refuse_secret_write` already occupies,
+    reached by every write-producing ruling and by no ruling that writes nothing
+    (ADR-0081 §2). Three placements are ruled out there, each for a reason already
+    on the record:
+
+    - **Not in** :meth:`MemoryIngestor._require_resolvable_evidence`, which runs
+      before the policy — at which point the write set is not yet known, because
+      ``REINFORCE``'s destination is ``decision.target_id``.
+    - **Not in** :func:`_refuse_unsafe_fold`, which ``ACCEPT`` and
+      ``STORE_TEMPORARY`` never reach — the same hole ADR-0078 §10 records when it
+      excepts check 0 from that helper, and those two rulings carry most of this
+      defect.
+    - **Not split in two**, with the ``proposed.id`` half hoisted ahead of the
+      ruling where it *is* computable. That would put one rule in two places
+      (ADR-0077 §5) and pre-empt a ruling the policy is entitled to make: a
+      self-citing proposal the policy declines should be a ``REJECT`` the user can
+      read, not an exception (ADR-0080 §3 declined the same hoist).
+
+    **It reads nothing from the store.** Its inputs are the observed proposal and
+    the ruling, both already fixed and private to this call, so it costs no ``get``,
+    adds no I/O inside the ingestor's lock, and — unlike ADR-0077 §5's
+    resolvability check — cannot itself be raced. It is therefore never a race and
+    always a producer fault, which is why the refusal earns **no** new error class
+    (§3) and specifically is **not** ``UnresolvedEvidenceError``: the evidence here
+    resolves perfectly well, and what is wrong is that the write would consume it.
+
+    The empty-slot case is refused too. For a ``DERIVED`` proposal it cannot arise
+    (ADR-0077 §5 already refused a citation resolving to nothing), but for an
+    ``ASSERTED`` or ``EXTERNAL`` one the install would store a record whose evidence
+    names itself and nothing else that exists — the same defect arriving with no
+    destruction at all. Refusing it is what makes the rule statable without a store
+    read rather than *in spite* of having none. The degenerate case where the record
+    already at that id is itself self-citing is refused as well (ADR-0081 §1):
+    distinguishing it would cost a ``get`` on every write-producing ingest to
+    protect a state the rule says must not exist.
+
+    Quantified over **the proposal's** evidence and **this write's** destination,
+    not over the tuple :func:`_merge` unions (ADR-0081 §1a): a target that already
+    cited itself is out of scope, since the fold neither creates that condition nor
+    destroys anything, and testing the merged tuple would make such a record
+    permanently unfoldable *and* make the refusal depend on state read from the
+    store. Scoped to no band, unlike ADR-0077 §5's floor (§1b): a record citing
+    nothing satisfies it trivially, while band-scoping would leave ``ASSERTED`` and
+    ``EXTERNAL`` free to fabricate their own warrant.
+
+    Raises:
+        MemoryStoreError: If the ruling would install the proposal at an id the
+            proposal cites. Nothing is written, no window is closed, and no
+            decision is returned.
+    """
+    proposed = proposal.proposed
+    destination = _installed_at(decision, proposed)
+    if destination is not None and destination in proposed.provenance.evidence:
+        msg = (
+            f"refusing to write {proposed.id!r}: a {decision.kind} ruling would install it at "
+            f"{destination!r}, an id its own provenance cites as evidence — the belief would "
+            f"stand as its own warrant, and no citation a write consumes can be presented "
+            f"honestly (ADR-0081 §1)"
         )
         raise MemoryStoreError(msg)
 
@@ -661,7 +777,7 @@ class MemoryIngestor:
         therefore blocks other ingests. That is the cost of the guarantee, not
         an oversight.
 
-        **Four refusals precede or replace a ruling**, in the order they fire:
+        **Five refusals precede or replace a ruling**, in the order they fire:
 
         1. **Unresolvable evidence** (ADR-0077 §5): a ``DERIVED`` proposal citing a
            record this store does not hold raises ``UnresolvedEvidenceError``
@@ -676,7 +792,17 @@ class MemoryIngestor:
            ``DataTier.SECRET`` proposal raises ``MemoryStoreError``
            (:func:`_refuse_secret_write`). ``ASK_USER`` and ``REJECT`` return
            normally, which is what preserves the ordinary secret-tier path.
-        4. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
+        4. **A write that consumes its own evidence** (ADR-0081 §1): at that same
+           seam, a ruling that would *install* the proposal at an id the proposal's
+           ``provenance.evidence`` names raises ``MemoryStoreError``
+           (:func:`_refuse_self_consuming_write`) — ``ACCEPT`` and
+           ``STORE_TEMPORARY`` at ``proposed.id``, ``REINFORCE`` at the ruling's
+           ``target_id``, whether or not a record stands there and for every band.
+           ``SUPERSEDE`` is decided at its *minted* id instead, inside
+           :meth:`_apply_supersede`, where a hit re-mints rather than refusing (§4);
+           its retirement-set writes retire rather than install and are never
+           refused by this rule.
+        5. **An unretirable window** (ADR-0080 §3): a ``SUPERSEDE`` whose retirement
            set holds a record whose window cannot be closed representably raises
            ``MemoryStoreError`` before the atomic batch (:func:`_close_window`).
 
@@ -696,10 +822,10 @@ class MemoryIngestor:
                 store does not hold; nothing is written and the policy is not asked.
             MemoryStoreError: If detection surfaces more conflicts than this
                 ingestor will resolve in one ingest, if a write-producing ruling
-                landed on a ``DataTier.SECRET`` proposal, if a fold onto a
-                ``USER_ASSERTED`` target is not covered by a confirmation, if a
-                retirement's window cannot be closed, or on any other store or
-                applier failure.
+                landed on a ``DataTier.SECRET`` proposal, if a ruling would install
+                the proposal at an id it cites, if a fold onto a ``USER_ASSERTED``
+                target is not covered by a confirmation, if a retirement's window
+                cannot be closed, or on any other store or applier failure.
         """
         # One observation of the caller's proposal, taken on this coroutine's
         # first executed line — before the lock, which is `ingest`'s first await
@@ -738,6 +864,11 @@ class MemoryIngestor:
         # reaches) nor at the top of `ingest` (which would break the ordinary
         # secret-tier path §1 preserves).
         _refuse_secret_write(decision, observed)
+        # ADR-0081 §1, at the same seam and for the same structural reason: it is a
+        # property of the *write*, so it belongs after the ruling that determines the
+        # write set and before the dispatch that performs it. `SUPERSEDE`'s minted
+        # destination does not exist yet and is tested in `_apply_supersede` (§2).
+        _refuse_self_consuming_write(decision, observed)
         record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
         # declined this and named the exact condition for revisiting — a consumer
@@ -902,7 +1033,11 @@ class MemoryIngestor:
         insert-if-absent, so a collision with any stored record — every retained
         target included — is *rejected*, not clobbered; on the resulting
         :class:`~ai_assistant.core.errors.MemoryStoreConflictError` the applier
-        re-mints and retries, bounded by :data:`_MAX_SUPERSEDE_ATTEMPTS`. Any other
+        re-mints and retries, bounded by :data:`_MAX_SUPERSEDE_ATTEMPTS`. A minted id
+        the **proposal cites** joins that same bounded loop (ADR-0081 §4): installing
+        the correction there would leave it standing as its own warrant, reached
+        without replacing anything, so the applier re-mints rather than refusing —
+        a re-mint is free and always available. Any other
         ``MemoryStoreError`` aborts with **every** target left **live and unchanged**,
         because the atomic batch rolls all the window-closes back together.
 
@@ -944,9 +1079,31 @@ class MemoryIngestor:
         now = self._now_utc()
         closed = [_close_window(target, now) for target in targets]
         retired_ids = {target.id for target in targets}
+        # ADR-0081 §1's second evaluation point (§2, §4). `SUPERSEDE`'s destination
+        # does not exist until it is minted, so its candidate is tested here — beside
+        # the retained-target test and before the batch is assembled — rather than at
+        # the seam the three other installing rulings are decided at. Quantified over
+        # *this proposal's* evidence, which `_supersede` carries onto the correction
+        # unchanged.
+        cited = frozenset(proposed.provenance.evidence)
         last_conflict: MemoryStoreConflictError | None = None
         for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
             new_id = _checked_id(self._id_factory, owner="MemoryIngestor")
+            if new_id in cited:
+                # A minted id the proposal cites would leave the correction standing
+                # as its own warrant — ADR-0081 §1's defect reached without replacing
+                # anything, since `INSERT_IF_ABSENT` overwrites nothing. It **re-mints**
+                # rather than refusing, because a re-mint is free and always available,
+                # which is exactly why the retained-target collision below is handled
+                # that way. For a `DERIVED` proposal this is belt to ADR-0077 §5's
+                # braces (a cited record that resolves is stored, so the insert would
+                # already conflict and re-mint); it does real work for the `ASSERTED`
+                # and `EXTERNAL` bands §5 does not check, where the cited id may name
+                # nothing and the insert would succeed.
+                last_conflict = MemoryStoreConflictError(
+                    f"minted id {new_id!r} is cited by the proposal's own evidence; re-minting"
+                )
+                continue
             if new_id in retired_ids:
                 # The minted id names one of the retained targets — a *stored* id, so
                 # it must be re-minted (ADR-0045 §4: the absent-id obligation covers

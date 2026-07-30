@@ -21,7 +21,7 @@ returns its id; ``STORE_TEMPORARY`` stores it with an expiry; ``REJECT`` and
 ``SUPERSEDE`` naming a target absent from the conflicts raises ``MemoryStoreError``
 rather than storing the proposal as new.
 
-Three refusals are pinned besides, each stated on what a writer can observe:
+Four refusals are pinned besides, each stated on what a writer can observe:
 
 * **Evidence must resolve** (ADR-0077 §5). A ``DERIVED`` proposal citing a record
   the store does not hold raises ``UnresolvedEvidenceError`` naming the id, with
@@ -30,6 +30,16 @@ Three refusals are pinned besides, each stated on what a writer can observe:
   ``ASSERTED`` or ``EXTERNAL`` proposal citing nothing passes here untouched.
   Because it *is* a floor on citing something absent, every derived proposal below
   cites :data:`_CITED`, which :func:`_cite` plants.
+* **No write consumes the evidence its own proposal cites** (ADR-0081 §1), in
+  three limbs. A ruling that **installs** the proposal at an id the proposal cites
+  raises ``MemoryStoreError`` — nothing written, no window closed, no decision
+  returned — whether or not a record stands at that id and for **every** band. A
+  ``SUPERSEDE``, whose destination is *minted*, re-mints past a cited candidate
+  instead, and raises only when its own bound is exhausted, leaving every target
+  live. And a ``SUPERSEDE`` whose **retirement set** holds a cited record still
+  retires it and still lands, *where the ruling is otherwise admissible*: this rule
+  adds no refusal to ``SUPERSEDE`` and removes none, so a cited ``USER_ASSERTED``
+  target is still refused by ADR-0045 §5 clause 1.
 * **Resolve or refuse** (ADR-0079 §1). A writer's conflict limit is a ceiling, not
   a truncation budget: above it ``ingest`` raises ``MemoryStoreError`` with nothing
   written, no window closed, and the policy not asked. Stated relative to *the
@@ -226,6 +236,47 @@ _CITED = "cited-episode"
 #: they plant, so the boundary those cases exercise is the *retirement* rule and
 #: not ADR-0079 §1's refusal. Nothing is asserted about the value (ADR-0079 §4).
 _ROOMY_CEILING = 10
+
+#: The **belief** ADR-0081 §1's cases cite: a ``PreferenceMemory`` carrying
+#: :data:`_CONTENT`, unlike :data:`_CITED`, so it is both a resolvable citation and
+#: a live conflict of the proposals below. That double duty is what lets one shape
+#: drive all three installing rulings: ``ACCEPT`` and ``STORE_TEMPORARY`` install at
+#: the proposal's *own* id, so they propose **at** this id; ``REINFORCE`` installs at
+#: the ruling's ``target_id``, so it proposes elsewhere and folds **onto** it.
+_SELF_CITED = "cited-belief"
+
+#: An id a proposal cites that names **no stored record**. ADR-0077 §5 refuses a
+#: ``DERIVED`` proposal citing it, so only the ``ASSERTED`` and ``EXTERNAL`` bands
+#: can carry it — which is exactly where ADR-0081 §4's re-mint does real work, since
+#: an ``INSERT_IF_ABSENT`` at an unoccupied id would otherwise *succeed*.
+_CITED_FREE = "cited-but-unstored"
+
+#: The three rulings that **install** the proposal at an id known at the seam
+#: between the ruling and the write dispatch (ADR-0081 §1): ``ACCEPT`` and
+#: ``STORE_TEMPORARY`` at ``proposed.id``, ``REINFORCE`` at ``target_id``.
+#: ``SUPERSEDE`` is not among them — it installs at an id it mints itself, tested
+#: inside its own re-mint loop (limb 2) — and ``REJECT``/``ASK_USER`` install
+#: nothing.
+_INSTALLING_KINDS = [
+    MemoryDecisionKind.ACCEPT,
+    MemoryDecisionKind.STORE_TEMPORARY,
+    MemoryDecisionKind.REINFORCE,
+]
+
+
+def _installing_proposal(
+    kind: MemoryDecisionKind, source: MemorySource, cited: str
+) -> MemoryUpdateProposal:
+    """A proposal citing ``cited`` that ``kind`` would install **at** ``cited``.
+
+    The proposed record's id is the destination for ``ACCEPT`` and
+    ``STORE_TEMPORARY`` and irrelevant for ``REINFORCE``, whose destination is the
+    fold target the ruling names — so the ``REINFORCE`` case must propose at a
+    *different* id, or the cited record would not be a conflict at all and the case
+    would silently degenerate into the other two.
+    """
+    record_id = "new" if kind is MemoryDecisionKind.REINFORCE else cited
+    return _proposal(_preference(record_id, source=source, evidence=(cited,)))
 
 
 async def _cite(store: MemoryStore) -> str:
@@ -1609,6 +1660,361 @@ class MemoryWriterContract:
 
         assert result.record_id == "new"
         assert await store.get("new") is not None
+
+    # --- no write consumes its own evidence (ADR-0081 §1) -------------------
+
+    @pytest.mark.parametrize("source", list(MemorySource), ids=str)
+    @pytest.mark.parametrize("kind", _INSTALLING_KINDS, ids=str)
+    async def test_an_install_at_a_cited_id_is_refused(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind, source: MemorySource
+    ) -> None:
+        """Limb 1, over the cell the clause lives in: the cited id **is** stored.
+
+        Every installing ruling by **all four** ``MemorySource`` members, named
+        rather than sampled, for ADR-0078 §10's reason — each omission is a live
+        hole, and this clause has two axes on which a plausible implementation
+        silently passes:
+
+        * **The ruling.** A check written for the two rulings that came up in
+          discussion passes ``REINFORCE``, whose case is a proposal citing its own
+          fold target — the one an implementation reading only #472 will not write.
+          It destroys nothing (``_merge`` writes at the target's id and unions both
+          evidence tuples, so the record survives) and is a defect anyway: the
+          citation resolves, to the belief itself.
+        * **The band.** A check that reused ADR-0077 §5's ``DERIVED`` guard clause,
+          or bolted a ``USER_ASSERTED`` arm beside it, passes every other case here
+          while letting an ``EXTERNAL`` install at a cited id through. ``EXTERNAL``
+          is both the member most likely to be missed and the one where a
+          self-citing record is most plausible in practice, since its ids come from
+          another system rather than from an ``id_factory``. Parametrising over the
+          enum also fails closed if a fifth source is added.
+
+        The refusal is a plain ``MemoryStoreError`` and specifically **not**
+        ``UnresolvedEvidenceError`` (ADR-0081 §3): here the evidence resolves
+        perfectly well, and what is wrong is that the write would consume it. The
+        assertion is explicit because the subclass **is** a ``MemoryStoreError``, so
+        ``pytest.raises`` on the base class alone would certify nothing.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        # INFERRED, so no fold refusal can fire ahead of this one for any incoming
+        # source: clause 1 keys on a USER_ASSERTED *target*, and clause 2 on a
+        # target outside {OBSERVED, INFERRED}.
+        await store.add(_preference(_SELF_CITED, source=MemorySource.INFERRED))
+        before = await store.export()
+        writer = make_writer(store, _RulesExactly(kind))
+
+        with pytest.raises(MemoryStoreError) as caught:
+            await writer.ingest(_installing_proposal(kind, source, _SELF_CITED))
+
+        assert not isinstance(caught.value, UnresolvedEvidenceError)
+        # Nothing written: not the proposal, and not a mutated version of the
+        # record it cites.
+        assert await store.export() == before
+
+    @pytest.mark.parametrize("source", [MemorySource.USER_ASSERTED, MemorySource.EXTERNAL], ids=str)
+    @pytest.mark.parametrize(
+        "kind",
+        [MemoryDecisionKind.ACCEPT, MemoryDecisionKind.STORE_TEMPORARY],
+        ids=["accept", "store-temporary"],
+    )
+    async def test_an_install_at_a_cited_id_is_refused_even_where_nothing_stands_there(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind, source: MemorySource
+    ) -> None:
+        """Limb 1's empty-slot cell, and its two exclusions are structural.
+
+        The rule holds "whether or not a record already stands at that id", which is
+        what keeps it statable **without a store read** rather than in spite of
+        having none. The install would store a record whose evidence names itself
+        and nothing else that exists — a belief standing as its own only warrant,
+        the defect arriving with no destruction at all.
+
+        Neither exclusion here is an oversight. A ``DERIVED`` proposal citing an id
+        that resolves to nothing is refused by ADR-0077 §5 *before the policy is
+        asked*, so that cell would prove nothing about this rule; and
+        ``REINFORCE``'s destination is its fold target, drawn from the conflicts and
+        therefore always stored, so "absent" is not a state its destination can be
+        in.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        writer = make_writer(store, _RulesExactly(kind))
+
+        with pytest.raises(MemoryStoreError) as caught:
+            await writer.ingest(_proposal(_preference("new", source=source, evidence=("new",))))
+
+        assert not isinstance(caught.value, UnresolvedEvidenceError)
+        assert await store.export() == []
+
+    async def test_an_install_at_a_cited_id_is_refused_even_when_it_would_change_nothing(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """The degenerate case is refused too, deliberately (ADR-0081 §1).
+
+        The record already standing at the cited id is *itself* already
+        self-citing, so the install would change nothing observable.
+        Distinguishing that would cost a ``get`` on every write-producing ingest to
+        protect a state §1 says must not exist — so it is refused, and pinning the
+        refusal is what stops a later "optimisation" putting that read back on the
+        hot path. A holder of such a legacy record repairs it through ``forget`` or
+        a user assertion (ADR-0077 §6), not by re-ingesting it.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(
+            _preference(_SELF_CITED, source=MemorySource.EXTERNAL, evidence=(_SELF_CITED,))
+        )
+        before = await store.export()
+        writer = make_writer(store, _RulesExactly(MemoryDecisionKind.ACCEPT))
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(
+                _proposal(
+                    _preference(_SELF_CITED, source=MemorySource.EXTERNAL, evidence=(_SELF_CITED,))
+                )
+            )
+
+        assert await store.export() == before
+
+    @pytest.mark.parametrize(
+        "kind", [MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER], ids=str
+    )
+    async def test_a_ruling_that_writes_nothing_on_a_self_citing_proposal_is_unaffected(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """The negative arm: ``REJECT`` and ``ASK_USER`` neither raise nor write.
+
+        Once the call reaches the policy, a self-citing proposal the policy declines
+        is reported as **the decision the policy made**, rather than converted into
+        an exception (ADR-0081 §1/§2). That is why the rule is not split, with the
+        ``proposed.id`` half hoisted ahead of the ruling where it *is* computable: a
+        pre-ruling refusal would pre-empt a ruling the policy is entitled to make,
+        which is ADR-0077 §5's own argument against a writer-side emptiness floor.
+
+        Driven on a proposal whose cited id **resolves**, so no earlier refusal can
+        fire and the assertion is about this rule rather than about §5's.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        occupant = _episodic("new", "the episode a self-citing belief would consume")
+        await store.add(occupant)
+        writer = make_writer(store, _RulesExactly(kind))
+
+        result = await writer.ingest(
+            _proposal(_preference("new", source=MemorySource.OBSERVED, evidence=("new",)))
+        )
+
+        assert result.decision.kind is kind
+        assert result.record_id is None
+        assert await store.get("new") == occupant  # the cited record is untouched
+
+    async def test_an_unresolvable_second_citation_still_refuses_with_the_evidence_error(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Precedence, asserted rather than assumed to follow (ADR-0081 §6).
+
+        A ``DERIVED`` proposal that self-cites **and** carries a second,
+        unresolvable citation is refused by ADR-0077 §5's *pre-policy* floor, with
+        the more specific class. This needs its own assertion precisely because
+        ``UnresolvedEvidenceError`` **is** a ``MemoryStoreError``: a test written
+        against the base class passes whichever refusal fired and certifies nothing
+        about the order.
+
+        The self-citation is planted so it *resolves* — an episode at the proposal's
+        own id, #472's literal shape — so the only unresolved id is the second one,
+        and a writer that had hoisted ADR-0081's check ahead of the policy would
+        refuse here with the wrong class and an empty ``unresolved_ids``.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await store.add(_episodic("new", "the episode the belief would replace"))
+        before = await store.export()
+        policy = FakeMemoryPolicy(MemoryDecisionKind.ACCEPT)
+        writer = make_writer(store, policy)
+
+        with pytest.raises(UnresolvedEvidenceError) as caught:
+            await writer.ingest(
+                _proposal(
+                    _preference("new", source=MemorySource.OBSERVED, evidence=("new", "gone"))
+                )
+            )
+
+        assert tuple(caught.value.unresolved_ids) == ("gone",)
+        assert policy.call_count == 0  # refused before any ruling was sought
+        assert await store.export() == before
+
+    @pytest.mark.parametrize("kind", _FOLD_KINDS, ids=str)
+    async def test_a_fold_naming_an_absent_uncited_target_still_raises_the_existing_error(
+        self, make_writer: WriterFactory, kind: MemoryDecisionKind
+    ) -> None:
+        """The other precedence half: ADR-0081 pre-empts no standing refusal.
+
+        A fold naming a target that is not among the conflicts still raises **that**
+        error, not this rule's — the proposal here cites a record that resolves and
+        is not the fold destination, so ADR-0081 §1 has nothing to refuse and the
+        existing refusal must still be reached.
+
+        The message fragment is the discriminator because both refusals raise
+        ``MemoryStoreError``, and the order between two same-class refusals is not
+        observable any other way. The suite already tells check 0 apart this way
+        (``match="secret-tier"``); what stays unpinned is this rule's *own* message,
+        which ADR-0081 §9 explicitly declines to make contract.
+        """
+        store = FakeMemoryStore(now=_long_ago)
+        await _cite(store)
+        writer = make_writer(store, _FoldToAbsentTargetPolicy(kind))
+        before = await store.export()
+
+        with pytest.raises(MemoryStoreError, match="not among the conflicts"):
+            await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        assert await store.export() == before
+
+    async def test_supersede_re_mints_past_a_cited_id_and_lands(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Limb 2, first arm: the minted id is cited, so the writer mints another.
+
+        A ``SUPERSEDE`` installs at a *freshly minted* id, which does not exist
+        until the applier mints it — so its candidate is tested there, inside the
+        bounded re-mint loop, and a hit is a **re-mint rather than a refusal**
+        (ADR-0081 §2/§4). A re-mint is free and always available, which is exactly
+        why the retained-target collision is handled that way already.
+
+        Driven on a **non-``DERIVED``** proposal, which is where the arm is
+        observable at all: a cited id that resolves is *stored*, so
+        ``INSERT_IF_ABSENT`` there already conflicts and the existing loop already
+        re-mints. The clause does real work only for the bands ADR-0077 §5 does not
+        check, where the cited id names nothing and the insert would **succeed** —
+        leaving a correction standing as its own warrant with nothing destroyed.
+
+        Without limb 2 a writer could satisfy limbs 1 and 3 and still store exactly
+        the record §1 exists to forbid; the suite forces it through the
+        ``id_factory`` seam that is already there, with no new hook.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            id_factory=_scripted(_CITED_FREE, "corrected"),
+        )
+
+        result = await writer.ingest(
+            _proposal(_preference("new", source=MemorySource.EXTERNAL, evidence=(_CITED_FREE,)))
+        )
+
+        assert result.record_id == "corrected"  # re-minted past the cited id
+        # The correction did not land at the id it cites — the whole point, and
+        # invisible to an insert-if-absent that finds the id free.
+        assert await store.get(_CITED_FREE) is None
+        assert await store.get("existing") is None  # target retired
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", "corrected"}
+        live = await store.get("corrected")
+        assert live is not None
+        assert live.provenance.evidence == (_CITED_FREE,)
+
+    async def test_supersede_with_an_always_cited_factory_leaves_every_target_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Limb 2, second arm: the bound is exhausted, so the writer raises.
+
+        Where it cannot find a free id within **its own** bound the writer raises
+        ``MemoryStoreError`` with every target left live and unchanged — the same
+        exhaustion behaviour the retained-target collision already has (ADR-0045
+        §4), which is what makes the re-mint a bounded loop rather than a spin. The
+        bound's *value* stays each writer's tuning; only the behaviour at
+        exhaustion is contract.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.INFERRED, evidence=("t-ev",)))
+        before = await store.export()
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            id_factory=_always(_CITED_FREE),
+        )
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(
+                _proposal(_preference("new", source=MemorySource.EXTERNAL, evidence=(_CITED_FREE,)))
+            )
+
+        assert await store.export() == before  # nothing written
+        target = await store.get("existing")
+        assert target is not None  # still live: the window never closed
+        assert target.validity.valid_until is None
+        assert await store.get(_CITED_FREE) is None
+
+    @pytest.mark.parametrize(
+        "target_source", [MemorySource.OBSERVED, MemorySource.INFERRED], ids=str
+    )
+    async def test_a_supersede_still_retires_a_cited_record_and_lands(
+        self, make_writer: WriterFactory, target_source: MemorySource
+    ) -> None:
+        """Limb 3: a cited record in the **retirement set** is still retired.
+
+        The arm that fails loudly rather than subtly if a writer implements the rule
+        over "every write in the batch". A retirement **retires** rather than
+        installs: ADR-0080 §1 writes the target back with every field preserved but
+        a clamped ``valid_until``, the record is retained on disk off the read path,
+        and ``export`` carries it as stored. A cited target leaving the read path is
+        therefore *exactly* ADR-0077 §6's ratified case — a citation that stops
+        resolving, rendered as a tombstone with the presented confidence lowered —
+        not a defect.
+
+        Refusing here would do two wrong things at once: break a correction that is
+        working because of a citation carried by the record correcting it, and put
+        the writer in the business of protecting a belief's warrant from a
+        retirement, which is the cascade ADR-0077 §6 refuses arriving from the
+        writer's side.
+
+        Driven on a **supersedable** cited target, so no standing refusal fires and
+        the assertion is about this rule.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=target_source))
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            id_factory=_scripted("corrected"),
+        )
+
+        result = await writer.ingest(
+            _proposal(_preference("new", source=MemorySource.OBSERVED, evidence=("existing",)))
+        )
+
+        assert result.record_id == "corrected"
+        assert await store.get("existing") is None  # retired, off the read path
+        retained = {record.id: record for record in await store.export()}
+        assert set(retained) == {"existing", "corrected"}
+        assert retained["existing"].validity.valid_until is not None  # retained, not destroyed
+        live = await store.get("corrected")
+        assert live is not None
+        assert live.provenance.evidence == ("existing",)
+
+    async def test_a_supersede_onto_a_cited_assertion_is_still_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """Limb 3's negative: "still lands" is not a licence a citation buys.
+
+        ADR-0081 adds one refusal to the writer and subtracts none, so every
+        standing refusal keeps its precedence and its scope — and being *cited*
+        neither triggers one nor excuses one. ADR-0045 §5 clause 1, as narrowed by
+        exception by ADR-0078 §5b, still refuses a fold onto a ``USER_ASSERTED``
+        target whether or not the proposal cites it: a citation confers no licence
+        to retire what the user told us.
+
+        This is why limb 3's clause is qualified — "still lands **where the ruling
+        is otherwise admissible**" — rather than absolute.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("existing", source=MemorySource.USER_ASSERTED))
+        before = await store.export()
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE))
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(
+                _proposal(_preference("new", source=MemorySource.OBSERVED, evidence=("existing",)))
+            )
+
+        assert await store.export() == before
 
     # --- input observation (ADR-0065) ---------------------------------------
 

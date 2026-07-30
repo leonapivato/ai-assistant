@@ -14,8 +14,10 @@ across, ``REINFORCE`` retaining both records' evidence, and the two fold refusal
 supersedable set and that exceeding the writer's conflict ceiling **refuses**
 rather than truncating; since ADR-0080 §7, that a retirement **clamps** a
 producer-set end rather than extending it and refuses an unrepresentable close;
-and since ADR-0077 §5, that a ``DERIVED`` proposal citing a record the store does
-not hold is refused. Its conflict heuristic, the *value* of its ceiling, its clock
+since ADR-0077 §5, that a ``DERIVED`` proposal citing a record the store does
+not hold is refused; and since ADR-0081 §1, that no ruling **installs** the
+proposal at an id the proposal itself cites — a ``SUPERSEDE`` re-minting past such
+an id rather than refusing. Its conflict heuristic, the *value* of its ceiling, its clock
 and how a ``REINFORCE`` combines content and confidence are deliberately *not* —
 those are ``MemoryIngestor``'s tuning and `memory`'s semantics, and a fake that
 promised them would be a second copy of one implementation.
@@ -28,7 +30,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -164,14 +166,15 @@ class FakeMemoryWriter:
         mutate what it reads there, so the call log gets its own; the working
         snapshot stays private to this call.
 
-        The four refusals ``MemoryIngestor`` carries are carried here too, in the
+        The five refusals ``MemoryIngestor`` carries are carried here too, in the
         same order and for the same reason the fold refusals already are — a fake
         that stored what production refuses lets a consumer's test pass on state the
         real writer would never produce. Unresolvable ``DERIVED`` evidence
         (ADR-0077 §5) fires first, before detection and before the policy; a
         conflict set above the ceiling (ADR-0079 §1) fires in detection, before any
         ruling; a write-producing ruling on secret-tier data (ADR-0078 §5b check 0)
-        fires between the ruling and the write dispatch; and an unrepresentable
+        and a ruling that would install the proposal at an id it cites (ADR-0081 §1)
+        both fire between the ruling and the write dispatch; and an unrepresentable
         window close (ADR-0080 §3) fires in the applier, before the atomic batch.
 
         Raises:
@@ -179,10 +182,10 @@ class FakeMemoryWriter:
                 store does not hold; nothing is written and the policy is not asked.
             MemoryStoreError: If conflict resolution surfaces more conflicts than
                 this writer resolves in one ingest, if a write-producing ruling
-                landed on a ``DataTier.SECRET`` proposal, if a fold onto a
-                ``USER_ASSERTED`` target is not covered by a confirmation, if a
-                retirement's window cannot be closed, or on any other store or
-                applier failure.
+                landed on a ``DataTier.SECRET`` proposal, if a ruling would install
+                the proposal at an id it cites, if a fold onto a ``USER_ASSERTED``
+                target is not covered by a confirmation, if a retirement's window
+                cannot be closed, or on any other store or applier failure.
         """
         observed = proposal.model_copy(deep=True)
         self.calls.append(observed.model_copy(deep=True))
@@ -198,6 +201,7 @@ class FakeMemoryWriter:
         ruled = observed.model_copy(update={"conflicts": resolved})
         decision = await self._policy.decide(ruled, conflicts=conflicts)
         _refuse_secret_write(decision, observed)
+        _refuse_self_consuming_write(decision, observed)
         record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
         # The resolved ids come back on **every** ruling (ADR-0078 §4), exactly as
         # they do from ``MemoryIngestor``: a fake that dropped them would let a
@@ -307,8 +311,10 @@ class FakeMemoryWriter:
         target plus every other supersedable conflict — and every window-close plus
         the insert-if-absent of the correction are **one** atomic ``write_atomic``
         batch (ADR-0046, ADR-0045 §8). The correction's id comes from the guarded
-        factory and is re-minted on a bounded number of collisions, and any other
-        store failure leaves every target live and unchanged. A fake that retired
+        factory and is re-minted on a bounded number of collisions — **including** a
+        candidate the proposal cites, which would otherwise leave the correction
+        standing as its own warrant (ADR-0081 §4) — and any other store failure
+        leaves every target live and unchanged. A fake that retired
         only the named target — which this one did until ADR-0079 §3 promoted the
         set into the contract — would let an `orchestration` test see one retirement
         where production performs N.
@@ -323,9 +329,22 @@ class FakeMemoryWriter:
         now = self._now_utc()
         closed = [_close_window(target, now) for target in targets]
         retired_ids = {target.id for target in targets}
+        # ADR-0081 §1's second evaluation point (§2, §4), mirroring
+        # ``MemoryIngestor``: a `SUPERSEDE`'s destination does not exist until it is
+        # minted, so its candidate is tested here rather than at the seam.
+        cited = frozenset(proposed.provenance.evidence)
         last_conflict: MemoryStoreConflictError | None = None
         for _ in range(_MAX_SUPERSEDE_ATTEMPTS):
             new_id = _checked_id(self._id_factory, owner="FakeMemoryWriter")
+            if new_id in cited:
+                # Installing the correction at an id it cites would leave it standing
+                # as its own warrant — reached without replacing anything, since
+                # `INSERT_IF_ABSENT` overwrites nothing. A re-mint is free, so it
+                # joins the bounded loop rather than refusing (ADR-0081 §4).
+                last_conflict = MemoryStoreConflictError(
+                    f"minted id {new_id!r} is cited by the proposal's own evidence; re-minting"
+                )
+                continue
             if new_id in retired_ids:
                 # The minted id names one of the retained targets — a stored id that
                 # must be re-minted (ADR-0045 §4). Writing it would make the batch
@@ -523,6 +542,67 @@ def _refuse_secret_write(decision: MemoryDecision, proposal: MemoryUpdateProposa
             f"refusing to write {proposal.proposed.id!r}: a {decision.kind} ruling on secret-tier "
             f"data would put Tier 0 content in the memory database, which lives in the OS keyring "
             f"and never in a database or a committed file (ADR-0004 §3, ADR-0078 §5b)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _installed_at(decision: MemoryDecision, proposed: MemoryRecord) -> str | None:
+    """The id this ruling would **install** the proposal at, as ``MemoryIngestor`` has it.
+
+    A write *installs* when it stores the proposal's content at an id; it *retires*
+    when it stores an existing record back with only its window narrowed (ADR-0080
+    §1), which lands nothing of the proposal anywhere. ``None`` means this ruling
+    installs nothing at an id known at the seam: ``REJECT`` and ``ASK_USER`` write
+    nothing, and a ``SUPERSEDE``'s destination does not exist until
+    :meth:`FakeMemoryWriter._apply_supersede` mints it, so its candidate is tested
+    there and a hit re-mints (ADR-0081 §2/§4). Duplicated from ``MemoryIngestor``
+    rather than imported (golden rule 1).
+    """
+    match decision.kind:
+        case MemoryDecisionKind.ACCEPT | MemoryDecisionKind.STORE_TEMPORARY:
+            return proposed.id
+        case MemoryDecisionKind.REINFORCE:
+            # The fold lands at the *target's* id, never at `proposed.id`.
+            return decision.target_id
+        case MemoryDecisionKind.SUPERSEDE:
+            return None
+        case MemoryDecisionKind.REJECT | MemoryDecisionKind.ASK_USER:
+            return None
+    # No `case _`: a new `MemoryDecisionKind` fails the type check here rather than
+    # silently acquiring an unguarded write.
+    assert_never(decision.kind)
+
+
+def _refuse_self_consuming_write(decision: MemoryDecision, proposal: MemoryUpdateProposal) -> None:
+    """Refuse a write landing at an id the proposal cites (ADR-0081 §1).
+
+    The fourth obligation on ``MemoryWriter.ingest``, and one a fake owes for
+    ADR-0079 §3's reason: a fake that stored a self-standing warrant would let a
+    consumer's test pass on state the production writer refuses. It gates the
+    **write** rather than the ruling, so it sits between the ruling and the write
+    dispatch — the seam :func:`_refuse_secret_write` occupies — and not in
+    :func:`_refuse_unsafe_fold`, which ``ACCEPT`` and ``STORE_TEMPORARY`` never
+    reach (ADR-0081 §2).
+
+    It reads nothing from the store: its inputs are the observed proposal and the
+    ruling, so it is never a race and always a producer fault, which is why it
+    raises plain ``MemoryStoreError`` and specifically **not**
+    ``UnresolvedEvidenceError`` — the evidence resolves; the write would consume it
+    (§3). Scoped to no band (§1b), and quantified over **this proposal's** evidence
+    rather than the tuple :func:`_merge` unions (§1a). Duplicated from
+    ``MemoryIngestor`` (golden rule 1).
+
+    Raises:
+        MemoryStoreError: If the ruling would install the proposal at an id the
+            proposal cites; nothing is written and no window is closed.
+    """
+    proposed = proposal.proposed
+    destination = _installed_at(decision, proposed)
+    if destination is not None and destination in proposed.provenance.evidence:
+        msg = (
+            f"refusing to write {proposed.id!r}: a {decision.kind} ruling would install it at "
+            f"{destination!r}, an id its own provenance cites as evidence — the belief would "
+            f"stand as its own warrant (ADR-0081 §1)"
         )
         raise MemoryStoreError(msg)
 
