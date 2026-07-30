@@ -76,6 +76,22 @@ An under-specified brief is the largest source of rework. Each one carries:
 - **Fetch and rebase before gating *and* before reviewing.** A gate against a
   stale tree is not evidence, and Codex reads the working tree for context, so a
   stale branch makes it report other lanes' merged work as regressions.
+- **`mkdir -p /home/leona/.pytest-tmp && export PYTEST_DEBUG_TEMPROOT=/home/leona/.pytest-tmp`
+  before the gate — the `mkdir` is not optional.** pytest creates only the
+  `pytest-of-<user>/` level beneath the root (`rootdir.mkdir(exist_ok=True)`, no
+  `parents=True`), so if the root itself is missing, every test taking `tmp_path`
+  errors at setup with `FileNotFoundError` — 634 of them here, plus a confusing
+  fallback to `pytest-of-unknown` as pytest retries. The
+  packaging tests build real sdists and wheels that embed the ~65 MB model, so a
+  single run leaves ~900 MB of scratch. `/tmp` is tmpfs — 7.8 GB of RAM — and
+  parallel lanes writing there exhaust it and fail with ENOSPC mid-gate. This
+  variable moves pytest's root to disk **without** pinning `--basetemp`, which
+  matters: given an explicit `--basetemp`, pytest wipes that one path and
+  registers no cleanup, so a finished lane's scratch is orphaned forever (41
+  lanes once left 26 GB). Unpinned, pytest numbers each run, keeps the last 3,
+  and takes `.lock` files so concurrent lanes never collect each other. Do not
+  give the lane its own basetemp path, and do not brief a cleanup step — the
+  point is that there is nothing left to clean.
 
 The report contract itself lives in `worker.md` — do not restate it in the brief.
 What the brief owes it is **completeness**: a worker treats a missing fence, or a
