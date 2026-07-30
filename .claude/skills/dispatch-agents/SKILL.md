@@ -59,7 +59,11 @@ An under-specified brief is the largest source of rework. Each one carries:
 - **A scope fence** — which directories this lane may touch and which it may
   not, naming the lane that owns each excluded one. `core/protocols.py` and
   `core/types.py` are the highest-collision surface; one lane holds them at a
-  time.
+  time. **Fence the ground, not the technique.** The worker owns method and will
+  substitute a better approach inside the fence and flag it (`worker.md`), so a
+  brief that prescribes *how* either gets overridden or, worse, is followed
+  against the worker's better judgement. Say what the lane delivers and what it
+  may touch; leave the rest to the agent you picked for its judgement.
 - **Corrections to stale issue text.** An issue written before a decision landed
   will instruct against it. Read it before dispatching and say which parts no
   longer apply — an agent that follows a stale issue faithfully has still done
@@ -143,6 +147,17 @@ A STOP report carries the resolution the worker would take (`worker.md`), so mos
 adjudications are a yes or a no rather than a re-brief. Rule on *that* — and where
 you overrule it, say which authority overrules it, because the worker read the
 same texts and will otherwise reach the same conclusion again.
+
+**Two tiers arrive differently.** A **STOP** halts the lane and needs a ruling
+before anything continues. A **FLAG** does not: the worker was entitled to decide
+it, did, and recorded it in the PR description and the report — so it needs your
+attention only if you disagree, and it costs nothing to arrive late. Method
+choices, and a brief that contradicted an ADR without reshaping the lane, come
+back as FLAGs. **Read them as feedback on your brief.** A lane that flags three
+method substitutions is telling you the brief was prescribing technique it should
+have left alone; a lane that flags an ADR conflict is telling you the brief was
+written against something the ADRs had already settled. Neither is the worker
+misbehaving.
 
 ### Resume the lane; do not restart it
 
