@@ -1,9 +1,13 @@
 # Contributing & development standards
 
 This is the authoritative reference for how code is written, reviewed, and
-committed in this project. It applies to human and AI contributors alike;
-`CLAUDE.md` is the short operating agreement for agents and points here for
-detail. Decisions recorded here are ratified in `docs/adr/0003-development-standards.md`.
+committed in this project. **The code here is written by AI agents**, dispatched
+into their own clones by an operator who assigns the work and owns the merge; a
+human reads, decides, and adjudicates, but does not author. Read every rule below
+as addressed to an agent — where one says "you," it means the agent doing the
+work. `CLAUDE.md` is the short operating agreement and points here for detail.
+Decisions recorded here are ratified in
+`docs/adr/0003-development-standards.md`.
 
 ## Setup
 
@@ -331,33 +335,42 @@ scope, and its legs are ordered.
 
 ### Working on GitHub (pull requests)
 
-The repository is hosted on GitHub with more than one contributor, so `main`
-is protected and integration happens through pull requests — not local merges
-(ADR-0010).
+`main` is protected and integration happens through pull requests — not local
+merges (ADR-0010). The protection is not about arbitrating between contributors;
+it is what makes every merge carry evidence: a green `gate` on the merged
+content, and a linear history where each commit keeps its `Refs:` trailer.
 
 - **Never push to `main`.** Push your `<area>/<slug>` branch and open a PR.
 - **Open a draft PR early — always.** As soon as you have a branch and a first
   commit, open it as a **draft**, before the work is done. CI runs on every push
-  so you get the gate continuously, and anyone else can see your direction (and
-  any contract change) before it lands. Mark it **ready for review** when the
-  change is complete — your call, made without asking (see "Report the review,
-  then mark it ready"). Nothing automated fires on that transition any more
-  (ADR-0015); it is a signal to humans.
+  so you get the gate continuously, and the dispatcher can see your direction
+  (and any contract change) while redirecting is still cheap. Mark it **ready for
+  review** when the change is complete — your call, made without asking (see
+  "Report the review, then mark it ready"). Nothing automated fires on that
+  transition (ADR-0015); it is the signal to the dispatcher that the lane is done
+  and ready to be verified and merged.
 - **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
   on every PR and push; a PR cannot merge while it is red. This is enforced for
   everyone. Run the gate locally first anyway — CI is the backstop, not the
   substitute.
-- **One approving review is required** before merge, and the Codex review is
-  reported on the PR by `just ship` (see "Review"). Note in the PR description
-  any `blocker`/`major` finding you waived, with its rationale, and link the
-  issues you filed for findings you deferred.
+- **`gate` is the only required check; no approving review is required.** Branch
+  protection asks for zero approvals, because there is no second author to ask —
+  so the Codex review reported by `just ship` (see "Review") is the entire
+  independent judgement on the change, and the dispatcher's verification is the
+  entire human one. Note in the PR description any `blocker`/`major` finding you
+  waived, with its rationale, and link the issues you filed for findings you
+  deferred. **A merge therefore needs no `--admin`:** reach for the bypass only
+  to override a genuinely red or stale gate, and say why in the PR.
 - **Rebase and merge.** Rebase your branch onto `main` and merge via GitHub's
   *Rebase and merge* so linear history holds and each commit keeps its
   `Refs: ADR-NNNN` trailer. Delete the branch after merge.
 - **Low-collision by design.** Work is split across low-overlap sections, so
   rebase conflicts should be rare; whoever merges second resolves them.
-- Administrators retain a bypass for genuine emergencies — the gate still runs,
-  but use the escape hatch sparingly and say why in the PR.
+- Administrators retain a bypass, and what it now bypasses is **evidence**, not
+  an approval queue: `--admin` merges past a red `gate` and past the
+  `strict`-protection check that a branch is current. Both of those are the
+  reason to trust the merge, so the bypass is for a genuine emergency and the
+  reason goes in the PR.
 
 ### Coordinating parallel work
 

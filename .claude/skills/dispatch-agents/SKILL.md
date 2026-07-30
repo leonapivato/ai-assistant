@@ -127,32 +127,46 @@ confidence.
 
 **A contract ADR merges before its implementation** (golden rule 5, ADR-0015 §5).
 Where a lane split into an ADR PR and an implementation PR, the order is
-load-bearing, and admin bypass makes merging out of order easy.
+load-bearing and nothing mechanical enforces it — both PRs are green and
+mergeable in either order.
 
-**Bypassing review is not bypassing the gate.** Merging past a required human
-review is the operator's call; merging past `BEHIND` skips *evidence*.
+**Merge without `--admin`.** Branch protection requires no approving review, so
+the ordinary merge path works — and that matters, because `--admin` does not
+just skip an approval queue, it skips *evidence*: a red `gate`, and the
+`strict`-protection check that the branch is current. Leaving the flag off means
+GitHub enforces both for you. If a merge is refused, read the reason rather than
+reaching for the flag.
 
 ```bash
 sha=$(gh pr view <n> --json headRefOid --jq .headRefOid)
 gh pr checks <n> --watch --fail-fast || exit 1
 [ "$(gh pr view <n> --json mergeStateStatus --jq .mergeStateStatus)" = BEHIND ] && exit 1
-gh pr merge <n> --rebase --admin --delete-branch --match-head-commit "$sha"
+gh pr merge <n> --rebase --delete-branch --match-head-commit "$sha"
 ```
 
-Each line guards a different hole. `--watch`: bare `gh pr checks` exits
-immediately while checks are *pending*, reporting "no checks reported yet" so
-the merge proceeds anyway. The `BEHIND` recheck: `main` can land another PR
-while yours is being checked, and `--admin` will merge the now-stale branch.
-`--match-head-commit`: an agent pushing in the same window gets its commit
-admin-merged unreviewed.
+Each line guards a different hole, and the first two are belt-and-braces now
+that protection enforces them — worth keeping, because they fail *before* the
+merge attempt with a reason you can read. `--watch`: bare `gh pr checks` exits
+immediately while checks are *pending*, reporting "no checks reported yet" so the
+merge proceeds anyway. The `BEHIND` recheck: `main` can land another PR while
+yours is being checked. `--match-head-commit` is the one nothing else covers — an
+agent pushing in the same window otherwise gets its commit merged unreviewed, and
+no protection setting sees that.
 
-**A rebase invalidates the review record.** `just ship` anchors a review to a
-commit (ADR-0015 §1), so `gh pr update-branch --rebase` produces a head nothing
-has reviewed, and `--admin` merges it regardless. Branch protection is `strict`,
-so a stale branch must be updated before it can merge — the two rules pull
-against each other, and the resolution is ordering. Merge while the branch is
-current. Where an update is unavoidable, the new SHA needs its own gate, review
-and ship.
+**A rebase may or may not invalidate the review record.** `just ship` anchors a
+review to *content*, not to a commit (ADR-0027 §2), so `gh pr update-branch
+--rebase` is a **base move**: the artifact still covers the head where the move
+leaves the reviewed patch untouched and clears ADR-0027 §3's floor, and costs a
+fresh round where it does not. `CONTRIBUTING.md` → "Report the review, then mark
+it ready" holds the conditions; do not reason them out from memory, and note that
+`docs/adr/**` is inside the floor, so an ADR lane pays a round for a rebase that
+an implementation lane would not.
+
+Nothing on the PR enforces this — `gate` re-runs green on the new head and
+protection has no opinion about review records — so it is the merger's job to
+check. Branch protection is `strict`, so a stale branch must be updated before it
+can merge; the cheap resolution is ordering. Merge while the branch is current.
+Where an update is unavoidable, the new SHA needs its own gate, review and ship.
 
 Rebase-merge only; the repo forbids squash and merge commits.
 
