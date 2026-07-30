@@ -44,6 +44,15 @@ def _semantic(record_id: str, content: str) -> SemanticMemory:
 class TestFakeMemoryStoreContract(MemoryStoreContract):
     """Runs FakeMemoryStore through the shared MemoryStore conformance suite."""
 
+    #: ``search`` and ``list_beliefs`` read a dict and return, with no ``await``
+    #: between the coroutine's first executed line and the filter being applied —
+    #: nothing for a mid-flight mutation to land in (#436). Unlike the write side
+    #: below, the fake does *not* model a suspension it does not have here: an
+    #: ``await`` invented inside a read would exist only to be gated, and the two
+    #: read cases run non-vacuously against ``SqliteMemoryStore``, which is where
+    #: the clause was actually broken.
+    reads_without_suspending = True
+
     @pytest.fixture
     def store(self) -> MemoryStore:
         return FakeMemoryStore(now=_fixed_now)
@@ -77,7 +86,7 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_at_its_first_await(
         self,
-    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
+    ) -> AsyncIterator[tuple[MemoryStore, Callable[[str], SuspendedCall]]]:
         """The same modelled resource, read for ADR-0065's position instead.
 
         The fake takes its one observation of the record on its first executed
@@ -87,9 +96,13 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
         here only because the fake's resource sits exactly at that boundary; the
         ``sqlite3`` store needs two, since its resource is acquired after the
         embedding await its input clause turns on.
+
+        ``arm`` ignores the operation for the same reason it does above — one
+        modelled resource serves every write — and is never asked for a read, since
+        :attr:`reads_without_suspending` declares that axis vacuous.
         """
         store = FakeMemoryStore(now=_fixed_now)
-        yield store, store.suspend_next_write()
+        yield store, lambda _operation: store.suspend_next_write()
 
 
 # Behaviour specific to FakeMemoryStore, beyond the shared contract: the contract

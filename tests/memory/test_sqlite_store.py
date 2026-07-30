@@ -1126,50 +1126,79 @@ class TestSqliteMemoryStoreContract(MemoryStoreContract):
     @contextlib.asynccontextmanager
     async def store_suspended_at_its_first_await(
         self,
-    ) -> AsyncIterator[tuple[MemoryStore, SuspendedCall]]:
-        """Park the first write inside the embedder — the write's first ``await``.
+    ) -> AsyncIterator[tuple[MemoryStore, Callable[[str], SuspendedCall]]]:
+        """Park the named call at its own first ``await`` — which is not one place.
 
         A different position from ``store_suspended_mid_write`` above, and
         deliberately so. ADR-0060's hook goes *inside the connection*, which for
         this store is after the embedding; ADR-0065's must be at the method's own
-        first suspension point, which is the embedding itself. That is exactly the
-        boundary the #286 tear straddled — the content read for the vector before
-        it, the id and the JSON read after — so a hook at the later position would
-        let the mutation land past every read, observe one coherent version, and
-        certify the bug.
+        first suspension point. For ``add`` and ``write_atomic`` that is exactly
+        the boundary the #286 tear straddled — the content read for the vector
+        before it, the id and the JSON read after — so a hook at the later position
+        would let the mutation land past every read, observe one coherent version,
+        and certify the bug.
 
-        The embedder is this store's only ``await`` before it commits, which is
-        what makes it the lever here — and also why the suite could not have
-        reached for it itself: no ``Embedder`` is on the ``MemoryStore`` seam, and
-        another backend suspends on something else entirely (ADR-0065 §3).
+        **Three of the four operations suspend on the embedder and the fourth does
+        not**, which is why the widened hook takes the operation's name (#436).
+        ``add``, ``write_atomic`` and ``search`` all embed before they touch the
+        connection, so the injected ``Embedder`` is their first ``await``.
+        ``list_beliefs`` embeds nothing: its first ``await`` is ``async with
+        self._lock``, so the lever there is the lock itself, wrapped so one
+        acquisition can be held at the door. Suspending it anywhere later — inside
+        ``_list_beliefs_sync``, say — would put the mutation past the point a
+        non-conforming implementation would have read ``bands``, which is the
+        entry-side mistake ADR-0065 §3 warns about, in mirror image.
+
+        Arming is deferred to ``arm`` because the read cases must seed the store
+        first, and every seeding ``add`` embeds: a hook armed at construction would
+        spend its one suspension on a precondition.
 
         Its own store on its own connection, like the hook above, so a failure
         leaves nothing parked on the ``store`` fixture's.
         """
         embedder = _GatedEmbedder(HashingEmbedder(dimensions=8))
         store = SqliteMemoryStore(path=":memory:", embedder=embedder, now=_fixed_now)
+        lock = _GatedLock(store._lock)
+
+        def arm(operation: str) -> SuspendedCall:
+            if operation == "list_beliefs":
+                # Installed only when it is needed, so every other case runs on the
+                # store's own lock. `_lock` is typed `asyncio.Lock`; this stands in
+                # for one and is only ever entered through `async with`.
+                store._lock = lock  # type: ignore[assignment]
+                lock.arm()
+                return lock
+            embedder.arm()
+            return embedder
+
         try:
-            yield store, embedder
+            yield store, arm
         finally:
             embedder.release()
+            lock.release()
             store.close()
 
 
 class _GatedEmbedder:
-    """An ``Embedder`` that parks its *first* call until the suite releases it.
+    """An ``Embedder`` that parks its next call, once armed, until the suite releases it.
 
-    ``FakeEmbedder``/``HashingEmbedder`` cannot suspend, and the store's first
-    ``await`` is an embedding, so the input-observation case needs one that can.
-    Only the first call is gated: the case goes on to read the store back, and a
-    ``search`` embeds its query too.
+    ``FakeEmbedder``/``HashingEmbedder`` cannot suspend, and the first ``await`` of
+    every store method that embeds is that embedding, so the input-observation
+    cases need one that can. Only the call after ``arm`` is gated: the cases seed
+    the store before arming and read it back afterwards, and both of those embed
+    too.
     """
 
     def __init__(self, delegate: Embedder) -> None:
-        """Wrap ``delegate``, arming its next call to suspend."""
+        """Wrap ``delegate``; unarmed, so nothing suspends until :meth:`arm`."""
         self._delegate = delegate
-        self._armed = True
+        self._armed = False
         self._entered = asyncio.Event()
         self._released = asyncio.Event()
+
+    def arm(self) -> None:
+        """Make the next :meth:`embed` suspend."""
+        self._armed = True
 
     @property
     def model_id(self) -> str:
@@ -1196,6 +1225,49 @@ class _GatedEmbedder:
 
     def release(self) -> None:
         """Let the gated call finish; idempotent."""
+        self._released.set()
+
+
+class _GatedLock:
+    """The store's ``asyncio.Lock``, wrapped so one acquisition can be held at the door.
+
+    ``list_beliefs`` is the one operation the input-observation cases drive that
+    never embeds, so its first ``await`` is the lock rather than the embedder. The
+    suspension goes *before* ``acquire``, not after: a conforming implementation
+    has materialised both filters on its first executed lines and cannot be reached
+    by the mutation, while one that read them after taking the lock would be.
+    """
+
+    def __init__(self, delegate: asyncio.Lock) -> None:
+        """Wrap ``delegate``; unarmed, so nothing suspends until :meth:`arm`."""
+        self._delegate = delegate
+        self._armed = False
+        self._entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    def arm(self) -> None:
+        """Make the next acquisition suspend before it takes the lock."""
+        self._armed = True
+
+    async def __aenter__(self) -> None:
+        """Suspend if armed, then take the real lock."""
+        if self._armed:
+            self._armed = False
+            self._entered.set()
+            await self._released.wait()
+        await self._delegate.acquire()
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        """Release the real lock."""
+        self._delegate.release()
+
+    async def reached(self) -> None:
+        """Wait until the gated call has arrived."""
+        async with asyncio.timeout(_GATE_SECONDS):
+            await self._entered.wait()
+
+    def release(self) -> None:
+        """Let the gated call take the lock; idempotent."""
         self._released.set()
 
 
