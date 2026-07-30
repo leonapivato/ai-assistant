@@ -1877,6 +1877,15 @@ class DeferralStoreContract:
 
         assert admission.outcome is DeferralAdmissionOutcome.ADMITTED
         assert admission.deferral is not None
+        # **Linked to nothing.** The record must not keep a `predecessor_id` naming a
+        # row that no longer exists: that claims a lineage nothing can walk, and the
+        # surface — which resolves the link to render "your answer raised this" —
+        # would try to follow it and find nothing. The caller named a parent; the
+        # store found none, so there is no link to record.
+        assert admission.deferral.predecessor_id is None
+        stored = await store.get("child")
+        assert stored is not None
+        assert stored.predecessor_id is None
         # Subject to the cap: with the parent gone there is no exemption to spend,
         # so the next ordinary question is refused at the same ceiling.
         refused = await store.defer(

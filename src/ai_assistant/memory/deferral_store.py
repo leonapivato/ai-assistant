@@ -673,6 +673,13 @@ class SqliteDeferralStore:
         # Built here, before the store is touched at all, so an inadmissible
         # proposal (a `DataTier.SECRET` one, a ruling that is not `ASK_USER`) leaves
         # the queue unchanged by construction rather than by care.
+        # Built with **no** parent link, whatever the caller named. Whether the
+        # successor genuinely links is only knowable inside the atomic section — the
+        # parent may have been destroyed by the user mid-apply — and ADR-0078 §2 is
+        # explicit that a `predecessor_id` naming no stored deferral admits the
+        # successor as an ordinary question "linked to nothing". A record carrying a
+        # link to a row that no longer exists would claim a lineage nothing can walk,
+        # which the surface would then try to resolve and fail.
         candidate = DeferredProposal(
             id=deferral_id,
             proposal=proposal,
@@ -681,7 +688,6 @@ class SqliteDeferralStore:
             deferred_at=now,
             retention=self._retention,
             expires_at=self._expiry_from(now),
-            predecessor_id=predecessor_id,
         )
         key = proposal.question_key
         async with self._lock:
@@ -733,7 +739,10 @@ class SqliteDeferralStore:
         """One atomic admission: the exemption, the id, the key, the cap, the insert."""
         with self._transaction("admit a deferral") as conn:
             parent = self._validated_parent(conn, predecessor_id, successor_to_claim)
-            admission = self._admit(conn, candidate, key, exempt=parent is not None, now=now)
+            linked = (
+                candidate if parent is None else _transition(candidate, predecessor_id=parent.id)
+            )
+            admission = self._admit(conn, linked, key, exempt=parent is not None, now=now)
             if parent is not None and admission.deferral is not None:
                 conn.execute(
                     "UPDATE deferrals SET successor_id = ? WHERE id = ?",

@@ -379,11 +379,21 @@ class FakeDeferralStore:
         # Built here, before the store is touched at all, so an inadmissible
         # proposal (a `DataTier.SECRET` one, a ruling that is not `ASK_USER`)
         # leaves the queue unchanged by construction rather than by care.
-        candidate = self._admission_record(deferral_id, proposal, decision, predecessor_id, now)
+        # Built with **no** parent link, whatever the caller named. Whether the
+        # successor genuinely links is only knowable inside the atomic section — the
+        # parent may have been destroyed by the user mid-apply — and ADR-0078 §2 is
+        # explicit that a `predecessor_id` naming no stored deferral admits the
+        # successor as an ordinary question "linked to nothing". A record carrying a
+        # link to a row that no longer exists would claim a lineage nothing can walk,
+        # which the surface would then try to resolve and fail.
+        candidate = self._admission_record(deferral_id, proposal, decision, now)
         key = proposal.question_key
         async with self._exclusive():
             parent = self._validated_parent(predecessor_id, successor_to_claim)
-            admission = self._admit(candidate, key, exempt=parent is not None, now=now)
+            linked = (
+                candidate if parent is None else _transition(candidate, predecessor_id=parent.id)
+            )
+            admission = self._admit(linked, key, exempt=parent is not None, now=now)
             if parent is not None and admission.deferral is not None:
                 self._rows[parent.id] = _transition(parent, successor_id=admission.deferral.id)
             return admission
@@ -393,15 +403,15 @@ class FakeDeferralStore:
         deferral_id: str,
         proposal: MemoryUpdateProposal,
         decision: MemoryDecision,
-        predecessor_id: str | None,
         now: datetime,
     ) -> DeferredProposal:
-        """Build the ``PENDING`` record this store would admit.
+        """Build the unlinked ``PENDING`` record this store would admit.
 
         Everything the store owns comes from the store: ``deferred_at`` from its
         clock, ``retention`` from the lifetime it was constructed with, and
         ``expires_at`` from their sum — with no argument able to change any of the
-        three (ADR-0078 §2).
+        three (ADR-0078 §2). The parent link is deliberately absent here and added
+        only once a live parent has been validated.
         """
         return DeferredProposal(
             id=deferral_id,
@@ -411,7 +421,6 @@ class FakeDeferralStore:
             deferred_at=now,
             retention=self._retention,
             expires_at=self._expiry_from(now),
-            predecessor_id=predecessor_id,
         )
 
     def _expiry_from(self, now: datetime) -> datetime | None:
