@@ -70,7 +70,10 @@ An under-specified brief is the largest source of rework. Each one carries:
   the wrong work.
 - **The ADR number, or that none is needed.** Never let an agent pick one.
 - **Cross-lane interactions** in both directions: what this lane will see if
-  another merges first, and what it must not assume.
+  another merges first, and what it must not assume. Say **where in the merge
+  order it sits and why** (§5). A lane told it merges last plans for the rebase
+  instead of reporting as though it were finished; a lane told it holds a floor
+  path knows its own merge is the expensive one.
 - **The finishing loop** — full gate, `just review-codex`, triage, `just ship`,
   `gh pr ready` — and that the agent owns all of it without asking.
 - **Fetch and rebase before gating *and* before reviewing.** A gate against a
@@ -165,6 +168,10 @@ A subagent has no channel to ask mid-run, so a STOP ends the run — but it does
 end the *lane*. The clone still holds the branch, the commits, and the draft PR
 with the pre-flight in its description.
 
+The same applies to a lane that finished and reported: **the most common resume is
+not an adjudication at all, it is "rebase, you went `BEHIND`"** (§5). Everything
+below holds for it unchanged.
+
 - **Prefer `SendMessage` to the same agent.** Its context is intact: it knows its
   clone, its fence, what it has already built, and why it stopped. A ruling plus
   "continue" is a few hundred tokens.
@@ -184,6 +191,30 @@ signal to close the PR and decide deliberately whether the work is discarded or
 becomes an issue. Then reset the clone so §1 sees it as free.
 
 ## 5. Merge
+
+**Decide the order when you dispatch, not when the PRs arrive.** It follows from
+one asymmetry, and it is cheap to get right in advance and expensive to discover
+late.
+
+`CONTRIBUTING.md` → "Report the review, then mark it ready" holds the floor and
+every condition — read it there rather than from memory. What the *order* turns
+on is this: a base move that clears the floor and leaves the reviewed patch
+untouched costs the rebasing lane **nothing**, while a base move landing in the
+floor invalidates its artifact **outright**, with no patch-identity relief. So:
+
+- **Lanes whose paths are all outside the floor are free to each other**, in any
+  order. Most waves are entirely this case, and then there is no ordering problem
+  to solve — sequence them by whatever is ready.
+- **A lane holding a floor path is the expensive merge, so put it last**, when
+  nothing else is open to rebase across it. Merging it first taxes every other
+  lane in the wave a full round each.
+- **Two floor-touching lanes in one wave means one of them pays.** That is a
+  reason to split them across waves, not a cost to absorb quietly — and note
+  `docs/adr/**` is *in* the floor, so an ADR lane and a contract lane are both
+  expensive and each wants its own quiet window.
+
+The corollary for §2: a wave is cheapest when at most one lane touches the floor.
+Fence for that when you slice the work, not afterwards.
 
 **A contract ADR merges before its implementation** (golden rule 5, ADR-0015 §5).
 Where a lane split into an ADR PR and an implementation PR, the order is
@@ -225,8 +256,18 @@ an implementation lane would not.
 Nothing on the PR enforces this — `gate` re-runs green on the new head and
 protection has no opinion about review records — so it is the merger's job to
 check. Branch protection is `strict`, so a stale branch must be updated before it
-can merge; the cheap resolution is ordering. Merge while the branch is current.
-Where an update is unavoidable, the new SHA needs its own gate, review and ship.
+can merge; the cheap resolution is ordering (above). Merge while the branch is
+current.
+
+**Where an update is unavoidable, the new SHA always needs its own gate and its
+own `ship`; it needs a fresh *review* only where the base move fails ADR-0027
+§2's conditions.** Say which of the two you are asking for when you send a lane
+back, because the default a worker reaches for is the expensive one: `ship`
+refusing looks like "run a review," and a lane left to its own judgement will buy
+a round it did not owe. Tell it to rebase, re-gate, re-`ship`, run **no** review,
+and **STOP and quote the refusal** if `ship` declines — its verification drill is
+in `worker.md`. A refusal you did not predict is worth reading; a round spent
+papering over it tells you nothing and cannot be refunded.
 
 Rebase-merge only; the repo forbids squash and merge commits.
 
