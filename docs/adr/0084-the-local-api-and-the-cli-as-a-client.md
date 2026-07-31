@@ -1,6 +1,6 @@
 # 84. The local API: a loopback socket, a versioned envelope, and the CLI as a client
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-31
 - **This is the second and last of leg 5's two decisions.** ADR-0083 decided the
   *process* — one resident instance, exclusive ownership of the five databases,
