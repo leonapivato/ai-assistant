@@ -102,15 +102,44 @@ lane, not this one.
 **The hub listens on an `AF_UNIX` stream socket at `<data_dir>/hub.sock`**, created
 with owner-only permissions (`0600`) and removed on shutdown.
 
-**The socket path is length-checked early, and an overlong one is a `78`.** A
-pathname `AF_UNIX` socket is bounded by `sun_path` — 108 bytes on Linux,
-terminator included — while `data_dir` is operator-configurable through
-`AI_ASSISTANT_DATA_DIR` (ADR-0083 §2). So a perfectly writable, perfectly valid
-data directory can have a path no socket can be bound inside. Left unchecked that
-failure lands at ADR-0083 §3's **step 6**, after the lock is held, the five
-stores are open and the start-up sweeps have run: the latest and least legible
-moment available, and a hub that is down for a reason buried in a `bind` errno is
-ruling 4's failure.
+**`0600` on the socket is necessary and not sufficient, and the gap is the
+directory.** A mode on the socket *file* restricts `connect()`; it does nothing
+about the **directory entry**. If `data_dir` is group- or world-writable, another
+local user can `unlink` the live `hub.sock` and bind their own in its place — and
+the CLI, following §9's derivation, connects to it and hands over the utterance.
+That is Tier 0/1 content going to another user's process (ADR-0004 §1), which no
+amount of mode on the replaced file prevents. ADR-0083 D3 does not close this: it
+requires `data_dir` to be local, writable, and not shared with another hub, none
+of which excludes a mode like `0777`.
+
+**So the data directory itself is constrained, and it is validated at ADR-0083
+§3's step 2.** Three conditions, each a `78` when it fails, because none of them
+is fixed by restarting:
+
+- **Owned by the hub's own uid**, and **not group- or world-writable**. Created
+  `0700` when the hub creates it. This is ADR-0004 §4's owner-only posture applied
+  to the container rather than only to the contents — and it protects the five
+  databases sitting in the same directory at least as much as it protects the
+  socket.
+- **Absolute and canonical.** `Settings.data_dir` is a `Path` and may be
+  relative, which silently breaks the one-setting-locates-both property §9 rests
+  on: a hub started at boot with a working directory of `/` and a setting of
+  `state` binds `/state/hub.sock`, while a CLI run from a project directory looks
+  for `<project>/state/hub.sock` and truthfully reports the hub down. Both read
+  the same setting and disagree. A relative value is therefore rejected at
+  settings load, and the path is canonicalised before either side derives
+  anything from it.
+- **Short enough to hold the socket**, which is the next paragraph.
+
+**The socket path is length-checked at the same point, and an overlong one is
+also a `78`.** A pathname `AF_UNIX` socket is bounded by `sun_path` — 108 bytes
+on Linux, terminator included — while `data_dir` is operator-configurable through
+`ASSISTANT_DATA_DIR` (ADR-0083 §2, and see the note on its spelling in §9). So a
+perfectly writable, perfectly valid data directory can have a path no socket can
+be bound inside. Left unchecked that failure lands at ADR-0083 §3's **step 6**,
+after the lock is held, the five stores are open and the start-up sweeps have
+run: the latest and least legible moment available, and a hub that is down for a
+reason buried in a `bind` errno is ruling 4's failure.
 
 **So the encoded length of `<data_dir>/hub.sock` is validated at step 2**,
 alongside the data-directory resolution and the lock that already happen there,
@@ -377,12 +406,22 @@ concurrency the engine does not offer.
 Two rules fall out, and both are needed because "one at a time" is only a
 contract if a violation has a defined answer:
 
-- **A request frame sent while another is outstanding is refused** with a typed
-  error, rather than queued or run concurrently. Running it would let a client
-  drive two operations it cannot then tell apart.
+- **A request frame sent while another is outstanding is a protocol violation,
+  and the connection is closed** — not queued, not run concurrently, and *not*
+  answered with a correlated error. The correlated error is the tempting answer
+  and it is unusable: its id would be the second request's, which by the next
+  rule the client must treat as a mismatch against the request still outstanding,
+  so a conforming client could never consume the refusal it was sent. A rule
+  whose own response violates the adjacent rule is not a rule.
 - **A response whose correlation id does not match the outstanding request is a
   protocol violation**, and the connection is closed rather than resynchronised.
   A stream that has desynchronised cannot be repaired by guessing.
+
+Closing on both is not severity for its own sake. A client that issues two
+concurrent requests on a connection this ADR defines as serial has a bug that no
+in-band message will fix, and the client is stateless (§7) — so reconnecting
+costs it nothing, which is what makes closing the cheap answer rather than the
+harsh one.
 
 **So the correlation id has one job today and one reason to exist tomorrow.**
 Today it detects exactly the desynchronisation above. Tomorrow it is what lets
@@ -884,11 +923,26 @@ reported.
 
 **The socket path derives from `Settings.data_dir`** (ADR-0083 §2) as
 `<data_dir>/hub.sock`. No new required setting: a client that can find the data
-directory can find the hub, and `AI_ASSISTANT_DATA_DIR` already works through
+directory can find the hub, and the environment variable already works through
 pydantic-settings for both halves. This is deliberately the same field on both
 sides — a hub and a client that disagree about the data directory would otherwise
 fail with a missing socket rather than with the misconfiguration they actually
-have.
+have. §1 is what makes "the same field" mean the same directory: without its
+absolute-and-canonical rule, two processes with different working directories read
+one setting and reach two paths.
+
+**The variable is `ASSISTANT_DATA_DIR`, not `AI_ASSISTANT_DATA_DIR`**, and the
+correction is recorded rather than made silently. `Settings` sets
+`env_prefix="ASSISTANT_"` (`core/config.py:554`), so the prefixed name is
+`ASSISTANT_DATA_DIR`. **ADR-0083 §2 names it `AI_ASSISTANT_DATA_DIR` and is
+wrong about it** — an operator following that sentence would set a variable
+`Settings` ignores and would silently get the default directory, which for a
+decision whose whole subject is where the data lives is worth more than a
+footnote. That slip is a *factual* error in a ratified ADR rather than a decision
+this ADR changes, so nothing here amends ADR-0083: under ADR-0070 §1 it is a
+candidate for a self-amendment — a dated note reconciling an ADR with a fact —
+and it is filed as an issue rather than fixed from this lane, whose fence is this
+ADR and ADR-0042.
 
 **One optional override** exists for the day the transport is not a socket, and it
 is optional precisely so that the common deployment configures nothing. Its
