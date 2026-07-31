@@ -171,16 +171,21 @@ and §2 and §3 are not.
 **Every connection opens with one client frame and one server frame, before any
 request.**
 
-The client sends a connect frame carrying, at minimum: the **protocol version**
-(§3), a **client identifier** (a free-form name for logs — `assistant-cli`), and
-a **credential field**. The server replies with its own protocol version, a
-**build identifier**, and its readiness. Only then may a request be sent.
+The client sends a connect frame carrying the **protocol version** (§3) and a
+**client identifier** (a free-form name for logs — `assistant-cli`). The connect
+schema also **defines** a **credential field**, which this transport does not
+populate. The server replies with its own protocol version, a **build
+identifier**, and its readiness. Only then may a request be sent.
 
-**The credential field exists and is empty, and the server refuses a non-empty
-one.** This is the whole point of the section, so the rule is stated as a rule:
+**The credential field is defined by the schema and carries nothing here, and the
+server refuses a frame that puts something in it.** This is the whole point of the
+section, so the rule is stated as a rule, and stated so that a conforming client
+has an encoding:
 
-> On this transport the credential field must be absent. A connect frame that
-> carries one is **refused**, with a distinct error naming the reason.
+> The credential field is **optional on the wire**. On this transport a
+> conforming client either omits the member or sends it empty, and both are
+> accepted. A connect frame carrying a **non-empty** credential is **refused**,
+> with a distinct error naming the reason.
 
 Accepting-and-ignoring is the alternative and it is the dangerous one: a client
 that presents a credential and is admitted has been told, by admission, that its
@@ -205,12 +210,19 @@ for the credential above, and it is the thing §3's refusal needs in order to fa
 the cost on every frame and buy the ability to change versions mid-connection,
 which nothing wants.
 
-### 3. One envelope version, matched exactly, refused at connect
+### 3. One protocol version, exchanged once, matched exactly, refused at connect
 
-**Every frame travels in an envelope, and the envelope carries a single integer
-`protocol_version` established at connect.** Client and server must agree
-exactly; a mismatch **refuses the connection** with a message naming both
-versions and the operator action.
+**The protocol version is a single integer exchanged in the connect handshake and
+nowhere else. It becomes connection state; it is not repeated on subsequent
+frames.** Client and server must agree exactly; a mismatch **refuses the
+connection** with a message naming both versions and the operator action.
+
+Every frame after the handshake travels in an envelope whose *interpretation* is
+fixed by the negotiated version — the version governs the envelope, it is not
+carried in it. Stating it that way is not pedantry: it is what makes §2's
+"handshake rather than a version on every message" a rule an implementation can
+actually satisfy, and it fixes for both halves whether a post-connect frame is
+expected to contain the field. It is not.
 
 **Refusing a mismatch is the right answer here, and it is not laziness.** Client
 and server are the same `uv` environment on the same machine, installed together
@@ -227,10 +239,41 @@ differ, and the day that arrives the negotiation becomes a change to *what the
 handshake does with a number it already exchanges* — not the introduction of a
 concept the wire has no room for.
 
-**The envelope's other required fields** are a message kind, a correlation id
-(one request, one response, so a future streaming or multiplexed extension is
-additive — ADR-0042 §5's deferral inherited unchanged), and an explicit payload
-length, which §4's unbounded-payload constraint makes non-optional.
+**The envelope's required fields** are a message kind, a correlation id (one
+request, one response, so a future streaming or multiplexed extension is additive
+— ADR-0042 §5's deferral inherited unchanged), and an explicit payload length,
+which §4's unbounded-payload constraint makes non-optional.
+
+**A declared length is a claim, and the reader must be free to disbelieve it.**
+An explicit payload length is only safe alongside a ceiling, so the transport
+also fixes:
+
+- a **maximum frame size**, which is configuration with a named default;
+- a declared length above it is **refused before a byte of payload is read**,
+  with a typed error, and the connection is closed;
+- the reader **never allocates the declared length up front**; it reads
+  incrementally against the cap;
+- a connect or a frame that stalls part-way is abandoned on a **read deadline**,
+  so a peer that stops sending cannot hold a connection open indefinitely.
+
+**The reason is robustness, not secrecy, and saying so keeps the rule honest.**
+The `0600` bit already scopes a peer to the owning user (§1), so this is not a
+defence against a hostile stranger and should not be sold as one. It is a defence
+against the thing ADR-0083 is entirely about: a *resident* process. A hub that
+dies on a malformed length, or that is held open by a client which stopped
+sending, is a hub that is down — ruling 4's failure, arriving through the one
+door this ADR opens. A one-shot CLI could shrug this off; a process that runs for
+weeks cannot.
+
+**This cap is a transport limit and is emphatically not #473's bound.** #473 is a
+*semantic* question — how large a belief's evidence tuple may legitimately grow —
+and it belongs to its own contract lane. The two meet at exactly one point: an
+evidence tuple that grew past the transport cap would make a *legitimate* response
+unsendable. That is one more reason the semantic bound is owed, and one more
+reason §4 refuses to design as though it already existed. So the default is set
+generously, and exceeding it surfaces as an error the client can read rather than
+as a quietly shortened payload — #473 records that silent truncation is not
+available in any case, ADR-0073 §4 forbidding a citation to be dropped silently.
 
 **#421 is answered here, and the honest answer is "partly, and not enough to act
 on."** #421 parks cross-process serialization portability until "the deployment
@@ -694,6 +737,9 @@ reviewed."
 - **A stale continuation token has one typed answer**, distinguishable from denial
   and from expiry, and the client stays stateless by decision rather than by
   accident (§7).
+- **The transport gains a frame ceiling, a refusal and a read deadline** (§3), so
+  a malformed length or a peer that stops sending cannot take a resident hub down.
+  It is a transport limit and leaves #473's semantic bound exactly where it was.
 - **The remote leg is one bind away on the wire and one ratified decision away in
   fact.** The envelope carries a version, the handshake has a credential slot, and
   the client is stateless — the three expensive retrofits are bought. What is not
