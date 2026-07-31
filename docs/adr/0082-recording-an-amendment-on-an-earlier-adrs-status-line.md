@@ -104,29 +104,37 @@ answer possible.
 
 ## Decision
 
-### 1. The record is owed when the later ADR declares an amendment — and not otherwise
+### 1. The record is owed when the later ADR amends a named clause — and not otherwise
 
 **A later ADR's change is recorded on an earlier ADR's `Status` line exactly
-when the later ADR declares, in its own text, that it amends a named clause of
-that earlier ADR.** Adding an obligation that contradicts no sentence the earlier
-ADR wrote is a **stacked addition**: it is recorded in the ADR that makes it, and
-nowhere else.
+when the later ADR amends a named clause of that earlier ADR**, and the later
+ADR states which clause, in its own text. Adding an obligation that contradicts
+no sentence the earlier ADR wrote is a **stacked addition**: it is recorded in
+the ADR that makes it, and nowhere else.
 
-**The classification test is ADR-0070 §1's, unchanged, applied to the earlier
-ADR's *text*.** Would a reader holding only the earlier ADR now act differently,
-or read one of its clauses more widely than it now holds? If yes, the later ADR
-amends it (or supersedes it — §1 decides which, and this ADR does not touch that
-line). If no — the earlier ADR's sentences all stay true, merely joined by
-another obligation stated elsewhere — nothing is owed on its `Status`.
+**What decides which of the two it is, is ADR-0070 §1's test, unchanged, applied
+to the earlier ADR's *text*.** Would a reader holding only the earlier ADR now
+act differently, or read one of its clauses more widely than it now holds? If
+yes, the later ADR amends it (or supersedes it — §1 decides which, and this ADR
+does not touch that line). If no — the earlier ADR's sentences all stay true,
+merely joined by another obligation stated elsewhere — nothing is owed on its
+`Status`. **The test controls, not the label**: a later ADR that calls its change
+an amendment of ADR-N without a clause of ADR-N failing §1's test has
+mis-declared it, and the record is wrong however the declaration reads.
 
-**The judgement belongs to the later ADR's author, and is made in the later
-ADR's text.** This is the operative half. A reviewer reads the declaration where
-the author made it and checks it against §1's test on the quoted clause; a
-reviewer may not demand a `Status` record on ADR-N that the ADR under review has
-not declared, nor demand the removal of one it has. That is what PR #478's
-deadlock was: two rounds of book-keeping demands in opposite directions against
-an ADR that had already declared exactly one amendment and argued it clause by
-clause (ADR-0081 §5).
+**The judgement is made in the later ADR's text, which is where it is reviewed.**
+This is the operative half. The author names the clause and applies §1's test to
+it; a reviewer checks that showing against the quoted clause, and **may require
+the record added or removed by showing the test comes out the other way** — by
+naming the sentence of the earlier ADR that does, or does not, become false or
+over-wide. What a reviewer may not do is demand a record, or its removal, on
+book-keeping grounds alone: that the earlier ADR's list "should mention" the
+change, that a conformance list has grown, or that a sibling ADR was recorded
+differently. Absent a clause that fails §1's test, there is nothing to record.
+That is what PR #478's deadlock was — two rounds of book-keeping demands in
+opposite directions, neither quoting a clause of ADR-0077 that ADR-0081 had made
+false, against an ADR that had already named its one clause and argued it (ADR-0081
+§5).
 
 **This classifies `main` as it stands, with nothing to retrofit.** ADR-0040
 amended ADR-0028 §8 — §8's ratified sentence excluding "the fold's own rule" from
@@ -288,16 +296,20 @@ violation this ADR is about.
 
 - **A mechanical cross-check** — #479's third question, an assertion in
   `scripts/project_status.py` that an ADR claiming to amend ADR-N is named on
-  ADR-N's `Status`. Declined on three grounds. It would be **wrong** under §1:
-  the check's premise is that every declared amendment is recorded, and §1's
-  answer is that a stacked addition is deliberately not; it would fire on every
-  correct silence. It would give this decision behavioural impact it does not
-  have — the field is displayed and classifies nothing (ADR-0070 §4) — and the
-  rule's failure mode is a reader misreading a record, which a script does not
-  catch. And `project_status.py` reads only the first physical line of a wrapped
-  `Status` field (#404), so any check built on it today would be built on a
-  truncated read. If a liveness-classifying consumer is ever added, ADR-0070 §4
-  already binds it and #404 is the prerequisite.
+  ADR-N's `Status`. **Not** declined for want of input: `project_status.py`
+  already folds a `Status` that wraps across physical lines (`_STATUS_RE`,
+  `_fold_status`, and `test_folds_a_status_that_wraps_across_lines`), so the
+  whole field is available to it — issue #404, which reported the truncation
+  ADR-0070 §4 recorded, is closed. It is declined because the check would be
+  **wrong** under §1: its premise is that every ADR naming another in an
+  amendment relation is recorded on that ADR's `Status`, and §1's answer is that
+  a stacked addition deliberately is not, so it would fire on every correct
+  silence — ADR-0077 and ADR-0079 against ADR-0028 today. Nor could it police
+  what §1 actually turns on, which is whether a *clause* of the earlier ADR fails
+  §1's test; that is a reading, and a script that cannot make it would enforce the
+  label this ADR says does not control. It would also give this decision
+  behavioural weight it does not have — the field is displayed and classifies
+  nothing (ADR-0070 §4) — for a failure mode that is a reader misreading a record.
 - **Re-adjudicating a ratified classification.** #479 asks whether ADR-0078
   recording an *exception to a ratified refusal* as `amended by` is arguably a
   decision change under ADR-0070 §1. This ADR does not reopen it. ADR-0081 §5
@@ -317,10 +329,9 @@ violation this ADR is about.
 - **The amend-versus-supersede line itself.** ADR-0070 §1 owns it, unchanged.
   This ADR decides only where the *record* goes once §1 has classified the
   change.
-- **#404 — `project_status.py` stops at the first physical line of a wrapped
-  `Status` field.** Untouched and still open; §6 names it as the prerequisite for
-  any mechanical check. Correcting the two lines makes them shorter, which
-  reduces the wrapped population by two but does not close the issue.
+- **What `scripts/project_status.py` does with the field.** It is not touched
+  here and gains no rule: it displays the folded value and classifies nothing,
+  exactly as ADR-0070 §4 records. §6 declines the one change #479 proposed to it.
 - **#458 — the recurring misreading of ADR-0070 §1's "a supersession that has
   landed" clause.** Not a governance gap but a reviewer failure mode, so this ADR
   states the condition rather than re-deciding it: §1's condition is that the
@@ -336,10 +347,12 @@ violation this ADR is about.
 
 **Easier.**
 
-- **A reviewer has a rule to converge on.** The `Status` record follows the later
-  ADR's declaration, checked against ADR-0070 §1 on the quoted clause. The two
-  book-keeping demands that deadlocked PR #478 — supply a record the ADR did not
-  declare, remove one it did — are both answerable by pointing at §1 here.
+- **A reviewer has a rule to converge on, and one currency to argue in.** The
+  `Status` record follows ADR-0070 §1's test on a named clause of the earlier
+  ADR; a demand to add or remove a record has to name that clause and show the
+  test's answer. The two demands that deadlocked PR #478 — supply a record, then
+  remove the one that was there — quoted no such clause, and §1 here says that
+  is what makes them unanswerable rather than merely opposed.
 - **The corpus states one thing about one field.** After this change ADR-0070
   §4's extraction invariant is true of every line in `docs/adr/`, and an ADR
   author choosing where to record an amendment has a single sentence to consult
@@ -360,12 +373,14 @@ violation this ADR is about.
   one shape everywhere — costs either sixteen deleted records or a partial
   supersession of ADR-0070 §4.
 - **The classification stays a judgement.** §1 locates it in the later ADR's
-  author and makes it reviewable, but it is not mechanical and §6 declines to
-  make it so. A wrong declaration produces a wrong record, and the correction is
+  author, makes it reviewable on the quoted clause, and lets a reviewer overturn
+  it — but it is not mechanical, and §6 declines to make it so on the ground that
+  no script can make the reading it turns on. A wrong classification that survives
+  review produces a wrong record, and correcting it once the ADR is ratified takes
   another ADR.
 
 **Revisit when** a consumer that classifies liveness from `Status` is actually
-built — ADR-0070 §4 binds it, #404 gates it, and it is the first thing that would
-make any of this behavioural — or if a third leading-token line is ever proposed
-to carry a qualifier, which §2 forbids and which would mean the trade above is
-being paid more often than twice.
+built — ADR-0070 §4 binds it, and it is the first thing that would make any of
+this behavioural — or if a third leading-token line is ever proposed to carry a
+qualifier, which §2 forbids and which would mean the trade above is being paid
+more often than twice.
