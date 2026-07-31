@@ -403,34 +403,52 @@ server must not read into a fixed buffer or assume a frame fits one (§3). The
 bound itself belongs to #473's contract lane — this ADR only refuses to design as
 though the bound already existed.
 
-**A bounded transport and an unbounded type are in direct tension, and it is
+**A bounded transport and an unbounded contract are in direct tension, and it is
 resolved by naming it rather than by choosing a large enough number.** §3's frame
-ceiling means a result that serialises beyond it cannot be returned. There are
-three ways out and only one is available:
+ceiling means a value that serialises beyond it cannot cross — and the problem is
+**symmetric**, which is easy to miss by thinking only about results. On the way
+back, `Belief.evidence` is unbounded (#473). On the way in, `converse` takes an
+unconstrained `str`, so a large enough utterance is a request frame no client can
+send. Either way the same three ways out exist, and only one is available:
 
 - **Silently truncate.** Forbidden — #473 records that ADR-0073 §4 does not
-  permit a citation to be dropped silently.
-- **Chunk or stream the result.** That is ADR-0042 §5's deferred streaming
-  extension, inherited deferred here (§11). Inventing it now would ratify a
-  streaming contract with no stage emitting one, which is the unspiked seam
-  ADR-0042 §5 rejected in as many words.
-- **Fail, visibly and inside the contract.** An oversized result raises a typed
-  `AssistantError` naming the limit and the field that exceeded it. It is part of
-  the **promoted Protocol's declared contract**, so the conformance suite (§5)
-  holds every implementation to it, and a client is not silently less capable
-  than the engine it stands in for.
+  permit a citation to be dropped silently, and truncating an *utterance* would
+  answer a question the user did not ask.
+- **Chunk or stream.** That is ADR-0042 §5's deferred streaming extension,
+  inherited deferred here (§11). Inventing it now would ratify a streaming
+  contract with no stage emitting one, which is the unspiked seam ADR-0042 §5
+  rejected in as many words.
+- **Fail, visibly and inside the contract.** An oversized value — argument or
+  result — raises a typed `AssistantError` naming the limit and the field that
+  exceeded it.
 
-**The third is chosen, and its consequence for sequencing is the real answer.** A
-conforming in-process `Engine` would return that oversized `Belief` where the
-client raises, so for that one state the two implementations are distinguishable
-— which is precisely the substitutability §5 exists to provide. That gap is not
-closed by the transport; it is closed by bounding the type. **So #473 is a
-prerequisite of the client lane, not merely context for it** (§11). Until its
-bound lands, §3's ceiling is set so the state is unreachable for any belief this
-system currently produces — the observer cites at most `observation_batch_size`
-episodes, default 20 — rather than *provably* unreachable. Recording that
-difference is the point: this ADR does not get to call the problem solved by
-picking a big number.
+**The third is chosen, and the load-bearing half is where the limit lives.** If
+the ceiling belonged to the transport alone, the wire client would refuse a
+17 MiB utterance that the in-process `Engine` accepts, and the two
+implementations §5 makes substitutable would diverge on a value both are handed.
+So:
+
+> **The size limit is part of the promoted Protocol's declared contract, not a
+> property of the transport, and *every* implementation enforces it** — the
+> in-process engine included. The conformance suite (§5) is what holds them to
+> it.
+
+That inverts the obvious reading, and deliberately. §3's ceiling stops being "a
+thing the socket does" and becomes a bound the contract states, which the socket
+then also happens to enforce for its own robustness reasons. A client is then
+never silently less capable than the engine it stands in for, in either
+direction.
+
+**One residual gap stays open, and it is a sequencing fact rather than a design
+hole.** A bound the contract enforces makes the two implementations agree, but it
+does not make an unbounded type sensible: a belief whose evidence grew past the
+limit becomes unreadable through *any* implementation, which is a memory-contract
+problem and not a transport one. **So #473 is a prerequisite of the client lane,
+not merely context for it** (§11). Until its bound lands, §3's ceiling is set so
+that state is unreachable for any belief this system currently produces — the
+observer cites at most `observation_batch_size` episodes, default 20 — rather
+than *provably* unreachable. Recording that difference is the point: this ADR
+does not get to call the problem solved by picking a big number.
 
 **The two rejected shapes**, both genuinely arguable:
 
