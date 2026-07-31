@@ -12,6 +12,39 @@
   `ModelProvider`, which the earlier §4 amendment showed was bound and violated.
   §3's original two-seam scope stands; the amendment appends `ModelProvider` as a
   third enforced seam. See the second amendment below.)
+- Note (2026-07-31): **The first amendment's in-place mutation vector is closed;
+  the consequence it draws from that vector is not.** *Amendment (2026-07-25):
+  §4's `ModelProvider` row was false* justifies copying the wrapper snapshots'
+  *elements* with a mechanism that can no longer be written: "`Message` is a
+  non-frozen model, so a turn's `content` or `role` can be rewritten in place
+  without the list changing".
+  [ADR-0068](0068-freeze-the-shared-record-graph.md) froze `Message`
+  (`core/types.py`, `ConfigDict(frozen=True)`), so no turn's field changes under
+  a suspended call today. **The `role`-flip consequence stands** — a turn flipped
+  to `ASSISTANT` between two attempts still converts a retryable transient
+  failure into a non-retryable malformed-argument `ModelError` (ADR-0066 §1), and
+  under `RoutingProvider` still truncates the remaining fallback order — but it
+  is now reached by **replacing an element of the caller's still-mutable
+  `Sequence`**, not by rewriting a turn. ADR-0068 §4 ("What survives of
+  ADR-0065") already records that shrink, names "the per-element tear inside
+  `MemoryWrite` and `Message`" as what freezing removes, and states this ADR
+  "stays in force and is **not** superseded" because the container residual is a
+  different property from element immutability. The 2026-07-25 section's closing
+  sentence — "pinned by mid-flight regression cases under `tests/models/`,
+  parametrised over an appended turn and a rewritten one" — is stale in its
+  second half: `tests/models/test_retry.py` and `tests/models/test_routing.py`
+  carry only the `appended-turn` id, and the surviving consequence is pinned in
+  its container form by
+  `test_a_mid_flight_role_flip_cannot_make_a_later_attempt_malformed` and
+  `test_a_mid_flight_role_flip_cannot_truncate_the_fallback_order` (#387,
+  PR #513). **Nothing decided changes.** ADR-0070 §1 is append-only in mechanism,
+  so the 2026-07-25 section is not rewritten and stands as history; this note is
+  a permitted dated header note under §1, an instrument ADR-0082 §4 records is
+  available independently of whether a `Status` record is owed. No `Status` edit
+  is made with it: ADR-0068 §4 made its own classification and recorded none,
+  ADR-0082 §6 declines re-adjudicating a ratified classification, and this ADR's
+  pre-ADR-0070 `Status` line is grandfathered (ADR-0070 §4; ADR-0082 §3 names it
+  among them). Refs #517, ADR-0068 §4, ADR-0070 §1, ADR-0082 §4.
 - **This is a contract change.** It adds a second standing clause to
   `core/protocols.py`'s module docstring, binding on every Protocol in the file,
   and it extends the shared conformance suites and canonical fakes of two of
