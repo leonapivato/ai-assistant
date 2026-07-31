@@ -516,3 +516,80 @@ async def test_every_attempt_answers_the_conversation_the_call_began_with(
     # The caller's conversation really was mutated mid-flight, so the case is not
     # vacuously green on a mutation that never happened.
     assert [m.content for m in conversation] != ["hi"]
+
+
+class PreconditionEnforcingProvider:
+    """Fails attempt 1 retryably, then answers — and enforces ADR-0066 §1 throughout.
+
+    The difference from :class:`MutatingProvider`, and the whole point of the case
+    below (#387): this double **enforces** the precondition every real
+    ``ModelProvider`` enforces — ``PydanticAIProvider.complete`` and
+    ``FakeModelProvider.complete`` both refuse a history ending on an assistant
+    turn as a bare ``ModelError``, neither retryable nor routable. A double that
+    ignores it can only show that a torn attempt answered a *different* question;
+    one that enforces it shows the cost the ADR-0065 amendment actually cites —
+    that the attempt could not be made at all, because a history well-formed when
+    the call began had become malformed under it.
+
+    Roles are recorded alongside text, not text alone: the tear here replaces one
+    turn with another of *different role*, which a content-only observation
+    (:class:`MutatingProvider`, and the ``SuspendingRecorder`` the shared suite
+    fingerprints through) would see only as a change of words.
+    """
+
+    def __init__(self, tear: Callable[[], None]) -> None:
+        self._tear = tear
+        self.seen: list[tuple[tuple[Role, str], ...]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> Message:
+        self.seen.append(tuple((m.role, m.content) for m in messages))
+        if messages[-1].role is Role.ASSISTANT:
+            # Bare, so neither retryable nor routable — what the shape is worth,
+            # and what makes it fatal to the loop rather than merely wrong.
+            msg = "complete() requires a conversation awaiting a reply"
+            raise ModelError(msg)
+        # The tear lands after *this* provider's await, so it happens while
+        # `RetryingProvider.complete` is itself suspended — the only window
+        # ADR-0065's clause is about, for the reason `MutatingProvider` documents.
+        await asyncio.sleep(0)
+        if len(self.seen) == 1:
+            self._tear()
+            raise ModelUnavailableError("503")
+        return Message(role=Role.ASSISTANT, content="|".join(m.content for m in messages))
+
+
+async def test_a_mid_flight_role_flip_cannot_make_a_later_attempt_malformed() -> None:
+    # The consequence the ADR-0065 amendment names to justify the snapshot, and
+    # which nothing pinned (#387): a `role` flipped to ASSISTANT between attempts
+    # "converts a retryable transient failure into a non-retryable
+    # malformed-argument ModelError (ADR-0066 §1) about a history that was
+    # well-formed when the call began".
+    #
+    # The amendment describes that flip as an in-place field rewrite, which
+    # ADR-0068 has since made impossible — `Message` is frozen. The claim survives
+    # the freeze through the vector ADR-0068 §4 keeps ADR-0065 binding for at this
+    # seam: the caller's *list*, which is still theirs and still mutable. Replacing
+    # an element is that container tear, and it flips the last turn's role just as
+    # effectively.
+    conversation = [Message(role=Role.USER, content="hi")]
+
+    def flip_the_last_turn_to_assistant() -> None:
+        conversation[-1] = Message(role=Role.ASSISTANT, content="cached reply")
+
+    inner = PreconditionEnforcingProvider(flip_the_last_turn_to_assistant)
+    provider = RetryingProvider(inner, sleep=SleepSpy(), jitter=lambda: 1.0)
+
+    reply = await provider.complete(conversation)
+
+    # Attempt 2 still saw the well-formed history the call began with, so it was
+    # made at all — the retry the caller was owed was not spent on a refusal.
+    assert inner.seen == [((Role.USER, "hi"),), ((Role.USER, "hi"),)]
+    assert reply.content == "hi"
+    # Not vacuously green: the caller's list really does end on an assistant turn
+    # now, so an attempt that re-read it would have been refused outright.
+    assert conversation[-1].role is Role.ASSISTANT
