@@ -24,8 +24,17 @@ from pathlib import Path
 # a following ``- <field>:`` bullet (at any indentation, e.g. ``- Date:``) or a
 # blank line ends the field, so an adjacent field is never absorbed. The
 # captured value is folded into one line by :func:`_fold_status` before use.
+#
+# An indented bullet ends the field only when it is a *metadata field* bullet —
+# one whose text is a field name followed by a colon (``- Date:``, ``- Amends on
+# ratification:``). A nested markdown list item (``- migration completed``) is
+# continuation and folds in. The distinction is deliberately conservative in one
+# direction: a bullet carrying any field-name-shaped colon terminates the field,
+# because dropping a continuation shape no ADR uses costs nothing, while
+# absorbing one of the real ``- Date:`` bullets would corrupt every wrapped
+# Status on the board.
 _STATUS_RE = re.compile(
-    r"^[ \t]*-[ \t]*Status:[ \t]*(.+(?:\n[ \t]+(?!-[ \t])\S.*)*)",
+    r"^[ \t]*-[ \t]*Status:[ \t]*(.+(?:\n[ \t]+(?!-[ \t]+[A-Za-z][A-Za-z0-9 _-]*:)\S.*)*)",
     re.IGNORECASE | re.MULTILINE,
 )
 _HEADING_RE = re.compile(r"^#\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
