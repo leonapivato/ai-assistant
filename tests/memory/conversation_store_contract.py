@@ -63,6 +63,11 @@ _RETENTION = 7 * _DAY
 #: only enforceable if it is observable.
 _EPISODE_PREFIX = "conv:"
 
+#: The two parked bindings the read ops below seed and look up. Distinct
+#: executions, so the two calls of a read op address independent subjects.
+_BINDING_LEFT = ParkedBinding(execution_id="exec-read-left", step_id="step-1")
+_BINDING_RIGHT = ParkedBinding(execution_id="exec-read-right", step_id="step-1")
+
 #: What a failure of the exclusion cases means, in one place (ADR-0074 §8): two
 #: mutations of one conversation interleaved, so one of them acted on state the
 #: other had already replaced.
@@ -222,7 +227,7 @@ async def _stamp_many(store: ConversationStore, count: int) -> list[str]:
 
 
 class _CancellationOp(Protocol):
-    """One locked ``ConversationStore`` mutation ADR-0060's case drives.
+    """One locked ``ConversationStore`` operation ADR-0060's case drives.
 
     Every ``async with self._lock`` site is a separate place the resource could be
     handed over early (#370), so the same cancelled-first / concurrent-second
@@ -231,6 +236,13 @@ class _CancellationOp(Protocol):
     third paragraph makes the cancelled call's effect indeterminate to the caller
     — under ADR-0054's shield a cancelled write that reached its commit is durably
     written — so only the second's outcome is assertable.
+
+    **Reads are operations too** (#492). ADR-0060 §3 binds any method that acquires
+    the resource, and each of this store's eight locked reads holds the connection
+    lock around its own worker-thread SQL — so a regression replacing one read's
+    ``_run_to_completion`` with a bare ``to_thread`` would hand the connection to a
+    concurrent caller while that read's worker still used it, and every mutation
+    case would still pass.
     """
 
     name: str
@@ -240,7 +252,7 @@ class _CancellationOp(Protocol):
         ...
 
     def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
-        """The call the case suspends mid-write and then cancels."""
+        """The call the case suspends inside the resource and then cancels."""
         ...
 
     def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
@@ -395,16 +407,187 @@ class _DropIfEligibleOp(_PairedOp):
         assert {one.id for one in await store.recent()} >= {self.left, self.right}
 
 
-#: Every locked ``ConversationStore`` *mutation* ADR-0060's case is run against:
-#: each is a distinct ``async with self._lock`` site (#370). The locked *read*
-#: paths are the same invariant on a different axis and are tracked separately,
-#: as ``MemoryStore``'s are under #397.
+class _ReadOp:
+    """A locked ``ConversationStore`` read, against a store seeded the same way (#492).
+
+    The two calls are the *same* read against independent subjects, because what
+    distinguishes a read op is its lock site and both calls have to enter it.
+    Nothing is asserted about the cancelled read's answer — it has none, its task
+    was cancelled — so :meth:`verify` pins the state the second call had to see,
+    re-read once the scenario is over.
+    """
+
+    name = ""
+
+    def __init__(self) -> None:
+        """Hold the ids and bindings the reads below address."""
+        self.left = ""
+        self.right = ""
+        self.stamped = ""
+        self.left_episode = ""
+        self.right_episode = ""
+
+    async def prepare(self, store: ConversationStore) -> None:
+        """Two live conversations with a parked turn each, plus one stamped."""
+        self.left = (await store.start()).id
+        self.right = (await store.start()).id
+        self.left_episode = (
+            await store.append(self.left, occurred_at=_NOW, parked=_BINDING_LEFT)
+        ).episode_id
+        self.right_episode = (
+            await store.append(self.right, occurred_at=_NOW, parked=_BINDING_RIGHT)
+        ).episode_id
+        self.stamped = (await store.start()).id
+        assert await store.stamp_deleted(self.stamped) is True
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """The read the case suspends inside the resource and then cancels."""
+        raise NotImplementedError
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """The concurrent read barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, store: ConversationStore) -> None:
+        """A read cancelled mid-flight leaves the store whole and still readable."""
+        assert await store.get(self.right) is not None
+        assert [turn.episode_id for turn in await store.turns(self.right)] == [self.right_episode]
+        assert await store.stamped_conversation_ids() == [self.stamped]
+        exported = await store.export()
+        assert {one.id for one in exported.conversations} == {self.left, self.right}
+
+
+class _GetOp(_ReadOp):
+    """``get`` — one conversation by id, under the connection lock."""
+
+    name = "get"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the left conversation — the call that is cancelled."""
+        return store.get(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the right one concurrently."""
+        return store.get(self.right)
+
+
+class _TurnsOp(_ReadOp):
+    """``turns`` — the presenting page, its own lock site."""
+
+    name = "turns"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Page the left conversation's turns — the call that is cancelled."""
+        return store.turns(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Page the right one's concurrently."""
+        return store.turns(self.right)
+
+
+class _EpisodesToPurgeOp(_ReadOp):
+    """``episodes_to_purge`` — the sweep's walk, its own lock site (ADR-0074 §8)."""
+
+    name = "episodes_to_purge"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Walk the left conversation's episode ids — the call that is cancelled."""
+        return store.episodes_to_purge(self.left)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Walk the right one's concurrently."""
+        return store.episodes_to_purge(self.right)
+
+
+class _StampedConversationIdsOp(_ReadOp):
+    """``stamped_conversation_ids`` — ADR-0076 §2's lexical walk, its own lock site."""
+
+    name = "stamped_conversation_ids"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Walk the tombstones — the call that is cancelled."""
+        return store.stamped_conversation_ids(limit=1)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Walk them again concurrently, from a cursor."""
+        return store.stamped_conversation_ids(limit=1, after_id="")
+
+
+class _RecentOp(_ReadOp):
+    """``recent`` — the activity-ordered page, its own lock site."""
+
+    name = "recent"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read the newest page — the call that is cancelled."""
+        return store.recent(limit=2)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Read a narrower page concurrently."""
+        return store.recent(limit=1)
+
+
+class _TurnOfEpisodeOp(_ReadOp):
+    """``turn_of_episode`` — the reverse lookup ADR-0074 §9 withholds on, its own site."""
+
+    name = "turn_of_episode"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Resolve the left episode — the call that is cancelled."""
+        return store.turn_of_episode(self.left_episode)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Resolve the right one concurrently."""
+        return store.turn_of_episode(self.right_episode)
+
+
+class _TurnOfBindingOp(_ReadOp):
+    """``turn_of_binding`` — the other reverse lookup, its own lock site."""
+
+    name = "turn_of_binding"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Resolve the left binding — the call that is cancelled."""
+        return store.turn_of_binding(_BINDING_LEFT)
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Resolve the right one concurrently."""
+        return store.turn_of_binding(_BINDING_RIGHT)
+
+
+class _ExportOp(_ReadOp):
+    """``export`` — the whole-store read, its own lock site."""
+
+    name = "export"
+
+    def first(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Export everything — the call that is cancelled."""
+        return store.export()
+
+    def second(self, store: ConversationStore) -> Coroutine[Any, Any, object]:
+        """Export again concurrently."""
+        return store.export()
+
+
+#: Every locked ``ConversationStore`` operation ADR-0060's case is run against:
+#: each is a distinct ``async with self._lock`` site. The mutations came first
+#: (#370's granularity, discharged here by #487); the eight reads are the same
+#: invariant on the other half of the surface (#492), since ADR-0060 §3 binds any
+#: method that acquires the resource rather than any method that mutates.
 _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _StartOp,
     _MarkActiveOp,
     _AppendOp,
     _StampDeletedOp,
     _DropIfEligibleOp,
+    _GetOp,
+    _TurnsOp,
+    _EpisodesToPurgeOp,
+    _StampedConversationIdsOp,
+    _RecentOp,
+    _TurnOfEpisodeOp,
+    _TurnOfBindingOp,
+    _ExportOp,
 )
 
 
@@ -1527,7 +1710,7 @@ class ConversationStoreContract:
     def store_suspended_mid_write(
         self,
     ) -> AbstractAsyncContextManager[SuspendedMidWrite[ConversationStore]]:
-        """Supply a store whose named locked mutation can be stopped *inside* its resource.
+        """Supply a store whose named locked operation can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. ADR-0074 §9.5
         binds this store to ``core.protocols``' standing cancellation clause like
@@ -1542,7 +1725,8 @@ class ConversationStoreContract:
         its preconditions, so a fake arming its single resource suspends the
         operation under test rather than a setup write. Every distinct
         ``async with self._lock`` site is a separate place the same regression can
-        reappear (#370), so ``arm`` is where the implementation says how it stops a
+        reappear — the locked *reads* included, since ADR-0060 §3 binds any method
+        that acquires the resource (#370, #492) — so ``arm`` says how it stops a
         given one: a worker thread parked mid-SQL, a fake's modelled resource.
 
         The ``ResourceLog`` is not redundant with the blocked-caller assertion. That
@@ -1554,12 +1738,12 @@ class ConversationStoreContract:
 
     @pytest.mark.optional_obligation
     @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
-    async def test_a_cancelled_mutation_holds_its_resource_until_the_work_finishes(
+    async def test_a_cancelled_operation_holds_its_resource_until_the_work_finishes(
         self, make_op: Callable[[], _CancellationOp]
     ) -> None:
-        """``core.protocols``' cancellation clause, on every locked mutation (ADR-0074 §9.5).
+        """``core.protocols``' cancellation clause, on every locked call (ADR-0074 §9.5).
 
-        A cancelled mutation must not hand the resource to the next caller while the
+        A cancelled call must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a test
         of the invariant rather than of propagation: a single cancelled call in
         isolation looks identical either way (ADR-0060 §3).
@@ -1569,6 +1753,13 @@ class ConversationStoreContract:
         indeterminate, since under ADR-0054's shield a cancelled write that reached
         its commit is durably written. What is pinned is that the second call is
         whole and the store still serves reads.
+
+        **Named for an operation, not a mutation.** ADR-0060 §3 binds any method
+        that acquires the resource; the five mutations were covered first (#487) and
+        the eight locked reads are the same invariant on the other half of the
+        surface (#492). A read that released the connection under cancellation while
+        its worker still held it is the identical ADR-0054 hazard, and no mutation
+        case can see it.
         """
         if self.acquires_no_shared_resource:
             pytest.skip("implementation acquires nothing whose safety outlives the coroutine")
