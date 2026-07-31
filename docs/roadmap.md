@@ -127,7 +127,9 @@ it, and built before anything ambient or polling.
    low-confidence, conflicting beliefs the current write path mishandles at the
    edges: a memory `ASK_USER` ruling has no resolution path and the conflict is
    silently dropped (#423); a correction contradicting more inferences than
-   `conflict_limit` leaves the surplus live (#313/#314); and, while ADR-0045 §4
+   `conflict_limit` leaves the surplus live (#313), with the separate question of
+   whether full-conflict-set retirement becomes a universal `MemoryWriter`
+   obligation covered by #314; and, while ADR-0045 §4
    ratifies retirement itself (supersession closes the prior record's window),
    the semantics for retiring a *producer-set bounded* window — clamp, refuse,
    or never-lived — are undecided and need their own ADR (#306). These
