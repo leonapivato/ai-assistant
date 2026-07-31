@@ -423,18 +423,25 @@ So the two classes are separated:
   violated the framing is not one to write more framed bytes at, and that is
   precisely where two implementations would diverge. A connection ceiling (§3) is
   refused the same way, before a byte is read.
-- **Everything that does decode gets a typed error**, including the connect
-  exchange's own contents: a version mismatch (§3) and a non-empty credential
-  (§2) are members of an envelope that parsed, so they are reported properly and
-  then the connection closes. This is what keeps the handshake's refusals legible
-  — ruling 4 would be poorly served by a silent close on a version mismatch, and
-  it does not get one.
+- **A frame that decodes gets a typed error rather than a silent close —
+  provided it is not itself a violation of the connection's own rules**, the one
+  exception being the third bullet below. This covers the connect exchange's own
+  contents: a version mismatch (§3) and a non-empty credential (§2) are members
+  of an envelope that parsed, so they are reported properly and only then does
+  the connection close. It is what keeps the handshake's refusals legible —
+  ruling 4 would be poorly served by a silent close on a version mismatch, and it
+  does not get one.
 - **Post-envelope request failures are ordinary correlated errors**: an unknown
   continuation (§7) and an oversized *result* (§4). The envelope has been read,
-  so the id is known. **One decoded frame is excluded from this rule** — a second
-  request arriving while one is outstanding, which closes the connection instead,
-  for the reason given below: its correlated error would carry an id the client
-  is separately required to reject.
+  so the id is known.
+- **The single exception is a second request arriving while one is
+  outstanding.** Its envelope decodes, so the rule above would reach it, and it
+  must not: a correlated error would carry the *second* request's id, which the
+  mismatch rule (below) separately obliges the client to reject — so the refusal
+  could never be consumed. It closes the connection instead. Stating the
+  exception once, here, is deliberate; it was previously written into one of the
+  two rules and not the other, which is how a contract acquires two answers to
+  one input.
 
 The client renders these differently, and must: a connection-level close is a
 **transport** failure, which is not the same event as a request the hub received
