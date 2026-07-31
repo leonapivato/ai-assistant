@@ -403,6 +403,35 @@ server must not read into a fixed buffer or assume a frame fits one (§3). The
 bound itself belongs to #473's contract lane — this ADR only refuses to design as
 though the bound already existed.
 
+**A bounded transport and an unbounded type are in direct tension, and it is
+resolved by naming it rather than by choosing a large enough number.** §3's frame
+ceiling means a result that serialises beyond it cannot be returned. There are
+three ways out and only one is available:
+
+- **Silently truncate.** Forbidden — #473 records that ADR-0073 §4 does not
+  permit a citation to be dropped silently.
+- **Chunk or stream the result.** That is ADR-0042 §5's deferred streaming
+  extension, inherited deferred here (§11). Inventing it now would ratify a
+  streaming contract with no stage emitting one, which is the unspiked seam
+  ADR-0042 §5 rejected in as many words.
+- **Fail, visibly and inside the contract.** An oversized result raises a typed
+  `AssistantError` naming the limit and the field that exceeded it. It is part of
+  the **promoted Protocol's declared contract**, so the conformance suite (§5)
+  holds every implementation to it, and a client is not silently less capable
+  than the engine it stands in for.
+
+**The third is chosen, and its consequence for sequencing is the real answer.** A
+conforming in-process `Engine` would return that oversized `Belief` where the
+client raises, so for that one state the two implementations are distinguishable
+— which is precisely the substitutability §5 exists to provide. That gap is not
+closed by the transport; it is closed by bounding the type. **So #473 is a
+prerequisite of the client lane, not merely context for it** (§11). Until its
+bound lands, §3's ceiling is set so the state is unreachable for any belief this
+system currently produces — the observer cites at most `observation_batch_size`
+episodes, default 20 — rather than *provably* unreachable. Recording that
+difference is the point: this ADR does not get to call the problem solved by
+picking a big number.
+
 **The two rejected shapes**, both genuinely arguable:
 
 - **Make them pydantic where they live, in `orchestration`.** Rejected because it
@@ -693,8 +722,11 @@ The roadmap attaches a hardening tail to this ADR. It is shorter than it reads.
   stage exists"; none does. The envelope's correlation id is what keeps the
   addition additive (§3).
 - **#473's evidence bound.** Its own contract lane, with the memory-contract
-  decision about `get_many`. Named here only as the reason §4 must not assume a
-  bounded payload.
+  decision about `get_many` — this ADR does not decide the bound. But it is named
+  here as a **prerequisite of the client lane**, not merely as context: §4 shows
+  that an unbounded result type and §3's bounded frame are reconcilable only by a
+  contract-visible failure, and that the residual gap closes when the type is
+  bounded and not before.
 - **#462's endpoint configuration**, §9.
 - **#333's plan-level reclamation**, and the observation cursor — both ADR-0083
   §13's, unchanged.
