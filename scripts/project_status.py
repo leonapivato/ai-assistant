@@ -20,20 +20,27 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # The Status field may wrap across continuation lines. Capture the first physical
-# line plus any following lines that are non-blank and indented **deeper than the
-# ``- Status:`` bullet itself**; a blank line or a line at the bullet's own
-# indentation (or shallower) ends the field. The captured value is folded into
-# one line by :func:`_fold_status` before use.
+# line plus any following lines that are non-blank and indented to **the content
+# column of the ``- Status:`` bullet** — the bullet's own indent plus the width
+# of ``- ``; a blank line or a line shallower than that ends the field. The
+# captured value is folded into one line by :func:`_fold_status` before use.
 #
-# Depth is the whole rule, and it is markdown's own: a bullet indented under
-# ``- Status:`` is a child of it (a nested list item, ``- migration completed``,
-# which belongs in the value), and a bullet at the same indentation is a sibling
-# field (``- Date:``, ``- Amends on ratification:``, which does not). Reading
-# nesting off indentation rather than guessing at a line's *text* is what lets a
-# nested item keep a colon of its own and a metadata label carry punctuation no
-# field-name pattern anticipates — both shapes a lexical guard gets wrong (#417).
+# Depth is the whole rule, and it is markdown's own: a line indented to the
+# bullet's content column belongs to that bullet (a wrapped prose line, or a
+# nested list item such as ``- migration completed``), and one indented less
+# starts a new sibling field (``- Date:``, ``- Amends on ratification:``).
+# Two consequences the previous lexical guard got wrong in opposite directions
+# (#417): a nested item may carry a colon of its own without being mistaken for
+# the next field, and a metadata label may carry punctuation no field-name
+# pattern anticipates without being folded into the value.
+#
+# The floor is the content column, not "any extra whitespace at all", which is
+# why a sibling written with a *single* leading space still ends the field: one
+# space does not reach the content column, so CommonMark reads that marker as a
+# sibling of the Status bullet rather than a child of it. A lone tab does reach
+# it — CommonMark expands a tab to the next four-column stop.
 _STATUS_RE = re.compile(
-    r"^(?P<indent>[ \t]*)-[ \t]*Status:[ \t]*(?P<value>.+(?:\n(?P=indent)[ \t]+\S.*)*)",
+    r"^(?P<indent>[ \t]*)-[ \t]*Status:[ \t]*(?P<value>.+(?:\n(?P=indent)(?:\t|[ \t]{2,})\S.*)*)",
     re.IGNORECASE | re.MULTILINE,
 )
 _HEADING_RE = re.compile(r"^#\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
