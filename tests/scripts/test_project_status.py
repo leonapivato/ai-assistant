@@ -146,6 +146,33 @@ def test_does_not_absorb_an_indented_following_field(tmp_path: Path) -> None:
     assert "Date" not in row  # the indented `- Date:` bullet is not folded in
 
 
+def test_folds_a_nested_list_continuation(tmp_path: Path) -> None:
+    # A nested markdown list inside a Status value is continuation, not a new
+    # field: its items must survive the fold (#417). No ADR uses this shape
+    # today, so this fixture is the only place it is exercised.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-nested.md",
+                "# 1. Nested decision\n\n"
+                "- Status: Accepted subject to:\n"
+                "  - migration completed\n"
+                "  - the observer running at volume\n"
+                "- Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Nested decision")
+    assert "Accepted subject to:" in row
+    assert "migration completed" in row
+    assert "the observer running at volume" in row
+    # The neighbouring metadata bullet is still not absorbed.
+    assert "2026-07-24" not in row
+
+
 def test_single_line_status_is_unchanged(tmp_path: Path) -> None:
     # The wrap-folding must not disturb an ordinary one-line Status.
     _make_repo(tmp_path)
