@@ -31,7 +31,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import ActionPlan, Message, PlanStep, Role
+from ai_assistant.core.types import ActionPlan, MemoryKind, Message, PlanStep, Role
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -305,6 +305,13 @@ def _render_request(
     The memories are rendered one line each, tagged with kind and provenance
     source, because passing the retrieved user model into the prompt is what makes
     a plan personal rather than generic (ADR-0014 §6).
+
+    ``memories`` carries two groups (ADR-0074 §5) and they are headed separately,
+    because one header calling both "relevant memories" tells the model a
+    chronological conversation tail is a relevance cut — the strain §5 refused to
+    accept in the Protocol's wording. The records are rendered **in the order they
+    were handed**, unchanged; the header is inserted at the boundary, nothing is
+    reordered or dropped.
     """
     lines = [
         "Goal:",
@@ -326,15 +333,56 @@ def _render_request(
     ]
 
     if memories:
-        lines.append("Relevant memories about the user:")
-        lines += [
-            f"  - [{record.kind}/{record.provenance.source.value}] {record.content}"
-            for record in memories
-        ]
+        turns, retrieved = _split_conversation_tail(memories)
+        if turns:
+            lines.append("Recent conversation turns, in order:")
+            lines += [_render_record(record) for record in turns]
+            if retrieved:
+                lines.append("")
+        if retrieved:
+            lines.append("Relevant memories about the user:")
+            lines += [_render_record(record) for record in retrieved]
     else:
         lines.append("No stored memories were retrieved for this goal.")
 
     return "\n".join(lines)
+
+
+def _render_record(record: MemoryRecord) -> str:
+    """Render one memory record as a prompt bullet, tagged with kind and source."""
+    return f"  - [{record.kind}/{record.provenance.source.value}] {record.content}"
+
+
+def _split_conversation_tail(
+    memories: Sequence[MemoryRecord],
+) -> tuple[Sequence[MemoryRecord], Sequence[MemoryRecord]]:
+    """Split ``memories`` into the conversation tail and the retrieved records.
+
+    The tail is the **leading run** of episodic records, not every episodic record:
+    ADR-0074 §5 puts the conversation's recent turns first and the
+    relevance-retrieved records after, and a prefix split is the only reading of
+    that order which cannot reorder the sequence. A partition by kind could.
+
+    Today the two coincide — §6 has the turn's relevance retrieval exclude
+    ``EPISODIC``, so no episodic record reaches the second group. If the
+    cross-conversation episodic recall §11 defers ever lands, an episode retrieved
+    *by relevance* arrives after the tail and stays in the retrieved group, which
+    is the group it belongs to.
+
+    Args:
+        memories: The records the pipeline assembled for this turn.
+
+    Returns:
+        The leading episodic run, then everything after it. Either may be empty.
+    """
+    boundary = 0
+    for record in memories:
+        # Via the enum, as `memory.policy` does: the discriminator is a `Literal`
+        # str, so comparing it to a member directly is a non-overlapping check.
+        if MemoryKind(record.kind) is not MemoryKind.EPISODIC:
+            break
+        boundary += 1
+    return memories[:boundary], memories[boundary:]
 
 
 def _repair_prompt(reason: str) -> str:

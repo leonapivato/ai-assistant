@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from ai_assistant.core.errors import ModelError, PlanningError
 from ai_assistant.core.types import (
     CurrentContext,
+    EpisodicMemory,
     Goal,
     MemorySource,
     Message,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.protocols import Planner
+    from ai_assistant.core.types import MemoryRecord
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -81,6 +83,26 @@ def _context() -> CurrentContext:
         time_of_day=TimeOfDay.MORNING,
         is_weekend=False,
         within_working_hours=True,
+    )
+
+
+def _preference() -> PreferenceMemory:
+    """A relevance-retrieved belief — the second group of ``memories``."""
+    return PreferenceMemory(
+        id="m1",
+        content="prefers a quiet neighbourhood",
+        preference="quiet neighbourhood",
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=_WHEN),
+    )
+
+
+def _turn(record_id: str, content: str) -> EpisodicMemory:
+    """A captured conversation turn — the first group of ``memories`` (ADR-0074 §5)."""
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        occurred_at=_WHEN,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=_WHEN),
     )
 
 
@@ -292,14 +314,8 @@ async def test_memories_reach_the_prompt() -> None:
     """Retrieved memory is rendered into the prompt — what makes a plan personal."""
     model = FakeModelProvider(_VALID_REPLY)
     planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
-    memory = PreferenceMemory(
-        id="m1",
-        content="prefers a quiet neighbourhood",
-        preference="quiet neighbourhood",
-        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.8, last_updated=_WHEN),
-    )
 
-    await planner.plan(_goal(), context=_context(), memories=[memory])
+    await planner.plan(_goal(), context=_context(), memories=[_preference()])
 
     user_turn = model.last_messages[1]
     assert user_turn.role is Role.USER
@@ -313,6 +329,82 @@ async def test_no_memories_is_a_generic_request() -> None:
     await planner.plan(_goal(), context=_context())
 
     assert "No stored memories" in model.last_messages[1].content
+
+
+async def test_a_conversation_tail_is_not_headed_as_a_relevance_cut() -> None:
+    """The two groups ADR-0074 §5 defines get their own headers.
+
+    Heading a chronological tail "relevant memories about the user" is the strain
+    §5 refused to accept in the Protocol's wording (#456).
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(
+        _goal(),
+        context=_context(),
+        memories=[_turn("t1", "user: I'm moving to Lisbon"), _preference()],
+    )
+
+    prompt = model.last_messages[1].content
+    turns_at = prompt.index("Recent conversation turns")
+    retrieved_at = prompt.index("Relevant memories about the user")
+    # The tail is headed as turns, above the retrieved group's own header.
+    assert turns_at < prompt.index("I'm moving to Lisbon") < retrieved_at
+    assert retrieved_at < prompt.index("prefers a quiet neighbourhood")
+
+
+async def test_only_retrieved_records_renders_exactly_the_old_prompt() -> None:
+    """With no episodic prefix — every caller today — the prompt is unchanged."""
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), context=_context(), memories=[_preference()])
+
+    prompt = model.last_messages[1].content
+    assert "Recent conversation turns" not in prompt
+    assert prompt.endswith(
+        "Relevant memories about the user:\n  - [preference/observed] prefers a quiet neighbourhood"
+    )
+
+
+async def test_only_a_tail_renders_no_relevance_header() -> None:
+    """A turn with nothing retrieved is not announced as a relevance cut either."""
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), context=_context(), memories=[_turn("t1", "user: hello")])
+
+    prompt = model.last_messages[1].content
+    assert "Recent conversation turns" in prompt
+    assert "Relevant memories about the user" not in prompt
+
+
+async def test_the_split_never_reorders_what_it_was_handed() -> None:
+    """The tail is the *leading* run, so a later episode stays where it was.
+
+    ADR-0074 §6 keeps episodic records out of relevance retrieval today, so this
+    sequence is not one the pipeline produces — it pins that the split is a prefix
+    cut rather than a partition by kind, which would move the last record up.
+    """
+    model = FakeModelProvider(_VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+    memories: list[MemoryRecord] = [
+        _turn("t1", "user: first turn"),
+        _preference(),
+        _turn("t2", "recalled: an older episode"),
+    ]
+
+    await planner.plan(_goal(), context=_context(), memories=memories)
+
+    prompt = model.last_messages[1].content
+    assert (
+        prompt.index("user: first turn")
+        < prompt.index("prefers a quiet neighbourhood")
+        < prompt.index("recalled: an older episode")
+    )
+    # The trailing episode sits under the retrieved header, not the tail's.
+    assert prompt.index("Relevant memories about the user") < prompt.index("an older episode")
 
 
 async def test_unparseable_output_raises_planning_error() -> None:
