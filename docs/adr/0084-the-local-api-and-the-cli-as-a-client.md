@@ -116,11 +116,18 @@ of which excludes a mode like `0777`.
 §3's step 2.** Three conditions, each a `78` when it fails, because none of them
 is fixed by restarting:
 
-- **Owned by the hub's own uid**, and **not group- or world-writable**. Created
-  `0700` when the hub creates it. This is ADR-0004 §4's owner-only posture applied
-  to the container rather than only to the contents — and it protects the five
-  databases sitting in the same directory at least as much as it protects the
-  socket.
+- **Owned by the hub's own uid**, and **not group- or world-writable** — and the
+  same holds for **every ancestor directory up to the root**, with one permitted
+  exception: an ancestor that is writable but carries the **sticky bit**, which
+  is what stops a user removing or renaming an entry they do not own. Checking
+  only `data_dir` is not enough, and the gap is worth naming because it looks
+  closed: with `data_dir=/srv/shared/alice` at `0700` but `/srv/shared` at `0777`
+  and not sticky, another user renames `alice` and creates their own directory
+  and socket at the configured path. The mode on the leaf never comes into it.
+  Created `0700` when the hub creates it. This is ADR-0004 §4's owner-only
+  posture applied to the container rather than only to the contents — and it
+  protects the five databases in that directory, which have no handshake to fall
+  back on, at least as much as it protects the socket.
 - **Absolute and canonical.** `Settings.data_dir` is a `Path` and may be
   relative, which silently breaks the one-setting-locates-both property §9 rests
   on: a hub started at boot with a working directory of `/` and a setting of
@@ -130,6 +137,27 @@ is fixed by restarting:
   settings load, and the path is canonicalised before either side derives
   anything from it.
 - **Short enough to hold the socket**, which is the next paragraph.
+
+**And the client authenticates the hub after connecting, which is what actually
+closes this.** Filesystem checks are a walk over topology the operator controls,
+and a walk can be wrong — a bind mount, an ACL, a symlinked ancestor. So the
+client does not rely on them alone:
+
+> **After `connect()` and before sending anything, the client reads the peer's
+> credentials (`SO_PEERCRED`) and refuses unless the server's uid is its own.**
+
+That is a direct check on *who is actually on the other end*, not an inference
+from who could have written where, and it is free of the time-of-check
+time-of-use gap a pre-connect `stat` of the socket would have. A replaced socket
+belonging to another user is refused at that point whatever the directory modes
+were. The filesystem conditions above stay, as defence in depth and because the
+databases in that directory have no equivalent check.
+
+**This does not contradict §2's declining of `SO_PEERCRED`, because it runs in
+the other direction.** §2 declines it as the *server* authorising the *client* —
+there it would re-derive what the socket mode already guarantees. Here it is the
+*client* authenticating the *server*, which nothing else establishes. Same call,
+opposite direction, and only one of the two is redundant.
 
 **The socket path is length-checked at the same point, and an overlong one is
 also a `78`.** A pathname `AF_UNIX` socket is bounded by `sun_path` — 108 bytes
@@ -378,8 +406,11 @@ So the two classes are separated:
   — ruling 4 would be poorly served by a silent close on a version mismatch, and
   it does not get one.
 - **Post-envelope request failures are ordinary correlated errors**: an unknown
-  continuation (§7), an oversized *result* (§4), a second outstanding request
-  (below). The envelope has been read, so the id is known.
+  continuation (§7) and an oversized *result* (§4). The envelope has been read,
+  so the id is known. **One decoded frame is excluded from this rule** — a second
+  request arriving while one is outstanding, which closes the connection instead,
+  for the reason given below: its correlated error would carry an id the client
+  is separately required to reject.
 
 The client renders these differently, and must: a connection-level close is a
 **transport** failure, which is not the same event as a request the hub received
