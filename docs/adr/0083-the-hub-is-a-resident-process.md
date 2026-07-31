@@ -2,6 +2,29 @@
 
 - Status: Accepted
 - Date: 2026-07-31
+- Amended: 2026-07-31 (§2 — it names the wrong environment variable for
+  `Settings.data_dir`). The sentence reads *"`AI_ASSISTANT_DATA_DIR` starts
+  working for free through pydantic-settings"*. That variable name is wrong and
+  was wrong when written: `Settings` sets `env_prefix="ASSISTANT_"`
+  (`core/config.py:554`), so the variable that binds `Settings.data_dir` is
+  **`ASSISTANT_DATA_DIR`**. Nothing about §2's decision changes — the field, its
+  `Path` type, its `~/.ai-assistant` default factory, and `build_engine`'s
+  retained `data_dir` keyword all stand; only the name of the variable that
+  reaches it was misstated. **The failure this would have caused is silent.**
+  `Settings` sets `extra="ignore"`, so an operator following §2 exports
+  `AI_ASSISTANT_DATA_DIR`, gets no error, and the hub uses the default directory
+  — under §1 that directory is also what exclusive ownership and the instance
+  lock are keyed to, and under ADR-0084 it is where the socket path is derived
+  from, so a hub and a client disagreeing about it fail as a missing socket
+  rather than as the misconfiguration they actually have. Raised by the
+  adversarial review of ADR-0084's draft and filed as #535; ADR-0084 §9 carries
+  the corrected name. **This is a self-amendment and no `Status` edit is owed**
+  (ADR-0082 §1): no other ADR is the cause — ADR-0084 observed the error but did
+  not create it. Noted for whoever next reads that clause: §1 enumerates its
+  triggers as reconciliation "with its own text or with a fact that postdates
+  it", and this is neither — the fact predated the ADR and was simply stated
+  wrongly. §1's operative condition ("no other ADR is the cause") is met, and the
+  gap in its enumeration is filed as #537 rather than resolved here.
 - **This is the first of leg 5's two decisions.** It decides the *process*: how
   one instance is enforced, how it starts, how it stops, what its exit codes
   mean, what it refuses to start over, and the internal scheduler that is already
