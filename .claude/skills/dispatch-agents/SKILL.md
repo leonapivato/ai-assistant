@@ -202,9 +202,14 @@ on is this: a base move that clears the floor and leaves the reviewed patch
 untouched costs the rebasing lane **nothing**, while a base move landing in the
 floor invalidates its artifact **outright**, with no patch-identity relief. So:
 
-- **Lanes whose paths are all outside the floor are free to each other**, in any
-  order. Most waves are entirely this case, and then there is no ordering problem
-  to solve — sequence them by whatever is ready.
+- **Lanes that are outside the floor *and* touch no file in common are free to
+  each other**, in any order — sequence them by whatever is ready. Both halves are
+  required. The identity is byte-sensitive to hunk bodies **including context
+  lines** (ADR-0027 §2), so two non-floor lanes editing nearby regions of one file
+  still invalidate the second one's artifact when it rebases: its context moved,
+  so its identity moved. Clearing the floor buys nothing there. §3's overlap check
+  is what establishes the second half, and it is worth running at *slice* time and
+  not only before merging.
 - **A lane holding a floor path is the expensive merge, so put it last**, when
   nothing else is open to rebase across it. Merging it first taxes every other
   lane in the wave a full round each.
@@ -213,8 +218,9 @@ floor invalidates its artifact **outright**, with no patch-identity relief. So:
   `docs/adr/**` is *in* the floor, so an ADR lane and a contract lane are both
   expensive and each wants its own quiet window.
 
-The corollary for §2: a wave is cheapest when at most one lane touches the floor.
-Fence for that when you slice the work, not afterwards.
+The corollary for §2: a wave is cheapest when at most one lane touches the floor
+and no two lanes share a file. Fence for both when you slice the work — a
+collision found at merge time has already been paid for.
 
 **A contract ADR merges before its implementation** (golden rule 5, ADR-0015 §5).
 Where a lane split into an ADR PR and an implementation PR, the order is
@@ -264,10 +270,16 @@ own `ship`; it needs a fresh *review* only where the base move fails ADR-0027
 §2's conditions.** Say which of the two you are asking for when you send a lane
 back, because the default a worker reaches for is the expensive one: `ship`
 refusing looks like "run a review," and a lane left to its own judgement will buy
-a round it did not owe. Tell it to rebase, re-gate, re-`ship`, run **no** review,
-and **STOP and quote the refusal** if `ship` declines — its verification drill is
-in `worker.md`. A refusal you did not predict is worth reading; a round spent
-papering over it tells you nothing and cannot be refunded.
+a round it did not owe.
+
+So say which, and say it from your own reading of the base move rather than
+leaving it open. Where you expect §2 to cover it: rebase, re-gate, re-`ship`, run
+**no** review. `worker.md` holds the drill that checks this *before* the push, and
+splits the two outcomes — a refusal the lane's own verification **predicted** is a
+real round, reported with its figures for you to authorise; a refusal that
+**contradicts** that verification is a STOP, quoted verbatim. Rule on the first;
+read the second, because it means one of the two readings of ADR-0027 §2 is wrong
+and a round spent papering over it tells you nothing and cannot be refunded.
 
 Rebase-merge only; the repo forbids squash and merge commits.
 
