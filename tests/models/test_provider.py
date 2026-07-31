@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from model_provider_contract import ConversationLog, FirstAwaitGate, ModelProviderContract
@@ -133,22 +133,28 @@ def test_tool_role_is_rejected() -> None:
         _to_model_messages([Message(role=Role.TOOL, content="result")])
 
 
-@pytest.mark.parametrize(
-    ("history", "match"),
-    [
-        pytest.param([], "at least one message", id="empty"),
-        pytest.param(
-            [Message(role=Role.USER, content="u"), Message(role=Role.ASSISTANT, content="cached")],
-            "already ends with an assistant turn",
-            id="ends-on-assistant",
-        ),
-        pytest.param(
-            [Message(role=Role.ASSISTANT, content="lone")],
-            "already ends with an assistant turn",
-            id="lone-assistant",
-        ),
-    ],
-)
+#: Every conversation shape ``complete`` refuses as a malformed argument
+#: (ADR-0066 §1), with the message each refusal carries. Shared by the two cases
+#: below so a shape added here gains *both* obligations at once — the disposition
+#: it surfaces and the ordering it surfaces it in — rather than only the one its
+#: author happened to be writing. That the two lists had drifted apart is what
+#: issue #383 records.
+_REFUSED_HISTORIES: Final = [
+    pytest.param([], "at least one message", id="empty"),
+    pytest.param(
+        [Message(role=Role.USER, content="u"), Message(role=Role.ASSISTANT, content="cached")],
+        "already ends with an assistant turn",
+        id="ends-on-assistant",
+    ),
+    pytest.param(
+        [Message(role=Role.ASSISTANT, content="lone")],
+        "already ends with an assistant turn",
+        id="lone-assistant",
+    ),
+]
+
+
+@pytest.mark.parametrize(("history", "match"), _REFUSED_HISTORIES)
 async def test_a_malformed_conversation_is_refused_as_a_bare_model_error(
     history: list[Message], match: str
 ) -> None:
@@ -168,8 +174,9 @@ async def test_a_malformed_conversation_is_refused_as_a_bare_model_error(
     assert type(caught.value) is ModelError
 
 
-async def test_a_trailing_assistant_turn_is_refused_before_the_agent_runs(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("history", "match"), _REFUSED_HISTORIES)
+async def test_a_malformed_conversation_is_refused_before_the_agent_runs(
+    history: list[Message], match: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The ordering ADR-0066 §6 obligation 2 requires, and the one obligation that
     # costs a reach into a private. An implementation that called ``Agent.run``,
@@ -179,6 +186,13 @@ async def test_a_trailing_assistant_turn_is_refused_before_the_agent_runs(
     # recorder nor a FunctionModel spy can tell the two apart. A spy on the
     # agent can. Worth pinning because it is what keeps the refusal free of a
     # vendor round trip if pydantic-ai ever stops short-circuiting.
+    #
+    # ADR-0066 §1 says *both* malformed shapes are refused "before any model is
+    # contacted", so the spy runs over every shape the case above refuses rather
+    # than only the trailing-assistant one (#383). The empty history is the shape
+    # the narrower version could not see: move its guard below ``Agent.run`` and
+    # the disposition case stays green, because a run over an empty history still
+    # surfaces a bare ``ModelError`` — only this assertion reddens.
     provider = PydanticAIProvider(default_model=TestModel(custom_output_text="MODEL WAS CALLED"))
     ran = False
 
@@ -189,13 +203,11 @@ async def test_a_trailing_assistant_turn_is_refused_before_the_agent_runs(
 
     monkeypatch.setattr(provider._agent, "run", spy)  # pyright: ignore[reportPrivateUsage]
 
-    with pytest.raises(ModelError):
-        await provider.complete(
-            [
-                Message(role=Role.USER, content="u"),
-                Message(role=Role.ASSISTANT, content="cached reply"),
-            ]
-        )
+    # Matching the message as well as the type keeps the refusal attributable: a
+    # shape refused *before* the agent for some unrelated reason would otherwise
+    # satisfy the assertion below without pinning the guard it is about.
+    with pytest.raises(ModelError, match=match):
+        await provider.complete(history)
 
     assert not ran
 
