@@ -65,10 +65,9 @@ def _disabled_if_sentinel(value: object) -> object:
 _RiskThreshold = Annotated[RiskLevel | None, BeforeValidator(_disabled_if_sentinel)]
 _ReversibilityThreshold = Annotated[Reversibility | None, BeforeValidator(_disabled_if_sentinel)]
 
-#: A retention horizon, or ``None`` for "keep forever" — reachable from the
-#: environment only through the same sentinel, since the default is finite
-#: (ADR-0074 §7).
-_OptionalDuration = Annotated[timedelta | None, BeforeValidator(_disabled_if_sentinel)]
+# The duration alias that also carries this sentinel (``_OptionalDuration``) is
+# defined further down, beside ``_only_a_duration``: it composes this validator
+# with that one, so it cannot be stated before that one exists.
 
 
 #: The shape of a pydantic-ai model spec: a non-empty ``provider`` and a non-empty
@@ -298,6 +297,218 @@ def _exactly_an_integer(value: object) -> object:
 _IntegerSetting = Annotated[int, BeforeValidator(_exactly_an_integer)]
 
 
+def _only_a_real_number(value: object) -> object:
+    """Refuse a value that is not a real number but would be coerced into one.
+
+    The ``float`` half of the defect :func:`_exactly_an_integer` closes for
+    integers (issue #500, split from #471). pydantic's non-strict ``float``
+    coercion accepts ``True`` as ``1.0`` — ``bool`` is an ``int`` subclass and an
+    integer converts to a float — so ``Settings(model_timeout_seconds=True)``
+    loaded a one-second deadline rather than refusing a flag where a measurement
+    belongs. Both bounds these fields carry (``gt=0``, ``allow_inf_nan=False``)
+    are satisfied by the ``1.0`` that arrives, so nothing downstream can tell.
+
+    The code **below** settings already refuses it. ``RetryPolicy.__post_init__``
+    is the sole consumer of all three real-valued settings and excludes ``bool``
+    for precisely these three knobs, on the stated ground that "a boolean timeout
+    is a mistake worth naming rather than coercing to 1.0". Because
+    ``RetryPolicy.from_settings`` is handed an *already coerced* float, that
+    exclusion can never fire on the settings path; it only ever protects the
+    constructor seam. This validator makes the configuration layer state the rule
+    the layer under it already states — the same argument, on a second type, that
+    #471 made for counts.
+
+    An **allowlist of the forms a real-valued setting is supplied in**, not a
+    denylist of ``bool``, for the reason :func:`_exactly_an_integer` sets out:
+    ``numpy.bool_`` is a flag, is *not* a ``bool`` subclass (nor an ``int`` or
+    ``float`` one), coerces to the same ``1.0``, and ``numpy`` is a direct
+    dependency here (ADR-0024's embedder). A denylist named after ``bool`` would
+    let it through to exactly this failure, one type name away.
+
+    The accepted forms, and why each is spelled as it is:
+
+    - A ``float``, by ``isinstance``. A subclass is safe to admit *and provably
+      so*: pydantic normalises one to a built-in ``float`` before storing it, so
+      the value the rest of the system sees is a plain float whatever was offered
+      — and no ``float`` subclass impersonates a flag anyway, since ``bool`` is
+      not one. Exactness here would only refuse ``numpy.float64``, which means
+      precisely its own value.
+    - An **exact** ``int``, because a whole number of seconds is how an operator
+      or a caller writes one (``model_timeout_seconds=60``) and ``RetryPolicy``
+      accepts it too (``isinstance(value, (int, float))``) — refusing it would
+      make configuration stricter than the layer it configures, for no gain.
+      Exact rather than ``isinstance``, because ``isinstance(True, int)`` *is*
+      the defect: only exactness refuses the flag while still accepting the
+      integer it impersonates.
+    - A ``str``, which is what an environment variable and a ``.env`` entry are;
+      it falls through to the field's ordinary parsing, so the operator-facing
+      path is untouched. ``isinstance``, for the reason
+      :func:`_exactly_an_integer` gives — the string is re-parsed rather than
+      trusted for its identity, so a subclass can misrepresent nothing by being
+      one.
+
+    **Reachable only from untyped code constructing** :class:`Settings`
+    **directly** (#500): ``ASSISTANT_MODEL_TIMEOUT_SECONDS=True`` already fails
+    float parsing at load, so no environment or ``.env`` value reaches this.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is none of the three accepted forms.
+    """
+    # As in `_exactly_an_integer`, the allowlist below already refuses a `bool`;
+    # this branch changes the *message*, not the outcome, so the mistake is named
+    # in the words `RetryPolicy` uses for it rather than reported as one more
+    # unaccepted type.
+    if isinstance(value, bool):
+        msg = (
+            f"expected a real number, got the flag {describe_untrusted(value)}: "
+            f"a flag is not a measurement"
+        )
+        raise ValueError(msg)
+    if isinstance(value, float) or type(value) is int or isinstance(value, str):
+        return value
+    # `describe_untrusted` rather than `!r`, for both the value and its type, for
+    # the reason spelled out in `_exactly_an_integer`: this branch is reached by
+    # arbitrary objects, and a `__repr__` that raises would otherwise replace the
+    # `ValueError` pydantic turns into a `ValidationError` with whatever it threw.
+    msg = (
+        f"expected a real number or its decimal spelling, got {describe_untrusted(value)} "
+        f"of type {describe_untrusted(type(value))}; only a float, an exact int, or a str "
+        f"is accepted, so nothing that merely converts to a real number — a foreign boolean "
+        f"scalar, a Decimal, a NumPy integer — is silently coerced into one"
+    )
+    raise ValueError(msg)
+
+
+#: A real-valued setting: a ``float``, an exact ``int``, or the ``str`` an operator
+#: spells one as. See :func:`_only_a_real_number` for what it refuses and why.
+#: Applied to **every** ``float``-typed field on :class:`Settings`, because the
+#: defect is a property of the type rather than of any one field (#500).
+#: ``tests/core/test_config.py`` pins that coverage per field.
+_RealSetting = Annotated[float, BeforeValidator(_only_a_real_number)]
+
+
+def _only_a_duration(value: object) -> object:
+    """Refuse a value that is not a duration but would be coerced into one.
+
+    The ``timedelta`` half of #500. pydantic's non-strict ``timedelta`` coercion
+    reads a bare number as *seconds*, and ``True`` is a number by inheritance, so
+    ``Settings(conversation_tombstone_grace=True)`` loaded a one-second grace
+    rather than refusing a flag where a duration belongs — and one second clears
+    the ``gt=timedelta(0)`` every one of these fields carries, so the flag loads
+    as a plausible horizon exactly as it did for a count and a measurement.
+
+    The refusal has to be **narrower than "anything that is not a timedelta"**:
+    every one of these settings is documented as parsed from an ISO-8601 or
+    ``HH:MM:SS`` string in the environment, and a bare number of seconds is a
+    form pydantic has always accepted from a direct caller. Refusing either would
+    break a legitimate input to close a defect neither causes — so this names the
+    forms a duration setting is supplied in, and refuses only what is left.
+
+    The accepted forms:
+
+    - A ``timedelta``, by **exact** type. The one place this guard is stricter
+      than :func:`_only_a_real_number`, and for a verified reason: pydantic
+      *preserves* a ``timedelta`` subclass instance in the model (it does not
+      normalise it the way it normalises a ``float`` subclass) while applying
+      ``gt`` natively, so a subclass whose comparison operators disagree with its
+      value passes the load-time bound and then reaches the Python comparisons
+      that read it — ``StepRunner._check_fresh``'s ``age > self._confirmation_ttl``
+      among them, where Python's reflected-operand priority hands the decision to
+      the subclass and a stale confirmation can be made to look fresh. Requiring
+      the built-in makes that comparison the uninterceptable one, the same
+      defence, for the same reason, as :func:`_split_model_specs`' exact ``list``.
+    - An **exact** ``int`` or an **exact** ``float`` — a number of seconds.
+      Exact, because ``isinstance(True, int)`` is the whole defect here: only
+      exactness refuses the flag while still accepting the ``1`` it impersonates.
+    - A ``str``, the environment and ``.env`` form, re-parsed rather than trusted
+      for its identity (hence ``isinstance``), which also carries the disable
+      sentinel through to :func:`_disabled_if_sentinel` on the fields that opt in.
+    - ``None``, passed through for the field's **own** annotation to judge, which
+      is the only thing that knows whether this duration has a ``None`` spelling:
+      it does for ``confirmation_ttl`` (no lifetime), ``episode_retention`` and
+      ``deferral_ttl`` (ADR-0074 §7, ADR-0078 §6), and deliberately does not for
+      ``conversation_tombstone_grace``, where ADR-0074 §8 declines to offer one.
+      Deciding that here would duplicate — and could contradict — the annotation.
+
+    An allowlist rather than a denylist of ``bool``, for the reason
+    :func:`_exactly_an_integer` sets out at length: ``numpy.bool_`` is a flag that
+    is not a ``bool`` subclass, ``numpy`` is a direct dependency, and it coerces
+    to the same one second.
+
+    **Reachable only from untyped code constructing** :class:`Settings`
+    **directly** (#500): ``ASSISTANT_CONFIRMATION_TTL=True`` already fails
+    duration parsing at load.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        ``value`` unchanged, for the field's own validation to judge.
+
+    Raises:
+        ValueError: If ``value`` is none of the accepted forms.
+    """
+    # Message-only, as in the two guards above: the allowlist would refuse a
+    # `bool` regardless, but this is the case #500 was filed for and it is worth
+    # naming in the same words.
+    if isinstance(value, bool):
+        msg = (
+            f"expected a duration, got the flag {describe_untrusted(value)}: "
+            f"a flag is not a duration"
+        )
+        raise ValueError(msg)
+    if (
+        value is None
+        or type(value) is timedelta
+        or type(value) is int
+        or type(value) is float
+        or isinstance(value, str)
+    ):
+        return value
+    # `describe_untrusted` for the reason given in `_exactly_an_integer`: the
+    # diagnostic must not be able to destroy the diagnosis.
+    msg = (
+        f"expected a duration, got {describe_untrusted(value)} of type "
+        f"{describe_untrusted(type(value))}; only a timedelta, an exact int or float of "
+        f"seconds, or the str an operator spells a duration as, is accepted, so nothing "
+        f"that merely converts to a duration — a foreign boolean scalar, a Decimal, a "
+        f"NumPy scalar — is silently coerced into one"
+    )
+    raise ValueError(msg)
+
+
+#: A duration setting with no ``None`` spelling (ADR-0074 §8's tombstone grace).
+#: See :func:`_only_a_duration` for the forms it accepts and why.
+_DurationSetting = Annotated[timedelta, BeforeValidator(_only_a_duration)]
+
+#: A duration setting whose ``None`` is reached by *omission* — its default is
+#: ``None``, so it needs no environment spelling for "unset" and deliberately does
+#: not opt into the disable sentinel (``confirmation_ttl``).
+_NullableDuration = Annotated[timedelta | None, BeforeValidator(_only_a_duration)]
+
+#: A retention horizon, or ``None`` for "keep forever" — reachable from the
+#: environment only through the disable sentinel, since the default is finite
+#: (ADR-0074 §7). The nullable duration *with* the sentinel, where
+#: :data:`_NullableDuration` is the one without it.
+#:
+#: pydantic runs the **last** ``BeforeValidator`` listed here first, so
+#: :func:`_only_a_duration` sees the value exactly as it was configured and
+#: :func:`_disabled_if_sentinel` then maps the sentinel. The order is not
+#: load-bearing — the guard accepts both the sentinel ``str`` and the ``None`` it
+#: becomes — but it is stated because the reversal is easy to read backwards.
+_OptionalDuration = Annotated[
+    timedelta | None,
+    BeforeValidator(_disabled_if_sentinel),
+    BeforeValidator(_only_a_duration),
+]
+
+
 class EmbedderKind(StrEnum):
     """Which :class:`~ai_assistant.core.protocols.Embedder` the app wires (ADR-0006 §2).
 
@@ -424,7 +635,7 @@ class Settings(BaseSettings):
     # ``max_attempts * timeout + total backoff``.
     # ``allow_inf_nan=False`` matters: ``gt=0`` rejects NaN but happily accepts
     # infinity, which would silently disable the deadline or unbound backoff.
-    model_timeout_seconds: float = Field(
+    model_timeout_seconds: _RealSetting = Field(
         default=60.0,
         gt=0,
         allow_inf_nan=False,
@@ -433,13 +644,13 @@ class Settings(BaseSettings):
     model_max_attempts: _IntegerSetting = Field(
         default=3, ge=1, description="Total model attempts, including the first. 1 disables retry."
     )
-    model_backoff_base_seconds: float = Field(
+    model_backoff_base_seconds: _RealSetting = Field(
         default=0.5,
         gt=0,
         allow_inf_nan=False,
         description="Backoff ceiling after the first failure; doubles per retry.",
     )
-    model_backoff_max_seconds: float = Field(
+    model_backoff_max_seconds: _RealSetting = Field(
         default=30.0,
         gt=0,
         allow_inf_nan=False,
@@ -492,7 +703,7 @@ class Settings(BaseSettings):
     # misconfiguration, so it is refused at load rather than per answer. Parsed
     # from an ISO-8601 duration or ``HH:MM:SS`` string in the environment
     # (e.g. ``ASSISTANT_CONFIRMATION_TTL=PT1H`` or ``01:00:00``).
-    confirmation_ttl: timedelta | None = Field(
+    confirmation_ttl: _NullableDuration = Field(
         default=None,
         gt=timedelta(0),
         description="Lifetime of a parked confirmation before its answer is refused as stale.",
@@ -533,7 +744,7 @@ class Settings(BaseSettings):
             "also stops idle conversations being reclaimed."
         ),
     )
-    conversation_tombstone_grace: timedelta = Field(
+    conversation_tombstone_grace: _DurationSetting = Field(
         default=timedelta(hours=1),
         gt=timedelta(0),
         description=(
