@@ -184,10 +184,17 @@ In order, and no step begins before the previous one has succeeded:
 
 1. **Load `Settings`.** A settings failure is a deployment fault → exit 78.
 2. **Resolve `data_dir`, create it if absent, and take the instance lock** (§1).
-   A `data_dir` that cannot be created or written → exit 78. **Lock contention →
-   exit 1**, for the reason §1 gives.
+   Taking the lock means opening a file for writing inside `data_dir`, so this
+   step is also the writability check, and it is where an unwritable directory
+   normally surfaces → exit 78. **Lock contention → exit 1**, for the reason §1
+   gives.
 3. **Build the engine** — `build_engine(settings)`, which opens the five stores.
-   A *state* fault here → exit 78 (§6). Any other failure → exit 1.
+   A *state* fault here → exit 78 (§6). A **filesystem access fault** — permission
+   denied, a read-only filesystem, a path that is not a directory — → exit 78 as
+   well, wherever it surfaces, because step 2's check is necessary and not
+   sufficient: `mkdir(exist_ok=True)` succeeds on an existing directory the
+   process may not write into, and a database file can be unreadable inside a
+   writable directory. Any other failure → exit 1.
 4. **`Engine.start()`** — the deletion sweep then the retention reclaim, already
    ratified for this position by ADR-0074 §8 ("at engine start") and already
    built. A resident process improves on the CLI here rather than changing
@@ -343,12 +350,26 @@ ADR-0042 itself.
 
 `78` is `EX_CONFIG` from `sysexits.h` — an existing convention rather than an
 invented number, which is what lets a reference deployment map it with one
-directive. It covers exactly three things: settings that will not load, a
-`data_dir` that cannot be created or written, and persisted state this build
-cannot serve correctly (§6). A contended lock is **not** among them (§1), and the
-test for the boundary is one question — *would restarting unchanged ever succeed?*
-For a foreign embedding space, never; for a peer that is draining, on the next
-attempt.
+directive.
+
+**The boundary is a test, not a list**, because a list is what gets out of date
+the first time a fault arrives by a route nobody enumerated. The test is one
+question: **would restarting, unchanged, ever succeed?** If no, it is `78` and a
+human must act. If yes — even eventually — it is `1`.
+
+Applied: settings that will not load, `78`. Persisted state this build cannot
+serve correctly, `78` (§6). A filesystem access fault, `78` **wherever in startup
+it surfaces** (§3 step 3) — a directory the process may not write into does not
+become writable by being opened again, and mapping it to `1` buys an infinite
+restart loop against an unchanging `EACCES`, which is ruling 2's failure in its
+purest form. A contended instance lock, `1`, because the peer holding it is either
+serving or draining and both resolve without anyone acting (§1). A store that
+fails to open for any reason the test does not reach — a corrupt page, an
+exhausted disk — `1`, because some of those do clear.
+
+The enumeration above is illustration. Where a new fault does not obviously answer
+the question, the answer is `1`: a spurious restart is recoverable and a spurious
+`78` is an outage.
 
 **Every `78` prints its cause and the operator action before exiting**, to stderr
 and to the log, and that is ruling 2 discharged: a hub that is down is down for a
