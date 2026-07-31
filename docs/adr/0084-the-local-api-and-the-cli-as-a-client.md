@@ -279,16 +279,30 @@ seam this ADR is built for is exactly where that gap would surface. So:
   members carrying the kind, the correlation id and the payload. Member order is
   therefore not significant and no ordering rule is needed — which is worth
   stating rather than leaving to be inferred.
-- **Payloads are the promoted `core` models serialised through pydantic's JSON
-  mode** (§4). This is deliberately *not* a second serialisation format invented
-  for the wire: binding to the encoding the stores already depend on is what
-  makes #421's integer-encodability question **one** question rather than two,
-  and it is why §4's promotion to pydantic models is what makes the codec honest
-  rather than merely convenient.
+- **Payload encoding follows what the value is**, and the rule is stated only as
+  widely as it actually holds — the façade does not return models everywhere:
+  - a **request** payload is a JSON object whose members are the call's
+    arguments;
+  - a **result** payload is a promoted `core` model (§4) serialised through
+    pydantic's JSON mode — or `null` where the method returns an optional
+    (`belief` returns `Belief | None`), or a JSON array of them where it returns
+    a sequence (`beliefs`);
+  - **arguments and scalars** — a `str` utterance, a flag, an optional id, a
+    `timedelta` budget — take pydantic's JSON-mode form for their type, so a
+    duration is an ISO-8601 string rather than a convention invented here;
+  - **errors are a distinct message kind**, carrying a typed code and a message,
+    never a result payload. That is what lets §7's unknown-continuation and §4's
+    oversized-value failures be told apart from a successful response **by kind**
+    rather than by inspecting a result for something that looks like an error.
 
 Choosing an existing encoding rather than specifying a new one is the whole point
-of this subsection. The exact member names are the follow-on contract ADR's (§5),
-along with the DTO field layouts they carry.
+of this subsection: binding to the encoding the stores already depend on is what
+makes #421's integer-encodability question **one** question rather than two, and
+it is why §4's promotion to pydantic models makes the codec honest rather than
+merely convenient. **The per-method mapping of arguments and results onto these
+forms is the surface ADR's** (§5, step 2), along with the envelope's member names
+and the DTO field layouts — it is exactly the signature-level detail that ADR
+exists to fix.
 
 **A connection carries one outstanding request at a time**, and that is a
 decision rather than an omission. ADR-0042 §3 made the façade strictly
