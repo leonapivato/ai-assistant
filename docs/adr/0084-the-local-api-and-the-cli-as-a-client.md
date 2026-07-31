@@ -365,8 +365,9 @@ A declared frame length is only safe alongside a ceiling, so the transport
 also fixes:
 
 - a **maximum frame size**, which is configuration with a named default;
-- a declared length above it is **refused before a byte of payload is read**,
-  with a typed error, and the connection is closed;
+- a declared length above it is **refused before a byte of payload is read** —
+  which is a pre-envelope failure, so it takes the connection-level close
+  specified below, not a typed error there is no correlation id to carry;
 - the reader **never allocates the declared length up front**; it reads
   incrementally against the cap;
 - a connect or a frame that stalls part-way is abandoned on a **read deadline**,
@@ -414,15 +415,26 @@ whose whole job is to refuse:
 - `hub_max_pending_handshakes` is refused unless it is **no greater than
   `hub_max_connections`**, since a pending ceiling above the total is a limit
   that can never bind.
-- `hub_max_frame_bytes` is refused unless it is **representable by the framing**
-  — the 4-byte prefix caps a frame at `2^32 - 1` bytes, and the envelope
-  consumes some of that, so the ceiling must leave room for it. Without this
-  bound a setting of, say, 5 GiB would be accepted at load and would then be a
-  limit the contract declares (§4) but the wire cannot encode: the in-process
-  engine would accept a value the client provably cannot send, which is the very
-  divergence §4 moved the limit into the contract to prevent. A configuration
-  the framing cannot represent is a deployment fault, and load time is where it
-  should surface.
+- `hub_max_frame_bytes` is bounded at **both** ends, and both bounds exist
+  because a value outside them yields a hub that starts and cannot serve:
+  - **Above**, it must be **representable by the framing** — the 4-byte prefix
+    caps a frame at `2^32 - 1` bytes and the envelope consumes some of that.
+    Without this, a setting of 5 GiB would be accepted at load and would be a
+    limit the contract declares (§4) but the wire cannot encode, so the
+    in-process engine would accept a value the client provably cannot send —
+    the very divergence §4 moved the limit into the contract to prevent.
+  - **Below**, it must be **large enough for the mandatory handshake and the
+    smallest valid envelope**. A value of `1` is positive and representable and
+    still useless: no connect reply carrying a version, a build identifier,
+    readiness and the effective frame size fits in one byte, so the hub would
+    pass every startup step in ADR-0083 §3 and then refuse every client,
+    including the CLI — indistinguishable from a hub that is down, which is
+    ruling 4's failure. The exact floor depends on the envelope schema and is
+    therefore fixed by the surface ADR (§5, step 2), which is the change that
+    knows it.
+
+  A configuration outside either bound is a deployment fault, and load time is
+  where it should surface.
 
 **None of them is nullable, and that is the one place this ADR departs from
 ADR-0083 §7's convention.** There, `None` means "disabled", because a scheduler
