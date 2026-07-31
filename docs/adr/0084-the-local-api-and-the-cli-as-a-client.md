@@ -151,7 +151,19 @@ and a walk can be wrong — a bind mount, an ACL, a symlinked ancestor. So the
 client does not rely on them alone:
 
 > **After `connect()` and before sending anything, the client reads the peer's
-> credentials (`SO_PEERCRED`) and refuses unless the server's uid is its own.**
+> credentials from the kernel and refuses unless the server's uid is its own.**
+
+**The rule is the check, not the syscall, because the syscall is not portable.**
+Linux exposes it as `SO_PEERCRED` via `getsockopt`; macOS and the BSDs expose the
+same fact as `getpeereid()` (or `LOCAL_PEERCRED`). The obligation is stated in
+terms of the *credential* so that it binds on both, and an implementation selects
+the mechanism its platform provides. **A platform offering neither cannot host
+this client**, and that is the fail-closed direction on purpose: silently skipping
+the check where the call is missing would leave exactly the deployments with the
+weakest filesystem guarantees running with no server authentication at all. This
+ADR does not otherwise restrict the transport to Linux — where a detail *is*
+Linux-specific, as `sun_path`'s 108 bytes and the abstract namespace are, it is
+named as such.
 
 That is a direct check on *who is actually on the other end*, not an inference
 from who could have written where, and it is free of the time-of-check
