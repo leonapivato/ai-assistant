@@ -80,7 +80,7 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
         yield SuspendedMidWrite(
             store=store,
             log=store.resource_log,
-            arm=lambda _operation: store.suspend_next_write(),
+            arm=lambda _operation: store.suspend_next_operation(),
         )
 
     @contextlib.asynccontextmanager
@@ -102,7 +102,7 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
         :attr:`reads_without_suspending` declares that axis vacuous.
         """
         store = FakeMemoryStore(now=_fixed_now)
-        yield store, lambda _operation: store.suspend_next_write()
+        yield store, lambda _operation: store.suspend_next_operation()
 
 
 # Behaviour specific to FakeMemoryStore, beyond the shared contract: the contract

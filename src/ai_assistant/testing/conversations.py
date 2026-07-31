@@ -19,13 +19,16 @@ the suite's serialisation clauses would be vacuous against exactly the
 implementation they most need to hold for. With it, dropping the lock makes those
 cases fail here as they would against a real store.
 
-**Its mutations pass through a modelled resource**, a
+**Its mutations and its reads pass through a modelled resource**, a
 :class:`~ai_assistant.testing.cancellation.SuspendableResource` entered inside the
-exclusion. A dict needs no serialising, so without one this fake could only opt out
-of ADR-0060's cancellation clause — and the suite's case would then run solely
-against the ``sqlite3`` store, which is the implementation that already got it
-right. Uncontended, entering it does not yield, so it adds no interleaving point
-that was not there before; under contention it only reinforces the exclusion.
+exclusion for a mutation and on its own for a read. A dict needs no serialising, so
+without one this fake could only opt out of ADR-0060's cancellation clause — and the
+suite's case would then run solely against the ``sqlite3`` store, which is the
+implementation that already got it right. The reads are in because that store holds
+its connection lock across every one of them, so each is its own place the resource
+could be handed over early (#492). Uncontended, entering it does not yield, so it
+adds no interleaving point that was not there before; under contention it only
+reinforces the exclusion.
 """
 
 from __future__ import annotations
@@ -226,13 +229,20 @@ class FakeConversationStore:
         self._start_lock = asyncio.Lock()
         self._resource = SuspendableResource()
 
-    def suspend_next_write(self) -> LoopSuspension:
-        """Hold the next mutation open *inside* the resource it acquired (ADR-0060 §3).
+    def suspend_next_operation(self) -> LoopSuspension:
+        """Hold the next call open *inside* the resource it acquired (ADR-0060 §3).
 
-        The hook ``ConversationStoreContract``'s cancellation case takes. Test-only,
-        and deliberately not on the ``ConversationStore`` seam: the Protocol grows no
+        The hook ``ConversationStoreContract``'s cancellation case takes, and its
+        input-observation case with it (ADR-0065): every method observes its
+        arguments only after entering the resource, so the entry is both the lock
+        site one clause names and the first ``await`` the other does. Test-only, and
+        deliberately not on the ``ConversationStore`` seam: the Protocol grows no
         affordance for this, so the suite asks the *subject* it was handed rather
         than the contract every consumer depends on.
+
+        Named for an *operation* rather than a mutation because the reads enter the
+        resource too (#492); it holds whichever call arrives next, so a suite arms
+        it after its preconditions have run.
 
         Returns:
             The handle to wait on and release.
@@ -399,8 +409,14 @@ class FakeConversationStore:
         raise ConversationStoreError(msg)
 
     async def get(self, conversation_id: str) -> Conversation | None:
-        """Return the conversation, or ``None`` if it is absent or stamped."""
-        conversation = self._conversations.get(conversation_id)
+        """Return the conversation, or ``None`` if it is absent or stamped.
+
+        Read inside the modelled resource, like every other read: the ``sqlite3``
+        store answers this from under its connection lock, so it is one of the lock
+        sites ADR-0060's clause binds (#492).
+        """
+        async with self._resource.held():
+            conversation = self._conversations.get(conversation_id)
         if conversation is None or conversation.deleted_at is not None:
             return None
         return conversation
@@ -481,11 +497,12 @@ class FakeConversationStore:
         _check_page_bound("limit", page)
         if before_ordinal is not None:
             _check_page_bound("before_ordinal", before_ordinal, floor=FIRST_TURN_ORDINAL)
-        self._live(conversation_id)
-        rows = self._turns[conversation_id]
-        if before_ordinal is not None:
-            rows = [turn for turn in rows if turn.ordinal < before_ordinal]
-        return list(rows[-page:]) if page else []
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            self._live(conversation_id)
+            rows = self._turns[conversation_id]
+            if before_ordinal is not None:
+                rows = [turn for turn in rows if turn.ordinal < before_ordinal]
+            return list(rows[-page:]) if page else []
 
     async def episodes_to_purge(
         self,
@@ -506,19 +523,22 @@ class FakeConversationStore:
         """
         batch = self._purge_batch if limit is None else limit
         _check_page_bound("limit", batch)
-        self._known(conversation_id)
-        rows = self._turns[conversation_id]
-        start = 0
-        if after_id is not None:
-            positions = [index for index, turn in enumerate(rows) if turn.episode_id == after_id]
-            if not positions:
-                msg = (
-                    f"after_id {describe_untrusted(after_id)} is not an episode id of this "
-                    f"conversation"
-                )
-                raise ValueError(msg)
-            start = positions[0] + 1
-        return [turn.episode_id for turn in rows[start : start + batch]]
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            self._known(conversation_id)
+            rows = self._turns[conversation_id]
+            start = 0
+            if after_id is not None:
+                positions = [
+                    index for index, turn in enumerate(rows) if turn.episode_id == after_id
+                ]
+                if not positions:
+                    msg = (
+                        f"after_id {describe_untrusted(after_id)} is not an episode id of this "
+                        f"conversation"
+                    )
+                    raise ValueError(msg)
+                start = positions[0] + 1
+            return [turn.episode_id for turn in rows[start : start + batch]]
 
     async def stamped_conversation_ids(
         self,
@@ -540,9 +560,10 @@ class FakeConversationStore:
         _check_page_bound("limit", batch)
         if batch == 0:
             return []
-        stamped = sorted(
-            one.id for one in self._conversations.values() if one.deleted_at is not None
-        )
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            stamped = sorted(
+                one.id for one in self._conversations.values() if one.deleted_at is not None
+            )
         if after_id is not None:
             stamped = [one for one in stamped if one > after_id]
         return stamped[:batch]
@@ -557,16 +578,25 @@ class FakeConversationStore:
         _check_page_bound("offset", offset)
         if limit == 0:
             return []
-        live = [one for one in self._conversations.values() if one.deleted_at is None]
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            live = [one for one in self._conversations.values() if one.deleted_at is None]
         return _by_last_activity(live)[offset : offset + limit]
 
     async def turn_of_episode(self, episode_id: str) -> ConversationTurn | None:
-        """Return the turn an episode records, or ``None`` if absent or stamped."""
-        return self._visible_turn(self._by_episode.get(episode_id))
+        """Return the turn an episode records, or ``None`` if absent or stamped (#492)."""
+        async with self._resource.held():
+            return self._visible_turn(self._by_episode.get(episode_id))
 
     async def turn_of_binding(self, binding: ParkedBinding) -> ConversationTurn | None:
-        """Return the turn that parked on ``binding``, or ``None`` if absent or stamped."""
-        return self._visible_turn(self._by_binding.get(binding))
+        """Return the turn that parked on ``binding``, or ``None`` if absent or stamped.
+
+        The index is read *inside* the modelled resource, so the resource entry is
+        this method's first ``await`` and lands before ``binding`` is observed —
+        which is what lets the suite's input-observation case (ADR-0065, ADR-0074
+        §9.5) position a caller's mutation where a late read would see it.
+        """
+        async with self._resource.held():
+            return self._visible_turn(self._by_binding.get(binding))
 
     async def stamp_deleted(self, conversation_id: str) -> bool:
         """Stamp the conversation deleted, returning whether this call did it."""
@@ -617,16 +647,17 @@ class FakeConversationStore:
         an episode still resolves, and the user-facing export is composed in
         `orchestration` (ADR-0074 §9).
         """
-        live = _by_last_activity(
-            [one for one in self._conversations.values() if one.deleted_at is None]
-        )
-        turns = [
-            turn
-            for conversation_id in sorted(one.id for one in live)
-            for turn in self._turns[conversation_id]
-        ]
-        return ConversationExport(
-            exported_at=self._now(),
-            conversations=tuple(live),
-            turns=tuple(turns),
-        )
+        async with self._resource.held():  # a locked read on the durable store (#492)
+            live = _by_last_activity(
+                [one for one in self._conversations.values() if one.deleted_at is None]
+            )
+            turns = [
+                turn
+                for conversation_id in sorted(one.id for one in live)
+                for turn in self._turns[conversation_id]
+            ]
+            return ConversationExport(
+                exported_at=self._now(),
+                conversations=tuple(live),
+                turns=tuple(turns),
+            )

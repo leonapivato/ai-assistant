@@ -64,7 +64,7 @@ class TestFakePlanStoreContract(PlanStoreContract):
         yield SuspendedMidWrite(
             store=store,
             log=store.resource_log,
-            arm=lambda _operation: store.suspend_next_write(),
+            arm=lambda _operation: store.suspend_next_operation(),
         )
 
 

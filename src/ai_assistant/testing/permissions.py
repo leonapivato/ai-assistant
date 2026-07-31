@@ -155,13 +155,14 @@ class FakeAuditTrail:
     :meth:`record`'s checks and its append are separated by no interleaving
     point, which is how the atomicity ADR-0021 §4 requires is obtained on a
     single event loop: two concurrent resolutions of one ``CONFIRM`` cannot both
-    observe an unresolved question. The append — and :meth:`clear`, the other
-    locked write — runs inside a
+    observe an unresolved question. The append — and every other method, the
+    reads included since #397 — runs inside a
     :class:`~ai_assistant.testing.cancellation.SuspendableResource` so the fake
-    is a subject for ADR-0060's cancellation clause, and that does not weaken the
-    argument: acquiring an uncontended :class:`asyncio.Lock` does not suspend, so
-    nothing runs between the checks and the append that did not before — and
-    under contention the lock serialises the pair outright.
+    is a subject for ADR-0060's cancellation clause on each of the lock sites the
+    ``sqlite3`` trail has, and that does not weaken the argument: acquiring an
+    uncontended :class:`asyncio.Lock` does not suspend, so nothing runs between
+    the checks and the append that did not before — and under contention the lock
+    serialises the pair outright.
     """
 
     def __init__(self) -> None:
@@ -169,11 +170,12 @@ class FakeAuditTrail:
         self._decisions: dict[str, PermissionDecision] = {}
         self._resource = SuspendableResource()
 
-    def suspend_next_write(self) -> LoopSuspension:
-        """Hold the next write — :meth:`record` or :meth:`clear` — open inside the trail.
+    def suspend_next_operation(self) -> LoopSuspension:
+        """Hold the next call that enters the modelled resource open inside it.
 
-        There is one modelled resource and both writes enter it, so this suspends
-        whichever of them is called next rather than a named operation.
+        There is one modelled resource and every method enters it — the two writes
+        and, since #397, the five reads — so this suspends whichever call arrives
+        next rather than a named operation.
 
         The hook ``AuditTrailContract``'s cancellation case takes (ADR-0060 §3).
         Test-only, and not part of the ``AuditTrail`` contract: the Protocol
@@ -373,14 +375,15 @@ class FakeAuditTrail:
         the newest unresolved ``CONFIRM`` by ``decided_at`` descending, ``id``
         ascending, or ``None`` if the binding carries none.
         """
-        confirms = [
-            held
-            for held in self._decisions.values()
-            if held.ruling.outcome is PermissionOutcome.CONFIRM
-            and held.execution_id == execution_id
-            and held.step_id == step_id
-        ]
-        resolved = {other.resolves for other in self._decisions.values() if other.resolves}
+        async with self._resource.held():
+            confirms = [
+                held
+                for held in self._decisions.values()
+                if held.ruling.outcome is PermissionOutcome.CONFIRM
+                and held.execution_id == execution_id
+                and held.step_id == step_id
+            ]
+            resolved = {other.resolves for other in self._decisions.values() if other.resolves}
         if any(confirm.id in resolved for confirm in confirms):
             return None
         if not confirms:
@@ -403,22 +406,29 @@ class FakeAuditTrail:
         question. ``None`` means the binding carries no resolution; a dict read
         cannot fail, so ``None`` never stands in for an unreadable trail.
         """
-        resolution = next(
-            (
-                held
-                for held in self._decisions.values()
-                if held.resolves is not None
-                and held.execution_id == execution_id
-                and held.step_id == step_id
-            ),
-            None,
-        )
-        return None if resolution is None else resolution.model_copy(deep=True)
+        async with self._resource.held():
+            resolution = next(
+                (
+                    held
+                    for held in self._decisions.values()
+                    if held.resolves is not None
+                    and held.execution_id == execution_id
+                    and held.step_id == step_id
+                ),
+                None,
+            )
+            return None if resolution is None else resolution.model_copy(deep=True)
 
     async def get(self, decision_id: str) -> PermissionDecision | None:
-        """Return the decision with ``decision_id`` as a detached snapshot, or ``None``."""
-        stored = self._decisions.get(decision_id)
-        return None if stored is None else stored.model_copy(deep=True)
+        """Return the decision with ``decision_id`` as a detached snapshot, or ``None``.
+
+        Read inside the modelled resource, like every other read: the ``sqlite3``
+        trail answers this from under its connection lock, so it is one of the lock
+        sites ADR-0060's clause binds (#397).
+        """
+        async with self._resource.held():
+            stored = self._decisions.get(decision_id)
+            return None if stored is None else stored.model_copy(deep=True)
 
     async def recent(self, *, limit: int = 50) -> list[PermissionDecision]:
         """Return up to ``limit`` decisions, newest first, ties broken by id.
@@ -429,11 +439,13 @@ class FakeAuditTrail:
         if limit <= 0:
             msg = f"limit must be strictly positive, got {limit}"
             raise ValueError(msg)
-        return [decision.model_copy(deep=True) for decision in self._ordered()[:limit]]
+        async with self._resource.held():
+            return [decision.model_copy(deep=True) for decision in self._ordered()[:limit]]
 
     async def export(self) -> list[PermissionDecision]:
-        """Return every recorded decision, in the same order as :meth:`recent`."""
-        return [decision.model_copy(deep=True) for decision in self._ordered()]
+        """Return every recorded decision, in the same order as :meth:`recent` (#397)."""
+        async with self._resource.held():
+            return [decision.model_copy(deep=True) for decision in self._ordered()]
 
     async def clear(self) -> int:
         """Delete every decision, returning the number removed.

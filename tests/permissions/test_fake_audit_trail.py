@@ -56,7 +56,7 @@ class TestFakeAuditTrailContract(AuditTrailContract):
         yield SuspendedMidWrite(
             store=trail,
             log=trail.resource_log,
-            arm=lambda _operation: trail.suspend_next_write(),
+            arm=lambda _operation: trail.suspend_next_operation(),
         )
 
 
