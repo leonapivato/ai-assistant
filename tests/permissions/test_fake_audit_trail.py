@@ -28,10 +28,10 @@ if TYPE_CHECKING:
 class TestFakeAuditTrailContract(AuditTrailContract):
     """Runs FakeAuditTrail through the shared AuditTrail conformance suite."""
 
-    # No ``operations_without_shared_resource`` opt-out: every locked write on this
-    # fake — ``record`` and ``clear`` alike — enters the one modelled resource, so
-    # ADR-0060's case runs against both lock sites rather than skipping ``clear``
-    # and leaving it proved only by the ``sqlite3`` trail (#396).
+    # No ``operations_without_shared_resource`` opt-out: every locked operation on
+    # this fake — the two writes since #396, the five reads since #397 — enters the
+    # one modelled resource, so ADR-0060's case runs against every lock site rather
+    # than skipping some and leaving them proved only by the ``sqlite3`` trail.
 
     @pytest.fixture
     def trail(self) -> AuditTrail:
