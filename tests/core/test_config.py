@@ -1173,32 +1173,40 @@ def test_every_duration_setting_refuses_a_timedelta_that_lies_about_its_length(
     **preserves** a ``timedelta`` subclass instance in the model rather than
     normalising it the way it normalises a ``float`` subclass, and it applies
     ``gt=timedelta(0)`` natively, so a subclass whose comparison operators disagree
-    with its own length clears the load-time bound intact. It then reaches the
-    ordinary Python comparisons that read it — ``StepRunner._check_fresh``'s
-    ``age > self._confirmation_ttl`` among them — where Python hands the decision
-    to the *subclass* as the reflected operand, and a confirmation five hours past
-    a one-second lifetime reads as fresh. The same defence, for the same reason, as
-    :func:`_split_model_specs`' exact ``list``.
+    with its own length clears the load-time bound intact. It is then handed to the
+    subsystems that compare *against* it, where the value sits on the right of the
+    comparison and Python's reflected-operand priority gives the subclass the
+    decision — ``ConversationStore``'s reclaim sweep,
+    ``now - conversation.deleted_at >= self._grace``, is the case pinned below: a
+    week-old tombstone reads as ineligible forever, dropping ADR-0074 §8's
+    guarantee with every stated setting still looking correct. The same defence,
+    for the same reason, as :func:`_split_model_specs`' exact ``list``.
     """
 
     class Deceitful(timedelta):
-        """A one-second duration that denies being shorter than anything."""
+        """An hour-long duration that denies being shorter than anything."""
 
-        def __lt__(self, other: object) -> bool:
+        def __le__(self, other: object) -> bool:
             return False
 
         def __repr__(self) -> str:
-            return "Deceitful(1s)"
+            return "Deceitful(1h)"
 
-    ttl = Deceitful(seconds=1)
-    # The premise, pinned rather than described: this is what the guard prevents
-    # reaching the runner, and if Python's reflected-operand rule ever stopped
-    # working this way the first assertion is where that would be noticed.
-    assert (timedelta(hours=5) > ttl) is False
-    assert (timedelta(hours=5) > timedelta(seconds=1)) is True
+    grace = Deceitful(hours=1)
+    # The premise, pinned rather than described. The first pair is the sweep's own
+    # comparison, `ConversationStore._reclaim`'s `now - deleted_at >= self._grace`,
+    # answered by the subclass instead of by its length. The second is the store's
+    # constructor guard, which cannot catch it either: `isinstance` admits the
+    # subclass and the `<=` it then evaluates is the subclass's own. If Python's
+    # reflected-operand rule ever stopped working this way, these are where it
+    # would be noticed rather than in a silently weakened guard.
+    assert (timedelta(days=7) >= grace) is False
+    assert (timedelta(days=7) >= timedelta(hours=1)) is True
+    assert isinstance(Deceitful(hours=-1), timedelta)
+    assert (Deceitful(hours=-1) <= timedelta(0)) is False
 
     with pytest.raises(ValidationError, match="expected a duration"):
-        _settings_with(name, ttl)
+        _settings_with(name, grace)
 
 
 @pytest.mark.parametrize("name", _REAL_FIELDS)

@@ -417,12 +417,20 @@ def _only_a_duration(value: object) -> object:
       *preserves* a ``timedelta`` subclass instance in the model (it does not
       normalise it the way it normalises a ``float`` subclass) while applying
       ``gt`` natively, so a subclass whose comparison operators disagree with its
-      value passes the load-time bound and then reaches the Python comparisons
-      that read it — ``StepRunner._check_fresh``'s ``age > self._confirmation_ttl``
-      among them, where Python's reflected-operand priority hands the decision to
-      the subclass and a stale confirmation can be made to look fresh. Requiring
-      the built-in makes that comparison the uninterceptable one, the same
-      defence, for the same reason, as :func:`_split_model_specs`' exact ``list``.
+      own length clears the load-time bound intact and is then handed to the
+      subsystems that compare against it. ``ConversationStore``'s reclaim sweep
+      is one: ``now - conversation.deleted_at >= self._grace`` puts the
+      configured value on the **right** of the comparison, where Python's
+      reflected-operand priority hands the decision to the subclass, so a
+      week-old tombstone can be made ineligible forever — dropping ADR-0074 §8's
+      guarantee without changing a stated setting. Nor can the store's own
+      constructor guard catch it: ``isinstance(tombstone_grace, timedelta) or
+      tombstone_grace <= timedelta(0)`` admits the subclass by ``isinstance`` and
+      then lets it answer the ``<=`` for itself. That is this module's whole
+      argument one level deeper — the layer below states a rule it cannot enforce
+      on a value configuration has already accepted. Requiring the built-in makes
+      those comparisons the uninterceptable ones, the same defence, for the same
+      reason, as :func:`_split_model_specs`' exact ``list``.
     - An **exact** ``int`` or an **exact** ``float`` — a number of seconds.
       Exact, because ``isinstance(True, int)`` is the whole defect here: only
       exactness refuses the flag while still accepting the ``1`` it impersonates.
