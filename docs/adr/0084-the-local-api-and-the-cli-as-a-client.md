@@ -295,6 +295,28 @@ seam this ADR is built for is exactly where that gap would surface. So:
     oversized-value failures be told apart from a successful response **by kind**
     rather than by inspecting a result for something that looks like an error.
 
+**Not every failure can be a correlated error, and the boundary is the envelope.**
+A frame refused on its *prefix* is refused before any envelope has been decoded,
+so the server has not learned a correlation id and cannot produce one — which
+would make the rule above unsatisfiable on exactly the path §3 most insists on.
+So the two classes are separated:
+
+- **Pre-envelope failures are connection-level**: an oversized or malformed
+  length prefix, a read deadline expiring before an envelope is complete, a
+  connection or handshake ceiling, and a failed handshake (§2, §3). The server
+  **closes the connection**, having first written a single **uncorrelated**
+  refusal frame naming the reason where it is still able to. There is nothing to
+  correlate against, and inventing a placeholder id would be worse than admitting
+  that.
+- **Post-envelope failures are ordinary correlated errors**: an unknown
+  continuation (§7), an oversized *result* (§4), a second outstanding request
+  (below). The envelope has been read, so the id is known.
+
+The client renders the two differently, and must: a connection-level refusal is a
+**transport** failure, which is not the same event as a request the hub received
+and declined, and ruling 4's legibility is the reason the difference survives to
+the user rather than being flattened into one message.
+
 Choosing an existing encoding rather than specifying a new one is the whole point
 of this subsection: binding to the encoding the stores already depend on is what
 makes #421's integer-encodability question **one** question rather than two, and
@@ -360,9 +382,20 @@ whose whole job is to refuse:
 
 **Every one is refused at load time unless it is strictly positive**, in the
 `gt=0` / `gt=timedelta(0)` form ADR-0083 §7 adopted from `confirmation_ttl` and
-`conversation_tombstone_grace` — and `hub_max_pending_handshakes` is additionally
-refused unless it is **no greater than `hub_max_connections`**, since a pending
-ceiling above the total is a limit that can never bind.
+`conversation_tombstone_grace` — and two of them carry a second bound each:
+
+- `hub_max_pending_handshakes` is refused unless it is **no greater than
+  `hub_max_connections`**, since a pending ceiling above the total is a limit
+  that can never bind.
+- `hub_max_frame_bytes` is refused unless it is **representable by the framing**
+  — the 4-byte prefix caps a frame at `2^32 - 1` bytes, and the envelope
+  consumes some of that, so the ceiling must leave room for it. Without this
+  bound a setting of, say, 5 GiB would be accepted at load and would then be a
+  limit the contract declares (§4) but the wire cannot encode: the in-process
+  engine would accept a value the client provably cannot send, which is the very
+  divergence §4 moved the limit into the contract to prevent. A configuration
+  the framing cannot represent is a deployment fault, and load time is where it
+  should surface.
 
 **None of them is nullable, and that is the one place this ADR departs from
 ADR-0083 §7's convention.** There, `None` means "disabled", because a scheduler
