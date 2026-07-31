@@ -1,6 +1,6 @@
 # 82. Recording an amendment on an earlier ADR's status line: when, and where it goes
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-30
 - **This ADR supersedes nothing.** It decides a question ADR-0070 left open —
   ADR-0070 §4 says what an amendment qualifier *means to a consumer* on a line
