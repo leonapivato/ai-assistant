@@ -194,7 +194,8 @@ The client sends a connect frame carrying the **protocol version** (§3) and a
 **client identifier** (a free-form name for logs — `assistant-cli`). The connect
 schema also **defines** a **credential field**, which this transport does not
 populate. The server replies with its own protocol version, a **build
-identifier**, and its readiness. Only then may a request be sent.
+identifier**, its readiness, and its **effective maximum frame size** (§3, where
+that field earns its place). Only then may a request be sent.
 
 **The credential field is defined by the schema and carries nothing here, and the
 server refuses a frame that puts something in it.** This is the whole point of the
@@ -301,21 +302,30 @@ so the server has not learned a correlation id and cannot produce one — which
 would make the rule above unsatisfiable on exactly the path §3 most insists on.
 So the two classes are separated:
 
-- **Pre-envelope failures are connection-level**: an oversized or malformed
-  length prefix, a read deadline expiring before an envelope is complete, a
-  connection or handshake ceiling, and a failed handshake (§2, §3). The server
-  **closes the connection**, having first written a single **uncorrelated**
-  refusal frame naming the reason where it is still able to. There is nothing to
-  correlate against, and inventing a placeholder id would be worse than admitting
-  that.
-- **Post-envelope failures are ordinary correlated errors**: an unknown
+- **If no envelope decodes, the server closes the connection without a
+  response.** That covers the whole class rather than a list that would go stale:
+  a malformed or oversized length prefix, a read deadline expiring mid-frame,
+  bytes that are not valid UTF-8, text that is not valid JSON, JSON that is not
+  an object, and an object missing a required member. There is no correlation id
+  to quote and **no agreed encoding to reply in** — a peer that has already
+  violated the framing is not one to write more framed bytes at, and that is
+  precisely where two implementations would diverge. A connection ceiling (§3) is
+  refused the same way, before a byte is read.
+- **Everything that does decode gets a typed error**, including the connect
+  exchange's own contents: a version mismatch (§3) and a non-empty credential
+  (§2) are members of an envelope that parsed, so they are reported properly and
+  then the connection closes. This is what keeps the handshake's refusals legible
+  — ruling 4 would be poorly served by a silent close on a version mismatch, and
+  it does not get one.
+- **Post-envelope request failures are ordinary correlated errors**: an unknown
   continuation (§7), an oversized *result* (§4), a second outstanding request
   (below). The envelope has been read, so the id is known.
 
-The client renders the two differently, and must: a connection-level refusal is a
+The client renders these differently, and must: a connection-level close is a
 **transport** failure, which is not the same event as a request the hub received
 and declined, and ruling 4's legibility is the reason the difference survives to
-the user rather than being flattened into one message.
+the user rather than being flattened into one message. A close with no response
+is reported as what the client was attempting when the connection went away.
 
 Choosing an existing encoding rather than specifying a new one is the whole point
 of this subsection: binding to the encoding the stores already depend on is what
@@ -367,8 +377,25 @@ also fixes:
   without bound**, so the client reads a refusal instead of waiting on something
   it cannot tell apart from a hung hub (ruling 4, again).
 
-**The figures are named here rather than left to the implementation**, following
-ADR-0083 §7, which named every scheduler interval for ADR-0074 §9.3's reason: "a
+**`hub_max_frame_bytes` is the *hub's* setting, and the handshake carries its
+effective value to the client.** A limit that each side configured independently
+would not be one limit at all: a client configured at 32 MiB against a hub at
+16 MiB would accept a 20 MiB utterance that the hub then refuses on its prefix,
+and §4's whole move — putting the size bound in the *contract* so both
+implementations agree — would be false in the one place it is load-bearing. So
+the server's value is authoritative, it is one of the fields the connect reply
+returns (§2), and **the client enforces the number it was told** rather than one
+of its own. An argument that exceeds it then fails in the client, locally, as
+§4's typed contract error naming the limit — not as a connection that closes
+mid-request.
+
+This is the third job the handshake does, after the version and the credential
+slot, and it is the one that would have been most annoying to retrofit: without a
+connect exchange there is nowhere to publish a server-side limit, and every
+client would have to discover it by being refused.
+
+**The remaining figures are named here rather than left to the implementation**,
+following ADR-0083 §7, which named every scheduler interval for ADR-0074 §9.3's reason: "a
 'bounded default' with no figure is two conforming stores handing the same
 continuation different history." The same applies with more force to a limit
 whose whole job is to refuse:
