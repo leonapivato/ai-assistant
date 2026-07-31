@@ -124,18 +124,29 @@ it, and built before anything ambient or polling.
    holds a correct belief the user never told it, and the user can see where it
    came from.*
 4. **Epistemic soundness.** Observation mass-produces exactly the
-   low-confidence, conflicting beliefs the current write path mishandles at the
-   edges: a memory `ASK_USER` ruling has no resolution path and the conflict is
-   silently dropped (#423); a correction contradicting more inferences than
-   `conflict_limit` leaves the surplus live (#313), with the separate question of
-   whether full-conflict-set retirement becomes a universal `MemoryWriter`
-   obligation covered by #314; and, while ADR-0045 §4
-   ratifies retirement itself (supersession closes the prior record's window),
-   the semantics for retiring a *producer-set bounded* window — clamp, refuse,
-   or never-lived — are undecided and need their own ADR (#306). These
-   land before the observer runs at volume. *Exit: a conflicting or
-   many-conflict correction leaves the store consistent, and a deferred
-   question reaches the user instead of vanishing.*
+   low-confidence, conflicting beliefs the write path used to mishandle at the
+   edges. All three edges are now decided, and each decision has shipped. A
+   memory `ASK_USER` ruling is a **durable question the user answers**
+   (ADR-0078), reachable as `assistant questions` / `answer` /
+   `forget-question` (#423). A correction contradicting more inferences than
+   `conflict_limit` no longer leaves a surplus live — it **resolves every
+   conflict it is shown, or it does not land** (ADR-0079, partially superseding
+   ADR-0050 §1's over-limit surplus clause), enforced on both writers (#313).
+   Retiring a *producer-set bounded* validity window **clamps, and refuses only
+   what it cannot represent** (ADR-0080, partially superseding ADR-0045 §4
+   step 1's window-close instruction) — ADR-0045 §4 had ratified retirement
+   itself, supersession closing the prior record's window, but not that case
+   (#306). *Exit (met): a conflicting or many-conflict correction leaves the
+   store consistent, and a deferred question reaches the user instead of
+   vanishing.*
+
+   Two residuals stay open, and neither reopens a decision: whether
+   full-conflict-set retirement becomes a universal `MemoryWriter` obligation
+   with fake parity (#314), and an absolute, clock-coherence-independent
+   retirement hide guarantee, split out of #306 (#460). One arm is closed **by**
+   decision rather than left open — a deferral of secret-tier data is never
+   queued, so there is nothing for the user to answer (ADR-0078 §1 and §10
+   item 9, on ADR-0004 §3's refusal of a durable file for it).
 5. **The hub.** The resident service, as two decisions. The **service ADR**:
    process model and lifecycle (graceful drain of in-flight steps, supervision,
    upgrade-with-state discipline — of which the embedder-change migration,
