@@ -116,18 +116,25 @@ of which excludes a mode like `0777`.
 §3's step 2.** Three conditions, each a `78` when it fails, because none of them
 is fixed by restarting:
 
-- **Owned by the hub's own uid**, and **not group- or world-writable** — and the
-  same holds for **every ancestor directory up to the root**, with one permitted
-  exception: an ancestor that is writable but carries the **sticky bit**, which
-  is what stops a user removing or renaming an entry they do not own. Checking
-  only `data_dir` is not enough, and the gap is worth naming because it looks
-  closed: with `data_dir=/srv/shared/alice` at `0700` but `/srv/shared` at `0777`
-  and not sticky, another user renames `alice` and creates their own directory
-  and socket at the configured path. The mode on the leaf never comes into it.
-  Created `0700` when the hub creates it. This is ADR-0004 §4's owner-only
-  posture applied to the container rather than only to the contents — and it
-  protects the five databases in that directory, which have no handshake to fall
-  back on, at least as much as it protects the socket.
+- **`data_dir` itself is owned by the hub's own uid and is not group- or
+  world-writable**, created `0700` when the hub creates it. This is ADR-0004 §4's
+  owner-only posture applied to the container rather than only to the contents,
+  and it protects the five databases in that directory — which have no handshake
+  to fall back on — at least as much as it protects the socket.
+- **Every ancestor directory, up to the root, is owned by root or by the hub's
+  uid and is not writable by anyone else** — with one exception, an ancestor that
+  is other-writable but carries the **sticky bit**, which is precisely what stops
+  a user removing or renaming an entry they do not own. The ancestors get the
+  weaker of the two conditions **deliberately**: requiring hub-uid ownership all
+  the way up would reject the ordinary default, since `/` and `/home` are
+  root-owned and always will be, and a rule that fails the deployment everyone
+  actually runs is not a security control but an outage. What matters about an
+  ancestor is not who owns it but whether an untrusted user can *replace* the
+  entry below it. That gap is worth stating because securing the leaf alone looks
+  sufficient and is not: with `data_dir=/srv/shared/alice` at `0700` but
+  `/srv/shared` at `0777` and not sticky, another user renames `alice`, creates
+  their own directory and socket at the configured path, and the leaf's mode
+  never comes into it.
 - **Absolute and canonical.** `Settings.data_dir` is a `Path` and may be
   relative, which silently breaks the one-setting-locates-both property §9 rests
   on: a hub started at boot with a working directory of `/` and a setting of
