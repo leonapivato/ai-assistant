@@ -280,6 +280,14 @@ seam this ADR is built for is exactly where that gap would surface. So:
   members carrying the kind, the correlation id and the payload. Member order is
   therefore not significant and no ordering rule is needed — which is worth
   stating rather than leaving to be inferred.
+- **Duplicate member names are rejected**, in the envelope and in payload
+  objects alike. JSON permits them and decoders disagree about which one wins,
+  so `{"kind":"request","kind":"error",…}` could decode as a request in one
+  implementation and an error in another — the same bytes, two meanings, which
+  is exactly the interoperability failure this subsection exists to prevent.
+  Rejecting is also the only option compatible with the rule above that an
+  undecodable frame closes the connection: a decoder that silently picked one
+  would not be undecodable, merely wrong.
 - **Payload encoding follows what the value is**, and the rule is stated only as
   widely as it actually holds — the façade does not return models everywhere:
   - a **request** payload is a JSON object whose members are the call's
