@@ -152,10 +152,13 @@ purely additive.
 
 **`max_outstanding_confirmations` is named here and not decided here.** A one-shot
 CLI could not accumulate against a cap of 1024; a process that runs for weeks can,
-which is what §7's confirmation-deadline job exists to relieve. That it is an
-`Engine.__init__` default `build_engine` never passes is a config-surface gap the
-hub makes matter, and it is filed as an issue rather than settled in a lifecycle
-ADR.
+and §7 explains why nothing on the scheduler relieves it yet — the reclamation
+that would is ADR-0059 §3's, deferred as #333. That it is an `Engine.__init__`
+default `build_engine` never passes is a config-surface gap the hub makes matter,
+and it is filed as an issue rather than settled in a lifecycle ADR. Naming the
+two together is the point: the cap becomes reachable and the mechanism that would
+drain it does not exist, so a deployment's only lever until #333 lands is the
+number itself.
 
 ### 3. Startup is a fixed sequence, and readiness is the last thing in it
 
@@ -205,15 +208,23 @@ The service promises:
   succeed, and it prints the cause and the operator action before doing so.
 - **S4.** Any other exit, and any fatal signal, means the process should be
   restarted.
-- **S5.** A stop request completes within `shutdown_drain_seconds` plus the store
-  quiescence tail (§4).
+- **S5.** A stop request reaches §4's cancel-and-await phase within
+  `shutdown_drain_seconds`. **It does not promise a hard upper bound on the
+  total**, because §4's final await is unbounded by design; what it promises is
+  that the wait is on work that is cancelling and observable, never on work that
+  has been asked for nothing.
 - **S6.** It is safe to start any number of times; at most one instance runs (§1).
 - **S7.** It needs no client to start it, and no client can start it (ruling 3).
 
 The deployment must provide:
 
 - **D1.** A supervisor that restarts on S4 and does **not** restart on S3.
-- **D2.** A stop timeout greater than S5's budget.
+- **D2.** A stop timeout comfortably above `shutdown_drain_seconds` — the
+  reference margin is `shutdown_drain_seconds` plus thirty seconds. **This is a
+  margin, not a proof.** S5 cannot promise a total, so D2 cannot be a guarantee
+  either; it is sized so that the unbounded tail, whose expected duration is one
+  cancelled operation unwinding, has room it will not normally use. Exceeding it
+  means `SIGKILL`, which §4 argues is the correct outcome when it happens.
 - **D3.** A `data_dir` on local storage, writable, not shared with another hub.
 - **D4.** Start at boot, not ordered after a user login (ruling 2).
 
@@ -417,7 +428,6 @@ process exit would trade a harmless backlog for an outage.
 | --- | --- | --- | --- |
 | Retention purge | `MemoryStore.purge_expired` **and** `DeferralStore.purge` | 1 h | ADR-0007 §2; ADR-0078 §10 item 8 |
 | Conversation sweep | the deletion sweep, then the retention reclaim | 1 h | ADR-0074 §8 |
-| Confirmation reclaim | the expiry sweep over `PermissionDecision.expires_at` | 5 min | ADR-0044 §4, ADR-0059 §1 |
 | Observation | the `Engine` observation operation | **disabled** | ADR-0077 §8 |
 
 Each interval is a `Settings` field with the default above, which is what ADR-0077
@@ -437,17 +447,36 @@ Four things about that table are decisions, not description:
   (`engine.py:1017-1048`), at the third of the three positions ADR-0074 §8
   ratified. It is idempotent and "can run any number of times", and ADR-0076 §5
   is explicit that the scheduler "inherits this method unchanged".
-- **The confirmation reclaim has a precondition that is not met today, and the
-  implementing lane must check it first.** ADR-0059 §1 ratified freezing
-  `decided_at + confirmation_ttl` onto the record, but its `orchestration` half
-  was never wired (**#525**): `runner.py:779-784` calls
-  `PermissionDecision.from_request` with no `expires_at` and is the only
-  production call site, and `runner.py:708` still computes `age = self._now() -
-  confirmed.decided_at`. The column exists and is written
-  (`permissions/audit.py:149,539,548`) and every row's value is `None`. **A
-  deadline job over a column of nulls sweeps nothing and looks healthy doing it.**
-  So: #525 lands first, or the job does not ship. This ADR states the dependency;
-  it does not fix it, and it is not in this fence.
+- **Confirmation deadlines are named by the roadmap as this scheduler's, and they
+  are *not* a job on this list — because the job does not exist to be scheduled.**
+  This is the one place the roadmap's leg-5 sentence does not survive contact with
+  what is ratified below it, and it is stated rather than papered over. Two
+  separate things block it:
+  1. **There is no operation to reclaim an expired confirmation.** ADR-0059 §3 is
+     explicit: "Durable *reclamation* of a permanently-parked step — cancelling it
+     so it stops being rediscovered — is explicitly out of scope and deferred. No
+     contract exposes it today: `PlanStore` offers only a single-step
+     `commit_transition` and `Engine` no cancellation entry point." A scheduler
+     cannot be the second caller of an operation that has no first caller, and
+     inventing one here would breach both §7's no-new-store-surface constraint and
+     §8's rule that a job holds nothing but the façade. That contract is #333's
+     (§13), not this ADR's.
+  2. **The deadline it would enforce is not yet written.** ADR-0059 §1 ratified
+     freezing `decided_at + confirmation_ttl` onto the record, but its
+     `orchestration` half was never wired (**#525**): `runner.py:779-784` calls
+     `PermissionDecision.from_request` with no `expires_at` and is the only
+     production call site, and `runner.py:708` still computes `age = self._now() -
+     confirmed.decided_at`. The column exists and is written
+     (`permissions/audit.py:149,539,548`) and every row's value is `None`. A
+     deadline job over a column of nulls sweeps nothing and looks healthy doing it.
+
+  **Nothing goes unenforced in the meantime, which is why this is a deferral and
+  not a gap.** The lifetime is enforced at *answer* time by `_check_fresh`, as
+  ADR-0044 §4 placed it; an expired confirmation is unanswerable whether or not
+  anything sweeps. What is deferred is only the *reclamation* — stopping an
+  expired park from being rediscovered — and that is what #333 is. When #525 and
+  #333 have both landed, this becomes a job on this list by configuration, which
+  is the shape §8 is built for.
 - **Observation ships disabled, and that is deliberate.** ADR-0077 §8 states
   there is no durable cursor and that re-observation is safe by construction, but
   safe is not free: without a cursor, a periodic run re-reads the same recent
@@ -458,7 +487,21 @@ Four things about that table are decisions, not description:
 
 **No job gets new store surface.** Every one of them calls an operation that
 already exists, which is ADR-0076 §5's constraint discharged rather than merely
-respected.
+respected — and it is the reason the confirmation reclaim is absent above rather
+than listed hopefully.
+
+**Every duration this ADR adds is a `timedelta` refused at load time unless it is
+finite and strictly positive**, in the `gt=timedelta(0)` form `confirmation_ttl`
+and `conversation_tombstone_grace` already use in `core/config.py`. That is not
+housekeeping: on a completion-scheduled loop (above), an interval of zero or below
+makes a job due again the instant it finishes, so a misconfiguration turns a
+retention purge into a hot loop against SQLite — and a `shutdown_drain_seconds` of
+zero silently deletes §4's phase A, which is the whole mechanism keeping the
+graceful path reachable. **"Disabled" is `None`, never `0`**, following
+`confirmation_ttl`'s and `deferral_ttl`'s existing `None`-means-off convention, so
+that "off" and "as fast as possible" cannot be confused by a value — which is the
+one confusion a scheduler cannot afford, because the two look identical in a
+config file and nothing but load-time validation distinguishes them.
 
 ### 8. The scheduler is a peer above the composition root, and every job is an `Engine` call
 
@@ -496,8 +539,8 @@ and nothing else — no concrete store, no subsystem import — so it is a clien
 the same façade the CLI is a client of.
 
 **The `Engine` therefore grows a maintenance surface** — façade operations for
-the retention purge and the confirmation reclaim, alongside `start()`'s sweeps and
-the observation operation ADR-0077 §9 already owes. That is new *concrete* surface
+the retention purge, alongside `start()`'s sweeps and the observation operation
+ADR-0077 §9 already owes. That is new *concrete* surface
 on a class in `orchestration`, not `core` contract surface, and it belongs to the
 implementing lane.
 
@@ -647,8 +690,10 @@ writer even is**". This ADR answers that question: **there is no second writer.*
   single-step `commit_transition` and `Engine` no cancellation entry point". It is
   a scheduler job the roadmap does not name, and it is genuinely blocked on a
   contract that does not exist — a scheduler cannot call an operation nobody
-  offers. It stays deferred, and it is named here so leg 5 does not close believing
-  the scheduler's job list is complete.
+  offers. **It is also what blocks the one job the roadmap *does* name** (§7):
+  confirmation deadlines are not on the job list because reclaiming an expired
+  park is this deferral. It stays deferred, and it is named twice so leg 5 does
+  not close believing the scheduler's job list is complete.
 - **A durable in-flight lease** keeping a slow turn's conversation alive through a
   reclaim (ADR-0074 §11). Not taken, with an observation for whoever does: under
   exclusivity the set of conversations with a live turn is knowable *in memory*,
@@ -802,8 +847,11 @@ has made false.
   amendment record it is owed is flagged, not written (§15).
 - **A `SIGKILL`ed hub becomes a deployment misconfiguration rather than normal
   operation** — D2 is the line, and S5 is what makes it checkable.
-- **#525 becomes a prerequisite of a named job** rather than a loose bug: the
-  confirmation reclaim cannot ship over a column of nulls (§7).
+- **The roadmap's leg-5 job list is one job shorter than it reads.** Confirmation
+  deadlines are blocked on a contract ADR-0059 §3 deferred (#333) and on a wiring
+  gap (#525), and the deadline itself is enforced at answer time regardless, so
+  nothing is unenforced (§7). Both become prerequisites of a named job rather than
+  loose bugs.
 - **#526, #505 and #305 stop being leg 5 blockers** and become, respectively,
   consistency work, a deliberately deferred durability decision, and ordinary test
   backlog (§12).
