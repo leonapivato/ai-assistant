@@ -14,12 +14,17 @@ neither persistent nor semantic; for those, use ``SqliteMemoryStore``. Its
 retrieval rules are not part of the contract — only the behaviour asserted by the
 shared ``MemoryStore`` conformance suite is.
 
-Its writes go through a :class:`~ai_assistant.testing.cancellation.SuspendableResource`
-so it is a real subject for the cancellation clause ``core.protocols`` states
-(ADR-0060), rather than an implementation the obligation cannot reach. A dict
-needs no serialising, so this buys the fake nothing on its own — what it buys is
-that the shared suite's cancellation case runs against the canonical fake and not
-only against the ``sqlite3`` stores that already got the invariant right once.
+Its reads *and* its writes go through a
+:class:`~ai_assistant.testing.cancellation.SuspendableResource` so it is a real
+subject for the cancellation clause ``core.protocols`` states (ADR-0060), rather
+than an implementation the obligation cannot reach. A dict needs no serialising,
+so this buys the fake nothing on its own — what it buys is that the shared suite's
+cancellation case runs against the canonical fake and not only against the
+``sqlite3`` stores that already got the invariant right once. The reads are in
+because ``SqliteMemoryStore`` serialises them through the same connection lock its
+writes take, so every one of them is its own place the resource can be handed over
+early (#397); modelling only the writes would have left that half of the matrix
+proved by a single implementation.
 """
 
 from __future__ import annotations
@@ -96,21 +101,21 @@ class FakeMemoryStore:
         self._clock = checked_clock(now, owner="FakeMemoryStore")
         self._resource = SuspendableResource()
 
-    def suspend_next_write(self) -> LoopSuspension:
-        """Hold the next :meth:`add` or :meth:`write_atomic` open inside the store.
+    def suspend_next_operation(self) -> LoopSuspension:
+        """Hold the next call that enters the modelled resource open inside it.
 
         The hook ``MemoryStoreContract``'s cancellation case takes (ADR-0060 §3),
-        and its write-side input-observation cases with it (ADR-0065 §3), since the
-        fake enters the modelled resource at exactly the boundary both clauses turn
-        on. Test-only, and not part of the ``MemoryStore`` contract: the Protocol
-        deliberately grows no affordance for this, so the suite asks the *subject*
-        it was handed rather than the seam every consumer depends on.
+        and its input-observation cases with it (ADR-0065 §3), since the fake
+        enters the modelled resource at exactly the boundary both clauses turn on:
+        every method takes its one observation of its arguments on its first
+        executed lines and only then enters. Test-only, and not part of the
+        ``MemoryStore`` contract: the Protocol deliberately grows no affordance for
+        this, so the suite asks the *subject* it was handed rather than the seam
+        every consumer depends on.
 
-        There is no read-side counterpart, and that is a declaration rather than an
-        omission: ``search`` and ``list_beliefs`` reach their filters with no
-        ``await`` in between, so the suite's read cases reduce to a post-call
-        assertion (``reads_without_suspending``). Inventing an ``await`` inside a
-        read to gate would model a suspension this fake does not have (#436).
+        Named for an *operation* rather than a write because the reads enter too
+        (#397). It holds whichever call arrives next, so a suite arms it after its
+        preconditions have run.
 
         Returns:
             The handle to wait on and release.
@@ -219,13 +224,19 @@ class FakeMemoryStore:
 
         ``None`` when the record is absent, expired, or not live at now — a closed
         or not-yet-open validity window, both ends (ADR-0045 §6).
+
+        Routed through the modelled resource like every other method: the
+        ``sqlite3`` store answers this from under its connection lock, so it is one
+        of the lock sites ADR-0060's clause binds (#397).
         """
-        record = self._records.get(record_id)
-        if record is None or not self._is_readable(record, self._now_utc()):
-            return None
-        # Deep copy so callers cannot mutate stored state — including nested fields
-        # like provenance and validity — matching the persistent store (ADR-0007).
-        return record.model_copy(deep=True)
+        async with self._resource.held():
+            record = self._records.get(record_id)
+            if record is None or not self._is_readable(record, self._now_utc()):
+                return None
+            # Deep copy so callers cannot mutate stored state — including nested
+            # fields like provenance and validity — matching the persistent store
+            # (ADR-0007).
+            return record.model_copy(deep=True)
 
     async def search(
         self,
@@ -242,27 +253,31 @@ class FakeMemoryStore:
         §6), an empty query, and a non-positive ``limit`` all yield nothing.
 
         ``kinds`` is materialised on the coroutine's **first executed line**, as in
-        ``list_beliefs`` below and for the same reason: this method never suspends,
-        so ADR-0065's clause is vacuous here, but the snapshot keeps the fake the
-        same shape as ``SqliteMemoryStore``, where the discharge is real (#436).
+        ``list_beliefs`` below and for the same reason: it is the discharge
+        ADR-0065 §3 names second — the caller's ``Sequence`` is observed once,
+        before this method enters the modelled resource, and only the copy is read
+        afterwards (#436). That ordering is what the suite's read-side
+        input-observation case turns on here, so the entry below must stay *after*
+        the materialisation.
         """
         wanted = None if kinds is None else frozenset(str(kind) for kind in kinds)
         query_terms = {term for term in query.lower().split() if term}
         if limit <= 0 or not query_terms:
             return []
-        now = self._now_utc()  # one reading for the whole search, not one per record
-        scored: list[MemoryRecord] = []
-        for record in self._records.values():
-            if not self._is_readable(record, now) or (
-                wanted is not None and record.kind not in wanted
-            ):
-                continue
-            content = record.content.lower()
-            hits = sum(1 for term in query_terms if term in content)
-            if hits:
-                scored.append(
-                    record.model_copy(update={"score": hits / len(query_terms)}, deep=True)
-                )
+        async with self._resource.held():
+            now = self._now_utc()  # one reading for the whole search, not one per record
+            scored: list[MemoryRecord] = []
+            for record in self._records.values():
+                if not self._is_readable(record, now) or (
+                    wanted is not None and record.kind not in wanted
+                ):
+                    continue
+                content = record.content.lower()
+                hits = sum(1 for term in query_terms if term in content)
+                if hits:
+                    scored.append(
+                        record.model_copy(update={"score": hits / len(query_terms)}, deep=True)
+                    )
         scored.sort(key=lambda record: record.score or 0.0, reverse=True)
         return scored[:limit]
 
@@ -281,19 +296,18 @@ class FakeMemoryStore:
         ``_is_readable`` predicate ``get``/``search`` use, against one clock reading
         for the whole page (ADR-0073 §2).
 
-        Deliberately **not** routed through the modelled
-        :class:`~ai_assistant.testing.cancellation.SuspendableResource`, unlike the
-        fake's writes: the shared suite's cancellation case (ADR-0060 §3) is
-        write-scoped, and the locked *read* paths are a separate axis tracked in
-        #397. Adding a read to the modelled resource here would arm a hook the
-        suite does not drive on either real store.
+        Routed through the modelled
+        :class:`~ai_assistant.testing.cancellation.SuspendableResource` like the
+        fake's writes, because ``SqliteMemoryStore`` answers this from under its
+        connection lock and that lock site is one more place the resource could be
+        handed over early (#397). An earlier revision of this docstring recorded the
+        opposite, on the premise that the shared suite's cancellation case was
+        write-scoped; closing #397 removed that premise.
 
         Both ``Sequence`` filters are materialised on the coroutine's **first
-        executed line** and only the copies are read thereafter — ADR-0065 §3's
-        second discharge, and the shape ADR-0073 §8 requires of every
-        implementation. This method never suspends, so the clause is vacuous here;
-        the snapshot keeps the fake the same shape as ``SqliteMemoryStore``, which
-        does suspend and for which the discharge is real.
+        executed line**, before that entry, and only the copies are read thereafter
+        — ADR-0065 §3's second discharge, and the shape ADR-0073 §8 requires of
+        every implementation.
 
         Args:
             bands: Belief bands to include; ``None`` is every band, ``()`` none.
@@ -317,14 +331,15 @@ class FakeMemoryStore:
         if limit == 0 or selects_nothing:
             return []
 
-        now = self._now_utc()  # one reading for the whole page
-        matched = [
-            record
-            for record in self._records.values()
-            if self._is_readable(record, now)
-            and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
-            and (wanted_kinds is None or record.kind in wanted_kinds)
-        ]
+        async with self._resource.held():
+            now = self._now_utc()  # one reading for the whole page
+            matched = [
+                record
+                for record in self._records.values()
+                if self._is_readable(record, now)
+                and (wanted_bands is None or band_of(record.provenance.source) in wanted_bands)
+                and (wanted_kinds is None or record.kind in wanted_kinds)
+            ]
         page = _newest_revision_first(matched)[offset : offset + limit]
         # Cleared, not merely absent: a record re-added after a search carries that
         # query's relevance, and nothing was ranked here (ADR-0073 §2).
@@ -349,11 +364,16 @@ class FakeMemoryStore:
         filter on the validity window — a superseded belief is retained data a
         data-rights export must keep; only expired records are excluded (ADR-0045
         §6, amending ADR-0007 §3).
+
+        Routed through the modelled resource, like every other read (#397).
         """
-        now = self._now_utc()
-        return [
-            r.model_copy(deep=True) for r in self._records.values() if not self._is_expired(r, now)
-        ]
+        async with self._resource.held():
+            now = self._now_utc()
+            return [
+                r.model_copy(deep=True)
+                for r in self._records.values()
+                if not self._is_expired(r, now)
+            ]
 
     async def purge_expired(self) -> int:
         """Physically remove expired records, returning the number removed."""

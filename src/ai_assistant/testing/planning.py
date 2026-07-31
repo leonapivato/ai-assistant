@@ -12,10 +12,12 @@ consumer's tests would then pull in the very subsystem the fake stands in for.
 The shared conformance suite is what keeps the two implementations honest — both
 must pass it, so a divergence is a test failure rather than a latent surprise.
 
-``FakePlanStore``'s writes go through a
+``FakePlanStore``'s reads *and* writes go through a
 :class:`~ai_assistant.testing.cancellation.SuspendableResource` so it is a real
 subject for the cancellation clause ``core.protocols`` states (ADR-0060), rather
-than an implementation the obligation cannot reach.
+than an implementation the obligation cannot reach. The reads are in because
+``SqlitePlanStore`` answers every one of them from under its connection lock, so
+each is its own place the resource could be handed over early (#397).
 """
 
 from __future__ import annotations
@@ -176,13 +178,17 @@ class FakePlanStore:
         self._incarnation = uuid4().hex
         self._resource = SuspendableResource()
 
-    def suspend_next_write(self) -> LoopSuspension:
-        """Hold the next write open inside the store.
+    def suspend_next_operation(self) -> LoopSuspension:
+        """Hold the next call that enters the modelled resource open inside it.
 
         The hook ``PlanStoreContract``'s cancellation case takes (ADR-0060 §3).
         Test-only, and not part of the ``PlanStore`` contract: the Protocol
         deliberately grows no affordance for this, so the suite asks the *subject*
         it was handed rather than the seam every consumer depends on.
+
+        Named for an *operation* rather than a write because the reads enter the
+        resource too (#397); it holds whichever call arrives next, so a suite arms
+        it after its preconditions have run.
 
         Returns:
             The handle to wait on and release.
@@ -234,9 +240,15 @@ class FakePlanStore:
         return goal.id
 
     async def get_goal(self, goal_id: str) -> Goal | None:
-        """Return the goal with ``goal_id``, or ``None``."""
-        stored = self._goals.get(goal_id)
-        return None if stored is None else stored.model_copy(deep=True)
+        """Return the goal with ``goal_id``, or ``None``.
+
+        Routed through the modelled resource, like every other read: the
+        ``sqlite3`` store answers this from under its connection lock, so it is one
+        of the lock sites ADR-0060's clause binds (#397).
+        """
+        async with self._resource.held():
+            stored = self._goals.get(goal_id)
+            return None if stored is None else stored.model_copy(deep=True)
 
     async def save_plan(self, plan: ActionPlan) -> str:
         """Persist a plan, requiring its goal to exist and its id to be free.
@@ -259,9 +271,10 @@ class FakePlanStore:
         return plan.id
 
     async def get_plan(self, plan_id: str) -> ActionPlan | None:
-        """Return the plan with ``plan_id``, or ``None``."""
-        stored = self._plans.get(plan_id)
-        return None if stored is None else stored.model_copy(deep=True)
+        """Return the plan with ``plan_id``, or ``None`` — under the resource (#397)."""
+        async with self._resource.held():
+            stored = self._plans.get(plan_id)
+            return None if stored is None else stored.model_copy(deep=True)
 
     async def start_execution(self, plan_id: str) -> ExecutionState:
         """Open and store a fresh execution, derived from the plan's steps.
@@ -425,9 +438,10 @@ class FakePlanStore:
         )
 
     async def get_execution(self, execution_id: str) -> ExecutionState | None:
-        """Return the execution with ``execution_id``, or ``None``."""
-        stored = self._executions.get(execution_id)
-        return None if stored is None else stored.model_copy(deep=True)
+        """Return the execution with ``execution_id``, or ``None`` — under the resource (#397)."""
+        async with self._resource.held():
+            stored = self._executions.get(execution_id)
+            return None if stored is None else stored.model_copy(deep=True)
 
     async def active_executions(self) -> list[ExecutionState]:
         """Return every execution with outstanding work, oldest first.
@@ -435,19 +449,27 @@ class FakePlanStore:
         Insertion order, not sorted id order: ids embed a plan prefix, so
         sorting them would interleave plans and put ``exec-10`` before
         ``exec-2``.
+
+        Routed through the modelled resource, like every other read (#397).
         """
-        return [
-            state.model_copy(deep=True) for state in self._executions.values() if state.is_active
-        ]
+        async with self._resource.held():
+            return [
+                state.model_copy(deep=True)
+                for state in self._executions.values()
+                if state.is_active
+            ]
 
     async def export(self) -> PlanExport:
-        """Return a portable, internally consistent snapshot."""
-        return PlanExport(
-            exported_at=self._now(),
-            goals=tuple(goal.model_copy(deep=True) for goal in self._goals.values()),
-            plans=tuple(plan.model_copy(deep=True) for plan in self._plans.values()),
-            executions=tuple(state.model_copy(deep=True) for state in self._executions.values()),
-        )
+        """Return a portable, internally consistent snapshot — under the resource (#397)."""
+        async with self._resource.held():
+            return PlanExport(
+                exported_at=self._now(),
+                goals=tuple(goal.model_copy(deep=True) for goal in self._goals.values()),
+                plans=tuple(plan.model_copy(deep=True) for plan in self._plans.values()),
+                executions=tuple(
+                    state.model_copy(deep=True) for state in self._executions.values()
+                ),
+            )
 
     async def delete_goal(self, goal_id: str) -> GoalDeletion:
         """Delete a goal and its plan history, refusing while work is live."""
