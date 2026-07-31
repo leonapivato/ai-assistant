@@ -1,7 +1,24 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause); §1's `USER_ASSERTED` hold-out amended by ADR-0078
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause)
 - Date: 2026-07-23
+- Note (2026-07-30): **The ADR-0078 amendment moves off the `Status` line to the
+  note below; nothing about it changes.** The line carried "§1's `USER_ASSERTED`
+  hold-out amended by ADR-0078" beside its leading partial-supersession token.
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2
+  rules that on a line led by `Partially superseded by`, an amendment is recorded
+  in its dated note and not on `Status`, so that ADR-0070 §4's invariant — "every
+  `ADR-NNNN` after the leading `Partially superseded by` is a target" — holds: a
+  consumer was reading ADR-0078 as a partial-supersession target of this ADR, and
+  it is not one. This is a re-rendering, not a deletion. **The amendment stands in
+  full in the 2026-07-29 note directly below**, which is untouched, as is ADR-0078
+  §10 which required it; §1's hold-out is narrowed to the one confirmed exception
+  exactly as that note records. The same note's paragraph headed "The Status line
+  accumulates; it does not replace" is left standing rather than rewritten
+  (ADR-0070 §1 is append-only) — ADR-0082 §2 settles its rendering claim the other
+  way, and nothing else in it is affected. This edit is ADR-0070 §1's Status
+  correction plus an appended dated note; no ratified text is rewritten and no
+  decision of this ADR moves (ADR-0082 §5). Refs #477.
 - Note (2026-07-29): **§1's `USER_ASSERTED` hold-out from the retirement set is
   narrowed to one exception.** The bullet headed *"`USER_ASSERTED` conflicts are
   never swept in"* stands for every conflict swept in on similarity;

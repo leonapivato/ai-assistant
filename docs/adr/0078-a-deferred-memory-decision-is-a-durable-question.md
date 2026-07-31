@@ -2,6 +2,24 @@
 
 - Status: Accepted
 - Date: 2026-07-28
+- Note (2026-07-30): **§10's `Status` renderings for ADR-0045 and ADR-0050 are
+  re-rendered; what §10 required is unchanged.** §10 instructed each of those
+  files to be "qualified" on its `Status` line plus a dated note. Both already
+  carried a leading `Partially superseded by` token, and
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2
+  rules that an amendment on such a line is recorded in the dated note only —
+  otherwise `ADR-0078` sits after the leading token and ADR-0070 §4's extraction
+  invariant reads it as a partial-supersession target of ADR-0045 and ADR-0050,
+  which it is not. So the two qualifiers came off those lines and the dated notes
+  §10 also required, which carry the narrowings in full, stand untouched. **No
+  decision of this ADR changes** and no reader of it acts differently: §10 is a
+  ratification checklist that borrowed its form ("Recorded in the form ADR-0028 §6
+  applied") rather than deciding one, and the form is ADR-0070 §4's to set. Under
+  ADR-0082 §1 no `Status` qualifier is owed here — §10's instructions are spent,
+  not live — and this note is added because a reader of §10 who then opens
+  ADR-0045 would otherwise find a line §10 does not describe (ADR-0082 §4). §10's
+  ADR-0028 entry is unaffected: that line is a plain `Accepted` and keeps its
+  qualifier. Refs #477.
 - **This is a contract change, and it is flagged as such (golden rule 5).** New
   `core` surface: a `DeferralStore` Protocol, a `DeferredProposal` record with its
   state enum, an admission-outcome enum, the `UserConfirmation`, `DeferralClaim`
