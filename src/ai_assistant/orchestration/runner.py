@@ -321,6 +321,12 @@ class StepRunner:
         refuses no legitimate answer, which is the failure ADR-0037 §4 named when
         it declined to invent one.
 
+        It applies at **ask** time (ADR-0059 §1): the duration is turned into a
+        deadline on the record when the ``CONFIRM`` is written (:meth:`_deadline`)
+        rather than recomputed when an answer arrives, so a question is answered
+        under the lifetime it was asked under and a later change to this setting
+        leaves already-parked confirmations alone.
+
         Raises:
             ValueError: If ``confirmation_ttl`` is set and not strictly positive.
                 A zero or negative lifetime would expire every confirmation the
@@ -468,10 +474,13 @@ class StepRunner:
         and the answer is refused with ``InvalidResolutionError`` rather than
         executed against arguments nobody approved.
 
-        **A stale confirmation is refused before anything is authored** when a
-        ``confirmation_ttl`` was configured (:meth:`_check_fresh`, #243): past its
-        lifetime a question is no longer answerable, whichever way the human
-        replied. With no lifetime set — the default — no confirmation expires.
+        **A stale confirmation is refused before anything is authored** when the
+        record carries a deadline (:meth:`_check_fresh`, #243, ADR-0059 §1): past
+        its ``expires_at`` a question is no longer answerable, whichever way the
+        human replied. A confirmation recorded without one — no
+        ``confirmation_ttl`` was configured when it was *asked*, or the record
+        predates ADR-0059 — does not expire; the live setting is never applied to
+        a record that carries no deadline.
 
         Args:
             state: The execution as currently stored. The step must be parked in
@@ -506,8 +515,9 @@ class StepRunner:
                 the record of it.
             PermissionDeniedError: If the named confirmation was not a ``CONFIRM``,
                 or is a ``CONFIRM`` about a different step, or one this execution
-                is not parked on (:meth:`_check_parked`), or one answered past its
-                configured lifetime (:meth:`_check_fresh`); or, on the restart
+                is not parked on (:meth:`_check_parked`), or one answered past the
+                deadline fixed on it when it was asked (:meth:`_check_fresh`); or,
+                on the restart
                 path, if the trail holds no pending confirmation for the binding —
                 it is already resolved, or the step was never parked
                 (:meth:`_confirmation_for`). Refused before anything is authored,
@@ -666,14 +676,35 @@ class StepRunner:
         here because this stage is the one that both holds a clock and takes the
         answer.
 
-        **Opt-in, and that is the whole of the design's caution.** With no
-        ``confirmation_ttl`` configured nothing expires, so a deployment that has
-        not decided how long a question stands refuses no legitimate reply — the
-        exact hazard ADR-0037 §4 named when it declined to invent a duration at
-        the moment an answer arrives. When a lifetime *is* set, the duration is
-        the deployment's, read from a construction parameter rather than a rule
-        this stage authors, the same division ``ThresholdActionPolicy`` draws
-        between its contract-fixed floors and its user-set thresholds.
+        **The deadline is read off the record, never recomputed here (ADR-0059
+        §1).** The lifetime was fixed when the question was asked, as
+        ``decided_at + confirmation_ttl`` frozen onto ``expires_at``
+        (:meth:`_deadline`), so all that is left at answer time is the single
+        comparison ``_now() > confirmed.expires_at``. The ``>`` is the specified
+        boundary: ``expires_at`` is the **last answerable instant**, so an answer
+        arriving exactly at it is accepted and one strictly after it is refused
+        — the behaviour the ``age > confirmation_ttl`` bound it replaces also
+        had, and ADR-0044's "a fast confirmation at a coarse clock resolution is
+        real" is the same point.
+
+        **``expires_at is None`` means no lifetime, uniformly, and that is the
+        whole of the design's caution.** A record carries no deadline when the
+        deployment configured no ``confirmation_ttl`` at ask time, when the
+        deadline was not representable (:meth:`_deadline`), or when the record
+        predates ADR-0059 — and all three read the same way here: the question
+        does not expire. There is deliberately **no answer-time recompute**
+        against the *live* ``self._confirmation_ttl``, which is what keeps
+        ``None`` unambiguous; recomputing would make it mean two contradictory
+        things at once ("explicitly unbounded" and "needs the live ttl"), since a
+        deployment with no lifetime records ``None`` too. ADR-0059
+        §Consequences states the one cost — a confirmation parked *before* the
+        upgrade and answered after it loses the best-effort bound it would once
+        have been checked against — as a bounded, deliberate migration
+        limitation in the safe direction, not a silent strip. The *policy* (the
+        duration, and whether any lifetime applies) stays the deployment's
+        construction parameter, the same division ``ThresholdActionPolicy`` draws
+        between its contract-fixed floors and its user-set thresholds; what
+        changed is only that it is read at ask time rather than here.
 
         **Refused whichever way the human answered.** Once past the lifetime a
         question is treated as no longer answerable, so this runs before
@@ -683,34 +714,39 @@ class StepRunner:
         ``AWAITING_APPROVAL``; reclaiming a permanently unanswerable park is a
         separate concern (a plan-level sweep), not this stage's to invent here.
 
-        **This is a wall-clock bound, and best-effort by construction.** The age
-        is ``_now() - decided_at`` over two ``UtcInstant`` readings of the ADR-0026
-        clock — well-defined across a DST boundary, where a naive subtraction
-        would not be, but *not* an elapsed-time measurement resilient to the clock
-        being corrected. A backward correction can carry ``_now()`` behind
-        ``decided_at``, making ``age`` negative and the question answerable again;
-        the failure direction is safe — an approval the user genuinely gave is
-        honoured late, never an action performed without one, and the trail's
-        single-resolution index still binds one approval to one resolution. A
-        lifetime robust to clock corrections and to a restart needs the deadline
-        on the durable record and a monotonic component — the deadline-on-the-
-        record shape ADR-0037 §4 and ADR-0044 defer to the contract change, not
-        this within-contract bound (issue filed).
+        **Durable across a restart; still a wall-clock bound across a
+        correction.** The anchor is one ``UtcInstant`` on the record rather than
+        a difference of two live readings, so a restart neither loses the
+        deadline nor re-derives it — the half of #277 ADR-0059 §1 states it
+        closes, and what makes a *later* ``confirmation_ttl`` change leave
+        already-asked questions on the lifetime they were promised. Against a
+        clock *correction* it is no better, and the ADR does not claim
+        otherwise: because ``expires_at == decided_at + ttl``, this comparison
+        and the subtraction it replaces re-open on the identical condition, so
+        any backward correction carrying ``_now()`` back across the deadline
+        makes an expired confirmation answerable again. The failure direction
+        stays the safe one — an approval the user genuinely gave is honoured
+        late, never an action performed without one, and the trail's
+        single-resolution index still binds one approval to one resolution.
+        Immunity would need a *monotonic* component, which ADR-0059
+        §Alternatives rejects as a record field (it is defined only within one
+        process and resets across the restart the deadline must survive) and
+        defers to an optional process-local layer here (#277).
 
         Raises:
-            PermissionDeniedError: If a lifetime is configured and this answer
-                arrives more than that long after the confirmation was recorded.
+            PermissionDeniedError: If the confirmation carries a deadline and
+                this answer arrives strictly after it.
             PlanningError: If the injected clock's reading is not conforming
                 (:meth:`_now`).
         """
-        if self._confirmation_ttl is None:
+        if confirmed.expires_at is None:
             return
-        age = self._now() - confirmed.decided_at
-        if age > self._confirmation_ttl:
+        now = self._now()
+        if now > confirmed.expires_at:
             msg = (
                 f"decision {confirmed.id!r} was confirmed at {confirmed.decided_at.isoformat()} "
-                f"and this answer arrives {age} later, past the {self._confirmation_ttl} a "
-                f"confirmation stands, so the question has expired and answers nothing"
+                f"and stood until {confirmed.expires_at.isoformat()}, but this answer arrives at "
+                f"{now.isoformat()}, so the question has expired and answers nothing"
             )
             raise PermissionDeniedError(msg)
 
@@ -769,6 +805,15 @@ class StepRunner:
         parking the step while handing back a confirmation about another tool,
         which :meth:`_check_parked` then refuses for ever.
 
+        **This is where a confirmation's lifetime is fixed** (:meth:`_deadline`,
+        ADR-0059 §1). The deadline belongs to the question at the moment it is
+        asked, so it is derived here from the same clock reading that stamps
+        ``decided_at`` and frozen onto the record; :meth:`_check_fresh` then only
+        compares against it. The deadline is the *recorder's* to supply — the
+        deployment's lifetime, not a fact the policy authored — which is why
+        ``from_request`` takes it as a parameter rather than transcribing it,
+        and why the policy stays clock-free (ADR-0036 §1, ADR-0021 §3).
+
         Raises:
             AuditError: If the trail refused the append — a duplicate id, or a
                 ``resolves`` pointer that failed its invariant — or if it does
@@ -776,12 +821,17 @@ class StepRunner:
                 hands back one that differs from what was written.
             PlanningError: If the injected clock's reading is not conforming.
         """
+        # One clock reading, used for both the stamp and the deadline derived
+        # from it: two reads could put `expires_at` a tick off `decided_at + ttl`
+        # and make the record describe a lifetime nobody configured.
+        decided_at = self._now()
         decision = PermissionDecision.from_request(
             request,
             ruling,
             id=self._id_factory(),
-            decided_at=self._now(),
+            decided_at=decided_at,
             resolves=resolves,
+            expires_at=self._deadline(ruling, decided_at),
         )
         await self._trail.record(decision)
         recorded = await self._recorded(decision.id)
@@ -792,6 +842,62 @@ class StepRunner:
             )
             raise AuditError(msg)
         return recorded
+
+    def _deadline(self, ruling: PermissionRuling, decided_at: datetime) -> datetime | None:
+        """The instant past which this ruling, if a ``CONFIRM``, stops being answerable.
+
+        ADR-0059 §1's ask-time half: the deployment's ``confirmation_ttl`` is a
+        *duration*, and what the record carries is the **instant derived from it
+        once**, ``decided_at + confirmation_ttl``. Storing the derived fact
+        rather than the policy is what reconciles the field with ADR-0044
+        §Alternatives' refusal to put "the deadline" on the record — a question
+        asked under a one-hour lifetime *is* a question that expires at a
+        specific instant, and that instant is a property of the question. The
+        duration itself stays here, a construction parameter, and is read at this
+        moment only.
+
+        **``None`` on every other outcome, and that is a construction
+        requirement, not tidiness.** ``PermissionDecision`` permits ``expires_at``
+        only on a ``CONFIRM`` — a lifetime is a property of an open question, and
+        an ``ALLOW``, a ``DENY`` or a resolving ruling carries none — so passing a
+        deadline alongside any other outcome would raise at construction rather
+        than record anything. The resolving path reaches here too (``resolve``
+        may not return ``CONFIRM``), and it is this check that leaves its record
+        deadline-free.
+
+        **An unrepresentable deadline is recorded as no lifetime, not raised.**
+        Both operands reach the edge of representability — the ADR-0026 clock
+        admits a reading within a day of ``datetime.max``, and
+        ``confirmation_ttl`` is any strictly-positive ``timedelta`` — so the sum
+        can raise a bare ``OverflowError``, which is neither an ``AssistantError``
+        nor a specified refusal. ADR-0059 §1 fixes one outcome for it: treat it
+        exactly as "no lifetime". That is the safe direction (a question that
+        would have expired only at the end of representable time is, for every
+        practical purpose, one that does not expire) and it keeps ``None`` a
+        single meaning, where the alternatives — failing the ask, or clamping to
+        ``datetime.max`` — would either lose a legitimate confirmation to
+        arithmetic or record a deadline nobody configured.
+
+        Args:
+            ruling: What the policy said; only a ``CONFIRM`` may carry a deadline.
+            decided_at: The reading that stamps the record, so that the deadline
+                is derived from the same instant it is anchored to.
+
+        Returns:
+            The deadline, or ``None`` when the deployment set no lifetime, the
+            ruling is not a ``CONFIRM``, or the sum is not representable.
+        """
+        if self._confirmation_ttl is None or ruling.outcome is not PermissionOutcome.CONFIRM:
+            return None
+        try:
+            return decided_at + self._confirmation_ttl
+        except OverflowError:
+            _log.warning(
+                "confirmation_deadline_unrepresentable",
+                decided_at=decided_at.isoformat(),
+                confirmation_ttl=str(self._confirmation_ttl),
+            )
+            return None
 
     def _authorised(self, request: ActionRequest, recorded: PermissionDecision) -> ToolCall:
         """Build the call from the trail's copy of the decision (ADR-0037 §3).
