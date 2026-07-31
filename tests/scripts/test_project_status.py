@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "project_status.py"
 
 
@@ -193,6 +195,28 @@ def test_a_nested_item_may_carry_a_colon_of_its_own(tmp_path: Path) -> None:
 
     row = _line_with(out, "Colon decision")
     assert "migration: complete" in row
+    assert "2026-07-24" not in row
+
+
+@pytest.mark.parametrize("lead", ["", " "])
+def test_a_shallow_indented_sibling_field_still_ends_it(tmp_path: Path, lead: str) -> None:
+    # A `- Date:` indented by less than the Status bullet's content column is a
+    # sibling field, not nesting, so it must still end the value. The floor is
+    # that column — not "any extra whitespace at all", which would fold a
+    # one-space-indented sibling straight into the Status.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-shallow.md",
+                f"# 1. Shallow decision\n\n- Status: Accepted\n{lead}- Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Shallow decision")
+    assert "Accepted" in row
     assert "2026-07-24" not in row
 
 
