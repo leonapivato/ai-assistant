@@ -104,21 +104,34 @@ answer possible.
 
 ## Decision
 
-### 1. The record is owed when the later ADR amends a named clause — and not otherwise
+### 1. A record on the earlier ADR is owed when the later ADR amends a named clause — and not otherwise
 
-**A later ADR's change is recorded on an earlier ADR's `Status` line exactly
-when the later ADR amends a named clause of that earlier ADR**, and the later
-ADR states which clause, in its own text. Adding an obligation that contradicts
-no sentence the earlier ADR wrote is a **stacked addition**: it is recorded in
-the ADR that makes it, and nowhere else.
+**Whether a record is owed and where it is written are two questions, and this
+ADR answers them in that order.** §1 decides the first for every case; §2 decides
+the second, and the leading-token line is the one shape on which the answer is
+not the `Status` field.
+
+**A later ADR's change is recorded on the earlier ADR exactly when the later ADR
+amends a named clause of that earlier ADR**, and the later ADR states which
+clause, in its own text. Adding an obligation that contradicts no sentence the
+earlier ADR wrote is a **stacked addition**: it is recorded in the ADR that makes
+it, and nowhere else.
+
+**Where a record *is* owed, it goes on the earlier ADR's `Status` line and in its
+appended dated note — except on a line led by `Partially superseded by`, where §2
+puts it in the note alone.** ADR-0070 §1 requires the dated note in every case, so
+the note is the invariant half of the record and the `Status` qualifier is the
+half §2 governs. Nothing in this section requires a qualifier on a line §2
+excludes it from.
 
 **What decides which of the two it is, is ADR-0070 §1's test, unchanged, applied
 to the earlier ADR's *text*.** Would a reader holding only the earlier ADR now
 act differently, or read one of its clauses more widely than it now holds? If
 yes, the later ADR amends it (or supersedes it — §1 decides which, and this ADR
 does not touch that line). If no — the earlier ADR's sentences all stay true,
-merely joined by another obligation stated elsewhere — nothing is owed on its
-`Status`. **The test controls, not the label**: a later ADR that calls its change
+merely joined by another obligation stated elsewhere — no record is owed against
+it at all, on `Status` or in a note. **The test controls, not the label**: a
+later ADR that calls its change
 an amendment of ADR-N without a clause of ADR-N failing §1's test has
 mis-declared it, and the record is wrong however the declaration reads.
 
@@ -167,11 +180,17 @@ ADR-0070's `Status`.
 ### 2. On a leading-token line the record lives in the dated note, not on `Status`
 
 **Where an ADR's `Status` carries the leading `Partially superseded by` token, no
-amendment qualifier is written on that line.** The amendment is recorded in the
-appended dated note ADR-0070 §1 already requires for it. On a line with no
-leading token — `Accepted`, or a grandfathered `Accepted, partially superseded
-…` — the qualifier stays permitted and accumulates in the established shape
-(`Accepted, §8 amended by ADR-0040, ADR-0045 and ADR-0078`).
+amendment qualifier is written on that line.** The record §1 owes is the appended
+dated note ADR-0070 §1 already requires, and that is the whole of it. On a line
+with no leading token — `Accepted`, or a grandfathered `Accepted, partially
+superseded …` — the qualifier stays permitted and accumulates in the established
+shape (`Accepted, §8 amended by ADR-0040, ADR-0045 and ADR-0078`) beside the same
+note.
+
+**This section is about the record's form, never about whether one is owed.** §1
+decides that, and §2 does not suppress a record §1 requires — it says which of
+the two places carries it. An amendment on a leading-token line is recorded in
+full; it is simply recorded four lines lower.
 
 **And when a line takes the leading token, any qualifier already on it moves to
 the dated note in the same change.** That is ADR-0080 §8's operation, generalised
@@ -279,13 +298,23 @@ violation this ADR is about.
   moves.
 - **ADR-0045, ADR-0050, ADR-0078 — dated notes appended.** ADR-0070 §1's fourth
   permitted header edit. No ratified text is rewritten anywhere in this change.
-- **ADR-0070 — nothing.** §1 and §4 are unchanged, and §1's own test says why:
-  §1 stands whole, and §2 here restores §4's invariant rather than restating it.
-  §1's rule 1 addition to §4's consumer rule is a stacked addition — §4 gave a
-  post-ADR-0070 line no instruction, so no sentence of §4 becomes false — and
-  under this ADR's own rule 1 a stacked addition is recorded in the ADR that
-  makes it. It is recorded here.
+- **ADR-0070 — nothing, and this ADR's own §1 says why.** ADR-0070 §1 stands
+  whole and is not touched. ADR-0070 §4 is not touched either: §2 above restores
+  its extraction invariant rather than restating it, so no sentence of §4 becomes
+  false or over-wide. The one thing §1 above adds to §4 — that §4's
+  legacy-qualifier consumer rule governs a *post*-ADR-0070 qualifier too — is a
+  **stacked addition** in this ADR's own sense: §4 gave a post-ADR-0070 line no
+  instruction at all, so nothing it decided is displaced. Under §1 a stacked
+  addition is recorded in the ADR that makes it, which is here, and nothing is
+  owed on ADR-0070's `Status` or in its notes.
 - **ADR-0028, ADR-0077 — nothing.** Correct as they stand under §1 and §2.
+- **ADR-0080 — a dated note, and it is not this ADR's.** The same change carries
+  the correction filed as #463: §3's summarising sentence names one of the two
+  cases §3 goes on to enumerate. That is ADR-0080 reconciling with its own text,
+  which §1 calls a **self-amendment** — it names no other ADR, so the appended
+  dated note is the whole record and no `Status` edit is owed. It rides here
+  because `docs/adr/**` is in ADR-0027 §3's review floor and a separate lane for
+  one note would cost the wave a round; nothing in ADR-0082 decides it.
 - **This ADR's `Status`.** It ships `Proposed` and is reviewed while `Proposed`
   so a finding can still change the decision, then flipped to `Accepted` before
   merge (`CONTRIBUTING.md`, "Contract ADRs land before their implementation";
