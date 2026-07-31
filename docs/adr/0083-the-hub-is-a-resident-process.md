@@ -110,12 +110,30 @@ kernel releases it when the process dies, so there is no stale-lock problem and 
 PID-liveness heuristic to get wrong — a held lock always means a live holder.
 
 A second instance **retries for a bounded few seconds** — absorbing a supervisor
-that overlaps a restart with a slow drain — and then **exits 78** (§5), naming the
-data directory and the holder's pid. It is deliberately *not* a restartable
-failure: after the retry window the holder is a live peer that is already serving,
-so the deployment is up and a restart loop against it would achieve nothing. The
-retry window is what keeps a benign overlap from being reported as an operator
-error.
+that overlaps a restart with an outgoing hub's drain — and then **exits 1**: a
+*restartable* failure, deliberately, and not `78`.
+
+That classification is the one place where an appealing answer is wrong, so the
+reasoning is written down. A held lock always means a live holder, and a live
+holder is in exactly one of two states, neither of which a human must fix. Either
+it is **serving**, in which case the deployment is up and the loser's restart loop
+is harmless noise against a healthy peer — and self-limiting, because a supervisor
+backs off. Or it is **draining**, in which case a later attempt succeeds. Treating
+contention as `78` would make the second case fatal: §4's phase B is unbounded, so
+a drain can outlast any retry window this ADR could name, and a `78` there —
+which D1 tells the supervisor not to restart — leaves **no** hub running after the
+outgoing one exits cleanly, with nothing wrong to fix. `78` means a human must
+act (§5); nobody must act here. The retry window is therefore a noise filter, not
+a correctness mechanism, and nothing rests on its length.
+
+**The diagnostic names the data directory and the lock path, and reports a pid
+only if it can.** `flock` exposes no portable query for its holder, so the holder
+writes its pid into the lock file *after* acquiring — which means a contender can
+find the file empty (the holder was pre-empted before writing) or stale (a
+previous holder's, not yet overwritten). The message therefore says "held by
+another instance", and adds the recorded pid as an explicitly advisory hint when
+one is present. A diagnostic that unconditionally promises a pid would eventually
+print a wrong one, and a wrong pid in an operator message is worse than none.
 
 The lock is **advisory** and it is unreliable on network filesystems. Both are
 named rather than papered over: it stops a second *hub*, not an arbitrary process
@@ -166,7 +184,8 @@ In order, and no step begins before the previous one has succeeded:
 
 1. **Load `Settings`.** A settings failure is a deployment fault → exit 78.
 2. **Resolve `data_dir`, create it if absent, and take the instance lock** (§1).
-   Failure → exit 78.
+   A `data_dir` that cannot be created or written → exit 78. **Lock contention →
+   exit 1**, for the reason §1 gives.
 3. **Build the engine** — `build_engine(settings)`, which opens the five stores.
    A *state* fault here → exit 78 (§6). Any other failure → exit 1.
 4. **`Engine.start()`** — the deletion sweep then the retention reclaim, already
@@ -319,14 +338,17 @@ ADR-0042 itself.
 | Code | Meaning | Supervisor should |
 | --- | --- | --- |
 | `0` | A stop was requested and the drain completed. | Not restart. |
-| `1` | An unexpected fault. The process should come back. | Restart. |
+| `1` | An unexpected fault, **or a contended instance lock** (§1). The process should come back. | Restart. |
 | `78` | **The deployment is wrong.** This build cannot serve this environment or this state, and restarting changes nothing until a human acts. | **Not restart.** |
 
 `78` is `EX_CONFIG` from `sysexits.h` — an existing convention rather than an
 invented number, which is what lets a reference deployment map it with one
-directive. It covers: settings that will not load, a `data_dir` that cannot be
-created or written, the instance lock held by a live peer after the retry window
-(§1), and persisted state this build cannot serve correctly (§6).
+directive. It covers exactly three things: settings that will not load, a
+`data_dir` that cannot be created or written, and persisted state this build
+cannot serve correctly (§6). A contended lock is **not** among them (§1), and the
+test for the boundary is one question — *would restarting unchanged ever succeed?*
+For a foreign embedding space, never; for a peer that is draining, on the next
+attempt.
 
 **Every `78` prints its cause and the operator action before exiting**, to stderr
 and to the log, and that is ruling 2 discharged: a hub that is down is down for a
