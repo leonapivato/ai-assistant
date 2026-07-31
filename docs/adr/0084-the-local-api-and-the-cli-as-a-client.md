@@ -99,6 +99,25 @@ lane, not this one.
 **The hub listens on an `AF_UNIX` stream socket at `<data_dir>/hub.sock`**, created
 with owner-only permissions (`0600`) and removed on shutdown.
 
+**The socket path is length-checked early, and an overlong one is a `78`.** A
+pathname `AF_UNIX` socket is bounded by `sun_path` — 108 bytes on Linux,
+terminator included — while `data_dir` is operator-configurable through
+`AI_ASSISTANT_DATA_DIR` (ADR-0083 §2). So a perfectly writable, perfectly valid
+data directory can have a path no socket can be bound inside. Left unchecked that
+failure lands at ADR-0083 §3's **step 6**, after the lock is held, the five
+stores are open and the start-up sweeps have run: the latest and least legible
+moment available, and a hub that is down for a reason buried in a `bind` errno is
+ruling 4's failure.
+
+**So the encoded length of `<data_dir>/hub.sock` is validated at step 2**,
+alongside the data-directory resolution and the lock that already happen there,
+and a path that cannot hold the socket **exits `78`**, naming the limit, the
+encoded length and the directory. ADR-0083 §5's test applies without strain:
+restarting unchanged never succeeds, and a human must move the data directory.
+The check is on the **encoded byte length** rather than the character count,
+because `sun_path` bounds bytes — a directory named in a non-ASCII script spends
+more of the budget than it looks like it does.
+
 **ADR-0017 does not constrain this, and the reason is worth writing down because
 the opposite reading is available and wrong.** ADR-0017 §1's rule governs data
 that "leave[s] the **device**", and §3's fourteen conditions are conditions on
@@ -884,6 +903,13 @@ reviewed."
   on, where a Unix socket reuses ADR-0004 §4's `0600` posture on an object the
   kernel already enforces it for. It is also one edit from binding a public
   interface, which would cross ADR-0017 §1 silently.
+- **An abstract-namespace socket**, which would sidestep `sun_path`'s pathname
+  budget entirely and need no unlink. *Rejected*, and it is the obvious escape
+  from the length check above, which is why it is written down: an abstract
+  socket has **no filesystem presence and therefore no permission bits**, so it
+  is reachable by every process in the network namespace and forfeits the exact
+  ADR-0004 §4 control that §1's whole argument rests on. It would also be
+  Linux-only. Paying a startup validation is much the cheaper side of that trade.
 - **Use the socket bind as the single-instance guard.** Rejected because ADR-0083
   §14.4 already decided it — "single-instance enforcement is the lock, not the
   bind" — and because it inverts §1's safe unlink ordering: unlinking a stale
