@@ -54,10 +54,29 @@ Most of both lists should surface in the pre-flight, before you have written any
 
 ## Finishing
 
-`CONTRIBUTING.md` owns the mechanics; two duties are easy to drop in a dispatched lane:
+`CONTRIBUTING.md` owns the mechanics; three duties are easy to drop in a dispatched lane:
 
 - **Open the draft PR early — as soon as you have a branch and a first commit, before the work is done**, so CI gates every push and the coordinator can see your direction (and any contract change) while it is still cheap to redirect. Your pre-flight goes in its description.
 - **Put the review outcome in the PR description**, not only in your report to the coordinator: any `blocker`/`major` finding you waived with its rationale, and links to the issues you filed for what you deferred. Your report reaches one reader; the PR is the audit trail.
+- **Expect a second act, and do not treat `gh pr ready` as the end of the lane.** You report, and then you very likely rebase — see below.
+
+### You are probably not finished when you report
+
+Reporting is not merging, and the gap between them is where `main` moves. Branch protection is `strict`, so a lane that reports while another lane merges ahead of it comes back `BEHIND` and cannot merge until it is current. In a batch with a merge order, every lane but the first **should expect this** — it is structural, not bad luck.
+
+So when the coordinator sends you back to rebase, that is the plan working. Rebase onto `origin/main`, **re-run the full gate against the landing tree**, push, and re-run `just ship` so the posted comment carries the new head's SHA — for **every** required persona, not just one.
+
+**Do not run a fresh review to make `ship` accept.** Whether the moved base costs a round is decided by ADR-0027 §2, and `CONTRIBUTING.md` → "Report the review, then mark it ready" carries every condition. Where the base move clears the floor and leaves the reviewed patch untouched, the existing artifact still covers the head and `ship` publishes the drift. **If `ship` refuses, STOP and quote what it said** rather than spending a round to satisfy it: a wrong reading of those conditions is worth surfacing, and paying for it silently hides it.
+
+### Prove the moved-base path before you push, don't assume it
+
+Check ADR-0027 §2(b)'s conditions yourself, using `ship`'s own logic rather than a paraphrase — then you learn a refusal before the push instead of after.
+
+- **Source the shared block between `scripts/ship.sh`'s `>>> shared-patch-identity` markers; never hand-copy the options.** The identity is `git patch-id --verbatim`, and `--verbatim` is load-bearing: `--stable` strips whitespace, so a hand-copy that drops the flag computes a whitespace-blind identity that would accept content no reviewer read (ADR-0027 §2 says exactly this). Worth confirming the block is byte-identical to the copy in `scripts/codex-review.sh`, so recorder and verifier agree.
+- **Validate your replica before you trust it.** It must reproduce the `patch_id=` recorded in the artifact header on the *pre-rebase* range, **and it must refuse your own stale artifacts** from earlier rounds. A replica that accepts everything looks identical on the artifact you care about, so a match proves nothing until you have seen it discriminate.
+- **Check the remaining conditions against `ship.sh`'s own helpers, not a paraphrase** — note they are not all inside the shared block, so read the script for where each lives: the range has no pathless entry (`_range_has_pathless_entry`; a rename-only or mode-only change makes the identity untrustworthy and path (b) unavailable, fail-closed); the base move clears the floor (`_is_floor_path`, applied rename-aware over **both** endpoints of every entry); and the recorded base is a *proper* ancestor of the new merge base — an equal base is path (a), not (b).
+
+Report the figures, not the conclusion. And note `ship` can fail with `PR head is X but HEAD is Y — push first` for a few seconds after a force-push — that is GitHub's PR head lagging, not a refusal. Retry before diagnosing.
 
 On findings, `docs/review/guide.md` is the reference: treat each one as a **hypothesis to verify against the actual text**, never a fact to comply with. Park anything out-of-scope, pre-existing, or nit-level as a **GitHub issue** — do NOT grow the PR to absorb findings.
 
