@@ -1,7 +1,51 @@
 # 42. The interface adapter contract
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0084 (§1's refusal of an engine-facing Protocol and of a `core` result type; the rule in §2 and §7 that an adapter obtains its engine by calling `build_engine`)
 - Date: 2026-07-22
+- Partially superseded: 2026-07-31 by ADR-0084 — **§1's refusal of an
+  engine-facing Protocol, and the rule that an interface adapter builds its own
+  engine, no longer hold.** ADR-0083 makes the hub a resident process owning the
+  five databases exclusively; ADR-0084 puts this façade behind a loopback
+  transport with the CLI as its first client. Clause by clause, under ADR-0070
+  §1's test — would a reader acting on the sentence act differently?
+
+  **Replaced.** §1's "We will not add an engine-facing Protocol to
+  `core/protocols.py`, and we will not add a new `core/types.py` type" is false:
+  ADR-0084 §5 adds the Protocol, and §4 promotes the result types — the latter
+  forced by golden rule 2, since a Protocol in `core` cannot name a return type
+  living in `orchestration`. §1's "promotion to `core` is reserved for 'the day a
+  subsystem needs to receive one,' which this is not" goes with it: the promotion
+  happens for a transport, not for a subsystem. §2's "Every adapter (the CLI now,
+  an API later) obtains its engine by calling this package's `build_engine` and
+  does no construction or injection itself" is false for a client adapter, and
+  ADR-0083 §10's `lint-imports` edit — sequenced into ADR-0084's lane — makes
+  acting on it a build failure. §7 states the same fact at the adapter level and
+  falls with it in exactly two places: "obtains the façade from the composition
+  root", and "closing the façade on exit", which a client does not do because the
+  façade now outlives its command inside the hub.
+
+  **Not replaced — stated explicitly rather than left to inference.** §1's
+  *reasoning* stands, and is what licensed this: its Revisit trigger names "a
+  remote engine" as the condition for promotion, and ADR-0084 §5 is that
+  condition being met. A foreseen change is still a change, which is why this is
+  a supersession and not an amendment. §2's composition root is untouched — it
+  remains the one place concrete subsystems are constructed and the wiring
+  obligations of ADR-0028 §4 and ADR-0029 §8 are discharged; what changes is that
+  the hub, not the adapter, is its caller. §3's request/response shape, §4's
+  confirmation-as-transported-prompt rule and its escaping-is-the-adapter's-job
+  clause, §5's deferral of streaming, and §6's list of what an adapter may and may
+  not do all stand — ADR-0084 depends on every one of them. Within §7, "The first
+  adapter is the **CLI**" stays true, as do relaying consent via `resume` and the
+  refusal to make the adapter responsible for subsystem construction, which
+  exclusivity only strengthens.
+
+  ADR-0084 lands **in the same change as this note**, so this `Status` line never
+  names an ADR that does not exist — the hazard ADR-0070 §1 guards against — and
+  if that change does not land, neither does this. While ADR-0084 is still
+  `Proposed`, the line names a supersession that is drafted rather than ratified,
+  which is the form ADR-0075 established and `main` carries several times over.
+  Appended note per ADR-0070 §1: no text below it is rewritten, and the
+  superseded sentences are left standing exactly as written.
 
 ## Context
 
