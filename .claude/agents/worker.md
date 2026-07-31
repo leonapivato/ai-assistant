@@ -70,7 +70,7 @@ So when the coordinator sends you back to rebase, that is the plan working. Reba
 
 Some base moves genuinely do cost a round, and then the review is owed — the point is not that you never re-review, it is that **you do not decide to spend on your own judgement.** Run the verification below *before* you push, and the two cases separate cleanly:
 
-- **Your own check predicts a refusal** — a floor path moved, the patch identity changed, the range has a pathless entry, or the drift record cannot be published whole (`ship`'s `toobig` and `unreadable` verdicts: §4 fails closed when the base-move listing exceeds its budget or cannot be read, so check the rendering too, not only the three conditions above). The round is really owed. Say so in your report with the figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
+- **Your own check predicts a refusal** — a floor path moved, the patch identity changed, the range has a pathless entry. The round is really owed. Say so in your report with the figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
 - **Your check predicted acceptance and `ship` refuses anyway.** That is a contradiction between your reading and the tool's, and it is a **STOP**: halt and quote the refusal verbatim. Do not buy a round to make it go away — a wrong reading of these conditions is worth surfacing, and paying for it silently hides it from everyone.
 
 ### Prove the moved-base path before you push, don't assume it
