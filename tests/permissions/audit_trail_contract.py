@@ -111,7 +111,7 @@ async def _refuses(
 
 
 class _CancellationOp(Protocol):
-    """One locked ``AuditTrail`` write the ADR-0060 case drives (#370).
+    """One locked ``AuditTrail`` operation the ADR-0060 case drives (#370, #397).
 
     Each :attr:`name` selects a distinct ``async with self._lock:
     _run_to_completion(...)`` site; the suite runs the same
@@ -120,6 +120,13 @@ class _CancellationOp(Protocol):
     ``record``. :meth:`first` and :meth:`second` act on *independent* subjects, so
     the concurrent second succeeds whatever the cancelled first's indeterminate
     effect turns out to be.
+
+    **Reads are operations too** (#397). ADR-0060 §3 binds any method that acquires
+    the resource, and every locked read here holds the connection lock around its
+    own worker-thread SQL — so a regression replacing one read's
+    ``_run_to_completion`` with a bare ``to_thread`` would hand the connection to a
+    concurrent caller while that read's worker still used it, and every write case
+    would still pass.
     """
 
     name: str
@@ -129,7 +136,7 @@ class _CancellationOp(Protocol):
         ...
 
     def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
-        """The call the case suspends mid-write and then cancels."""
+        """The call the case suspends inside the resource and then cancels."""
         ...
 
     def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
@@ -137,7 +144,7 @@ class _CancellationOp(Protocol):
         ...
 
     async def verify(self, trail: AuditTrail) -> None:
-        """Assert the resource survived: the second write is whole and reads work."""
+        """Assert the resource survived: the second call is whole and reads work."""
         ...
 
 
@@ -187,9 +194,138 @@ class _ClearOp:
         assert await trail.export() == []
 
 
-#: Every locked ``AuditTrail`` write ADR-0060's case is run against (#370). Each is
-#: a distinct lock site with its own ``_run_to_completion`` call.
-_CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (_RecordOp, _ClearOp)
+#: The two executions every read op below is seeded with and answers from. Their
+#: step is ``step-1``, ``action``'s default, so each pair is a concrete binding.
+_EXEC_A = "exec-read-a"
+_EXEC_B = "exec-read-b"
+_STEP = "step-1"
+
+
+class _ReadOp:
+    """A locked ``AuditTrail`` read, driven against a trail seeded the same way (#397).
+
+    The two calls are the *same* read against independent bindings, because what
+    distinguishes a read op is its lock site and both calls have to enter it.
+    Nothing is asserted about the cancelled read's answer — it has none, its task
+    was cancelled — so :meth:`verify` pins the state the second call had to see,
+    re-read once the scenario is over.
+    """
+
+    name = ""
+
+    async def prepare(self, trail: AuditTrail) -> None:
+        """Seed an unresolved ``CONFIRM`` on one binding and a resolved one on the other."""
+        await trail.record(decision("c-a", request=action(execution_id=_EXEC_A)))
+        confirmed = decision("c-b", request=action(execution_id=_EXEC_B))
+        await trail.record(confirmed)
+        await trail.record(
+            decision(
+                "r-b",
+                request=action(execution_id=_EXEC_B),
+                ruled=ruling(PermissionOutcome.ALLOW, authorised_by=confirmed.id),
+                resolves=confirmed.id,
+            )
+        )
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """The read the case suspends inside the resource and then cancels."""
+        raise NotImplementedError
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """The concurrent read barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, trail: AuditTrail) -> None:
+        """A read cancelled mid-flight leaves the trail whole and still readable."""
+        expected = decision("c-a", request=action(execution_id=_EXEC_A))
+        assert await trail.get("c-a") == expected
+        assert {entry.id for entry in await trail.export()} == {"c-a", "c-b", "r-b"}
+
+
+class _GetOp(_ReadOp):
+    """``get`` — one row by id, under the connection lock."""
+
+    name = "get"
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Read the unresolved confirmation — the call that is cancelled."""
+        return trail.get("c-a")
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Read the resolved one concurrently."""
+        return trail.get("c-b")
+
+
+class _PendingConfirmationOp(_ReadOp):
+    """``pending_confirmation`` — ADR-0044 §3's two-step lookup, its own lock site."""
+
+    name = "pending_confirmation"
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Look up binding A's outstanding question — the call that is cancelled."""
+        return trail.pending_confirmation(execution_id=_EXEC_A, step_id=_STEP)
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Look up binding B's concurrently."""
+        return trail.pending_confirmation(execution_id=_EXEC_B, step_id=_STEP)
+
+
+class _ResolutionOfOp(_ReadOp):
+    """``resolution_of`` — ADR-0059 §2's complement, its own lock site."""
+
+    name = "resolution_of"
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Look up binding A's resolution — the call that is cancelled."""
+        return trail.resolution_of(execution_id=_EXEC_A, step_id=_STEP)
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Look up binding B's concurrently."""
+        return trail.resolution_of(execution_id=_EXEC_B, step_id=_STEP)
+
+
+class _RecentOp(_ReadOp):
+    """``recent`` — the ordered page, its own lock site though it shares a reader."""
+
+    name = "recent"
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Read the newest page — the call that is cancelled."""
+        return trail.recent(limit=2)
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Read a narrower page concurrently."""
+        return trail.recent(limit=1)
+
+
+class _ExportOp(_ReadOp):
+    """``export`` — the whole-trail read, its own lock site."""
+
+    name = "export"
+
+    def first(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Export everything — the call that is cancelled."""
+        return trail.export()
+
+    def second(self, trail: AuditTrail) -> Coroutine[Any, Any, object]:
+        """Export again concurrently."""
+        return trail.export()
+
+
+#: Every locked ``AuditTrail`` operation ADR-0060's case is run against: each is a
+#: distinct lock site with its own ``_run_to_completion`` call. The writes came
+#: first (#370); the reads are the same invariant on the other half of the surface
+#: (#397), since ADR-0060 §3 binds any method that acquires the resource rather
+#: than any method that mutates.
+_CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
+    _RecordOp,
+    _ClearOp,
+    _GetOp,
+    _PendingConfirmationOp,
+    _ResolutionOfOp,
+    _RecentOp,
+    _ExportOp,
+)
 
 
 class AuditTrailContract:
@@ -968,17 +1104,19 @@ class AuditTrailContract:
     #: Operations this implementation acquires no coroutine-outliving resource for,
     #: even though others do — the per-operation form of
     #: :attr:`acquires_no_shared_resource`, for a subject that takes the lock on
-    #: some writes but not this one. ``FakeAuditTrail.clear`` touches only a dict
-    #: where its ``record`` enters the modelled resource, so the ``clear`` case has
-    #: nothing to suspend on it while the ``sqlite3`` trail — whose ``clear`` takes
-    #: the connection lock — still runs it. Empty by default: an implementation
-    #: whose every locked write is resource-backed proves them all.
+    #: some operations but not another. Nothing declares it: every operation on both
+    #: shipped subjects enters a resource, so it is supported machinery with no
+    #: current user, like an unexercised branch. It is stated hypothetically on
+    #: purpose — it was once illustrated with ``FakeAuditTrail.clear``, which #396
+    #: routed through the modelled resource and #504 recorded as an example that had
+    #: stopped being true. Empty by default: an implementation whose every locked
+    #: operation is resource-backed proves them all.
     operations_without_shared_resource: frozenset[str] = frozenset()
 
     def trail_suspended_mid_write(
         self,
     ) -> AbstractAsyncContextManager[SuspendedMidWrite[AuditTrail]]:
-        """Supply a trail whose named locked write can be stopped *inside* its resource.
+        """Supply a trail whose named locked operation can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
         cancels the call while it is suspended and then watches what a second
@@ -990,8 +1128,10 @@ class AuditTrailContract:
         The returned :class:`SuspendedMidWrite` carries the trail, its
         :class:`ResourceLog`, and an ``arm(operation)`` lever the case calls —
         *after* its preconditions — to hold the next entry into that operation
-        (#370). Every distinct ``async with self._lock`` site is a separate place
-        the same regression can reappear, so the case is run against each; ``arm``
+        (#370, #397). Every distinct ``async with self._lock`` site is a separate
+        place the same regression can reappear — the locked *reads* included, since
+        ADR-0060 §3 binds any method that acquires the resource — so the case is run
+        against each; ``arm``
         is where the implementation says how it stops a given one — a worker
         thread parked mid-SQL, a fake's single modelled resource. Returned as a
         context manager so the subject is disposed of the way that implementation
@@ -1008,17 +1148,23 @@ class AuditTrailContract:
 
     @pytest.mark.optional_obligation
     @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
-    async def test_a_cancelled_append_holds_its_resource_until_the_work_finishes(
+    async def test_a_cancelled_operation_holds_its_resource_until_the_work_finishes(
         self, make_op: Callable[[], _CancellationOp]
     ) -> None:
-        """``core.protocols``' cancellation clause, on every locked write (ADR-0060, #370).
+        """``core.protocols``' cancellation clause, on every locked operation (ADR-0060).
 
-        A cancelled write must not hand the resource to the next caller while the
+        A cancelled call must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a
         test of the invariant rather than of propagation: a single cancelled call
         in isolation looks identical either way. Run once per locked operation, so
         a regression reintroduced at any one lock site — not just ``record`` — is
         caught.
+
+        **Named for an operation, not an append.** ADR-0060 §3 binds any method that
+        acquires the resource; the writes were covered first (#370) and the locked
+        reads are the same invariant on the other half of the surface (#397). A read
+        that released the connection under cancellation while its worker still held
+        it is the identical ADR-0054 hazard, and no write case can see it.
 
         The cancelled write's *effect* is deliberately not asserted here (the op's
         ``verify`` pins only what a caller may rely on). The clause's third

@@ -54,6 +54,24 @@ def ephemeral() -> Iterator[SqliteAuditTrail]:
         trail.close()
 
 
+#: The private method each locked operation does its SQL in, which ADR-0060's hook
+#: wraps to park a worker thread inside the connection's turn. Spelled out rather
+#: than derived from the operation name, because ``recent`` and ``export`` share one
+#: ordered reader: ``_ordered_sync`` is named for what it does, not for the two
+#: contract methods that each take the lock around it. Wrapping the shared helper
+#: still exercises both sites separately, because the case arms immediately before
+#: the site under test calls it.
+_SYNC_METHODS = {
+    "record": "_record_sync",
+    "clear": "_clear_sync",
+    "get": "_get_sync",
+    "pending_confirmation": "_pending_confirmation_sync",
+    "resolution_of": "_resolution_of_sync",
+    "recent": "_ordered_sync",
+    "export": "_ordered_sync",
+}
+
+
 class TestSqliteAuditTrailContract(AuditTrailContract):
     """Runs SqliteAuditTrail through the shared AuditTrail conformance suite."""
 
@@ -65,15 +83,14 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
     async def trail_suspended_mid_write(
         self,
     ) -> AsyncIterator[SuspendedMidWrite[AuditTrail]]:
-        """Park a named write's worker thread inside the connection's turn.
+        """Park a named operation's worker thread inside the connection's turn.
 
-        ``arm(operation)`` wraps that operation's ``_<operation>_sync`` — inside
-        ``async with self._lock`` and inside the ``to_thread`` the event loop
-        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
-        first worker to reach it blocks and every later one runs free. Each
-        distinct lock site is a separate place the bug can reappear (#370), and
-        the sync-method suffix matches the operation name (``record`` →
-        ``_record_sync``, ``clear`` → ``_clear_sync``). Blocking there is what
+        ``arm(operation)`` wraps the private method that operation does its SQL in
+        (:data:`_SYNC_METHODS`) — inside ``async with self._lock`` and inside the
+        ``to_thread`` the event loop cannot interrupt, which is exactly where
+        ADR-0054's bug lived — so the first worker to reach it blocks and every
+        later one runs free. Each distinct lock site is a separate place the bug can
+        reappear, the locked *reads* included (#370, #397). Blocking there is what
         makes the case deterministic: left to run, a commit finishes in
         microseconds and whether the second caller arrives while the worker still
         holds the connection would be a race, so the invariant would be exercised
@@ -88,7 +105,8 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
         suspension = ThreadSuspension()
 
         def arm(operation: str) -> SuspendedCall:
-            original = getattr(trail, f"_{operation}_sync")
+            attribute = _SYNC_METHODS[operation]
+            original = getattr(trail, attribute)
             armed = threading.Event()
 
             def blocking(*args: object) -> object:
@@ -98,7 +116,7 @@ class TestSqliteAuditTrailContract(AuditTrailContract):
                         suspension.hold()
                     return original(*args)
 
-            setattr(trail, f"_{operation}_sync", blocking)
+            setattr(trail, attribute, blocking)
             return suspension
 
         try:
