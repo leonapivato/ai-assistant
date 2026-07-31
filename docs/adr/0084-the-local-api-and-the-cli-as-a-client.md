@@ -254,7 +254,21 @@ also fixes:
 - the reader **never allocates the declared length up front**; it reads
   incrementally against the cap;
 - a connect or a frame that stalls part-way is abandoned on a **read deadline**,
-  so a peer that stops sending cannot hold a connection open indefinitely.
+  so a peer that stops sending cannot hold a connection open indefinitely;
+- a **ceiling on concurrent connections**, and a separate, lower ceiling on
+  connections that have not yet completed the handshake — both configuration with
+  named defaults. Beyond a ceiling the listener **refuses rather than queueing
+  without bound**, so the client reads a refusal instead of waiting on something
+  it cannot tell apart from a hung hub (ruling 4, again).
+
+**The two ceilings are separate, and the handshake one is lower on purpose.** A
+per-frame deadline bounds each connection but says nothing about how many there
+may be, so without a connection ceiling a client in a crash loop — or a script
+that forgot to close — exhausts descriptors and reader tasks while every
+individual connection is still inside its deadline. And a connection that has not
+completed the handshake has cost the hub a descriptor and a task while telling it
+nothing, which is the cheapest state for a misbehaving peer to accumulate; giving
+it a tighter budget than an identified client costs one number.
 
 **The reason is robustness, not secrecy, and saying so keeps the rule honest.**
 The `0600` bit already scopes a peer to the owning user (§1), so this is not a
@@ -737,9 +751,10 @@ reviewed."
 - **A stale continuation token has one typed answer**, distinguishable from denial
   and from expiry, and the client stays stateless by decision rather than by
   accident (§7).
-- **The transport gains a frame ceiling, a refusal and a read deadline** (§3), so
-  a malformed length or a peer that stops sending cannot take a resident hub down.
-  It is a transport limit and leaves #473's semantic bound exactly where it was.
+- **The transport gains frame and connection ceilings, refusals and read
+  deadlines** (§3), so a malformed length, a peer that stops sending, or a client
+  in a crash loop cannot take a resident hub down. These are transport limits and
+  leave #473's semantic bound exactly where it was.
 - **The remote leg is one bind away on the wire and one ratified decision away in
   fact.** The envelope carries a version, the handshake has a credential slot, and
   the client is stateless — the three expensive retrofits are bought. What is not
