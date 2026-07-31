@@ -773,3 +773,97 @@ async def test_every_route_answers_the_conversation_the_call_began_with(
     # The caller's conversation really was mutated mid-flight, so the case is not
     # vacuously green on a mutation that never happened.
     assert [m.content for m in conversation] != ["hi"]
+
+
+class PreconditionEnforcingProvider:
+    """A route that enforces ADR-0066 §1, records roles, and optionally tears the caller's list.
+
+    The difference from :class:`MutatingProvider`, and the whole point of the case
+    below (#387): this double **enforces** the precondition every real
+    ``ModelProvider`` enforces — ``PydanticAIProvider.complete`` and
+    ``FakeModelProvider.complete`` both refuse a history ending on an assistant
+    turn as a bare ``ModelError``. Bare means **non-routable**, and that is what
+    makes the tear worse here than under retry: ``RoutingProvider`` re-raises a
+    non-routable failure without trying the next route (ADR-0013 §5), so a
+    conversation torn into malformed shape mid-flight does not merely fail one
+    route — it **truncates the remaining fallback order**, the same way an
+    unresolvable model spec does (``ensure_vendor_available``'s docstring).
+
+    Roles are recorded alongside text, not text alone: the tear replaces one turn
+    with another of *different role*, which a content-only observation
+    (:class:`MutatingProvider`, :class:`RecordingConversationProvider`) would see
+    only as a change of words.
+    """
+
+    def __init__(
+        self,
+        *,
+        tear: Callable[[], None] | None = None,
+        fail_routably: bool = False,
+    ) -> None:
+        self._tear = tear
+        self._fail_routably = fail_routably
+        self.seen: list[tuple[tuple[Role, str], ...]] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> Message:
+        self.seen.append(tuple((m.role, m.content) for m in messages))
+        if messages[-1].role is Role.ASSISTANT:
+            msg = "complete() requires a conversation awaiting a reply"
+            raise ModelError(msg)
+        # The tear lands after *this* route's await, so it happens while
+        # `RoutingProvider.complete` is itself suspended — the only window
+        # ADR-0065's clause is about, for the reason `MutatingProvider` documents.
+        await asyncio.sleep(0)
+        if self._tear is not None:
+            self._tear()
+        if self._fail_routably:
+            raise ModelUnavailableError("503")
+        return Message(role=Role.ASSISTANT, content="|".join(m.content for m in messages))
+
+
+async def test_a_mid_flight_role_flip_cannot_truncate_the_fallback_order() -> None:
+    # The consequence the ADR-0065 amendment names to justify the snapshot, and
+    # which nothing pinned (#387): a `role` flipped to ASSISTANT mid-flight turns a
+    # routable failure into a non-routable one "about a history that was
+    # well-formed when the call began — and under `RoutingProvider` that error is
+    # non-routable, so it truncates the remaining fallback order".
+    #
+    # The amendment describes that flip as an in-place field rewrite, which
+    # ADR-0068 has since made impossible — `Message` is frozen. The claim survives
+    # the freeze through the vector ADR-0068 §4 keeps ADR-0065 binding for at this
+    # seam: the caller's *list*, which is still theirs and still mutable. Replacing
+    # an element is that container tear, and it flips the last turn's role just as
+    # effectively.
+    #
+    # Three routes rather than two, so the *truncation* is what the case measures
+    # and not merely the failure: route 2 fails routably too, so route 3 is the
+    # fallback a router that re-read the caller's list would never reach — route 2
+    # would refuse the torn history non-routably and end the whole order there.
+    conversation = [Message(role=Role.USER, content="hi")]
+
+    def flip_the_last_turn_to_assistant() -> None:
+        conversation[-1] = Message(role=Role.ASSISTANT, content="cached reply")
+
+    down = PreconditionEnforcingProvider(tear=flip_the_last_turn_to_assistant, fail_routably=True)
+    also_down = PreconditionEnforcingProvider(fail_routably=True)
+    backup = PreconditionEnforcingProvider()
+
+    reply = await RoutingProvider([Route(down), Route(also_down), Route(backup)]).complete(
+        conversation
+    )
+
+    # Every route saw the well-formed history the call began with, and the order
+    # ran to its end: the last fallback was actually reached, not short-circuited
+    # by a non-routable refusal of a conversation the caller changed mid-flight.
+    assert down.seen == [((Role.USER, "hi"),)]
+    assert also_down.seen == [((Role.USER, "hi"),)]
+    assert backup.seen == [((Role.USER, "hi"),)]
+    assert reply.content == "hi"
+    # Not vacuously green: the caller's list really does end on an assistant turn
+    # now, so a route that re-read it would have been refused outright.
+    assert conversation[-1].role is Role.ASSISTANT
