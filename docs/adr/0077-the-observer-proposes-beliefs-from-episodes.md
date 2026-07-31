@@ -1,7 +1,131 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Accepted, §5's check-not-a-guarantee clause amended by ADR-0081
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise)
 - Date: 2026-07-28
+- Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
+  façade's observation result is an `orchestration` type and not contract surface
+  is false; everything this ADR decided about *what* that result conveys stands.**
+  [ADR-0084](0084-the-local-api-and-the-cli-as-a-client.md) §5 finds ADR-0042 §1's
+  revisit trigger fired and promotes the engine façade to a Protocol in
+  `core/protocols.py`, which forces its result types into `core/types.py` (golden
+  rule 2: a `core` Protocol cannot name an `orchestration` return type). ADR-0042
+  §1 is partially superseded there, and the clauses below rest on it by citation.
+  ADR-0084 §12 rules this record owed and defers it to its own lane (#536).
+
+  **Replaced**, both clauses in §10 item 7:
+
+  1. "The façade is concrete and not a contract (ADR-0042 §1), so those names are
+     shape, not spelling (ADR-0073 §7)." The premise is false after ADR-0084 §5.
+     **The conclusion outlives its premise, for a different reason**: ADR-0084 §4
+     hands the exact set, the field layouts and the method signatures to a
+     follow-on contract ADR (#281) rather than to an implementing lane, so these
+     names are still shape and the spelling is still a later ADR's — ADR-0073 §7's
+     form, reached now because the surface is ratified elsewhere rather than
+     because it is not a contract at all.
+  2. **The operative one.** "**Its result is an `orchestration` type beside
+     `LearnOutcome`**, not a `core` one". `Engine.observe` returns
+     `ObservationReport` (`orchestration/observation.py:305`, returned at
+     `engine.py:1201`), which is inside the set ADR-0084 §4 promotes — the result
+     types the promoted surface returns, and the transitive closure of what they
+     name. It is therefore a `core` pydantic model frozen under ADR-0068 §1, not a
+     frozen `orchestration` dataclass. **The practical consequence, which is the
+     whole reason this record exists:** changing a field of that report was an
+     `orchestration` edit and is now a `core` contract change under golden rule 5,
+     owing an ADR. A reader acting on the superseded sentence would ship one
+     without — the process failure ADR-0015 §5 exists to prevent — and this is not
+     hypothetical: **#494 proposes adding a field to exactly this type**, to carry
+     the `DeferralAdmission` the stage currently drops.
+
+  **One clause of item 7 stays literally true and stops being sufficient**, which
+  is worth separating out rather than sweeping into the quotations above. "It
+  crosses no subsystem boundary, only `interfaces` (ADR-0022 §2's reasoning for
+  `TurnResult`)" is still a true statement about where the value travels; what it
+  no longer does is *entail* the conclusion drawn from it. ADR-0084 §4 promotes for
+  a different reason — golden rule 2, forced by §5's Protocol — and ADR-0042 §1's
+  "promotion to `core` is reserved for 'the day a subsystem needs to receive one'"
+  is itself superseded there, the transport being what needs to receive one. The
+  "beside `LearnOutcome`" adjacency survives the move as well: `LearnOutcome` is
+  promoted by the same clause, so the two types still sit together, at a new
+  address.
+
+  **Also replaced, and it is not in §10.** The `Refs` list's gloss "ADR-0042 §1
+  (the façade is concrete, not a contract)" restates the same premise and fails
+  for the same reason. It is recorded because a reader who never reaches §10 meets
+  it in the header, and because it is precisely the *paraphrase* the first
+  enumeration passed over (ADR-0084 §12). The gloss beside it — ADR-0042 "§3 (one
+  call in, one result out)" — is untouched: ADR-0084 §12 supersedes §1, §2 and §7
+  of ADR-0042, and not §3.
+
+  **Not replaced, and it is nearly all of this ADR.** The rest of §10 item 7
+  stands: the stage selecting **at most** `observation_batch_size` episodes, so
+  the producer's refusal (§1) guards a contract rather than a routine path; the
+  four things the result carries and why they are kept apart — each proposal
+  paired with the ruling it received rather than rendered from the ruling alone,
+  the producer's two counts relayed unchanged, the separate count of proposals
+  dropped at the write for unresolved evidence, and the route that is **absent
+  when none read**; and the closing reason for the separation, that
+  `ObservationOutcome`'s invariant is over the entries the model emitted. **What
+  the result conveys is exactly as ratified; only its home and the cost of
+  changing it move.**
+
+  Nothing else in this ADR rests on the superseded premise, and each was checked
+  by asking what it relied on ADR-0042 §1 *for*:
+
+  - **§9's contract surface is untouched.** `Observer`, `ObservationOutcome`, the
+    `Provenance` validator, `UnresolvedEvidenceError` and `MemoryWriter.ingest`'s
+    refusal clause are a producer seam on the write path, not the façade.
+    `ObservationOutcome` was already a `core` type and stays one — ADR-0084
+    promotes nothing about it, and it is a different type from the façade's report,
+    deliberately named apart. The header's "**This is a contract change** … one
+    Protocol, one type, one validator, one error class" and the Consequences'
+    "adds the least contract surface of the four" are true claims about *this
+    ADR's own change* and stay true; ADR-0084 adding `core` types later does not
+    make them retroactively false.
+  - **§5's `DefaultMemoryPolicy` sentence stays true.** "The rule §5 puts on the
+    *shipped* `DefaultMemoryPolicy` is a rule in a concrete policy, not contract
+    surface" is about the policy, not the façade, and ADR-0084 promotes no policy.
+    This is the sentence a lexical search for the phrase matched, and it is not
+    the one that failed (ADR-0084 §12).
+  - **§6's placement of citation resolution stays true, and is strengthened.**
+    "The `orchestration` façade, on the belief views it already assembles — not in
+    `interfaces/`" says where the work happens; an adapter that reaches the engine
+    over a transport makes the case for keeping a live-at-now computation out of
+    `interfaces` stronger, not weaker.
+  - **§8's cadence conclusion stays true.** "Leg 5's scheduler … becomes a second
+    caller of the same façade operation. Cadence then becomes configuration rather
+    than a contract change" survives, because a second caller of an unchanged
+    operation is not a change to it — the ruling ADR-0084 §12 makes for ADR-0078
+    §8's "the hub adds push without touching this contract". §10's deferral of
+    cadence to leg 5, "the façade operation is what the scheduler calls,
+    unchanged", is intact for the same reason.
+
+  **This note claims no closure beyond this file.** ADR-0084 §12 records that the
+  first enumeration of ADR-0042 §1's fan-out was lexical and missed this ADR, and
+  that a fan-out has to be found by asking what each citing ADR relied on the
+  superseded one for; a record declaring itself exhaustive would repeat the error
+  it exists to correct.
+
+  ADR-0084 is `Accepted` and merged, so the `Status` line above names an ADR that
+  exists and is ratified, and ADR-0070 §1's hazard — a line pointing at nothing —
+  does not arise. Appended note per ADR-0070 §1: no text below it is rewritten,
+  and the superseded sentences are left standing exactly as written.
+- Note (2026-07-31): **The ADR-0081 amendment qualifier moves off the `Status`
+  line into the note below; nothing about the amendment changes.** The line read
+  `Accepted, §5's check-not-a-guarantee clause amended by ADR-0081`. Taking the
+  leading `Partially superseded by` token above,
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2
+  applies: on a line led by that token no amendment qualifier is written, and
+  "when a line takes the leading token, any qualifier already on it moves to the
+  dated note in the same change". Left in place, `ADR-0081` would sit after the
+  leading token and ADR-0070 §4's extraction invariant — "every `ADR-NNNN` after
+  the leading `Partially superseded by` is a target" — would read ADR-0081 as a
+  partial-supersession target of this ADR, which it is not; ADR-0081 §5 says so
+  itself. This is a re-rendering, not a deletion: **the amendment stands in full
+  in the 2026-07-29 note directly below**, which is untouched, and §5's third
+  clause is bounded exactly as that note records. ADR-0082 §3's "ADR-0077's
+  qualifier is correct as it stands and is not touched" was a statement about a
+  plain `Accepted` line and is not contradicted — §2 is what governs the line this
+  change writes. Refs #536, #477.
 - Note (2026-07-29): **§5's third clause is bounded, not lifted.** Its statement —
   *"It is a check, not a guarantee. An episode deleted between the check and the
   write leaves a citation that no longer resolves, and no seam closes that"* —
