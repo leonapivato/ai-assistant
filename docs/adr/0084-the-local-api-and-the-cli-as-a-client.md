@@ -284,6 +284,35 @@ also fixes:
   without bound**, so the client reads a refusal instead of waiting on something
   it cannot tell apart from a hung hub (ruling 4, again).
 
+**The figures are named here rather than left to the implementation**, following
+ADR-0083 §7, which named every scheduler interval for ADR-0074 §9.3's reason: "a
+'bounded default' with no figure is two conforming stores handing the same
+continuation different history." The same applies with more force to a limit
+whose whole job is to refuse:
+
+| `Settings` field | Type | Default |
+| --- | --- | --- |
+| `hub_max_frame_bytes` | `int` | 16 MiB |
+| `hub_read_timeout` | `timedelta` | 30 s |
+| `hub_max_connections` | `int` | 64 |
+| `hub_max_pending_handshakes` | `int` | 8 |
+
+**Every one is refused at load time unless it is strictly positive**, in the
+`gt=0` / `gt=timedelta(0)` form ADR-0083 §7 adopted from `confirmation_ttl` and
+`conversation_tombstone_grace` — and `hub_max_pending_handshakes` is additionally
+refused unless it is **no greater than `hub_max_connections`**, since a pending
+ceiling above the total is a limit that can never bind.
+
+**None of them is nullable, and that is the one place this ADR departs from
+ADR-0083 §7's convention.** There, `None` means "disabled", because a scheduler
+job that never runs is a coherent deployment. Here it is not: a hub with no frame
+cap or no read deadline has exactly the failure §3 exists to prevent, so "off" is
+not an available value and a zero is a misconfiguration rather than a way to
+express it. Validating at load is what keeps a zero from presenting as an outage —
+a `hub_max_connections` of 0 would refuse every client, including the CLI, and
+would look from outside exactly like a hub that is down, which is ruling 4's
+failure produced by a config typo.
+
 **The two ceilings are separate, and the handshake one is lower on purpose.** A
 per-frame deadline bounds each connection but says nothing about how many there
 may be, so without a connection ceiling a client in a crash loop — or a script
@@ -765,6 +794,10 @@ reviewed."
   triggered literally — unlike ADR-0083, which added only `Settings` fields and an
   error class. A triad is owed and is a separate lane merging before any client
   (§5). Three changes, in order: this ADR, the triad, the implementation.
+- **`core` also gains four `Settings` fields** — the transport's frame, deadline
+  and connection ceilings (§3) — each strictly positive at load time, none
+  nullable. They are contract surface in ADR-0054's sense, which this ADR already
+  was.
 - **The system gains a third top-level package**, `wire`, holding the envelope,
   the codec and the client, depending only on `core`. `service` and `interfaces`
   both import it; nothing imports `service`.
