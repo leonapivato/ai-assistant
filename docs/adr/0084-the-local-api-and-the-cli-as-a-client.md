@@ -1218,10 +1218,36 @@ learns that its premise moved. Applying ADR-0070 §1's test to each:
   their reason: it crosses no *subsystem* boundary, only `interfaces` (ADR-0042
   §1)." §4 promotes `Belief`, and `TurnOutcome` and `IngestSummary` with it. Same
   failure, same reason.
-- **ADR-0077 — no record is owed**, and it is checked rather than assumed because
-  it uses the same phrase. Its "not contract surface" is about the rule §5 places
-  on the shipped `DefaultMemoryPolicy`, a concrete policy — not about the façade.
-  Untouched by this ADR, and the sentence stays true.
+- **ADR-0077 — a record *is* owed, on §10 item 7, and it is deliberately not
+  written here.** Two of its sentences fail: "The façade is concrete and not a
+  contract (ADR-0042 §1), so those names are shape, not spelling", and "**Its
+  result is an `orchestration` type beside `LearnOutcome`**, not a `core` one — it
+  crosses no subsystem boundary, only `interfaces`". `Engine.observe()` returns
+  `ObservationReport` (`engine.py:1201`), so §4 promotes it, and a reader
+  following ADR-0077 would treat an `ObservationReport` field change as a free
+  `orchestration` edit when it has become a `core` contract change. Its §5 claim
+  about `DefaultMemoryPolicy` — a rule in a concrete policy — is a different
+  subject and stays true, so the record owed is narrow.
+
+**That fourth record is deferred to its own lane, and the reason is a rule about
+when to stop rather than a judgement that it is unimportant.** Three candidates
+were enumerated and ruled on; a fourth surfacing *after* that enumeration is
+evidence the fan-out is not reliably bounded by inspection, and an unbounded
+closure is not something to keep absorbing into a change that has already grown
+twice. It is **#536**, carrying this analysis in full, so the lane that takes it
+starts from the ruling rather than re-deriving it.
+
+**And the enumeration that missed it is worth being honest about, because the
+failure is instructive.** ADR-0077 was first excluded on the strength of a
+*lexical* search — for "not contract surface" and the "frozen `orchestration`
+dataclass" phrasing — which matched only its §5 sentence about
+`DefaultMemoryPolicy`. §10 item 7 says the same thing in different words ("not a
+contract", "an `orchestration` type"), so the search passed over the clause that
+actually mattered. **A citation fan-out cannot be found by grepping for a phrase**,
+because the citing ADRs paraphrase; it has to be found by asking, of every ADR
+that names the superseded one, what it *relied on it for*. That is the method the
+follow-up lane should use, and it is why this paragraph is here rather than
+quietly corrected.
 
 **Both records land in this change**, in ADR-0042's form: leading token, dated
 note, scoped narrowly to the not-contract-surface claims, append-only, and each
@@ -1239,10 +1265,10 @@ detect it — and a follow-up touching `docs/adr/**` pays a review-floor round
 *premise* propagates to everything that cited it, and **no tool detects that.**
 `lint-imports` sees no boundary break, the gate sees no failure, and the citing
 ADR reads as true in isolation. The only defence is to enumerate the citations and
-rule on each, which is what was done here — every ADR referencing ADR-0042's
-phrasing was examined, and ADR-0077 was excluded **on the substance** rather than
-by omission. Whoever next supersedes a premise should expect the same fan-out and
-the same enumeration.
+rule on each — and, as the ADR-0077 entry above records, to do that enumeration
+*semantically* rather than by matching a phrase, because the citing ADRs
+paraphrase. Whoever next supersedes a premise should expect the same fan-out, and
+should expect it to be larger than a first search suggests.
 
 ## Consequences
 
