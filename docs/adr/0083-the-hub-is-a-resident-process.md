@@ -885,7 +885,9 @@ load-bearing on a live path rather than insurance against a dormant one.
   ratified rather than left to the lane.
 - **ADR-0054's insurance is cashed.** Its regression tests already cover the path
   §4 makes live; what changes is that a failure there stops being theoretical. The
-  amendment record it is owed is flagged, not written (§15).
+  amendment record it is owed is **written in this change** — its `Status`
+  qualifier and appended dated note, append-only, with the Consequences sentence
+  §4 falsified left standing and the note recording that it has (§15).
 - **A `SIGKILL`ed hub becomes a deployment misconfiguration rather than normal
   operation** — D2 is the line, and S5 is what makes it checkable.
 - **The roadmap's leg-5 job list is one job shorter than it reads.** Confirmation
