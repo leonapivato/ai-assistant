@@ -746,31 +746,40 @@ become operative. That fails ADR-0082 §1's test, so a record on ADR-0054 is owe
 its `Status` line and an appended dated note (ADR-0082 §2 — ADR-0054's `Status` is
 plain `Accepted`, not a leading-token line, so the qualifier belongs on it).
 
-**It is left undone here on purpose, and the reasoning is worth stating because
-the natural reading is that it should land in this change.** Three things bear on
-it, in order:
+**It is left undone here, and the reason is this lane's scope and nothing else.**
+Two things that are *not* the reason are worth ruling out, because both are
+plausible and both are wrong:
 
-- **ADR-0082 §1 and §2 decide *whether* a record is owed and *where* it goes.
-  Neither decides *when* it is written.** §1's operative half is that "the
-  judgement is made in the later ADR's text, which is where it is reviewed" — and
-  that judgement is here, above, in full, with the clause named and the test
-  applied. What ADR-0082 forbids is an unargued record or an unargued absence;
-  neither is what this is.
-- **The record cannot be written truthfully while this ADR is `Proposed`.** A
-  `Status` qualifier on ADR-0054 naming an amendment by ADR-0083 asserts that the
-  amendment exists. Until ratification it does not, and an ADR that is reviewed
-  while `Proposed` precisely so a finding can still change the decision is one
-  whose §4 could still change. The corpus's own answer to this is that such a note
-  lands *with* the change that makes it true — ADR-0045, ADR-0050 and ADR-0074
-  each say so on their own lines — so the earliest honest home for this record is
-  the ratification change, not the drafting one.
-- **This lane's fence is this file.** Widening a `Proposed` ADR's PR into a second
-  `docs/adr/` file is the dispatcher's call, not the author's, and `docs/adr/**`
-  is inside ADR-0027 §3's review floor for every persona, so the edit is not free.
+- **Not because ADR-0082 leaves the timing open.** It decides *whether* a record
+  is owed and *where* it goes rather than *when* it is written, and §1's operative
+  half — "the judgement is made in the later ADR's text, which is where it is
+  reviewed" — is satisfied above. But that is an argument for the record being
+  reviewable here, not for it being absent.
+- **Not because this ADR is still `Proposed`.** The corpus settles that in the
+  other direction, in as many words: ADR-0045's own note says "ADR-0080 lands **in
+  the same change as this note**, so this Status line never names an ADR that does
+  not exist — the hazard ADR-0070 §1 guards against — and if that change does not
+  land, neither does this. While ADR-0080 is still `Proposed`, this line names a
+  supersession that is drafted rather than ratified, which is the form ADR-0075
+  established and `main` carries three times over." ADR-0074's header carries the
+  same sentence about ADR-0076. The existence condition is that the naming ADR
+  **ships in the same change**, not that it has ratified. So a record on ADR-0054
+  naming this ADR while it is `Proposed` would be well-formed, and the corpus's
+  established form is that it lands here.
 
-So it is **flagged rather than taken quietly**, and tracked as **#529** so it
-cannot be lost between the two. Nothing in this ADR depends on the record existing
-first: §15's analysis is the substance, and the `Status` edit is its bookkeeping.
+**The reason is the fence.** This lane was dispatched with `docs/adr/0083-*.md` as
+its whole scope and an explicit instruction to flag rather than write a record on
+an earlier ADR. Widening a PR into a second `docs/adr/` file is the dispatcher's
+call, not the author's, and `docs/adr/**` sits inside ADR-0027 §3's review floor
+for every persona, so the edit costs a round wherever it lands. It is therefore
+**flagged rather than taken quietly**, and tracked as **#529**, whose earliest
+correct home is this ADR's ratification change.
+
+Nothing in this ADR depends on the record existing first: §15's analysis is the
+substance and the `Status` edit is its bookkeeping. What the deferral does cost is
+real and is named here rather than discovered later — between this ADR's merge and
+#529's, `main` carries an ADR-0054 whose Consequences assert something ADR-0083 §4
+has made false.
 
 ## Consequences
 
