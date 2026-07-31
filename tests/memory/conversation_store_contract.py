@@ -28,6 +28,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -36,15 +37,15 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ConversationStoreError, UnknownConversationError
 from ai_assistant.core.types import FIRST_TURN_ORDINAL, ParkedBinding
-from ai_assistant.testing.cancellation import settle
+from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable, Coroutine
     from contextlib import AbstractAsyncContextManager
 
     from ai_assistant.core.protocols import ConversationStore
     from ai_assistant.core.types import ConversationTurn
-    from ai_assistant.testing.cancellation import SuspendedMidWrite
+    from ai_assistant.testing.cancellation import SuspendedCall, SuspendedMidWrite
 
 #: The instant every store fixture's clock starts at.
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -78,6 +79,16 @@ _INTERLEAVED = (
 )
 
 #: What a failure of the cancellation case below means (ADR-0060 §3).
+#: What a failure of the input-observation cases below means, in one place.
+_TORN_INPUT = (
+    "the store derived its outcome from more than one observation of the argument "
+    "it was handed, so a caller's mid-flight mutation reached part of the write"
+)
+#: The read-side version of the same failure.
+_LATE_ARGUMENT = (
+    "the store read its argument only after suspending, so it answered for a "
+    "version of it the caller supplied after the call had begun"
+)
 _RELEASED_EARLY = (
     "the cancelled call released its resource while its own work was still "
     "running, so a second caller reached it before the first had finished"
@@ -1808,3 +1819,150 @@ class ConversationStoreContract:
             )
 
             await op.verify(store)
+
+    # --- input observation (ADR-0065) ----------------------------------------
+
+    #: Whether this implementation performs no ``await`` between the coroutine's
+    #: first executed line and the point its caller-owned argument is observed — no
+    #: suspension window for a mutation to land in. ``core.protocols``' input clause
+    #: is then discharged by "do not suspend" and the two cases below reduce to a
+    #: post-call assertion, correctly: a call with no window has none to tear in.
+    #: Left ``False``, the suite requires the implementation to open that window by
+    #: overriding :meth:`store_suspended_at_its_first_await`. Nothing declares it —
+    #: both shipped subjects suspend before they read anything — so it is stated
+    #: hypothetically, as the declaration a future non-suspending backend makes
+    #: rather than as a description of one that exists. Deliberately *not* the same
+    #: declaration as :attr:`acquires_no_shared_resource`: ADR-0065 §"This is not
+    #: ADR-0060's axis" holds that the two have different vacuity sets.
+    observes_without_suspending: bool = False
+
+    def store_suspended_at_its_first_await(
+        self,
+    ) -> AbstractAsyncContextManager[tuple[ConversationStore, Callable[[str], SuspendedCall]]]:
+        """Supply a store whose next call to a **named operation** stops at its first ``await``.
+
+        Override unless :attr:`observes_without_suspending` is set. The suite runs
+        any preconditions the operation needs, then calls the returned
+        ``arm(operation)`` to get the :class:`SuspendedCall` lever back — after the
+        preconditions, so a store arming one collaborator suspends the operation
+        under test rather than a setup write. The named call must suspend at its own
+        first ``await`` and stay there until the case releases it; later calls run
+        free, because the cases go on to read the store back.
+
+        **The position is part of the hook's contract, not the implementer's
+        choice** (ADR-0065 §3). A hook fired at method *entry* would let the mutation
+        land before the method had read anything, so the store would observe one
+        coherent mutated version, the case would pass, and a tear at the real window
+        would survive untested. The first ``await`` is exactly the boundary the
+        clause draws: a conforming call has taken its one observation before that
+        point and cannot be reached by the mutation, while a call that reads its
+        argument afterwards answers from the later version.
+
+        The two operations the cases below arm are ``append`` and
+        ``turn_of_binding`` — the only methods on this Protocol that take a
+        caller-owned argument which is not a plain ``str`` or ``int``. Returned as a
+        context manager so the subject is disposed of the way that implementation
+        needs.
+        """
+        raise NotImplementedError
+
+    @contextlib.asynccontextmanager
+    async def _observation_subject(
+        self, store: ConversationStore
+    ) -> AsyncIterator[tuple[ConversationStore, Callable[[str], SuspendedCall] | None]]:
+        """The store the two cases below drive, and the lever arming one of its calls.
+
+        ``None`` for the lever where the implementation declares itself
+        non-suspending (:attr:`observes_without_suspending`); the ``store`` fixture
+        is then the subject, since there is no window to open and nothing to build.
+        The caller arms *after* its own preconditions, which is why the lever is
+        handed out rather than the gate. Mirrors ``MemoryStoreContract``'s helper of
+        the same name.
+        """
+        if self.observes_without_suspending:
+            yield store, None
+            return
+        async with self.store_suspended_at_its_first_await() as (subject, arm):
+            yield subject, arm
+
+    async def test_append_cannot_tear_on_a_mid_flight_mutation_of_its_binding(
+        self, store: ConversationStore
+    ) -> None:
+        """``core.protocols``' input clause, on ``append``'s ``parked`` (ADR-0074 §9.5).
+
+        §9.5 binds this store to input observation before the first ``await``
+        alongside the cancellation clause and detached snapshots; this is the first
+        of the three, which had no case.
+
+        **What is actually at risk here is small, and worth saying rather than
+        overstating.** ``ParkedBinding`` is a frozen model and ``occurred_at`` is a
+        ``datetime``, so the #286 tear — the caller rewriting the argument while the
+        write is suspended and the store committing a mix of two versions — is not
+        reachable through the exchanged types today. Both shipped implementations
+        would in fact be reached by it: neither reads ``parked`` until *after* it has
+        taken its lock, so the invariant holds by construction rather than by
+        position. That is exactly why the case earns its keep — nothing would notice
+        if a future argument stopped being frozen, and this fails the moment one
+        does.
+
+        So the assertion is in two halves: the mutation must be unrepresentable
+        while the call is in flight, and what the store recorded must correspond to
+        the binding as constructed. The second half is what catches a late read once
+        the first half stops holding.
+        """
+        async with self._observation_subject(store) as (subject, arm):
+            conversation = await subject.start()
+            binding = ParkedBinding(execution_id="exec-obs", step_id="step-obs")
+            # The version handed over, kept independently of the object the body
+            # goes on to attack: comparing against ``binding`` itself would compare
+            # the outcome to whatever the mutation left behind, and pass either way.
+            handed_over = binding.model_copy(deep=True)
+            # Armed after the precondition, so the collaborator that stops the
+            # append is not spent on the ``start``.
+            gate = None if arm is None else arm("append")
+            call = subject.append(conversation.id, occurred_at=_NOW, parked=binding)
+            async with held_at_its_first_await(gate, call) as pending:
+                # The tear needs one of these to land mid-flight; the frozen model
+                # refuses both, so there is no second version for the store to read.
+                with pytest.raises(ValidationError):
+                    binding.execution_id = "exec-moved"
+                with pytest.raises(ValidationError):
+                    binding.step_id = "step-moved"
+            turn = cast("ConversationTurn", await pending)
+
+            assert turn.parked == handed_over, _TORN_INPUT
+            found = await subject.turn_of_binding(handed_over)
+            assert found is not None, _TORN_INPUT
+            assert found.episode_id == turn.episode_id, _TORN_INPUT
+
+    async def test_turn_of_binding_observes_its_binding_before_its_first_await(
+        self, store: ConversationStore
+    ) -> None:
+        """The same clause on the read side — the reverse lookup's own argument.
+
+        A read derives one answer from one argument, so there is nothing to compare
+        it against and a store that observed the binding late would return the later
+        version's answer whole. What makes it checkable is the *position* ADR-0065 §1
+        fixes rather than the coherence it guarantees: every discharge it offers
+        yields the answer for the argument as it stood when the work began, so the
+        case asserts the pre-mutation answer.
+
+        As above, the mutation is currently unrepresentable — which is the finding
+        this case records rather than hides.
+        """
+        async with self._observation_subject(store) as (subject, arm):
+            conversation = await subject.start()
+            binding = ParkedBinding(execution_id="exec-obs-read", step_id="step-obs-read")
+            recorded = await subject.append(conversation.id, occurred_at=_NOW, parked=binding)
+            other = ParkedBinding(execution_id="exec-obs-other", step_id="step-obs-other")
+            await subject.append(conversation.id, occurred_at=_NOW, parked=other)
+            gate = None if arm is None else arm("turn_of_binding")
+            async with held_at_its_first_await(gate, subject.turn_of_binding(binding)) as pending:
+                with pytest.raises(ValidationError):
+                    binding.execution_id = other.execution_id
+                with pytest.raises(ValidationError):
+                    binding.step_id = other.step_id
+            found = cast("ConversationTurn | None", await pending)
+
+            assert found is not None, _LATE_ARGUMENT
+            assert found.episode_id == recorded.episode_id, _LATE_ARGUMENT

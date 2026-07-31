@@ -66,6 +66,10 @@ _SYNC_METHODS = {
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
+#: How long an input-observation case waits for its gated call to arrive before
+#: declaring the scenario broken. Only ever reached when something has hung.
+_GATE_SECONDS = 5.0
+
 
 def _fixed_now() -> datetime:
     return _NOW
@@ -289,6 +293,90 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
             # assertion in the suite be the thing that speaks.
             await asyncio.sleep(0.05)
             store.close()
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_at_its_first_await(
+        self,
+    ) -> AsyncIterator[tuple[ConversationStore, Callable[[str], SuspendedCall]]]:
+        """Park the named call at its own first ``await``, which here is the lock.
+
+        A different position from ``store_suspended_mid_write`` above, and
+        deliberately so. ADR-0060's hook goes *inside* the connection — inside the
+        worker thread, past every argument this store reads. ADR-0065's must be at
+        the method's own first suspension point, which for both operations the cases
+        drive is ``async with self._lock``: neither ``append`` nor
+        ``turn_of_binding`` awaits anything before it, and both hand their argument
+        to the worker only afterwards. Suspending any later would put the mutation
+        past the point a non-conforming implementation would have read the argument
+        — the entry-side mistake ADR-0065 §3 warns about, in mirror image.
+
+        The gate goes *before* ``acquire``, not after: a conforming implementation
+        has observed its argument on its first executed lines and cannot be reached
+        by the mutation, while one that reads it after taking the lock would be.
+
+        Arming is deferred to ``arm`` because the cases seed the store first, and
+        every seeding call takes the same lock: a hook armed at construction would
+        spend its one suspension on a precondition.
+
+        Its own store on its own connection, like the hook above, so a failure leaves
+        nothing parked on the ``store`` fixture's.
+        """
+        store = SqliteConversationStore(path=":memory:", now=_fixed_now)
+        lock = _GatedLock(store._lock)
+        # `_lock` is typed `asyncio.Lock`; this stands in for one and is only ever
+        # entered through `async with`.
+        store._lock = lock  # type: ignore[assignment]
+
+        def arm(_operation: str) -> SuspendedCall:
+            lock.arm()
+            return lock
+
+        try:
+            yield store, arm
+        finally:
+            lock.release()
+            store.close()
+
+
+class _GatedLock:
+    """The store's ``asyncio.Lock``, wrapped so one acquisition can be held at the door.
+
+    Every ``ConversationStore`` method's first ``await`` is this lock, so ADR-0065's
+    input-observation cases gate it rather than a collaborator. The suspension goes
+    *before* ``acquire`` for the reason the hook above gives.
+    """
+
+    def __init__(self, delegate: asyncio.Lock) -> None:
+        """Wrap ``delegate``; unarmed, so nothing suspends until :meth:`arm`."""
+        self._delegate = delegate
+        self._armed = False
+        self._entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    def arm(self) -> None:
+        """Make the next acquisition suspend before it takes the lock."""
+        self._armed = True
+
+    async def __aenter__(self) -> None:
+        """Suspend if armed, then take the real lock."""
+        if self._armed:
+            self._armed = False
+            self._entered.set()
+            await self._released.wait()
+        await self._delegate.acquire()
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        """Release the real lock."""
+        self._delegate.release()
+
+    async def reached(self) -> None:
+        """Wait until the gated call has arrived."""
+        async with asyncio.timeout(_GATE_SECONDS):
+            await self._entered.wait()
+
+    def release(self) -> None:
+        """Let the gated call take the lock; idempotent."""
+        self._released.set()
 
 
 @pytest.mark.integration

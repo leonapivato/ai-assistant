@@ -26,7 +26,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
 from ai_assistant.core.protocols import MemoryStore
-from ai_assistant.testing.cancellation import settle
+from ai_assistant.testing.cancellation import held_at_its_first_await, settle
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
@@ -136,35 +136,6 @@ _LATE_FILTER = (
     "work began: a caller's mid-flight mutation widened the result, so the filter "
     "was observed after the first await rather than before it (ADR-0065 §1)"
 )
-
-
-@contextlib.asynccontextmanager
-async def _held_at_its_first_await(
-    gate: SuspendedCall | None, call: Coroutine[Any, Any, Any]
-) -> AsyncIterator[asyncio.Task[Any]]:
-    """Run ``call`` and hold it at its first ``await`` for the body of the block.
-
-    The body is where the caller mutates what it passed; leaving the block lets
-    the call finish. The task is yielded rather than its result: the mutation has
-    to happen *while* the call is in flight, so the case awaits it afterwards.
-
-    ``gate`` of ``None`` is ADR-0065 §3's reduction for an implementation that
-    declares no suspension window: the call is run to completion first, so the
-    body's mutation is a post-call one. That is the right weakening and not a
-    hole — a store that performs no ``await`` between reading its input and
-    committing it has no window for a mutation to land in, so the only thing left
-    to assert is the isolation the suite has asserted since ADR-0045.
-    """
-    task = asyncio.ensure_future(call)
-    try:
-        if gate is None:
-            await asyncio.wait([task])
-        else:
-            await gate.reached()
-        yield task
-    finally:
-        if gate is not None:
-            gate.release()
 
 
 async def _score_for(store: MemoryStore, query: str, record_id: str) -> float:
@@ -1479,7 +1450,7 @@ class MemoryStoreContract:
         ):
             gate = None if arm is None else arm("add")
             record = _semantic("obs-add", "alpha alpha alpha")
-            async with _held_at_its_first_await(gate, subject.add(record)) as call:
+            async with held_at_its_first_await(gate, subject.add(record)) as call:
                 # The tear needed these two rewrites mid-flight; the frozen record
                 # refuses both, so there is no second version to commit.
                 with pytest.raises(ValidationError):
@@ -1524,7 +1495,7 @@ class MemoryStoreContract:
             writes = [MemoryWrite(record=first), MemoryWrite(record=second)]
             before = {write.record.id for write in writes}
             third = MemoryWrite(record=_semantic("obs-batch-3", "delta delta delta"))
-            async with _held_at_its_first_await(gate, subject.write_atomic(writes)) as call:
+            async with held_at_its_first_await(gate, subject.write_atomic(writes)) as call:
                 writes.append(third)  # grow the caller's own list while the write is held
                 after = {write.record.id for write in writes}
             returned = set(await call)
@@ -1586,7 +1557,7 @@ class MemoryStoreContract:
             # Armed after the seeding writes, so the collaborator that stops the
             # read is not spent on a precondition.
             gate = None if arm is None else arm("search")
-            async with _held_at_its_first_await(gate, subject.search("gamma", kinds=kinds)) as call:
+            async with held_at_its_first_await(gate, subject.search("gamma", kinds=kinds)) as call:
                 kinds.append(MemoryKind.PREFERENCE)  # grow the caller's own list mid-flight
             found = {record.id for record in await call}
 
@@ -1614,7 +1585,7 @@ class MemoryStoreContract:
             bands = [BeliefBand.DERIVED]
             kinds = [MemoryKind.SEMANTIC]
             gate = None if arm is None else arm("list_beliefs")
-            async with _held_at_its_first_await(
+            async with held_at_its_first_await(
                 gate, subject.list_beliefs(bands=bands, kinds=kinds)
             ) as call:
                 bands.append(BeliefBand.ATTESTED)
