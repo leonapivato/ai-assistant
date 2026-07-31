@@ -239,10 +239,33 @@ differ, and the day that arrives the negotiation becomes a change to *what the
 handshake does with a number it already exchanges* — not the introduction of a
 concept the wire has no room for.
 
-**The envelope's required fields** are a message kind, a correlation id (one
-request, one response, so a future streaming or multiplexed extension is additive
-— ADR-0042 §5's deferral inherited unchanged), and an explicit payload length,
-which §4's unbounded-payload constraint makes non-optional.
+**The envelope's required fields** are a message kind, a correlation id, and an
+explicit payload length, which §4's unbounded-payload constraint makes
+non-optional.
+
+**A connection carries one outstanding request at a time**, and that is a
+decision rather than an omission. ADR-0042 §3 made the façade strictly
+request/response and §5 kept it there — "v1 is strictly request/response" — so
+nothing above this transport has a second concurrent request to issue. Making the
+connection serial keeps the wire honest about that instead of implying a
+concurrency the engine does not offer.
+
+Two rules fall out, and both are needed because "one at a time" is only a
+contract if a violation has a defined answer:
+
+- **A request frame sent while another is outstanding is refused** with a typed
+  error, rather than queued or run concurrently. Running it would let a client
+  drive two operations it cannot then tell apart.
+- **A response whose correlation id does not match the outstanding request is a
+  protocol violation**, and the connection is closed rather than resynchronised.
+  A stream that has desynchronised cannot be repaired by guessing.
+
+**So the correlation id has one job today and one reason to exist tomorrow.**
+Today it detects exactly the desynchronisation above. Tomorrow it is what lets
+multiplexing or a progress stream be added *additively* — ADR-0042 §5's deferred
+extension — without renegotiating a frame that had nowhere to put an id. That is
+the same "pay a field now, avoid a flag day later" trade as the version in this
+section and the credential slot in §2, and it is the last of the three.
 
 **A declared length is a claim, and the reader must be free to disbelieve it.**
 An explicit payload length is only safe alongside a ceiling, so the transport
