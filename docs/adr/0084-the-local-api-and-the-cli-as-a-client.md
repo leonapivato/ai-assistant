@@ -1223,14 +1223,26 @@ learns that its premise moved. Applying ADR-0070 §1's test to each:
   on the shipped `DefaultMemoryPolicy`, a concrete policy — not about the façade.
   Untouched by this ADR, and the sentence stays true.
 
-**Those two records are not written in this change**, and the reason is the fence
-rather than the reasoning: this change's scope is this ADR and ADR-0042. The
-analysis is recorded here — which is the half ADR-0082 §1 calls operative, "the
-judgement is made in the later ADR's text, which is where it is reviewed" — and
-the records themselves are owed from whichever change is scoped to carry them,
-alongside this one. Recording the fan-out rather than discovering it later is the
-point: a supersession of a *premise* propagates to everything that cited it, and
-nothing mechanical detects that.
+**Both records land in this change**, in ADR-0042's form: leading token, dated
+note, scoped narrowly to the not-contract-surface claims, append-only, and each
+stating **what survives** as well as what falls — a reader needs to know the
+clause was narrowed rather than voided, which for ADR-0078 is nearly the whole of
+§8.
+
+They land with their cause rather than in a follow-up, for a reason worth
+recording. Between this merge and a follow-up's, `main` would carry two ADRs
+asserting something this one has already made false, with nothing mechanical to
+detect it — and a follow-up touching `docs/adr/**` pays a review-floor round
+(ADR-0027 §3) *plus* a fresh lane re-deriving this entire argument.
+
+**The general point, which is the reason §12 is this long:** a supersession of a
+*premise* propagates to everything that cited it, and **no tool detects that.**
+`lint-imports` sees no boundary break, the gate sees no failure, and the citing
+ADR reads as true in isolation. The only defence is to enumerate the citations and
+rule on each, which is what was done here — every ADR referencing ADR-0042's
+phrasing was examined, and ADR-0077 was excluded **on the substance** rather than
+by omission. Whoever next supersedes a premise should expect the same fan-out and
+the same enumeration.
 
 ## Consequences
 

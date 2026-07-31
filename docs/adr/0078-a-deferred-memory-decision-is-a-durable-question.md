@@ -1,7 +1,59 @@
 # 78. A deferred memory decision is a durable question the user answers
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0084 (§8's placement of the question surface and its DTOs outside contract surface, and its licence to widen the learn DTO without a contract change)
 - Date: 2026-07-28
+- Partially superseded: 2026-07-31 by ADR-0084 — **§8's three statements that the
+  façade is not contract surface are false; every decision §8 made about *what the
+  question surface conveys* stands.** ADR-0084 §5 finds ADR-0042 §1's revisit
+  trigger fired and promotes the engine façade to a Protocol in
+  `core/protocols.py`, forcing its result types into `core/types.py` (golden rule
+  2). ADR-0042 §1 is partially superseded there, and the clauses below rest on it
+  by citation — §8 names it as its authority.
+
+  **Replaced**, all three in §8:
+
+  1. "Per [ADR-0042](0042-the-interface-adapter-contract.md) §1 the seam is the
+     concrete `orchestration` façade, which is **not** contract surface". It is,
+     after ADR-0084 §5.
+  2. "`Question` is a **frozen `orchestration` dataclass** beside `Belief`,
+     `Confirmation` and `TurnOutcome`, for their reason (ADR-0042 §1: it crosses
+     no *subsystem* boundary, only `interfaces`)". ADR-0084 §4 promotes all four
+     to `core/types.py` as pydantic models frozen under ADR-0068 §1.
+  3. **The operative one.** Reach 1 "requires the façade's learn DTO to carry the
+     deferral id — **an `orchestration` widening, not a contract change (ADR-0042
+     §1)**". That DTO is now `core` contract surface, reached as `LearnOutcome →
+     IngestSummary → QueuedQuestion` (`engine.py:433`, `:412`), so the widening
+     **is** a contract change under golden rule 5 and owes an ADR — ADR-0084 §5
+     names the surface ADR that carries it. A reader acting on this sentence would
+     ship a `core` change with no ADR, which is the process failure ADR-0015 §5
+     exists to prevent.
+
+  **Not replaced, and it is nearly all of §8.** What the surface must convey per
+  question — the conditional wording of the band, the non-optional
+  `MemoryDecision.reason`, the resolved conflict ids as the exact scope the answer
+  authorises, when it was asked and when it goes stale, and the `APPLYING`
+  disclosure with §9's two steps in order — is untouched. So are: the two
+  enumerations staying separate to the surface; the deliberate absence of a
+  "retry" verb; answering being binary with no free-text third option;
+  `AnswerOutcome` distinguishing *applied*, *rejected*, *stale* and *re-deferred*
+  and the last carrying the successor's id; the three reaches and the refusal to
+  inject into `respond`; and "**the hub adds push without touching this
+  contract**", which ADR-0084 confirms rather than disturbs — a scheduler that
+  polls is still a reader, and delivery state is still not on `DeferredProposal`.
+  The named method shapes (`questions`, `answer`, `interrupted_questions`,
+  `forget_question`) stand as **shape**, in ADR-0073 §7's form, with spelling still
+  the later ADR's. **`band_of` is still applied once, in the engine.** And this
+  ADR's own header declaration that it is a contract change — the `DeferralStore`
+  Protocol, `DeferredProposal` and the rest — is independently true and wholly
+  unaffected: it concerns `core` surface this ADR added, not the façade.
+
+  ADR-0084 lands **in the same change as this note**, so this `Status` line never
+  names an ADR that does not exist — the hazard ADR-0070 §1 guards against — and
+  if that change does not land, neither does this. While ADR-0084 is still
+  `Proposed`, the line names a supersession that is drafted rather than ratified,
+  the form ADR-0075 established. Appended note per ADR-0070 §1: no text below it
+  is rewritten, and the superseded sentences are left standing exactly as written.
+  §10's ratification checklist and the 2026-07-30 note below are untouched.
 - Note (2026-07-30): **§10's `Status` renderings for ADR-0045 and ADR-0050 are
   re-rendered; what §10 required is unchanged.** §10 instructed each of those
   files to be "qualified" on its `Status` line plus a dated note. Both already
