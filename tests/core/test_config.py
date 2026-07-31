@@ -1156,3 +1156,65 @@ def test_an_undescribable_value_is_still_a_validation_error(name: str, expected:
 
     with pytest.raises(ValidationError, match=expected):
         _settings_with(name, Unprintable())
+
+
+@pytest.mark.parametrize("name", _DURATION_FIELDS)
+def test_every_duration_setting_refuses_a_timedelta_that_lies_about_its_length(
+    name: str,
+) -> None:
+    """The exact-``timedelta`` check is load-bearing, and this is what makes it so.
+
+    Without this case the guard could be relaxed to ``isinstance(value, timedelta)``
+    and the rest of the suite would stay green, because nothing else offers a
+    subclass — so the one difference between the duration guard and the real-number
+    one would be untested (raised as a ``major`` by the adversarial review).
+
+    What the exactness buys, in the two steps the assertions below pin. pydantic
+    **preserves** a ``timedelta`` subclass instance in the model rather than
+    normalising it the way it normalises a ``float`` subclass, and it applies
+    ``gt=timedelta(0)`` natively, so a subclass whose comparison operators disagree
+    with its own length clears the load-time bound intact. It then reaches the
+    ordinary Python comparisons that read it — ``StepRunner._check_fresh``'s
+    ``age > self._confirmation_ttl`` among them — where Python hands the decision
+    to the *subclass* as the reflected operand, and a confirmation five hours past
+    a one-second lifetime reads as fresh. The same defence, for the same reason, as
+    :func:`_split_model_specs`' exact ``list``.
+    """
+
+    class Deceitful(timedelta):
+        """A one-second duration that denies being shorter than anything."""
+
+        def __lt__(self, other: object) -> bool:
+            return False
+
+        def __repr__(self) -> str:
+            return "Deceitful(1s)"
+
+    ttl = Deceitful(seconds=1)
+    # The premise, pinned rather than described: this is what the guard prevents
+    # reaching the runner, and if Python's reflected-operand rule ever stopped
+    # working this way the first assertion is where that would be noticed.
+    assert (timedelta(hours=5) > ttl) is False
+    assert (timedelta(hours=5) > timedelta(seconds=1)) is True
+
+    with pytest.raises(ValidationError, match="expected a duration"):
+        _settings_with(name, ttl)
+
+
+@pytest.mark.parametrize("name", _REAL_FIELDS)
+def test_every_real_setting_accepts_a_float_subclass_and_stores_a_plain_float(
+    name: str,
+) -> None:
+    """The other side of that asymmetry, pinned so it is a decision rather than a slip.
+
+    The real-number guard admits a ``float`` by ``isinstance`` where the duration
+    guard demands the built-in, and this is why that is safe: pydantic
+    **normalises** a ``float`` subclass to a built-in ``float`` before storing it,
+    so no subclass survives into the model to intercept a later comparison — the
+    exact hazard the duration case above exists for. ``numpy.float64`` is the
+    subclass this codebase can actually produce (ADR-0024's embedder), and it means
+    precisely its own value, so refusing it would buy nothing.
+    """
+    stored = getattr(_settings_with(name, numpy.float64(2.5)), name)
+    assert stored == 2.5
+    assert type(stored) is float
