@@ -434,14 +434,21 @@ So the two classes are separated:
 - **Post-envelope request failures are ordinary correlated errors**: an unknown
   continuation (§7) and an oversized *result* (§4). The envelope has been read,
   so the id is known.
-- **The single exception is a second request arriving while one is
+- **The one exception on this side is a second request arriving while one is
   outstanding.** Its envelope decodes, so the rule above would reach it, and it
   must not: a correlated error would carry the *second* request's id, which the
-  mismatch rule (below) separately obliges the client to reject — so the refusal
-  could never be consumed. It closes the connection instead. Stating the
-  exception once, here, is deliberate; it was previously written into one of the
-  two rules and not the other, which is how a contract acquires two answers to
-  one input.
+  mismatch rule separately obliges the client to reject — so the refusal could
+  never be consumed. It closes the connection instead. Stating the exception
+  once, here, is deliberate; it was previously written into one of the two rules
+  and not the other, which is how a contract acquires two answers to one input.
+
+**All three bullets scope to the *server* and the frames it receives.** The
+client has one rule of its own, and keeping it separate is what stops "the one
+exception" from being false: a **response** whose correlation id does not match
+the request the client has outstanding is a protocol violation, and the client
+closes rather than resynchronising (below). That is a decoded frame answered by a
+close too — but it is the client's obligation about a response, not the server's
+about a request, and the two never apply to the same frame.
 
 The client renders these differently, and must: a connection-level close is a
 **transport** failure, which is not the same event as a request the hub received
