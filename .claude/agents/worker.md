@@ -66,7 +66,12 @@ Reporting is not merging, and the gap between them is where `main` moves. Branch
 
 So when the coordinator sends you back to rebase, that is the plan working. Rebase onto `origin/main`, **re-run the full gate against the landing tree**, push, and re-run `just ship` so the posted comment carries the new head's SHA — for **every** required persona, not just one.
 
-**Do not run a fresh review to make `ship` accept.** Whether the moved base costs a round is decided by ADR-0027 §2, and `CONTRIBUTING.md` → "Report the review, then mark it ready" carries every condition. Where the base move clears the floor and leaves the reviewed patch untouched, the existing artifact still covers the head and `ship` publishes the drift. **If `ship` refuses, STOP and quote what it said** rather than spending a round to satisfy it: a wrong reading of those conditions is worth surfacing, and paying for it silently hides it.
+**Do not run a fresh review to make `ship` accept.** Whether the moved base costs a round is decided by ADR-0027 §2, and `CONTRIBUTING.md` → "Report the review, then mark it ready" carries every condition. Where the base move clears the floor and leaves the reviewed patch untouched, the existing artifact still covers the head and `ship` publishes the drift.
+
+Some base moves genuinely do cost a round, and then the review is owed — the point is not that you never re-review, it is that **you do not decide to spend on your own judgement.** Run the verification below *before* you push, and the two cases separate cleanly:
+
+- **Your own check predicts a refusal** — a floor path moved, the patch identity changed, the range has a pathless entry. The round is really owed. Say so in your report with the figures, and let the coordinator rule before you spend it. This is cheap, because you have not pushed yet.
+- **Your check predicted acceptance and `ship` refuses anyway.** That is a contradiction between your reading and the tool's, and it is a **STOP**: halt and quote the refusal verbatim. Do not buy a round to make it go away — a wrong reading of these conditions is worth surfacing, and paying for it silently hides it from everyone.
 
 ### Prove the moved-base path before you push, don't assume it
 
