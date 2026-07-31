@@ -2,6 +2,31 @@
 
 - Status: Accepted
 - Date: 2026-07-26
+- Amended: 2026-07-31 (§4 — the display limitation it records twice has been
+  fixed since). §4 states that "the sole status consumer,
+  `scripts/project_status.py`, only *displays* it, **and even that display stops
+  at the first physical line (issue #404)**", and, on the going-forward
+  single-line rule, that the wrapped fields several ADRs already carry "are the
+  exception the consumer rule **and issue #404** handle", with "folding those is
+  issue #404's" in the paragraph above. **Issue #404 is closed (2026-07-27).**
+  `scripts/project_status.py` captures indented continuation lines in
+  `_STATUS_RE` and folds them in `_fold_status`, so the whole field is read
+  today; `tests/scripts/test_project_status.py` pins it in
+  `test_folds_a_status_that_wraps_across_lines` and
+  `test_folds_a_nested_list_continuation`. **Nothing decided changes and no
+  reader acts differently.** §4's load-bearing claim is untouched and still
+  true — nothing classifies ADR liveness from status, the consumer only
+  *displays* it — and every consequence §4 draws from it stands: the
+  going-forward one-line rule, the non-retrofit of the legacy wrapped fields,
+  the whole-field consumer rule, and the obligation it lays on any
+  liveness-classifying consumer added later. What #404's closure changes is that
+  the folding §4 anticipated now exists; anticipating it was not a decision.
+  This is a self-amendment reconciling the ADR with a fact that postdates it, so
+  under §1 it is recorded as this appended dated note and the ratified sentences
+  below are **not** rewritten; it names no other ADR, so no `Status` edit is owed
+  (ADR-0082 §1). ADR-0082 §6 records the same fact from the other side, when it
+  declined a mechanical `Status` cross-check for a different reason. Refs #518,
+  #404.
 - Partially supersedes: ADR-0001 — its change-a-decision clause ("to change a
   past decision, write a new ADR that supersedes the old one and update the old
   one's status"); §2 below. ADR-0001's other decisions — ADRs in `docs/adr/`,
