@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.protocols import ConversationStore
+    from ai_assistant.testing.cancellation import SuspendedCall
 
 #: The fake's own defaults, restated here rather than imported: the suite asserts
 #: the store *behaves* to these figures, so a default changed without this test
@@ -101,6 +102,21 @@ class TestFakeConversationStoreContract(ConversationStoreContract):
             log=store.resource_log,
             arm=lambda _operation: store.suspend_next_operation(),
         )
+
+    @contextlib.asynccontextmanager
+    async def store_suspended_at_its_first_await(
+        self,
+    ) -> AsyncIterator[tuple[ConversationStore, Callable[[str], SuspendedCall]]]:
+        """The same modelled resource, read for ADR-0065's position instead.
+
+        One hook serves both clauses here because the fake's resource sits exactly at
+        the boundary they share: every method enters it before it observes any
+        argument, so the armed suspension *is* the call's first ``await``. ``arm``
+        ignores the operation for the reason it does above — one modelled resource
+        serves every call.
+        """
+        store = FakeConversationStore(now=_fixed_now)
+        yield store, lambda _operation: store.suspend_next_operation()
 
 
 async def test_no_lock_is_kept_for_a_conversation_the_store_does_not_hold() -> None:

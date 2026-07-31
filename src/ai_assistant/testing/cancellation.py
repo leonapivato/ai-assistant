@@ -25,6 +25,11 @@ hook hands back. Two mechanisms, because the implementations split two ways:
 
 Both satisfy :class:`SuspendedCall`, which is all a suite depends on.
 
+ADR-0065's input-observation cases reuse that same lever from a different position
+— a call held at its **first await** rather than inside a resource — so
+:func:`held_at_its_first_await`, the choreography those cases share, lives here too
+rather than being copied into each suite that needs it.
+
 Nothing here is a mechanism ``core`` promotes. ADR-0060 refuses a shared home for
 ADR-0054's ``_run_to_completion`` precisely so that subsystems depend on the
 *obligation* and not on one way of meeting it; this module is test-side
@@ -38,10 +43,10 @@ import asyncio
 import contextlib
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, final
+from typing import TYPE_CHECKING, Any, Protocol, final
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 
 #: How long either side waits for the other before declaring the scenario broken.
 #: Generous — it is only ever reached when a test has hung, and a hung suite that
@@ -135,6 +140,39 @@ class SuspendedCall(Protocol):
         whether it already did.
         """
         ...
+
+
+@contextlib.asynccontextmanager
+async def held_at_its_first_await(
+    gate: SuspendedCall | None, call: Coroutine[Any, Any, Any]
+) -> AsyncIterator[asyncio.Task[Any]]:
+    """Run ``call`` and hold it at its first ``await`` for the body of the block.
+
+    The body is where the caller mutates what it passed; leaving the block lets the
+    call finish. The task is yielded rather than its result: the mutation has to
+    happen *while* the call is in flight, so the case awaits it afterwards.
+
+    ``gate`` of ``None`` is ADR-0065 §3's reduction for an implementation that
+    declares no suspension window: the call is run to completion first, so the
+    body's mutation is a post-call one. That is the right weakening and not a hole —
+    a store that performs no ``await`` between reading its input and committing it
+    has no window for a mutation to land in, so the only thing left to assert is the
+    isolation the suite has asserted since ADR-0045.
+
+    Here rather than in one suite because more than one now needs it: ADR-0065's
+    input clause binds every Protocol whose methods take a caller-owned argument,
+    and the choreography for observing it is the same wherever it is asserted.
+    """
+    task = asyncio.ensure_future(call)
+    try:
+        if gate is None:
+            await asyncio.wait([task])
+        else:
+            await gate.reached()
+        yield task
+    finally:
+        if gate is not None:
+            gate.release()
 
 
 @final
