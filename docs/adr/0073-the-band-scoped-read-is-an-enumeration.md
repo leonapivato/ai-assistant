@@ -1,7 +1,45 @@
 # 73. The band-scoped read is an enumeration; inspection shows live beliefs
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0084 (the placement of the `Belief`, `TurnOutcome` and `IngestSummary` DTOs as `orchestration` dataclasses outside contract surface)
 - Date: 2026-07-27
+- Partially superseded: 2026-07-31 by ADR-0084 — **one sentence about where the
+  `Belief` DTO lives is now false; nothing this ADR decided about what it carries
+  changes.** ADR-0084 §5 finds ADR-0042 §1's revisit trigger fired and promotes
+  the engine façade to a Protocol in `core/protocols.py`, which forces its result
+  types into `core/types.py` (golden rule 2: a `core` Protocol cannot name an
+  `orchestration` return type). ADR-0042 §1 is partially superseded there, and the
+  clause below rests on it by citation.
+
+  **Replaced.** "**The `Belief` DTO** is a frozen `orchestration` dataclass
+  carrying exactly §4's fields, alongside `TurnOutcome` and `IngestSummary` and
+  for their reason: it crosses no *subsystem* boundary, only `interfaces`
+  (ADR-0042 §1)." All three of those DTOs are promoted by ADR-0084 §4, so they
+  are `core` pydantic models frozen under ADR-0068 §1, not `orchestration`
+  dataclasses. **The practical consequence, which is the whole reason this record
+  exists:** changing a field of `Belief` was an `orchestration` edit and is now a
+  `core` contract change under golden rule 5, owing an ADR. A reader acting on the
+  superseded sentence would ship one without.
+
+  **Not replaced.** §1's addition of `list_beliefs` to the `MemoryStore` Protocol,
+  and everything this ADR decided about the read's semantics, are untouched —
+  ADR-0084 changes nothing about `MemoryStore`. §4's *content* is untouched: which
+  fields `Belief` carries, and §2's bounded default of 50, are exactly as ratified;
+  only the DTO's home and the cost of changing it move. §7's "shape, not spelling"
+  form still governs how these names are ratified, and ADR-0084 §5 names the
+  surface ADR that fixes the spelling. The deciding reason `Belief` is not a raw
+  `MemoryRecord` — "**`band_of` is applied here, once, in the engine**", so no
+  adapter classifies anything — **stays true and matters more**, since promotion
+  moves the type without moving that computation. And the header's "Adds no
+  `core/types.py` type" is a true statement about *this ADR's own change* and stays
+  true: ADR-0073 added none, and ADR-0084 adding some later does not retroactively
+  make it false.
+
+  ADR-0084 lands **in the same change as this note**, so this `Status` line never
+  names an ADR that does not exist — the hazard ADR-0070 §1 guards against — and
+  if that change does not land, neither does this. While ADR-0084 is still
+  `Proposed`, the line names a supersession that is drafted rather than ratified,
+  the form ADR-0075 established. Appended note per ADR-0070 §1: no text below it
+  is rewritten, and the superseded sentence is left standing exactly as written.
 - **This is a contract change.** §1 adds one method — `list_beliefs` — to the
   `MemoryStore` Protocol in `core/protocols.py`. Golden rule 5 therefore applies:
   this ADR ships as **its own docs-only PR**, is reviewed while still `Proposed`
