@@ -1,7 +1,28 @@
 # 54. A cancelled store call must not release its connection while a worker thread still holds it
 
-- Status: Accepted
+- Status: Accepted; its dormant-path premise amended by ADR-0083
 - Date: 2026-07-24
+- Amended: 2026-07-31 by ADR-0083 — **the premise that this mechanism guards a
+  path nothing exercises has stopped being true.** Consequences states, as fact,
+  "the composition model does not cancel store writes in practice", and the
+  Decision rests the choice of mechanism (a) over (b) on the same fact: "Since
+  this is correctness insurance for a path the one-event-loop, drain-on-`aclose`
+  model does not currently exercise — not a hot path — the smaller mechanism is
+  the right trade." ADR-0083 §4 makes that path live. The hub's shutdown bounds a
+  first drain phase and then **cancels** the remaining tracked engine tasks before
+  awaiting them, so a stop that outruns the budget cancels store calls as a matter
+  of routine rather than as a pathology. **Nothing decided here changes, and
+  ADR-0083 §4 depends on all of it being exactly as written** — the helper, its
+  keying on the worker's *physical* completion rather than on a task's cancelled
+  state, the precedence of an absorbed cancellation over the worker's outcome, and
+  the per-store duplication. What changes is their standing: this is load-bearing
+  machinery on a live path, and the Consequences clause "If a store ever grows a
+  genuinely unbounded sync op this trade would need revisiting" is now operative
+  rather than hypothetical. The sentences above are left as written (ADR-0001's
+  append-only rule); this note is the correction, not an edit to them. Recorded
+  under ADR-0082 §1, whose test ADR-0083 §15 applies clause by clause, and placed
+  on the `Status` line and in this note per ADR-0082 §2, this line being led by
+  `Accepted` rather than by `Partially superseded by`.
 - **Not a contract change.** This ADR touches no Protocol in
   `core/protocols.py`, no `core` type, and no `Settings` field. It fixes the
   *internals* of three existing durable-store implementations
