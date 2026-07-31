@@ -100,7 +100,7 @@ def _claim(state: ExecutionState, step_id: str = "s1") -> StepTransition:
 
 
 class _CancellationOp(Protocol):
-    """One locked ``PlanStore`` write the ADR-0060 case drives (#370).
+    """One locked ``PlanStore`` operation the ADR-0060 case drives (#370, #397).
 
     Each :attr:`name` selects a distinct ``async with self._lock:
     _run_to_completion(...)`` site; the suite runs the same
@@ -110,6 +110,13 @@ class _CancellationOp(Protocol):
     so the concurrent second succeeds whatever the cancelled first's
     indeterminate effect turns out to be — which matters most for
     ``commit_transition``, whose compare-and-swap would otherwise couple them.
+
+    **Reads are operations too** (#397). ADR-0060 §3 binds any method that acquires
+    the resource, and every locked read here holds the connection lock around its
+    own worker-thread SQL — so a regression replacing one read's
+    ``_run_to_completion`` with a bare ``to_thread`` would hand the connection to a
+    concurrent caller while that read's worker still used it, and every write case
+    would still pass.
     """
 
     name: str
@@ -119,7 +126,7 @@ class _CancellationOp(Protocol):
         ...
 
     def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
-        """The call the case suspends mid-write and then cancels."""
+        """The call the case suspends inside the resource and then cancels."""
         ...
 
     def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
@@ -127,7 +134,7 @@ class _CancellationOp(Protocol):
         ...
 
     async def verify(self, store: PlanStore) -> None:
-        """Assert the resource survived: the second write is whole and reads work."""
+        """Assert the resource survived: the second call is whole and reads work."""
         ...
 
 
@@ -289,8 +296,123 @@ class _ClearOp:
         assert not (await store.export()).goals
 
 
-#: Every locked ``PlanStore`` write ADR-0060's case is run against (#370). Each is
-#: a distinct lock site with its own ``_run_to_completion`` call.
+class _ReadOp:
+    """A locked ``PlanStore`` read, driven against a store seeded the same way (#397).
+
+    The two calls are the *same* read against independent subjects, because what
+    distinguishes a read op is its lock site and both calls have to enter it.
+    Nothing is asserted about the cancelled read's answer — it has none, its task
+    was cancelled — so :meth:`verify` pins the state the second call had to see,
+    re-read once the scenario is over.
+    """
+
+    name = ""
+
+    def __init__(self) -> None:
+        """Hold the executions the read ops below address."""
+        self._state_a: ExecutionState
+        self._state_b: ExecutionState
+
+    async def prepare(self, store: PlanStore) -> None:
+        """Seed two independent goal/plan/execution chains for the reads to answer from."""
+        await store.save_goal(_goal("gA"))
+        await store.save_plan(_plan("pA", "gA"))
+        self._state_a = await store.start_execution("pA")
+        await store.save_goal(_goal("gB"))
+        await store.save_plan(_plan("pB", "gB"))
+        self._state_b = await store.start_execution("pB")
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The read the case suspends inside the resource and then cancels."""
+        raise NotImplementedError
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """The concurrent read barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, store: PlanStore) -> None:
+        """A read cancelled mid-flight leaves the store whole and still readable."""
+        assert await store.get_goal("gA") == _goal("gA")
+        assert await store.get_plan("pB") == _plan("pB", "gB")
+        exported = await store.export()
+        assert {goal.id for goal in exported.goals} == {"gA", "gB"}
+
+
+class _GetGoalOp(_ReadOp):
+    """``get_goal`` — one row by id, under the connection lock."""
+
+    name = "get_goal"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read goal A — the call that is cancelled."""
+        return store.get_goal("gA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read goal B concurrently."""
+        return store.get_goal("gB")
+
+
+class _GetPlanOp(_ReadOp):
+    """``get_plan`` — its own lock site, though it shares a row reader with the others."""
+
+    name = "get_plan"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read plan A — the call that is cancelled."""
+        return store.get_plan("pA")
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read plan B concurrently."""
+        return store.get_plan("pB")
+
+
+class _GetExecutionOp(_ReadOp):
+    """``get_execution`` — the third ``async with self._lock`` around a row read."""
+
+    name = "get_execution"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read execution A — the call that is cancelled."""
+        return store.get_execution(self._state_a.id)
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Read execution B concurrently."""
+        return store.get_execution(self._state_b.id)
+
+
+class _ActiveExecutionsOp(_ReadOp):
+    """``active_executions`` — the outstanding-work scan, its own lock site."""
+
+    name = "active_executions"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Scan for live executions — the call that is cancelled."""
+        return store.active_executions()
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Scan again concurrently."""
+        return store.active_executions()
+
+
+class _ExportOp(_ReadOp):
+    """``export`` — the whole-store read, its own lock site."""
+
+    name = "export"
+
+    def first(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Export everything — the call that is cancelled."""
+        return store.export()
+
+    def second(self, store: PlanStore) -> Coroutine[Any, Any, object]:
+        """Export again concurrently."""
+        return store.export()
+
+
+#: Every locked ``PlanStore`` operation ADR-0060's case is run against: each is a
+#: distinct lock site with its own ``_run_to_completion`` call. The writes came
+#: first (#370); the reads are the same invariant on the other half of the surface
+#: (#397), since ADR-0060 §3 binds any method that acquires the resource rather
+#: than any method that mutates.
 _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _SaveGoalOp,
     _SavePlanOp,
@@ -298,6 +420,11 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _CommitTransitionOp,
     _DeleteGoalOp,
     _ClearOp,
+    _GetGoalOp,
+    _GetPlanOp,
+    _GetExecutionOp,
+    _ActiveExecutionsOp,
+    _ExportOp,
 )
 
 
@@ -1104,7 +1231,7 @@ class PlanStoreContract:
     def store_suspended_mid_write(
         self,
     ) -> AbstractAsyncContextManager[SuspendedMidWrite[PlanStore]]:
-        """Supply a store whose named locked write can be stopped *inside* its resource.
+        """Supply a store whose named locked operation can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
         cancels the call while it is suspended and then watches what a second
@@ -1116,8 +1243,10 @@ class PlanStoreContract:
         The returned :class:`SuspendedMidWrite` carries the store, its
         :class:`ResourceLog`, and an ``arm(operation)`` lever the case calls —
         *after* its preconditions — to hold the next entry into that operation
-        (#370). Every distinct ``async with self._lock`` site is a separate place
-        the same regression can reappear, so the case is run against each; ``arm``
+        (#370, #397). Every distinct ``async with self._lock`` site is a separate
+        place the same regression can reappear — the locked *reads* included, since
+        ADR-0060 §3 binds any method that acquires the resource — so the case is run
+        against each; ``arm``
         is where the implementation says how it stops a given one — a worker
         thread parked mid-SQL, a fake's single modelled resource. Returned as a
         context manager so the subject is disposed of the way that implementation
@@ -1134,19 +1263,25 @@ class PlanStoreContract:
 
     @pytest.mark.optional_obligation
     @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
-    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(
+    async def test_a_cancelled_operation_holds_its_resource_until_the_work_finishes(
         self, make_op: Callable[[], _CancellationOp]
     ) -> None:
-        """``core.protocols``' cancellation clause, on every locked write (ADR-0060, #370).
+        """``core.protocols``' cancellation clause, on every locked operation (ADR-0060).
 
-        A cancelled write must not hand the resource to the next caller while the
+        A cancelled call must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a
         test of the invariant rather than of propagation: a single cancelled call
         in isolation looks identical either way. Run once per locked operation, so
         a regression reintroduced at any one lock site — not just ``save_goal`` —
         is caught.
 
-        The first write's *effect* is deliberately not asserted here (the op's
+        **Named for an operation, not a write.** ADR-0060 §3 binds any method that
+        acquires the resource; the writes were covered first (#370) and the locked
+        reads are the same invariant on the other half of the surface (#397). A read
+        that released the connection under cancellation while its worker still held
+        it is the identical ADR-0054 hazard, and no write case can see it.
+
+        The first call's *effect* is deliberately not asserted here (the op's
         ``verify`` pins only what a caller may rely on). The clause's third
         paragraph makes it indeterminate to the caller — under ADR-0054's shield a
         cancelled write that reached ``COMMIT`` is durably written — so the two
