@@ -394,15 +394,22 @@ class Harness:
         trail: FakeAuditTrail | None = None,
         now: Clock | None = None,
         confirmation_ttl: timedelta | None = None,
+        id_prefix: str = "d",
     ) -> None:
-        """Wire the stage over canonical fakes."""
+        """Wire the stage over canonical fakes.
+
+        ``id_prefix`` lets a *second* harness over a shared trail mint distinct
+        decision ids — the trail refuses a duplicate, so a restarted or
+        reconfigured runner answering a question the first one parked needs its
+        own series.
+        """
         self.plans = plans if plans is not None else FakePlanStore(now=lambda: AT)
         # One object as both registry and invoker, as ADR-0029 §8 requires of
         # the wiring — the same binding selects and acts.
         self.invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools])
         self.policy = policy if policy is not None else FakeActionPolicy()
         self.trail = trail if trail is not None else FakeAuditTrail()
-        self.ids = iter(f"d-{n}" for n in range(1, 100))
+        self.ids = iter(f"{id_prefix}-{n}" for n in range(1, 100))
         ticks = clock()
         self.runner = StepRunner(
             plans=self.plans,
@@ -1228,6 +1235,222 @@ def test_a_non_positive_confirmation_ttl_is_refused_at_construction() -> None:
     for bad in (timedelta(0), timedelta(seconds=-1)):
         with pytest.raises(ValueError, match="confirmation_ttl must be strictly positive"):
             Harness(confirmation_ttl=bad)
+
+
+# --- the deadline is fixed on the record at ask time (ADR-0059 §1) ------
+
+
+async def test_a_configured_lifetime_is_recorded_as_a_deadline_on_the_confirm() -> None:
+    """The record carries the *instant*, computed once at ask time (ADR-0059 §1).
+
+    Not the duration: the deadline is what makes the record self-describing
+    about its own lifetime, which is what the answer-time check and, later, a
+    sweep have to read. The trail's copy is asserted, not just the returned
+    one — a deadline that did not survive the write would be a column of nulls
+    again.
+    """
+    hour = timedelta(hours=1)
+    harness = Harness(tools=(confirmable(),), confirmation_ttl=hour)
+    state = await an_execution(harness.plans, plan_step())
+
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    assert parked.decision is not None
+    assert parked.decision.decided_at == AT
+    assert parked.decision.expires_at == AT + hour
+    stored = await harness.trail.get(FIRST_DECISION)
+    assert stored is not None
+    assert stored.expires_at == AT + hour
+
+
+async def test_no_configured_lifetime_records_a_confirm_with_no_deadline() -> None:
+    """``None`` is "this question does not expire", and it is what is stored."""
+    harness = Harness(tools=(confirmable(),))
+    state = await an_execution(harness.plans, plan_step())
+
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert parked.decision is not None
+    assert parked.decision.expires_at is None
+
+
+async def test_only_a_confirm_carries_a_deadline() -> None:
+    """A lifetime is a property of an open question, and nothing else.
+
+    ``PermissionDecision`` permits ``expires_at`` only on a ``CONFIRM``, so a
+    deadline attached to an outright ``ALLOW`` — or to the ``ALLOW`` that
+    *resolves* a confirmation — would not be a wrong record but an unconstructable
+    one, failing the ask rather than authorising it. Both paths run under a
+    configured lifetime here.
+    """
+    harness = Harness(tools=(tool(),), confirmation_ttl=timedelta(hours=1))
+    state = await an_execution(harness.plans, plan_step())
+
+    allowed = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert allowed.disposition is Disposition.EXECUTED
+    granted = await harness.trail.get(FIRST_DECISION)
+    assert granted is not None
+    assert granted.ruling.outcome is PermissionOutcome.ALLOW
+    assert granted.expires_at is None
+
+    # And the resolving decision, which reaches the same recording path.
+    confirming = Harness(tools=(confirmable(),), confirmation_ttl=timedelta(hours=1))
+    other = await an_execution(confirming.plans, plan_step())
+    parked = await confirming.runner.run(other, STEP, timeout=PATIENT)
+    resumed = await confirming.runner.resume(
+        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+    )
+
+    assert resumed.disposition is Disposition.EXECUTED
+    resolving = await confirming.trail.get("d-2")
+    assert resolving is not None
+    assert resolving.resolves == parked.decision_id
+    assert resolving.expires_at is None
+
+
+async def test_a_confirmation_is_answerable_at_exactly_its_deadline() -> None:
+    """``expires_at`` is the **last** answerable instant (ADR-0059 §1's ``>``).
+
+    The boundary is specified rather than incidental: a fast confirmation under
+    a coarse clock is real, and refusing at equality would lose it.
+    """
+    hour = timedelta(hours=1)
+    ticks = advancing_clock(first=AT, then=AT + hour)
+    harness = Harness(tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=hour)
+    state = await an_execution(harness.plans, plan_step())
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    result = await harness.runner.resume(
+        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+
+
+async def test_a_confirmation_is_refused_one_tick_past_its_deadline() -> None:
+    """And strictly after it, the question is gone — one microsecond is enough."""
+    hour = timedelta(hours=1)
+    ticks = advancing_clock(first=AT, then=AT + hour + timedelta(microseconds=1))
+    harness = Harness(tools=(confirmable(),), now=lambda: next(ticks), confirmation_ttl=hour)
+    state = await an_execution(harness.plans, plan_step())
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    with pytest.raises(PermissionDeniedError, match="the question has expired"):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    assert harness.policy.resolutions == []
+    stored = await stored_step(harness.plans, state)
+    assert stored.status is StepStatus.AWAITING_APPROVAL
+
+
+async def test_the_recorded_deadline_governs_after_the_lifetime_is_reconfigured() -> None:
+    """A question is answered under the lifetime it was *asked* under.
+
+    The second runner is the restart: a new ``StepRunner`` over the same trail,
+    holding a different ``confirmation_ttl``. Neither a longer one nor no
+    lifetime at all revives the question, because nothing recomputes — the
+    deadline is read off the record (ADR-0059 §1, the restart half of #277).
+    """
+    hour = timedelta(hours=1)
+    asked = Harness(tools=(confirmable(),), confirmation_ttl=hour)
+    state = await an_execution(asked.plans, plan_step())
+    parked = await asked.runner.run(state, STEP, timeout=PATIENT)
+    assert parked.decision is not None
+    assert parked.decision.expires_at == AT + hour
+
+    for prefix, reconfigured in (("e", timedelta(days=30)), ("f", None)):
+        answering = Harness(
+            tools=(confirmable(),),
+            plans=asked.plans,
+            trail=asked.trail,
+            now=lambda: AT + timedelta(hours=2),
+            confirmation_ttl=reconfigured,
+            id_prefix=prefix,
+        )
+
+        with pytest.raises(PermissionDeniedError, match="the question has expired"):
+            await answering.runner.resume(
+                parked.state,
+                STEP,
+                confirmation_id=str(parked.decision_id),
+                approved=True,
+                timeout=PATIENT,
+            )
+
+        assert answering.policy.resolutions == []
+
+
+async def test_a_record_with_no_deadline_does_not_expire_under_a_live_lifetime() -> None:
+    """The migration rule: a null deadline reads as "no lifetime", uniformly.
+
+    A confirmation parked before ADR-0059 carries ``expires_at = NULL``, and so
+    does one parked by a deployment that configured no lifetime — the record
+    cannot tell them apart, which is exactly why there is **no** answer-time
+    recompute against the live ``confirmation_ttl``. Applying the live setting
+    here would make ``None`` mean two contradictory things at once; ADR-0059
+    §Consequences takes the bounded upgrade-window loss instead, in the safe
+    direction (a genuine approval honoured late, never an action without one).
+    """
+    asked = Harness(tools=(confirmable(),))
+    state = await an_execution(asked.plans, plan_step())
+    parked = await asked.runner.run(state, STEP, timeout=PATIENT)
+    assert parked.decision is not None
+    assert parked.decision.expires_at is None
+
+    # The deployment configures a lifetime afterwards, and a year goes by.
+    answering = Harness(
+        tools=(confirmable(),),
+        plans=asked.plans,
+        trail=asked.trail,
+        now=lambda: AT + timedelta(days=365),
+        confirmation_ttl=timedelta(hours=1),
+        id_prefix="e",
+    )
+
+    result = await answering.runner.resume(
+        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+    )
+
+    assert result.disposition is Disposition.EXECUTED
+
+
+async def test_an_unrepresentable_deadline_is_recorded_as_no_lifetime() -> None:
+    """``decided_at + ttl`` past ``datetime.max`` records ``None``, and does not raise.
+
+    Both operands reach the edge: the ADR-0026 clock admits a reading within a
+    day of ``datetime.max``. ADR-0059 §1 fixes one outcome for the resulting
+    ``OverflowError`` — treat it as "no lifetime" — rather than letting a bare
+    arithmetic error escape as neither an ``AssistantError`` nor a specified
+    refusal, and rather than losing a legitimate confirmation to a deadline that
+    is, for every practical purpose, no deadline at all.
+    """
+    latest = datetime.max.replace(tzinfo=UTC) - timedelta(days=1)
+    harness = Harness(
+        tools=(confirmable(),), now=lambda: latest, confirmation_ttl=timedelta(days=2)
+    )
+    state = await an_execution(harness.plans, plan_step())
+
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    assert parked.decision is not None
+    assert parked.decision.decided_at == latest
+    assert parked.decision.expires_at is None
+
+    # And it is answerable, which is what "no lifetime" has to mean.
+    result = await harness.runner.resume(
+        parked.state, STEP, confirmation_id=str(parked.decision_id), approved=True, timeout=PATIENT
+    )
+
+    assert result.disposition is Disposition.EXECUTED
 
 
 # --- the step comes from the plan (ADR-0037 §2) --------------------------
