@@ -661,8 +661,37 @@ Protocol's location; it is not a free decision made alongside it.
 
 **What promotes:** the result types the promoted surface returns —
 `TurnOutcome`, `StepOutcome`, `Confirmation`, `ContinuationToken`, `Belief`,
-`Question` and the remaining outcome types the public methods return, **bounded by
-one rule: everything the Protocol's methods name.**
+`Question` and the remaining outcome types the public methods return — **bounded
+by one rule: the *transitive closure* of what the Protocol's methods name, not
+just the types they return.**
+
+**The transitive half is load-bearing, and naming only the returned types would
+have been a golden-rule-2 violation waiting to happen.** A promoted DTO drags
+every type its fields reach, and three of those live in `orchestration` today:
+
+- `StepOutcome.disposition` is `Disposition` (`orchestration/runner.py:203`);
+- `QueuedQuestion.question_state` is `QuestionState`
+  (`engine.py:351`, `orchestration/questions.py:92`);
+- `SuccessorLink` (`orchestration/questions.py:171`) is reached the same way and
+  its own `state` field is that same enum.
+
+Promote `StepOutcome` to `core/types.py` while `Disposition` stays where it is
+and `core` imports `orchestration` — which golden rule 2 forbids outright and
+`lint-imports` fails mechanically. So the closure comes too, and **the surface
+ADR (§5, step 2) owns the complete graph explicitly** rather than discovering it
+mid-implementation.
+
+**Relocating an enum is not redefining it.** `Disposition` keeps its five members
+and everything ADR-0037 ratified about them; §8's refusal to add a `FAILED`
+member is unaffected by the move, and the same holds for `QuestionState`. What
+changes is which module declares them.
+
+**The alternative — mapping these values to primitives at the Protocol boundary —
+is rejected**, and for §4's own reason. Encoding `Disposition` as a bare string
+the client re-parses would put a second vocabulary on the wire, to be kept in step
+with the first by hand, which is exactly the invisible drift that made the
+separate wire schema the wrong answer below. A value worth returning is worth
+returning as itself.
 
 **The exact set, the field layouts and the method signatures are ratified by a
 follow-on contract ADR — not chosen by the implementing lane.** That distinction
@@ -808,8 +837,9 @@ implements against it (golden rule 5, ADR-0015 §5). The sequencing is therefore
 1. **this ADR** — that the façade is promoted, what promotes, where it lives,
    and the boundary rules the surface must satisfy;
 2. **the surface ADR** (#281's scope) — the method signatures, the promoted DTO
-   set and their normative fields, including §8's step-identity field. `Proposed`,
-   reviewed as contract surface, ratified before the triad;
+   set and their normative fields, **the complete transitive type graph those
+   fields reach** (§4), and §8's step-identity field. `Proposed`, reviewed as
+   contract surface, ratified before the triad;
 3. **the triad** (`core/protocols.py`, `core/types.py`, conformance suite,
    canonical fake);
 4. **the hub, the `wire` package, the client, and the `lint-imports` edits** (§6).
