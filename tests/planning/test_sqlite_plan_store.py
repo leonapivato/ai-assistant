@@ -67,6 +67,28 @@ async def _park(store: SqlitePlanStore) -> str:
     return state.id
 
 
+#: The private method each locked operation does its SQL in, which ADR-0060's hook
+#: wraps to park a worker thread inside the connection's turn. Spelled out rather
+#: than derived from the operation name, because the three by-id reads share one
+#: row reader: ``_read_one`` is named for what it does, not for the three contract
+#: methods that each take the lock around it. Wrapping the shared helper still
+#: exercises each of those three sites separately, because the case arms
+#: immediately before the site under test calls it.
+_SYNC_METHODS = {
+    "save_goal": "_save_goal_sync",
+    "save_plan": "_save_plan_sync",
+    "start_execution": "_start_execution_sync",
+    "commit_transition": "_commit_transition_sync",
+    "delete_goal": "_delete_goal_sync",
+    "clear": "_clear_sync",
+    "get_goal": "_read_one",
+    "get_plan": "_read_one",
+    "get_execution": "_read_one",
+    "active_executions": "_active_executions_sync",
+    "export": "_export_sync",
+}
+
+
 class TestSqlitePlanStoreContract(PlanStoreContract):
     """Runs SqlitePlanStore through the shared PlanStore conformance suite."""
 
@@ -82,16 +104,15 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
     async def store_suspended_mid_write(
         self,
     ) -> AsyncIterator[SuspendedMidWrite[PlanStore]]:
-        """Park a named write's worker thread inside the connection's turn.
+        """Park a named operation's worker thread inside the connection's turn.
 
-        ``arm(operation)`` wraps that operation's ``_<operation>_sync`` — inside
-        ``async with self._lock`` and inside the ``to_thread`` the event loop
-        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
-        first worker to reach it blocks and every later one runs free. Each
-        distinct lock site is a separate place the bug can reappear (#370), and
-        the sync-method suffix matches the operation name (``save_goal`` →
-        ``_save_goal_sync``, ``commit_transition`` → ``_commit_transition_sync``,
-        and so on). Blocking there is what makes the case deterministic: left to
+        ``arm(operation)`` wraps the private method that operation does its SQL in
+        (:data:`_SYNC_METHODS`) — inside ``async with self._lock`` and inside the
+        ``to_thread`` the event loop cannot interrupt, which is exactly where
+        ADR-0054's bug lived — so the first worker to reach it blocks and every
+        later one runs free. Each distinct lock site is a separate place the bug can
+        reappear, the locked *reads* included (#370, #397). Blocking there is what
+        makes the case deterministic: left to
         run, a commit finishes in microseconds and whether the second caller
         arrives while the worker still holds the connection would be a race, so
         the invariant would be exercised only sometimes.
@@ -105,7 +126,8 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
         suspension = ThreadSuspension()
 
         def arm(operation: str) -> SuspendedCall:
-            original = getattr(realised, f"_{operation}_sync")
+            attribute = _SYNC_METHODS[operation]
+            original = getattr(realised, attribute)
             armed = threading.Event()
 
             def blocking(*args: object) -> object:
@@ -115,7 +137,7 @@ class TestSqlitePlanStoreContract(PlanStoreContract):
                         suspension.hold()
                     return original(*args)
 
-            setattr(realised, f"_{operation}_sync", blocking)
+            setattr(realised, attribute, blocking)
             return suspension
 
         try:
