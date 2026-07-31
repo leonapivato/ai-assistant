@@ -179,8 +179,13 @@ there it would re-derive what the socket mode already guarantees. Here it is the
 opposite direction, and only one of the two is redundant.
 
 **The socket path is length-checked at the same point, and an overlong one is
-also a `78`.** A pathname `AF_UNIX` socket is bounded by `sun_path` — 108 bytes
-on Linux, terminator included — while `data_dir` is operator-configurable through
+also a `78`.** A pathname `AF_UNIX` socket is bounded by `sun_path`, and **the
+figure is platform-specific: 108 bytes on Linux, 104 on macOS and the BSDs,
+terminator included in both.** The check uses **the running platform's own
+limit** rather than a constant — hardcoding 108 would let a 104-byte path pass
+validation on macOS and then fail at `bind()`, which is precisely the late,
+opaque failure this rule exists to prevent, reintroduced by the check itself.
+Meanwhile `data_dir` is operator-configurable through
 `ASSISTANT_DATA_DIR` (ADR-0083 §2, and see the note on its spelling in §9). So a
 perfectly writable, perfectly valid data directory can have a path no socket can
 be bound inside. Left unchecked that failure lands at ADR-0083 §3's **step 6**,
