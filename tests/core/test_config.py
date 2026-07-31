@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, get_args
 
 import numpy
 import pytest
@@ -910,3 +910,249 @@ def test_every_integer_setting_still_parses_from_the_environment(
     default = Settings.model_fields[name].default
     monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(default))
     assert getattr(load_settings(), name) == default
+
+
+# --- a flag is not a measurement or a duration: the float and timedelta half (#500) ---
+#
+# The sibling of the integer block above, split from it in #471/#499 because a
+# duration is not a count and needed its own reasoning. Discovered from the model
+# for the same reason, and through a helper rather than `field.annotation is ...`
+# because three of the four duration settings are nullable, so their annotation is
+# `timedelta | None` rather than `timedelta`.
+
+
+def _admitted_types(annotation: object) -> frozenset[object]:
+    """The non-``None`` types a field's annotation admits.
+
+    ``float`` for a real-valued setting; ``timedelta`` for a duration whether or
+    not it spells ``None``. A field carrying a ``BeforeValidator`` reports the same
+    annotation as one without — pydantic files the validator under ``metadata`` —
+    so an unguarded new field is discovered here and fails the tests below rather
+    than slipping past them.
+    """
+    args = get_args(annotation)
+    if not args:
+        return frozenset({annotation})
+    return frozenset(args) - {type(None)}
+
+
+_REAL_FIELDS: Final = tuple(
+    name
+    for name, field in Settings.model_fields.items()
+    if _admitted_types(field.annotation) == frozenset({float})
+)
+
+_DURATION_FIELDS: Final = tuple(
+    name
+    for name, field in Settings.model_fields.items()
+    if _admitted_types(field.annotation) == frozenset({timedelta})
+)
+
+#: Values that are neither a real number nor a duration but that pydantic's lax
+#: mode coerces into a plausible one anyway. ``numpy.bool_`` is the case the
+#: allowlist exists for: a flag that is not a ``bool`` subclass — so a denylist
+#: named after ``bool`` would miss it — from a direct dependency (ADR-0024's
+#: embedder). The rest are numerics that convert without being the type asked for.
+_CONVERTIBLE_NON_NUMBERS: Final = (
+    numpy.bool_(True),
+    numpy.bool_(False),
+    Decimal(1),
+    numpy.int64(1),
+)
+
+
+def test_every_real_setting_is_discovered() -> None:
+    """Pin the discovery, so the parametrised tests below cannot pass vacuously.
+
+    A helper that quietly returned nothing would turn every ``parametrize`` over
+    it into zero cases and a green run. It is also the tripwire: a new ``float``
+    setting fails here until it is acknowledged, which is the moment to give it
+    ``_RealSetting`` too.
+    """
+    assert set(_REAL_FIELDS) == {
+        "model_timeout_seconds",
+        "model_backoff_base_seconds",
+        "model_backoff_max_seconds",
+    }
+
+
+def test_every_duration_setting_is_discovered() -> None:
+    """The same tripwire for the durations, nullable and not alike."""
+    assert set(_DURATION_FIELDS) == {
+        "confirmation_ttl",
+        "episode_retention",
+        "conversation_tombstone_grace",
+        "deferral_ttl",
+    }
+
+
+@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize("value", [True, False])
+def test_every_real_setting_refuses_a_bool(name: str, value: bool) -> None:
+    """``Settings(model_timeout_seconds=True)`` is a mistake, not a one-second deadline.
+
+    ``bool`` is an ``int`` subclass and an integer converts to a float, so lax mode
+    reads ``True`` as ``1.0`` — which clears ``gt=0`` and ``allow_inf_nan=False``
+    alike, so the flag loads as a plausible deadline and nothing downstream can
+    tell. ``RetryPolicy.__post_init__`` already refuses it for exactly these three
+    knobs ("a boolean timeout is a mistake worth naming rather than coercing to
+    1.0"), but is handed an already-coerced float by ``RetryPolicy.from_settings``,
+    so on the settings path that exclusion can never fire (#500).
+
+    The message is asserted rather than the bare refusal, for the reason the
+    integer block gives: ``False`` lands on ``0.0``, which ``gt=0`` would reject
+    anyway, so a test that only asserted "raises" would pass for the wrong reason
+    on half its cases and prove nothing about ``True``.
+    """
+    with pytest.raises(ValidationError, match="a flag is not a measurement"):
+        _settings_with(name, value)
+
+
+@pytest.mark.parametrize("name", _DURATION_FIELDS)
+@pytest.mark.parametrize("value", [True, False])
+def test_every_duration_setting_refuses_a_bool(name: str, value: bool) -> None:
+    """``Settings(conversation_tombstone_grace=True)`` is a mistake, not one second.
+
+    Lax mode reads a bare number as *seconds*, and ``True`` is a number by
+    inheritance, so the flag arrives as a one-second horizon — past the
+    ``gt=timedelta(0)`` every one of these fields carries, exactly as ``1``
+    cleared every integer bound in #471.
+
+    The message is asserted for the same reason as above: ``False`` becomes
+    ``timedelta(0)``, which the positive bound rejects on its own.
+    """
+    with pytest.raises(ValidationError, match="a flag is not a duration"):
+        _settings_with(name, value)
+
+
+@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize("value", _CONVERTIBLE_NON_NUMBERS)
+def test_every_real_setting_refuses_a_convertible_non_number(name: str, value: object) -> None:
+    """Only a float, an exact int, or a str is a real-valued setting.
+
+    The companion to the ``bool`` case, and the reason the guard names what it
+    accepts rather than what it refuses: ``bool`` is not the only type pydantic
+    would turn into a plausible ``1.0``, so a denylist would have to grow a case
+    for every foreign scalar and would be wrong until it did.
+    """
+    with pytest.raises(ValidationError, match="expected a real number"):
+        _settings_with(name, value)
+
+
+@pytest.mark.parametrize("name", _DURATION_FIELDS)
+@pytest.mark.parametrize("value", _CONVERTIBLE_NON_NUMBERS)
+def test_every_duration_setting_refuses_a_convertible_non_duration(
+    name: str, value: object
+) -> None:
+    """The same allowlist on the duration axis: ``numpy.bool_`` also reads as one second."""
+    with pytest.raises(ValidationError, match="expected a duration"):
+        _settings_with(name, value)
+
+
+@pytest.mark.parametrize("name", _REAL_FIELDS)
+@pytest.mark.parametrize(("value", "expected"), [(2.5, 2.5), (2, 2.0), ("2.5", 2.5)])
+def test_every_real_setting_still_accepts_the_forms_it_is_written_in(
+    name: str, value: object, expected: float
+) -> None:
+    """The refusal narrows nothing legitimate.
+
+    A ``float`` is the obvious one; an **exact** ``int`` is accepted because a whole
+    number of seconds is how a caller writes one and ``RetryPolicy`` accepts one
+    itself (``isinstance(value, (int, float))``) — refusing it would make
+    configuration stricter than the layer it configures; a ``str`` is what the
+    environment supplies. ``2.5`` and ``2`` are inside every one of these fields'
+    bounds *and* inside the backoff window the model validator cross-checks, so a
+    refusal here would be about the guard rather than about the value.
+    """
+    assert getattr(_settings_with(name, value), name) == expected
+
+
+@pytest.mark.parametrize("name", _DURATION_FIELDS)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (timedelta(hours=1), timedelta(hours=1)),
+        # A bare number of seconds: a form pydantic has always accepted from a
+        # direct caller, kept working deliberately. The guard refuses the *flag*
+        # by requiring an exact `int`/`float`, not by refusing numbers — a
+        # refusal of "anything that is not a timedelta" would have closed one
+        # defect by breaking two legitimate inputs (#500). The value each number
+        # lands on is asserted, not merely that it is accepted: seconds is
+        # pydantic's reading of a bare number, and it is the reading this keeps.
+        (3600, timedelta(hours=1)),
+        (3600.5, timedelta(seconds=3600, microseconds=500_000)),
+        # The operator's own spellings, ISO-8601 and `HH:MM:SS`.
+        ("PT1H", timedelta(hours=1)),
+        ("01:00:00", timedelta(hours=1)),
+    ],
+)
+def test_every_duration_setting_still_accepts_the_forms_it_is_written_in(
+    name: str, value: object, expected: timedelta
+) -> None:
+    """A duration setting still takes a timedelta, a number of seconds, or a string."""
+    assert getattr(_settings_with(name, value), name) == expected
+
+
+@pytest.mark.parametrize("name", _REAL_FIELDS)
+def test_every_real_setting_still_parses_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The operator-facing path is untouched, and this is what keeps it so.
+
+    #500 is reachable only from untyped code constructing ``Settings`` directly —
+    ``ASSISTANT_MODEL_TIMEOUT_SECONDS=True`` already fails float parsing at load.
+    So the guard accepts a ``str``: an environment variable and a ``.env`` entry
+    both arrive as one, and a guard that demanded a ``float`` and nothing else
+    would break every real-valued setting in every deployment while fixing a seam
+    no deployment can reach.
+    """
+    default = Settings.model_fields[name].default
+    assert type(default) is float
+    monkeypatch.setenv(f"ASSISTANT_{name.upper()}", str(default))
+    assert getattr(load_settings(), name) == default
+
+
+@pytest.mark.parametrize("name", _DURATION_FIELDS)
+def test_every_duration_setting_still_parses_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The same for the durations, spelled as ISO-8601 the way each field documents.
+
+    Not the field's own default, which is ``None`` for ``confirmation_ttl`` and has
+    no environment spelling other than the sentinel: one literal that every one of
+    the four accepts proves the string path just as well.
+    """
+    monkeypatch.setenv(f"ASSISTANT_{name.upper()}", "PT1H")
+    assert getattr(load_settings(), name) == timedelta(hours=1)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("model_timeout_seconds", "expected a real number"),
+        ("confirmation_ttl", "expected a duration"),
+    ],
+)
+def test_an_undescribable_value_is_still_a_validation_error(name: str, expected: str) -> None:
+    """The diagnostic must not be able to destroy the diagnosis.
+
+    The integer guard learned this the hard way (#499, round 2): a refusal that
+    builds its message with ``{value!r}`` is reached by *arbitrary* objects, and a
+    ``__repr__`` that raises replaces the ``ValueError`` pydantic converts into a
+    ``ValidationError`` with whatever it threw — escaping the seam
+    ``load_settings`` promises to report as a ``ConfigurationError``. Both new
+    guards use ``describe_untrusted`` (``core.types``) for the same reason, and
+    this is the test that they actually do.
+
+    One field per guard, not all seven: the message is built once in a
+    field-independent helper, and the parametrised cases above already prove every
+    field reaches it.
+    """
+
+    class Unprintable:
+        def __repr__(self) -> str:
+            msg = "this value refuses to describe itself"
+            raise RuntimeError(msg)
+
+    with pytest.raises(ValidationError, match=expected):
+        _settings_with(name, Unprintable())
