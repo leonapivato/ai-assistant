@@ -1,6 +1,6 @@
 # 83. The hub is a resident process: lifecycle, exclusivity, and an internal scheduler
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-31
 - **This is the first of leg 5's two decisions.** It decides the *process*: how
   one instance is enforced, how it starts, how it stops, what its exit codes
