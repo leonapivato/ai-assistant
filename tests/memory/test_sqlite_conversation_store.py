@@ -42,16 +42,26 @@ if TYPE_CHECKING:
 _TAIL_DEFAULT = 20
 _PURGE_DEFAULT = 100
 
-#: The private method each locked mutation does its SQL in, which ADR-0060's hook
+#: The private method each locked operation does its SQL in, which ADR-0060's hook
 #: wraps to park a worker thread inside the connection's turn. Spelled out rather
-#: than derived, because ``start``'s is ``_insert_sync`` — the method is named for
-#: what it writes, not for the contract method that calls it.
+#: than derived, because two of them are named for what they touch rather than for
+#: the contract method that calls them (``start`` → ``_insert_sync``,
+#: ``stamped_conversation_ids`` → ``_stamped_ids_sync``). The reads are here for the
+#: reason the mutations are: each is its own ``async with self._lock`` site (#492).
 _SYNC_METHODS = {
     "start": "_insert_sync",
     "mark_active": "_mark_active_sync",
     "append": "_append_sync",
     "stamp_deleted": "_stamp_deleted_sync",
     "drop_if_eligible": "_drop_if_eligible_sync",
+    "get": "_get_sync",
+    "turns": "_turns_sync",
+    "episodes_to_purge": "_episodes_to_purge_sync",
+    "stamped_conversation_ids": "_stamped_ids_sync",
+    "recent": "_recent_sync",
+    "turn_of_episode": "_turn_of_episode_sync",
+    "turn_of_binding": "_turn_of_binding_sync",
+    "export": "_export_sync",
 }
 
 _NOW = datetime(2026, 6, 1, tzinfo=UTC)
@@ -233,12 +243,14 @@ class TestSqliteConversationStoreContract(ConversationStoreContract):
     async def store_suspended_mid_write(
         self,
     ) -> AsyncIterator[SuspendedMidWrite[ConversationStore]]:
-        """Park a named mutation's worker thread inside the connection's turn.
+        """Park a named operation's worker thread inside the connection's turn.
 
-        ``arm(operation)`` wraps that operation's ``_..._sync`` — inside
-        ``async with self._lock`` and inside the worker thread the event loop
-        cannot interrupt, which is exactly where ADR-0054's bug lived — so the
-        first worker to reach it blocks and every later one runs free. Blocking
+        ``arm(operation)`` wraps that operation's ``_..._sync`` (:data:`_SYNC_METHODS`)
+        — inside ``async with self._lock`` and inside the worker thread the event
+        loop cannot interrupt, which is exactly where ADR-0054's bug lived — so the
+        first worker to reach it blocks and every later one runs free. Every lock
+        site is its own place the bug can reappear, the locked reads included
+        (#492). Blocking
         there is what makes the case deterministic: left to run, the transaction
         finishes in microseconds and whether the second caller arrives while the
         worker still holds the connection would be a race, so the invariant would
