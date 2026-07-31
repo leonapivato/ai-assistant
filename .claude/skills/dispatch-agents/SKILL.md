@@ -209,8 +209,7 @@ floor invalidates its artifact **outright**, with no patch-identity relief. So:
   still invalidate the second one's artifact when it rebases: its context moved,
   so its identity moved. Clearing the floor buys nothing there. §3's overlap check
   is what establishes the second half, and it is worth running at *slice* time and
-  not only before merging — with `--name-status -M`, since `--name-only` reports
-  only a rename's destination (ADR-0027 §3).
+  not only before merging.
 - **A lane holding a floor path is the expensive merge, so put it last**, when
   nothing else is open to rebase across it. Merging it first taxes every other
   lane in the wave a full round each.
