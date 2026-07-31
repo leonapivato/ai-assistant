@@ -253,6 +253,26 @@ promise to correctly interpret *several* versions, and nothing in this repositor
 would ever test the old ones — a compatibility surface that is asserted and never
 exercised is worse than a refusal, because it fails silently and later.
 
+**The connect exchange is version-invariant, and that is what makes the refusal
+above reachable at all.** Refusing with a message naming both versions is only
+possible if a v1 hub can decode a v2 client's connect frame far enough to *read*
+its version — and nothing guarantees that if a later version is free to change
+the bootstrap. Left unstated, a half-upgraded deployment would fall into the
+undecodable-frame close specified below, and the operator would see a connection
+that dropped instead of the message this section promises: the failure the
+section exists to prevent, arriving through the mechanism meant to prevent it. So
+one rule is frozen:
+
+> **The length prefix, the UTF-8 JSON codec, and the connect frame's version
+> member keep their representation in every protocol version, permanently.** A
+> later version may add members to the connect exchange, and may change anything
+> it likes after the handshake; it may not change how a connect frame is framed,
+> how it is decoded, or where its version is read from.
+
+That costs nothing today and cannot be added later — the same test §2's
+credential slot and this section's version already passed, applied to the one
+frame that has to survive a version disagreement in order to report one.
+
 **The version exists from day one anyway, and that is the retrofit this ADR is
 buying off.** A remote spoke is a deployment where the two halves genuinely can
 differ, and the day that arrives the negotiation becomes a change to *what the
