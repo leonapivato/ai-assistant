@@ -399,7 +399,15 @@ also fixes:
 - the reader **never allocates the declared length up front**; it reads
   incrementally against the cap;
 - a connect or a frame that stalls part-way is abandoned on a **read deadline**,
-  so a peer that stops sending cannot hold a connection open indefinitely;
+  so a peer that stops sending mid-frame cannot hold a connection open
+  indefinitely;
+- the same deadline runs while **waiting for the next frame's prefix**, not only
+  mid-frame, so a peer that completes the handshake and then sends nothing is
+  closed rather than holding a slot against the connection ceiling. Closing an
+  idle connection is safe here for a specific reason: the client is stateless
+  (§7), so it holds no server-side session to lose and reconnecting costs it
+  nothing — which is why an idle timeout is a resource rule rather than a
+  behaviour change;
 - a **ceiling on concurrent connections**, and a separate, lower ceiling on
   connections that have not yet completed the handshake — both configuration with
   named defaults. Beyond a ceiling the listener **refuses rather than queueing
