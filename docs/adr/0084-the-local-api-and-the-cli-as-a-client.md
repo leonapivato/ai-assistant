@@ -17,13 +17,16 @@
   client** (golden rule 5, ADR-0015 §5, `CONTRIBUTING.md` → "Adding a
   Protocol"). This ADR ratifies the decision; it does not write the triad.
 - **No implementation lands with it.** No `src/`, no `tests/`.
-- **An amendment record is owed on ADR-0042 and is not written here.** §12
-  applies ADR-0082 §1's test and finds that clauses of ADR-0042 §1, §2 and §7
-  fail it. Writing that record touches a file outside this change's fence, so
-  the analysis is here and the record is flagged for the change that may carry
-  it. ADR-0083 §14 anticipated exactly this: "One thing ADR-0084's lane inherits
-  as work, not as a constraint… That lane owes ADR-0082 §1's test against
-  ADR-0042, and this ADR does not pre-judge it."
+- **This ADR partially supersedes ADR-0042, and the record lands in this
+  change.** §12 applies ADR-0070 §1's test clause by clause and finds ADR-0042
+  §1's refusal of an engine-facing Protocol and of a `core` result type, and §2's
+  and §7's rule that an adapter obtains its engine by calling `build_engine`,
+  **contradicted** rather than merely joined by a new obligation. ADR-0042's
+  `Status` line and its appended dated note are the whole of the record (ADR-0070
+  §1, ADR-0082 §2); no ratified text of ADR-0042 is rewritten. ADR-0083 §14
+  anticipated this exactly: "One thing ADR-0084's lane inherits as work, not as a
+  constraint… That lane owes ADR-0082 §1's test against ADR-0042, and this ADR
+  does not pre-judge it."
 
 ## Context
 
@@ -977,9 +980,9 @@ holds?
 - **#281's subject matter.** Not an ADR; §4 and §5 discharge it rather than amend
   it.
 
-**A record *is* owed on ADR-0042, and this change does not write it.**
+**ADR-0042 is partially superseded, and this change writes the record.**
 
-Three clauses fail the test, and the first two fail it flatly:
+Four clauses fail the test, and the first two fail it flatly:
 
 - **§1: "We will not add an engine-facing Protocol to `core/protocols.py`, and we
   will not add a new `core/types.py` type."** §5 adds the Protocol and §4 adds the
@@ -995,42 +998,50 @@ Three clauses fail the test, and the first two fail it flatly:
   receive one — the transport does. The clause is read more narrowly than it
   states, which is the second limb of the test.
 
-**§7's "obtains the façade from the composition root" is the same fact as §2's**
-and is named as part of one record, not a second.
+- **§7: "obtains the façade from the composition root"**, and "closing the façade
+  on exit". This is §2's fact restated at the adapter level, and it is ruled on
+  here rather than folded silently into §2 — a reader consulting §7 alone is
+  misled by both phrases. A client obtains a client, and it does not close a
+  façade that outlives its command inside the hub. **The rest of §7 survives, and
+  the record says so**: "The first adapter is the **CLI**" stays true, relaying
+  consent via `resume` stays true, and §7's refusal to make the adapter
+  responsible for subsystem construction is strengthened, not weakened, by
+  exclusivity.
 
-**The instrument is genuinely arguable, and this ADR states the argument rather
-than settling it unilaterally**, because the two governing precedents point in
-opposite directions:
+**The instrument is partial supersession, not an amendment**, and one precedent
+that appears to point the other way is addressed rather than ignored:
 
-- **For a partial supersession.** ADR-0070 §1 is categorical: "An ADR may be
-  amended in place only when the amendment changes no decision… **Any change to
-  what was decided requires a new ADR that supersedes the old one** — wholly, or
-  partially." "We will not add an engine-facing Protocol" is a decision, and it is
-  being reversed.
-- **For a stacked addition with a dated note.** ADR-0042 §1 contains its **own
-  revisit trigger** naming this exact condition and instructing exactly this
-  outcome ("a remote engine… promoted to a Protocol *then*, contract-first"). On
-  ADR-0083 §15's rule — "a deferral discharged by the ADR it named is a stacked
-  addition… the deferring sentence stays true and now has an answer" — carrying
-  out an instruction the earlier ADR wrote is not acting against it. A reader
-  holding only ADR-0042 and told a remote engine exists would reach §5's
-  conclusion unaided.
+- **ADR-0070 §1 is categorical.** "An ADR may be amended in place only when the
+  amendment changes no decision… **Any change to what was decided requires a new
+  ADR that supersedes the old one** — wholly, or partially." "We will not add an
+  engine-facing Protocol" is a decision, and it is reversed.
+- **ADR-0083 §15's stacked-addition carve-out does not reach it, on its own
+  stated test.** That rule holds where "the deferring sentence **stays true** and
+  now has an answer" — as ADR-0007 §2's "a future scheduler" and ADR-0074 §8's
+  "later by the hub's scheduler" both do, neither becoming false. ADR-0042 §1's
+  sentence does not stay true; it is contradicted. A clause saying "we will not
+  do X" is not discharged by a later ADR doing X, it is superseded by it.
+- **The revisit trigger licenses the change without changing its instrument.**
+  §1's "If a second engine implementation is ever genuinely needed… the façade is
+  promoted" says *when* to revisit; it does not pre-authorise the reversal or make
+  it non-decisional. ADR-0070 §1 carries ADR-0001's rule verbatim — "to change a
+  past decision, write a new ADR that supersedes the old one and update the old
+  one's status". **A foreseen change is still a change.**
 
-**The recommendation is a record on ADR-0042 naming §1 and §2**, on the reasoning
-that ADR-0082 §1's test is applied to the *text* and two ratified sentences become
-flatly false — a revisit trigger licenses the change and makes it legitimate, but
-it does not keep the superseded sentences true, and a reader who never reaches the
-trigger paragraph is the reader the test is about. Whether that record takes the
-amendment form or the partial-supersession form determines whether ADR-0042's
-`Status` line acquires a leading token, which under ADR-0082 §2 also decides
-whether the record sits on the line or in the dated note alone.
+**So ADR-0042's `Status` takes the leading `Partially superseded by` token**, with
+the appended dated note ADR-0070 §1 requires in every case. Under ADR-0082 §2 a
+leading-token line carries no amendment qualifier beside it — and there is none to
+move, ADR-0042's line having been plain `Accepted`. The record is **append-only**:
+the superseded sentences are left standing exactly as written, and the note records
+that they became false, which clause of this ADR did it, and that §1's own revisit
+trigger is what made the outcome legitimate. Rewriting them would be the failure
+ADR-0001's append-only rule exists to prevent — a ratified text quietly reshaped to
+match a later decision, with no trace it ever said otherwise.
 
-**Why it is not written here.** The record edits `docs/adr/0042-*.md`, outside
-this change's fence. ADR-0083 §15 argues a record should land in the change that
-makes the judgement, and that argument applies; the fence, not the reasoning, is
-what defers it. The judgement itself is above, which is the half ADR-0082 §1 calls
-operative — "the judgement is made in the later ADR's text, which is where it is
-reviewed."
+**It lands in this change**, so ADR-0042's `Status` never names an ADR that does
+not exist; and while this one is `Proposed` the line names a supersession that is
+drafted rather than ratified, the form ADR-0075 established and ADR-0083 §15
+re-argued at length. If this change does not land, neither does the record.
 
 ## Consequences
 
