@@ -222,7 +222,7 @@ _TORN_ATOMIC = "the atomic batch committed some rows and not others"
 
 
 class _CancellationOp(Protocol):
-    """One locked ``MemoryStore`` write the ADR-0060 case drives (#370).
+    """One locked ``MemoryStore`` operation the ADR-0060 case drives (#370, #397).
 
     Each :attr:`name` selects a distinct ``async with self._lock:
     _run_to_completion(...)`` site; the suite runs the same
@@ -231,6 +231,13 @@ class _CancellationOp(Protocol):
     ``add``. :meth:`first` and :meth:`second` are two *independent* subjects, so
     the concurrent second succeeds whatever the cancelled first's indeterminate
     effect turns out to be.
+
+    **Reads are operations too** (#397). ADR-0060 §3 binds any method that
+    acquires the resource, and every locked read here holds the connection lock
+    around its own worker-thread SQL — so a regression replacing one read's
+    ``_run_to_completion`` with a bare ``to_thread`` would release the connection
+    to a concurrent caller while that read's worker still used it, and every write
+    case would still pass.
     """
 
     name: str
@@ -240,7 +247,7 @@ class _CancellationOp(Protocol):
         ...
 
     def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
-        """The call the case suspends mid-write and then cancels."""
+        """The call the case suspends inside the resource and then cancels."""
         ...
 
     def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
@@ -248,7 +255,7 @@ class _CancellationOp(Protocol):
         ...
 
     async def verify(self, store: MemoryStore) -> None:
-        """Assert the resource survived: the second write is whole and reads work."""
+        """Assert the resource survived: the second call is whole and reads work."""
         ...
 
 
@@ -392,17 +399,114 @@ class _PurgeExpiredOp:
         assert await store.get("live") is not None
 
 
-#: Every locked ``MemoryStore`` *write* ADR-0060's case is run against (#370):
-#: each is a distinct ``async with self._lock`` site with its own
-#: ``_run_to_completion``. The locked *read* paths (``get``, ``search``,
-#: ``export``) are the same invariant on a different axis and are tracked
-#: separately (#397), out of this write-focused lane.
+class _ReadOp:
+    """A locked ``MemoryStore`` read, driven against a store seeded the same way (#397).
+
+    The two calls are the *same* read of independent records rather than two
+    different ones, because what distinguishes a read op is its lock site and both
+    calls have to enter it. Nothing is asserted about the cancelled read's answer —
+    it has none, its task was cancelled — so :meth:`verify` pins the state the
+    second call had to see, re-read after the scenario.
+    """
+
+    name = ""
+
+    async def prepare(self, store: MemoryStore) -> None:
+        """Seed the two records every read op below answers from."""
+        await store.add(_semantic("read-a", "alpha alpha alpha"))
+        await store.add(_preference("read-b", "bravo bravo bravo"))
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """The read the case suspends inside the resource and then cancels."""
+        raise NotImplementedError
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """The concurrent read barred from the resource until the first is done."""
+        raise NotImplementedError
+
+    async def verify(self, store: MemoryStore) -> None:
+        """A read cancelled mid-flight leaves the store whole and still readable."""
+        assert await store.get("read-a") == _semantic("read-a", "alpha alpha alpha")
+        assert {record.id for record in await store.export()} == {"read-a", "read-b"}
+
+
+class _GetOp(_ReadOp):
+    """``get`` — one row by id, under the connection lock (``sqlite_store.py:641``)."""
+
+    name = "get"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read record A — the call that is cancelled."""
+        return store.get("read-a")
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Read record B concurrently."""
+        return store.get("read-b")
+
+
+class _SearchOp(_ReadOp):
+    """``search`` — retrieval under the same lock, after the embedding await."""
+
+    name = "search"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Search for A's words — the call that is cancelled."""
+        return store.search("alpha")
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Search for B's words concurrently."""
+        return store.search("bravo")
+
+
+class _ListBeliefsOp(_ReadOp):
+    """``list_beliefs`` — ADR-0073's enumeration, its own lock site.
+
+    Not in #397's enumeration, which predates it: the method landed with ADR-0073
+    and holds the connection lock across its own ``_run_to_completion`` like every
+    other read, so leaving it out would preserve exactly the gap the issue is
+    about.
+    """
+
+    name = "list_beliefs"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Enumerate the semantic beliefs — the call that is cancelled."""
+        return store.list_beliefs(kinds=[MemoryKind.SEMANTIC])
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Enumerate the preferences concurrently."""
+        return store.list_beliefs(kinds=[MemoryKind.PREFERENCE])
+
+
+class _ExportOp(_ReadOp):
+    """``export`` — the whole-store read, its own lock site."""
+
+    name = "export"
+
+    def first(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Export everything — the call that is cancelled."""
+        return store.export()
+
+    def second(self, store: MemoryStore) -> Coroutine[Any, Any, object]:
+        """Export again concurrently."""
+        return store.export()
+
+
+#: Every locked ``MemoryStore`` operation ADR-0060's case is run against: each is a
+#: distinct ``async with self._lock`` site with its own ``_run_to_completion``. The
+#: writes came first (#370); the reads are the same invariant on the other half of
+#: the surface (#397), and ADR-0060 §3 binds "any method that acquires the
+#: resource" rather than any method that mutates.
 _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
     _AddOp,
     _WriteAtomicOp,
     _DeleteOp,
     _ClearOp,
     _PurgeExpiredOp,
+    _GetOp,
+    _SearchOp,
+    _ListBeliefsOp,
+    _ExportOp,
 )
 
 
@@ -1159,7 +1263,7 @@ class MemoryStoreContract:
     def store_suspended_mid_write(
         self,
     ) -> AbstractAsyncContextManager[SuspendedMidWrite[MemoryStore]]:
-        """Supply a store whose named locked write can be stopped *inside* its resource.
+        """Supply a store whose named locked operation can be stopped *inside* its resource.
 
         Override unless :attr:`acquires_no_shared_resource` is set. The suite
         cancels the call while it is suspended and then watches what a second
@@ -1171,8 +1275,10 @@ class MemoryStoreContract:
         The returned :class:`SuspendedMidWrite` carries the store, its
         :class:`ResourceLog`, and an ``arm(operation)`` lever the case calls —
         *after* its preconditions — to hold the next entry into that operation
-        (#370). Every distinct ``async with self._lock`` site is a separate place
-        the same regression can reappear, so the case is run against each; ``arm``
+        (#370, #397). Every distinct ``async with self._lock`` site is a separate
+        place the same regression can reappear — the locked *reads* included, since
+        ADR-0060 §3 binds any method that acquires the resource — so the case is run
+        against each; ``arm``
         is where the implementation says how it stops a given one — a worker
         thread parked mid-SQL, a fake's single modelled resource. Returned as a
         context manager so the subject is disposed of the way that implementation
@@ -1189,19 +1295,25 @@ class MemoryStoreContract:
 
     @pytest.mark.optional_obligation
     @pytest.mark.parametrize("make_op", _CANCELLATION_OPS, ids=lambda op: op().name)
-    async def test_a_cancelled_write_holds_its_resource_until_the_work_finishes(
+    async def test_a_cancelled_operation_holds_its_resource_until_the_work_finishes(
         self, make_op: Callable[[], _CancellationOp]
     ) -> None:
-        """``core.protocols``' cancellation clause, on every locked write (ADR-0060, #370).
+        """``core.protocols``' cancellation clause, on every locked operation (ADR-0060).
 
-        A cancelled write must not hand the resource to the next caller while the
+        A cancelled call must not hand the resource to the next caller while the
         work it started is still using it. The second call is what makes this a
         test of the invariant rather than of propagation: a single cancelled call
         in isolation looks identical either way. Run once per locked operation, so
         a regression reintroduced at any one lock site — not just ``add`` — is
         caught.
 
-        The first write's *effect* is deliberately not asserted here (the op's
+        **Named for an operation, not a write.** ADR-0060 §3 binds any method that
+        acquires the resource; the writes were covered first (#370) and the locked
+        reads are the same invariant on the other half of the surface (#397). A
+        read that released the connection under cancellation while its worker still
+        held it is the identical ADR-0054 hazard, and no write case can see it.
+
+        The first call's *effect* is deliberately not asserted here (the op's
         ``verify`` pins only what a caller may rely on). The clause's third
         paragraph makes it indeterminate to the caller — under ADR-0054's shield a
         cancelled write that reached ``COMMIT`` is durably written — so the two

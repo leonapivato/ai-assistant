@@ -44,14 +44,14 @@ def _semantic(record_id: str, content: str) -> SemanticMemory:
 class TestFakeMemoryStoreContract(MemoryStoreContract):
     """Runs FakeMemoryStore through the shared MemoryStore conformance suite."""
 
-    #: ``search`` and ``list_beliefs`` read a dict and return, with no ``await``
-    #: between the coroutine's first executed line and the filter being applied —
-    #: nothing for a mid-flight mutation to land in (#436). Unlike the write side
-    #: below, the fake does *not* model a suspension it does not have here: an
-    #: ``await`` invented inside a read would exist only to be gated, and the two
-    #: read cases run non-vacuously against ``SqliteMemoryStore``, which is where
-    #: the clause was actually broken.
-    reads_without_suspending = True
+    # No ``reads_without_suspending`` opt-out. It was here while the fake's reads
+    # touched a dict and returned, with no ``await`` for a mid-flight mutation to
+    # land in (#436). Routing the reads through the modelled resource for ADR-0060
+    # (#397) gives them a real suspension point — and one in the right place, since
+    # both filters are materialised on the coroutine's first executed line and the
+    # resource is entered only afterwards. So the read-side input-observation cases
+    # now run non-vacuously here as well as against ``SqliteMemoryStore``, and a
+    # fake that started reading its filters late would fail them.
 
     @pytest.fixture
     def store(self) -> MemoryStore:
@@ -97,9 +97,9 @@ class TestFakeMemoryStoreContract(MemoryStoreContract):
         ``sqlite3`` store needs two, since its resource is acquired after the
         embedding await its input clause turns on.
 
-        ``arm`` ignores the operation for the same reason it does above — one
-        modelled resource serves every write — and is never asked for a read, since
-        :attr:`reads_without_suspending` declares that axis vacuous.
+        ``arm`` ignores the operation for the same reason it does above: one
+        modelled resource serves every call, reads included since #397, and each
+        enters it only after taking its one observation of its arguments.
         """
         store = FakeMemoryStore(now=_fixed_now)
         yield store, lambda _operation: store.suspend_next_operation()
