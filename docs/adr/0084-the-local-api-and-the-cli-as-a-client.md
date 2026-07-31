@@ -1196,6 +1196,42 @@ not exist; and while this one is `Proposed` the line names a supersession that i
 drafted rather than ratified, the form ADR-0075 established and ADR-0083 §15
 re-argued at length. If this change does not land, neither does the record.
 
+**The supersession has a fan-out, and two further ADRs inherit it.** This is the
+part that is easy to miss: ADR-0042 §1's "not contract surface" claim was *cited*
+by later ADRs to justify their own DTO decisions, and superseding the claim
+falsifies the sentences that rest on it. A reader holding only the later ADR never
+learns that its premise moved. Applying ADR-0070 §1's test to each:
+
+- **ADR-0078 §8 — a record is owed.** Three sentences fail. "Per ADR-0042 §1 the
+  seam is the concrete `orchestration` façade, which is **not** contract surface"
+  is false after §5. "`Question` is a **frozen `orchestration` dataclass**…
+  it crosses no *subsystem* boundary" is false after §4, which promotes `Question`
+  to `core/types.py`. And the operative one: reach 1 "requires the façade's learn
+  DTO to carry the deferral id — **an `orchestration` widening, not a contract
+  change**". After §4 that DTO is `core` contract surface, reached transitively as
+  `LearnOutcome → IngestSummary → QueuedQuestion → QuestionState` (`engine.py:433`,
+  `:412`, `:351`), so widening it *is* a contract change owing an ADR under golden
+  rule 5. A reader acting on that sentence would ship a `core` change with no ADR
+  — the exact process failure ADR-0015 §5 exists to prevent.
+- **ADR-0073 — a record is owed.** "**The `Belief` DTO** is a frozen
+  `orchestration` dataclass… alongside `TurnOutcome` and `IngestSummary` and for
+  their reason: it crosses no *subsystem* boundary, only `interfaces` (ADR-0042
+  §1)." §4 promotes `Belief`, and `TurnOutcome` and `IngestSummary` with it. Same
+  failure, same reason.
+- **ADR-0077 — no record is owed**, and it is checked rather than assumed because
+  it uses the same phrase. Its "not contract surface" is about the rule §5 places
+  on the shipped `DefaultMemoryPolicy`, a concrete policy — not about the façade.
+  Untouched by this ADR, and the sentence stays true.
+
+**Those two records are not written in this change**, and the reason is the fence
+rather than the reasoning: this change's scope is this ADR and ADR-0042. The
+analysis is recorded here — which is the half ADR-0082 §1 calls operative, "the
+judgement is made in the later ADR's text, which is where it is reviewed" — and
+the records themselves are owed from whichever change is scoped to carry them,
+alongside this one. Recording the fan-out rather than discovering it later is the
+point: a supersession of a *premise* propagates to everything that cited it, and
+nothing mechanical detects that.
+
 ## Consequences
 
 - **The CLI stops being the application and becomes a spoke.** `_open_engine`
