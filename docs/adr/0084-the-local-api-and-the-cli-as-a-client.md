@@ -262,6 +262,31 @@ concept the wire has no room for.
 explicit payload length, which §4's unbounded-payload constraint makes
 non-optional.
 
+**The framing and the codec are normative, because two implementations that
+satisfy every rule above could still be unable to exchange a frame.** Naming the
+envelope's *fields* does not fix their *representation*, and the remote-spoke
+seam this ADR is built for is exactly where that gap would surface. So:
+
+- **Framing** is a **4-byte big-endian unsigned length prefix** followed by that
+  many bytes. The prefix counts the bytes that follow it — envelope and payload
+  together — which also settles what `hub_max_frame_bytes` bounds: that same
+  number, so the cap is checked against the prefix before anything is read (§3
+  above) and there is one answer to "does the limit include the envelope".
+- **The codec is UTF-8 JSON**, and the envelope is a JSON **object** with named
+  members carrying the kind, the correlation id and the payload. Member order is
+  therefore not significant and no ordering rule is needed — which is worth
+  stating rather than leaving to be inferred.
+- **Payloads are the promoted `core` models serialised through pydantic's JSON
+  mode** (§4). This is deliberately *not* a second serialisation format invented
+  for the wire: binding to the encoding the stores already depend on is what
+  makes #421's integer-encodability question **one** question rather than two,
+  and it is why §4's promotion to pydantic models is what makes the codec honest
+  rather than merely convenient.
+
+Choosing an existing encoding rather than specifying a new one is the whole point
+of this subsection. The exact member names are the follow-on contract ADR's (§5),
+along with the DTO field layouts they carry.
+
 **A connection carries one outstanding request at a time**, and that is a
 decision rather than an omission. ADR-0042 §3 made the façade strictly
 request/response and §5 kept it there — "v1 is strictly request/response" — so
@@ -400,10 +425,22 @@ Protocol's location; it is not a free decision made alongside it.
 
 **What promotes:** the result types the promoted surface returns —
 `TurnOutcome`, `StepOutcome`, `Confirmation`, `ContinuationToken`, `Belief`,
-`Question` and the remaining outcome types the public methods return. **The exact
-set is the triad lane's, bounded by one rule: everything the Protocol's methods
-name.** Pinning the field layout here would be the unspiked seam #281 and
-`CONTRIBUTING.md` both warn against; pinning the *boundary* is this ADR's job.
+`Question` and the remaining outcome types the public methods return, **bounded by
+one rule: everything the Protocol's methods name.**
+
+**The exact set, the field layouts and the method signatures are ratified by a
+follow-on contract ADR — not chosen by the implementing lane.** That distinction
+is the whole of this paragraph. Pinning a nineteen-method surface and ten DTOs'
+fields *here*, in an ADR about a transport, would be the unspiked seam #281 and
+`CONTRIBUTING.md`'s spike-first guidance both warn against; but leaving them to a
+lane would make that lane the unreviewed author of `core` contract surface, which
+golden rule 5 and ADR-0015 §5 exist to prevent. A second `Proposed` contract ADR,
+written with implementation contact and reviewed as contract surface, is the only
+option that is neither speculative nor unreviewed. **#281 is that ADR's brief** —
+it already scopes exactly this work, and its own reasoning names this moment as
+the trigger: adapters target one façade's DTOs today, and "a second engine
+implementation is what §1's revisit-trigger promotes to a Protocol, **at which
+point the DTOs become a ratified contract**."
 
 **What they become:** frozen pydantic models under ADR-0068 §1 — `frozen=True`,
 `tuple` collections, nested models frozen. They are already frozen dataclasses
@@ -525,16 +562,27 @@ client has no business driving the service's lifecycle) forbids as squarely as i
 forbids autostart. The Protocol carries the **request** surface; lifecycle stays
 on the concrete class the composition root builds.
 
-**The triad is a separate lane and it merges before the client.** Protocol +
-shared conformance suite + canonical fake in `ai_assistant.testing`, landing as
-one unit (`CONTRIBUTING.md` → "Adding a Protocol"), after this ADR ratifies and
-before anything implements against it (golden rule 5, ADR-0015 §5). The
-sequencing is therefore three changes, not one:
+**The triad is a separate lane and it merges before the client**, and it is
+*preceded* by the contract ADR §4 names. Protocol + shared conformance suite +
+canonical fake in `ai_assistant.testing` land as one unit (`CONTRIBUTING.md` →
+"Adding a Protocol"), after the surface is ratified and before anything
+implements against it (golden rule 5, ADR-0015 §5). The sequencing is therefore
+**four** changes, not one:
 
-1. this ADR;
-2. the triad (`core/protocols.py`, `core/types.py`, conformance suite, canonical
-   fake);
-3. the hub, the wire package, the client, and the `lint-imports` edits (§6).
+1. **this ADR** — that the façade is promoted, what promotes, where it lives,
+   and the boundary rules the surface must satisfy;
+2. **the surface ADR** (#281's scope) — the method signatures, the promoted DTO
+   set and their normative fields, including §8's step-identity field. `Proposed`,
+   reviewed as contract surface, ratified before the triad;
+3. **the triad** (`core/protocols.py`, `core/types.py`, conformance suite,
+   canonical fake);
+4. **the hub, the `wire` package, the client, and the `lint-imports` edits** (§6).
+
+Steps 1 and 2 are split rather than merged because they answer different
+questions and only one of them can be answered honestly today. *Whether* the
+trigger has fired is decided by reading ADR-0042 against the deployment, which is
+what this ADR does. *What the surface is* wants contact with a real client, which
+does not exist yet — and #281 was filed for precisely that reason.
 
 **The cost is named rather than discovered.** The engine's public surface is
 around nineteen methods, so this is a large Protocol and a large conformance
@@ -683,6 +731,11 @@ its minimal form. It adds one field rather than duplicating status and failure
 onto the outcome, because duplication would create two sources of truth for a
 fact `state` already carries correctly.
 
+**What is ratified here is that the identity exists and what the rule is; its
+spelling and type are the surface ADR's** (§5, step 2), along with every other
+field of a promoted DTO. Splitting it that way is what keeps one lane from
+choosing a `core` field unreviewed.
+
 **Why this belongs in *this* ADR rather than a later one.** ADR-0084 is what puts
 this façade behind a transport, and §4 promotes `StepOutcome` to `core/types.py`
 as a ratified contract. A field added before that promotion is a design decision;
@@ -768,8 +821,9 @@ The roadmap attaches a hardening tail to this ADR. It is shorter than it reads.
 - **#333's plan-level reclamation**, and the observation cursor — both ADR-0083
   §13's, unchanged.
 - **The field layout of the promoted DTOs and the exact method set of the
-  Protocol** — the triad lane's, with implementation contact, which is #281's
-  standing instruction.
+  Protocol** — deferred to the **surface ADR** of §5's step 2, not to a lane,
+  written with implementation contact. That is #281's standing instruction and
+  #281 is its brief.
 
 ### 12. Amendment records under ADR-0082 §1
 
