@@ -2,6 +2,27 @@
 
 - Status: Accepted
 - Date: 2026-07-28
+- Amended: 2026-07-30 (§3 — its lead sentence names one of the two cases the
+  section goes on to enumerate). The sentence reads *"This refusal is a circuit
+  breaker, and it fires on an incoherent composition rather than on a hard
+  belief."* Read as a summary of §3 it is incomplete: the paragraphs below it
+  establish a **second** firing case under a composition that is *not*
+  incoherent — the close-coherent tie `valid_from == now_read == now_close`,
+  where `valid_from` is inclusive so the record is live at the read and the
+  chosen end lands exactly on it, and the retirement is therefore
+  unrepresentable rather than pathological. §3 states that case itself ("**The
+  tie is a genuine close-coherent exception, and it is stated rather than
+  defined away**"), and its own closing paragraph already names both — the
+  refusal "exists to make a pathological *composition* — **or, at the tie, an
+  unrepresentable retirement** — fail loudly". So the accurate summary is: **it
+  fires on an incoherent composition, or on a retirement that cannot be
+  represented, and never on a hard belief.** Nothing decided changes and no
+  reader acts differently: §3's rule, its two named edges, its close-coherence
+  analysis, the ADR-0079 reach paragraph and the Consequences bullet all state
+  both cases already and are untouched. This is a self-amendment reconciling the
+  ADR with its own text, so under ADR-0070 §1 it is recorded as this appended
+  dated note and the ratified sentence below is **not** rewritten; it names no
+  other ADR, so no `Status` edit is owed (ADR-0082 §1). Refs #463, ADR-0070 §1.
 - **This ADR partially supersedes [ADR-0045](0045-memory-records-carry-a-validity-window.md)**,
   in the scope named in §8: **§4 step 1's window-close instruction** (the
   numbered step headed *Close `T`'s window*, whose sentence is "Write `T` back
