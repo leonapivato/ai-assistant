@@ -173,6 +173,51 @@ def test_folds_a_nested_list_continuation(tmp_path: Path) -> None:
     assert "2026-07-24" not in row
 
 
+def test_a_nested_item_may_carry_a_colon_of_its_own(tmp_path: Path) -> None:
+    # Nesting is read off indentation, not off the item's text, so a nested item
+    # whose own prose contains a colon is still continuation — a lexical
+    # field-name guard would mistake it for the next metadata field and drop it.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-colon.md",
+                "# 1. Colon decision\n\n"
+                "- Status: Accepted subject to:\n"
+                "  - migration: complete\n"
+                "- Date: 2026-07-24\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Colon decision")
+    assert "migration: complete" in row
+    assert "2026-07-24" not in row
+
+
+def test_a_punctuated_metadata_label_still_ends_the_field(tmp_path: Path) -> None:
+    # The mirror case: a sibling field whose label carries punctuation no
+    # field-name pattern anticipates is still a sibling, because it sits at the
+    # Status bullet's own indentation.
+    _make_repo(
+        tmp_path,
+        adrs=(
+            (
+                "0001-punctuated.md",
+                "# 1. Punctuated decision\n\n"
+                "  - Status: Accepted\n"
+                "  - Note (2026-07-30): a clarification\n",
+            ),
+        ),
+    )
+    out = _run(tmp_path)
+
+    row = _line_with(out, "Punctuated decision")
+    assert "Accepted" in row
+    assert "clarification" not in row
+
+
 def test_single_line_status_is_unchanged(tmp_path: Path) -> None:
     # The wrap-folding must not disturb an ordinary one-line Status.
     _make_repo(tmp_path)
