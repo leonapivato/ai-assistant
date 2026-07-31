@@ -19,22 +19,21 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-# The Status field may wrap across indented continuation lines. Capture the
-# first physical line plus any following lines that are indented and non-blank;
-# a following ``- <field>:`` bullet (at any indentation, e.g. ``- Date:``) or a
-# blank line ends the field, so an adjacent field is never absorbed. The
-# captured value is folded into one line by :func:`_fold_status` before use.
+# The Status field may wrap across continuation lines. Capture the first physical
+# line plus any following lines that are non-blank and indented **deeper than the
+# ``- Status:`` bullet itself**; a blank line or a line at the bullet's own
+# indentation (or shallower) ends the field. The captured value is folded into
+# one line by :func:`_fold_status` before use.
 #
-# An indented bullet ends the field only when it is a *metadata field* bullet —
-# one whose text is a field name followed by a colon (``- Date:``, ``- Amends on
-# ratification:``). A nested markdown list item (``- migration completed``) is
-# continuation and folds in. The distinction is deliberately conservative in one
-# direction: a bullet carrying any field-name-shaped colon terminates the field,
-# because dropping a continuation shape no ADR uses costs nothing, while
-# absorbing one of the real ``- Date:`` bullets would corrupt every wrapped
-# Status on the board.
+# Depth is the whole rule, and it is markdown's own: a bullet indented under
+# ``- Status:`` is a child of it (a nested list item, ``- migration completed``,
+# which belongs in the value), and a bullet at the same indentation is a sibling
+# field (``- Date:``, ``- Amends on ratification:``, which does not). Reading
+# nesting off indentation rather than guessing at a line's *text* is what lets a
+# nested item keep a colon of its own and a metadata label carry punctuation no
+# field-name pattern anticipates — both shapes a lexical guard gets wrong (#417).
 _STATUS_RE = re.compile(
-    r"^[ \t]*-[ \t]*Status:[ \t]*(.+(?:\n[ \t]+(?!-[ \t]+[A-Za-z][A-Za-z0-9 _-]*:)\S.*)*)",
+    r"^(?P<indent>[ \t]*)-[ \t]*Status:[ \t]*(?P<value>.+(?:\n(?P=indent)[ \t]+\S.*)*)",
     re.IGNORECASE | re.MULTILINE,
 )
 _HEADING_RE = re.compile(r"^#\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
@@ -195,7 +194,7 @@ def adr_entries(adr_dir: Path) -> list[Adr]:
         entries.append(
             Adr(
                 number=int(match.group(1)),
-                status=_fold_status(status.group(1)) if status else "?",
+                status=_fold_status(status.group("value")) if status else "?",
                 title=heading.group(2) if heading else path.stem,
                 heading_number=int(heading.group(1)) if heading else None,
             )
