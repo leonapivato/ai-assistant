@@ -746,10 +746,31 @@ become operative. That fails ADR-0082 §1's test, so a record on ADR-0054 is owe
 its `Status` line and an appended dated note (ADR-0082 §2 — ADR-0054's `Status` is
 plain `Accepted`, not a leading-token line, so the qualifier belongs on it).
 
-**It is left undone here on purpose.** This ADR's fence is its own file, and
-ADR-0082 §2's record is an edit to a second `docs/adr/` file. It is flagged for a
-follow-up lane rather than taken quietly, and nothing in this ADR depends on the
-record existing first.
+**It is left undone here on purpose, and the reasoning is worth stating because
+the natural reading is that it should land in this change.** Three things bear on
+it, in order:
+
+- **ADR-0082 §1 and §2 decide *whether* a record is owed and *where* it goes.
+  Neither decides *when* it is written.** §1's operative half is that "the
+  judgement is made in the later ADR's text, which is where it is reviewed" — and
+  that judgement is here, above, in full, with the clause named and the test
+  applied. What ADR-0082 forbids is an unargued record or an unargued absence;
+  neither is what this is.
+- **The record cannot be written truthfully while this ADR is `Proposed`.** A
+  `Status` qualifier on ADR-0054 naming an amendment by ADR-0083 asserts that the
+  amendment exists. Until ratification it does not, and an ADR that is reviewed
+  while `Proposed` precisely so a finding can still change the decision is one
+  whose §4 could still change. The corpus's own answer to this is that such a note
+  lands *with* the change that makes it true — ADR-0045, ADR-0050 and ADR-0074
+  each say so on their own lines — so the earliest honest home for this record is
+  the ratification change, not the drafting one.
+- **This lane's fence is this file.** Widening a `Proposed` ADR's PR into a second
+  `docs/adr/` file is the dispatcher's call, not the author's, and `docs/adr/**`
+  is inside ADR-0027 §3's review floor for every persona, so the edit is not free.
+
+So it is **flagged rather than taken quietly**, and tracked as **#529** so it
+cannot be lost between the two. Nothing in this ADR depends on the record existing
+first: §15's analysis is the substance, and the `Status` edit is its bookkeeping.
 
 ## Consequences
 
