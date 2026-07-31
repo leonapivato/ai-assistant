@@ -258,9 +258,12 @@ differ, and the day that arrives the negotiation becomes a change to *what the
 handshake does with a number it already exchanges* — not the introduction of a
 concept the wire has no room for.
 
-**The envelope's required fields** are a message kind, a correlation id, and an
-explicit payload length, which §4's unbounded-payload constraint makes
-non-optional.
+**The envelope's required fields** are a message kind and a correlation id. It
+carries **no length member of its own**: the frame's length is the prefix below,
+which covers envelope and payload together, so a second length inside the
+envelope would be a value that can disagree with the one already read — and a
+frame whose two lengths disagree has no defensible interpretation. §4's
+unbounded-payload constraint is discharged by the prefix, not by a member.
 
 **The framing and the codec are normative, because two implementations that
 satisfy every rule above could still be unable to exchange a frame.** Naming the
@@ -312,7 +315,7 @@ the same "pay a field now, avoid a flag day later" trade as the version in this
 section and the credential slot in §2, and it is the last of the three.
 
 **A declared length is a claim, and the reader must be free to disbelieve it.**
-An explicit payload length is only safe alongside a ceiling, so the transport
+A declared frame length is only safe alongside a ceiling, so the transport
 also fixes:
 
 - a **maximum frame size**, which is configuration with a named default;
@@ -916,7 +919,10 @@ reviewed."
 - **`core` gains a Protocol and a family of result types**, so golden rule 5 is
   triggered literally — unlike ADR-0083, which added only `Settings` fields and an
   error class. A triad is owed and is a separate lane merging before any client
-  (§5). Three changes, in order: this ADR, the triad, the implementation.
+  (§5). **Four changes, in order: this ADR; the surface ADR that ratifies the
+  method signatures and DTO fields (#281's scope); the triad; the
+  implementation.** The middle step exists so no lane authors `core` contract
+  surface unreviewed.
 - **`core` also gains four `Settings` fields** — the transport's frame, deadline
   and connection ceilings (§3) — each strictly positive at load time, none
   nullable. They are contract surface in ADR-0054's sense, which this ADR already
