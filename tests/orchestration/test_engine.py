@@ -232,6 +232,7 @@ class Harness:
         feedback: object | None = None,
         observer: object | None = None,
         queue_limit: int = 50,
+        drain_timeout: timedelta | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -309,6 +310,7 @@ class Harness:
             questions=self.questions,
             closers=tuple(closers),  # type: ignore[arg-type]
             id_factory=lambda: next(self.handles),
+            drain_timeout=drain_timeout,
         )
 
 
@@ -1098,6 +1100,185 @@ async def test_cancelling_aclose_still_closes_the_resources() -> None:
     release.set()
     await call
     await harness.engine.aclose()
+    assert closed.is_set()
+
+
+# --- the two-phase drain (ADR-0083 §4) ---------------------------------
+
+
+class _NeverFinishing:
+    """A planner whose call runs until it is cancelled.
+
+    Deliberately *not* a suppressor of cancellation: ADR-0083 §4's argument rests
+    on every in-flight party honouring cancellation, and ADR-0054 making a
+    cancelled store call release its connection only after its worker physically
+    finishes. A fake that ignored cancellation would be testing the shape the ADR
+    considered and **declined** (ADR-0033's bounded-and-abandon).
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+    ) -> ActionPlan:
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        raise AssertionError  # pragma: no cover - the wait above never returns
+
+
+async def test_the_drain_is_unbounded_when_no_budget_is_given() -> None:
+    """The pre-ADR-0083 shape, kept as the default (``drain_timeout=None``).
+
+    Production gets the budget through the composition root, which is where
+    deployment values belong. Defaulting the class to thirty seconds would change
+    the shutdown of every caller that never asked for one — including every test
+    that builds an ``Engine`` directly — so the absence of a budget has to keep
+    meaning "wait".
+    """
+    planner = _NeverFinishing()
+    harness = Harness(planner=planner)
+    call = asyncio.ensure_future(harness.engine.converse("hello", timeout=PATIENT))
+    await planner.entered.wait()
+
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.sleep(0.05)
+
+    assert not closing.done()
+    assert not planner.cancelled.is_set()
+
+    call.cancel()
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+
+async def test_phase_a_ends_and_phase_b_cancels_the_remainder() -> None:
+    """The budget is what keeps the graceful path reachable at all (§4).
+
+    Under a supervisor with a stop timeout an unbounded wait ends in ``SIGKILL``,
+    which destroys exactly the ADR-0029 §4 bookkeeping the drain exists to
+    preserve — the record of *why* a step ended, committed under a shield so that
+    "a shutdown that stops waiting politely" cannot leave it unwritten. Phase A's
+    budget exists so the process reaches phase B instead.
+    """
+    planner = _NeverFinishing()
+    harness = Harness(planner=planner, drain_timeout=timedelta(milliseconds=20))
+    call = asyncio.ensure_future(harness.engine.converse("hello", timeout=PATIENT))
+    await planner.entered.wait()
+
+    await harness.engine.aclose()
+
+    assert planner.cancelled.is_set()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+
+async def test_nothing_is_closed_until_the_cancelled_work_has_completed() -> None:
+    """Phase B awaits what it cancelled, and that is ADR-0042 §2 satisfied literally.
+
+    Cancelling is not abandoning. ADR-0054 makes a cancelled store call keep its
+    connection until its worker thread physically finishes and re-raise only then,
+    so the ``CancelledError`` arrives *after* the connection is free. Closing
+    before that await completed would be the failure ADR-0042 §2 exists to
+    prevent — and bounding the await instead would re-create ADR-0054's own bug, a
+    worker thread still holding a connection the next statement closes.
+    """
+    closed = asyncio.Event()
+    unwound = asyncio.Event()
+
+    class _SlowToUnwind:
+        async def plan(
+            self,
+            goal: Goal,
+            *,
+            context: CurrentContext,
+            memories: Sequence[MemoryRecord] = (),
+        ) -> ActionPlan:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Stands in for ADR-0054's worker thread finishing after the
+                # cancellation and before the error surfaces.
+                assert not closed.is_set(), "a resource was closed while work was unwinding"
+                unwound.set()
+                raise
+            raise AssertionError  # pragma: no cover
+
+    async def close() -> None:
+        closed.set()
+
+    harness = Harness(
+        planner=_SlowToUnwind(),
+        closers=(close,),
+        drain_timeout=timedelta(milliseconds=20),
+    )
+    call = asyncio.ensure_future(harness.engine.converse("hello", timeout=PATIENT))
+    await asyncio.sleep(0.01)
+
+    await harness.engine.aclose()
+
+    assert unwound.is_set()
+    assert closed.is_set()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+
+async def test_work_that_finishes_inside_the_budget_is_never_cancelled() -> None:
+    """Phase A is a *wait*, not a deadline the drain enforces on healthy work.
+
+    The budget elapsing is what moves the drain to phase B; work that quiesces
+    before it must complete normally, or every ordinary shutdown would start
+    cancelling turns that were about to finish.
+    """
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class _Gated:
+        async def plan(
+            self,
+            goal: Goal,
+            *,
+            context: CurrentContext,
+            memories: Sequence[MemoryRecord] = (),
+        ) -> ActionPlan:
+            await release.wait()
+            finished.set()
+            return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(), created_at=AT)
+
+    harness = Harness(planner=_Gated(), drain_timeout=timedelta(seconds=30))
+    call = asyncio.ensure_future(harness.engine.converse("hello", timeout=PATIENT))
+    await asyncio.sleep(0)
+
+    closing = asyncio.ensure_future(harness.engine.aclose())
+    await asyncio.sleep(0)
+    release.set()
+    await call
+    await closing
+
+    assert finished.is_set()
+
+
+async def test_a_drain_with_nothing_in_flight_closes_at_once() -> None:
+    """The ordinary case: an idle hub does not wait out its budget to stop."""
+    closed = asyncio.Event()
+
+    async def close() -> None:
+        closed.set()
+
+    harness = Harness(closers=(close,), drain_timeout=timedelta(seconds=30))
+
+    await asyncio.wait_for(harness.engine.aclose(), timeout=5)
+
     assert closed.is_set()
 
 

@@ -851,7 +851,7 @@ class Engine:
     construct concretes (ADR-0042 §2).
     """
 
-    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus two knobs
+    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus three knobs
         self,
         *,
         loop: LearningLoop,
@@ -865,6 +865,7 @@ class Engine:
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
+        drain_timeout: timedelta | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
 
@@ -974,6 +975,19 @@ class Engine:
                 enough that this bites only a genuinely saturated system; a caller
                 that wants a different policy sets it here. Must be a positive
                 integer.
+            drain_timeout: Phase A's budget in :meth:`_drain_and_close` — how long
+                tracked in-flight work is given to finish **on its own** before the
+                remainder is cancelled and awaited (ADR-0083 §4). The composition
+                root passes ``Settings.shutdown_drain_seconds``.
+
+                ``None``, the default, means **phase A is unbounded**: the drain
+                waits and never cancels, which is exactly what this façade did
+                before ADR-0083 and is what a test constructing an ``Engine``
+                directly keeps getting. The default is *not* thirty seconds
+                because that would silently change the shutdown of every caller
+                that never asked for a budget; production gets the budget by going
+                through the composition root, which is where deployment values
+                belong.
 
         Raises:
             TypeError: If ``max_outstanding_confirmations`` is not an integer. A
@@ -1007,6 +1021,7 @@ class Engine:
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
+        self._drain_timeout = drain_timeout
         self._parked: dict[str, _Parked] = {}
         self._reserved: set[str] = set()
         self._recovery_lock = asyncio.Lock()
@@ -1786,8 +1801,12 @@ class Engine:
         ``close()`` racing a store call still touching the connection; that
         ordering has to be the façade's (ADR-0042 §2).
 
-        So this (a) stops accepting new calls, then (b) awaits every tracked
-        operation to quiescence before closing. The tracking is of the underlying
+        So this (a) stops accepting new calls, then (b) drains every tracked
+        operation to quiescence before closing — waiting for it to finish on its
+        own for ``drain_timeout``, then cancelling what is left and awaiting
+        *that* to completion (ADR-0083 §4; :meth:`_drain_and_close`). Both phases
+        end in quiescence, which is what ADR-0042 §2 requires; the budget only
+        decides whether the remaining work is asked to stop. The tracking is of the underlying
         work itself, not merely the public call: a client cancelling its own
         ``converse()`` mid-call abandons the awaiting coroutine but not the work it
         started, which keeps using the connection a subsequent ``close()`` would
@@ -1810,12 +1829,13 @@ class Engine:
         await asyncio.shield(self._shutdown)
 
     async def _drain_and_close(self) -> None:
-        """Await every tracked operation, then close owned resources in order.
+        """Drain every tracked operation, then close owned resources in order.
 
         The body of shutdown, run as one retained task so no caller's cancellation
-        can leave it half-done (:meth:`aclose`). Draining is *awaiting*, never
-        cancelling (ADR-0042 §2): a tracked task orphaned by a cancelled call is
-        still using a connection ``close()`` would shut, so it is waited out first.
+        can leave it half-done (:meth:`aclose`). A tracked task orphaned by a
+        cancelled call is still using a connection ``close()`` would shut, so
+        **nothing is closed until every tracked task has completed** — which is
+        ADR-0042 §2's requirement and is what both phases below end in.
 
         **Every closer is attempted, even after one fails — including on
         cancellation.** ADR-0042 §2 requires the façade to release *every* owned
@@ -1833,8 +1853,7 @@ class Engine:
             ExceptionGroup: If one or more closers raised (and none was cancelled).
                 Every closer was still attempted; the group carries each failure.
         """
-        if self._inflight:
-            await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
+        await self._drain()
         errors: list[Exception] = []
         cancelled: asyncio.CancelledError | None = None
         for close in self._closers:
@@ -1853,6 +1872,72 @@ class Engine:
             raise cancelled
         if errors:
             raise ExceptionGroup("one or more resources failed to close on shutdown", errors)
+
+    async def _drain(self) -> None:
+        """Bring the tracked set to quiescence: wait, then cancel, then wait again.
+
+        ADR-0083 §4's two phases, and the shape is decided rather than incidental.
+
+        **Phase A is bounded** at ``drain_timeout``, and the bound is what keeps
+        the graceful path reachable at all. Under a supervisor with a stop
+        timeout, an unbounded wait ends in ``SIGKILL`` — which destroys exactly
+        the ADR-0029 §4 bookkeeping the drain exists to preserve, committed under
+        a shield so that "a shutdown that stops waiting politely" cannot leave a
+        step ``RUNNING`` with its classification unwritten.
+
+        **Phase B cancels what is left and then awaits it, unbounded.** Three
+        things make that safe, and each is load-bearing:
+
+        * **Cancelling is not abandoning.** ADR-0054 makes a cancelled store call
+          keep its connection until its worker thread physically finishes and
+          re-raise only then, uniformly across all five stores. So a cancelled
+          task's ``CancelledError`` arrives *after* the connection is free, and
+          awaiting it is still ADR-0042 §2's "awaits every tracked underlying
+          operation to quiescence… before closing", satisfied literally.
+        * **Cancelling is what preserves the bookkeeping**, not what loses it: a
+          cancelled step still records why it ended (ADR-0029 §4), a ``SIGKILL``ed
+          one does not.
+        * **Bounding phase B is the one thing that must not be done.** Its only
+          termination-forcing alternative is abandonment, and an abandoned store
+          call is a worker thread holding a connection the very next statement
+          closes — ADR-0054's bug, deliberately re-created. If phase B ever
+          outlives the supervisor's stop timeout then ``SIGKILL`` is the correct
+          outcome and is strictly safer: SQLite recovers a journal on next open,
+          and has no recovery for a connection closed under a running statement.
+
+        ADR-0060 §1 permits the unbounded tail and permits it for this reason —
+        the deadline is one this object issues *itself*, so it is its own control
+        flow, and the wait is on work that is observably completing. It is the
+        "documented as unbounded" form that clause names, and this is where it is
+        documented.
+
+        With no budget (``drain_timeout=None``) there is no phase B: the wait is
+        the whole drain, which is what this façade did before ADR-0083.
+        """
+        pending = set(self._inflight)
+        if not pending:
+            return
+        if self._drain_timeout is None:
+            await asyncio.gather(*pending, return_exceptions=True)
+            return
+        # Phase A. `asyncio.wait` returns rather than raising on the timeout, and
+        # hands back precisely the set still running — no task is disturbed by the
+        # budget merely elapsing, which is what makes the two phases separable.
+        _finished, pending = await asyncio.wait(
+            pending, timeout=self._drain_timeout.total_seconds()
+        )
+        if not pending:
+            return
+        # Phase B. Logged before cancelling: this is the moment a deployment's stop
+        # timeout is being spent, so an operator reading the journal after a
+        # SIGKILL can see that the drain had reached its budget and was cancelling.
+        _log.info("shutdown_drain_budget_exceeded", cancelling=len(pending))
+        for task in pending:
+            task.cancel()
+        # Unbounded, and `return_exceptions=True` so a cancelled task's
+        # `CancelledError` is a *result* here rather than something that aborts the
+        # gather and skips its siblings. Every one must complete before a closer runs.
+        await asyncio.gather(*pending, return_exceptions=True)
 
     async def _tracked(self, coro: Awaitable[_T]) -> _T:
         """Run ``coro`` as a tracked, shielded task, so shutdown can drain it.
