@@ -662,13 +662,15 @@ The triad and its consumers, in the order golden rule 5 fixes.
    - `MemoryStore`: `get_many` never disagrees with `get` on any id, on all three
      read-time outcomes; duplicates collapse; an empty argument returns an empty
      mapping; a missing id is an omission and not an error; **the batch is one
-     snapshot** — of the clock *and* of the stored state. Two cases, because one
-     of them is easy to write and insufficient: no two entries may reflect
-     different **instants**, tested against a controlled clock; and no result may
-     mix **states**, tested by mutating the store between the reads a chunked
-     implementation makes — which is the only case that catches the chunking §8
-     requires. Both are observable at the boundary and neither says how a store
-     obtains the snapshot. **And it observes
+     snapshot** — of the clock *and* of the stored state — tested only through
+     what the Protocol exposes: a controlled clock, and results that never
+     disagree with a `get` taken at the same instant. **The shared suite stops
+     there, deliberately.** A conforming store may answer in one remote request,
+     one statement or one in-memory snapshot, so it has no per-chunk boundary a
+     portable test could inject a mutation at, and a suite that raced a writer
+     against an in-flight call would be nondeterministic where it was not simply
+     testing SQLite. Demanding that boundary would also make one store's chunking
+     a universal obligation — the mechanism §6 says the contract is *not*. **And it observes
      `record_ids` before its first await** — the ADR-0065 clause §6 binds it to,
      which needs its own suspended-call case because none of the clauses above
      mutates the sequence mid-call and an implementation that took its lock first
@@ -731,6 +733,13 @@ The triad and its consumers, in the order golden rule 5 fixes.
    reference deployment and names its relaxation as the condition that makes this
    urgent again; the transaction costs nothing and does not depend on that
    holding.
+
+   **The interleaving test belongs here too, not in the shared suite.** Only this
+   store has chunks to interleave between, and `tests/memory/test_sqlite_store.py`
+   already constructs the second-process case deliberately for #562's forked
+   cases — so the test is written where both the chunk boundary and the writer can
+   be controlled, and it is deterministic. The shared suite tests the observable
+   snapshot and stops (item 3).
 6. **The presentation path** — `Engine._project` calls `get_many` once per belief
    instead of `get` per citation. **That is the whole of what this lane owes
    there**, and the limit is deliberate: `Engine._project` builds the DTOs
