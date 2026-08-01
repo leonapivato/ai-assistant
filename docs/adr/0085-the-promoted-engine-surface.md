@@ -1158,7 +1158,7 @@ it.
 | --- | --- | --- |
 | `code` | always | the exception type's own class name |
 | `message` | always | the exception's human-readable message |
-| `details` | only where the type's contract names structured data | an object carrying those values |
+| `details` | only where the type carries structured state | an object whose members are the exception's public attributes |
 
 **The code is the class name, which makes the mapping total by construction
 rather than by a registry someone maintains.** A hand-kept table of tokens is a
@@ -1167,6 +1167,36 @@ second vocabulary to drift against the first — the objection §4 raises to map
 only on failure paths, which are the least exercised. Class names are already
 contract surface: renaming one in `core/errors.py` is already a change that costs
 an ADR, so the wire inherits that stability for free.
+
+**`details` is the exception's own public attributes, which makes its schema
+mechanical for the same reason the code is the class name.** Naming members
+per-error in this ADR would be a table to keep in step with `core/errors.py` by
+hand, and it would go stale the first time a structured error is added. So:
+
+> An `AssistantError` subtype that carries structured state declares it as
+> **public attributes whose names match its constructor's keyword parameters**,
+> and `details` is exactly those attributes serialised in pydantic JSON mode. A
+> client reconstructs by calling the named type with the message positionally and
+> the `details` members as keyword arguments.
+
+That is a **contract clause on the error types**, testable by the conformance
+suite: an attribute the constructor will not accept back under the same name
+breaks reconstruction, and nothing else would catch it.
+
+**Exactly two declared failures carry structured state today**, and both are
+named because the general rule is only checkable against a known set:
+
+| Type | `details` members |
+| --- | --- |
+| `OversizedValueError` | `limit: int`, `size: int`, `field: str` |
+| `UnresolvedEvidenceError` | `unresolved_ids: tuple[str, ...]` |
+
+`UnresolvedEvidenceError` is the one this ADR did not invent — it already carries
+`unresolved_ids` (`core/errors.py:179-190`), it is declared by `answer` (§9), and
+its ids are the whole content of the refusal. Every other type in §9's vocabulary
+defines no `__init__` and therefore carries a message and nothing else, so it
+sends no `details` at all. `OversizedValueError`'s three attributes are fixed here
+because this ADR is what creates the type (§9).
 
 **One code per *concrete* type, never flattened to a declared base.** §9's table
 names base classes — `ModelError`, `MemoryStoreError`, `PlanningError` — and each
@@ -1182,9 +1212,10 @@ code it does not know reports a transport-level protocol failure naming the code
 it does **not** fall back to the nearest ancestor it recognises. Falling back
 would manufacture a typed refusal the server never sent, and ADR-0084 §3's exact
 version match means the two halves ship together, so an unknown code is a bug
-rather than a version skew to tolerate. Same for a `details` object missing a
-value the named type's contract requires: fail closed rather than raise a
-half-populated exception.
+rather than a version skew to tolerate. A `details` object with a member the named
+type does not accept, or missing one its constructor requires, fails the same way
+— closed, rather than raising a half-populated exception whose empty field a
+caller would read as "no ids were unresolved".
 
 **`ValueError` is deliberately absent from this vocabulary**, and its absence is a
 property of §9 rather than an omission here. Every `ValueError` the surface
@@ -1300,11 +1331,13 @@ move to `Accepted` triggers nothing.
   addition it has taken. That is the cost ADR-0084 §5 named ("a large Protocol and
   a large conformance suite — considerably more than the triads the corpus has
   written so far"), quantified.
-- **Five contract clauses exist that no type expresses**, and the conformance
+- **Six contract clauses exist that no type expresses**, and the conformance
   suite is the only thing that can hold an implementation to them: the page-size
   default (§3a), pre-`await` materialisation of the filters (§3d), local refusal
   of malformed page arguments and blank identifiers (§3c, §9), the size limit in
-  both directions (§8), and the disposition-is-not-the-outcome rule (§7). Each is
+  both directions (§8), the disposition-is-not-the-outcome rule (§7), and an
+  error type's structured state round-tripping through its own constructor
+  (§10a). Each is
   written as a testable sentence for that reason. **Five more are expressed by the
   types themselves** — §4b's cross-field validators — and one more by a return
   type alone (§4a), which is the cheapest of the lot: it needs no clause and no
@@ -1437,9 +1470,13 @@ move to `Accepted` triggers nothing.
   opposite of the legibility ADR-0084's ruling 4 asks for, arriving at the one
   surface a user reaches for to understand what the assistant believes.
 - **Carry error codes in a hand-maintained registry of tokens rather than using
-  the class name.** Rejected in §10a: it is a second vocabulary kept in step with
-  the first by hand, on the paths least likely to be exercised — §4's objection to
-  mapping `Disposition` to a bare string, applied to failures.
+  the class name, and name each error's `details` members in a table here.**
+  Rejected in §10a: both are second vocabularies kept in step with
+  `core/errors.py` by hand, on the paths least likely to be exercised — §4's
+  objection to mapping `Disposition` to a bare string, applied to failures. The
+  class name and the public attributes are the schema, so there is nothing to
+  drift; the two structured types are listed as a check on the rule, not as its
+  source.
 - **Let a client widen an unrecognised error code to the nearest ancestor it
   knows.** Rejected in §10a: it manufactures a typed refusal the server never
   sent, and ADR-0084 §3's exact version match means an unknown code is a bug
