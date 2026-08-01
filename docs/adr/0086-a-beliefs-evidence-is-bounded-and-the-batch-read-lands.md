@@ -195,11 +195,34 @@ make it true on the read path for the exact records the bound is about.
 
 So:
 
-> **No `MemoryWriter` stores a record whose `provenance.evidence` exceeds
-> `MAX_EVIDENCE_CITATIONS`.** Where the record it would store does, it stores the
-> retained subset §3 specifies and records the count of what it did not, as §4
+> **No `MemoryWriter` *installs* a record whose `provenance.evidence` exceeds
+> `MAX_EVIDENCE_CITATIONS`.** Where the record it would install does, it installs
+> the retained subset §3 specifies and records the count of what it did not, as §4
 > specifies. `Provenance` itself admits a longer tuple, and a record already
 > stored with one stays readable.
+>
+> **A write that merely *retires* is not an install and carries the record as it
+> stands.** Storing an existing record back with only its validity window narrowed
+> (ADR-0080 §1) changes no citation and asserts nothing new about the warrant, so
+> it is exempt — a legacy over-bound target is retired intact, not truncated.
+
+**The install/retire line is ADR-0081 §1's, taken as given rather than invented
+here.** That ADR already needed exactly this distinction for a different rule and
+defined it in `MemoryIngestor._installed_at`: a write *installs* when "it stores
+the proposal's content at an id", and *retires* when "it stores an **existing**
+record back with only its validity window narrowed (ADR-0080 §1) — the record is
+retained, `export` still carries it, and nothing of the proposal lands at its id."
+Reusing it costs nothing and keeps one concept from acquiring two definitions.
+
+**Without the exemption the rule would contradict this section's own reasoning.**
+`SUPERSEDE` retires its targets through `_close_window`, which preserves
+"`valid_from` and every other field" and writes the record back inside the atomic
+batch. A universal "no writer stores" rule would therefore be violated by
+*retiring* a legacy 80-citation belief — and the only way to satisfy it would be
+to truncate a record on its way off the read path, which is the eager rewrite
+ADR-0077 §6 refused and which §2 has just spent four paragraphs refusing for the
+same reason. A rule that can only be obeyed by breaking the rule above it is
+mis-scoped, not strict.
 
 **#566 put element-level validators on this very field, and that is the sharpest
 objection to this section — so it is answered rather than left standing.**
@@ -229,15 +252,18 @@ resolvability check, because that one cannot live at the policy at all." Here th
 same seam is chosen because the check cannot live on the *type* at all — not
 without making the type refuse data it is the only reader of.
 
-**The population converges rather than being migrated.** Every write conforms
-from the day the implementing lane lands, so an over-long tuple can only shrink:
-the next `REINFORCE` on that belief brings it under the bound and records the
-elision. No migration, no backfill, no read-path repair, and nothing that
+**The population converges rather than being migrated.** Every *install*
+conforms from the day the implementing lane lands, so an over-long tuple can only
+shrink: the next `REINFORCE` on that belief brings it under the bound and records
+the elision. A legacy record that is only ever retired keeps its tuple, readable,
+in the history `export` carries — which is the right outcome, since retirement is
+where a belief stops being asserted rather than where its warrant is restated. No migration, no backfill, no read-path repair, and nothing that
 rewrites a record because of something that happened to another one — which
 ADR-0077 §6 refused in as many words.
 
-**It applies to every write, not only to a fold.** An `ACCEPT` of a proposal
-citing more than 64 episodes is bounded by the same rule. That is unreachable
+**It applies to every *install*, not only to a fold.** An `ACCEPT` of a proposal
+citing more than 64 episodes is bounded by the same rule — it installs the
+proposal's content at an id, which is the thing the bound is about. That is unreachable
 with `observation_batch_size` at its default, and it is written anyway so the
 rule is not one configuration change away from being untrue: the setting's upper
 bound is `2**63`, and a deployment that raises it is not thereby permitted to
@@ -646,7 +672,11 @@ The triad and its consumers, in the order golden rule 5 fixes.
      `write_atomic`'s `Sequence` argument already carries; a second `Sequence`
      argument on the same Protocol gets it too, or the clause is declared and
      unenforced.
-   - `MemoryWriter`: no stored record exceeds `MAX_EVIDENCE_CITATIONS`; a
+   - `MemoryWriter`: no **installed** record exceeds `MAX_EVIDENCE_CITATIONS`,
+     **and a retirement write is exempt** — a `SUPERSEDE` whose *target* is a
+     legacy over-bound record retires it with its tuple and its
+     `evidence_elided` untouched, which is a distinct case from the oversized
+     *proposal* below and is reachable on any store that predates this ADR; a
      `REINFORCE` whose union would exceed it retains the **last**
      `MAX_EVIDENCE_CITATIONS` of the deduplicated union and increments
      `evidence_elided` by exactly the number displaced; a `REINFORCE` whose union
@@ -659,7 +689,7 @@ The triad and its consumers, in the order golden rule 5 fixes.
      previously displaced — pinning the recurrence as stated, so the suite
      asserts the count it defines rather than an exactness the field does not
      claim. **And the bound is exercised on the rulings that are not folds**:
-     §2 applies it to *every* write, so an oversized `ACCEPT`,
+     §2 applies it to *every* install, so an oversized `ACCEPT`,
      `STORE_TEMPORARY` and `SUPERSEDE` proposal each assert the retained suffix
      **and** the proposal's own displacement count — a writer that truncated
      these without incrementing `evidence_elided` would satisfy "no stored record
