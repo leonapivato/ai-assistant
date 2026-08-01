@@ -1152,10 +1152,12 @@ would break the reconstruction contract this section just established. Left as
 prose, "largest contributing field" does not determine an answer: it says nothing
 about nesting, and nothing about ties. So:
 
-> **`field` names the top-level member of the payload whose own canonical
-> encoding (ADR-0087 §2) is longest, ties broken by the member name's bytes in
-> ascending order. It is `null` where the payload has no named members** — a
-> `forget` result is a bare `true`, and a `beliefs` result is a bare array.
+> **`field` is `str | None`. It names the top-level member of the payload whose
+> own canonical encoding (ADR-0087 §2) is longest, ties broken by the member
+> name's bytes in ascending order, and is `None` where the payload has no named
+> members** — a `beliefs` result is a bare array, a `forget` result a bare
+> `true`. The optional type is not defensive: the `None` case is reachable, since
+> an oversized `beliefs` page is exactly a bare array with no member to name.
 
 **Top-level only, and no path syntax**, which is the restraint that keeps this
 from becoming a second specification. A path language would need its own grammar,
@@ -1319,7 +1321,7 @@ named because the general rule is only checkable against a known set:
 
 | Type | `details` members |
 | --- | --- |
-| `OversizedValueError` | `limit: int`, `size: int`, `field: str` |
+| `OversizedValueError` | `limit: int`, `size: int`, `field: str \| None` |
 | `UnresolvedEvidenceError` | `unresolved_ids: tuple[str, ...]` |
 
 Both counts are of *structured state*, and `details_elided` is not that (above),
