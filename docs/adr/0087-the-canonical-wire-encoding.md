@@ -15,7 +15,7 @@
   is defined in bytes.
 - **It ratifies the bytes and nothing else.** No method, no field, no type, no
   setting, no figure, no limit. §2's member ordering is length-preserving and
-  §4(b)'s zero normalisation shortens one value by one byte, so nothing here
+  §4(ii)'s zero normalisation shortens one value by one byte, so nothing here
   widens a payload or moves a ceiling ADR-0084 §3 sets.
 - **Written with implementation contact.** Every byte string in §5 was produced
   by running the encoding against `pydantic 2.13.4` / `pydantic-core 2.46.4` on
@@ -253,7 +253,18 @@ existing vector covers, consistent with §2, is an addition and not a change.
 
 ### 2. The encoding, as five properties
 
-> **The canonical wire encoding of a value is ADR-0021 §1's canonical JSON form
+**Its subject is the payload, and only the payload.** ADR-0084 §4 puts the size
+limit on the value a call passes or returns, so the payload is what has to have
+determined bytes; the frame around it is ADR-0084 §3's, and §3 decides the
+envelope's own representation — including that its "member order is therefore not
+significant and no ordering rule is needed". **Nothing here changes that.** An
+implementation that emits envelope members in any order conforms to §3 and to
+this ADR; one that happens to sort the whole frame in a single pass conforms too,
+because "not significant" permits both. What this ADR determines is the bytes of
+the payload; it does not determine the bytes of the frame, and it does not need
+to.
+
+> **The canonical wire encoding of a payload is ADR-0021 §1's canonical JSON form
 > applied to that value's pydantic JSON-mode projection**, subject to the three
 > corrections in §3. Concretely, and normatively:
 >
@@ -276,10 +287,12 @@ other means conforms, and §7 says so.
 - **No insignificant whitespace anywhere.** The separators are exactly `,` and
   `:` — one byte each, nothing around them. The empty object is `{}` and the
   empty array is `[]`.
-- **Every JSON object's members are in ascending order of their names' Unicode
-  code points.** UTF-8 byte order and code-point order agree, so the rule is
-  unambiguous however it is implemented. It is case-sensitive and not
-  locale-sensitive: `"Z"` (U+005A) precedes `"body"` (U+0062).
+- **Every JSON object *within the payload* has its members in ascending order of
+  their names' Unicode code points.** UTF-8 byte order and code-point order
+  agree, so the rule is unambiguous however it is implemented. It is
+  case-sensitive and not locale-sensitive: `"Z"` (U+005A) precedes `"body"`
+  (U+0062). The envelope is not a payload object and is not reached by this rule
+  (above).
 - **Array order is the value's own order** and is never sorted. A `tuple` field
   is ordered data; an object's member names are not.
 - **The encoding is context-free.** A value's bytes are identical standalone and
@@ -421,18 +434,65 @@ it there as a normalisation rather than here as a correction. The distinction is
 worth keeping: §3 is about the encoder disagreeing with this ADR, §4 is about
 the value space disagreeing with itself.
 
-### 4. Byte-determinism, and the three ways this tree breaks it
+### 4. Byte-determinism, over the equivalence the codec round-trips
 
-> **For any two values `a` and `b` of a promoted type, if `a == b` then
-> `encode(a) == encode(b)`.** A value's bytes depend on what it is, never on how
-> it was constructed.
+> **For any two payload values `a` and `b`, if `a` and `b` are the *same value*
+> then `encode(a) == encode(b)`.** A value's bytes depend on what it is, never on
+> how it was constructed.
+>
+> **"The same value" is structural equality *with matching types*, applied
+> recursively**: equal scalars of the same Python type; sequences of the same
+> length, pairwise the same; mappings with the same key set, pairwise the same.
+> It is deliberately **not** Python's `==`.
+
+#### 4a. Why the equivalence has to be type-aware, and why `==` is the wrong one
+
+Python's `==` identifies values across the three JSON scalar types that the
+encoding must keep apart. Measured on a promoted `FrozenJsonMapping` field:
+
+| `parameters` | Encoded | Python `==` to `{"x": 1}`? |
+| --- | --- | --- |
+| `{"x": 1}` | `{"x":1}` | — |
+| `{"x": True}` | `{"x":true}` | **yes** (`1 == True`) |
+| `{"x": 1.0}` | `{"x":1.0}` | **yes** |
+
+Under Python `==` the rule above would be false for values on the promoted
+surface today, and no amount of sorting or normalising would rescue it: `1`,
+`true` and `1.0` are three distinct JSON texts and collapsing them would destroy
+information rather than canonicalise it. So `==` is not a defect the encoding
+must work around — **it is the wrong equivalence relation for this property**,
+and stating the property over it was an error in an earlier draft of this ADR.
+
+**The right one is the equivalence the codec round-trips, which is exactly
+type-aware structural equality.** Measured: `{"x": 1}`, `{"x": True}` and
+`{"x": 1.0}` encode to three byte strings, and decoding each recovers `int`,
+`bool` and `float` respectively. So `encode` is injective up to this relation and
+`decode` inverts it — which is the property a wire format is supposed to have,
+and the one that makes a round-trip test meaningful.
+
+**And the hazard the rule exists for does not reach these cases.** The concern is
+one *datum* acquiring two spellings depending on which implementation built the
+object. A tool parameter that is the integer `1` is carried as `int` by
+`_deep_freeze`, which preserves the type, and comes back as `int` through the
+wire; nothing in the pipeline turns it into `True`. Two implementations handed
+the same datum produce the same bytes. What Python `==` was reporting was two
+*different* data that happen to compare equal, which is a fact about `==` and not
+about the encoding.
+
+**Why it arises only here.** Every other field on the promoted surface has a
+declared type, so validation fixes the Python type before the encoder sees the
+value — an `int` handed to a `float` field is a `float` afterwards — §4(iii).
+`FrozenJson` is the one holder that is deliberately untyped, being a JSON value
+of any shape, and it is therefore the only place two Python types can occupy one
+field. The rule is stated over the general equivalence anyway, because a later
+untyped holder would otherwise reopen the question.
 
 This is the constraint Context states, taken at its stronger reading. Three
 concrete violations exist in the tree today; each is closed by a rule already
 stated, and the point of listing them is that a conformance test can be written
 directly from the list.
 
-**(a) `FrozenJsonMapping` key order — the one that reaches a promoted DTO.**
+**(i) `FrozenJsonMapping` key order — the one that reaches a promoted DTO.**
 `FrozenDict.__eq__` compares as a `dict` and `__hash__` uses a `frozenset`
 (`core/types.py:1846-1852`), so key order is invisible to equality and to
 hashing; but `__iter__` yields insertion order and `_thaw_json` rebuilds a `dict`
@@ -453,7 +513,7 @@ outputs, both `FrozenJson` holders in `core/types.py`. §2a's sort closes all
 three at once, and would close any further holder the transitive closure turns
 out to reach, because the rule is over the type and not over an enumerated field.
 
-**(b) Negative zero.** A `float` field bounded `ge=0.0` — a confidence, which
+**(ii) Negative zero.** A `float` field bounded `ge=0.0` — a confidence, which
 ADR-0084 §4 names `Belief` as carrying — admits `-0.0`, because `-0.0 >= 0.0` is
 true. So:
 
@@ -463,12 +523,12 @@ Nothing on the promoted surface distinguishes the two — no field's meaning tur
 on the sign of a zero magnitude — so normalising loses no information, and
 carrying it would make one value two encodings of different lengths.
 
-**(c) Anything the type already normalises is *not* a violation, and saying so
+**(iii) Anything the type already normalises is *not* a violation, and saying so
 bounds the list.** `Identifier` strips on validation, `UtcInstant` converts to
 UTC on validation, `timedelta` normalises on construction, and pydantic coerces
 an `int` handed to a `float` field to `1.0`. In each case two "differently
 constructed" values are one value by the time the encoder runs, so the encoder
-has nothing to do. The rule this leaves for a reviewer checking (a)–(c) is
+has nothing to do. The rule this leaves for a reviewer checking (i)-(iii) is
 complete: **construction-dependence can only survive validation where the type's
 `__eq__` ignores something its iteration order or its representation exposes** —
 which in this tree is the mapping, and the float's sign of zero.
@@ -478,7 +538,7 @@ which in this tree is the mapping, and the float's sign of zero.
 **Every byte string below is normative.** A conforming encoder reproduces it
 exactly. They were generated by running §2's encoding on `pydantic 2.13.4` /
 `pydantic-core 2.46.4` / CPython 3.14.6; the rows the library does not produce
-are marked, and are the two §3 corrects and §4(b)'s normalisation.
+are marked, and are the two §3 corrects and §4(ii)'s normalisation.
 
 **Every vector carries its own input**, so each is checkable against this
 document alone. §5a–§5d are over Python and JSON types and depend on no field
@@ -518,7 +578,7 @@ U+007F and U+2028 rows fix that the escaping stops at U+0020 and does not resume
 | Input | Encoded | Bytes |
 | --- | --- | --- |
 | `0.0` | `0.0` | 3 |
-| `-0.0` | `0.0` — **normalised, §4(b)** | 3 |
+| `-0.0` | `0.0` — **normalised, §4(ii)** | 3 |
 | `1.0` | `1.0` | 3 |
 | `0.1` | `0.1` | 3 |
 | `0.1 + 0.2` | `0.30000000000000004` | 19 |
@@ -530,6 +590,16 @@ U+007F and U+2028 rows fix that the escaping stops at U+0020 and does not resume
 | `0` (`int`) | `0` | 1 |
 | `2**63` | `9223372036854775808` | 19 |
 | `inf`, `nan` | **no encoding — the encoder raises** | — |
+
+**The type-aware triple**, inside a `FrozenJsonMapping` where all three are
+reachable and Python's `==` identifies them (§4a). These three vectors are the
+witness that the equivalence in §4 is type-aware and not `==`:
+
+| `parameters` | Encoded | Bytes | decodes back as |
+| --- | --- | --- | --- |
+| `{"x": 1}` (`int`) | `{"x":1}` | 7 | `int` |
+| `{"x": True}` (`bool`) | `{"x":true}` | 10 | `bool` |
+| `{"x": 1.0}` (`float`) | `{"x":1.0}` | 9 | `float` |
 
 The `1e-4`/`1e-5` and `1e15`/`1e16` pairs are the two thresholds where the
 exponent form begins, and the `1e-05`/`1e-07` rows fix the two-digit exponent
@@ -549,7 +619,7 @@ Shown as the encoding of `{"d": <instant>}` so the member framing is visible.
 | `…12:00:00.100000+00:00` | `{"d":"2026-08-01T12:00:00.100000Z"}` | 35 |
 | `…12:00:00.000001+00:00` | `{"d":"2026-08-01T12:00:00.000001Z"}` | 35 |
 
-Rows 1 and 2 are the §4(c) witness: the type normalised, so the encoder did not
+Rows 1 and 2 are the §4(iii) witness: the type normalised, so the encoder did not
 have to. Rows 3–5 fix six digits with trailing zeros kept.
 
 #### 5d. Durations
@@ -598,7 +668,7 @@ payload is a JSON object whose members are the call's arguments"). Under §2a it
 member order is **sorted, not the caller's keyword order** — which matters more
 than it looks, because `f(b=…, a=…)` and `f(a=…, b=…)` are the same call and a
 naive encoder built on a kwargs `dict` gives them different bytes. That is
-construction-dependence on the *request* path, structurally identical to §4(a)
+construction-dependence on the *request* path, structurally identical to §4(i)
 and closed by the same rule.
 
 The three below are vectors for the encoding of the argument object; the
@@ -629,7 +699,7 @@ and `valid_until: UtcInstant | None`, with `Evidence` carrying
 `valid_until=None`. A page of them is a JSON array of exactly these bytes, comma
 separated, with no whitespace — §2a's context-freedom stated as a vector.
 
-**A confirmation-shaped model**, exercising §4(a). Built over `tool_id`,
+**A confirmation-shaped model**, exercising §4(i). Built over `tool_id`,
 `tool_description`, `parameters: FrozenJsonMapping`, `reason` and
 `token: ContinuationToken(handle)` — again the tree's shape at `89e0cfe`, for a
 type ADR-0084 §4 names:
@@ -923,7 +993,7 @@ that still stands.
   the wire lane inherits, this change discharges early — a debt discharged before
   the debtor expected is discharged — and what its text would need is one
   sentence saying the limit is measured on the canonical encoding ratified here.
-  **No figure of its moves**: §2's ordering is length-preserving and §4(b)
+  **No figure of its moves**: §2's ordering is length-preserving and §4(ii)
   shortens one value, so any reserve, floor or ceiling it computes stands.
 - **ADR-0021.** §2 uses §1's canonical form as the form it is, for a second
   consumer. Applying a rule at its stated scope is the rule being used rather
@@ -931,9 +1001,43 @@ that still stands.
   ADR-0021 decided about digests moves, and no digest's bytes change.
 - **ADR-0084 §3.** Its framing, its codec choice, its duplicate-member refusal
   and its permanent-representation freeze are all used as given. §2 states what
-  "the UTF-8 JSON codec" spells out to; it does not choose a different one. §8
-  applies the exact-match version rule at its stated scope rather than widening
-  it.
+  "the UTF-8 JSON codec" spells out to for a *payload*; it does not choose a
+  different codec. §8 applies the exact-match version rule at its stated scope
+  rather than widening it.
+
+  **Its member-order sentence is the one clause worth arguing rather than
+  asserting**, because §2a imposes an ordering rule and §3 says one is not
+  needed. The sentence is:
+
+  > **The codec is UTF-8 JSON**, and the envelope is a JSON **object** with named
+  > members carrying the kind, the correlation id and the payload. Member order
+  > is therefore not significant and no ordering rule is needed.
+
+  **Its subject is the envelope**, and that is not a convenient reading — it is
+  the sentence's own grammar ("the envelope is a JSON object … Member order is
+  *therefore* not significant"), and §3 shows it distinguishes deliberately: the
+  very next bullet says duplicate members are rejected "in the envelope **and in
+  payload objects alike**". A clause that says "and in payload objects alike"
+  when it means both is a clause that means the envelope when it does not say so.
+  §2 is scoped to the payload for exactly this reason, and **imposes no ordering
+  rule on the envelope** — an implementation that emits envelope members in any
+  order conforms to both ADRs, which is the sentence still holding rather than
+  being narrowed.
+
+  **Nor does its operative content move.** "Not significant" is a statement about
+  *interpretation*: no reader may depend on order. That survives untouched,
+  because §7 makes the canonical form an obligation on the **writer** only and
+  leaves ADR-0084 §3's decoder rules exactly as they are. A reader holding only
+  ADR-0084 §3 and writing a decoder acts identically before and after.
+
+  **What §3 leaves unstated, this ADR states**, and that is the stacked-addition
+  shape rather than the supersession one (ADR-0083 §15's test): §3 says nothing
+  about the member order of a *payload* object, so no sentence of it becomes
+  false when §2a fixes one. **What would change this answer** — recorded so a
+  later reader can check rather than re-derive — is a reading on which §3's
+  sentence governs payload objects too. On that reading a record would be owed
+  on §3 as well as §5, and the scope on ADR-0084's `Status` would have to name
+  both.
 - **ADR-0084 §4 and §6.** §4's ruling that the limit is contract rather than
   transport is the premise this ADR serves. §6's placement of the codec in `wire`
   is untouched: §7 keeps the encoder there and takes only the *specification* of
@@ -955,7 +1059,7 @@ that still stands.
   reason it did not is gone.
 - **The wire lane inherits a specification and a test suite, not a design task.**
   §5's vectors are the assertions; §2 is the docstring. What is left is an
-  encoder, a duration serialiser (§2e), a zero normalisation (§4b) and a sort.
+  encoder, a duration serialiser (§2e), a zero normalisation (§4(ii)) and a sort.
 - **A `model_dump_json()` shortcut will not pass.** Three of §3's rows and one of
   §4's are places the obvious one-liner produces the wrong bytes. That is a cost
   — the wire lane writes ~20 lines it hoped not to — and it is the cost of the
