@@ -1261,3 +1261,95 @@ def test_every_real_setting_accepts_a_float_subclass_and_stores_a_plain_float(
     stored = getattr(_settings_with(name, numpy.float64(2.5)), name)
     assert stored == 2.5
     assert type(stored) is float
+
+
+# --- the local API's transport (ADR-0084 §3, ADR-0085 §8d) ------------------
+
+
+def test_the_transport_settings_carry_the_ratified_defaults() -> None:
+    """ADR-0084 §3 names all four rather than leaving them to the implementation.
+
+    Following ADR-0083 §7, "which named every scheduler interval for ADR-0074 §9.3's
+    reason: 'a "bounded default" with no figure is two conforming stores handing the
+    same continuation different history.' The same applies with more force to a
+    limit whose whole job is to refuse."
+    """
+    settings = Settings()
+    assert settings.hub_max_frame_bytes == 16 * 1024 * 1024
+    assert settings.hub_read_timeout == timedelta(seconds=30)
+    assert settings.hub_max_connections == 64
+    assert settings.hub_max_pending_handshakes == 8
+
+
+@pytest.mark.parametrize("value", [0, 1023])
+def test_a_frame_size_below_the_floor_is_refused(value: int) -> None:
+    """ADR-0085 §8d: 512 for the envelope reserve plus 256 for either connect
+    payload is 768, and 1024 leaves room for both handshake frames and a small
+    request besides.
+
+    "A value below the floor yields a hub that passes every ADR-0083 §3 startup step
+    and then refuses every client including the CLI — indistinguishable from a hub
+    that is down, which is ADR-0084's ruling 4 failure produced by a config typo,
+    and load time is where it should surface."
+    """
+    with pytest.raises(ValidationError):
+        Settings(hub_max_frame_bytes=value)
+
+
+def test_a_frame_size_the_prefix_cannot_express_is_refused() -> None:
+    """ADR-0084 §3's upper bound: "representable by the framing".
+
+    "Without this, a setting of 5 GiB would be accepted at load and would be a limit
+    the contract declares (§4) but the wire cannot encode, so the in-process engine
+    would accept a value the client provably cannot send — the very divergence §4
+    moved the limit into the contract to prevent."
+    """
+    with pytest.raises(ValidationError):
+        Settings(hub_max_frame_bytes=5 * 1024**3)
+    assert Settings(hub_max_frame_bytes=2**32 - 1).hub_max_frame_bytes == 2**32 - 1
+
+
+def test_the_floor_and_the_ceiling_admit_what_they_must() -> None:
+    """The discriminating half of the two bounds above."""
+    assert Settings(hub_max_frame_bytes=1024).hub_max_frame_bytes == 1024
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_non_positive_connection_ceiling_is_refused(value: int) -> None:
+    """ADR-0084 §3: "'off' is not an available value and a zero is a
+    misconfiguration rather than a way to express it".
+
+    "A ``hub_max_connections`` of 0 would refuse every client, including the CLI, and
+    would look from outside exactly like a hub that is down."
+    """
+    with pytest.raises(ValidationError):
+        Settings(hub_max_connections=value)
+
+
+@pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1)])
+def test_a_non_positive_read_timeout_is_refused(value: timedelta) -> None:
+    """The deadline is not nullable and not zero: a hub with no read deadline "has
+    exactly the failure §3 exists to prevent"."""
+    with pytest.raises(ValidationError):
+        Settings(hub_read_timeout=value)
+
+
+def test_a_pending_ceiling_above_the_total_is_refused() -> None:
+    """ADR-0084 §3: "a pending ceiling above the total is a limit that can never bind".
+
+    A limit that cannot bind is not a weaker limit but an absent one, and an operator
+    who set it believes they hold a defence against the cheapest state a misbehaving
+    peer can accumulate.
+    """
+    with pytest.raises(ValidationError, match="can never bind"):
+        Settings(hub_max_connections=4, hub_max_pending_handshakes=5)
+    assert Settings(hub_max_connections=4, hub_max_pending_handshakes=4).hub_max_connections == 4
+
+
+def test_load_settings_reports_a_bad_transport_setting_as_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment fault surfaces at load, as every other setting's does."""
+    monkeypatch.setenv("ASSISTANT_HUB_MAX_FRAME_BYTES", "10")
+    with pytest.raises(ConfigurationError, match="invalid configuration"):
+        load_settings()
