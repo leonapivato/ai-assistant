@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
@@ -49,6 +49,14 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import AssistantEngine
 
 _log = structlog.get_logger(__name__)
+
+#: How many turns of the event loop the overlap watcher is given to observe a frame
+#: that is already buffered (:func:`_settle`). **One is enough today** — measured:
+#: with zero the refusal is missed, with one it fires — and three is headroom for a
+#: watcher path that grows a suspension point, which is free because the loop stops
+#: the moment the watcher settles. Zero is the case the tests pin, so a change that
+#: removed the yielding would fail rather than become intermittent.
+_SETTLE_TURNS: Final[int] = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,9 +253,24 @@ async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:
     discard bytes a conforming client could not have sent — it may write again only
     after the reply, and the reply has not been written yet.
 
+    **The loop of bare yields is what makes the observation deterministic**, and it
+    is not a sleep in disguise. A client that pipelined two requests writes both
+    before the first reply, so by the time the dispatch returns the second frame is
+    already in the reader's buffer — but the watcher only *sees* it once the event
+    loop has given it a turn, and a dispatched call that never suspends (a
+    ``forget`` that misses, say) returns without the loop ever running. Without
+    these turns the refusal would fire or not depending on whether the method
+    happened to await, which is a property of the method rather than of the
+    protocol. Yielding until the watcher settles is the same idiom the conformance
+    suite uses to put a mutation inside the window ADR-0065 protects.
+
     Returns:
         Whether a second request frame arrived while one was outstanding.
     """
+    for _ in range(_SETTLE_TURNS):
+        if watcher.done():
+            break
+        await asyncio.sleep(0)
     if not watcher.done():
         watcher.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

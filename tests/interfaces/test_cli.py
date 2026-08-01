@@ -84,6 +84,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeToolInvoker,
 )
+from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -439,6 +440,29 @@ async def test_ask_reports_a_closed_door_as_an_instruction_and_exits_nonzero(
     assert "hub.sock" in rendered
     assert "ai-assistant-hub" in rendered
     assert "not reachable" in rendered
+
+
+async def test_a_data_directory_too_long_for_the_socket_is_reported_as_itself(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The client gives the hub's own diagnosis rather than a bare errno (#554).
+
+    One setting locates both the data and the door (ADR-0084 §9), so both halves
+    reach the same verdict about it. Without this the user reads
+    ``AF_UNIX path too long`` out of ``connect`` and has to work out for themselves
+    that ``ASSISTANT_DATA_DIR`` is what to move; with it they read the limit, the
+    encoded length, and what to do.
+    """
+    deep = tmp_path
+    while len(str(deep).encode()) < sun_path_limit():
+        deep = deep / "aaaaaaaaaa"
+    monkeypatch.setattr(cli, "load_settings", lambda: Settings(data_dir=deep))
+    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
+    code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
+    assert code == 1
+    rendered = output.getvalue()
+    assert "sun_path" in rendered
+    assert "ASSISTANT_DATA_DIR" in rendered
 
 
 @pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "1e100", "1e-7"])

@@ -132,13 +132,24 @@ async def _read_exactly(reader: asyncio.StreamReader, count: int, *, at_start: b
     Returns:
         The bytes.
 
+    **A reset is treated exactly as an end of file**, and that is a decision rather
+    than laziness. A peer that closed with unread bytes still queued reaches this as
+    ``ConnectionResetError`` rather than as an empty read — the same event from the
+    kernel's point of view and a different exception from Python's — and the
+    listener's own ceiling refusal is one of the paths that produces it. Letting the
+    raw ``OSError`` escape would hand a caller an exception outside this package's
+    vocabulary for the ordinary case of a peer hanging up.
+
     Raises:
         ConnectionClosedError: On a clean close before any of the frame arrived.
         UndecodableFrameError: On a close part-way through one.
     """
     buffer = bytearray()
     while len(buffer) < count:
-        chunk = await reader.read(min(_CHUNK_BYTES, count - len(buffer)))
+        try:
+            chunk = await reader.read(min(_CHUNK_BYTES, count - len(buffer)))
+        except OSError:
+            chunk = b""
         if not chunk:
             if at_start and not buffer:
                 msg = "the peer closed the connection"
