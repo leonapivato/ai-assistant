@@ -659,27 +659,32 @@ the strings inside the pre-existing `core` types §5's walk terminates at. So
 `learn(FeedbackEvent(content="\ud800"))` still constructs today. **That is
 tracked as #565, and a lane is closing it.**
 
-**The affected fields, named rather than gestured at**, so #565's lane has a
-target and does not go looking in types that do not need it:
+**#565's scope is a rule, not a list**, and this ADR states it as one after
+trying the other:
 
-| Type | Plain-`str` fields |
-| --- | --- |
-| `FeedbackEvent` | `content`, `subject`, `evidence` (`core/types.py:1748-1755`) |
-| `Goal` | `statement` |
-| `ActionPlan` | `rationale`, and `PlanStep.intent` beneath it |
-| `MemoryRecord` | `content`, and its kind-specific text |
-| `ExecutionState` | none of its own — reached via `StepExecution.failure` → `StepFailure.message` |
+> **Every string-bearing field reachable from the `core` types §5's walk
+> terminates at is in scope** — at any depth, through nested models and through
+> collections of them. Not a named set of fields.
 
-**`CurrentContext` is *not* on that list**, and saying so is worth a line because
-it is the obvious one to assume: it carries only `now` (`UtcInstant`),
-`time_of_day` (an enum) and two booleans, so it has no string to refuse.
+**A field table was written here and is deliberately gone**, because it was
+falsified in a single review round. It named `FeedbackEvent`, `Goal`,
+`ActionPlan`, `MemoryRecord` and `ExecutionState`, and missed **`MemoryBase.id`**
+— a plain `str`, not an `Identifier` — and **`Provenance.evidence`**, both
+reachable through `MemoryRecord` and both able to carry a surrogate into a
+`TurnResult` a canonical fake returns. That is §4c's own argument landing on
+§4c: a rule over "every string" survives, and a list of fields rots. Recording
+the failure rather than quietly replacing the table is the point, since the next
+reader's instinct will be to write the list again.
 
-**Nor are the JSON-shaped fields**, and for a better reason than absence:
-`PlanStep.parameters`, `StepExecution.output` and `Confirmation.parameters` are
+**Two observations do survive as *evidence*, not as scope.** `CurrentContext`
+carries no string at all — only `now`, `time_of_day` and two booleans — so a
+reader assuming every leaf needs work is wrong. And the JSON-shaped fields need
+none for a better reason than absence: `PlanStep.parameters`,
+`StepExecution.output` and `Confirmation.parameters` are
 `FrozenJsonMapping`/`FrozenJsonValue`, and `FrozenJson` **already** catches a
-surrogate by running the real encoder at validation — which is exactly the
-precedent ADR-0087 §9 points at and the method §4c adopts. The gap is in the
-fields that were left as bare `str`, not in the ones that were given a validator.
+surrogate by running the real encoder at validation — the precedent ADR-0087 §9
+points at and the method §4c adopts. The gap is in fields left as bare `str`, not
+in ones that were given a validator.
 
 **The boundary is where it is for a reason, not for want of noticing.** ADR-0087
 §9 scoped its handover in as many words — "the refusal belongs on the type, and
@@ -1579,9 +1584,9 @@ the triad. This ADR is ADR-0084 §5's step 2 whatever else lands.
 
 **#565's fix is a prerequisite of the client lane, not merely context for it**
 (§4c). §4c closes encodability for the promoted types and direct arguments and
-records that the strings inside the pre-existing `core` leaves — `FeedbackEvent`,
-`Goal`, `ActionPlan`, `MemoryRecord`, and `ExecutionState` transitively through
-`StepFailure.message` — are not reached. Until that lands, this contract declares request and result values
+records that the strings inside the pre-existing `core` types §5's walk
+terminates at are not reached — **every** such string, at any depth, which §4c
+states as a rule rather than as a list for a reason it learned the hard way. Until that lands, this contract declares request and result values
 that ADR-0087 §2b gives no wire form, so **the client lane does not proceed
 without it**: a client built first would be one whose encoder raises on inputs
 this Protocol admits, which is ADR-0084 §4's substitutability failure arriving
