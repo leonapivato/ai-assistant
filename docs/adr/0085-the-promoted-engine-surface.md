@@ -508,9 +508,9 @@ Three categories stay in `orchestration`, and the first is the one that would
 have broken the build.
 
 **(a) Projection helpers stay behind, because one of them names a type the
-closure does not reach.** All six classmethods and two module functions that
-construct these DTOs today, enumerated so the triad lane does not have to find
-them:
+closure does not reach.** All seven classmethods and two module functions that
+construct these DTOs today, private ones included, enumerated so the triad lane
+does not have to find them:
 
 | Helper | Today | Names |
 | --- | --- | --- |
@@ -520,6 +520,7 @@ them:
 | `ConversationSummary.from_record` | `engine.py:768` | `core.types.Conversation` |
 | `ObservedProposal.ruled` | `observation.py:231` | `core.types.MemoryUpdateProposal`, `core.types.MemoryIngestResult` |
 | `ObservedProposal.unsupported` | `observation.py:247` | `core.types.MemoryUpdateProposal` |
+| `ObservedProposal._project` | `observation.py:266` | `core.types.MemoryUpdateProposal` |
 | `learn_decision` | `engine.py:487` | `core.types.MemoryDecisionKind` |
 | `question_state` | `questions.py:126` | `core.types.DeferralState` |
 
@@ -533,8 +534,16 @@ counted as a field.
 > projection helper becomes a module-level function in the `orchestration` module
 > that owns the projection, and none of them is part of the Protocol.
 
-The other seven would have been safe to carry, and they move anyway, for two
-reasons: a rule with exceptions is a rule the triad lane has to re-derive, and a
+`_project` is private and is `ruled`'s and `unsupported`'s shared implementation;
+it moves with them, so the two keep an implementation rather than losing one. It
+is listed because a rule stated over "every projection helper" is only checkable
+against a complete inventory, and a private member is exactly the kind that gets
+left behind.
+
+The other eight would have been safe to carry — `MemoryUpdateProposal`,
+`MemoryIngestResult`, `MemoryRecord`, `Conversation`, `DeferralAdmission`,
+`MemoryDecisionKind` and `DeferralState` are all `core.types` — and they move
+anyway, for two reasons: a rule with exceptions is a rule the triad lane has to re-derive, and a
 projection from a `core` record into a `core` DTO belongs to the layer that
 *decides* the projection. `Belief.from_record` is where `band_of` is applied
 (ADR-0073 §7); putting that in `core/types.py` would make `core` the home of a
@@ -677,8 +686,9 @@ several of them, without anyone having to notice.
 > **The contract limit is `hub_max_frame_bytes - 512`, applied to the whole
 > serialised **payload** — for a call, the request's argument object as §10
 > encodes it; for a return, the result value as §10 encodes it — measured as the
-> byte length of its pydantic JSON-mode serialisation.** Every implementation
-> enforces it, on arguments before dispatch and on results before return.
+> byte length of that payload's canonical UTF-8 JSON encoding, which is pinned
+> below.** Every implementation enforces it, on arguments before dispatch and on
+> results before return.
 
 **Bounding the payload rather than each value is the correction that makes the
 arithmetic true, and it is worth stating why the per-value form fails.** A
@@ -692,10 +702,28 @@ the divergence ADR-0084 §4 moved the limit into the contract to prevent, one
 level up from where it was being watched. A whole-payload bound has no such gap,
 because what it measures is the thing the length prefix counts.
 
-The measure is the serialisation because that is what ADR-0084 §3's length prefix
-counts, and a limit measured on anything else — a character count, a Python
-object size — would be a number the two implementations compute differently for
-the same value. A directory named in a non-ASCII script spends more of the budget
+**The encoding is pinned, because "JSON mode" names a value shape and not a byte
+string.** Two conforming encoders can produce different byte counts for the same
+value — one inserting whitespace after `,` and `:`, one escaping non-ASCII as
+`\uXXXX` — and a limit whose measurement differs between the two implementations
+is not one limit. So:
+
+> **The measurement is taken on the payload's UTF-8 JSON encoding in its
+> canonical form: no insignificant whitespace (the `,` and `:` separators carry
+> none), and non-ASCII characters emitted as UTF-8 rather than as `\u` escapes.**
+> This is the encoding ADR-0084 §3 puts on the wire, and it is what pydantic's
+> own `model_dump_json()` produces — so an implementation that measures the bytes
+> it is about to send, and an in-process one that calls the same method, agree by
+> construction rather than by care.
+
+Pinning it as the *wire's* encoding rather than as a convention of this ADR is
+what keeps the two numbers the same: the client is measuring the frame it will
+actually write, not a proxy for it.
+
+The measure is a serialisation at all because that is what ADR-0084 §3's length
+prefix counts, and a limit measured on anything else — a character count, a
+Python object size — would be a number the two implementations compute
+differently for the same value. A directory named in a non-ASCII script spends more of the budget
 than it looks like it does, and so does an utterance.
 
 **Subtracting the reserve is the other half of the arithmetic.** Set the contract
@@ -739,9 +767,20 @@ schema and is therefore fixed by the surface ADR". With §8a's schema:
 > its existing `gt=0` and its upper bound at the 4-byte prefix's ceiling.
 
 The connect reply's payload carries a version (an integer), a build identifier, a
-readiness flag and the effective frame size. Bounding the build identifier at 64
-bytes puts that payload comfortably under 200; with the 512-byte reserve, 1024
-leaves room for the handshake and for a small request besides. A value below the
+readiness flag and the effective frame size — every member fixed-width except the
+build identifier, so the floor is only derivable if that one is bounded. It is
+not bounded anywhere today, and a floor resting on an unstated bound is not a
+proof: a hub emitting a 1000-byte build identifier would accept
+`hub_max_frame_bytes=1024` at load and then fail every handshake, which is the
+exact failure this floor exists to prevent, produced by the check that was
+supposed to prevent it. So the bound is made normative here, which ADR-0084 §3's
+assignment of the floor to this ADR necessarily carries with it:
+
+> **The connect reply's build identifier is at most 64 bytes**, and a longer one
+> is a protocol violation.
+
+With that, the connect reply's payload is under 200 bytes; with the 512-byte
+reserve, 1024 leaves room for the handshake and for a small request besides. A value below the
 floor yields a hub that passes every ADR-0083 §3 startup step and then refuses
 every client including the CLI — indistinguishable from a hub that is down, which
 is ADR-0084's ruling 4 failure produced by a config typo, and load time is where
@@ -845,6 +884,9 @@ fixed, so it is stated compactly rather than method by method:
 - **Every promoted `StrEnum` serialises as its member value**, which is why §4
   keeps the `StrEnum` base: `Disposition.EXECUTED` is `"executed"` on the wire
   today and after the move, so the relocation changes no byte.
+- **The byte encoding is §8c's canonical form** — compact separators, non-ASCII
+  as UTF-8 rather than `\u` escapes — for every payload on this wire, so the
+  bytes a client measures against §8c's limit are the bytes it writes.
 
 ### 11. Where the corpus and the tree disagree, and which this ADR follows
 
@@ -970,6 +1012,22 @@ move to `Accepted` triggers nothing.
   transmitting them creates a second source of truth for a fact the client can
   recompute exactly, and a client trusting the transmitted copy would be trusting
   a value nothing validates.
+- **Bound each argument and result *value* independently, rather than the
+  payload.** Rejected in §8c: a request payload carries every argument plus its
+  member names, so a `converse` call whose `utterance` sits exactly at the bound
+  overflows the frame on `timeout` alone — leaving the client to refuse an input
+  the contract admitted, or to send a frame the server refuses on its prefix.
+  Bounding the payload measures the thing the length prefix counts.
+- **Leave the measurement as "pydantic JSON mode" without pinning the bytes.**
+  Rejected in §8c: JSON mode names a value shape, not a byte string, so two
+  conforming encoders differing only in whitespace or `\u` escaping would
+  disagree about whether the same call is oversized — which is one limit in name
+  and two in effect.
+- **Derive the `hub_max_frame_bytes` floor without bounding the build
+  identifier.** Rejected in §8d: the floor is then a proof resting on an unstated
+  premise, and a hub emitting a long build identifier would accept the minimum
+  configuration and fail every handshake — the floor's own failure, arriving
+  through the floor.
 - **Set the contract size limit equal to `hub_max_frame_bytes`.** Rejected in §8c:
   a value at exactly the limit passes the contract and overflows the frame by the
   envelope's bytes, so the in-process engine would accept what the client
