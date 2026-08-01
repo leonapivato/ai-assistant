@@ -128,9 +128,27 @@ single listing holding the memory store's lock several thousand times.
 MAX_EVIDENCE_CITATIONS = 64
 ```
 
-and no record this system **installs** carries more than that many citations in
-`provenance.evidence` — "install" in ADR-0081 §1's sense, which §2 defines the
-scope with and which exempts a write that only retires an existing record. The same bound governs `FeedbackEvent.evidence`, which is
+and no **`MemoryRecord`** this system **installs** carries more than that many
+citations in `provenance.evidence` — "install" in ADR-0081 §1's sense, which §2
+defines the scope with and which exempts a write that only retires an existing
+record.
+
+**`Goal` carries a `Provenance` too, and this bound does not reach it.** The
+scope is stated on the record type rather than on the field, because §2 puts
+enforcement at the `MemoryWriter` seam and `PlanStore.save_goal` does not cross
+it — a caller can persist a `Goal` with 65 citations and nothing here stops it.
+That is deliberate on both halves:
+
+- **Nothing accumulates on the goal path.** The bound exists because `REINFORCE`
+  unions evidence without limit (Context); there is no fold on a `Goal`, so the
+  growth this ADR is about cannot happen there. A bound whose motivating
+  mechanism is absent would be a rule imported for symmetry.
+- **The goal path already has a ratified owner, and it is not this ADR.**
+  ADR-0077 §11 defers "**the evidence obligation on `Goal`** (§7, #432), and any
+  enforcement seam on the goal write path" to "the lane that adds an
+  inferred-goal producer". No such producer exists, which is why that lane is
+  where the seam is decided rather than guessed at here — the same reasoning
+  ADR-0072 §3 used to decline a validator until a producer could violate it. The same bound governs `FeedbackEvent.evidence`, which is
 copied straight into a `Provenance` (`RuleBasedFeedbackProcessor._to_record`,
 `learning/processor.py`) and would otherwise fail at a construction the caller
 cannot see.
@@ -373,7 +391,8 @@ a magnitude the writer holds.
 
 **It is additive with a default**, so a stored record written before this ADR
 deserialises with `evidence_elided=0` and nothing migrates. Every `Goal` carries
-a `Provenance` too (ADR-0068 §2); its value is always zero, which is the same
+a `Provenance` too (ADR-0068 §2); its value is always zero — §1 scopes the bound
+to `MemoryRecord` installs, so nothing on the goal path ever elides — which is the same
 harmless breadth ADR-0077 §7's validator already accepted on that type.
 
 **It is an elision, not a tombstone, and the two are different facts.** ADR-0077
@@ -807,6 +826,10 @@ The triad and its consumers, in the order golden rule 5 fixes.
   difference is capacity rather than loss
   — and leaves the words to the surface, exactly as ADR-0077 §6 left the
   tombstone's.
+- **Any bound or elision on `Goal.provenance.evidence`, or an enforcement seam
+  on the goal write path.** §1. ADR-0077 §11 already owns it and assigns it to the
+  lane that adds an inferred-goal producer; none exists, and this ADR does not
+  pre-empt that lane by bounding a field on a path with no accumulation on it.
 - **Whether an evidence tuple should be *pruned* by relevance or age rather than
   displaced by arrival.** That is consolidation, and consolidation is leg 7
   (ADR-0072 §10, ADR-0077 §11, unchanged). §3 decides only what the fold does at
