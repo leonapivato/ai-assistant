@@ -143,6 +143,18 @@ _ADR_FILENAME_RE = re.compile(r"^(\d{4})-.*\.md$")
 #: rather than whitespace, so a level-3 heading does not end the header.
 _HEADING_2_RE = re.compile(r"^ {0,3}##(?:[ \t].*)?$")
 
+#: The underline of a **setext** level-2 heading — the corpus writes none, and
+#: the boundary accepts it anyway, because the cost of not recognising a heading
+#: is that a whole document body re-enters liveness scope. Level 1 underlines
+#: with ``=`` and does not end a header that has not started.
+_SETEXT_2_RE = re.compile(r"^ {0,3}-+[ \t]*$")
+
+#: A line that cannot be the *text* of a setext heading, so an underline-shaped
+#: line beneath it is a thematic break or a list marker instead. CommonMark
+#: requires the preceding line to be a paragraph: blank ends one, and a leading
+#: ``-``, ``#``, ``>`` or ``|`` starts a different block.
+_NOT_SETEXT_TEXT_RE = re.compile(r"^\s*$|^ {0,3}[-#>|]")
+
 #: The two tiers of ADR-0088 §6.
 _TIER_FAILING = 1
 _TIER_REPORTED = 2
@@ -680,6 +692,10 @@ def header(text: str) -> str:
     for index, line in enumerate(lines):
         if _HEADING_2_RE.match(line):
             return "\n".join(lines[:index])
+        # A setext heading is two lines, and the *first* is its text — so the
+        # header ends above it, not above the underline.
+        if index and _SETEXT_2_RE.match(line) and not _NOT_SETEXT_TEXT_RE.match(lines[index - 1]):
+            return "\n".join(lines[: index - 1])
     return "\n".join(lines)
 
 

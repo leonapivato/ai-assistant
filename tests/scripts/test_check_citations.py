@@ -654,6 +654,39 @@ def test_the_header_boundary_follows_markdown_not_one_spelling(
     assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
 
 
+def test_a_setext_heading_ends_the_header_too(tmp_path: Path) -> None:
+    """``Decision`` over ``-------`` is a level-2 heading; the corpus writes none, and it counts."""
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            "# 2. Two\n\n- Status: Accepted\n\nDecision\n--------\n\n"
+            "A record is written like this:\n\n- Supersedes: ADR-0001\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
+def test_a_dashed_line_under_a_record_is_not_a_setext_heading(tmp_path: Path) -> None:
+    """CommonMark needs a *paragraph* above the underline; a list item is not one.
+
+    Reading one as a heading would end the header above a real record and drop
+    it — the opposite failure, and the reason the guard is asserted rather than
+    assumed.
+    """
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            "# 2. Two\n\n- Status: Accepted\n- Supersedes: ADR-0001\n---\n\n"
+            "## Context\n\nReplaces it.\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert len(_findings(_report(tmp_path, "--no-tracker"), "liveness")) == 1
+
+
 def test_a_level_three_heading_does_not_end_the_header(tmp_path: Path) -> None:
     """``###`` closes its marker with a third ``#``, not with whitespace."""
     adrs = {
