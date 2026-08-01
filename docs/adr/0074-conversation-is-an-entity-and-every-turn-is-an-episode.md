@@ -37,8 +37,11 @@
   continuity seam stands whole: recent turns reach the planner as `memories`,
   `Planner` grows no `history` parameter, the widened meaning of `memories` and its
   ordering rule stand, the tail stays bounded by a configured count of recent turns,
-  and an id that does not resolve is still **skipped, not an error**. `get_many`
-  changes how those turns are fetched, not what continuity is or what it carries.
+  and an id that does not resolve is still **skipped, not an error**. What ADR-0086
+  §6 lands is the batch read's *availability* on the contract; converting this ADR's
+  own caller to it is ADR-0086 §8's work and has not happened yet — `history` still
+  fetches turn by turn, and issue #575 tracks the conversion. Either way what
+  changes is how the turns are fetched, never what continuity is or what it carries.
   ADR-0086 replaces nothing else in this ADR — §10's other declinations, and every
   other section, stand exactly as they stood before it.
 
