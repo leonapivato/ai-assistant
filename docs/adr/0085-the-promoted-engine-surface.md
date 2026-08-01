@@ -488,13 +488,26 @@ content term does not exist, and what is left is the single-belief view's
 citations — the term #473 was always about.
 
 **The same three names read identically on both types**, which is what keeps a
-renderer from needing two code paths: `evidence_count`, `lost_evidence` and
-`unsupported` are fields on `BeliefSummary` (nothing to derive them from) and
-properties on `Belief` (where `evidence` is complete, so a field would be the
-second source of truth §6b rejects). `unsupported` has one definition on both —
-`evidence_count > 0 and lost_evidence == evidence_count` — so a belief citing
-nothing is not "unsupported", it is supported by the user's own word (ADR-0038
-§1a).
+renderer from needing two code paths — but only **two** of them change category,
+and being precise about which is load-bearing:
+
+| Name | On `BeliefSummary` | On `Belief` |
+| --- | --- | --- |
+| `evidence_count` | **field** — nothing to derive it from | property over `evidence` |
+| `lost_evidence` | **field** — same reason | property over `evidence` |
+| `unsupported` | **property**, over the two counts | property over `evidence` |
+
+`unsupported` stays derived on **both**, because on `BeliefSummary` the two count
+fields already determine it. Making it a field there would be the second source of
+truth §6b rejects, and it would put a value on the wire that a client can compute
+exactly — so one implementation could send `unsupported: true` while another
+omitted it, and the same call would measure two different sizes against §8c. §4's
+field table and §6b's property table are the normative pair; this row exists so
+they are read together.
+
+`unsupported` has one definition everywhere — `evidence_count > 0 and
+lost_evidence == evidence_count` — so a belief citing nothing is not
+"unsupported", it is supported by the user's own word (ADR-0038 §1a).
 
 **ADR-0073 §4's floor gets a static guarantee rather than a convention.** Its rule
 is that "a citation the surface cannot render as evidence is never rendered *as*
@@ -914,6 +927,27 @@ is not one limit. So:
 >    decimal that reads back to the same value. `Belief.confidence` is the field
 >    this bites, and without it `0.1`, `1e-1` and `0.1000000000000000055` are all
 >    valid encodings of one number at three different lengths.
+> 6. **Scalars JSON has no native form for take one spelling each.** These are
+>    strings on the wire, so rules 2–4 fix their *escaping* and nothing fixes
+>    their *content* until this rule does:
+>    - an **instant** (`UtcInstant`) is RFC 3339 in UTC with the **`Z`**
+>      designator, never `+00:00`, and fractional seconds are **omitted when
+>      zero** and otherwise carry exactly six digits —
+>      `"2026-07-31T12:00:00Z"`, `"2026-07-31T12:00:00.500000Z"`;
+>    - a **duration** (`timeout`) is ISO-8601 carrying only its non-zero
+>      components, largest first, and `"PT0S"` for zero — `"PT30S"`,
+>      `"PT1H30M"`. Never a numeric form.
+>
+> **Rule 6's list is closed**, which is what makes the five rules above
+> sufficient: across the twenty-four promoted types and the fifteen signatures the
+> only field and argument types are `str`, `int`, `float`, `bool`, `None`,
+> `StrEnum` members, `UtcInstant`, `timedelta`, and containers of those. The first
+> six are JSON-native and rules 1–5 fix them; the last two are rule 6's.
+>
+> **`Z` is *satisfiable* rather than an extra burden**, because `UtcInstant`'s
+> validator already converts every value to UTC before it is stored
+> (`_utc_instant`, `core/types.py`) — so a promoted model never holds an instant
+> at another offset that would have to be rewritten to meet this rule.
 >
 > **Member order is deliberately not fixed**, because ADR-0084 §3 already rules it
 > insignificant and because it cannot change a byte *count* — only the order of
@@ -1479,11 +1513,14 @@ move to `Accepted` triggers nothing.
   the contract admitted, or to send a frame the server refuses on its prefix.
   Bounding the payload measures the thing the length prefix counts.
 - **Leave the measurement as "pydantic JSON mode" without pinning the bytes**, or
-  pin only whitespace and non-ASCII escaping. Rejected in §8c: JSON mode names a
-  value shape, not a byte string, and a partial pin is no better — `/` versus
-  `\/`, `\n` versus `\u000a`, and `0.1` versus `1e-1` are all still open, so two
-  conforming encoders disagree about whether the same call is oversized. One limit
-  in name and two in effect.
+  pin only whitespace and non-ASCII escaping, or pin only the JSON-native scalars.
+  Rejected in §8c: JSON mode names a value shape, not a byte string, and each
+  partial pin leaves a real disagreement — `/` versus `\/`, `\n` versus
+  `\u000a`, `0.1` versus `1e-1`, and `"…12:00:00Z"` versus `"…12:00:00+00:00"`,
+  the last differing by four bytes on a field every promoted model carries. Two
+  conforming encoders would disagree about whether the same call is oversized: one
+  limit in name and two in effect. The rule list is closed against the payload's
+  scalar vocabulary rather than left open-ended.
 - **State only that identifier arguments must be non-blank, leaving stripping to
   the implementation.** Rejected in §3c: `_non_blank` strips as well as rejects,
   so a wire client deserialising through `Identifier` and an in-process engine
