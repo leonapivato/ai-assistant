@@ -357,9 +357,25 @@ evidence_elided: int = Field(default=0, ge=0, description=...)
 > **The number of displacements this record's history has performed**, and
 > therefore an **upper bound** on the number of distinct citations it no longer
 > carries. It is a count and never an id: keeping the ids would defeat the
-> bound, since the ids are the payload. On a fold the surviving value is
-> `target.evidence_elided + incoming.evidence_elided + (citations displaced by
-> this fold)`.
+> bound, since the ids are the payload.
+>
+> **One recurrence, over every install.** The installed record's
+> `evidence_elided` is the **sum of the counts on every record the install draws
+> content from, plus the citations this install displaces.** It instantiates
+> three ways and no install is outside it:
+>
+> - a **`REINFORCE`** draws from two — `target.evidence_elided +
+>   incoming.evidence_elided + displaced`;
+> - an **`ACCEPT`** or **`STORE_TEMPORARY`** draws from one, the proposal —
+>   `proposal.evidence_elided + displaced`;
+> - a **`SUPERSEDE`** draws from one, also the proposal, because ADR-0040 §5a has
+>   it carry nothing of the target across — so the target's count is **not**
+>   inherited even though the target's id survives.
+>
+> Stating it as a sum over sources rather than as three rules is what stops the
+> non-fold cases quietly resetting a history: a proposal that already carries
+> `evidence_elided=3` and 65 citations installs at `3 + 1`, never at `1`, and
+> `export` never understates what a record has displaced.
 
 **It is a bound and not an equality, and that is a decision rather than an
 oversight.** Two cases make an exact count unobtainable, and both are reachable:
@@ -717,12 +733,15 @@ The triad and its consumers, in the order golden rule 5 fixes.
      claim. **And the bound is exercised on the rulings that are not folds**:
      §2 applies it to *every* install, so an oversized `ACCEPT`,
      `STORE_TEMPORARY` and `SUPERSEDE` proposal each assert the retained suffix
-     **and** the proposal's own displacement count — a writer that truncated
-     these without incrementing `evidence_elided` would satisfy "no installed
-     record exceeds the bound" and every `REINFORCE` clause above while silently
-     dropping provenance, which is the one outcome §4 exists to prevent. For
-     `SUPERSEDE` the case asserts both halves of §3's ruling: the proposal's own
-     count is recorded, and the *target's* is not inherited.
+     **and** §4's recurrence in its one-source form — `proposal.evidence_elided
+     + displaced`, exercised with a proposal whose count is already **non-zero**,
+     since a writer that stored the displacement alone would pass every
+     zero-valued case while discarding a history `export` is supposed to carry.
+     A writer that truncated these without incrementing at all would satisfy "no
+     installed record exceeds the bound" and every `REINFORCE` clause above while
+     silently dropping provenance, which is the one outcome §4 exists to prevent.
+     For `SUPERSEDE` the case asserts both halves of §3's ruling: the proposal's
+     own count is carried, and the *target's* is not inherited.
    - `FakeMemoryStore` and `FakeMemoryWriter` grow the behaviour, not a stub.
 4. **`memory/ingest.py`** — `_merge` truncates before constructing `Provenance`,
    so the constructor's validators still run on the value that is stored
