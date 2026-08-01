@@ -1,7 +1,51 @@
 # 84. The local API: a loopback socket, a versioned envelope, and the CLI as a client
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0087 (§5's enumeration of the implementation sequence as four changes)
 - Date: 2026-07-31
+- Partially superseded: 2026-08-01 by ADR-0087 — **§5's sequence is five changes,
+  not four; nothing §5 decided about the *order* of the four it names changes.**
+  ADR-0087 ratifies the canonical wire encoding — the exact byte string a payload
+  serialises to — and places itself **before the triad**, on §5's own item 3: the
+  triad ships a *canonical fake* and a *conformance suite*, so change 3 is where a
+  second implementation is first held to §4's rule that "every implementation
+  enforces" the size limit. A limit is a byte count, so the bytes are ratified
+  first. Its position relative to the surface ADR is deliberately not fixed;
+  both are contract changes preceding change 3. Under ADR-0070 §1's test, applied
+  to §5's enumeration:
+
+  **Replaced.** "The sequencing is therefore **four** changes, not one", and the
+  numbered list it introduces, read as complete. A reader holding only this ADR,
+  having ratified the surface ADR, builds the triad next — and would build it
+  against an unratified encoding, in the one clause §4 hands the conformance
+  suite. §5's item 4, "**the hub, the `wire` package, the client, and the
+  `lint-imports` edits**", is also read more widely than it now holds: taken with
+  §6's placement of "the codec" in the `wire` package, it reads as still carrying
+  the canonical byte encoding. It no longer does. **§6's placement itself is
+  untouched** — ADR-0087 takes the *specification* of that codec's output and
+  leaves the codec where §6 put it.
+
+  **Why the count fails and a deferral would not have.** ADR-0083 §15's
+  stacked-addition carve-out holds where "the deferring sentence **stays true**
+  and now has an answer". "Four changes, not one" does not stay true. The
+  falsifying decision is ADR-0087's *insertion into the sequence* — not any later
+  ADR's citation of it — which is why the record is ADR-0087's to write and lands
+  in ADR-0087's change, on the same reasoning §12 below applies to ADR-0042.
+
+  **Not replaced — and this is the larger half.** §5's *argument* is untouched
+  and is in fact what licences the insertion. Its reasoning is that a contract is
+  ratified before anything implements against it, and that steps 1 and 2 are split
+  "because they answer different questions and only one of them can be answered
+  honestly today". ADR-0087 is a third question of that kind — one wanting contact
+  with a serialiser and a test rather than with a deployment or a signature — and
+  it lands ahead of the triad for §5's own reason, contract before implementation.
+  The relative order of the four changes this ADR names is unchanged; so is every
+  clause about *what* each of them contains, the promotion in §4 and §5, the
+  triad's obligation under golden rule 5 and ADR-0015 §5, and §5's ruling that
+  `start()` and `aclose()` stay off the Protocol. §3's framing, codec and
+  permanently-frozen connect representation are used by ADR-0087 as given, not
+  changed; §4's ruling that the size limit is contract rather than transport is
+  the premise ADR-0087 serves; §6's placement of the codec in the `wire` package
+  stands, ADR-0087 taking only the *specification* of that codec's output.
 - **This is the second and last of leg 5's two decisions.** ADR-0083 decided the
   *process* — one resident instance, exclusive ownership of the five databases,
   two-phase shutdown, exit-code classification, the internal scheduler. This one
