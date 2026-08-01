@@ -532,7 +532,15 @@ The triad and its consumers, in the order golden rule 5 fixes.
    (`CONTRIBUTING.md`, "Adding a Protocol"):
    - `MemoryStore`: `get_many` never disagrees with `get` on any id, on all three
      read-time outcomes; duplicates collapse; an empty argument returns an empty
-     mapping; a missing id is an omission and not an error.
+     mapping; a missing id is an omission and not an error. **And it observes
+     `record_ids` before its first await** — the ADR-0065 clause §6 binds it to,
+     which needs its own suspended-call case because none of the clauses above
+     mutates the sequence mid-call and an implementation that took its lock first
+     and materialised the argument afterwards would pass every one of them while
+     answering a later version of the caller's input. This is the case
+     `write_atomic`'s `Sequence` argument already carries; a second `Sequence`
+     argument on the same Protocol gets it too, or the clause is declared and
+     unenforced.
    - `MemoryWriter`: no stored record exceeds `MAX_EVIDENCE_CITATIONS`; a
      `REINFORCE` whose union would exceed it retains the **last**
      `MAX_EVIDENCE_CITATIONS` of the deduplicated union and increments
@@ -674,12 +682,32 @@ the drop from being silent. ADR-0084 §4 named this ADR as its prerequisite and 
 above discharges the part of it that is a memory-contract problem; §3's ceiling
 and its settings are untouched.
 
-**The edits themselves are sequenced separately.** Two lanes are writing under
-`docs/adr/` this wave, and a record naming ADR-0086 written while ADR-0086 is
-`Proposed` would assert a supersession that has not landed — which ADR-0070 §1
-forbids in as many words ("flipping a live decision to `Superseded` with no such
-ADR is not a status change but an unrecorded decision change"). The records land
-with, or after, this ADR's ratification.
+**The edits themselves are sequenced into their own change, and this is the
+corpus's own practice rather than a convenience.** ADR-0084 §12 made exactly this
+split days ago: it declared every record it owed, wrote one of them in its own
+change, and **deferred the rest** — its ADR-0077 record explicitly "to its own
+lane (#536)". The records on ADR-0077 §10, ADR-0052 §3, ADR-0022 §2 and ADR-0074
+§9 all landed in separate commits *after* `docs(adr): ratify ADR-0084`. Declaring
+in the text and writing in a following change is a ratified, exercised shape.
+
+**Two reasons it is the right one here.** ADR-0070 §1 permits "recording a
+supersession **that has landed**", and a `Proposed` ADR's decision has not: this
+ADR is reviewed while `Proposed` precisely "so a finding can still change the
+decision" (ADR-0015 §5), and this review already changed §4, §6 and §7. A
+`Partially superseded by ADR-0086` line written now would assert on two live
+ADRs' `Status` lines that they had been superseded by a decision not yet made,
+and would have to be revised or withdrawn if a later round moved §3's fold rule
+or §6's ruling. And two lanes are writing under `docs/adr/` this wave, so the
+edits need ordering that this lane does not own.
+
+**What is *not* being deferred is the judgement.** ADR-0082 §1 puts the
+substantive work in the later ADR's text — "the author names the clause and
+applies §1's test to it; a reviewer checks that showing against the quoted
+clause" — and it is all above, quoted and argued, where this review can reach it.
+The following change transcribes a decision made here; it is not where the scope
+is chosen, and it is emphatically **not** the `Proposed` → `Accepted` flip, which
+ADR-0070 §1 permits only as an edit that "finalises the current decision rather
+than changing a past one" and which must stay trivial for exactly that reason.
 
 ## Consequences
 
