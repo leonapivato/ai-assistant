@@ -221,6 +221,7 @@ def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES, parks: bool = F
         plans=plans,
         trail=trail,
         memory=memory,
+        deferrals=deferrals,
         conversations=conversations,
         observation=observation,
         questions=questions,

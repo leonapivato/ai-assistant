@@ -990,6 +990,18 @@ def test_every_duration_setting_is_discovered() -> None:
         # for this field is the difference between "wait thirty seconds" and
         # "delete phase A".
         "shutdown_drain_seconds",
+        # ADR-0083 §7's three scheduler intervals, acknowledged here for the same
+        # reason ``shutdown_drain_seconds`` is: §7 requires *every* duration the hub
+        # adds to be refused at load unless finite and strictly positive, and
+        # joining this tuple is what subjects each to the parametrised guards below.
+        # For an interval the ``bool`` guard is the difference between "sweep every
+        # hour" and "sweep every second"; the positive bound is the difference
+        # between an interval and a hot loop, because the loop re-arms a job from
+        # its *completion* and a zero interval makes it due again the instant it
+        # finishes.
+        "retention_purge_interval",
+        "conversation_sweep_interval",
+        "observation_interval",
     }
 
 

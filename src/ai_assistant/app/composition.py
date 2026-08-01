@@ -294,6 +294,11 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # the inspection surface lists the beliefs the assistant actually uses
             # and ``forget`` destroys what the user was shown (ADR-0073 §7).
             memory=memory,
+            # The very queue `writes` enqueues into and `questions` below answers
+            # from, so the retention sweep (ADR-0083 §7) reclaims the rows the
+            # user's own questions live in. A second queue here would report a cap
+            # kept over rows nobody can see (ADR-0078 §1, §10 item 8).
+            deferrals=deferrals,
             # The capture/lifecycle stage, holding *both* durable stores — the same
             # `memory` again, so a captured turn is retrievable and destroyable
             # through the surfaces the user already has (ADR-0074 §9). Its

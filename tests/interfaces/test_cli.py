@@ -218,6 +218,7 @@ def _engine(
         plans=plans,
         trail=trail,
         memory=memory,
+        deferrals=deferrals,
         conversations=ConversationLifecycle(
             conversations=conversations,
             memory=memory,
@@ -1308,6 +1309,7 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
         plans=plans,
         trail=trail,
         memory=memory,
+        deferrals=deferrals,
         conversations=ConversationLifecycle(
             conversations=conversations,
             memory=memory,
