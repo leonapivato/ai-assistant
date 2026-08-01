@@ -647,6 +647,14 @@ provenance_field() {
 # incomplete one, so a review the recorder accepts and the shipper rejects would
 # strand a valid review with no way to ship it.
 #
+# The label's separator is `[^[:alnum:]]*` rather than an enumeration, for the
+# reason codex-review.sh gives at length: `Verdict — X`, `Verdict – X` and
+# `Verdict - X` are all spellings the reviewer uses, demanding a colon discarded
+# them as refusals (issue #555), and a bracket class of multibyte dashes would
+# not survive `LC_ALL=C` — which these scripts never pin. The pattern is one of
+# the two rules both scripts must agree on; `tests/scripts/test_verdict_line.py`
+# asserts the two copies are byte-identical rather than trusting this comment.
+#
 # A verdict alone does not count, for the same reason the recorder rejects one:
 # the rubric's anti-patterns forbid rubber-stamping, and an artifact whose only
 # non-blank body line is the verdict carries no findings and no statement of
@@ -656,7 +664,7 @@ artifact_has_verdict() {
     local last body_lines
     last="$(grep -v '^[[:space:]]*$' "$1" | tail -n 1 |
         tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' <<<"$last" ||
+    grep -qiE '^(verdict[^[:alnum:]]*)?(block|approve with nits|approve)\.?$' <<<"$last" ||
         return 1
     body_lines="$(tail -n +2 "$1" | grep -c -v '^[[:space:]]*$' || true)"
     [[ "$body_lines" -ge 2 ]]
