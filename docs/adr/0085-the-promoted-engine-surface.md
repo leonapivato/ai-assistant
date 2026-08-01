@@ -12,7 +12,7 @@
 - **Written with implementation contact, as ADR-0084 §4 requires.** Every
   signature, field and type below was read off `orchestration/engine.py`,
   `runner.py`, `questions.py`, `loop.py`, `observation.py` and `conversations.py`
-  at `main` @ `4d6aa7c`, not derived from the ADRs. **Every line citation below is
+  at `main` @ `89e0cfe`, not derived from the ADRs. **Every line citation below is
   grounded at that commit** and was re-checked against it symbol by symbol. Where the corpus and the tree
   disagree, §11b says so and says which one this ADR follows.
 - **No implementation lands with it.** No `src/`, no `tests/`. It ratifies what
