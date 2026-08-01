@@ -318,6 +318,8 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         'See <a href="#123">section</a>.',
         "See <a href='/docs/#123'>section</a>.",
         'An <img src="#123"> tag.',
+        "See <a href=#123>section</a>.",
+        "An <img src=/docs/#123> tag.",
     ],
     ids=[
         "heading",
@@ -340,6 +342,8 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "html-href",
         "html-single-quoted",
         "html-src",
+        "html-unquoted",
+        "html-unquoted-path",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
