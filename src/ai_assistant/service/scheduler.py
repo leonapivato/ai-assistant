@@ -192,8 +192,29 @@ class Scheduler:
                 than one is due at the same instant. An empty table is legal and
                 produces a scheduler that starts, does nothing and stops — which is
                 what a deployment that disabled every job asked for.
+
+        Raises:
+            ValueError: If two jobs share a name. A name is this table's **key**,
+                not a label: due instants are held per name, so a duplicate would
+                let the first job re-arm the shared entry before the loop reached
+                the second — and the second would then be skipped at every tick,
+                forever, while ``hub_ready`` listed it and nothing logged its
+                absence. §7 says the loop "runs every due job", and a job that
+                never runs while reporting healthy is the exact failure mode
+                ADR-0078 §1's exposure cap is lost to. Names are also what every
+                log line and the readiness event report, so two jobs sharing one
+                would make those unreadable even if the loop coped.
         """
         self._jobs = tuple(jobs)
+        names = [job.name for job in self._jobs]
+        if len(set(names)) != len(names):
+            repeated = sorted({name for name in names if names.count(name) > 1})
+            msg = (
+                f"job names must be unique; {repeated} appears more than once. A name is "
+                f"the key a due instant is held under, so a duplicate is a job that is "
+                f"silently never run (ADR-0083 §7)"
+            )
+            raise ValueError(msg)
         self._task: asyncio.Task[None] | None = None
 
     @property

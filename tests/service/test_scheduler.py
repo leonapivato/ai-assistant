@@ -152,6 +152,23 @@ def test_a_job_refuses_a_non_positive_interval(bad: timedelta) -> None:
         _job("bad", _nothing, every=bad)
 
 
+def test_two_jobs_may_not_share_a_name() -> None:
+    """A name is the table's **key**, so a duplicate is a job that never runs.
+
+    Due instants are held per name. With two jobs called ``purge``, the first
+    re-arms the shared entry before the loop reaches the second, so the second is
+    skipped at every tick — forever — while ``hub_ready`` lists it and nothing logs
+    its absence. §7 says the loop "runs every due job", and *silently never ran* is
+    the single worst failure available to a maintenance job: ADR-0078 §1's exposure
+    cap would go unkept by a hub reporting itself healthy.
+
+    Refused at construction rather than survived at runtime, because the loop
+    cannot report a job it does not know it is missing.
+    """
+    with pytest.raises(ValueError, match=r"job names must be unique.*'purge'"):
+        Scheduler([_job("purge", _nothing), _job("sweep", _nothing), _job("purge", _nothing)])
+
+
 async def _nothing() -> None:
     return None
 
