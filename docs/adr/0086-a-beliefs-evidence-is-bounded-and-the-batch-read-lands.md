@@ -683,10 +683,15 @@ The triad and its consumers, in the order golden rule 5 fixes.
    caller-reachable "too many SQL variables" failure inside a method §6 promises
    never refuses on size.
 6. **The presentation path** — `Engine._project` calls `get_many` once per belief
-   instead of `get` per citation, and what it renders is §4's floor-plus-bound
-   (`len(evidence)` shown, up to `evidence_elided` further episodes no longer
-   carried) rather than an exact total. The listing-carries-content question
-   (§7) is **not** this lane's and stays open behind it: **#552**.
+   instead of `get` per citation. **That is the whole of what this lane owes
+   there**, and the limit is deliberate: `Engine._project` builds the DTOs
+   ADR-0085 §4a ratified, neither of which can carry `evidence_elided` (§4), so
+   this lane renders no elision and changes no field. It resolves the same
+   citations against the same predicate and answers in one call instead of *n*.
+   Whether the DTOs grow a field is **#568**, and this obligation is written so
+   that a lane taking it cannot mistake a rendering it has nowhere to put for
+   work it was assigned. The listing's payload — §7's other factor — needs
+   nothing here at all: ADR-0085 §4a settled it, and **#552** with it.
 
 ### 9. Explicitly declined
 
