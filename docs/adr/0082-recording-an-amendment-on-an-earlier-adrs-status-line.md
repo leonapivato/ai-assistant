@@ -51,12 +51,19 @@
   is harmless. This is §1's own "**The test controls, not the label**", applied to
   this note.
 
-  **The operative condition is unchanged and is worth restating as the check that
-  actually decides**: "no other ADR is the cause". Where a later ADR *is* the
-  cause, §1's main rule governs and the record goes on the earlier ADR's `Status`
-  line and note; where none is, this is a self-amendment and the dated note is the
-  whole record. That condition is what carried #535 even on the narrow reading of
-  the triggers, and it is why nothing in the corpus is misfiled.
+  **The operative condition is unchanged, and it decides between §1's two record
+  *forms* — never whether an in-place edit was permitted.** Its place in the order
+  is what matters, so the order is stated outright. **First** ADR-0070 §1
+  classifies the edit: a correction that changes what the ADR decided is a
+  supersession and takes a new ADR, and nothing in §1 or in this note reaches it.
+  **Only then**, for an edit already classified as an amendment, does "no other
+  ADR is the cause" apply — where a later ADR *is* the cause, §1's main rule
+  governs and the record goes on the earlier ADR's `Status` line and in its note;
+  where none is, the dated note is the whole record. So the condition is necessary
+  for the dated-note form and never sufficient to license the edit: it cannot be
+  read as a route to changing a decision in place merely because no later ADR is
+  involved. On that ordering it is what carried #535 even under the narrow reading
+  of the triggers, and it is why nothing in the corpus is misfiled.
 
   **Nothing decided changes and no reader acts differently**, which is ADR-0070
   §1's test applied to this note. No case moves across any line: under the text as
