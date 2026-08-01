@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -56,6 +57,12 @@ _NOW = datetime(2026, 6, 1, tzinfo=UTC)
 #: How long ``_GatedEmbedder`` waits for a call to arrive before declaring the
 #: scenario broken. Generous — only reached when a case has already hung.
 _GATE_SECONDS = 5.0
+#: How long the first opener holds the meta-insert window open once it has
+#: announced itself. A *bound* on how long the second is given to arrive and
+#: collide, not a synchronisation primitive — the ordering comes from the
+#: announcement. Under ``sqlite3.connect``'s 5.0 s default busy timeout, so a
+#: blocked ``BEGIN IMMEDIATE`` waits it out rather than giving up.
+_SETUP_HOLD_SECONDS = 1.0
 
 
 def _fixed_now() -> datetime:
@@ -480,6 +487,103 @@ async def test_write_atomic_recovers_to_neither_write_after_a_crash(tmp_path: Pa
         reopened.close()
 
 
+def _orphan_vector_rowids(database: Path) -> list[int]:
+    """Vector rows whose ``rowid`` names no record — the #526 corruption, directly.
+
+    ``records`` and ``vec_records`` are joined by ``rowid`` with **no foreign
+    key**: ``vec_records`` is a ``vec0`` virtual table, so SQLite cannot enforce
+    one, and nothing but the store's own transaction discipline keeps the two
+    tables agreeing. That is why this is asserted against the raw file rather than
+    through the store's API — ``search`` inner-joins the two, so an orphan makes a
+    result quietly *missing* rather than wrong, and every public read would report
+    a corrupt database as a healthy empty one.
+    """
+    raw = sqlite3.connect(database)
+    try:
+        raw.enable_load_extension(True)
+        sqlite_vec.load(raw)
+        raw.enable_load_extension(False)
+        return [
+            row[0]
+            for row in raw.execute(
+                "SELECT v.rowid FROM vec_records v "
+                "LEFT JOIN records r ON r.rowid = v.rowid WHERE r.rowid IS NULL"
+            )
+        ]
+    finally:
+        raw.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the child's hold assumes POSIX scheduling")
+async def test_a_persist_holds_off_a_deletion_in_another_process(tmp_path: Path) -> None:
+    """#526's exclusion, across the boundary the claim is actually about.
+
+    Every other concurrency case in this module is one process, and each passes on
+    the store's own ``asyncio.Lock`` alone — so none of them can tell
+    ``BEGIN IMMEDIATE`` from the deferred transaction the driver would otherwise
+    open. Only two engines really running at once can, which is the same reason
+    ``SqliteConversationStore``'s suite drives its exclusion across processes.
+
+    This is deliberately the condition **ADR-0083 §12 says makes the asymmetry
+    urgent again** — exclusivity relaxed, two writers over one ``memory.db``. Under
+    the hub there is one writing process and this cannot arise; the case exists so
+    that the day exclusivity is relaxed, the discipline is already in place and
+    provably so, rather than re-derived from the asymmetry.
+
+    The child pauses between ``_persist_record``'s rowid read and its first write
+    and announces itself from inside, so the collision is *attempted* on every run
+    rather than whenever the scheduler arranges it. With the write lock taken up
+    front the deletion below waits, the overwrite lands whole, and the deletion
+    then removes both rows. Without it the deletion lands mid-sequence and the
+    child's ``INSERT INTO vec_records`` writes a vector against a ``rowid`` that no
+    longer names a record — an orphan ``search``'s KNN matches and then fails to
+    join, which is worse than a lost write because no public read reports it.
+    """
+    db = tmp_path / "memory.db"
+    child = Path(__file__).parent / "_begin_immediate_child.py"
+    store = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    try:
+        await store.add(_semantic("T", "coffee target"))
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(child),
+            str(db),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        # The rendezvous. Generous, because it is only reached when the child has
+        # already failed to start — not a bound on the interleaving itself.
+        announcement = await asyncio.wait_for(process.stdout.readline(), timeout=_GATE_SECONDS * 6)
+        assert announcement.strip() == b"inside", "the child never reached the window"
+
+        # The competing writer, inside the window the announcement opened.
+        deleted = await store.delete("T")
+    finally:
+        store.close()
+
+    _, stderr = await process.communicate()
+    # 43 is "the hold never fired": the child's write took a path it does not
+    # recognise, so the deletion above raced nothing and a pass would be vacuous.
+    assert process.returncode == 0, f"child did not complete its overwrite: {stderr.decode()}"
+    assert deleted is True
+
+    assert _orphan_vector_rowids(db) == [], (
+        "a deletion interleaved with an overwrite left a vector row naming no "
+        "record, so the read-then-write is not atomic across processes"
+    )
+
+    reopened = SqliteMemoryStore(path=db, embedder=HashingEmbedder(dimensions=8))
+    try:
+        # Whichever order the two landed in, the file is internally consistent:
+        # the deletion is last, so nothing is left behind either.
+        assert await reopened.get("T") is None
+        assert await reopened.search("coffee") == []
+    finally:
+        reopened.close()
+
+
 async def test_embedder_exception_is_wrapped_as_store_error(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
@@ -556,6 +660,126 @@ async def test_setup_failure_is_wrapped_and_closes_connection(
     assert len(captured) == 1  # a connection was opened
     with pytest.raises(sqlite3.ProgrammingError):
         captured[0].execute("SELECT 1")  # ...and closed on the failure path
+
+
+def _connect_holding_the_first_meta_insert(
+    real_connect: Callable[..., sqlite3.Connection], inside: threading.Event
+) -> Callable[..., sqlite3.Connection]:
+    """A ``sqlite3.connect`` whose *first* connection stops inside setup's window.
+
+    The rendezvous the setup race needs: the hold is placed between
+    ``_verify_or_init_meta``'s read and its insert, and ``inside`` is set from in
+    there, so a second opener can be released at the one moment its own read would
+    observe the same empty ``meta``. Later connections are returned unhooked, so
+    the store the second thread opens behaves exactly as it does in production.
+    """
+    connections = 0
+    guard = threading.Lock()
+
+    def _connect(database: str, **kwargs: object) -> sqlite3.Connection:
+        nonlocal connections
+        conn = real_connect(database, **kwargs)
+        with guard:
+            connections += 1
+            if connections != 1:
+                return conn
+        fired = False
+
+        # Fires as each statement starts, so keying it on the meta insert places
+        # the hold after the read above has already returned empty.
+        def hold(statement: str) -> None:
+            nonlocal fired
+            if fired or not statement.lstrip().upper().startswith("INSERT INTO META"):
+                return
+            fired = True
+            inside.set()
+            time.sleep(_SETUP_HOLD_SECONDS)
+
+        conn.set_trace_callback(hold)
+        return conn
+
+    return _connect
+
+
+def test_a_second_open_of_a_fresh_file_waits_for_the_first_to_initialise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup's own read-then-write is under the write lock too (#526).
+
+    ``_verify_or_init_meta`` reads ``meta`` and inserts the embedding model and
+    dimension only if it found nothing, so setup has exactly the shape the
+    mutations do — and ``SqlitePlanStore._setup`` and ``SqliteAuditTrail._setup``
+    both take ``BEGIN IMMEDIATE`` for it. This is the case that says so here.
+
+    **Staged rather than merely simultaneous**, which is what gives it teeth.
+    ``SqlitePlanStore``'s equivalent releases two threads from a barrier, and a
+    barrier only makes them *runnable*: the window between the meta read and the
+    meta insert is a few microseconds wide, so both openers usually miss it and
+    the case passes on a deferred setup as happily as on an immediate one —
+    verified, by reverting. Here the first opener is stopped *inside* the window
+    and the second is released only once it is in there, so the collision is
+    attempted on every run.
+
+    With the write lock taken at the top of setup the second opener's ``BEGIN
+    IMMEDIATE`` waits, then finds ``meta`` already populated and skips the insert;
+    both constructors succeed. Without it the second opener reads an empty ``meta``
+    and inserts, and the first's insert then loses a primary-key race on
+    ``meta.key`` — which surfaces as a store that will not open at all.
+    """
+    path = tmp_path / "memory.db"
+    real_connect = sqlite3.connect
+    inside = threading.Event()
+    guard = threading.Lock()
+    monkeypatch.setattr(
+        "ai_assistant.memory.sqlite_store.sqlite3.connect",
+        _connect_holding_the_first_meta_insert(real_connect, inside),
+    )
+
+    opened: list[SqliteMemoryStore] = []
+    errors: list[BaseException] = []
+
+    def _open(*, wait: bool) -> None:
+        if wait and not inside.wait(timeout=_GATE_SECONDS):
+            errors.append(AssertionError("the first opener never reached the meta insert"))
+            return
+        try:
+            store = SqliteMemoryStore(path=path, embedder=HashingEmbedder(dimensions=8))
+        except BaseException as exc:
+            with guard:
+                errors.append(exc)
+        else:
+            with guard:
+                opened.append(store)
+
+    threads = [
+        threading.Thread(target=_open, kwargs={"wait": False}),
+        threading.Thread(target=_open, kwargs={"wait": True}),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    try:
+        assert not errors, f"a concurrent first open failed: {errors}"
+        assert len(opened) == 2
+    finally:
+        for store in opened:
+            store.close()
+
+    # `real_connect`, not `sqlite3.connect`: the patch above is on the shared
+    # `sqlite3` module object, so it is still in force here.
+    raw = real_connect(path)
+    try:
+        recorded = dict(raw.execute("SELECT key, value FROM meta").fetchall())
+    finally:
+        raw.close()
+    # One row per key: the loser skipped the insert rather than duplicating or
+    # half-writing the identity a later open judges its embedder against.
+    assert recorded == {
+        "embedding_model": HashingEmbedder(dimensions=8).model_id,
+        "dimensions": "8",
+    }
 
 
 async def test_delete_removes_record_and_reports_existence(
