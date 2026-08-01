@@ -27,21 +27,23 @@
   premise is taken from ADR-0084, ADR-0021 or the tree, and §5's vectors carry
   their own inputs. Where ADR-0085's draft is quoted it is because it is the best
   statement of a problem, and it is marked as in flight each time.
-- **This ADR partially supersedes ADR-0084 §5, and the record lands in this
-  change.** Inserting a fifth change into a four-change enumeration makes the
-  count false, and ADR-0083 §15's stacked-addition carve-out does not reach a
-  sentence that stops being true. §10 applies ADR-0070 §1's test and states the
-  record's form; ADR-0084's `Status` line and its appended dated note are the
-  whole of it (ADR-0070 §1, ADR-0082 §2), and **no ratified text of ADR-0084 is
-  rewritten** — not §5's list, and not a word of §5's reasoning, which §6 shows
-  the insertion honours rather than strains. The record is written here because
-  the falsifying decision is here: it is this ADR's *insertion into the
-  sequence*, not any later ADR's citation of it.
+- **This ADR partially supersedes ADR-0084 on two clauses, and the record lands
+  in this change.** **§3's payload-encoding rule** — that a payload is
+  "serialised through pydantic's JSON mode" — is replaced, because naming a
+  library fixes a *form* and not a byte string, and because the three places
+  §3 corrects are three places a reader of ADR-0084 would emit forbidden bytes.
+  **§5's four-change enumeration** becomes five. §10 applies ADR-0070 §1's test to
+  each and states the record's form; ADR-0084's `Status` line and its appended
+  dated note are the whole of it (ADR-0070 §1, ADR-0082 §2), and **no ratified
+  text of ADR-0084 is rewritten** — not §3's bullets, not §5's list, not a word of
+  §5's reasoning, which §6 shows the insertion honours rather than strains. Nearly
+  all of §3 stands and is used as given, including its envelope member-order
+  sentence, which §2's payload scoping leaves true of its subject.
 - **No implementation lands with it.** No `src/`, no `tests/`.
 
 ## Context
 
-### ADR-0084 §4 declared a limit in bytes and no ADR says what a byte is
+### ADR-0084 declared a limit in bytes, and answered "which bytes" by naming a library
 
 ADR-0084 §4 ruled:
 
@@ -52,22 +54,48 @@ ADR-0084 §4 ruled:
 
 and gave the reason: otherwise "the wire client would refuse a 17 MiB utterance
 that the in-process `Engine` accepts, and the two implementations §5 makes
-substitutable would diverge on a value both are handed". §3 supplies the codec —
-"the codec is UTF-8 JSON" — and the frame ceiling the limit is derived from.
+substitutable would diverge on a value both are handed".
 
-**Between those two rulings there is a gap, and it is the whole of this ADR.** A
-limit expressed in bytes is a predicate over byte strings. "UTF-8 JSON" does not
-determine a byte string: `/` and `\/` are the same string, `1e-7` and `1e-07` are
-the same number, `"…12:00:00Z"` and `"…12:00:00+00:00"` are the same instant, and
-`{"a":1,"b":2}` and `{"b":2,"a":1}` are the same object. Each pair is a different
-byte count or a different byte sequence. So two implementations can both obey
-ADR-0084 §3 and §4 completely, and still disagree about whether one particular
-value is refused.
+**A limit in bytes is a predicate over byte strings, so something has to say
+which byte string a value is, and §3 does say** — it is worth quoting exactly,
+because this ADR replaces it and an ADR that replaces a clause should print it:
+
+> - a **result** payload is a promoted `core` model (§4) serialised through
+>   pydantic's JSON mode …
+> - **arguments and scalars** — a `str` utterance, a flag, an optional id, a
+>   `timedelta` budget — take pydantic's JSON-mode form for their type, so a
+>   duration is an ISO-8601 string rather than a convention invented here;
+
+**That is the right shape and the wrong instrument, and this ADR keeps the shape.**
+The shape is: bind to an encoding that already exists rather than invent one —
+§3's own closing sentence, "choosing an existing encoding rather than specifying a
+new one is the whole point of this subsection". §2 does exactly that. What does
+not survive is *which* existing encoding, because **naming a library does not
+determine a byte string**, and three measured facts say so:
+
+- **Pydantic's JSON mode does not make equal values encode alike.** It emits a
+  `FrozenJsonMapping` in the order a caller happened to insert keys, so
+  `Confirmation(parameters={"a":1,"b":2})` and `Confirmation(parameters={"b":2,"a":1})`
+  are `==`, hash alike, and produce two byte strings (§4). Two implementations
+  can both obey §3 to the letter and disagree about a payload's bytes.
+- **A library's behaviour cannot be frozen, and §3 freezes this codec** — in the
+  same subsection: "the length prefix, the UTF-8 JSON codec … keep their
+  representation in every protocol version, **permanently**". A permanent
+  representational commitment whose content is a third party's changelog is not
+  a commitment. `pydantic-core`'s float formatter, its duration spelling and its
+  `ser_json_inf_nan` default are all configuration surface, and each moves the
+  limit's boundary.
+- **It is silently wrong in two places.** A non-finite float becomes `null` — a
+  value changed into a different value with no error — and a duration of 365 days
+  or more acquires a `Y` component (`timedelta.max` is `"P2739726Y9DT23H59M59.999999S"`),
+  a *nominal* unit that does not denote a fixed elapsed time and round-trips only
+  because both halves privately agree a year is 365 days.
 
 **Refusal is contract-visible behaviour**, not an implementation detail — a typed
 error a caller catches and branches on. So a disagreement about the boundary is a
 disagreement about the contract, and it is exactly the divergence §4 moved the
-limit into the contract to prevent, one level below where §4 was watching.
+limit into the contract to prevent, one level below where §4 was watching. §10
+records the supersession this ADR therefore owes ADR-0084 §3, alongside §5's.
 
 ### The gap becomes reachable at ADR-0084 §5's change 3, not change 4
 
@@ -200,27 +228,35 @@ corrected, and there are exactly three places.
   which is what makes it *falsifiable* by a test rather than by whoever reads it
   next.
 
-**The rejected alternative is naming a serialiser and its settings** — "the
-encoding is `BaseModel.model_dump_json()` on pydantic ≥ 2.13 with default
-configuration". It is genuinely tempting: shorter, exactly what the
-implementation would do anyway, and impossible to get wrong by transcription. It
-is rejected for three reasons, in the order they bind:
+**The rejected alternative is naming a serialiser and its settings**, and it is
+rejected as an *incumbent* rather than as a hypothetical: it is what ADR-0084 §3
+decided, and this ADR replaces it (§10). The tempting form is short, is what an
+implementation would reach for anyway, and cannot be got wrong by transcription.
+It is rejected for three reasons, in the order they bind:
 
-- **ADR-0084 §3 freezes the codec permanently, and a dependency's defaults are
-  not a thing that can be frozen.** "The length prefix, the UTF-8 JSON codec, and
-  the connect frame's version member keep their representation in every protocol
-  version, permanently." A permanent representational commitment defined as
+- **A dependency's defaults are not a thing that can be frozen, and ADR-0084 §3
+  freezes this codec** — the same subsection that names pydantic also says "the
+  length prefix, the UTF-8 JSON codec, and the connect frame's version member
+  keep their representation in every protocol version, permanently". The two
+  sentences cannot both hold: a permanent representational commitment defined as
   "whatever this library emits" is a commitment whose content is a third party's
   changelog. `pydantic-core`'s float formatter, its duration spelling and its
-  `ser_json_inf_nan` default are all configuration surface that has moved before
-  and may move again; each of them moves the limit's boundary, which is
-  contract-visible behaviour nobody ratified. A vector fails at the upgrade, in
-  CI, which is where a change of contract should surface.
-- **The library's defaults are already wrong in three places** (§3), so "name
-  the serialiser" does not even describe the intended encoding. It would have to
-  be "the serialiser, except here, here and here" — at which point the
-  properties are being written anyway, with the vectors' checkability thrown
-  away.
+  `ser_json_inf_nan` default are all configuration surface, and each of them
+  moves the limit's boundary, which is contract-visible behaviour nobody
+  ratified. A vector fails at the upgrade, in CI, which is where a change of
+  contract should surface.
+- **The library's defaults are wrong in three places** (§3), so "name the
+  serialiser" does not even describe the intended encoding — a `-0.0` it gets
+  right, but a `null` for infinity and a `P1Y` for a year it does not. The
+  description would have to be "the serialiser, except here, here and here", at
+  which point the properties are being written anyway, with the vectors'
+  checkability thrown away.
+- **Naming a serialiser does not achieve determinism at all**, which is the
+  reason that outranks both of the above and the one that makes this a
+  replacement rather than a refinement: pydantic's JSON mode emits a
+  `FrozenJsonMapping` in caller-insertion order, so two equal values get two byte
+  strings (§4). A rule that names a serialiser inherits whatever
+  non-determinism the serialiser has, and cannot see it.
 - **Two implementations that satisfy the vectors are byte-identical without
   sharing code.** This is the payoff, and §7 turns on it: the in-process engine
   must enforce the same limit (ADR-0084 §4) while `orchestration` importing
@@ -256,14 +292,17 @@ existing vector covers, consistent with §2, is an addition and not a change.
 
 **Its subject is the payload, and only the payload.** ADR-0084 §4 puts the size
 limit on the value a call passes or returns, so the payload is what has to have
-determined bytes; the frame around it is ADR-0084 §3's, and §3 decides the
-envelope's own representation — including that its "member order is therefore not
-significant and no ordering rule is needed". **Nothing here changes that.** An
-implementation that emits envelope members in any order conforms to §3 and to
-this ADR; one that happens to sort the whole frame in a single pass conforms too,
-because "not significant" permits both. What this ADR determines is the bytes of
-the payload; it does not determine the bytes of the frame, and it does not need
-to.
+determined bytes. This is where §2 **replaces** ADR-0084 §3's rule that a payload
+"is serialised through pydantic's JSON mode" (§10 carries the record), and the
+scoping is what keeps the replacement as narrow as it can be.
+
+**The envelope is not touched.** §3 decides the envelope's own representation,
+including that its "member order is therefore not significant and no ordering rule
+is needed", and nothing here changes that: an implementation that emits envelope
+members in any order conforms to both ADRs, and one that happens to sort the
+whole frame in a single pass conforms too, because "not significant" permits
+both. What this ADR determines is the bytes of the payload; it does not determine
+the bytes of the frame, and it does not need to.
 
 > **The canonical wire encoding of a payload is ADR-0021 §1's canonical JSON form
 > applied to that value's pydantic JSON-mode projection**, subject to the three
@@ -440,9 +479,15 @@ vectors and the properties are both normative.
 
 ### 3. Where the library and this ADR disagree, listed exhaustively
 
+**This table is also the exact extent of what ADR-0084 §3's payload clause loses**
+— it named pydantic's JSON mode, so every row below is a place a reader following
+that clause emits bytes this ADR forbids. §10 is the record; this is its scope,
+stated as three rows rather than as prose so it can be checked.
+
 Three cases, each measured rather than assumed. Everywhere else,
 `model_dump(mode="json")` fed through `_canonical_bytes`' form already produces
-the ratified bytes.
+the ratified bytes — which is why §2 keeps §3's *shape*, binding to an encoding
+that already exists, and changes only the instrument.
 
 | # | Case | `pydantic` / `json.dumps` default | Ratified | Why |
 | --- | --- | --- | --- | --- |
@@ -1091,6 +1136,57 @@ same three parts as the analysis above: what became false, what did the
 falsifying, and — the part a bare token would lose — the whole of what §5 decided
 that still stands.
 
+**A second record is owed, on ADR-0084 §3's payload-encoding clause.**
+
+The clause is §3's third and fourth payload bullets:
+
+> - a **result** payload is a promoted `core` model (§4) serialised through
+>   **pydantic's JSON mode** …
+> - **arguments and scalars** … take **pydantic's JSON-mode form** for their
+>   type …
+
+**The first limb fails, in three measured places.** A reader holding only
+ADR-0084 writes an encoder that calls pydantic's JSON mode and believes it
+conforms. After this ADR it does not: it emits members in declaration and
+insertion order where §2a requires code-point order, `"P1Y"` for a year where
+§2e requires `"P365D"`, and `null` for a non-finite float where §2c requires a
+raise. §3's table above is the exhaustive scope, which is why it is written as a
+table.
+
+**The second limb fails too, and it is the sharper one.** §3's clause is read as
+*determining* the payload's bytes — that is the job it was written to do, being
+the subsection that makes "the framing and the codec … normative, because two
+implementations that satisfy every rule above could still be unable to exchange a
+frame". It does not determine them: pydantic's JSON mode emits a
+`FrozenJsonMapping` in caller-insertion order, so two `==`-equal `Confirmation`
+values get two byte strings (§4a). The clause holds more narrowly than it is
+read — it fixes a *form* (a duration is an ISO-8601 string, not a float of
+seconds) and does not fix a *byte string*.
+
+**Stacked addition does not reach it** on ADR-0083 §15's test: "serialised
+through pydantic's JSON mode" is not a deferral that stays true and gains an
+answer, it is an answer, and it is replaced by a different one.
+
+**What is not replaced is most of §3, and the note says so at length**: the
+UTF-8 JSON codec, the 4-byte big-endian length prefix, the object envelope, the
+duplicate-member refusal, the undecodable-frame close and its closed list, the
+correlated-error boundary, the serial-connection rules, the exact-match version
+and the permanent-representation freeze. §2 also keeps §3's own stated *reason* —
+"choosing an existing encoding rather than specifying a new one is the whole
+point of this subsection" — by binding to ADR-0021 §1's form, which is the
+encoding the stores already depend on and the one §3's closing sentence points
+at. **The instrument changes; the intent is the one being carried out.**
+
+**And the envelope keeps its own rule.** §3's "member order is therefore not
+significant and no ordering rule is needed" is about the envelope — its own
+grammar says so, and the adjacent bullet says "in the envelope **and in payload
+objects alike**" when it means both. §2 is scoped to the payload (§2's opening),
+so that sentence stays true of its subject and no part of the record reaches it.
+
+**So ADR-0084's `Status` scope names both clauses**, §5's enumeration and §3's
+payload-encoding rule, in one leading `Partially superseded by` token with one
+dated note beneath it (ADR-0082 §2).
+
 **No record is owed on:**
 
 - **ADR-0085, the surface ADR.** It is `Proposed` and unmerged, so there is no
@@ -1107,45 +1203,6 @@ that still stands.
   consumer. Applying a rule at its stated scope is the rule being used rather
   than changed, and ADR-0084 §3 asked for exactly this reuse by name. Nothing
   ADR-0021 decided about digests moves, and no digest's bytes change.
-- **ADR-0084 §3.** Its framing, its codec choice, its duplicate-member refusal
-  and its permanent-representation freeze are all used as given. §2 states what
-  "the UTF-8 JSON codec" spells out to for a *payload*; it does not choose a
-  different codec. §8 applies the exact-match version rule at its stated scope
-  rather than widening it.
-
-  **Its member-order sentence is the one clause worth arguing rather than
-  asserting**, because §2a imposes an ordering rule and §3 says one is not
-  needed. The sentence is:
-
-  > **The codec is UTF-8 JSON**, and the envelope is a JSON **object** with named
-  > members carrying the kind, the correlation id and the payload. Member order
-  > is therefore not significant and no ordering rule is needed.
-
-  **Its subject is the envelope**, and that is not a convenient reading — it is
-  the sentence's own grammar ("the envelope is a JSON object … Member order is
-  *therefore* not significant"), and §3 shows it distinguishes deliberately: the
-  very next bullet says duplicate members are rejected "in the envelope **and in
-  payload objects alike**". A clause that says "and in payload objects alike"
-  when it means both is a clause that means the envelope when it does not say so.
-  §2 is scoped to the payload for exactly this reason, and **imposes no ordering
-  rule on the envelope** — an implementation that emits envelope members in any
-  order conforms to both ADRs, which is the sentence still holding rather than
-  being narrowed.
-
-  **Nor does its operative content move.** "Not significant" is a statement about
-  *interpretation*: no reader may depend on order. That survives untouched,
-  because §7 makes the canonical form an obligation on the **writer** only and
-  leaves ADR-0084 §3's decoder rules exactly as they are. A reader holding only
-  ADR-0084 §3 and writing a decoder acts identically before and after.
-
-  **What §3 leaves unstated, this ADR states**, and that is the stacked-addition
-  shape rather than the supersession one (ADR-0083 §15's test): §3 says nothing
-  about the member order of a *payload* object, so no sentence of it becomes
-  false when §2a fixes one. **What would change this answer** — recorded so a
-  later reader can check rather than re-derive — is a reading on which §3's
-  sentence governs payload objects too. On that reading a record would be owed
-  on §3 as well as §5, and the scope on ADR-0084's `Status` would have to name
-  both.
 - **ADR-0084 §4 and §6.** §4's ruling that the limit is contract rather than
   transport is the premise this ADR serves. §6's placement of the codec in `wire`
   is untouched: §7 keeps the encoder there and takes only the *specification* of

@@ -1,19 +1,47 @@
 # 84. The local API: a loopback socket, a versioned envelope, and the CLI as a client
 
-- Status: Partially superseded by ADR-0087 (§5's enumeration of the implementation sequence as four changes)
+- Status: Partially superseded by ADR-0087 (§3's rule that a payload is serialised through pydantic's JSON mode; §5's enumeration of the implementation sequence as four changes)
 - Date: 2026-07-31
-- Partially superseded: 2026-08-01 by ADR-0087 — **§5's sequence is five changes,
-  not four; nothing §5 decided about the *order* of the four it names changes.**
-  ADR-0087 ratifies the canonical wire encoding — the exact byte string a payload
-  serialises to — and places itself **before the triad**, on §5's own item 3: the
-  triad ships a *canonical fake* and a *conformance suite*, so change 3 is where a
-  second implementation is first held to §4's rule that "every implementation
-  enforces" the size limit. A limit is a byte count, so the bytes are ratified
-  first. Its position relative to the surface ADR is deliberately not fixed;
-  both are contract changes preceding change 3. Under ADR-0070 §1's test, applied
-  to §5's enumeration:
+- Partially superseded: 2026-08-01 by ADR-0087 — **two clauses: §3's
+  payload-encoding rule is replaced, and §5's sequence is five changes, not
+  four.** ADR-0087 ratifies the canonical wire encoding — the exact byte string a
+  payload serialises to — and places itself **before the triad**, on §5's own
+  item 3: the triad ships a *canonical fake* and a *conformance suite*, so change
+  3 is where a second implementation is first held to §4's rule that "every
+  implementation enforces" the size limit. A limit is a byte count, so the bytes
+  are ratified first. Its position relative to the surface ADR is deliberately not
+  fixed; both are contract changes preceding change 3.
 
-  **Replaced.** "The sequencing is therefore **four** changes, not one", and the
+  **Replaced — §3's payload-encoding rule.** "A **result** payload is a promoted
+  `core` model (§4) serialised through **pydantic's JSON mode**", and "**arguments
+  and scalars** … take **pydantic's JSON-mode form** for their type". A reader
+  acting on those sentences writes an encoder that emits members in declaration
+  and insertion order, `"P1Y"` for a 365-day duration, and `null` for a non-finite
+  float — three byte strings ADR-0087 §2 forbids, and the exhaustive extent of
+  what changes. The clause is also read more widely than it holds: it is read as
+  *determining* a payload's bytes, which is what this subsection exists to do, and
+  it does not — pydantic's JSON mode emits a `FrozenJsonMapping` in caller
+  insertion order, so two `==`-equal `Confirmation` values get two byte strings.
+  It fixes a *form* (a duration is an ISO-8601 string, not a float of seconds); it
+  does not fix a byte string.
+
+  **Not replaced — the rest of §3, which is nearly all of it.** The UTF-8 JSON
+  codec, the 4-byte big-endian length prefix, the object envelope and its members,
+  the duplicate-member refusal, the undecodable-frame close and its closed list,
+  the correlated-error boundary and its one exception, the serial-connection
+  rules, the correlation id, the exact-match protocol version and the permanent
+  representation freeze all stand and are used by ADR-0087 as given. **§3's
+  "member order is therefore not significant and no ordering rule is needed"
+  stands too**: its subject is the envelope, and ADR-0087 §2 is scoped to the
+  payload, so an implementation that emits envelope members in any order still
+  conforms. And ADR-0087 carries out §3's own stated intent — "choosing an
+  existing encoding rather than specifying a new one is the whole point of this
+  subsection" — by binding to ADR-0021 §1's canonical form, the encoding the
+  stores already depend on. The instrument changes; the intent is the one being
+  executed.
+
+  **Replaced — §5's enumeration.** "The sequencing is therefore **four** changes,
+  not one", and the
   numbered list it introduces, read as complete. A reader holding only this ADR,
   having ratified the surface ADR, builds the triad next — and would build it
   against an unratified encoding, in the one clause §4 hands the conformance
