@@ -393,6 +393,51 @@ the field and left its spelling and type here.
 | `TurnResult` | `loop.py:118` | `goal: Goal`, `context: CurrentContext`, `memories: tuple[MemoryRecord, ...]`, `plan: ActionPlan`, `memory_degraded: bool = False` |
 | `ConversationDigest` | `conversations.py:140` | `id: Identifier`, `started_at: UtcInstant`, `last_turn_at: UtcInstant \| None`, `recorded_turns: int` (`ge=0`) |
 
+#### 4a. The cross-field invariants promote with the fields
+
+**A field list is not the whole of a DTO's contract, and dropping an invariant
+while promoting one is the quiet way to lose it.** Four of these types state a
+cross-field rule in the text they carry today; those rules are ratified content,
+not commentary, and they become **model validators** on the promoted models —
+which is precisely the "what it adds is validation" ADR-0084 §4 names as the
+reason for moving to pydantic in the first place.
+
+| Model | Invariant |
+| --- | --- |
+| `StepOutcome` | `confirmation` is present **iff** `disposition` is `AWAITING_CONFIRMATION` |
+| `IngestSummary` | `queued` is present **iff** `decision` is `DEFERRED` |
+| `QueuedQuestion` | `question_id` and `question_state` are both `None` when `outcome` is `QUEUE_FULL` or `NOT_QUEUABLE` |
+| `AnswerOutcome` | `record_id` is present **iff** `kind` is `APPLIED`; `successor` and `successor_refused` are set only when `kind` is `REDEFERRED` |
+
+**`StepOutcome`'s is the one a wire client cannot work around**, which is why it
+is listed first. ADR-0042 §4 obliges a parked step's result to carry the
+confirmation content and the opaque token the adapter renders and relays; a
+nullable field with no invariant permits an `AWAITING_CONFIRMATION` outcome
+carrying neither, and a client handed one has nothing to resume with and no
+contract violation to point at. The invariant is what makes "park, render,
+relay" a sequence a spoke can rely on rather than one that happens to work
+in-process.
+
+**The three others are the same shape**: each is an existing ratified rule
+(ADR-0078 §10 item 9 for `IngestSummary.queued`, ADR-0078 §7 for
+`QueuedQuestion`, ADR-0078 §8 for `AnswerOutcome`) that a bare field list would
+silently drop.
+
+**`QueuedQuestion`'s is stated in one direction only, deliberately.** The
+converse — that a `QUEUED` or `ALREADY_ASKED` outcome always names a question —
+is *nearly* true and is not asserted, because `from_admission` keeps a defensive
+branch for an admission whose deferral is absent (`engine.py:377-378`), which
+`DeferralAdmission`'s own validator is supposed to make unreachable. Asserting an
+invariant that a defensive branch can violate would turn a store-conformance
+fault into an unconstructable DTO, which is §4's `confidence` reasoning applied
+to a different field.
+
+**Every other "``None`` when…" in these docstrings stays prose**, because it
+describes *when* a value is absent rather than constraining which combinations
+exist — `TurnOutcome.turn` is `None` on a recovered resume, `Evidence.content` is
+`None` for a tombstone — and a validator cannot check a fact about how the value
+was produced. The conformance suite is where those are exercised.
+
 **Relocating an enum is not redefining it** (ADR-0084 §4). `Disposition` keeps its
 five members and everything ADR-0037 ratified about them, including §8's refusal
 of a `FAILED` member; `QuestionState`, `AnswerKind`, `LearnDecision` and
@@ -766,15 +811,23 @@ schema and is therefore fixed by the surface ADR". With §8a's schema:
 > **`hub_max_frame_bytes` is refused at load time below 1024 bytes**, alongside
 > its existing `gt=0` and its upper bound at the 4-byte prefix's ceiling.
 
-**A floor is a proof, and it needs the handshake to be bounded — as a whole, not
-member by member.** The connect reply carries a protocol version, a build
-identifier, a readiness flag and the effective frame size (ADR-0084 §2), and
-nothing bounds the encoded width of any of them: a build identifier is a
+**A floor is a proof, and it needs the handshake to be bounded in *both*
+directions — as a whole, not member by member.** The mandatory handshake is two
+frames, not one (ADR-0084 §2): the client's connect request carries a protocol
+version, a free-form client identifier and a credential member; the server's
+reply carries a version, a build identifier, a readiness flag and the effective
+frame size. Nothing bounds the encoded width of any of them — an identifier is a
 free-form string, and a "single integer" version has no stated range, so its
-decimal form is as wide as the value. Either one, left unbounded, yields a hub
-that accepts `hub_max_frame_bytes` at its minimum, passes every ADR-0083 §3
-startup step, and then cannot send its own mandatory reply — the exact failure
-this floor exists to prevent, produced by the check meant to prevent it.
+decimal form is as wide as the value.
+
+**The request half matters more than it looks, because it is sent blind.** The
+client has not yet been told the hub's `hub_max_frame_bytes` — that is what the
+reply carries — so a client cannot enforce the server's limit on the one frame
+it sends before learning it. A floor that fits only the reply therefore yields a
+hub that accepts `hub_max_frame_bytes` at its minimum, passes every ADR-0083 §3
+startup step, and then refuses the connect frame of every client, including the
+CLI: the exact failure this floor exists to prevent, produced by the check meant
+to prevent it.
 
 **Bounding the members one at a time is the tempting fix and it is the one that
 keeps failing.** Two separate members turned out to be unbounded on inspection,
@@ -782,19 +835,23 @@ which is evidence that inspection is not a reliable way to enumerate them — an
 later protocol version may add a fifth (ADR-0084 §3 permits it) that no sentence
 here would reach. So the bound is stated over the payload, where it closes:
 
-> **The connect reply's payload is at most 256 bytes encoded**, and a reply that
-> would exceed it is a hub configuration fault rather than a frame to send. Its
-> build identifier is at most 64 bytes; every other member's encoded width is
-> bounded by the payload bound whatever members a later version adds.
+> **Each connect-exchange payload — the request and the reply alike — is at most
+> 256 bytes encoded.** A frame that would exceed it is a configuration fault on
+> the side that would send it rather than a frame to send. The build identifier
+> and the client identifier are each at most 64 bytes; every other member's
+> encoded width is bounded by the payload bound, whatever members a later
+> protocol version adds.
 
 That is fail-closed in the direction that matters: a member nobody thought about
-cannot silently widen the handshake past the floor, because the aggregate is what
-is checked. Today's reply — a version, a 64-byte build identifier, a boolean and
-a frame size that the 4-byte prefix caps at ten digits — encodes to roughly 135
-bytes, so 256 is generous rather than tight.
+cannot silently widen either handshake frame past the floor, because the
+aggregate is what is checked, on both sides. Today's reply — a version, a 64-byte
+build identifier, a boolean and a frame size that the 4-byte prefix caps at ten
+digits — encodes to roughly 135 bytes, and the request is smaller; 256 is
+generous rather than tight for either.
 
-With that, 512 (the envelope reserve) plus 256 (the connect reply) is 768, and
-**1024** leaves room for the handshake and for a small request besides. A value
+With that, 512 (the envelope reserve) plus 256 (either connect payload) is 768,
+and **1024** leaves room for both handshake frames and for a small request
+besides. A value
 below the floor yields a hub that passes every ADR-0083 §3 startup step and then
 refuses every client including the CLI — indistinguishable from a hub that is
 down, which is ADR-0084's ruling 4 failure produced by a config typo, and load
@@ -1002,7 +1059,9 @@ move to `Accepted` triggers nothing.
   default (§3a), pre-`await` materialisation of the filters (§3d), local refusal
   of malformed page arguments and blank identifiers (§3c, §9), the size limit in
   both directions (§8), and the disposition-is-not-the-outcome rule (§7). Each is
-  written as a testable sentence for that reason.
+  written as a testable sentence for that reason. **Four more are expressed by the
+  types themselves** — §4a's cross-field validators — which is one of the things
+  the move to pydantic buys.
 - **What becomes harder: every one of these fields now costs an ADR to change.**
   ADR-0084 §4 anticipated it — "changing a field that was free to change in
   `orchestration` now costs an ADR" — and the figure is twenty-three types' worth
@@ -1053,12 +1112,13 @@ move to `Accepted` triggers nothing.
   disagree about whether the same call is oversized — which is one limit in name
   and two in effect.
 - **Derive the `hub_max_frame_bytes` floor from the handshake's members, bounding
-  each one as it is noticed.** Rejected in §8d: two members turned out to be
-  unbounded on inspection — the build identifier and the version's decimal width
-  — which is evidence that enumerating them is not how this is made safe, and a
-  later protocol version may add a member no sentence here reaches. The bound is
-  stated over the whole connect-reply payload instead, so an unforeseen member
-  cannot widen the handshake past the floor.
+  each one as it is noticed.** Rejected in §8d: three separate things turned out
+  to be unbounded on inspection — the build identifier, the version's decimal
+  width, and then the whole connect *request*, which is sent before the client has
+  been told the limit — which is evidence that enumerating them is not how this is
+  made safe, and a later protocol version may add a member no sentence here
+  reaches. The bound is stated over each connect payload as a whole instead, so an
+  unforeseen member cannot widen either handshake frame past the floor.
 - **Set the contract size limit equal to `hub_max_frame_bytes`.** Rejected in §8c:
   a value at exactly the limit passes the contract and overflows the frame by the
   envelope's bytes, so the in-process engine would accept what the client
