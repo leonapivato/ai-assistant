@@ -1,6 +1,6 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-31
 - **This is ADR-0084 §5's step 2, and it exists so that no lane authors `core`
   contract surface unreviewed.** ADR-0084 decided *that* the façade is promoted
@@ -205,15 +205,15 @@ Written as they appear on the Protocol, **verbatim rather than abbreviated** —
 this block is what an implementation is generated from, so unlike §4's tables it
 spells every annotation out. `Identifier` and `UtcInstant` are `core/types.py`'s
 existing annotated aliases (a non-blank `str`, a tz-aware `datetime`);
-`WireText` is §4c's encodable `str`, and `utterance` is the only bare-text
-argument on the surface; `DEFAULT_PAGE_SIZE` is §3a below.
+`EncodableText` is `core/types.py:343`'s alias for a `str` with a UTF-8
+encoding (§4c), and `utterance` is the only bare-text argument on the surface; `DEFAULT_PAGE_SIZE` is §3a below.
 
 ```python
 class AssistantEngine(Protocol):
     # The two turn calls (ADR-0042 §3)
     async def converse(
         self,
-        utterance: WireText,
+        utterance: EncodableText,
         *,
         timeout: timedelta,
         conversation_id: Identifier | None = None,
@@ -398,11 +398,11 @@ Every type below moves to `core/types.py` as a frozen pydantic model or a
 frozen (§9 covers the mechanism and what changes with it). Fields are listed in
 declaration order; a trailing `= …` is the default.
 
-**`str` in these tables means `WireText`** (§4c) — every string this surface
-carries must have a UTF-8 encoding. It is written `str` below for readability and
+**`str` in these tables means `EncodableText`** (§4c) — every string this
+surface carries must have a UTF-8 encoding. It is written `str` below for readability and
 stated once here rather than repeated thirty times, which is the same choice §4c
 makes for the same reason. **The abbreviation is confined to these tables**: §3's
-Protocol block spells `WireText` out, because that block is what an implementation
+Protocol block spells `EncodableText` out, because that block is what an implementation
 is generated from and a reader of it may never reach this line.
 
 **Group A — the turn surface (from `orchestration/engine.py`)**
@@ -625,16 +625,34 @@ point.** Every `float` on this surface is a confidence — `Belief.confidence`,
 bounds already refuse exactly the values ADR-0087 §2c has no form for. Nothing is
 added here for floats; it is recorded so a reader does not go looking for it.
 
-**The string half is open, and left open it is a divergence.** A Python `str` may
-hold a lone surrogate. Nothing in the tree stops `converse(utterance="\ud800")`,
-the in-process engine has no reason to encode it, and the wire client must — so
-one implementation accepts the call and the other raises at the socket.
+**The string half was open, and left open it is a divergence — in two
+directions, not one.** A Python `str` may hold a lone surrogate, and such a
+string has no UTF-8 encoding. Over the wire that is immediate: the in-process
+engine has no reason to encode it and a client must, so one implementation
+accepts the call and the other raises at the socket. **And the store refuses it
+too** — the five databases are SQLite, whose driver encodes text as UTF-8 and
+raises `UnicodeEncodeError` at the `INSERT` (verified against the tree). So the
+constraint is not the wire's; it is a property of text that can be written down
+at all, and the wire and the store are two places that need it.
 
-> **Every string the promoted surface can carry is `WireText`** — a `core`
-> annotated `str` that refuses a value with no UTF-8 encoding. That is every
-> `str` and `str | None` field of a promoted type, every `str` argument
-> (`utterance`), the `message` and any string inside `details` of an error
-> payload (§10a), and every `Identifier`, which composes the same check.
+**That is why the type is named for the property rather than for the
+transport.** Naming it after the frame would name it for one of the two things it
+protects — and the store half is the fact §4c leans on below to argue that
+closing this was a fix rather than a decision.
+
+> **Every string the promoted surface can carry is `EncodableText`** — the
+> `core` alias at `core/types.py:343`, a `str` that refuses a value with no UTF-8
+> encoding. That is every `str` and `str | None` field of a promoted type, every
+> `str` argument (`utterance`), the `message` and any string inside `details` of
+> an error payload (§10a), and every `Identifier`, which layers on it.
+
+**This ADR adopts an existing `core` alias rather than inventing one**, which is
+a stronger position than the one it drafted from. `EncodableText` is in the tree,
+`Identifier`, `VisibleIdentifier` and `Sha256Hex` are layered on it, and
+`tests/core/test_text_encodability_coverage.py` **fails the gate on a bare `str`
+field anywhere in `core/types.py`**. So the promoted types inherit a mechanical
+guard: the property §4c states is enforced by a test rather than by a reviewer
+noticing, from the moment the triad puts these models in that file.
 
 **This is emphatically not a size rule, and putting it in §8 would have hidden
 it.** A payload can be far inside §8c's limit and still have no canonical
@@ -658,18 +676,22 @@ and §3c and §9 already declare `ValueError` on every method that takes text. W
 §4c adds is that both implementations raise it for the same inputs at the same
 point, rather than one of them discovering it at the socket.
 
-**What this covers, and what it does not.** `WireText` reaches the **promoted
-types' own fields** and the surface's **direct arguments**. It does **not** reach
-the strings inside the pre-existing `core` types §5's walk terminates at. So
-`learn(FeedbackEvent(content="\ud800"))` still constructs today. **That is
-tracked as #565, and a lane is closing it.**
+**What this covers, and the gap it used to leave.** `EncodableText` reaches the
+**promoted types' own fields** and the surface's **direct arguments**. When this
+section was drafted it did **not** reach the strings inside the pre-existing
+`core` types §5's walk terminates at, so `learn(FeedbackEvent(content="\ud800"))`
+constructed. That was **#565**, and **#566 closed it**: `EncodableText` is now
+applied across `core/types.py` — `FeedbackEvent.content`, `.subject` and
+`.evidence`, `Goal.statement`, `MemoryBase.id`, `Provenance.evidence` and the
+rest — with a coverage test that fails the gate on any bare `str` field in that
+module. The gap this section named is closed in the tree, not merely tracked.
 
-**#565's scope is a rule, not a list**, and this ADR states it as one after
-trying the other:
+**The scope was stated as a rule and not a list, and that is why it closed
+cleanly:**
 
 > **Every string-bearing field reachable from the `core` types §5's walk
-> terminates at is in scope** — at any depth, through nested models and through
-> collections of them. Not a named set of fields.
+> terminates at** — at any depth, through nested models and through collections
+> of them. Not a named set of fields.
 
 **A field table was written here and is deliberately gone**, because it was
 falsified in a single review round. It named `FeedbackEvent`, `Goal`,
@@ -677,9 +699,11 @@ falsified in a single review round. It named `FeedbackEvent`, `Goal`,
 — a plain `str`, not an `Identifier` — and **`Provenance.evidence`**, both
 reachable through `MemoryRecord` and both able to carry a surrogate into a
 `TurnResult` a canonical fake returns. That is §4c's own argument landing on
-§4c: a rule over "every string" survives, and a list of fields rots. Recording
-the failure rather than quietly replacing the table is the point, since the next
-reader's instinct will be to write the list again.
+§4c: a rule over "every string" survives, and a list of fields rots. **The
+failure is left on the record rather than quietly replaced**, because the next
+reader's instinct is to write the list again — and because #566 closed the gap by
+covering the module mechanically rather than by working down a list, which is the
+same lesson at implementation scale.
 
 **Two observations do survive as *evidence*, not as scope.** `CurrentContext`
 carries no string at all — only `now`, `time_of_day` and two booleans — so a
@@ -700,24 +724,27 @@ record graph ADR-0068 froze, with a blast radius outside any contract ADR's fenc
 Absorbing that here is the mistake ADR-0087 exists as evidence against — a
 representation concern reviewed by people reading for method shape.
 
-**And #565 is a *fix*, not a decision this ADR is ducking**, which is what makes
-leaving it out cost the corpus nothing:
+**And #565 was a *fix*, not a decision this ADR was ducking** — which is what
+made leaving it to its own change cost the corpus nothing, and is borne out by
+#566 having simply made it:
 
 - **No ADR ever ratified that those fields accept unencodable text.** There is no
   clause to supersede and no reader acting on one; the plain `str` is an absence,
   not a decision.
 - **ADR-0087 §9 is a deferring clause acquiring an answer**, which is ADR-0083
   §15's stacked-addition carve-out on its own stated test: its sentence stays true
-  and now has somewhere to be answered. So #565 owes no supersession either.
+  and now has an answer. So #565 owed no supersession either, and #566 wrote
+  none.
 - **Nothing durable can already hold such a value, and that is the load-bearing
   reason rather than a reassurance.** The five stores are SQLite, whose driver
   encodes text as UTF-8, so inserting a lone surrogate raises
   `UnicodeEncodeError` at the `INSERT` — checked against the tree, not assumed,
-  because the whole claim turns on it. It follows that #565 can invalidate no
-  stored record and needs no migration: the gap is reachable only **in memory**,
-  between constructing a value and a socket that does not exist yet. A fix with
-  no durable footprint is one a later change can simply make, which is what
-  separates it from a decision this ADR would be ducking.
+  because the whole claim turns on it — and it is also why the alias is named
+  `EncodableText` rather than for the wire (§4c). It follows that #565 could
+  invalidate no stored record and needed no migration: the gap was reachable only
+  **in memory**, between constructing a value and a socket that does not exist
+  yet. A fix with no durable footprint is one a later change can simply make,
+  which is exactly what #566 did.
 
 ### 5. The complete transitive closure, and the boundary it stops at
 
@@ -1532,7 +1559,7 @@ makes "the code is the class name" safe: `ValueError` is not ours to name.
 
 ### 11. Deferred by name, and where the corpus and the tree disagree
 
-#### 11a. What is settled elsewhere: ADR-0087's encoding, and #565's prerequisite
+#### 11a. What is settled elsewhere: ADR-0087's encoding, and #565's discharged prerequisite
 
 Named so the reference in §8c resolves to a decision rather than to a silence.
 
@@ -1587,15 +1614,19 @@ position: "the relative order of this ADR and the surface ADR is deliberately no
 fixed… neither is a prerequisite of the other". Both are contract changes before
 the triad. This ADR is ADR-0084 §5's step 2 whatever else lands.
 
-**#565's fix is a prerequisite of the client lane, not merely context for it**
-(§4c). §4c closes encodability for the promoted types and direct arguments and
-records that the strings inside the pre-existing `core` types §5's walk
-terminates at are not reached — **every** such string, at any depth, which §4c
-states as a rule rather than as a list for a reason it learned the hard way. Until that lands, this contract declares request and result values
-that ADR-0087 §2b gives no wire form, so **the client lane does not proceed
-without it**: a client built first would be one whose encoder raises on inputs
-this Protocol admits, which is ADR-0084 §4's substitutability failure arriving
-through the leaves.
+**#565's fix was named here as a prerequisite of the client lane, and it has
+landed.** While the pre-existing `core` leaves still held bare `str`, this
+contract declared request and result values ADR-0087 §2b gives no wire form, so
+a client built first would have been one whose encoder raises on inputs this
+Protocol admits — ADR-0084 §4's substitutability failure arriving through the
+leaves. **#566 closed it** (§4c), so the condition is discharged rather than
+outstanding, and the client lane inherits no debt from this clause.
+
+**It is recorded rather than deleted**, because the reasoning is what a later
+reader needs: a contract that admits a value no implementation can encode is not
+made safe by the fact that nobody has built the second implementation yet, and
+naming that as a readiness condition is what stopped it being discovered at the
+socket.
 
 **This is ADR-0084 §11's own form, deliberately** — that ADR attaches exactly
 this kind of condition to #473 twice, at `0084:839` ("**So #473 is a prerequisite
@@ -1605,8 +1636,9 @@ the shape this ADR avoids elsewhere: **a prerequisite is a fact about the client
 lane's readiness, not a claim about when a change merges.** It orders no ADRs
 against each other and enumerates nothing, so it leaves ADR-0084 §5's enumeration
 of *changes* untouched and owes no record — the same reason ADR-0084 §11 owed
-none for #473. **Nothing here says when #565's fix merges**, only that the client
-lane is not ready before it does.
+none for #473. **Nothing here said when #565's fix would merge**, only that the
+client lane was not ready before it did — and #566 has since landed it, so the
+condition is discharged rather than pending.
 
 #### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
