@@ -79,7 +79,7 @@ from ai_assistant.core.types import (
     StepStatus,
 )
 from ai_assistant.wire import HubEngineClient, TransportError
-from ai_assistant.wire.address import socket_path
+from ai_assistant.wire.address import check_socket_path, socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -661,12 +661,19 @@ async def _open_engine() -> AssistantEngine:
         A client of the hub, which is an ``AssistantEngine`` like any other.
 
     Raises:
-        AssistantError: If settings will not load.
+        AssistantError: If settings will not load, or the data directory's path
+            cannot hold the hub's socket.
         TransportError: If no hub is listening, or the one that answers is not
             this user's, or speaks another protocol version.
     """
     settings = load_settings()
     configure_logging(settings)
+    # The same condition the hub refuses to start on (#554, ADR-0084 §1), checked
+    # here so the *client* gives the same diagnosis rather than a bare
+    # ``AF_UNIX path too long`` out of ``connect``. One setting locates both the
+    # data and the door (§9), so both halves reach the same verdict about it — and
+    # the user is told to move the data directory rather than left to infer it.
+    check_socket_path(settings.data_dir)
     client = HubEngineClient(socket_path(settings.data_dir), read_timeout=settings.hub_read_timeout)
     await client.probe()
     return client

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import struct
 from datetime import timedelta
 
 import pytest
@@ -169,3 +170,22 @@ async def _pair() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     reader, writer = await asyncio.open_connection(sock=left)
     right.close()
     return reader, writer
+
+
+async def test_a_reset_is_read_as_an_end_of_file() -> None:
+    """A peer that closed with bytes still queued reaches this as a reset.
+
+    The same event from the kernel's point of view as an empty read and a different
+    exception from Python's — and the listener's own ceiling refusal is one of the
+    paths that produces it, so a raw ``OSError`` escaping here would hand the CLI an
+    exception outside this package's vocabulary for the ordinary case of a hub
+    hanging up.
+    """
+    left, right = socket.socketpair()
+    reader, writer = await asyncio.open_connection(sock=left)
+    right.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    right.send(b"\x00\x00\x00\x10partial")
+    right.close()
+    with pytest.raises((ConnectionClosedError, UndecodableFrameError)):
+        await read_frame(reader, max_frame_bytes=1024, timeout=_PATIENT, idle_timeout=_PATIENT)
+    writer.close()

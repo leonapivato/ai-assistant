@@ -586,8 +586,10 @@ async def _hang_up(writer: asyncio.StreamWriter) -> None:
     """Close one connection, tolerating a peer that has already gone.
 
     A stateless client holds nothing a close can lose, so a failure to shut a
-    socket down cleanly is not a failure of the call it belonged to.
+    socket down cleanly is not a failure of the call it belonged to — and a close
+    that reported one would replace the failure the caller actually needs to read
+    with a footnote about the socket.
     """
     writer.close()
-    with contextlib.suppress(ConnectionError, OSError, asyncio.CancelledError):
+    with contextlib.suppress(Exception, asyncio.CancelledError):
         await writer.wait_closed()
