@@ -517,11 +517,25 @@ Three cases, each measured rather than assumed. Everywhere else,
 the ratified bytes — which is why §2 keeps §3's *shape*, binding to an encoding
 that already exists, and changes only the instrument.
 
-| # | Case | `pydantic` / `json.dumps` default | Ratified | Why |
-| --- | --- | --- | --- | --- |
-| 1 | member order | insertion order (both) | code-point sorted | §2a — a field reorder must not be a protocol change; a `FrozenJsonMapping`'s key order must not be caller-visible (§4) |
-| 2 | duration ≥ 365 days | `"P1Y"` (pydantic) | `"P365D"` | §2e — a nominal component on a permanently frozen codec |
-| 3 | non-finite float | `null` (pydantic) / `NaN`, `Infinity` (`json.dumps`) | raise | §2c — one is silent corruption, the other is not JSON |
+**Three APIs are in play and the table names each**, because they differ exactly
+where it matters: `model_dump_json()` is the one-shot serialiser ADR-0084 §3's
+"pydantic's JSON mode" most naturally means; `model_dump(mode="json")` is the
+*projection* §2's recipe uses, which renders scalars but leaves Python containers
+and floats alone; and `json.dumps` is what §2 then runs over that projection.
+
+| # | Case | `model_dump_json()` | `model_dump(mode="json")` → `json.dumps` default | Ratified | Why |
+| --- | --- | --- | --- | --- | --- |
+| 1 | member order | declaration / insertion order | same | code-point sorted | §2a — a field reorder must not be a protocol change; a `FrozenJsonMapping`'s key order must not be caller-visible (§4) |
+| 2 | duration ≥ 365 days | `"P1Y"` | `"P1Y"` — the projection renders it | `"P365D"` | §2e — a nominal component on a permanently frozen codec |
+| 3 | non-finite float | `null` — **silently a different value** | the projection keeps `inf`, and `json.dumps` writes the non-JSON token `Infinity` | raise | §2c — one is silent corruption, the other is not JSON |
+
+**Row 3 is why `allow_nan=False` is in §2's recipe rather than decorative.** The
+projection does *not* convert a non-finite float — `model_dump(mode="json")` on
+`inf` yields the Python `inf`, not `null` — so without the flag `json.dumps`
+would emit `Infinity` and produce something that is not JSON at all. With it, the
+recipe raises, which is what §2c ratifies. The `null` in the first column is
+`model_dump_json()`'s behaviour, and it is the one ADR-0084 §3's rule delivers,
+which is why the supersession record names that clause and not this recipe.
 
 **Negative zero is not a fourth row, and an earlier draft of this ADR got that
 wrong in an instructive way.** `-0.0 == 0.0` is true and the two encode
