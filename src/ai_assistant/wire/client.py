@@ -47,6 +47,7 @@ from ai_assistant.wire.codec import (
     check_payload,
     identifier,
     page_argument,
+    project,
 )
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
@@ -410,6 +411,18 @@ class HubEngineClient:
             TransportError: If there is no hub, or one that broke the protocol.
         """
         payload = arguments_object(**arguments)
+        # **Projected before the socket is opened**, which is where ADR-0085 §9's
+        # "refused locally, before any I/O" bites for a value that has no wire form
+        # at all. ``project`` is what raises on a lone surrogate or a non-finite
+        # float (ADR-0087 §2b, §2c), and running it after ``connect`` would make the
+        # error a caller sees depend on whether a hub happened to be up: a
+        # ``ValueError`` in-process, a ``HubUnavailableError`` over the wire, for one
+        # value both implementations must refuse the same way.
+        #
+        # The *size* check cannot move with it, and does not need to: the limit is
+        # the hub's to publish (ADR-0084 §3), so it is measured once the handshake
+        # has said what it is — still locally, and still before any request frame.
+        project(payload)
         reader, writer, limit = await self._connect()
         try:
             check_payload(payload, max_bytes=limit, subject=f"the arguments to {method}()")

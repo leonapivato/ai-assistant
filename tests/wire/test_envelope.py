@@ -13,7 +13,14 @@ import pytest
 
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES
 from ai_assistant.wire.envelope import (
+    ACK_BUILD,
+    ACK_MAX_FRAME_BYTES,
+    ACK_READY,
+    ACK_VERSION,
+    CONNECT_CLIENT,
+    CONNECT_VERSION,
     MAX_CORRELATION_ID_BYTES,
+    MAX_IDENTIFIER_BYTES,
     PROTOCOL_VERSION,
     Envelope,
     FrameKind,
@@ -139,17 +146,63 @@ def test_an_empty_credential_is_accepted_and_a_populated_one_is_refused() -> Non
         read_connect(connect_payload(client="cli", credential="hunter2"))
 
 
-def test_either_connect_payload_is_bounded_as_a_whole() -> None:
+def test_an_over_long_client_identifier_is_refused() -> None:
+    """ADR-0085 §8d's per-member bound: 64 bytes for either identifier."""
+    with pytest.raises(ValueError, match=str(MAX_IDENTIFIER_BYTES)):
+        connect_payload(client="x" * 400)
+
+
+def test_a_member_nobody_bounded_still_cannot_widen_the_handshake() -> None:
     """ADR-0085 §8d bounds the payload, not its members one at a time.
 
     "Two separate members turned out to be unbounded on inspection, which is
     evidence that inspection is not a reliable way to enumerate them" — and a later
-    protocol version may add a fifth that no per-member sentence would reach. The
-    aggregate is fail-closed in the direction that matters: a member nobody thought
-    about cannot silently widen either frame past the floor.
+    protocol version may add a fifth that no per-member sentence would reach. So the
+    case that matters is a member no rule names, which is what this stands in for:
+    the aggregate refuses it even though every *named* member is inside its own
+    bound.
     """
-    with pytest.raises(ValueError, match=str(CONNECT_PAYLOAD_BYTES)):
-        connect_payload(client="x" * 400)
+    future = {
+        CONNECT_VERSION: PROTOCOL_VERSION,
+        CONNECT_CLIENT: "assistant-cli",
+        "something_a_later_version_added": "y" * 300,
+    }
+    with pytest.raises(UndecodableFrameError, match=str(CONNECT_PAYLOAD_BYTES)):
+        read_connect(future)
+
+
+def test_a_received_handshake_payload_is_held_to_the_same_bound() -> None:
+    """The reader is bound too, and the asymmetry is what made this worth closing.
+
+    §8d states the bound flatly over "each connect-exchange payload — the request
+    and the reply alike", and a reader that accepted what the builder refuses would
+    be more permissive than the contract on the one exchange whose whole job is to
+    bound itself — letting a peer spend up to ``hub_max_frame_bytes`` on a frame
+    that has told the hub nothing yet.
+    """
+    with pytest.raises(UndecodableFrameError, match=str(MAX_IDENTIFIER_BYTES)):
+        read_connect({CONNECT_VERSION: PROTOCOL_VERSION, CONNECT_CLIENT: "x" * 100})
+    with pytest.raises(UndecodableFrameError, match=str(MAX_IDENTIFIER_BYTES)):
+        read_connect_ack(
+            {
+                ACK_VERSION: PROTOCOL_VERSION,
+                ACK_BUILD: "b" * 100,
+                ACK_READY: True,
+                ACK_MAX_FRAME_BYTES: 1024,
+            }
+        )
+
+
+def test_a_build_identifier_is_trimmed_on_bytes_and_not_on_characters() -> None:
+    """The bound exists so the reply fits the frame-size floor, and a floor is bytes.
+
+    A character count is the tempting spelling and the wrong one: 64 non-ASCII
+    characters are more than 64 bytes, so a character-trimmed identifier would
+    still overrun what the floor was proved against.
+    """
+    payload = connect_ack_payload(build="é" * 100, max_frame_bytes=1024)
+    assert len(str(payload[ACK_BUILD]).encode()) <= MAX_IDENTIFIER_BYTES
+    read_connect_ack(payload)
 
 
 def test_the_connect_reply_carries_the_hub_s_authoritative_frame_size() -> None:

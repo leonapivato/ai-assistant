@@ -265,11 +265,23 @@ def connect_payload(*, client: str, credential: str | None = None) -> dict[str, 
     Returns:
         The connect payload's members.
 
+    **The client identifier is refused rather than trimmed**, where the *build*
+    identifier below is trimmed. The two are not alike: a build identifier is
+    ``__version__``, so refusing it would break every connect on a deployment whose
+    version string grew, while a client name is this caller's own literal and an
+    over-long one is a programming error worth reporting.
+
     Raises:
-        ValueError: If the payload exceeds ADR-0085 §8d's 256-byte bound, which is
-            a configuration fault "on the side that would send it rather than a
-            frame to send".
+        ValueError: If the identifier or the whole payload exceeds ADR-0085 §8d's
+            bounds, which is a configuration fault "on the side that would send it
+            rather than a frame to send".
     """
+    if len(client.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
+        msg = (
+            f"a client identifier of {len(client.encode('utf-8'))} bytes is over the "
+            f"{MAX_IDENTIFIER_BYTES}-byte bound ADR-0085 §8d fixes"
+        )
+        raise ValueError(msg)
     payload: dict[str, Any] = {CONNECT_VERSION: PROTOCOL_VERSION, CONNECT_CLIENT: client}
     if credential is not None:
         payload[CONNECT_CREDENTIAL] = credential
@@ -302,12 +314,25 @@ def connect_ack_payload(*, build: str, max_frame_bytes: int) -> dict[str, Any]:
     """
     payload: dict[str, Any] = {
         ACK_VERSION: PROTOCOL_VERSION,
-        ACK_BUILD: build[:MAX_IDENTIFIER_BYTES],
+        ACK_BUILD: _bounded(build),
         ACK_READY: True,
         ACK_MAX_FRAME_BYTES: max_frame_bytes,
     }
     _check_connect_payload(payload, sender="the hub")
     return payload
+
+
+def _bounded(identifier: str) -> str:
+    """Trim a build identifier to ADR-0085 §8d's 64 **bytes**, not 64 characters.
+
+    A character count is the tempting spelling and the wrong one: the bound exists
+    so the reply fits inside the frame-size floor, and a floor is measured in bytes.
+    Trimmed rather than refused because this value is ``__version__`` — refusing it
+    would make every connect fail on a deployment whose version string grew, which
+    is a worse answer than a shortened identifier in a log line.
+    """
+    encoded = identifier.encode("utf-8")[:MAX_IDENTIFIER_BYTES]
+    return encoded.decode("utf-8", errors="ignore")
 
 
 def _check_connect_payload(payload: dict[str, Any], *, sender: str) -> None:
@@ -325,6 +350,45 @@ def _check_connect_payload(payload: dict[str, Any], *, sender: str) -> None:
             f"floor holds; shorten the identifier"
         )
         raise ValueError(msg)
+
+
+def _refuse_an_oversized_handshake(payload: dict[str, Any], *, member: str) -> None:
+    """Refuse a *received* handshake payload the contract does not admit (§8d).
+
+    **The bound binds the reader as well as the writer, and the asymmetry is what
+    made this worth closing.** ADR-0085 §8d states it flatly — "each
+    connect-exchange payload — the request and the reply alike — is at most 256
+    bytes encoded" — and this module already refuses to *build* one that exceeds
+    it. A reader that accepted what the contract forbids would be more permissive
+    than the contract on the one exchange whose whole job is to bound itself, and
+    would let a peer spend up to ``hub_max_frame_bytes`` on a frame that has told
+    the hub nothing yet: the cheapest state for a misbehaving peer to accumulate,
+    which is precisely what §3's pending-handshake ceiling exists to bound.
+
+    **It closes rather than answering with a typed error**, which is the narrow
+    reading of ADR-0084 §3: a decoded frame gets a typed error "provided it is not
+    itself a violation of the connection's own rules", and a handshake that
+    overruns the handshake's own bound is one. Inventing a code for it would be
+    this lane adding vocabulary to a ratified list.
+
+    Raises:
+        UndecodableFrameError: If the payload, or its identifier member, is over
+            the bound.
+    """
+    size = len(encode_projection(payload))
+    if size > CONNECT_PAYLOAD_BYTES:
+        msg = (
+            f"a connect-exchange payload of {size} bytes is over the "
+            f"{CONNECT_PAYLOAD_BYTES}-byte bound ADR-0085 §8d fixes"
+        )
+        raise UndecodableFrameError(msg)
+    identifier = payload.get(member)
+    if isinstance(identifier, str) and len(identifier.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
+        msg = (
+            f"a connect-exchange {member} identifier is over the "
+            f"{MAX_IDENTIFIER_BYTES}-byte bound ADR-0085 §8d fixes"
+        )
+        raise UndecodableFrameError(msg)
 
 
 def read_connect(payload: object) -> tuple[int, str]:
@@ -347,6 +411,7 @@ def read_connect(payload: object) -> tuple[int, str]:
     if not isinstance(payload, dict):
         msg = f"a connect payload must be an object, got {type(payload).__name__}"
         raise UndecodableFrameError(msg)
+    _refuse_an_oversized_handshake(payload, member=CONNECT_CLIENT)
     version = payload.get(CONNECT_VERSION)
     if not isinstance(version, int) or isinstance(version, bool):
         msg = "a connect payload's version must be an integer"
@@ -385,6 +450,7 @@ def read_connect_ack(payload: object) -> tuple[int, int]:
     if not isinstance(payload, dict):
         msg = f"a connect reply must be an object, got {type(payload).__name__}"
         raise UndecodableFrameError(msg)
+    _refuse_an_oversized_handshake(payload, member=ACK_BUILD)
     version = payload.get(ACK_VERSION)
     frame_bytes = payload.get(ACK_MAX_FRAME_BYTES)
     ready = payload.get(ACK_READY)
