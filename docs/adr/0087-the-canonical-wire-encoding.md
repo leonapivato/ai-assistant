@@ -344,7 +344,7 @@ ceiling that any ADR has set or will set.
 | --- | --- |
 | `bool` | `true` / `false` |
 | `None` | `null` |
-| `int` | decimal, no sign for zero, no exponent, arbitrary width |
+| `int` | decimal, no sign for zero, no exponent, any width CPython will render — an integer past its integer-string conversion guard has no encoding and the encoder raises, symmetrically with the decoder, which cannot parse one either |
 | `float` | CPython's `float.__repr__` — the shortest decimal that round-trips, with a decimal point or an exponent always present, and an exponent of at least two digits (`1e-07`, `1e+16`) |
 | `str` / `Identifier` | §2b, on the *validated* value: `Identifier` strips, so `" x "` and `"x"` are one value and one encoding |
 | `StrEnum` | the member's `value` as a string — `Disposition.EXECUTED` is `"executed"` |
@@ -862,14 +862,32 @@ leaves the rest, and the line is drawn at a property rather than at a module:
   bug rather than a peer to accommodate, and it is caught by the vectors on the
   side that wrote it.
 - **The limit is measured on the value, on both sides, so a lenient reader costs
-  nothing.** ADR-0084 §4 puts the limit on the *value* rather than on the frame,
-  and that is what makes this work: the sender encodes canonically and refuses
-  before sending; the receiver decodes, then measures the canonical encoding of
-  the value it decoded. Same value, same bytes, same number — which is only true
-  because of §4, and is the second reason byte-determinism is load-bearing rather
-  than tidy. The frame's own size is a separate bound with a separate subject
-  (ADR-0084 §3's prefix), and the two are related by whatever reserve the surface
-  ADR sets between them.
+  nothing — provided measurement runs *after* validation.** ADR-0084 §4 puts the
+  limit on the *value* rather than on the frame, and that is what makes this
+  work: the sender encodes canonically and refuses before sending; the receiver
+  decodes, validates into the declared type, and measures the canonical encoding
+  of the validated value. Same value, same bytes, same number — which is only
+  true because of §4, and is the second reason byte-determinism is load-bearing
+  rather than tidy.
+
+  > **The order is decode, then validate, then measure**, and it is fixed rather
+  > than left to an implementation. A value with no canonical form (§2c) must not
+  > reach the measurement step.
+
+  **This is not fussiness — measuring first is unsatisfiable.** `1e999` is
+  well-formed JSON that CPython decodes to `float("inf")`, and §2c gives a
+  non-finite float no encoding, so a receiver that measured before validating
+  would have to produce a size for a value that has none. Validating first
+  disposes of it: `inf` fails any bounded `float` field, and inside `FrozenJson`
+  it is refused structurally by `_deep_freeze`, whose docstring gives this exact
+  reason — `json.dumps` "renders it to a non-JSON token (`NaN`/`Infinity`)
+  instead of raising, so running the encoder would let it through". **The place a
+  non-encodable value is refused is the type, not the frame**, which is also why
+  this ADR adds nothing to ADR-0084 §3's closed undecodable-frame list. §9
+  records what is left open where a declared type admits such a value anyway.
+
+  The frame's own size is a separate bound with a separate subject (ADR-0084 §3's
+  prefix), related to the limit by a reserve §2a and §7 both decline to set.
 - **Two encoders may exist without the contract weakening.** This is §1's payoff
   and it is what makes the boundary survivable: because conformance is defined by
   output, an encoder inside `wire` and an encoder the in-process engine reaches
@@ -920,16 +938,19 @@ behaviour at the handshake.
 
 ### 9. What is left open, honestly
 
-- **A `str` with no UTF-8 encoding.** §2b makes the encoder raise on a lone
-  surrogate, which is right — substituting U+FFFD would change a user's data
-  silently. But a belief's content and an utterance are plain `str` with no
-  validator refusing one, so a value the in-process engine accepts can be one the
-  wire cannot carry. `core/types.py`'s `_freeze_json` already closes exactly this
-  for `FrozenJson`, by running the real encoder at validation time rather than by
-  enumerating the value types that can fail (issues #121, #127) — which is both
-  the shape of the fix and the reason it is not made here: the refusal belongs on
-  the type, and the promoted types are the surface ADR's. **Filed rather than
-  designed around.**
+- **A declared type that admits a value with no canonical form.** §2 gives three
+  values no encoding — a lone surrogate `str` (§2b), a non-finite `float` and an
+  oversized `int` (§2c) — and §7 fixes that the type is where each must be
+  refused, before measurement. Two holders already do it: `FrozenJson` refuses
+  the non-finite float structurally and catches the other two **by running the
+  real encoder at validation time** rather than by enumerating the value types
+  that can fail, which is exactly what the surrogate and big-integer cases
+  defeated when they were enumerated (issues #121, #127). A plain `str` or an
+  unbounded `float` on the promoted surface has no such validator, so a value the
+  in-process engine accepts could be one the wire cannot carry. `_freeze_json` is
+  both the shape of the fix and the reason it is not made here: **the refusal
+  belongs on the type, and the promoted types are the surface ADR's.** Filed
+  rather than designed around.
 - **Where the encoder lives, for the in-process engine.** ADR-0084 §4 obliges
   every implementation to enforce the limit — "the in-process engine included" —
   and an engine with no payload to serialise for its own sake must build one to
