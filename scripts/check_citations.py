@@ -462,23 +462,34 @@ def _module_path_candidates(root: Path, cited: str) -> Iterator[Path]:
     ``tests/`` or ``scripts/``, written either in full or relative to one of
     them" (ADR-0088 §1(b)), so both readings are candidates for each root.
 
-    **A candidate that does not normalise to somewhere inside its own root is
+    Two rules keep the readings from inventing a citation between them.
+
+    **A citation that names a root explicitly gets that reading and no other.**
+    ``tests/../docs/missing.py`` says ``docs/missing.py``, which §1(b) calls a
+    document reference — and reading it *also* as relative to ``tests/`` yields
+    ``tests/docs/missing.py``, which a ``tests/docs/`` directory would anchor and
+    report. The author wrote a root; taking a second reading past it is the
+    checker choosing the interpretation that produces a finding.
+
+    **And a candidate that does not normalise to somewhere inside its own root is
     discarded**, which is the whole content of "defined by root". Without it
-    ``src/ai_assistant/../../docs/missing.md`` reads as a full-form citation,
-    normalises to ``docs/missing.md``, anchors on the existing ``docs/`` — and
-    is reported as an absent module path, when §1(b) says in terms that a path
-    under ``docs/`` is a document reference nothing resolves against the code.
-    Containment in the *repository* is not enough to catch that; containment in
-    the candidate's own root is.
+    ``src/ai_assistant/../../docs/missing.md`` normalises to ``docs/missing.md``,
+    anchors on the existing ``docs/``, and is reported. Containment in the
+    *repository* is not enough to catch that; containment in the candidate's own
+    root is.
     """
     for code_root in _CODE_ROOTS:
-        base = (root / code_root).resolve()
-        readings = [base / cited]
         if cited == code_root or cited.startswith(f"{code_root}/"):
-            readings.append(root / cited)
-        for candidate in readings:
+            base = (root / code_root).resolve()
+            candidate = root / cited
             if candidate.resolve().is_relative_to(base):
                 yield candidate
+            return
+    for code_root in _CODE_ROOTS:
+        base = (root / code_root).resolve()
+        candidate = base / cited
+        if candidate.resolve().is_relative_to(base):
+            yield candidate
 
 
 def _is_anchored(candidate: Path) -> bool:
