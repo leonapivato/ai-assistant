@@ -88,6 +88,22 @@ class ProtocolError(TransportError):
     """
 
 
+class CredentialNotSupportedError(ProtocolError):
+    """A connect frame carried a credential this transport does not check.
+
+    **A type of its own rather than a plain ``ProtocolError``, and the reason is a
+    bug this once caused.** ADR-0084 §3 sorts a connect frame's faults into two
+    answers — a credential is "a member of an envelope that parsed", so it is
+    "reported properly and only then does the connection close", while an
+    undecodable frame closes with no response at all. The server has to tell those
+    apart, and telling them apart by catching ``ProtocolError`` silently caught
+    :class:`UndecodableFrameError` too (it is a subclass), so an oversized handshake
+    was answered with a credential refusal instead of being closed on. Naming the
+    one case that earns a typed error is what makes the distinction unmissable
+    rather than a matter of which ``except`` clause comes first.
+    """
+
+
 class UndecodableFrameError(ProtocolError):
     """No envelope decoded, so there is nothing to answer and nothing to quote.
 

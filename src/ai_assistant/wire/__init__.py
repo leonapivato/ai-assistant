@@ -40,6 +40,7 @@ from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES, canonical_payload
 from ai_assistant.wire.envelope import PROTOCOL_VERSION, Envelope, FrameKind
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
+    CredentialNotSupportedError,
     HubUnavailableError,
     ProtocolError,
     TransportError,
@@ -54,6 +55,7 @@ __all__ = [
     "SOCKET_MODE",
     "ConnectionClosedError",
     "ConnectionLimits",
+    "CredentialNotSupportedError",
     "Envelope",
     "FrameKind",
     "HubEngineClient",
