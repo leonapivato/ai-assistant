@@ -15,9 +15,10 @@
   Two records are owed — on ADR-0040 and on ADR-0074 — and one commonly-assumed
   third is argued *not* owed. They are declared in this text, which is where
   ADR-0082 §1 says the judgement is made and reviewed, and the edits themselves
-  are sequenced separately because two lanes are writing under `docs/adr/` this
-  wave and a record for an ADR that is not yet `Accepted` would be false when it
-  landed.
+  are sequenced into a following change — the split ADR-0084 §12 made days ago,
+  deferring its ADR-0077 record "to its own lane (#536)". §11 gives the grounding;
+  the short of it is that ADR-0070 §1 permits recording a supersession that has
+  **landed**, and a `Proposed` ADR's decision has not.
 - **Closes #473.** Its two questions are decided together, in §1–§5 and in §6,
   because each turns on the other: the bound decides whether the batch read is
   buying anything, and the batch read decides how expensive the bound is allowed
@@ -420,12 +421,22 @@ trade is arithmetic. This is why #473 asked for the two together.
   read that answered differently about a record's liveness is the failure
   `MemoryStore`'s own docstring already forbids between `search` and
   `list_beliefs`; a third read gets the same rule.
-- **One clock reading for the whole batch**, taken inside the store's lock, the
-  way `get` already takes one for itself. This is a real guarantee and not
-  book-keeping: resolving 64 citations through 64 `get`s takes 64 clock readings,
-  so a citation can expire mid-resolution and a belief's rendered count can
-  disagree with its own tombstones. A batch is internally consistent; a loop of
-  singles is not.
+- **One read-time snapshot for the whole batch.** Every id in a call is judged
+  against **one instant**: the result is exactly what the store would return for
+  those ids at some single point in time, so no two entries can disagree about
+  when "now" was. This is a real guarantee and not book-keeping — resolving 64
+  citations through 64 `get`s judges them against 64 instants, so a citation can
+  expire mid-resolution and a belief's rendered count can disagree with its own
+  tombstones. A batch is internally consistent; a loop of singles is not.
+
+  **The guarantee is the snapshot, not any mechanism for obtaining one.** A lock
+  plus one clock reading is how the shipped SQLite store will meet it (§8), and
+  that is an implementation note there rather than an obligation here: a
+  transactional, remote or lock-free store can satisfy the same observable
+  property with no lock at all, and a Protocol that named one would put a
+  concrete store's synchronisation into a contract every consumer depends on
+  (golden rule 1). Stated as a snapshot, the clause is also testable at the
+  boundary, which a clause about a private lock is not.
 - **A mapping, not a sequence.** The caller's question is *which* ids resolved —
   that is the lost count and the tombstone placement — so a positional result
   would force every caller to re-derive the correspondence. Duplicate ids
@@ -532,7 +543,10 @@ The triad and its consumers, in the order golden rule 5 fixes.
    (`CONTRIBUTING.md`, "Adding a Protocol"):
    - `MemoryStore`: `get_many` never disagrees with `get` on any id, on all three
      read-time outcomes; duplicates collapse; an empty argument returns an empty
-     mapping; a missing id is an omission and not an error. **And it observes
+     mapping; a missing id is an omission and not an error; **the batch is one
+     read-time snapshot** — no two entries in a result may reflect different
+     instants, which is observable at the boundary against a controlled clock and
+     says nothing about how any store obtains it. **And it observes
      `record_ids` before its first await** — the ADR-0065 clause §6 binds it to,
      which needs its own suspended-call case because none of the clauses above
      mutates the sequence mid-call and an implementation that took its lock first
@@ -565,9 +579,10 @@ The triad and its consumers, in the order golden rule 5 fixes.
    so the constructor's validators still run on the value that is stored
    (ADR-0026 §2's hazard: the surrounding `model_copy(update=...)` skips them).
 5. **`memory/sqlite_store.py`** — `get_many` under **one lock acquisition and one
-   clock reading**, not a loop over `_get_sync`. A loop of singles would pass
-   every conformance clause in §6 and buy none of the thing the method exists
-   for. The obligation is the single snapshot, **not a single SQL statement**:
+   clock reading**, not a loop over `_get_sync`. That is this store's way of
+   meeting §6's snapshot guarantee, not the guarantee itself; a loop of singles
+   would pass every conformance clause in §6 and buy none of the thing the method
+   exists for. It is equally **not a single SQL statement**:
    SQLite caps bound parameters per statement (`SQLITE_MAX_VARIABLE_NUMBER`,
    32,766 on current builds and 999 on older ones), so an `IN` clause must be
    chunked to that limit — inside the one lock, against the one clock reading, so
