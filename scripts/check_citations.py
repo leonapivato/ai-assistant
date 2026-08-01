@@ -126,6 +126,15 @@ _LINK_DESTINATION_RE = re.compile(r"\]\([^)\n]*\)")
 #: definition labelled ``[#588]`` still reads as one.
 _LINK_REFERENCE_RE = re.compile(r"(?<=\]:)[ \t]*\S+")
 
+#: A quoted HTML attribute value — ``<a href="#123">`` — markdown's third way of
+#: writing a destination, since raw HTML is valid markdown.
+#:
+#: **Excluded as a span, and it has to be**: the obvious rule, "a ``#NNN``
+#: preceded by a quote is not a citation", is refuted by the corpus, which
+#: quotes seven of them (``"#54 stays …"``). What separates the two is the
+#: ``attribute=`` before the quote, not the quote.
+_HTML_ATTRIBUTE_RE = re.compile(r"""[\w:.-]+\s*=\s*("[^"\n]*"|'[^'\n]*')""")
+
 #: **The one case the pattern above cannot decide: a ``/`` before the ``#``.**
 #: It is how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``, 14
 #: occurrences — and it is also every fragment identifier that is not caught by
@@ -497,6 +506,7 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
         # its context.
         outside_links = _LINK_DESTINATION_RE.sub(lambda m: " " * len(m.group(0)), line)
         outside_links = _LINK_REFERENCE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
+        outside_links = _HTML_ATTRIBUTE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
         for match in _TRACKER_RE.finditer(outside_links):
             if _is_fragment_identifier(outside_links[: match.start()]):
                 continue
