@@ -1,0 +1,400 @@
+"""The envelope every frame travels in, and the connect exchange (ADR-0084 §2-§3).
+
+The envelope is a JSON object with the members ADR-0085 §8a fixes — ``kind``,
+``id``, ``method`` on a request, and ``payload`` — and no others. It carries **no
+length member of its own**: the frame's length is :mod:`ai_assistant.wire.framing`'s
+prefix, which covers envelope and payload together, so "a second length inside the
+envelope would be a value that can disagree with the one already read".
+
+**Member order is not significant here**, and that is ADR-0084 §3's own sentence
+about its own subject. ADR-0087 §2 is scoped to the *payload*, so an implementation
+that emits envelope members in any order conforms — and one that sorts the whole
+frame in a single pass, as this one does, conforms too, because "not significant"
+permits both.
+
+**Duplicate member names are rejected**, in the envelope and in payload objects
+alike. JSON permits them and decoders disagree about which one wins, so
+``{"kind":"request","kind":"error",…}`` "could decode as a request in one
+implementation and an error in another — the same bytes, two meanings".
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any, Final
+
+from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, canonical_payload, encode_projection
+from ai_assistant.wire.errors import ProtocolError, UndecodableFrameError
+
+#: The protocol version, exchanged once in the connect handshake and nowhere else
+#: (ADR-0084 §3). It becomes connection state; it is not repeated on subsequent
+#: frames. Client and server must agree **exactly** — "there is no supported
+#: deployment in which they differ except a half-finished upgrade, and a
+#: half-finished upgrade is precisely the state ruling 4 wants legible rather than
+#: papered over".
+PROTOCOL_VERSION: Final[int] = 1
+
+#: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
+#: Bounding it is what makes the reserve a constant rather than an aspiration; a
+#: frame whose ``id`` is longer is a protocol violation and takes ADR-0084 §3's
+#: undecodable-frame close, because the length is part of what makes the frame
+#: decodable within budget."
+MAX_CORRELATION_ID_BYTES: Final[int] = 36
+
+#: ADR-0085 §8d bounds the build identifier and the client identifier at 64 bytes
+#: each. The aggregate bound on either connect payload
+#: (:data:`~ai_assistant.wire.codec.CONNECT_PAYLOAD_BYTES`) is what actually closes
+#: the floor's proof; this is the per-member bound the same clause states.
+MAX_IDENTIFIER_BYTES: Final[int] = 64
+
+_KIND: Final = "kind"
+_ID: Final = "id"
+_METHOD: Final = "method"
+_PAYLOAD: Final = "payload"
+
+#: Connect request members (ADR-0084 §2).
+CONNECT_VERSION: Final = "version"
+CONNECT_CLIENT: Final = "client"
+CONNECT_CREDENTIAL: Final = "credential"
+
+#: Connect reply members (ADR-0084 §2, §3).
+ACK_VERSION: Final = "version"
+ACK_BUILD: Final = "build"
+ACK_READY: Final = "ready"
+ACK_MAX_FRAME_BYTES: Final = "max_frame_bytes"
+
+#: The two handshake refusals ADR-0084 names, as error codes.
+#:
+#: **They are deliberately not class names**, which is what ADR-0085 §10a's rule
+#: gives a *call-path* error. That rule's subject is a declared failure of the
+#: promoted surface — "the wire's error vocabulary is therefore exactly the
+#: ``AssistantError`` subtree" — and neither of these is one: ADR-0085 §9 lists a
+#: version mismatch and a credential refusal among the transport conditions that
+#: "are not ``AssistantEngine`` failures and no Protocol method declares them". A
+#: lowercase token cannot collide with a class name, so a client can tell a
+#: reconstructable failure from a transport refusal by looking at the code alone.
+VERSION_MISMATCH: Final = "protocol_version_mismatch"
+CREDENTIAL_NOT_SUPPORTED: Final = "credential_not_supported"
+
+
+class FrameKind(StrEnum):
+    """What a frame is (ADR-0085 §8a)."""
+
+    CONNECT = "connect"
+    CONNECT_ACK = "connect_ack"
+    REQUEST = "request"
+    RESULT = "result"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class Envelope:
+    """One decoded frame.
+
+    Attributes:
+        kind: What the frame is.
+        id: The correlation id, which "has one job today and one reason to exist
+            tomorrow" (ADR-0084 §3) — today it detects desynchronisation, tomorrow
+            it is what lets multiplexing or a progress stream be added additively.
+        payload: The request arguments, the result value, the handshake body, or
+            the error body.
+        method: The ``AssistantEngine`` method name, on a request and nowhere else.
+    """
+
+    kind: FrameKind
+    id: str
+    payload: Any
+    method: str | None = None
+
+
+def _no_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object, refusing a name that appears twice (ADR-0084 §3).
+
+    Rejecting "is also the only option compatible with the rule that an
+    undecodable frame closes the connection: a decoder that silently picked one
+    would not be undecodable, merely wrong."
+
+    Args:
+        pairs: The object's members, in the order they were parsed.
+
+    Returns:
+        The object.
+
+    Raises:
+        ValueError: If a member name appears more than once.
+    """
+    seen: dict[str, Any] = {}
+    for name, value in pairs:
+        if name in seen:
+            msg = f"duplicate member {name!r}"
+            raise ValueError(msg)
+        seen[name] = value
+    return seen
+
+
+def decode_json(data: bytes) -> Any:
+    """Decode one frame's bytes into JSON values (ADR-0084 §3's codec).
+
+    Args:
+        data: The frame's bytes, without the length prefix.
+
+    Returns:
+        The decoded JSON value.
+
+    Raises:
+        UndecodableFrameError: If the bytes are not valid UTF-8, are not valid
+            JSON, or carry a duplicate member name. All three are members of
+            ADR-0084 §3's closed undecodable class, whose answer is a close.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        msg = "a frame's bytes are not valid UTF-8"
+        raise UndecodableFrameError(msg) from exc
+    try:
+        return json.loads(text, object_pairs_hook=_no_duplicate_members)
+    except ValueError as exc:
+        msg = f"a frame is not decodable JSON: {exc}"
+        raise UndecodableFrameError(msg) from exc
+
+
+def encode_envelope(envelope: Envelope) -> bytes:
+    """Render one frame's bytes, without the length prefix.
+
+    The payload's bytes are ADR-0087's canonical encoding; the envelope's own
+    members are written by the same recipe, which "not significant" permits and
+    which keeps one code path rather than two.
+
+    Args:
+        envelope: The frame to write.
+
+    Returns:
+        The frame's UTF-8 JSON bytes.
+    """
+    members: dict[str, Any] = {
+        _KIND: envelope.kind.value,
+        _ID: envelope.id,
+        _PAYLOAD: envelope.payload,
+    }
+    if envelope.method is not None:
+        members[_METHOD] = envelope.method
+    return canonical_payload(members)
+
+
+def decode_envelope(data: bytes) -> Envelope:
+    """Decode one frame into an :class:`Envelope`.
+
+    **Unknown members are refused.** ADR-0085 §8a fixes the envelope as carrying
+    "these members, and no others", and ADR-0084 §3's exact-match version means the
+    two halves ship together — so a member nobody declared is a bug on the writing
+    side, not a later version to accommodate. Accepting it silently would leave the
+    one thing the envelope is for, telling frames apart, decided by a field nobody
+    reviewed.
+
+    Args:
+        data: The frame's bytes, without the length prefix.
+
+    Returns:
+        The decoded envelope.
+
+    Raises:
+        UndecodableFrameError: If no envelope decodes — the whole class ADR-0084 §3
+            closes, whose answer is to close the connection without a response.
+    """
+    decoded = decode_json(data)
+    if not isinstance(decoded, dict):
+        msg = f"a frame's envelope must be a JSON object, got {type(decoded).__name__}"
+        raise UndecodableFrameError(msg)
+
+    unknown = set(decoded) - {_KIND, _ID, _METHOD, _PAYLOAD}
+    if unknown:
+        msg = f"a frame carries members no protocol version declares: {sorted(unknown)}"
+        raise UndecodableFrameError(msg)
+    missing = {_KIND, _ID, _PAYLOAD} - set(decoded)
+    if missing:
+        msg = f"a frame is missing required members: {sorted(missing)}"
+        raise UndecodableFrameError(msg)
+
+    raw_kind = decoded[_KIND]
+    if not isinstance(raw_kind, str):
+        msg = f"a frame's kind must be a string, got {type(raw_kind).__name__}"
+        raise UndecodableFrameError(msg)
+    try:
+        kind = FrameKind(raw_kind)
+    except ValueError as exc:
+        msg = f"a frame names no known kind: {raw_kind!r}"
+        raise UndecodableFrameError(msg) from exc
+
+    correlation = decoded[_ID]
+    if not isinstance(correlation, str):
+        msg = f"a frame's correlation id must be a string, got {type(correlation).__name__}"
+        raise UndecodableFrameError(msg)
+    if len(correlation.encode("utf-8")) > MAX_CORRELATION_ID_BYTES:
+        msg = (
+            f"a frame's correlation id is longer than the {MAX_CORRELATION_ID_BYTES}-byte "
+            f"bound the envelope reserve is computed against"
+        )
+        raise UndecodableFrameError(msg)
+
+    method = decoded.get(_METHOD)
+    if method is not None and not isinstance(method, str):
+        msg = f"a request's method must be a string, got {type(method).__name__}"
+        raise UndecodableFrameError(msg)
+    if (method is None) is (kind is FrameKind.REQUEST):
+        obligation = "must" if kind is FrameKind.REQUEST else "must not"
+        msg = f"a {kind.value} frame {obligation} name a method"
+        raise UndecodableFrameError(msg)
+
+    return Envelope(kind=kind, id=correlation, payload=decoded[_PAYLOAD], method=method)
+
+
+def connect_payload(*, client: str, credential: str | None = None) -> dict[str, Any]:
+    """Build the client's half of the handshake (ADR-0084 §2).
+
+    The **credential field is optional on the wire**: "on this transport a
+    conforming client either omits the member or sends it empty, and both are
+    accepted". This client omits it, because it has nothing to put there.
+
+    Args:
+        client: A free-form name for logs — ``assistant-cli``.
+        credential: Deliberately unused on this transport; a non-empty value is
+            refused by the server, so passing one is only ever a test of that.
+
+    Returns:
+        The connect payload's members.
+
+    Raises:
+        ValueError: If the payload exceeds ADR-0085 §8d's 256-byte bound, which is
+            a configuration fault "on the side that would send it rather than a
+            frame to send".
+    """
+    payload: dict[str, Any] = {CONNECT_VERSION: PROTOCOL_VERSION, CONNECT_CLIENT: client}
+    if credential is not None:
+        payload[CONNECT_CREDENTIAL] = credential
+    _check_connect_payload(payload, sender="the client")
+    return payload
+
+
+def connect_ack_payload(*, build: str, max_frame_bytes: int) -> dict[str, Any]:
+    """Build the server's half of the handshake (ADR-0084 §2, §3).
+
+    ``max_frame_bytes`` is the third job the handshake does, "and it is the one
+    that would have been most annoying to retrofit: without a connect exchange
+    there is nowhere to publish a server-side limit, and every client would have to
+    discover it by being refused." The server's value is authoritative and **the
+    client enforces the number it was told** rather than one of its own.
+
+    ``ready`` is always true here, and that is ADR-0083 §14.2 rather than a
+    constant: the listener does not accept until step 6, so a connection that got
+    far enough to be answered is a connection to a hub that is ready.
+
+    Args:
+        build: This build's identifier, for an operator reading two logs.
+        max_frame_bytes: The hub's effective maximum frame size.
+
+    Returns:
+        The connect reply's members.
+
+    Raises:
+        ValueError: If the payload exceeds ADR-0085 §8d's 256-byte bound.
+    """
+    payload: dict[str, Any] = {
+        ACK_VERSION: PROTOCOL_VERSION,
+        ACK_BUILD: build[:MAX_IDENTIFIER_BYTES],
+        ACK_READY: True,
+        ACK_MAX_FRAME_BYTES: max_frame_bytes,
+    }
+    _check_connect_payload(payload, sender="the hub")
+    return payload
+
+
+def _check_connect_payload(payload: dict[str, Any], *, sender: str) -> None:
+    """Hold either handshake payload to ADR-0085 §8d's aggregate bound.
+
+    Stated over the payload rather than member by member because that is what
+    closes: "a member nobody thought about cannot silently widen either handshake
+    frame past the floor, because the aggregate is what is checked, on both sides."
+    """
+    size = len(encode_projection(payload))
+    if size > CONNECT_PAYLOAD_BYTES:
+        msg = (
+            f"{sender}'s connect payload encodes to {size} bytes, over the "
+            f"{CONNECT_PAYLOAD_BYTES}-byte bound ADR-0085 §8d fixes so the frame-size "
+            f"floor holds; shorten the identifier"
+        )
+        raise ValueError(msg)
+
+
+def read_connect(payload: object) -> tuple[int, str]:
+    """Read the client's connect payload, applying §2's credential rule.
+
+    Args:
+        payload: The connect frame's payload, as decoded.
+
+    Returns:
+        The version the client claims, and its identifier.
+
+    Raises:
+        UndecodableFrameError: If the payload is not an object or is missing a
+            required member.
+        ProtocolError: If the credential member carries something. "Accepting-and-
+            ignoring is the alternative and it is the dangerous one: a client that
+            presents a credential and is admitted has been told, by admission, that
+            its credential was checked. Nothing on this transport checks anything."
+    """
+    if not isinstance(payload, dict):
+        msg = f"a connect payload must be an object, got {type(payload).__name__}"
+        raise UndecodableFrameError(msg)
+    version = payload.get(CONNECT_VERSION)
+    if not isinstance(version, int) or isinstance(version, bool):
+        msg = "a connect payload's version must be an integer"
+        raise UndecodableFrameError(msg)
+    client = payload.get(CONNECT_CLIENT)
+    if not isinstance(client, str):
+        msg = "a connect payload must name its client"
+        raise UndecodableFrameError(msg)
+    credential = payload.get(CONNECT_CREDENTIAL)
+    if credential not in (None, ""):
+        msg = (
+            "this transport carries no credential, and admitting one would tell the client "
+            "its credential had been checked when nothing checked anything; the 0600 bit on "
+            "the socket is what restricts connection here"
+        )
+        raise ProtocolError(msg)
+    return version, client
+
+
+def read_connect_ack(payload: object) -> tuple[int, int]:
+    """Read the server's connect reply.
+
+    Args:
+        payload: The reply frame's payload, as decoded.
+
+    Returns:
+        The version the hub claims, and its effective maximum frame size.
+
+    Raises:
+        UndecodableFrameError: If the payload is not an object or is missing a
+            required member.
+        ProtocolError: If the hub reports itself not ready, which cannot happen
+            through a listener that only accepts after ADR-0083 §3's step 6 and is
+            therefore reported rather than assumed away.
+    """
+    if not isinstance(payload, dict):
+        msg = f"a connect reply must be an object, got {type(payload).__name__}"
+        raise UndecodableFrameError(msg)
+    version = payload.get(ACK_VERSION)
+    frame_bytes = payload.get(ACK_MAX_FRAME_BYTES)
+    ready = payload.get(ACK_READY)
+    if not isinstance(version, int) or isinstance(version, bool):
+        msg = "a connect reply's version must be an integer"
+        raise UndecodableFrameError(msg)
+    if not isinstance(frame_bytes, int) or isinstance(frame_bytes, bool):
+        msg = "a connect reply must carry the hub's effective maximum frame size"
+        raise UndecodableFrameError(msg)
+    if ready is not True:
+        msg = "the hub answered the handshake but reports that it is not ready to serve"
+        raise ProtocolError(msg)
+    return version, frame_bytes
