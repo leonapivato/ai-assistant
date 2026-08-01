@@ -420,6 +420,89 @@ async def test_history_skips_a_turn_whose_episode_no_longer_resolves() -> None:
     assert history.degraded is False, "a gap is an ordinary state, not a degradation"
 
 
+async def test_history_reads_the_whole_tail_in_one_batch() -> None:
+    """ADR-0086 §8 item 7: one ``get_many`` for the resume, not one ``get`` per turn.
+
+    The ids go in the conversation's own order, which is also what makes the result
+    reconstructible: the batch is read back by walking ``turns``.
+    """
+
+    class Counting(FakeMemoryStore):
+        def __init__(self, *, now: MovableClock) -> None:
+            super().__init__(now=now)
+            self.singles: list[str] = []
+            self.batches: list[tuple[str, ...]] = []
+
+        async def get(self, record_id: str) -> MemoryRecord | None:
+            self.singles.append(record_id)
+            return await super().get(record_id)
+
+        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+            self.batches.append(tuple(record_ids))
+            return await super().get_many(record_ids)
+
+    clock = MovableClock()
+    store = Counting(now=clock)
+    wiring = Wiring(clock=clock, memory=store)
+    conversation_id, episodes = await _capture_turns(wiring, 3)
+    store.singles.clear()
+    store.batches.clear()
+
+    history = await wiring.stage.history(conversation_id)
+
+    assert [record.id for record in history.records] == episodes
+    assert store.batches == [tuple(episodes)]
+    assert store.singles == [], "no turn is read on its own any more"
+
+
+async def test_history_keeps_the_conversations_order_not_the_mappings() -> None:
+    """§8 item 7: the order is the conversation's ordinal sequence (ADR-0074 §5).
+
+    A mapping carries no order the caller may rely on, so the result is assembled by
+    walking ``turns``. This store hands back a mapping deliberately iterating the
+    other way; an implementation that walked the mapping would replay the
+    conversation backwards, which is a plausible migration and a silent one — every
+    record is present and only the sequence is wrong.
+    """
+
+    class Reversing(FakeMemoryStore):
+        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+            found = await super().get_many(record_ids)
+            return dict(reversed(list(found.items())))
+
+    clock = MovableClock()
+    wiring = Wiring(clock=clock, memory=Reversing(now=clock))
+    conversation_id, episodes = await _capture_turns(wiring, 3)
+
+    history = await wiring.stage.history(conversation_id)
+
+    assert [record.id for record in history.records] == episodes
+
+
+async def test_history_of_a_conversation_with_no_turns_asks_the_store_for_nothing() -> None:
+    """§6: an empty argument is answered without a round trip, and relied on here."""
+
+    class Counting(FakeMemoryStore):
+        def __init__(self, *, now: MovableClock) -> None:
+            super().__init__(now=now)
+            self.batches: list[tuple[str, ...]] = []
+
+        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+            self.batches.append(tuple(record_ids))
+            return await super().get_many(record_ids)
+
+    clock = MovableClock()
+    store = Counting(now=clock)
+    wiring = Wiring(clock=clock, memory=store)
+    conversation = await wiring.stage.begin(None)
+
+    history = await wiring.stage.history(conversation.id)
+
+    assert history.records == ()
+    assert history.degraded is False
+    assert store.batches == [()]
+
+
 async def test_history_degrades_rather_than_failing_the_turn() -> None:
     """Losing continuity costs the answer its history, not its usefulness.
 

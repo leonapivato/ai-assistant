@@ -92,7 +92,7 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.types import (
         CurrentContext,
@@ -2798,6 +2798,228 @@ async def test_the_listing_and_the_single_belief_view_agree_on_the_number() -> N
     assert single is not None
     assert [one.confidence for one in listed if one.id == "rec-1"] == [single.confidence]
     assert single.confidence < _STORED
+
+
+# --- citations resolve in one batch read (ADR-0086 §6, §8 item 6) --------
+
+
+class CountingStore(FakeMemoryStore):
+    """A store that records which read shape each call took, and with what ids.
+
+    Both counters matter separately. ``_belief`` reads the belief itself through
+    ``get`` and §6 is explicit that ``get_many`` "does not replace ``get``", so a
+    case that merely counted total reads could not tell the one legitimate single
+    from *n* illegitimate ones.
+    """
+
+    def __init__(self, *, now: Callable[[], datetime]) -> None:
+        super().__init__(now=now)
+        self.singles: list[str] = []
+        self.batches: list[tuple[str, ...]] = []
+
+    async def get(self, record_id: str) -> MemoryRecord | None:
+        self.singles.append(record_id)
+        return await super().get(record_id)
+
+    async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
+        self.batches.append(tuple(record_ids))
+        return await super().get_many(record_ids)
+
+
+class SteppingClock:
+    """A clock that advances on every reading **once armed**, so *when* is visible.
+
+    This is what makes §6's snapshot testable from the consumer's side without
+    counting calls: a loop of singles reads the clock once per citation and a batch
+    reads it once for the record, so a citation whose expiry falls between two steps
+    resolves under one and not the other.
+
+    Arming is what makes the case deterministic rather than merely suggestive. A
+    clock that stepped from construction would also step for every ``add`` in the
+    fixture, so how far it had moved by the read under test would depend on how many
+    setup writes happened to precede it — and the case would pass or fail on that
+    accident instead of on the batch.
+    """
+
+    def __init__(self, *, step: timedelta) -> None:
+        self._now = AT
+        self._step = step
+        self._armed = False
+
+    def arm(self) -> None:
+        """Start advancing, from here on."""
+        self._armed = True
+
+    def __call__(self) -> datetime:
+        now = self._now
+        if self._armed:
+            self._now += self._step
+        return now
+
+
+async def test_a_beliefs_citations_are_resolved_in_one_batch_read() -> None:
+    """§8 item 6: one ``get_many`` per record, not one ``get`` per citation."""
+    store = CountingStore(now=lambda: AT)
+    harness = Harness(memory=store)
+    await _derived_with_two_episodes(harness)
+    store.singles.clear()
+    store.batches.clear()
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert store.batches == [("ep-1", "ep-2")], "the citations went in one call, in order"
+    assert store.singles == ["rec-1"], (
+        "the only single read left is the belief's own id — §6 does not replace `get`"
+    )
+
+
+async def test_a_listing_page_batches_once_per_belief_not_once_per_citation() -> None:
+    """The listing is the call site §8 item 6's arithmetic is actually about.
+
+    ADR-0085 §4a removed the listing's evidence *payload* and none of its reads, so
+    a lane that migrated the single-belief wrapper alone would leave the 50-by-64 path
+    on singles while every single-belief test passed. One batch **per belief**, not
+    one per page: the beliefs are independent presentations and §8 item 6 says per
+    belief.
+    """
+    store = CountingStore(now=lambda: AT)
+    harness = Harness(memory=store)
+    await _derived_with_two_episodes(harness)
+    await harness.memory.add(_episode_record("ep-3", "they wrote 20 °C"))
+    await harness.memory.add(
+        _record("rec-2", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-3",))
+    )
+    store.singles.clear()
+    store.batches.clear()
+
+    listed = await harness.engine.beliefs()
+
+    assert {"rec-1", "rec-2"} <= {one.id for one in listed}
+    assert len(store.batches) == len(listed), "one batch per listed belief, page-wide"
+    assert sorted(one for one in store.batches if one) == [("ep-1", "ep-2"), ("ep-3",)]
+    assert store.singles == [], "the listing reads through `list_beliefs`, then batches"
+
+
+async def test_a_belief_citing_nothing_asks_the_store_for_nothing() -> None:
+    """§6: an empty argument is a question with an answer, and no round trip.
+
+    Relied on rather than branched around, so this pins that the reliance is real.
+    """
+    store = CountingStore(now=lambda: AT)
+    harness = Harness(memory=store)
+    await harness.memory.add(_record("rec-1", evidence=()))
+    store.singles.clear()
+    store.batches.clear()
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert belief.evidence == ()
+    assert store.batches == [()]
+
+
+async def test_every_citation_of_a_belief_is_judged_at_one_instant() -> None:
+    """§6's snapshot, observed from the consumer: one clock reading for the record.
+
+    Pins the *mechanism* and not the values. Armed, the clock steps an hour per read:
+    the belief's own ``get`` takes ``AT``, and the citations are read next. ``ep-2``
+    expires 90 minutes in, so a loop of singles reads ``ep-1`` at ``AT + 1h`` and
+    ``ep-2`` at ``AT + 2h`` and renders a tombstone the record never lost — the
+    "belief's rendered count disagrees with its own tombstones" failure §6 names. One
+    batch judges both against the single instant the batch was taken, and nothing is
+    lost. No call is counted here, deliberately: this is the case that fails if the
+    batch is replaced by a loop that returns identical values.
+    """
+    clock = SteppingClock(step=timedelta(hours=1))
+    store = FakeMemoryStore(now=clock)
+    harness = Harness(memory=store)
+    await store.add(_episode_record("ep-1", "they asked for metric units"))
+    await store.add(
+        _episode_record("ep-2", "they asked again in metric", expires_at=AT + timedelta(minutes=90))
+    )
+    await store.add(
+        _record(
+            "rec-1", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-1", "ep-2")
+        )
+    )
+    clock.arm()
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert belief.lost_evidence == 0, (
+        "both citations were judged against the batch's one instant, not against one "
+        "instant each — a citation cannot expire partway through its own presentation"
+    )
+    assert [item.content for item in belief.evidence] == [
+        "they asked for metric units",
+        "they asked again in metric",
+    ]
+
+
+async def test_a_repeated_citation_keeps_a_position_of_its_own() -> None:
+    """§6: duplicates collapse in the mapping; the rendering must not lose them.
+
+    The answer is assembled by walking ``provenance.evidence``, so a tuple citing an
+    id twice renders two positions. An implementation that iterated the mapping would
+    render one, and would be silently short for every belief a fold cited twice.
+    """
+    harness = Harness()
+    await harness.memory.add(_episode_record("ep-1", "they asked for metric units"))
+    await harness.memory.add(
+        _record(
+            "rec-1", source=MemorySource.INFERRED, confidence=_STORED, evidence=("ep-1", "ep-1")
+        )
+    )
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert [item.content for item in belief.evidence] == [
+        "they asked for metric units",
+        "they asked for metric units",
+    ]
+    assert belief.evidence_count == 2
+    assert belief.lost_evidence == 0
+
+
+async def test_the_batch_renders_tombstones_where_the_singles_did() -> None:
+    """§6: ``get_many`` never disagrees with ``get``, on any of the three outcomes.
+
+    Absent, expired and not-yet-live in one record, each in a known position, so a
+    batch that honoured only some of the read-time axes — or that returned a ``None``
+    value where §6 requires an omission — is caught at the position it broke.
+    """
+    harness = Harness()
+    await harness.memory.add(_episode_record("ep-live", "they asked for metric units"))
+    await harness.memory.add(
+        _episode_record("ep-expired", "old", expires_at=AT - timedelta(days=1))
+    )
+    await harness.memory.add(
+        EpisodicMemory(
+            id="ep-future",
+            content="not yet",
+            occurred_at=AT,
+            validity=Validity(valid_from=AT + timedelta(days=1)),
+            provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+        )
+    )
+    await harness.memory.add(
+        _record(
+            "rec-1",
+            source=MemorySource.INFERRED,
+            confidence=_STORED,
+            evidence=("ep-live", "ep-expired", "ep-absent", "ep-future"),
+        )
+    )
+
+    belief = await harness.engine.belief("rec-1")
+
+    assert belief is not None
+    assert [item.lost for item in belief.evidence] == [False, True, True, True]
+    assert belief.evidence[0].content == "they asked for metric units"
+    assert belief.lost_evidence == 3
 
 
 # --- the deferred-question surface, through the façade (ADR-0078 §8, §9) ----
