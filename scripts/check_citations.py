@@ -108,10 +108,17 @@ _DECISION_RE = re.compile(r"\bADR-(\d{4})\b")
 #: **numeric** fragment link — ``[section](#123)`` — by the ``](`` lookbehind,
 #: which the slug case never exercised.
 #:
-#: A parenthesised citation in prose — "the fix (#123) landed" — stays
-#: selected, which is why this names ``](`` instead of dropping everything
-#: inside brackets.
-_TRACKER_RE = re.compile(r"(?<![\w#])(?<!\]\()#(\d{1,6})(?![\w#])")
+_TRACKER_RE = re.compile(r"(?<![\w#])#(\d{1,6})(?![\w#])")
+
+#: A markdown inline link's **destination**, blanked before trackers are read.
+#: Excluded as a *span* rather than by what it starts with, because its content
+#: is a URL in an open set of shapes — ``#123``, ``/docs/#123``, ``../adr/#123``,
+#: even ``#2/#3`` — and four review rounds each found one more. Nothing inside
+#: ``](…)`` is a citation, whatever it looks like.
+#:
+#: A parenthesised citation in prose — "the fix (#123) landed" — carries no
+#: closing bracket before it and stays selected.
+_LINK_DESTINATION_RE = re.compile(r"\]\([^)\n]*\)")
 
 #: **The one case the pattern above cannot decide: a ``/`` before the ``#``.**
 #: It is how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``, 14
@@ -452,11 +459,12 @@ def _as_dotted_symbol(content: str, top_names: frozenset[str]) -> tuple[str, str
 def _is_fragment_identifier(prefix: str) -> bool:
     """Whether a ``#NNN`` following ``prefix`` is a URL fragment, not a citation.
 
-    Only a ``/`` immediately before it is ambiguous, and it is decided by what
-    that slash follows: a run of ``#NNN/`` back to whitespace or an opening
-    bracket is the corpus's way of joining citations, and anything else is a
-    path — a scheme-relative URL, a root-relative link destination, or an
-    absolute one. Stating the citation this way rather than enumerating URL
+    Markdown link destinations are already gone by the time this runs, so what
+    is left is a bare URL in running prose. Only a ``/`` immediately before the
+    ``#`` is ambiguous, and it is decided by what that slash follows: a run of
+    ``#NNN/`` back to whitespace or an opening bracket is the corpus's way of
+    joining citations, and anything else is a path, whatever scheme it carries
+    or does not. Stating the citation this way rather than enumerating URL
     shapes is what makes the answer closed; ADR-0088 §6 puts this selector's
     mistakes in Tier 1, where a false positive fails a change.
     """
@@ -478,8 +486,11 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
     for lineno, line in iter_prose_lines(text):
         for match in _DECISION_RE.finditer(line):
             found.append(Citation("decision", match.group(0), path, lineno))
-        for match in _TRACKER_RE.finditer(line):
-            if _is_fragment_identifier(line[: match.start()]):
+        # Link destinations are blanked to the same width, so a citation
+        # elsewhere on the line keeps its position and its context.
+        outside_links = _LINK_DESTINATION_RE.sub(lambda m: " " * len(m.group(0)), line)
+        for match in _TRACKER_RE.finditer(outside_links):
+            if _is_fragment_identifier(outside_links[: match.start()]):
                 continue
             found.append(Citation("tracker", match.group(0), path, lineno))
         for content in _iter_code_spans(line):

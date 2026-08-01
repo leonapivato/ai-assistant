@@ -310,6 +310,8 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "See //example.test/docs/#123.",
         "See the [section](/docs/#123).",
         "See the [section](../adr/#123).",
+        "See the [section](#2/#3).",
+        "See the [link](https://example.test/x/#123) too.",
     ],
     ids=[
         "heading",
@@ -324,6 +326,8 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "protocol-relative",
         "root-relative-destination",
         "relative-destination",
+        "slash-joined-destination",
+        "absolute-destination",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
@@ -345,8 +349,16 @@ def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, l
         "See #2/#3.",
         "#2 is the one.",
         "See https://example.test/x and #2.",
+        "See the [guide](https://example.test/g) and #2.",
     ],
-    ids=["parenthesised", "trailing", "slash-joined", "leading", "beside-a-url"],
+    ids=[
+        "parenthesised",
+        "trailing",
+        "slash-joined",
+        "leading",
+        "beside-a-url",
+        "beside-a-link",
+    ],
 )
 def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str) -> None:
     """The exclusions above must not swallow the form the corpus actually writes."""
