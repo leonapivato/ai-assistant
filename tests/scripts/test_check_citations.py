@@ -304,6 +304,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         'See the [section](#123 "title").',
         "The colour #abc123 is wrong.",
         "Item ##7 is odd.",
+        "See <https://example.test/docs/#123>.",
+        "See https://example.test/docs/#123 for detail.",
+        "See http://example.test/#123.",
     ],
     ids=[
         "heading",
@@ -312,6 +315,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "titled-anchor",
         "hex-colour",
         "doubled-hash",
+        "autolink-fragment",
+        "bare-url-fragment",
+        "http-fragment",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
@@ -327,8 +333,14 @@ def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, l
 
 @pytest.mark.parametrize(
     "line",
-    ["The fix (#2) landed.", "Tracked by #2.", "See #2/#3.", "#2 is the one."],
-    ids=["parenthesised", "trailing", "slash-joined", "leading"],
+    [
+        "The fix (#2) landed.",
+        "Tracked by #2.",
+        "See #2/#3.",
+        "#2 is the one.",
+        "See https://example.test/x and #2.",
+    ],
+    ids=["parenthesised", "trailing", "slash-joined", "leading", "beside-a-url"],
 )
 def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str) -> None:
     """The exclusions above must not swallow the form the corpus actually writes."""
