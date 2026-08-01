@@ -244,7 +244,10 @@ the checker to infer its own input set and *intent is not in the text*:
   document filenames are excluded — `` `CONTRIBUTING.md` `` and
   `` `CLAUDE.md` `` share the shape and are not code.
 - **b3, a bare single token** — `` `ConversationLifecycle` ``, `` `Engine` ``.
-  **Not mechanically separable** from the vocabulary the corpus also backticks.
+  **Not mechanically separable** from the vocabulary the corpus also backticks,
+  and therefore **not checked at all** (§6). It stays a legitimate way to write a
+  citation — it is how most of the corpus names a symbol — but no tool selects
+  it, because selecting it *is* the inference §6 forbids.
 
 **A code citation carries no line number** (§5).
 
@@ -320,14 +323,21 @@ class-body annotation.
 **The three sub-forms differ sharply in how much noise they carry**, which is
 why §1 separates them at all:
 
-| form | occurrences | not resolving |
-|---|---|---|
-| **b1** module path | 574 | 3 (0.5%) |
-| **b2** dotted symbol | ~770 (excl. document names) | ~4% |
-| **b3** bare token | 6,675 | ~20% |
+| form | occurrences | not resolving | disposition |
+|---|---|---|---|
+| **b1** module path | 574 | 3 (0.5%) | reported (Tier 2) |
+| **b2** dotted symbol | ~770 (excl. document names) | ~4% | reported (Tier 2) |
+| **b3** bare token | 6,675 | ~20% | **not checked** |
 
-**But none of the three may fail a check, and §3 is why.** The measurement above
-was taken to justify failing on b1 and b2. Reading the flags refuses it: of b1's
+**b3 is not checked because it cannot be *selected*.** A checker would have to
+decide that `` `ConversationService` `` is a citation and `` `Status` `` is
+vocabulary, from two tokens of identical shape, with intent nowhere in the text.
+Reporting both is a false report on `Status`; reporting neither is what §6
+requires. There is no third option, so b3 leaves the checker entirely — and with
+it the ~20% noise that made the naive check unusable.
+
+**And neither b1 nor b2 may *fail* a check, which is §3.** The measurement above
+was taken to justify failing on them. Reading the flags refuses it: of b1's
 three, one is a genuine defect and **two are correct citations that an
 append-only corpus must be able to write**. That result generalises, and §3
 states it.
@@ -589,10 +599,16 @@ passed silently until a mechanically distinct scope-reference form exists**, and
 contains **no** real section miss, so the check had nothing to catch and only
 something to be wrong about.
 
-**Tier 2 — reported, never failing.** Every code citation that does not resolve
-(§3), and every liveness disagreement (§4). Each has a legitimate class no
-mechanical test separates from a defect — but each is at least *evaluable*, which
-is what section references are not. Each is surfaced for a reader; none blocks.
+**Tier 2 — reported, never failing.** Every **b1 or b2** code citation that does
+not resolve (§3), and every liveness disagreement (§4). Each has a legitimate
+class no mechanical test separates from a defect — but each is at least
+*selectable and evaluable*, which is what b3 citations and section references are
+not. Each is surfaced for a reader; none blocks.
+
+**Nothing else is checked.** Not b3 (§1 — unselectable), not section numbers
+(above — unevaluable), not issue state (§2(c) — unreadable without inference).
+Three rules, one boundary: **the checker touches only what it can pick out of the
+text without guessing what the author meant.**
 
 **The input set is §1's forms, and the checker does not infer its own.** This is
 the difference between 479 false positives and a usable check.
@@ -725,11 +741,12 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   clean answer to b3's irreducible ~20% and it is declined on cost: it is worth
   nothing until the corpus is marked, marking 86 ratified ADRs is the retrofit
   §5 and ADR-0070 §4 both refuse, and marking only new ADRs buys a check that
-  sees almost nothing for a long time. §1's b1/b2/b3 grading gets most of the
-  precision — the two checkable forms cover 1,344 citations at ~1% error —
-  without asking the corpus to be rewritten. **Revisit if** b3's advisory
-  reports prove worth failing on, which is the condition under which a marker
-  starts paying for itself.
+  sees almost nothing for a long time. §1's b1/b2/b3 grading keeps the
+  precision without rewriting the corpus — the two checkable forms cover 1,344
+  citations at ~1% error — and pays for it by leaving b3's 6,675 unchecked.
+  **Revisit if** a b3 defect of `ConversationService`'s kind recurs often enough
+  to be worth marking for, which is the condition under which a marker starts
+  paying for itself. That is the one thing this decision knowingly gives up.
 - **A distinct written form for a supersession-scope restatement**, which would
   let §6 check section numbers. It is the honest fix for ADR-0074's "ADR-0076
   §9's obligation set" and it is declined on the same ground as the marker
@@ -791,12 +808,15 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   permanent. The mitigation is that the *symbol* beside a legacy line number is
   checked under §2(b), so the old form degrades to the new one rather than to
   nothing.
-- **The check will not catch the defect that started this, and mostly will not
-  *fail*.** `Engine._project` resolves; #586's first half — a name pointing at the
-  wrong object — is outside anything §6 can promise. And of the known instances,
-  every code-citation one lands in Tier 2, so the check reports them and blocks
-  nothing. A reader who expected "the gate can now fail on a bad ADR citation"
-  gets that only for Tier 1.
+- **The check catches none of the four defects that motivated it, and this is
+  the honest headline.** #586's `ConversationService` is a b3 bare token, so
+  nothing selects it; its `Engine._project` half resolves; #593 and #588's
+  defect 2 are issue-state claims, which §2(c) does not read; #572's
+  `hub_max_frame_bytes` is a §3 class-1 citation that was correct all along. A
+  reader who expected this ADR to mechanise the cases in its own Context should
+  stop here: it does not. What it delivers is a Tier 1 that cannot regress, a
+  small Tier 2 that found a defect nobody had (`testing/store.py`), and — mostly
+  — a written account of exactly which of these a tool can never do.
 - **Tier 2 needs someone to read it.** A report nobody reads is worse than no
   report, because it looks like coverage. §3's three legitimate classes mean the
   list is permanently non-empty — `MemoryDecisionKind.MERGE` will be on it
@@ -829,11 +849,11 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   `file:symbol`, not prose … A pointer to code is checkable by the gate in a way a
   quotation is not"). #579 should close, pointing here and at #588.
 - **#586 and #593 remain open, and neither is caught by §6.** #586's
-  `ConversationService` is a Tier 2 report at best — surfaced, never failing —
-  and its `Engine._project` half resolves, so nothing sees it. #593 is a tracker
-  state claim, which §2(c) does not check at all. Both need a `docs/adr/**`
-  amendment or a tracker action, and neither is written by this lane, whose
-  fence is this file.
+  `ConversationService` is a b3 bare token, which §1 leaves unselectable and §6
+  therefore never reports; its `Engine._project` half resolves. #593 is an issue
+  state claim, which §2(c) does not check. Both need a `docs/adr/**` amendment or
+  a tracker action, and neither is written by this lane, whose fence is this
+  file.
 - **Three further candidates surfaced by the measurement, filed for triage.**
   `ClassifiedToolError` and `UserProfile` are backticked in ADR text and resolve
   in none of `src/`, `tests/` or `scripts/`; each is either a §3 class or a
