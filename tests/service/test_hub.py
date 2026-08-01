@@ -9,9 +9,10 @@ never had to get right at all.
 Order, because ADR-0083 §3 makes startup a fixed sequence in which no step begins
 before the previous one has succeeded, and every one of those orderings is
 load-bearing: the lock before any store, so exclusivity is not a race; readiness
-last, so nothing observes a half-built engine; and the scheduler joined before
-``Engine.aclose()`` (§8), which is expressed in code position here because the
-scheduler itself is a later lane.
+last, so nothing observes a half-built engine; and the scheduler stopped and joined
+before ``Engine.aclose()`` (§8), asserted with a job **actually in flight**, because
+an idle scheduler leaves no window to get wrong and a test over one would pass for
+an implementation that closed the engine first.
 
 Classification, because the owner's ruling behind §5 and §6 is that if the hub is
 not running there must be a legible reason — and a crash loop is a process that
@@ -36,6 +37,7 @@ import structlog
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, IncompatibleStateError
+from ai_assistant.orchestration.engine import DrainPhase, PurgeReport
 from ai_assistant.service import hub
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
@@ -64,6 +66,8 @@ class FakeEngine:
     def __init__(self) -> None:
         self.started = 0
         self.closed = 0
+        self.purged = 0
+        self.observed = 0
         #: Run inside ``start()``. Tests use it to signal the process at a point
         #: where the hub's own handlers are certainly installed.
         self.on_start: Callable[[], None] | None = None
@@ -72,6 +76,11 @@ class FakeEngine:
         #: ``stop.wait()``, i.e. after readiness. On, the signal lands while
         #: startup is still running, which is the other case worth testing.
         self.settle = False
+        #: What :attr:`drain_phase` reports once ``aclose`` has run. The real engine
+        #: records it inside its own drain (ADR-0083 §4) and the hub only reads it,
+        #: so a fake that never moved it would let the completion event's phase
+        #: field pass without ever carrying anything but its default.
+        self.drain_phase = DrainPhase.NOT_RUN
 
     async def start(self) -> None:
         self.started += 1
@@ -81,8 +90,18 @@ class FakeEngine:
         if self.settle:
             await _settle()
 
+    async def purge_expired(self) -> PurgeReport:
+        self.purged += 1
+        _marker.info("fake_engine_purged")
+        return PurgeReport(records=0, questions=0)
+
+    async def observe(self, *, conversation_id: str | None = None) -> None:
+        self.observed += 1
+        _marker.info("fake_engine_observed")
+
     async def aclose(self) -> None:
         self.closed += 1
+        self.drain_phase = DrainPhase.QUIESCED
         _marker.info("fake_engine_closed")
 
 
@@ -241,11 +260,11 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
 ) -> None:
     """One of the two observables §3 names, and the one needing no supervisor.
 
-    The job set is empty because the scheduler (§§7-9) is a lane behind this one.
-    Reporting it as a field rather than omitting it is the point: when jobs exist,
-    an operator reads which ones are enabled from the same line, and ADR-0083 §7
-    ships observation disabled by default precisely so that "enabled" is a
-    question worth asking.
+    The job set is what the scheduler actually armed, so an operator reads which
+    jobs are enabled from the same line that says the hub is up. ADR-0083 §7 ships
+    observation **disabled by default** precisely so "enabled" is a question worth
+    asking — and asserting the default set here is what makes the omission of
+    ``observation`` visible rather than incidental.
     """
     engine.on_start = _stop_after_start()
 
@@ -255,7 +274,7 @@ async def test_the_readiness_event_names_the_pid_the_directory_and_the_job_set(
     ready = _only(captured, "hub_ready")
     assert ready["pid"] == os.getpid()
     assert ready["data_dir"] == str(settings.data_dir)
-    assert ready["jobs"] == []
+    assert ready["jobs"] == ["retention_purge", "conversation_sweep"]
 
 
 # --- Shutdown (§4) -----------------------------------------------------------
@@ -366,6 +385,135 @@ async def test_a_stop_during_startup_still_closes_and_releases(
     # The stop landed during `start()`, so the hub never advertised itself.
     assert "hub_ready" not in names
     assert engine.closed == 1
+
+
+async def test_the_scheduler_is_stopped_and_joined_before_the_engine_is_closed(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """ADR-0083 §8's ordering, asserted with a job **actually in flight**.
+
+    §8 makes this the mechanism rather than a tidiness preference:
+
+        Service shutdown stops and joins the scheduler *before* calling
+        ``Engine.aclose()``.
+
+    A test that merely stopped an idle scheduler would pass for an implementation
+    that closed the engine first, because with nothing running there is no window to
+    get wrong. So the retention job is parked *inside* its body when the stop
+    arrives, and the assertion is that the join reports itself before the engine
+    reports closing — with the job's own body never reaching its far side, since the
+    join cancels rather than waits.
+    """
+    running = asyncio.Event()
+    finished = False
+
+    async def parks() -> None:
+        nonlocal finished
+        running.set()
+        await asyncio.sleep(30)
+        finished = True
+
+    engine.purge_expired = parks  # type: ignore[method-assign, assignment]
+
+    async def stop_once_the_job_is_running() -> None:
+        await asyncio.wait_for(running.wait(), timeout=5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    with structlog.testing.capture_logs() as captured:
+        async with asyncio.TaskGroup() as group:
+            group.create_task(stop_once_the_job_is_running())
+            code = await hub.serve(settings)
+
+    names = _events(captured)
+    assert code == EXIT_OK
+    assert not finished, "the join waited for the job instead of cancelling it"
+    assert names.index("hub_scheduler_stopped") < names.index("fake_engine_closed")
+
+
+async def test_shutdown_reports_its_completion_its_phase_and_what_it_cost(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """#559: the drain says it finished, how long it took and which phase it ended in.
+
+    Before this the last line in the log was ``hub_shutdown_requested``, and four
+    states an operator has to tell apart looked identical: phase A still within
+    budget, phase B awaiting after a cancellation, phase B blocked on something that
+    will never finish, and already finished. ADR-0083 §4 leaves phase B's await
+    **unbounded**, so "which phase" is also "was this bounded at all".
+
+    The phase is read from the engine rather than guessed, which is why the fake
+    moves its own ``drain_phase`` inside ``aclose``: an event that hard-coded the
+    happy answer would report a clean drain over a cancelled one.
+    """
+    engine.on_start = _stop_after_start()
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    names = _events(captured)
+    done = _only(captured, "hub_shutdown_completed")
+    assert code == EXIT_OK
+    assert names.index("hub_shutdown_requested") < names.index("hub_shutdown_completed")
+    assert done["exit_code"] == EXIT_OK
+    assert done["drain_phase"] == "phase_a_quiesced"
+    assert done["jobs"] == ["retention_purge", "conversation_sweep"]
+    for field in ("drain_seconds", "scheduler_join_seconds", "elapsed_seconds"):
+        assert isinstance(done[field], float), field
+        assert done[field] >= 0
+
+
+async def test_a_startup_that_never_built_an_engine_reports_no_shutdown(
+    settings: Settings, wired: dict[str, list[Any]]
+) -> None:
+    """The completion event is about a drain, so a hub with no drain stays silent.
+
+    A contended lock never builds an engine and has nothing to drain. Emitting a
+    completion event there would put a "shutdown finished" line in the log of a
+    process that never started — the "crash loop wearing a diagnosis" §5 warns
+    about, in miniature, and precisely the kind of noise that makes the real event
+    stop being read.
+    """
+    settings.data_dir.mkdir(parents=True)
+    holder = InstanceLock(settings.data_dir / LOCK_FILENAME)
+    assert holder.acquire()
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            code = await hub.serve(settings)
+    finally:
+        holder.release()
+
+    assert code == EXIT_RESTART
+    assert "hub_shutdown_completed" not in _events(captured)
+
+
+async def test_a_drain_that_fails_still_reports_what_it_cost(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """The case where an operator most needs the account is the one that went wrong.
+
+    A closer that cannot release its connection raises out of ``aclose``. The timing
+    is recorded before the exception leaves, so the event ``serve`` logs afterwards
+    is about the shutdown that actually happened — carrying the classified exit code
+    rather than the one the happy path would have returned.
+    """
+
+    async def refuses_to_close() -> None:
+        msg = "the connection would not close"
+        raise OSError(msg)
+
+    engine.aclose = refuses_to_close  # type: ignore[method-assign]
+    engine.on_start = _stop_after_start()
+
+    with structlog.testing.capture_logs() as captured:
+        code = await hub.serve(settings)
+
+    done = _only(captured, "hub_shutdown_completed")
+    assert code != EXIT_OK
+    assert done["exit_code"] == code
+    assert isinstance(done["drain_seconds"], float)
+    # Nothing pretended the drain reached a phase it never got to.
+    assert done["drain_phase"] == "not_run"
 
 
 # --- Exit classification (§5, §6) -------------------------------------------

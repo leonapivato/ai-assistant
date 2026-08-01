@@ -992,39 +992,169 @@ async def test_build_engine_gives_the_answer_path_the_writer_and_store_learn_use
         await engine.aclose()
 
 
-def test_no_production_code_sweeps_either_store() -> None:
-    """ADR-0078 §10 item 8 discharged, and it discharges to **nothing**.
+#: The **one** place either Tier 1 sweep may be called from (ADR-0083 §11).
+#:
+#: A file *and a function*, not a file alone: the delegating call sites are the
+#: body of ``Engine._purge_expired`` and nothing else, so a second sweeper added
+#: further down the same module is caught exactly as one added in another package.
+#: Line numbers are deliberately absent — they churn on every edit above and would
+#: turn a real guard into a chore.
+_SWEEP_HOME = frozenset(
+    {
+        ("orchestration/engine.py", "Engine._purge_expired", "purge_expired"),
+        ("orchestration/engine.py", "Engine._purge_expired", "purge"),
+    }
+)
 
-    "A home for ``purge``. It does not get a new one… this store's purge is wired
-    wherever ``purge_expired`` is wired and inherits the same fate. Inventing a second
-    sweeping mechanism for one store would be the thing that has to be undone at
-    leg 5." ``MemoryStore.purge_expired`` has no caller in this repository — leg 5's
-    scheduler is where both get one — so the deferral queue's ``purge`` has none
-    either.
 
-    An *absence* is the only shape a "do not invent a mechanism" instruction can be
-    pinned in, and it has to be pinned statically: a runtime test could only prove that
-    the handful of operations it happened to call do not sweep, which is not the claim.
-    Reading the source proves the claim, and it fails the day someone adds the timer
-    leg 5 would have to remove.
+class _SweepScan(ast.NodeVisitor):
+    """Find every call to ``purge``/``purge_expired`` and the function it sits in.
 
-    Correctness does not depend on either sweep running; ADR-0078 §1's *exposure cap*
-    does, and it is tracked with the scheduler rather than bought here.
+    **Receiver-blind, exactly as the pre-inversion guard was**, and ADR-0083 §11
+    says that blindness is a *feature* here: it is what makes a sweep added under a
+    different name, or over a different store, still show up. The scan matches the
+    bare attribute name and has no idea what it is called on.
     """
-    swept: list[str] = []
-    root = Path(ai_assistant.__file__).resolve().parent
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"purge", "purge_expired"}
-            ):
-                swept.append(f"{path.relative_to(root)}:{node.lineno}")
 
-    assert swept == [], (
-        f"something in production code now sweeps a store: {swept}. ADR-0078 §10 item 8 "
-        f"forbids a second sweeping mechanism — both purges get one home, leg 5's "
-        f"scheduler, at the same time."
+    def __init__(self, module: str) -> None:
+        self._module = module
+        self._scope: list[str] = []
+        #: ``(module, enclosing qualname, attribute)`` for each call found.
+        self.found: set[tuple[str, str, str]] = set()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._scope.append(node.name)
+        self.generic_visit(node)
+        self._scope.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {"purge", "purge_expired"}:
+            self.found.add((self._module, ".".join(self._scope) or "<module>", node.func.attr))
+        self.generic_visit(node)
+
+
+def _sweep_call_sites(root: Path) -> set[tuple[str, str, str]]:
+    """Every sweep call under ``root``, as ``(module, enclosing qualname, name)``."""
+    found: set[tuple[str, str, str]] = set()
+    for path in sorted(root.rglob("*.py")):
+        scan = _SweepScan(path.relative_to(root).as_posix())
+        scan.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        found |= scan.found
+    return found
+
+
+def test_only_the_scheduler_s_own_path_sweeps_either_store() -> None:
+    """ADR-0083 §11's inversion: the guard moves its goalpost, it is not deleted.
+
+    Before leg 5 this asserted ``swept == []`` — an *absence*, the only shape a "do
+    not invent a mechanism" instruction could be pinned in while nothing was allowed
+    to sweep. ADR-0078 §10 item 8: "this store's purge is wired wherever
+    ``purge_expired`` is wired and inherits the same fate. Inventing a second
+    sweeping mechanism for one store would be the thing that has to be undone at
+    leg 5." Its own docstring recorded that it "fails the day someone adds the timer
+    leg 5 would have to remove".
+
+    Leg 5 added that timer, so the assertion becomes an *equality with one named
+    place*: both sweeps are called from ``Engine._purge_expired`` and nowhere else,
+    which is the scheduler's own path — its ``retention_purge`` job is
+    ``Engine.purge_expired`` bound, and this is where that method delegates. §11:
+    "``swept`` equals *exactly* the scheduler's own path… so that a second bespoke
+    sweeper added anywhere else still fails."
+
+    **Deleting it was the wrong move**, and §11 says why: it is the only mechanical
+    expression of ADR-0078 §10 item 8, and "an instruction not to build a second
+    mechanism is worth exactly as much as the guard that notices one".
+
+    It still has to be static. A runtime test could only prove that the handful of
+    operations it happened to call do not sweep, which is not the claim; reading the
+    source proves the claim.
+
+    That the scan **discriminates** — that it would still fail for a sweeper added
+    somewhere else — is not taken on trust: see the two tests below, which run this
+    same scan over a tree that has one.
+    """
+    root = Path(ai_assistant.__file__).resolve().parent
+
+    assert _sweep_call_sites(root) == _SWEEP_HOME, (
+        "the set of production sweep call sites is no longer exactly the scheduler's "
+        "own path. ADR-0078 §10 item 8 forbids a second sweeping mechanism, and "
+        "ADR-0083 §11 puts the one permitted home in Engine._purge_expired: one job "
+        "calling both stores. A new entry here is a second sweeper; a missing one is "
+        "a sweep that stopped happening."
     )
+
+
+def test_the_sweep_guard_still_catches_a_sweeper_added_somewhere_else(tmp_path: Path) -> None:
+    """The inverted guard is only worth keeping if it still fires. Proven, not assumed.
+
+    An equality assertion can be satisfied by a scan that finds the right two things
+    and is blind to everything else, and that scan would look identical on the real
+    tree while catching nothing. So the scan is run over a tree that *does* contain a
+    second sweeper, and it must find it.
+
+    Three decoys, one per way a second mechanism could arrive: a different package
+    entirely, a *different function in the very module that is allowed to sweep*, and
+    a sweep of some other store under a name nobody enumerated. The middle one is
+    what a file-level allowlist would have missed, and the last is what
+    receiver-blindness buys (ADR-0083 §11 calls that blindness a feature).
+    """
+    (tmp_path / "orchestration").mkdir()
+    (tmp_path / "orchestration" / "engine.py").write_text(
+        "class Engine:\n"
+        "    async def _purge_expired(self):\n"
+        "        await self._memory.purge_expired()\n"
+        "        await self._deferrals.purge()\n"
+        "    async def _tick(self):\n"
+        "        await self._deferrals.purge()\n",  # a second sweeper, same module
+        encoding="utf-8",
+    )
+    (tmp_path / "timer.py").write_text(
+        "async def sweep(store):\n    await store.purge_expired()\n",  # another package
+        encoding="utf-8",
+    )
+    (tmp_path / "other.py").write_text(
+        "async def tidy(trail):\n    await trail.purge()\n",  # some other store
+        encoding="utf-8",
+    )
+
+    found = _sweep_call_sites(tmp_path)
+
+    assert found != _SWEEP_HOME, "the guard passed a tree with three foreign sweepers"
+    assert ("orchestration/engine.py", "Engine._tick", "purge") in found
+    assert ("timer.py", "sweep", "purge_expired") in found
+    assert ("other.py", "tidy", "purge") in found
+
+
+def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None:
+    """The other half of discrimination: it must *pass* for the shape it permits.
+
+    A scan that reported everything would also "still fail for a foreign sweeper",
+    and would be useless — the guard has to be able to say yes. This pins that the
+    permitted set is reachable, and that the thing making it reachable is the
+    enclosing function rather than the file: the same two calls moved into a sibling
+    method of the same class do **not** satisfy it.
+    """
+    (tmp_path / "orchestration").mkdir()
+    permitted = (
+        "class Engine:\n"
+        "    async def _purge_expired(self):\n"
+        "        await self._memory.purge_expired()\n"
+        "        await self._deferrals.purge()\n"
+    )
+    (tmp_path / "orchestration" / "engine.py").write_text(permitted, encoding="utf-8")
+    assert _sweep_call_sites(tmp_path) == _SWEEP_HOME
+
+    (tmp_path / "orchestration" / "engine.py").write_text(
+        permitted.replace("_purge_expired", "_sweep_everything"), encoding="utf-8"
+    )
+    assert _sweep_call_sites(tmp_path) != _SWEEP_HOME

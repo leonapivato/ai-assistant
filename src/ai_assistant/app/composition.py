@@ -347,17 +347,19 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 # The deferral queue joins the façade's ordered shutdown (ADR-0042
                 # §2, ADR-0078 §10 item 5).
                 #
-                # **Its `purge` is deliberately wired nowhere** (ADR-0078 §10 item
-                # 8): "it does not get a new one… this store's purge is wired
-                # wherever `purge_expired` is wired and inherits the same fate.
-                # Inventing a second sweeping mechanism for one store would be the
-                # thing that has to be undone at leg 5." `MemoryStore.purge_expired`
-                # has no caller in this repository — leg 5's scheduler is where both
-                # get one — so this store's `purge` has none either. That is the
-                # instruction discharged, not an omission: correctness does not
-                # depend on either sweep running, only ADR-0078 §1's exposure cap
-                # does, and buying it with a bespoke timer here would cost more to
-                # remove than it buys.
+                # **Its `purge` is wired exactly where `purge_expired` is, and at
+                # the same time** (ADR-0078 §10 item 8): "it does not get a new
+                # one… this store's purge is wired wherever `purge_expired` is
+                # wired and inherits the same fate. Inventing a second sweeping
+                # mechanism for one store would be the thing that has to be undone
+                # at leg 5." Leg 5 is here: both are called by `Engine.purge_expired`
+                # as **one** operation, run by the hub's scheduler on one interval
+                # (ADR-0083 §7, §8). Nothing in this file schedules anything —
+                # cadence is a property of a deployment, not of the wiring, which is
+                # why the scheduler is a peer above this layer and not inside it.
+                #
+                # Correctness never depended on either sweep running; ADR-0078 §1's
+                # exposure cap did, and that is what has now been bought.
                 _as_async(deferrals.close),
             ],
             # The shutdown budget every production engine gets, hub and CLI alike
