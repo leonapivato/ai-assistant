@@ -34,6 +34,7 @@ from ai_assistant.core.types import (
     MemoryRecord,
     MemorySource,
     MemoryWrite,
+    MemoryWriteMode,
     PreferenceMemory,
     Provenance,
     SemanticMemory,
@@ -44,7 +45,7 @@ from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing.cancellation import ResourceLog, SuspendedMidWrite, ThreadSuspension
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from ai_assistant.core.protocols import Embedder
     from ai_assistant.core.types import Embedding
@@ -780,6 +781,103 @@ def test_a_second_open_of_a_fresh_file_waits_for_the_first_to_initialise(
         "embedding_model": HashingEmbedder(dimensions=8).model_id,
         "dimensions": "8",
     }
+
+
+def _assert_opens_with_the_write_lock(statements: list[str], *, what: str) -> None:
+    """Assert one write path took the write lock **before its first read**.
+
+    The staged races elsewhere in this module prove the lock, once held, really
+    does exclude a second process. They cannot prove *when* it was taken: each
+    releases its competitor at the first write, so an implementation that left the
+    read outside the transaction and issued ``BEGIN IMMEDIATE`` immediately before
+    the write would satisfy them and still leave the read-to-``BEGIN`` window
+    open — which is the entire window #526 is about. This is the deterministic
+    other half, asserted on the statement stream rather than on a race.
+
+    Also pins the two ends the store depends on structurally: exactly one
+    transaction (a second ``BEGIN`` on the shared connection raises), and a
+    ``COMMIT`` last, so a path that returns early cannot abandon an open
+    transaction that would poison the next caller's ``BEGIN``.
+    """
+    assert statements, f"{what} ran no SQL at all"
+    opened = statements[0].strip()
+    assert opened.upper() == "BEGIN IMMEDIATE", (
+        f"{what} began with {opened!r}. The write lock has to be the *first* "
+        f"statement: a `BEGIN IMMEDIATE` issued any later leaves every read before "
+        f"it outside the transaction, which is exactly the exposure #526 names."
+    )
+    begins = [one for one in statements if one.strip().upper().startswith("BEGIN")]
+    assert len(begins) == 1, f"{what} opened {len(begins)} transactions: {begins}"
+    assert statements[-1].strip().upper() == "COMMIT", (
+        f"{what} ended with {statements[-1]!r} rather than COMMIT, so it left a "
+        f"transaction open on the shared connection"
+    )
+
+
+def test_setup_takes_the_write_lock_before_it_inspects_the_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup's reads — the shape check and the meta read — are inside its transaction.
+
+    ``_migrate_records``' ``PRAGMA table_info`` decides whether to rebuild
+    ``records``, and ``_verify_or_init_meta``'s ``SELECT`` decides whether to write
+    the store's embedder identity. Both are reads that a write depends on, so both
+    have to be under the lock; #526 names the first of them explicitly.
+    """
+    statements: list[str] = []
+    real_connect: Callable[..., sqlite3.Connection] = sqlite3.connect
+
+    def _connect(database: str, **kwargs: object) -> sqlite3.Connection:
+        conn = real_connect(database, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr("ai_assistant.memory.sqlite_store.sqlite3.connect", _connect)
+    store = SqliteMemoryStore(path=tmp_path / "memory.db", embedder=HashingEmbedder(dimensions=8))
+    store.close()
+
+    _assert_opens_with_the_write_lock(statements, what="setup")
+    # Named rather than left implicit, so a later change that moved either read
+    # out of setup's transaction fails here instead of passing quietly.
+    assert "PRAGMA table_info(records)" in statements
+    assert "SELECT key, value FROM meta" in statements
+
+
+async def test_every_mutation_takes_the_write_lock_before_its_first_read(
+    make_store: Callable[..., SqliteMemoryStore],
+) -> None:
+    """The same assertion, over every write path the store has.
+
+    Each of these reads before it writes — a rowid lookup, a presence check, a
+    count, an expiry scan — and each read is the one #526 says must not be
+    interleavable. The two that can return early (``delete`` on an absent id,
+    ``purge_expired`` with nothing to purge) are driven down that arm too, since
+    an early return is where an open transaction would be abandoned.
+    """
+    store = make_store()
+    await store.add(_semantic("seed", "coffee target"))
+
+    async def _recorded(what: str, run: Callable[[], Awaitable[object]]) -> None:
+        statements: list[str] = []
+        store._conn.set_trace_callback(statements.append)
+        try:
+            await run()
+        finally:
+            store._conn.set_trace_callback(None)
+        _assert_opens_with_the_write_lock(statements, what=what)
+
+    await _recorded("add (insert)", lambda: store.add(_semantic("fresh", "tea")))
+    await _recorded("add (overwrite)", lambda: store.add(_semantic("seed", "cocoa")))
+    await _recorded(
+        "write_atomic",
+        lambda: store.write_atomic(
+            [MemoryWrite(record=_semantic("batched", "juice"), mode=MemoryWriteMode.UPSERT)]
+        ),
+    )
+    await _recorded("delete (present)", lambda: store.delete("fresh"))
+    await _recorded("delete (absent)", lambda: store.delete("no-such-record"))
+    await _recorded("purge_expired (nothing to purge)", store.purge_expired)
+    await _recorded("clear", store.clear)
 
 
 async def test_delete_removes_record_and_reports_existence(
