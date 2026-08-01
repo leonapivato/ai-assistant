@@ -641,9 +641,22 @@ def _fold(value: str) -> str:
     return " ".join(value.split())
 
 
+def _outside_fences(text: str) -> str:
+    """Return the text with every fenced line blanked, line numbering preserved.
+
+    §1's fence exclusion is general, so the header fields §4 reads obey it too:
+    an ADR exhibiting a ``- Supersedes: …`` line as an example fences it, and a
+    scan that read the example would compare a pair nobody wrote. One blank line
+    per fenced line keeps the newline count intact, so a match's line number is still
+    the line number in the file.
+    """
+    kept = dict(iter_prose_lines(text))
+    return "\n".join(kept.get(number, "") for number in range(1, len(text.splitlines()) + 1))
+
+
 def status_field(text: str) -> str | None:
     """Return one ADR's whole ``Status`` field, folded onto one line."""
-    match = _STATUS_RE.search(text)
+    match = _STATUS_RE.search(_outside_fences(text))
     return None if match is None else _fold(match.group("value"))
 
 
@@ -654,8 +667,9 @@ def reverse_records(text: str) -> list[tuple[int, str, str]]:
         ``(lineno, kind, folded value)`` per record, in document order.
     """
     records: list[tuple[int, str, str]] = []
-    for match in _SUPERSEDES_RE.finditer(text):
-        lineno = text.count("\n", 0, match.start()) + 1
+    prose = _outside_fences(text)
+    for match in _SUPERSEDES_RE.finditer(prose):
+        lineno = prose.count("\n", 0, match.start()) + 1
         records.append((lineno, _fold(match.group("kind")), _fold(match.group("value"))))
     return records
 
@@ -735,9 +749,13 @@ def fetch_tracker_numbers(root: Path) -> frozenset[int] | None:
     call covers the shared number space a ``#NNN`` citation lives in.
 
     Returns ``None`` — unevaluable, therefore silent (ADR-0088 §6) — when ``gh``
-    is missing, unauthenticated, or the call fails. A checker that cannot reach
-    the tracker has learned nothing about the citation, and inventing a failure
-    from that is the false report §6 forbids.
+    is missing, unauthenticated, the call fails, or it succeeds while naming no
+    number at all. That last case is deliberate: a repository always holds at
+    least the issue an ADR cites, so an empty answer is a broken call rather than
+    an empty tracker, and reading it as "every citation is dangling" would fail
+    the whole corpus on a transport fault. A checker that cannot reach the
+    tracker has learned nothing about the citation, and inventing a failure from
+    that is the false report §6 forbids.
     """
     argv = [
         "gh",
@@ -768,7 +786,7 @@ def load_adrs(root: Path) -> dict[int, tuple[str, str]]:
     directory = root / "docs" / "adr"
     if not directory.is_dir():
         return adrs
-    for file in sorted(directory.glob("*.md")):
+    for file in sorted(directory.rglob("*.md")):
         match = _ADR_FILENAME_RE.match(file.name)
         if match is None:
             continue
@@ -792,7 +810,7 @@ def _adr_documents(root: Path) -> list[tuple[str, str]]:
         return []
     return [
         (file.relative_to(root).as_posix(), file.read_text(encoding="utf-8"))
-        for file in sorted(directory.glob("*.md"))
+        for file in sorted(directory.rglob("*.md"))
     ]
 
 
