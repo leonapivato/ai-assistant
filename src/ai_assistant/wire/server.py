@@ -236,9 +236,11 @@ async def _serve_requests(
             overlapped = await _settle(watcher)
         if overlapped:
             msg = (
-                "a second request arrived while one was outstanding; this connection is "
-                "serial, and a correlated error would carry an id the client must itself "
-                "reject, so the connection is closed instead"
+                "a peer wrote a second frame while a request was outstanding; this "
+                "connection is serial, and a correlated error would carry an id the client "
+                "must itself reject, so the connection is closed instead — with no reply to "
+                "either, since a peer that has broken the rule is not one to write more "
+                "framed bytes at"
             )
             raise ProtocolError(msg)
         await write_frame(
@@ -247,11 +249,25 @@ async def _serve_requests(
 
 
 async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:
-    """Stop watching for an overlapping request, and say whether one arrived.
+    """Stop watching for an overlapping frame, and say whether one arrived.
 
     A watcher that is still running has seen nothing, and cancelling it can only
     discard bytes a conforming client could not have sent — it may write again only
     after the reply, and the reply has not been written yet.
+
+    **The subject is a *frame*, not a well-formed request, and that distinction is
+    the whole of this function.** A peer that writes anything at all before its
+    reply has violated the serial rule, so a watcher that ends in an
+    :class:`~ai_assistant.wire.errors.UndecodableFrameError` is reporting a
+    violation just as surely as one that ends with an envelope — and treating that
+    as "no overlap" would be worse than missing it, because the malformed bytes have
+    already been consumed: the reply would be written to a peer that has already
+    violated the framing, and ADR-0084 §3 is explicit that such a peer "is not one
+    to write more framed bytes at".
+
+    **The one ending that is not a violation is a clean close.** A client that hung
+    up while its request was running is the ordinary case — a cancelled command —
+    and closing on it says nothing new.
 
     **The loop of bare yields is what makes the observation deterministic**, and it
     is not a sleep in disguise. A client that pipelined two requests writes both
@@ -261,11 +277,10 @@ async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:
     ``forget`` that misses, say) returns without the loop ever running. Without
     these turns the refusal would fire or not depending on whether the method
     happened to await, which is a property of the method rather than of the
-    protocol. Yielding until the watcher settles is the same idiom the conformance
-    suite uses to put a mutation inside the window ADR-0065 protects.
+    protocol.
 
     Returns:
-        Whether a second request frame arrived while one was outstanding.
+        Whether anything arrived while a request was outstanding.
     """
     for _ in range(_SETTLE_TURNS):
         if watcher.done():
@@ -278,9 +293,7 @@ async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:
         return False
     if watcher.cancelled():  # pragma: no cover — nothing else cancels this future
         return False
-    # A peer that hung up, or sent something undecodable, while a request was in
-    # flight is not an *overlap*; the next loop iteration reports it as itself.
-    return watcher.exception() is None
+    return not isinstance(watcher.exception(), ConnectionClosedError)
 
 
 async def _read_request(
