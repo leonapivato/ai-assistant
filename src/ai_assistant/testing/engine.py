@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from ai_assistant.core.errors import UnknownContinuationError
+from ai_assistant.core.errors import UnknownContinuationError, UnknownConversationError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     ActionPlan,
@@ -118,6 +118,10 @@ class FakeAssistantEngine:
         self.beliefs_held: dict[str, Belief] = {}
         self.questions_open: dict[str, Question] = {}
         self.questions_interrupted: dict[str, Question] = {}
+        #: Questions in a terminal state — declined, applied, stale, re-deferred.
+        #: Neither enumeration shows one and :meth:`answer` refuses it, because
+        #: "that question is not open" is what the surface has to say about it.
+        self.questions_settled: dict[str, Question] = {}
         self.conversations_held: dict[str, ConversationDigest] = {}
         self.parked: dict[str, Confirmation] = {}
         self.turn_outcome: TurnOutcome | None = None
@@ -128,6 +132,22 @@ class FakeAssistantEngine:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     # --- the two turn calls -----------------------------------------------
+
+    def _resolve(self, conversation_id: str | None) -> str:
+        """Continue the conversation named, or start one where none was (ADR-0074 §1).
+
+        **An id this engine does not know is refused, not silently started.**
+        Silently starting one turns a typo or a stale copy-paste into "my
+        conversation vanished" and lands the user's continuation somewhere they
+        cannot find — and a fake that started one instead would let a client's tests
+        pass over the exact path the real engine refuses.
+        """
+        if conversation_id is None:
+            return self.start_conversation(f"c-{len(self.conversations_held) + 1}")
+        if conversation_id not in self.conversations_held:
+            msg = f"no conversation {conversation_id!r}"
+            raise UnknownConversationError(msg)
+        return conversation_id
 
     async def converse(
         self,
@@ -148,9 +168,7 @@ class FakeAssistantEngine:
             conversation_id=selected,
         )
         self.calls.append(("converse", {"utterance": utterance, "conversation_id": selected}))
-        if selected is not None and selected not in self.conversations_held:
-            self.start_conversation(selected)
-        held = selected if selected is not None else self.start_conversation("c-1")
+        held = self._resolve(selected)
         outcome = self.turn_outcome or TurnOutcome(turn=_turn(utterance), conversation_id=held)
         return self._checked(outcome, "converse")
 
@@ -201,6 +219,9 @@ class FakeAssistantEngine:
         )
         check_arguments("observe", limit=self._max_payload_bytes, conversation_id=selected)
         self.calls.append(("observe", {"conversation_id": selected}))
+        if selected is not None and selected not in self.conversations_held:
+            msg = f"no conversation {selected!r}"
+            raise UnknownConversationError(msg)
         return self._checked(self.observation, "observe")
 
     # --- the inspection surface -------------------------------------------
@@ -298,7 +319,11 @@ class FakeAssistantEngine:
         named = identifier(question_id, name="question_id")
         check_arguments("forget_question", limit=self._max_payload_bytes, question_id=named)
         self.calls.append(("forget_question", {"question_id": named}))
-        gone = self.questions_open.pop(named, None) or self.questions_interrupted.pop(named, None)
+        gone = (
+            self.questions_open.pop(named, None)
+            or self.questions_interrupted.pop(named, None)
+            or self.questions_settled.pop(named, None)
+        )
         return self._checked(gone is not None, "forget_question")
 
     # --- the conversation surface -----------------------------------------
@@ -369,10 +394,12 @@ class FakeAssistantEngine:
     def ask(self, question_id: str, *, content: str, state: QuestionState) -> Question:
         """Put one deferred question in the queue, and return it.
 
-        ``state`` decides which enumeration it lands in: an ``INTERRUPTED``
-        question is a *second*, separate list all the way to the surface, because
-        offering it beside the answerable ones would present a claim that cannot be
-        taken (ADR-0078 §8).
+        ``state`` decides which enumeration it lands in, and **only ``OPEN`` is
+        answerable**. An ``INTERRUPTED`` question is a *second*, separate list all
+        the way to the surface, because offering it beside the answerable ones would
+        present a claim that cannot be taken (ADR-0078 §8); every terminal state —
+        declined, applied, stale, re-deferred — appears in neither list and answers
+        ``NOT_OPEN``, because those are questions the user has no move left on.
         """
         question = Question(
             id=question_id,
@@ -386,10 +413,13 @@ class FakeAssistantEngine:
             asked_at=_AT,
             expires_at=None,
         )
-        if state is QuestionState.INTERRUPTED:
-            self.questions_interrupted[question_id] = question
-        else:
-            self.questions_open[question_id] = question
+        match state:
+            case QuestionState.OPEN:
+                self.questions_open[question_id] = question
+            case QuestionState.INTERRUPTED:
+                self.questions_interrupted[question_id] = question
+            case _:
+                self.questions_settled[question_id] = question
         return question
 
     def start_conversation(self, conversation_id: str) -> str:
