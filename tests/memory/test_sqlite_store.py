@@ -22,7 +22,11 @@ import sqlite_vec
 from memory_store_contract import MemoryStoreContract
 from pydantic import ValidationError
 
-from ai_assistant.core.errors import MemoryStoreConflictError, MemoryStoreError
+from ai_assistant.core.errors import (
+    IncompatibleStateError,
+    MemoryStoreConflictError,
+    MemoryStoreError,
+)
 from ai_assistant.core.protocols import MemoryStore
 from ai_assistant.core.types import (
     MemoryKind,
@@ -998,12 +1002,26 @@ async def test_persists_across_reopen(make_store: Callable[..., SqliteMemoryStor
 async def test_reopening_with_different_embedder_raises(
     make_store: Callable[..., SqliteMemoryStore],
 ) -> None:
+    """The refusal stands, and it is a **deployment** fault (ADR-0083 §6).
+
+    What is detected and when is unchanged from ADR-0006 §4 and ADR-0024 §2 —
+    only the class is, so an entry point can map "this build cannot serve this
+    state" to a stay-down exit without matching on the message string. The
+    assertion pins both halves: the new class, and that it is deliberately *not*
+    a ``MemoryStoreError``, which is the distinction the hub's exit-code mapping
+    rests on.
+    """
     store = make_store(dimensions=256)
     await store.add(_semantic("1", "x"))
     store.close()
 
-    with pytest.raises(MemoryStoreError, match="re-embedding is required"):
+    with pytest.raises(IncompatibleStateError, match="re-embedding is required") as caught:
         make_store(dimensions=128)
+
+    assert not isinstance(caught.value, MemoryStoreError)
+    assert caught.value.expected == "embedding_model='hashing-128'"
+    assert caught.value.found == "embedding_model='hashing-256'"
+    assert "re-embed" in caught.value.operator_action
 
 
 def test_database_file_is_owner_only(
