@@ -15,7 +15,7 @@ import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
 import sqlite_vec
@@ -526,8 +526,21 @@ async def test_setup_failure_is_wrapped_and_closes_connection(
     captured: list[sqlite3.Connection] = []
     real_connect = sqlite3.connect
 
-    def _capturing_connect(database: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
-        conn = real_connect(database, check_same_thread=check_same_thread)
+    # Every argument is required and forwarded, mirroring the store's own call
+    # exactly: the store connects in autocommit mode so that its `BEGIN
+    # IMMEDIATE`/`COMMIT` are its own, and a double that defaulted the argument
+    # away would leave this case exercising a differently-configured connection
+    # from the one the store actually opens — and would go on silently doing so if
+    # the store ever stopped passing it.
+    def _capturing_connect(
+        database: str,
+        *,
+        check_same_thread: bool,
+        isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None,
+    ) -> sqlite3.Connection:
+        conn = real_connect(
+            database, check_same_thread=check_same_thread, isolation_level=isolation_level
+        )
         captured.append(conn)
         return conn
 

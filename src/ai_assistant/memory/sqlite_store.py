@@ -8,6 +8,18 @@ stored as JSON alongside their embedding; ``add`` embeds the record's content an
 The database file is created with owner-only permissions (ADR-0004), and the
 embedding model/dimension are recorded so opening the store with a different
 embedder fails loudly rather than returning meaningless similarities.
+
+Every mutation — the schema setup included — runs inside one ``BEGIN IMMEDIATE``
+transaction, which is what makes each read-then-write sequence here atomic
+against a second *process* on the same file and not merely against another
+coroutine on this loop. This is the discipline the other four SQLite stores
+already keep, and ADR-0083 §12 rules its adoption here **consistency work rather
+than a defect fix**: under the hub's exclusivity there is one writing process, so
+worth doing so five stores read the same way, not worth blocking the hub on. The
+section also names the one condition that makes it urgent again — exclusivity
+being relaxed — which is the case ``tests/memory/test_sqlite_store.py``'s forked
+cases construct deliberately. Journal mode is untouched: ADR-0083 §12 defers WAL
+with reasons and says it still owes its own ADR if taken (#505).
 """
 
 from __future__ import annotations
@@ -33,7 +45,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import MemoryRecord, MemoryWriteMode, band_of
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import Embedder
@@ -217,7 +229,15 @@ class SqliteMemoryStore:
 
     def _setup(self) -> sqlite3.Connection:
         try:
-            conn = sqlite3.connect(self._path, check_same_thread=False)
+            # `isolation_level=None` puts the driver in autocommit mode, so every
+            # transaction below is an explicit `BEGIN ... COMMIT` this module
+            # controls. The implicit transactions the driver would otherwise open
+            # are *deferred*, upgrading to a write lock only at the first write —
+            # which leaves every read-then-write sequence here (`_persist_record`'s
+            # rowid lookup, `_delete_sync`'s, `_clear_sync`'s count) open to
+            # exactly the cross-process interleaving `BEGIN IMMEDIATE` forbids.
+            # The two sibling stores in this package connect the same way.
+            conn = sqlite3.connect(self._path, check_same_thread=False, isolation_level=None)
         except (sqlite3.Error, OSError) as exc:
             # e.g. the parent directory does not exist — no connection to close.
             msg = f"failed to open memory store at {self._path!r}: {exc}"
@@ -228,14 +248,24 @@ class SqliteMemoryStore:
             # rollback journal it creates for it, so a journal opened while the
             # file still carried the process umask is world-readable too — and an
             # interrupted write leaves it on disk holding Tier 1 pages (ADR-0004
-            # §1, §4). `_migrate_records` below is the write most exposed to that:
-            # it runs an explicit `BEGIN` and can copy every row. `connect`
+            # §1, §4). The `BEGIN IMMEDIATE` below is exactly such a write, and
+            # `_migrate_records` inside it can copy every row. `connect`
             # creates the file, so there is something to restrict by the time this
             # runs (#451; `SqliteConversationStore._setup` has the same ordering).
             self._restrict_permissions()
             conn.enable_load_extension(True)
             sqlite_vec.load(conn)
             conn.enable_load_extension(False)
+            # `BEGIN IMMEDIATE` takes the write lock before the schema is
+            # inspected, so the whole of create/migrate/verify is **serialised
+            # against another process opening the same file** — the guard the
+            # mutations below use, applied to setup, as `SqliteAuditTrail._setup`
+            # and `SqlitePlanStore._setup` already do. Without it two processes
+            # opening a fresh file both find `meta` empty and both insert it, and
+            # two upgrading a legacy file both read the pre-migration
+            # `PRAGMA table_info` and rebuild `records` twice; the lock makes the
+            # loser wait and re-read the finished schema instead.
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
@@ -251,9 +281,11 @@ class SqliteMemoryStore:
                 "CREATE VIRTUAL TABLE IF NOT EXISTS vec_records "
                 f"USING vec0(embedding float[{self._embedder.dimensions}] distance_metric=cosine)"
             )
-            conn.commit()
+            conn.execute("COMMIT")
         except MemoryStoreError, IncompatibleStateError:
-            # Never leak the connection when opening fails. `IncompatibleStateError`
+            # Never leak the connection when opening fails; closing it also discards
+            # the uncommitted `BEGIN IMMEDIATE` above, so a refused open leaves no
+            # half-built schema behind. `IncompatibleStateError`
             # is listed alongside rather than covered by it: ADR-0083 §6 puts it
             # *outside* the store-error family on purpose, so it would otherwise
             # fall past every handler here and leave this connection open.
@@ -284,51 +316,48 @@ class SqliteMemoryStore:
         needs SQLite 3.35+); the copy carries each original ``rowid`` forward
         explicitly, so the ``vec_records`` join by rowid stays intact.
 
-        It runs in an **explicit** transaction. SQLite auto-commits a bare DDL
-        statement when no transaction is open (issue #289 review), so without the
-        ``BEGIN`` a failure during the row copy would leave the schema already
+        It runs in an **explicit** transaction — its caller's. SQLite auto-commits
+        a bare DDL statement when no transaction is open (issue #289 review), so
+        without one a failure during the row copy would leave the schema already
         swapped and the values un-backfilled — permanently, since a later open
         would see ``INTEGER`` columns and skip migration, resurrecting expired
         rows. Inside the transaction every statement — the DDL included — rolls
-        back together on any failure.
+        back together on any failure, and a crash mid-rebuild is covered too: the
+        uncommitted transaction is discarded by SQLite on the next open.
+
+        The transaction is :meth:`_setup`'s ``BEGIN IMMEDIATE`` rather than one
+        opened here, which is what puts the ``PRAGMA table_info`` read below
+        *inside* it. Opened here, the shape check would run outside the write lock
+        and two processes upgrading one legacy file could both read the
+        pre-migration columns and both rebuild (#526). It also means this method
+        must not begin or commit anything of its own: nesting a ``BEGIN`` inside
+        the open one raises, and committing here would publish a half-built schema.
         """
         info = {row[1]: str(row[2]).upper() for row in conn.execute("PRAGMA table_info(records)")}
         if info.get("expires_at") == "INTEGER" and info.get("valid_until") == "INTEGER":
             return  # already on the microsecond-epoch schema; nothing to do
-        conn.execute("BEGIN")
-        try:
+        conn.execute(
+            "CREATE TABLE records_migrated("
+            "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL, "
+            "expires_at INTEGER, valid_until INTEGER)"
+        )
+        # Stream the source rows through a dedicated read cursor rather than
+        # ``fetchall()``, so migrating a large legacy store does not
+        # materialise the whole ``records`` table in memory at once. Reads
+        # come from ``records`` and writes go to ``records_migrated`` — a
+        # different table — so the scan cursor stays valid across the inserts.
+        read = conn.execute("SELECT rowid, id, kind, data FROM records")
+        for rowid, id_, kind, data in read:
+            expires = self._micros_from_json(data, "expires_at")
+            valid_until = self._micros_from_json(data, "valid_until", nested="validity")
             conn.execute(
-                "CREATE TABLE records_migrated("
-                "rowid INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, "
-                "kind TEXT NOT NULL, data TEXT NOT NULL, "
-                "expires_at INTEGER, valid_until INTEGER)"
+                "INSERT INTO records_migrated"
+                "(rowid, id, kind, data, expires_at, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
+                (rowid, id_, kind, data, expires, valid_until),
             )
-            # Stream the source rows through a dedicated read cursor rather than
-            # ``fetchall()``, so migrating a large legacy store does not
-            # materialise the whole ``records`` table in memory at once. Reads
-            # come from ``records`` and writes go to ``records_migrated`` — a
-            # different table — so the scan cursor stays valid across the inserts.
-            read = conn.execute("SELECT rowid, id, kind, data FROM records")
-            for rowid, id_, kind, data in read:
-                expires = self._micros_from_json(data, "expires_at")
-                valid_until = self._micros_from_json(data, "valid_until", nested="validity")
-                conn.execute(
-                    "INSERT INTO records_migrated"
-                    "(rowid, id, kind, data, expires_at, valid_until) VALUES (?, ?, ?, ?, ?, ?)",
-                    (rowid, id_, kind, data, expires, valid_until),
-                )
-            conn.execute("DROP TABLE records")
-            conn.execute("ALTER TABLE records_migrated RENAME TO records")
-            conn.commit()
-        except Exception:
-            # A backfill failure (e.g. a corrupt legacy JSON blob) or any error
-            # must undo the whole rewrite, DDL included, so a reopen re-attempts a
-            # clean migration rather than finding a half-swapped schema. A crash
-            # mid-rebuild is covered too: the uncommitted BEGIN is discarded by
-            # SQLite on the next open.
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
-            raise
+        conn.execute("DROP TABLE records")
+        conn.execute("ALTER TABLE records_migrated RENAME TO records")
 
     def _micros_from_json(self, data: str, key: str, *, nested: str | None = None) -> int | None:
         """Read a stored ISO instant from a record's JSON, as a µs epoch or None.
@@ -426,6 +455,59 @@ class SqliteMemoryStore:
             with contextlib.suppress(FileNotFoundError):
                 sidecar.chmod(_OWNER_ONLY)
 
+    @contextlib.contextmanager
+    def _transaction(self, what: str, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+        """Run the block inside one transaction, translating backend failures.
+
+        ``IMMEDIATE`` takes the write lock up front, so a read-then-write mutation
+        cannot interleave with another writer's — which is how this store's rowid
+        lookups hold **across processes** and not merely across coroutines on one
+        loop. That matters more here than the wrong return value it also prevents:
+        ``records`` and ``vec_records`` are joined by ``rowid`` with no foreign key
+        (``vec_records`` is a ``vec0`` virtual table, so SQLite cannot enforce
+        one), and a deletion landing between :meth:`_persist_record`'s ``SELECT``
+        and its vector write leaves an **orphan vector row** that ``search``'s KNN
+        matches and then fails to join (#526). ``immediate=False`` is the read
+        form: a deferred transaction, so several ``SELECT``s in one block see one
+        consistent snapshot rather than two states either side of a racing write.
+
+        Anything other than a backend failure propagates unchanged, after the
+        transaction is rolled back — which is how :meth:`write_atomic` refuses an
+        ``INSERT_IF_ABSENT`` collision as ``MemoryStoreConflictError`` without
+        leaving any element of the batch behind.
+
+        Raises:
+            MemoryStoreError: If the backend fails at any point.
+        """
+        conn = self._conn
+        begin = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+        try:
+            conn.execute(begin)
+        except sqlite3.Error as exc:
+            msg = f"failed to {what}: {exc}"
+            raise MemoryStoreError(msg) from exc
+        try:
+            yield conn
+        except BaseException as exc:
+            # `BaseException`, not `Exception`: ADR-0060's resource clause is
+            # unconditional, and a transaction left open on the shared connection
+            # is a resource held with nothing running that will release it — the
+            # next `BEGIN` fails with "cannot start a transaction within a
+            # transaction" and the store is poisoned for every later caller.
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            if isinstance(exc, sqlite3.Error):
+                msg = f"failed to {what}: {exc}"
+                raise MemoryStoreError(msg) from exc
+            raise
+        try:
+            conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            msg = f"failed to {what}: {exc}"
+            raise MemoryStoreError(msg) from exc
+
     async def _embed_one(self, text: str) -> Embedding:
         """Embed a single text, mapping any embedder misbehaviour to our error.
 
@@ -478,18 +560,10 @@ class SqliteMemoryStore:
         return snapshot.id
 
     def _add_sync(self, record: MemoryRecord, vector: Embedding) -> None:
-        conn = self._conn
-        try:
+        # The transaction rolls the partial multi-table write back on any failure,
+        # so a later commit cannot persist an inconsistent record/vector pair.
+        with self._transaction(f"store memory {record.id!r}"):
             self._persist_record(record, vector)
-            conn.commit()
-        except sqlite3.Error as exc:
-            # Roll back the partial multi-table write so a later commit cannot
-            # persist an inconsistent record/vector pair. A rollback failure
-            # (e.g. the connection is closed) must not mask the original cause.
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
-            msg = f"failed to store memory {record.id!r}: {exc}"
-            raise MemoryStoreError(msg) from exc
 
     def _persist_record(self, record: MemoryRecord, vector: Embedding) -> None:
         """Write one record and its vector into the *open* transaction, no commit.
@@ -500,6 +574,10 @@ class SqliteMemoryStore:
         equally one standalone write or one element of an atomic batch (ADR-0046
         §4). Raises the underlying :class:`sqlite3.Error` unwrapped, for the caller
         to translate.
+
+        Both callers open that transaction with :meth:`_transaction`, so the write
+        lock is already held when the ``SELECT`` below runs and the rowid it reads
+        cannot be deleted out from under the vector write that follows (#526).
         """
         conn = self._conn
         blob = sqlite_vec.serialize_float32(list(vector))
@@ -571,42 +649,41 @@ class SqliteMemoryStore:
     def _write_atomic_sync(
         self, prepared: Sequence[tuple[MemoryRecord, MemoryWriteMode, Embedding]]
     ) -> None:
-        conn = self._conn
         try:
-            for record, mode, vector in prepared:
-                if mode is MemoryWriteMode.INSERT_IF_ABSENT:
-                    row = conn.execute(
-                        "SELECT rowid FROM records WHERE id = ?", (record.id,)
-                    ).fetchone()
-                    if row is not None:
-                        msg = (
-                            f"cannot insert {record.id!r}: a record with that id is already stored"
-                        )
-                        raise MemoryStoreConflictError(msg)
-                self._persist_record(record, vector)
-            conn.commit()
+            with self._transaction("commit an atomic memory batch") as conn:
+                for record, mode, vector in prepared:
+                    if mode is MemoryWriteMode.INSERT_IF_ABSENT:
+                        row = conn.execute(
+                            "SELECT rowid FROM records WHERE id = ?", (record.id,)
+                        ).fetchone()
+                        if row is not None:
+                            msg = (
+                                f"cannot insert {record.id!r}: "
+                                f"a record with that id is already stored"
+                            )
+                            raise MemoryStoreConflictError(msg)
+                    self._persist_record(record, vector)
         except MemoryStoreError:
-            # The in-scope collision is *this*: the presence check above raises
-            # MemoryStoreConflictError deterministically for a single writer (§4).
-            # Roll the whole batch back and propagate it unchanged — it is already
-            # the seam's error (ADR-0028 §5). A raced cross-process INSERT that hit
-            # the records.id UNIQUE constraint instead is §5's out-of-scope
+            # Already rolled back by the transaction, which propagates anything
+            # that is not a backend failure unchanged. The in-scope collision is
+            # *this*: the presence check above raises MemoryStoreConflictError
+            # deterministically for a single writer (§4), and it is already the
+            # seam's error (ADR-0028 §5). A raced cross-process INSERT that hit the
+            # records.id UNIQUE constraint instead is §5's out-of-scope
             # concurrency, which ADR-0046 §4 does *not* require reclassifying as a
-            # conflict; it falls through below as MemoryStoreError, so only a
-            # verified stored-id collision — never another integrity failure (a
-            # NOT NULL or vec constraint) — is reported as recoverable.
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
+            # conflict; the transaction reports it as a plain MemoryStoreError, so
+            # only a verified stored-id collision — never another integrity failure
+            # (a NOT NULL or vec constraint) — is reported as recoverable. The
+            # presence check now runs under the write lock, so that raced INSERT is
+            # itself no longer reachable from a second process (#526).
             raise
         except Exception as exc:
-            # Any *other* mid-transaction failure — a backend error, or a
-            # malformed vector that makes serialization raise after an earlier
-            # element was already written — must still roll the whole batch back,
-            # and only MemoryStoreError may cross the seam (ADR-0028 §5). Catching
-            # sqlite3.Error alone would let a non-SQLite exception escape with the
-            # transaction still open, leaving a committable partial batch.
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
+            # Any *other* mid-transaction failure — notably a malformed vector that
+            # makes serialization raise after an earlier element was already
+            # written — has been rolled back by the transaction but propagates
+            # unchanged, and only MemoryStoreError may cross the seam (ADR-0028
+            # §5). Without this arm a non-SQLite exception would escape the seam
+            # raw.
             msg = f"failed to commit an atomic memory batch: {exc}"
             raise MemoryStoreError(msg) from exc
 
@@ -877,20 +954,16 @@ class SqliteMemoryStore:
             return await _run_to_completion(self._delete_sync, record_id)
 
     def _delete_sync(self, record_id: str) -> bool:
-        conn = self._conn
-        try:
+        # The early return leaves the (empty) transaction to the context manager's
+        # ``COMMIT`` rather than to nothing at all: an open transaction abandoned on
+        # the shared connection poisons the next ``BEGIN`` for every later caller.
+        with self._transaction(f"delete memory {record_id!r}") as conn:
             row = conn.execute("SELECT rowid FROM records WHERE id = ?", (record_id,)).fetchone()
             if row is None:
                 return False
             rowid = row[0]
             conn.execute("DELETE FROM vec_records WHERE rowid = ?", (rowid,))
             conn.execute("DELETE FROM records WHERE rowid = ?", (rowid,))
-            conn.commit()
-        except sqlite3.Error as exc:
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
-            msg = f"failed to delete memory {record_id!r}: {exc}"
-            raise MemoryStoreError(msg) from exc
         return True
 
     async def clear(self) -> int:
@@ -899,17 +972,13 @@ class SqliteMemoryStore:
             return await _run_to_completion(self._clear_sync)
 
     def _clear_sync(self) -> int:
-        conn = self._conn
-        try:
+        # The count is read under the write lock, so the number returned is the
+        # number this call actually removed rather than one another process
+        # changed between the count and the deletion (#526).
+        with self._transaction("clear the memory store") as conn:
             (count,) = conn.execute("SELECT COUNT(*) FROM records").fetchone()
             conn.execute("DELETE FROM vec_records")
             conn.execute("DELETE FROM records")
-            conn.commit()
-        except sqlite3.Error as exc:
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
-            msg = f"failed to clear the memory store: {exc}"
-            raise MemoryStoreError(msg) from exc
         return int(count)
 
     async def export(self) -> list[MemoryRecord]:
@@ -945,8 +1014,7 @@ class SqliteMemoryStore:
             return await _run_to_completion(self._purge_expired_sync, self._now_micros())
 
     def _purge_expired_sync(self, now: int) -> int:
-        conn = self._conn
-        try:
+        with self._transaction("purge expired memories") as conn:
             rowids = [
                 row[0]
                 for row in conn.execute(
@@ -955,15 +1023,11 @@ class SqliteMemoryStore:
                 )
             ]
             if not rowids:
+                # As in `_delete_sync`: the early return commits the empty
+                # transaction rather than abandoning it on the shared connection.
                 return 0
             conn.executemany("DELETE FROM vec_records WHERE rowid = ?", [(r,) for r in rowids])
             conn.executemany("DELETE FROM records WHERE rowid = ?", [(r,) for r in rowids])
-            conn.commit()
-        except sqlite3.Error as exc:
-            with contextlib.suppress(sqlite3.Error):
-                conn.rollback()
-            msg = f"failed to purge expired memories: {exc}"
-            raise MemoryStoreError(msg) from exc
         return len(rowids)
 
     def close(self) -> None:
