@@ -1037,6 +1037,10 @@ code and a message". So the failures are declared, and two new types are named �
 both of them the *spelling* of a refusal ADR-0084 already ratified, not a new
 decision.
 
+**Both new types live in `core/errors.py`**, beside the hierarchy they extend —
+the same file every other `AssistantError` subtype is declared in, and the one a
+Protocol in `core/protocols.py` can name without reaching outside `core`.
+
 **`UnknownContinuationError(PlanningError)`.** ADR-0084 §7 ratified that
 presenting a token the server cannot resolve "yields one specific, typed refusal —
 an unknown-continuation error — and never a generic failure, and never a denial",
@@ -1134,6 +1138,60 @@ fixed, so it is stated compactly rather than method by method:
 - **The byte encoding is §8c's canonical form** — compact separators, non-ASCII
   as UTF-8 rather than `\u` escapes — for every payload on this wire, so the
   bytes a client measures against §8c's limit are the bytes it writes.
+
+#### 10a. The error frame, so a declared failure survives the wire
+
+**A typed failure that cannot be reconstructed on the far side is not a contract,
+and §9 declares one that §10 above had no room for.** ADR-0084 §3 fixes that
+errors are "a distinct message kind, carrying a typed code and a message, never a
+result payload", and leaves the member names here. §9 then obliges
+`OversizedValueError` to carry the limit, the measured size and the largest
+contributing field — three values a client reconstructing from a code and a
+message alone cannot repopulate. It would raise the right *type* with empty
+fields, which is the in-process engine and the client disagreeing about a
+contract-declared exception: §4's divergence, one layer over from where §8 closed
+it.
+
+**The error payload** is a JSON object with these members:
+
+| Member | Presence | Value |
+| --- | --- | --- |
+| `code` | always | the exception type's own class name |
+| `message` | always | the exception's human-readable message |
+| `details` | only where the type's contract names structured data | an object carrying those values |
+
+**The code is the class name, which makes the mapping total by construction
+rather than by a registry someone maintains.** A hand-kept table of tokens is a
+second vocabulary to drift against the first — the objection §4 raises to mapping
+`Disposition` to a bare string, and it applies with more force to a mapping used
+only on failure paths, which are the least exercised. Class names are already
+contract surface: renaming one in `core/errors.py` is already a change that costs
+an ADR, so the wire inherits that stability for free.
+
+**One code per *concrete* type, never flattened to a declared base.** §9's table
+names base classes — `ModelError`, `MemoryStoreError`, `PlanningError` — and each
+has subtypes an implementation may actually raise. Encoding a
+`ModelRateLimitError` as `"ModelError"` would destroy exactly what ADR-0077 §3
+requires to survive: it obliges a failed observing call to surface "unwrapped and
+with its classification intact", and a client that received the base class has
+been handed a classification the server did not make. So the code names what was
+raised.
+
+**An unknown code is a protocol violation, not a widening.** A client meeting a
+code it does not know reports a transport-level protocol failure naming the code;
+it does **not** fall back to the nearest ancestor it recognises. Falling back
+would manufacture a typed refusal the server never sent, and ADR-0084 §3's exact
+version match means the two halves ship together, so an unknown code is a bug
+rather than a version skew to tolerate. Same for a `details` object missing a
+value the named type's contract requires: fail closed rather than raise a
+half-populated exception.
+
+**`ValueError` is deliberately absent from this vocabulary**, and its absence is a
+property of §9 rather than an omission here. Every `ValueError` the surface
+declares — a malformed page argument, a blank identifier — is refused **locally,
+before any I/O** (§3c, §9), so it never crosses a frame. The wire's error
+vocabulary is therefore exactly the `AssistantError` subtree, which is also what
+makes "the code is the class name" safe: `ValueError` is not ours to name.
 
 ### 11. Where the corpus and the tree disagree, and which this ADR follows
 
@@ -1378,6 +1436,14 @@ move to `Accepted` triggers nothing.
   success depends on how much episode text happens to sit behind the page — the
   opposite of the legibility ADR-0084's ruling 4 asks for, arriving at the one
   surface a user reaches for to understand what the assistant believes.
+- **Carry error codes in a hand-maintained registry of tokens rather than using
+  the class name.** Rejected in §10a: it is a second vocabulary kept in step with
+  the first by hand, on the paths least likely to be exercised — §4's objection to
+  mapping `Disposition` to a bare string, applied to failures.
+- **Let a client widen an unrecognised error code to the nearest ancestor it
+  knows.** Rejected in §10a: it manufactures a typed refusal the server never
+  sent, and ADR-0084 §3's exact version match means an unknown code is a bug
+  rather than skew to absorb.
 - **Add a `data_export` method to the Protocol while the surface is being
   pinned.** Rejected in §6c: `Engine` exposes no export today and no CLI command
   reaches `ConversationLifecycle.export`, so adding one would be widening the
