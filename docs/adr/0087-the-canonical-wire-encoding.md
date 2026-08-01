@@ -296,11 +296,20 @@ other means conforms, and §7 says so.
 - **Array order is the value's own order** and is never sorted. A `tuple` field
   is ordered data; an object's member names are not.
 - **The encoding is context-free.** A value's bytes are identical standalone and
-  nested inside a larger structure. This is what makes measure-then-send sound: a
-  payload measured against ADR-0084 §4's limit is measured on the bytes that then
-  appear inside the envelope, so it cannot grow on the way into the frame, and
-  the frame ceiling ADR-0084 §3 sets is not overrun by a payload the contract
-  admitted.
+  nested inside a larger structure. This is what makes measure-then-send sound,
+  and the claim is exactly that and no more: **the bytes a sender measures are
+  the bytes it transmits**, so measurement and transmission cannot disagree and a
+  payload does not grow on its way into the envelope.
+
+  **It does not follow that an admitted payload fits the frame**, and this ADR
+  does not say so. Payload plus envelope exceeds the payload, so a payload
+  admitted at exactly the frame ceiling overruns the frame by the envelope's own
+  bytes. Closing that takes a **reserve** between the contract limit and
+  ADR-0084 §3's prefix cap — a number, and **not this ADR's**: §7 leaves the
+  limit and the envelope's member names where ADR-0084 §4 and §6 put them. What
+  context-freedom guarantees is that whatever reserve is ratified is *sufficient*,
+  because the payload's contribution to the frame is the number that was
+  measured; without it, no reserve could be computed at all.
 
 **Sorting rather than preserving declaration order is a decision, not an
 inherited default, and the reason is a refactor nobody would flag.** A promoted
@@ -434,7 +443,7 @@ it there as a normalisation rather than here as a correction. The distinction is
 worth keeping: §3 is about the encoder disagreeing with this ADR, §4 is about
 the value space disagreeing with itself.
 
-### 4. Byte-determinism, over the equivalence the codec round-trips
+### 4. Byte-determinism, over the equivalence that keeps one datum one type
 
 > **For any two payload values `a` and `b`, if `a` and `b` are the *same value*
 > then `encode(a) == encode(b)`.** A value's bytes depend on what it is, never on
@@ -463,12 +472,37 @@ information rather than canonicalise it. So `==` is not a defect the encoding
 must work around — **it is the wrong equivalence relation for this property**,
 and stating the property over it was an error in an earlier draft of this ADR.
 
-**The right one is the equivalence the codec round-trips, which is exactly
-type-aware structural equality.** Measured: `{"x": 1}`, `{"x": True}` and
-`{"x": 1.0}` encode to three byte strings, and decoding each recovers `int`,
-`bool` and `float` respectively. So `encode` is injective up to this relation and
-`decode` inverts it — which is the property a wire format is supposed to have,
-and the one that makes a round-trip test meaningful.
+**The right one is the equivalence under which one datum keeps one type from end
+to end**, and the three JSON scalar types are exactly where Python's `==` loses
+it. Measured: `{"x": 1}`, `{"x": True}` and `{"x": 1.0}` encode to three byte
+strings, and decoding each recovers `int`, `bool` and `float` respectively.
+
+**That recovery is worth being precise about, because it holds for a different
+reason in the two halves of a payload, and a general injectivity claim would be
+false.** The encoding is *not* injective over all values: `timedelta(seconds=30)`
+and the string `"PT30S"` both encode to `"PT30S"`, as do a `UtcInstant` and its
+formatted string, and a `StrEnum` member and its value. So JSON alone cannot say
+which type produced a string, and this ADR does not claim it can.
+
+- **Where a field is typed — every promoted field but one — decoding is
+  schema-directed**, which is what a ratified type surface is *for*: the
+  annotation says the member is a `timedelta`, so `"PT30S"` is parsed as one.
+  Ambiguity in the JSON is not a problem because the JSON is never read without
+  the schema.
+- **Where there is no schema — inside `FrozenJson`, the one deliberately untyped
+  holder — the JSON form itself carries the type**, because `FrozenJson`'s six
+  arms (`str | int | float | bool | None | Sequence | Mapping`) map onto six
+  distinct JSON productions. `1`, `true` and `1.0` are three of them. **§2c's
+  rule that a `float` always carries a decimal point or an exponent is
+  load-bearing here and not cosmetic**: without it `2.0` would encode as `2` and
+  come back an `int`.
+
+So type-aware equality is recoverable exactly where nothing else could recover
+it, and elsewhere the schema does the work. **The one shape that would reopen
+this** is a promoted field annotated as a union of `str` with a string-encoded
+scalar — `str | timedelta`, say — where the schema would not disambiguate
+either. No promoted field is; the constraint is recorded here rather than assumed,
+because it is a property of the *surface* and this ADR does not choose it.
 
 **And the hazard the rule exists for does not reach these cases.** The concern is
 one *datum* acquiring two spellings depending on which implementation built the
