@@ -283,6 +283,12 @@ source_modules = [
     # says nothing about an external one, so without this line a direct
     # `import openai` here would pass the gate.
     "ai_assistant.wire",
+    # The resident process builds an engine through the composition root and asks a
+    # model nothing itself (ADR-0083 §8). Listed for the same reason: a package that
+    # exists and is absent from this list is one golden rule 4 is asserted about and
+    # not checked on. It was missed when `service` was created and is added here
+    # rather than filed, because this is the change that edits this contract.
+    "ai_assistant.service",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
@@ -321,8 +327,10 @@ source_modules = [
     # The composition root is production code, so the same ban applies (ADR-0042 §Consequences).
     "ai_assistant.app",
     # So is the wire (ADR-0084 §6): it ships in the same wheel and runs in both
-    # the hub and every spoke.
+    # the hub and every spoke — and so is the resident process itself, which was
+    # missed when it was created.
     "ai_assistant.wire",
+    "ai_assistant.service",
 ]
 forbidden_modules = ["ai_assistant.testing"]
 
