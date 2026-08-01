@@ -397,69 +397,72 @@ decision citation to `ADR-NNNN §K` is **live** when §K has not been replaced. 
 citation of a dead clause resolves perfectly and is still wrong, and verbatim
 quotation establishes nothing about it (Context).
 
-**Liveness is derived from both the earlier ADR and the later one, and
-disagreement between them is the finding.** Concretely, for a citation of
-`ADR-A §K`:
+**For a reader, liveness is derived from both the earlier ADR and the later
+one.** Read `ADR-A`'s whole `Status` **field** — every physical line, since a
+legacy value may wrap (ADR-0070 §4) — then read each ADR it names, because §4
+makes the later ADR the authority on extent, and follow the transitive walk
+onward through that ADR's own status. The walk terminates: an ADR is only ever
+superseded by a higher-numbered one. **A checker that read only `ADR-A`'s status
+would have believed ADR-0074 and been wrong; the lane that trusted ADR-0086's own
+declaration was right.**
 
-1. **Forward** — read `ADR-A`'s whole `Status` **field**, every physical line,
-   since a legacy value may wrap (ADR-0070 §4), and take **every `ADR-NNNN`
-   appearing anywhere in it** as a candidate. Not only the targets after a
-   leading `Partially superseded by`: the corpus's 86 status lines carry at
-   least six shapes, and the leading-token form is 14 of them. ADR-0015's is
-   `Accepted, partially superseded by ADR-0020 and ADR-0025` — grandfathered by
-   ADR-0070 §4 and never retrofitted — so a rule keyed to the leading token
-   finds nothing there while the reverse direction finds two, and reports a
-   disagreement against a record that is correct. Others carry `§2 amended by
-   ADR-NNNN`, `narrowed by`, `discharged by`, or a `;`-joined qualifier.
-   Extraction is safe on all of them because ADR-0070 §4's authoring invariant
-   guarantees it: "**a scope names a clause, not another ADR**: it carries no
-   `ADR-NNNN` token."
+**The reverse record is a header line, and this ADR ratifies it as the canonical
+machine-readable form.** An ADR that supersedes another, wholly or partly, writes
+`- Supersedes: ADR-A …` or `- Partially supersedes: ADR-A …` in its header. Seven
+and two ADRs respectively carry one today, ADR-0070 and ADR-0015 among them. Like
+the forward record it is a pointer: the superseding ADR's own text remains the
+authority on extent. The check must not discover a supersession by reading prose
+— "ADR-0090 replaces ADR-0080's retry rule" is a sentence, and recognising it is
+exactly the structural inference §6 forbids.
 
-   **Each candidate is then resolved against the ADR it names**, which is
-   ADR-0070 §4's consumer rule verbatim — a qualifier that names a later ADR is
-   "not a reliable liveness signal", so the named ADR's own record says whether
-   it superseded the clause or merely amended it. An amendment "is not a status
-   token and never bears on this read", so it drops out here rather than
-   counting as a forward supersession;
-2. **Reverse** — collect every ADR carrying a header line
-   `- Supersedes: ADR-A …` or `- Partially supersedes: ADR-A …` (below);
-3. **Transitive** — follow the walk ADR-0070 §4 requires, onward through each
-   target's own status, which terminates because an ADR is only ever superseded
-   by a higher-numbered one.
+**The target is the first `ADR-NNNN` in the record, and one record names one
+ADR.** Everything after that token is scope prose and is not extracted. This is
+necessary rather than tidy: ADR-0070 §4 forbade an `ADR-NNNN` inside the
+*forward* record's scope, nothing ever bound the reverse record, and the corpus's
+scopes use them freely — ADR-0020's names ADR-0012 and ADR-0015 while superseding
+only ADR-0015; ADR-0067's points a reader at ADR-0019; ADR-0024's cites ADR-0017's
+precedent and quotes its own number. Extracting every token instead of the first
+turns all three into false reports. **An ADR superseding two earlier ADRs writes
+two records**, which is also what keeps each scope attached to its own target.
 
-**The reverse record is that header line, and this ADR ratifies it as the
-canonical machine-readable form.** The check must not discover a supersession by
-reading prose: "ADR-0090 replaces ADR-0080's retry rule" is a sentence, and
-recognising it is exactly the structural inference §6 forbids. The corpus
-already has the form — nine ADRs carry `- Supersedes:` or
-`- Partially supersedes:` in their header, ADR-0070 and ADR-0015 among them —
-and **an ADR that supersedes another, wholly or partly, writes one going
-forward.** It names the target ADR and the scope in the same shape ADR-0070 §4
-gives the forward record, and like that record it is a pointer: the superseding
-ADR's own text remains the authority on extent.
+**This rule was run against the corpus before being written here.** Over the nine
+reverse records on `main` it produces **zero** reports — the quiet-by-construction
+property claimed below is measured, not assumed. Extracting every `ADR-NNNN`
+instead produces five, all false.
 
-So both directions read a **declared header field**, and the comparison is
-between two machine-readable sets. Nothing infers structure from prose.
+**The checker emits exactly one liveness report, and this is its whole rule.**
+For every ADR `B` carrying a reverse record naming `ADR-A`: if `ADR-A`'s whole
+`Status` field does not mention `ADR-B` anywhere, **report the disagreement**.
+Otherwise, silence. Nothing else about liveness is reported.
 
-**Where the reverse record is absent, nothing is reported.** Only nine ADRs
-carry one today; the rule is forward-only and no header is retrofitted, on
-ADR-0070 §4's non-retrofit reasoning. An older ADR that superseded something
-without a header line simply yields no reverse entry, and §6's miss-is-benign
-rule governs: the check is silent rather than wrong. ADR-0086 is exactly this
-case — it declares its supersessions in §11 and carries no header line — so the
-window it opened would be caught **only once the rule is being followed**. That
-is honest about what this buys and when.
+Three properties make that rule implementable where the earlier drafts of this
+section were not:
 
-**Where the two directions disagree, that is the report** — a later ADR declaring
-it supersedes a clause of `ADR-A` while `ADR-A`'s `Status` does not name it, or
-the reverse. **It would have surfaced the ADR-0074/ADR-0086 window only if
-ADR-0086 had carried the reverse header this section now requires** — it did
-not, and the paragraph above says so. The rule earns out going forward, and it
-does not depend on that window being structural: it is the direct consequence of
-ADR-0070 §4's ruling that the `Status` scope is a pointer and the superseding ADR
-is the authority. A checker that read only
-the pointer would have believed ADR-0074's `Status` and been wrong; a lane that
-trusted ADR-0086's own declaration was right.
+- **It is a membership test, not a classification.** It never has to decide
+  whether `B` superseded or merely amended `A`. That distinction is expressed six
+  ways in the corpus — `- Amends on ratification:` (6 ADRs), `- Amends:` (5),
+  `- Superseded:` (4), and legacy status qualifiers reading `discharged by`,
+  `narrowed by`, `amended by` — and **none of them is specified by this ADR**. So
+  ADR-0038's `Accepted, §1b discharged by ADR-0040` is silent because it mentions
+  ADR-0040, without anyone deciding what `discharged by` means to a machine.
+- **It reads the whole field, so every legacy shape works.** ADR-0015's
+  grandfathered `Accepted, partially superseded by ADR-0020 and ADR-0025` is
+  silent, where a rule keyed to a *leading* `Partially superseded by` would find
+  an empty forward set and report a correct record as a disagreement. Extraction
+  is safe because ADR-0070 §4's authoring invariant guarantees it: "**a scope
+  names a clause, not another ADR**: it carries no `ADR-NNNN` token."
+- **It is driven by the reverse record, so an absent one is silence, not a
+  report.** A forward target with no reverse record produces nothing. ADR-0040's
+  status names ADR-0086 while ADR-0086 carries no header line; under this rule
+  that pair is simply never compared, where a two-set difference would have
+  reported it in one direction and suppressed it in the other.
+
+**What this buys, and when.** The reverse record is forward-only and no header is
+retrofitted, on ADR-0070 §4's non-retrofit reasoning. So the check is quiet on
+the existing corpus by construction, and **it would not have caught the
+ADR-0074/ADR-0086 window**, because ADR-0086 declared its supersessions in §11
+and carried no header. It earns out on ADRs written after this one. That is a
+thinner promise than the brief for this ADR assumed, and it is the honest one.
 
 **A liveness result is surfaced, never adjudicated.** ADR-0070 §4 is explicit
 that scopes are free-form pointers and that "a tool does not decide containment —
