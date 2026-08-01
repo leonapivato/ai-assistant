@@ -495,13 +495,30 @@ to reason about at the boundary.
 #### 2e. Durations
 
 > **`[-]P[nD][T[nH][nM][n[.ffffff]S]]`** — a sign only when negative, and only
-> the four components `D`, `H`, `M` (minutes) and `S`. A zero component is
-> omitted; the zero duration is `PT0S`. The seconds' fractional part is present
-> only when non-zero, with **trailing zeros trimmed** (`PT0.5S`, not
-> `PT0.500000S`).
+> the four components `D`, `H`, `M` (minutes) and `S`.
+>
+> **The decomposition is fixed, not merely the alphabet.** Take the magnitude,
+> then: `D` is its whole days; `H`, `M` and `S` are its remaining seconds split so
+> that **`0 ≤ H < 24`, `0 ≤ M < 60` and `0 ≤ S < 60`**; the fraction is its
+> microseconds, `0 ≤ f < 10^6`. A negative duration is `-` followed by the
+> encoding of its magnitude.
+>
+> A zero component is omitted; the zero duration is `PT0S`. The seconds'
+> fractional part is present only when non-zero, with **trailing zeros trimmed**
+> (`PT0.5S`, not `PT0.500000S`).
 >
 > **No nominal component is ever emitted.** `Y` and date-position `M` are
 > forbidden outright.
+
+**The range constraints are what make the grammar single-valued, and without them
+it is not.** An alphabet plus "omit zero components" admits `"PT61S"` and
+`"PT1M1S"` for one value, and `"PT60M"` and `"PT1H"` for another — two encoders
+conforming to the letter and disagreeing on bytes, which is the whole failure this
+ADR exists to close, reproduced inside its own rule. An earlier draft had exactly
+that gap. With the ranges fixed the decomposition is a function of the value, and
+it is the one `timedelta` already stores: `.days`, `.seconds` and `.microseconds`
+are normalised on construction to the same ranges, so an encoder reads the fields
+rather than choosing a split.
 
 **`"P2DT3S"` versus `"PT172803S"` is not a choice, and finding that out is what
 this rule is really about.** `timedelta` normalises on construction:
@@ -885,6 +902,8 @@ have to. Rows 3–5 fix six digits with trailing zeros kept.
 | `timedelta(seconds=172803)` — the same value | `"P2DT3S"` | 8 |
 | `timedelta(hours=24)` | `"P1D"` | 5 |
 | `timedelta(minutes=90)` | `"PT1H30M"` | 9 |
+| `timedelta(seconds=61)` | `"PT1M1S"` — **not** `"PT61S"`; the range rule, §2e | 8 |
+| `timedelta(minutes=60)` | `"PT1H"` — **not** `"PT60M"` | 6 |
 | `timedelta(microseconds=500000)` | `"PT0.5S"` | 8 |
 | `timedelta(microseconds=1)` | `"PT0.000001S"` | 13 |
 | `timedelta(seconds=-30)` | `"-PT30S"` | 8 |
