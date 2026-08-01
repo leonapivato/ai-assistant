@@ -983,6 +983,13 @@ def test_every_duration_setting_is_discovered() -> None:
         "episode_retention",
         "conversation_tombstone_grace",
         "deferral_ttl",
+        # ADR-0083 §4's phase-A budget. Acknowledged here rather than exempted:
+        # §7 requires *every* duration the hub adds to be refused at load unless
+        # finite and strictly positive, and joining this tuple is what subjects
+        # it to the parametrised guards below — including the ``bool`` one, which
+        # for this field is the difference between "wait thirty seconds" and
+        # "delete phase A".
+        "shutdown_drain_seconds",
     }
 
 

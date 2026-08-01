@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
 from datetime import timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -543,6 +544,13 @@ class EmbedderKind(StrEnum):
     HASHING = "hashing"
 
 
+#: The per-user data directory's name under ``Path.home()`` — the default
+#: :attr:`Settings.data_dir` (ADR-0083 §2). Moved here from the composition root
+#: with the field: the *value* is unchanged, so no deployment's directory moves;
+#: what changed is that the default now sits beside the setting that names it.
+_DEFAULT_DATA_DIRNAME: Final = ".ai-assistant"
+
+
 class Settings(BaseSettings):
     """Typed application settings.
 
@@ -577,6 +585,64 @@ class Settings(BaseSettings):
             msg = f"unknown log level {value!r}; expected one of: {known}"
             raise ValueError(msg)
         return normalised
+
+    # --- The resident process (ADR-0083) ---------------------------------
+    # Where the hub's state lives, and how long its graceful drain gets.
+    #
+    # ``data_dir`` is the hub's most basic configuration item and did not exist
+    # as a setting at all: the data directory was only ``build_engine``'s
+    # ``data_dir=`` keyword, resolved by a private helper. ADR-0083 §2 makes it a
+    # field so it is readable through ``Settings`` like everything else, and §1
+    # then makes it the thing **exclusive ownership and the instance lock are
+    # keyed to**. ADR-0084 §9 derives the hub's socket path from the same field,
+    # deliberately, so a hub and a client cannot disagree about where the data is.
+    #
+    # **The variable is ``ASSISTANT_DATA_DIR``** — the ``env_prefix`` above
+    # applied to the field name. ADR-0083 §2's prose printed
+    # ``AI_ASSISTANT_DATA_DIR``, which was wrong when written; its own amendment
+    # note and ADR-0084 §9 carry the correction and #535 is the record. The
+    # failure that name would cause is **silent**: ``extra="ignore"`` means an
+    # operator exporting it gets no error and lands on the default directory.
+    #
+    # The default is a factory rather than a literal because ``Path.home()`` is
+    # read at load, not at import — the same ``~/.ai-assistant`` the composition
+    # root resolved before, so no existing behaviour changes and the field is
+    # purely additive. ``build_engine`` keeps its ``data_dir=`` keyword, which
+    # overrides this when given: it is the injection seam every existing test
+    # uses (§2).
+    data_dir: Path = Field(
+        default_factory=lambda: Path.home() / _DEFAULT_DATA_DIRNAME,
+        description=(
+            "Directory the hub owns exclusively: the five SQLite stores, the "
+            "instance lock, and any transport-local artefact (ADR-0083 §1, §2)."
+        ),
+    )
+
+    # The budget for phase A of the hub's two-phase shutdown (ADR-0083 §4): how
+    # long tracked in-flight work is given to finish **on its own** before the
+    # remainder is cancelled and awaited unbounded.
+    #
+    # **The name is §4's, verbatim, and the type is §7's.** §4 names
+    # ``Settings.shutdown_drain_seconds, default 30 seconds``; §7 requires that
+    # "every duration this ADR adds is a ``timedelta`` refused at load time
+    # unless it is finite and strictly positive". A ``float`` of seconds would
+    # match the name and break the rule, so the name is kept and the type is a
+    # duration — parsed from an ISO-8601 or ``HH:MM:SS`` string in the
+    # environment like every other one (``ASSISTANT_SHUTDOWN_DRAIN_SECONDS=PT45S``).
+    #
+    # ``gt=timedelta(0)`` is not housekeeping here. §7 is explicit that "a
+    # ``shutdown_drain_seconds`` of zero silently deletes §4's phase A", and
+    # phase A is the whole mechanism that keeps the graceful path reachable
+    # before a supervisor's stop timeout turns into ``SIGKILL`` — which destroys
+    # exactly the ADR-0029 §4 bookkeeping the drain exists to preserve.
+    shutdown_drain_seconds: _DurationSetting = Field(
+        default=timedelta(seconds=30),
+        gt=timedelta(0),
+        description=(
+            "How long shutdown waits for in-flight work to finish on its own before "
+            "cancelling the remainder and awaiting it (ADR-0083 §4). Positive and finite."
+        ),
+    )
 
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
