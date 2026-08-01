@@ -34,7 +34,6 @@ production.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -46,6 +45,7 @@ from ai_assistant.core.types import (
     Goal,
     MemorySource,
     Provenance,
+    TurnResult,
 )
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 
@@ -60,8 +60,6 @@ if TYPE_CHECKING:
         Planner,
     )
     from ai_assistant.core.types import (
-        ActionPlan,
-        CurrentContext,
         FeedbackEvent,
         MemoryRecord,
     )
@@ -112,39 +110,6 @@ def _check_tuning(*, retrieval_limit: int) -> None:
     if retrieval_limit < 1:
         msg = f"retrieval_limit must be at least 1, got {retrieval_limit}"
         raise ValueError(msg)
-
-
-@dataclass(frozen=True, slots=True)
-class TurnResult:
-    """What one conversational turn produced (ADR-0022 §2).
-
-    A frozen dataclass in `orchestration` rather than a pydantic model in
-    ``core/types.py``, because it crosses no *subsystem* boundary: only
-    `interfaces`, which already depends on this package, ever sees one. It
-    graduates to ``core`` on the day a subsystem needs to receive one.
-
-    Attributes:
-        goal: The objective this turn was planned against, minted from the
-            utterance.
-        context: The situational context assembled for the turn.
-        memories: What the pipeline assembled for this turn, in the order the
-            planner is handed it (ADR-0074 §5): the conversation's recent turns
-            **first**, in order, then the records retrieved as relevant, best
-            first within that group. Empty on the first turn of a fresh
-            conversation, and empty for whichever half degraded.
-        plan: What the planner decided to do.
-        memory_degraded: Whether assembling those records failed — retrieval, or
-            the conversation's history, or both — making ``plan`` a *generic*
-            answer rather than a personal one. Reported rather than swallowed:
-            an unpersonalised answer is the one failure a user of this system
-            most deserves to be told about.
-    """
-
-    goal: Goal
-    context: CurrentContext
-    memories: tuple[MemoryRecord, ...]
-    plan: ActionPlan
-    memory_degraded: bool = False
 
 
 class LearningLoop:

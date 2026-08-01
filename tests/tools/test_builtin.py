@@ -21,6 +21,7 @@ import pytest
 from ai_assistant.core.clock import ClockReadingError
 from ai_assistant.core.types import (
     ActionPlan,
+    Disposition,
     ExecutionState,
     Goal,
     MemoryKind,
@@ -33,7 +34,10 @@ from ai_assistant.core.types import (
     ToolDefinition,
     ToolFailureKind,
 )
-from ai_assistant.orchestration import Disposition, StepExecutor, StepRunner
+from ai_assistant.orchestration import (
+    StepExecutor,
+    StepRunner,
+)
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakeMemoryStore, FakePlanStore
 from ai_assistant.tools import (
     CURRENT_TIME,

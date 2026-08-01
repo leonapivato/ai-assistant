@@ -42,6 +42,7 @@ from ai_assistant.core.errors import (
     UnknownConversationError,
 )
 from ai_assistant.core.types import (
+    ConversationDigest,
     EpisodicMemory,
     MemoryKind,
     MemorySource,
@@ -134,36 +135,6 @@ class AssembledHistory:
 
     records: tuple[MemoryRecord, ...] = ()
     degraded: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationDigest:
-    """What a person is shown before consenting to destroy a conversation (§8).
-
-    ADR-0073 §5's show-then-confirm, at the unit the user thinks in: "what will be
-    destroyed is shown before consent is taken, in a form a human can judge — for a
-    conversation, **the count and span** rather than every turn". Printing every
-    turn would be a transcript nobody can read at a prompt, and printing nothing
-    would be consent to destroy something unseen.
-
-    Attributes:
-        id: The conversation's id.
-        started_at: When it began.
-        last_turn_at: When a turn was last recorded in it, or ``None`` if none ever
-            was — the span's other end.
-        recorded_turns: How many turns its index holds. Read off the last ordinal
-            rather than counted, which is exact because ordinals are dense from
-            :data:`~ai_assistant.core.types.FIRST_TURN_ORDINAL` and nothing removes
-            a single row — they go only when the record is dropped. It counts
-            **recorded turns**, not surviving episodes: a turn whose episode expired
-            or was destroyed still happened, and this is the ceremony for destroying
-            the conversation rather than a report on its content.
-    """
-
-    id: str
-    started_at: datetime
-    last_turn_at: datetime | None
-    recorded_turns: int
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,51 +24,53 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     ActionPlan,
+    AnswerKind,
     BeliefBand,
+    BeliefSummary,
+    ContinuationToken,
     CostBasis,
     DataTier,
+    Disposition,
     EpisodicMemory,
+    Evidence,
     FeedbackEvent,
     FeedbackKind,
     Idempotency,
+    IngestSummary,
+    LearnDecision,
+    LearnOutcome,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryIngestResult,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
+    ObservationReport,
+    ObservedProposal,
     PlanStep,
     Provenance,
+    QuestionState,
+    QueueOutcome,
     Reversibility,
     RiskLevel,
     SemanticMemory,
     StepStatus,
     ToolCost,
     ToolDefinition,
+    TurnOutcome,
     Validity,
 )
 from ai_assistant.orchestration import (
-    AnswerKind,
-    Belief,
-    ContinuationToken,
     ConversationLifecycle,
-    Disposition,
     Engine,
-    Evidence,
-    IngestSummary,
-    LearnDecision,
-    LearnOutcome,
     MemoryWriteStage,
-    ObservationReport,
     ObservationStage,
-    ObservedProposal,
     QuestionStage,
-    QuestionState,
-    QueueOutcome,
     StepExecutor,
     StepRunner,
-    TurnOutcome,
     WriteOutcome,
+    belief_from_record,
+    learn_outcome,
     presented_confidence,
 )
 from ai_assistant.orchestration.loop import LearningLoop
@@ -464,7 +466,9 @@ async def test_resume_with_an_unrecognised_token_is_refused() -> None:
     """A token this engine never minted names no parked step (§4 lifetime)."""
     harness = Harness(tools=(confirmable(),))
     with pytest.raises(PlanningError, match="no step awaiting confirmation"):
-        await harness.engine.resume(ContinuationToken("fabricated"), approved=True, timeout=PATIENT)
+        await harness.engine.resume(
+            ContinuationToken(handle="fabricated"), approved=True, timeout=PATIENT
+        )
 
 
 async def test_the_token_is_opaque_process_scoped_state() -> None:
@@ -508,7 +512,7 @@ async def test_pending_confirmations_is_empty_when_nothing_is_parked() -> None:
     executed = await harness.engine.converse("send it", timeout=PATIENT)
     assert executed.step is not None
     assert executed.step.disposition is Disposition.EXECUTED
-    assert await harness.engine.pending_confirmations() == []
+    assert await harness.engine.pending_confirmations() == ()
 
 
 async def test_pending_confirmations_recovers_a_park_for_a_fresh_facade() -> None:
@@ -567,7 +571,7 @@ async def test_a_recovered_confirmation_resolved_is_no_longer_presented() -> Non
     assert denied.step.disposition is Disposition.DENIED
 
     # The binding is decided; recovery presents nothing further.
-    assert await fresh.pending_confirmations() == []
+    assert await fresh.pending_confirmations() == ()
 
 
 async def test_pending_confirmations_recovers_a_dropped_in_process_token() -> None:
@@ -640,7 +644,7 @@ async def test_a_recovered_entry_resolved_elsewhere_is_pruned() -> None:
     await facade_b.resume(b_pending[0].token, approved=True, timeout=PATIENT)
 
     # A recovers again: nothing pending now, and A's stale entry is pruned.
-    assert await facade_a.pending_confirmations() == []
+    assert await facade_a.pending_confirmations() == ()
     assert facade_a._parked == {}
 
 
@@ -682,7 +686,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         await facade_a.converse("send another", timeout=PATIENT)  # consumes g-2
 
     # Recovery reconciles the stale entry away — it is no longer pending in the trail.
-    assert await facade_a.pending_confirmations() == []
+    assert await facade_a.pending_confirmations() == ()
     assert facade_a._parked == {}
 
     # The ceiling is freed: A drives a fresh turn again.
@@ -1630,7 +1634,7 @@ def test_from_results_maps_every_decision_kind(
     """Every ``core`` ruling has a faithful orchestration echo (§1, exhaustive)."""
     decision = _decision(kind)
     stored = None if kind in {MemoryDecisionKind.REJECT, MemoryDecisionKind.ASK_USER} else "rec-1"
-    outcome = LearnOutcome.from_results(
+    outcome = learn_outcome(
         (_write_outcome(MemoryIngestResult(decision=decision, record_id=stored)),)
     )
     summary = outcome.results[0]
@@ -1650,7 +1654,7 @@ def test_from_results_preserves_order_across_multiple_results() -> None:
             MemoryIngestResult(decision=_decision(MemoryDecisionKind.REJECT), record_id=None)
         ),
     )
-    outcome = LearnOutcome.from_results(results)
+    outcome = learn_outcome(results)
     assert [s.decision for s in outcome.results] == [LearnDecision.STORED, LearnDecision.REJECTED]
     assert outcome.stored == 1
 
@@ -1757,7 +1761,7 @@ def test_from_record_applies_the_band_projection_in_the_engine(
 ) -> None:
     """Every source is classified here, once, so no adapter ever has to (ADR-0073 §7)."""
     confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
-    belief = Belief.from_record(_record("rec-1", source=source, confidence=confidence))
+    belief = belief_from_record(_record("rec-1", source=source, confidence=confidence))
     assert belief.band is band
     assert belief.confidence == confidence
 
@@ -1765,7 +1769,7 @@ def test_from_record_applies_the_band_projection_in_the_engine(
 def test_from_record_carries_exactly_what_the_surface_must_convey() -> None:
     """The DTO carries ADR-0073 §4's fields: id, band, kind, content, confidence, times."""
     until = datetime(2026, 8, 1, tzinfo=UTC)
-    belief = Belief.from_record(
+    belief = belief_from_record(
         _record(
             "rec-1",
             source=MemorySource.INFERRED,
@@ -1790,7 +1794,7 @@ def test_from_record_carries_resolved_evidence_and_never_ids() -> None:
     explicit tombstone; what it still never carries is an id, which is what stops an
     adapter passing one off as the warrant.
     """
-    belief = Belief.from_record(
+    belief = belief_from_record(
         _record("rec-1", source=MemorySource.INFERRED, confidence=0.5, evidence=("ep-1", "ep-2")),
         (Evidence(content="they said so"), Evidence()),
     )
@@ -1801,7 +1805,7 @@ def test_from_record_carries_resolved_evidence_and_never_ids() -> None:
 
 def test_from_record_drops_the_relevance_score() -> None:
     """Nothing was ranked on this path, so no score is carried (ADR-0073 §2, §7)."""
-    belief = Belief.from_record(_record("rec-1", score=0.93))
+    belief = belief_from_record(_record("rec-1", score=0.93))
     assert not hasattr(belief, "score")
 
 
@@ -1812,8 +1816,11 @@ async def test_beliefs_lists_what_memory_holds_in_the_store_s_own_order() -> Non
     await harness.memory.add(_record("newer", last_updated=AT))
 
     page = await harness.engine.beliefs()
-    assert [belief.id for belief in page] == ["newer", "older"]  # the store's order, unchanged
-    assert all(isinstance(belief, Belief) for belief in page)
+    assert [summary.id for summary in page] == ["newer", "older"]  # the store's order, unchanged
+    # The listing ships summaries, not beliefs (ADR-0085 §4a): a `BeliefSummary` has
+    # no field a citation's content could occupy, so no page can carry the corpus.
+    assert all(isinstance(summary, BeliefSummary) for summary in page)
+    assert all(not hasattr(summary, "evidence") for summary in page)
     assert page[0].band is BeliefBand.ASSERTED
 
 
@@ -2334,7 +2341,7 @@ async def test_observe_delegates_to_the_stage_and_reports_what_happened() -> Non
     harness = Harness()
     conversation = await _one_captured_turn(harness)
 
-    report = await harness.engine.observe(conversation)
+    report = await harness.engine.observe(conversation_id=conversation)
 
     assert isinstance(report, ObservationReport)
     assert report.conversation_id == conversation
@@ -2376,7 +2383,7 @@ async def test_observe_is_drained_before_shutdown_closes_resources() -> None:
     )
     conversation = await _one_captured_turn(harness)
 
-    running = asyncio.ensure_future(harness.engine.observe(conversation))
+    running = asyncio.ensure_future(harness.engine.observe(conversation_id=conversation))
     await gate.reached()
     shutdown = asyncio.ensure_future(harness.engine.aclose())
     await asyncio.sleep(0)

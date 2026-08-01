@@ -32,19 +32,19 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     DeferralAdmissionOutcome,
     EpisodicMemory,
+    LearnDecision,
     MemoryDecision,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
     MemoryUpdateProposal,
     ObservationOutcome,
+    ObservationReport,
     Provenance,
     SemanticMemory,
 )
 from ai_assistant.orchestration import (
-    LearnDecision,
     MemoryWriteStage,
-    ObservationReport,
     ObservationStage,
 )
 from ai_assistant.testing import (

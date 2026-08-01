@@ -43,7 +43,6 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import structlog
@@ -53,6 +52,7 @@ from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import AuditError, PermissionDeniedError, PlanningError
 from ai_assistant.core.types import (
     ActionRequest,
+    Disposition,
     ExecutionState,
     PermissionDecision,
     PermissionOutcome,
@@ -200,43 +200,15 @@ def _detached_state(state: ExecutionState) -> ExecutionState:
         raise PlanningError(msg) from exc
 
 
-class Disposition(StrEnum):
-    """What became of one plan step at this stage (ADR-0037 §1, §4, §5).
-
-    Five members, and the two that commit nothing are as much a result as the
-    three that do: a step this stage declines to act on is a fact its caller has
-    to be told, not an error.
-    """
-
-    EXECUTED = "executed"
-    """The call was authorised and handed to the executor; ``state`` carries the
-    outcome the executor committed."""
-
-    DENIED = "denied"
-    """The policy refused. The step is ``SKIPPED``/``APPROVAL_DENIED``, naming
-    the recorded decision."""
-
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
-    """The policy wants a human answer. The step is durably
-    ``AWAITING_APPROVAL``; :meth:`StepRunner.resume` continues it."""
-
-    NO_CAPABLE_TOOL = "no_capable_tool"
-    """Nothing advertises the step's capability. The step is
-    ``SKIPPED``/``NO_CAPABLE_TOOL`` (ADR-0014 §4)."""
-
-    AMBIGUOUS_CAPABILITY = "ambiguous_capability"
-    """Several tools advertise it and no rule chooses between them (ADR-0037 §1,
-    #241). Nothing is committed and the step stays ``PENDING``."""
-
-
 @dataclass(frozen=True, slots=True)
 class StepDisposition:
     """What one pass of :class:`StepRunner` did with a step (ADR-0037 §4).
 
-    A frozen dataclass in `orchestration` rather than a pydantic model in
-    ``core/types.py``, for :class:`~ai_assistant.orchestration.loop.TurnResult`'s
-    reason: it crosses no *subsystem* boundary. It graduates to ``core`` on the
-    day a subsystem needs to receive one.
+    A frozen dataclass in `orchestration` and **not** on the promoted surface: it
+    is a *stage* type no public method returns and no promoted field reaches, so
+    ADR-0085 §5's walk never gets to it and §6c leaves it exactly where it is.
+    :class:`~ai_assistant.core.types.StepOutcome` is what the engine hands a client
+    instead, richer by the confirmation content a bare tool id cannot convey.
 
     Attributes:
         disposition: Which of the five outcomes happened.

@@ -16,6 +16,7 @@ from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.deferrals import FakeDeferralStore
 from ai_assistant.testing.embeddings import FakeEmbedder
+from ai_assistant.testing.engine import FakeAssistantEngine
 from ai_assistant.testing.invoker import FakeToolImplementation, FakeToolInvoker, succeeds
 from ai_assistant.testing.learning import FakeFeedbackProcessor
 from ai_assistant.testing.memory import FakeMemoryStore
@@ -37,6 +38,7 @@ __all__ = [
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
     "FakeActionPolicy",
+    "FakeAssistantEngine",
     "FakeAuditTrail",
     "FakeContextProvider",
     "FakeConversationStore",

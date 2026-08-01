@@ -44,18 +44,23 @@ asserts it structurally.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import TYPE_CHECKING, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import DeferralStoreError, MemoryStoreError
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    AnswerKind,
+    AnswerOutcome,
     DeferralAdmissionOutcome,
     DeferralState,
     MemoryDecisionKind,
     MemoryKind,
+    Question,
+    QuestionState,
+    Retirement,
+    SuccessorLink,
     UserConfirmation,
     band_of,
 )
@@ -67,18 +72,11 @@ if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import DeferralStore, MemoryStore, MemoryWriter
     from ai_assistant.core.types import (
-        BeliefBand,
         DeferralClaim,
         DeferredProposal,
         MemoryIngestResult,
         MemoryUpdateProposal,
     )
-
-#: Default page size for both enumerations, restated here rather than left to the
-#: store's own default so the façade's signature says what a caller gets by saying
-#: nothing — and relayed explicitly on every call, so a store whose default drifted
-#: could not silently change what this surface returns (ADR-0073 §2, §8).
-DEFAULT_QUESTION_PAGE = 50
 
 
 def _uuid() -> str:
@@ -87,40 +85,6 @@ def _uuid() -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-class QuestionState(StrEnum):
-    """Where a question stands, as a surface says it (ADR-0078 §8).
-
-    The ``orchestration``-level echo of
-    :class:`~ai_assistant.core.types.DeferralState`, so an adapter can render a
-    question without importing ``core`` — the same boundary every other result DTO
-    on this façade holds (ADR-0042 §1). One member per ``DeferralState``
-    (:func:`question_state`), named for what the user can *do* rather than for the
-    row's internal label.
-    """
-
-    OPEN = "open"
-    """Answerable: nobody has begun an answer (``PENDING``)."""
-
-    INTERRUPTED = "interrupted"
-    """An answer was begun and its outcome is not recorded (``APPLYING``).
-
-    Not "failed" and not "retryable": the system does **not** know whether the
-    memory write landed, which is the actual epistemic situation (ADR-0078 §9).
-    """
-
-    DECLINED = "declined"
-    """The user said no, and the record is retained so they are not re-asked."""
-
-    APPLIED = "applied"
-    """The answer was applied and a record is live (``ACCEPTED``)."""
-
-    STALE = "stale"
-    """The answer arrived and the belief it was about no longer applied."""
-
-    REDEFERRED = "redeferred"
-    """The answer was used and raised a further question the record names."""
 
 
 def question_state(state: DeferralState) -> QuestionState:
@@ -146,150 +110,6 @@ def question_state(state: DeferralState) -> QuestionState:
             return QuestionState.REDEFERRED
         case _:  # pragma: no cover — exhaustive over the enum
             assert_never(state)
-
-
-@dataclass(frozen=True, slots=True)
-class Retirement:
-    """One record a question's answer would retire (ADR-0078 §8).
-
-    **Not decoration: this is the exact scope the answer authorises** (§5). The
-    content is resolved through the ratified ``MemoryStore.get``, which hides a
-    closed window (ADR-0045 §6) — so a conflict retired since the question was asked
-    does not resolve, and renders as *no longer held* rather than being omitted. The
-    user should be told that the thing they would be overruling is already gone.
-
-    Attributes:
-        record_id: The conflict's id, opaque data an adapter may echo.
-        content: What that record says, or ``None`` when it is no longer held.
-    """
-
-    record_id: str
-    content: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class SuccessorLink:
-    """A question raised by an answer, and the state it is in (ADR-0078 §7, §9).
-
-    The state is carried because **naming it without its state would be the failure
-    §9 names**: a ``PENDING`` successor is a question the user can go and answer, a
-    ``DECLINED`` one means they already declined this and must forget it to be asked
-    again, and an ``INTERRUPTED`` one is another interrupted answer. Calling any of
-    those "the follow-on question" would tell a user their answer raised something
-    askable when it raised nothing they can act on.
-    """
-
-    id: str
-    state: QuestionState
-
-
-@dataclass(frozen=True, slots=True)
-class Question:
-    """A deferred memory decision, as the user is shown it (ADR-0078 §8).
-
-    A frozen ``orchestration`` dataclass beside :class:`Belief`,
-    :class:`Confirmation` and :class:`TurnOutcome`, for their reason (ADR-0042 §1:
-    it crosses no *subsystem* boundary, only `interfaces`) and for ADR-0073 §7's
-    deciding reason — ``band_of`` is applied here, in the engine, so no adapter
-    classifies anything.
-
-    Attributes:
-        id: The question's id, which :meth:`QuestionStage.answer` and
-            :meth:`QuestionStage.forget_question` take.
-        state: Where it stands, and therefore what the user can do about it.
-        content: What accepting would have the assistant believe.
-        kind: Which typed memory it would establish.
-        band: The band the record **would** enter if accepted — a conditional, never
-            a belief held. A pending question is not a belief of any band (§1):
-            ``band_of`` applied to its proposal says only where it would land.
-        rationale: Why the proposal was made, in its producer's words.
-        reason: **Why the user is being asked** — the ``ASK_USER`` ruling's own
-            non-optional ``reason``.
-        retires: What accepting would retire, resolved to content (:class:`Retirement`).
-        asked_at: When the question was admitted.
-        expires_at: When it stops being answerable, or ``None`` under the user's
-            deliberate "ask me forever".
-        successor: The question this one's answer already raised, when it has one —
-            the state a cancellation caught after a re-deferral admitted a successor
-            leaves behind (§9).
-    """
-
-    id: str
-    state: QuestionState
-    content: str
-    kind: MemoryKind
-    band: BeliefBand
-    rationale: str
-    reason: str
-    retires: tuple[Retirement, ...]
-    asked_at: datetime
-    expires_at: datetime | None
-    successor: SuccessorLink | None = None
-
-
-class AnswerKind(StrEnum):
-    """What answering a question produced (ADR-0078 §8).
-
-    Four outcomes the ADR names — *applied*, *rejected*, *stale* and *re-deferred* —
-    plus the one an answer to a question that is not open produces. Rendering a
-    re-deferral as a failure would be a lie in a small place, so it is its own
-    member and carries the successor.
-    """
-
-    APPLIED = "applied"
-    """The correction landed; ``record_id`` names what is now live."""
-
-    REJECTED = "rejected"
-    """Nothing was written. Either the user declined, or the policy ruled
-    ``REJECT`` on the re-submitted proposal — a conforming policy that is not the
-    default one may, and the mapping to a terminal state is **total** so such an
-    answer resolves rather than stranding (ADR-0078 §2)."""
-
-    STALE = "stale"
-    """The proposal's own validity window had closed by the answer instant, so
-    accepting would have written a belief born dead (ADR-0078 §6). Distinct from a
-    lapsed deadline: telling a user who answered promptly they were too slow would
-    be the wrong sentence."""
-
-    REDEFERRED = "redeferred"
-    """The answer was **used** and raised a further question, because re-ingesting
-    surfaced an assertion the user was never shown (ADR-0078 §5a). A completed
-    answer, not a failed one."""
-
-    NOT_OPEN = "not_open"
-    """That question is not open — absent, lapsed, already being answered, or
-    already answered. Nothing was written."""
-
-
-@dataclass(frozen=True, slots=True)
-class AnswerOutcome:
-    """What one answer did (ADR-0078 §8, §9).
-
-    Attributes:
-        kind: Which of the five outcomes happened.
-        question_id: The question that was answered, echoed back.
-        record_id: What an applied answer left live; ``None`` otherwise.
-        successor: The question a re-deferred answer raised — newly admitted, or the
-            already-open one it collapsed onto — with the state that decides what to
-            say about it. ``None`` when no successor could be queued.
-        successor_refused: Whether a re-deferral could queue **no** follow-on
-            question at all, because the queue was full and this admission had no
-            exemption to spend (which happens only where the parent was destroyed
-            mid-apply, since an exempt admission never consults the cap). Reporting
-            it as an ordinary re-deferral would claim a question was asked when none
-            was, which is the one sentence ADR-0078 cannot write.
-        disposed: Whether the question was **destroyed while its answer was being
-            applied**, so the bookkeeping found nothing. A true statement the caller
-            reports; what it reports *about the answer* comes from the ingest, which
-            it still holds, and never from the failed bookkeeping (ADR-0078 §9).
-    """
-
-    kind: AnswerKind
-    question_id: str
-    record_id: str | None = None
-    successor: SuccessorLink | None = None
-    successor_refused: bool = False
-    disposed: bool = False
 
 
 class QuestionStage:
@@ -346,7 +166,7 @@ class QuestionStage:
         self._id_factory = id_factory
 
     async def questions(
-        self, *, limit: int = DEFAULT_QUESTION_PAGE, offset: int = 0
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
     ) -> tuple[Question, ...]:
         """Enumerate the **answerable** questions, oldest first (ADR-0078 §2, §7, §8).
 
@@ -378,7 +198,7 @@ class QuestionStage:
         return await self._page(await self._deferrals.pending(limit=limit, offset=offset))
 
     async def interrupted_questions(
-        self, *, limit: int = DEFAULT_QUESTION_PAGE, offset: int = 0
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
     ) -> tuple[Question, ...]:
         """Enumerate the questions whose answer was begun and never recorded (§9).
 

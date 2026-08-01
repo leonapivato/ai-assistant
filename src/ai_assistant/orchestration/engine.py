@@ -59,50 +59,71 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any, TypeVar, assert_never
 
 import structlog
 
-from ai_assistant.core.errors import ConversationStoreError, PlanningError
+from ai_assistant.core.errors import (
+    ConversationStoreError,
+    PlanningError,
+    UnknownContinuationError,
+)
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
+    Belief,
+    BeliefSummary,
+    Confirmation,
+    ContinuationToken,
+    ConversationSummary,
     DeferralAdmissionOutcome,
+    Disposition,
+    Evidence,
+    IngestSummary,
+    LearnDecision,
+    LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
     ParkedBinding,
+    QueuedQuestion,
+    QueueOutcome,
+    StepOutcome,
     StepStatus,
+    TurnOutcome,
     band_of,
 )
-from ai_assistant.orchestration.questions import (
-    DEFAULT_QUESTION_PAGE,
-    AnswerOutcome,
-    Question,
-    QuestionState,
-    question_state,
+from ai_assistant.orchestration.payloads import (
+    DEFAULT_MAX_PAYLOAD_BYTES,
+    check_arguments,
+    check_payload,
+    identifier,
+    page_argument,
 )
-from ai_assistant.orchestration.runner import Disposition
+from ai_assistant.orchestration.questions import question_state
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     from ai_assistant.core.protocols import AuditTrail, MemoryStore, PlanStore
     from ai_assistant.core.types import (
+        AnswerOutcome,
         BeliefBand,
         Conversation,
+        ConversationDigest,
         DeferralAdmission,
-        ExecutionState,
+        EncodableText,
         FeedbackEvent,
         FrozenJsonMapping,
+        Identifier,
         MemoryRecord,
+        ObservationReport,
         PermissionDecision,
+        Question,
+        TurnResult,
     )
-    from ai_assistant.orchestration.conversations import (
-        ConversationDigest,
-        ConversationLifecycle,
-    )
-    from ai_assistant.orchestration.loop import LearningLoop, TurnResult
-    from ai_assistant.orchestration.observation import ObservationReport, ObservationStage
+    from ai_assistant.orchestration.conversations import ConversationLifecycle
+    from ai_assistant.orchestration.loop import LearningLoop
+    from ai_assistant.orchestration.observation import ObservationStage
     from ai_assistant.orchestration.questions import QuestionStage
     from ai_assistant.orchestration.runner import StepDisposition, StepRunner
     from ai_assistant.orchestration.writes import WriteOutcome
@@ -116,353 +137,83 @@ _T = TypeVar("_T")
 #: it, low enough that an abandoning client cannot exhaust memory.
 _DEFAULT_MAX_OUTSTANDING = 1024
 
-#: Default page size for :meth:`Engine.beliefs`. Restated here rather than left to
-#: ``MemoryStore.list_beliefs``'s own default so the façade's signature says what a
-#: caller gets by saying nothing (ADR-0073 §2's bounded default, 50, matching
-#: ``AuditTrail.recent``). It is relayed explicitly on every call, so a store whose
-#: default drifted could not silently change what this surface returns.
-_DEFAULT_BELIEF_PAGE = 50
-
-#: Default page size for :meth:`Engine.recent_conversations`, restated here for the
-#: reason :data:`_DEFAULT_BELIEF_PAGE` is: the façade's signature should say what a
-#: caller gets by saying nothing, and it is relayed explicitly on every call so a
-#: store whose default drifted could not silently change this surface (ADR-0074
-#: §9.3's named default, 50, matching ``AuditTrail.recent``).
-_DEFAULT_CONVERSATION_PAGE = 50
+#: The page size every enumeration on this surface returns by saying nothing is
+#: :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and the three private
+#: constants that used to carry the figure in this package are gone (ADR-0085 §3a):
+#: the Protocol states these defaults, so they need a public name to refer to, and
+#: the default is a **contract clause** rather than a signature detail — an
+#: implementation called without ``limit`` behaves as though it had been passed.
+#: It is still relayed explicitly on every store call, so a store whose own default
+#: drifted could not silently change what this surface returns.
 
 
 def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-@dataclass(frozen=True, slots=True)
-class ContinuationToken:
-    """An opaque handle to a parked step (ADR-0042 §4).
+def queued_question(admission: DeferralAdmission) -> QueuedQuestion:
+    """Translate a ``core`` admission into the surface's own echo (ADR-0078 §7).
 
-    The adapter stores this and relays it back on :meth:`Engine.resume`. It
-    **must not** interpret, construct, or re-derive its contents: an adapter that
-    branched on the token to decide allow/deny would be authoring a permission
-    outcome in `interfaces/`, exactly what ADR-0042 §4 forbids. The ``handle`` is
-    deliberately meaningless outside the :class:`Engine` instance that minted it —
-    it names an entry in that instance's private table, nothing more.
+    A **module function rather than a classmethod**, like every other projection in
+    this package (ADR-0085 §6a): the promoted models carry their fields, not their
+    constructors. The rule is stated over *every* projection helper rather than
+    over the ones that would break the build, because a rule with exceptions is one
+    the next reader has to re-derive — and because a projection from a ``core``
+    record into a ``core`` DTO belongs to the layer that *decides* the projection.
 
-    **Lifetime is process-scoped.** The table lives in the engine object, so a
-    handle does not survive a restart. Making the continuation durable across a
-    restart is a separate concern ADR-0042's Revisit-if clause ties to #242; until
-    then a token is valid only within the process (and the ``Engine``) that
-    produced it.
+    It branches on the ``outcome`` and **never on an id comparison**, which is the
+    shape ADR-0078 §2 rejects: comparing the returned id to the one the coordinator
+    minted fails the moment a caller retries with the same id, and the surface would
+    announce a newly parked question over a suppressed one.
     """
+    match admission.outcome:
+        case DeferralAdmissionOutcome.ADMITTED:
+            outcome = QueueOutcome.QUEUED
+        case DeferralAdmissionOutcome.SUPPRESSED:
+            outcome = QueueOutcome.ALREADY_ASKED
+        case DeferralAdmissionOutcome.REFUSED:
+            # No deferral to read at all — reaching for one here is the
+            # dereference the three-shape validator exists to prevent.
+            return QueuedQuestion(outcome=QueueOutcome.QUEUE_FULL)
+        case _:  # pragma: no cover — exhaustive over the enum
+            assert_never(admission.outcome)
+    deferral = admission.deferral
+    if deferral is None:  # pragma: no cover — the validator pins the shapes
+        return QueuedQuestion(outcome=outcome)
+    return QueuedQuestion(
+        outcome=outcome,
+        question_id=deferral.id,
+        question_state=question_state(deferral.state),
+    )
 
-    handle: str
 
+def learn_outcome(outcomes: tuple[WriteOutcome, ...]) -> LearnOutcome:
+    """Translate the write stage's outcomes into the surface's summary.
 
-@dataclass(frozen=True, slots=True)
-class Confirmation:
-    """What a person needs to judge a parked action (ADR-0042 §4).
+    The one place a ``core``
+    :class:`~ai_assistant.core.types.MemoryIngestResult` or
+    :class:`~ai_assistant.core.types.DeferralAdmission` is read on the learn path;
+    everything a client sees downstream is a promoted type (ADR-0042 §1).
 
-    The engine assembles this because the adapter may not read the audit trail or
-    a ``PermissionDecision`` to recover it (ADR-0042 §6). The values are carried
-    **as data, not pre-formatted**: "safe" is target-specific — a parameter value
-    holding an ANSI escape or Rich markup is valid data a terminal would interpret
-    as a control sequence, but an HTTP front end encodes differently — so escaping
-    is each adapter's own job on render (ADR-0042 §4).
-
-    Attributes:
-        tool_id: The selected tool's id, human-readable and shown to the user.
-        tool_description: What the tool does, from the declaration ruled on.
-        parameters: The arguments it would run with, as structured data.
-        reason: The recorded ``CONFIRM`` ruling's own ``reason`` — the policy's
-            explanation of *why* confirmation is required (an off-device
-            disclosure, an unknown cost). Not optional: ``PermissionRuling.reason``
-            is "text shown to the user at the moment they decide", so a prompt
-            omitting it would drop what the user most needs (ADR-0042 §4).
-        token: The opaque continuation to relay back on :meth:`Engine.resume`.
+    **It cannot be a classmethod on the promoted model, and this is the helper that
+    proves the rule** (ADR-0085 §6a): it names
+    :class:`~ai_assistant.orchestration.writes.WriteOutcome`, which lives in
+    `orchestration`. Carried onto :class:`~ai_assistant.core.types.LearnOutcome` it
+    would put ``core -> orchestration`` in the import graph — the precise
+    ``lint-imports`` failure the closure is promoted to avoid, reintroduced by a
+    classmethod nobody counted as a field.
     """
-
-    tool_id: str
-    tool_description: str
-    parameters: FrozenJsonMapping
-    reason: str
-    token: ContinuationToken
-
-
-@dataclass(frozen=True, slots=True)
-class StepOutcome:
-    """What became of the one step a turn drove (ADR-0042 §3, §4).
-
-    Richer than the raw stage :class:`~ai_assistant.orchestration.runner.StepDisposition`,
-    which carries only ``state``, ``decision_id`` and ``tool_id`` — a bare tool id
-    is not enough for a human to judge "send email to X" (ADR-0042 §4). This is
-    the concrete reason the façade returns its own result type rather than a raw
-    stage DTO (ADR-0042 §1).
-
-    Attributes:
-        disposition: Which of the five outcomes the step reached.
-        state: The durable execution state after the last transition committed.
-        tool_id: The tool selected, or ``None`` where none was.
-        confirmation: Present **iff** ``disposition`` is
-            :attr:`~ai_assistant.orchestration.runner.Disposition.AWAITING_CONFIRMATION`
-            — the content and token the adapter renders and relays.
-    """
-
-    disposition: Disposition
-    state: ExecutionState
-    tool_id: str | None = None
-    confirmation: Confirmation | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class TurnOutcome:
-    """One unit of what a call produced (ADR-0042 §3).
-
-    A frozen dataclass in `orchestration`, like
-    :class:`~ai_assistant.orchestration.loop.TurnResult` and
-    :class:`~ai_assistant.orchestration.runner.StepDisposition`, for their reason:
-    it crosses no *subsystem* boundary, only `interfaces`, which already depends
-    on this package. It graduates to ``core`` on the day a subsystem needs to
-    receive one (ADR-0042 §1).
-
-    Attributes:
-        turn: The turn's goal, context, retrieved memories, plan, and — obliged to
-            be surfaced, not swallowed — whether retrieval degraded
-            (:attr:`~ai_assistant.orchestration.loop.TurnResult.memory_degraded`).
-            ``None`` on a resume driven from a **recovered** park (ADR-0052 §3):
-            a confirmation reconstructed from durable state after a restart has no
-            live turn — context and retrieved memories are ephemeral and were never
-            persisted — so a fabricated ``TurnResult`` would misrepresent what the
-            turn saw. The ``step`` — the resolution — is what a resume is for and is
-            always present.
-        step: The disposition of the step the engine drove, or ``None`` when the
-            plan had no step to drive. On a resumption this is the resolved step.
-        conversation_id: The conversation this turn ran under (ADR-0074 §2), which
-            a client keeps and presents to continue. ``None`` only on a resumption
-            whose parked binding no longer resolves to a turn — a park predating
-            capture, or one whose conversation the user deleted — which §3 ratifies
-            as "not captured at all, and no conversation invented".
-        capture_degraded: Whether the exchange went **unrecorded** (ADR-0074 §9
-            item 6). The answer is still the answer: capture failure degrades a
-            turn rather than failing it, because failing would throw away an answer
-            the user already has because the record of it could not be written. But
-            it is reported beside
-            :attr:`~ai_assistant.orchestration.loop.TurnResult.memory_degraded` and
-            not swallowed, because a user whose turns are silently not being
-            recorded will not find out until they try to continue.
-    """
-
-    turn: TurnResult | None
-    step: StepOutcome | None = None
-    conversation_id: str | None = None
-    capture_degraded: bool = False
-
-
-class LearnDecision(StrEnum):
-    """How memory folded one piece of feedback — the orchestration-level echo of a ruling.
-
-    The façade translates each raw :class:`~ai_assistant.core.types.MemoryIngestResult`
-    the loop returns into an :class:`IngestSummary` carrying one of these, so an
-    adapter can render what became of the feedback **without importing** ``core``'s
-    :class:`~ai_assistant.core.types.MemoryDecisionKind` — the same reason the
-    façade returns its own result DTOs rather than raw stage types (ADR-0042 §1).
-    One member per ``MemoryDecisionKind`` (:meth:`LearnOutcome.from_results`), named
-    for the effect on memory rather than the relation the policy names.
-    """
-
-    STORED = "stored"
-    """A new memory was written (``ACCEPT``)."""
-
-    REJECTED = "rejected"
-    """The proposal was refused; nothing was written (``REJECT``)."""
-
-    REINFORCED = "reinforced"
-    """An existing memory was strengthened by folding the proposal into it
-    (``REINFORCE``)."""
-
-    SUPERSEDED = "superseded"
-    """A prior belief was retired and the correction written in its place
-    (``SUPERSEDE``)."""
-
-    DEFERRED = "deferred"
-    """The policy wants a human answer before acting; nothing was written yet
-    (``ASK_USER``)."""
-
-    STORED_TEMPORARILY = "stored_temporarily"
-    """A memory was written with a retention window (``STORE_TEMPORARY``)."""
-
-
-class QueueOutcome(StrEnum):
-    """What became of the question a deferred ruling raised (ADR-0078 §7, §10 item 9).
-
-    The ``orchestration``-level echo of
-    :class:`~ai_assistant.core.types.DeferralAdmissionOutcome`, plus the one arm
-    ADR-0078 deliberately does **not** close. A closed set with a name because the
-    surface must say a *different sentence* for each — and because a single "not
-    stored, go answer it" line covering all four would tell a user to answer a
-    question that was never queued, which is the same dishonesty ``cli.py``'s old
-    comment was written to avoid, arriving from the other direction.
-    """
-
-    QUEUED = "queued"
-    """The question was parked, and ``question_id`` names it."""
-
-    ALREADY_ASKED = "already_asked"
-    """An existing question the key still speaks for stands in the way, and
-    ``question_id`` and ``question_state`` say **which and in what state** — a
-    declined one to forget, an interrupted answer to dispose of, or one still
-    waiting (ADR-0078 §7)."""
-
-    QUEUE_FULL = "queue_full"
-    """The answerable queue was at its cap, so nothing was queued and there is no
-    question to read. The refusal is **reported, not swallowed**: the cap refuses
-    the *new* question rather than evicting an old one, which is safe only because
-    the producer still holds what it proposed and can re-propose."""
-
-    NOT_QUEUABLE = "not_queuable"
-    """Secret-tier data, which is never queued at all (ADR-0078 §1). ADR-0004 §3
-    puts Tier 0 content in the OS keyring and forbids it a committed file, and a
-    durable queue is a file — so today's deferral is precisely what keeps such
-    content out of storage. This is the one ``ASK_USER`` ADR-0078 leaves
-    unanswerable, and it keeps the existing non-answerable line and the existing
-    reason."""
-
-
-@dataclass(frozen=True, slots=True)
-class QueuedQuestion:
-    """Where a deferred proposal's question went (ADR-0078 §7, §8 reach 1).
-
-    Carried on :class:`IngestSummary` so ``learn`` can point the user at the
-    question in the moment they submitted the correction — the reach that closes
-    issue #423's own scenario. An ``orchestration`` widening, not a contract change
-    (ADR-0042 §1).
-
-    Attributes:
-        outcome: Which of the four things happened.
-        question_id: The question parked, or the existing one standing in the way.
-            ``None`` for ``QUEUE_FULL`` and ``NOT_QUEUABLE``, where there is no
-            question to name.
-        question_state: The state of the question ``question_id`` names, for the
-            same reason :class:`~ai_assistant.orchestration.questions.SuccessorLink`
-            carries one: "you declined this" and "an answer to this may be
-            committing right now" are different sentences, and naming a question
-            without its state would render one as the other.
-    """
-
-    outcome: QueueOutcome
-    question_id: str | None = None
-    question_state: QuestionState | None = None
-
-    @classmethod
-    def from_admission(cls, admission: DeferralAdmission) -> QueuedQuestion:
-        """Translate a ``core`` admission into the surface's own echo.
-
-        The one place a :class:`~ai_assistant.core.types.DeferralAdmission` is read
-        on the learn path, exactly as :meth:`LearnOutcome.from_results` is the one
-        place a ``MemoryIngestResult`` is (ADR-0042 §1). It branches on the
-        ``outcome`` and **never on an id comparison**, which is the shape ADR-0078 §2
-        rejects: comparing the returned id to the one the coordinator minted fails
-        the moment a caller retries with the same id, and the surface would announce
-        a newly parked question over a suppressed one.
-        """
-        match admission.outcome:
-            case DeferralAdmissionOutcome.ADMITTED:
-                outcome = QueueOutcome.QUEUED
-            case DeferralAdmissionOutcome.SUPPRESSED:
-                outcome = QueueOutcome.ALREADY_ASKED
-            case DeferralAdmissionOutcome.REFUSED:
-                # No deferral to read at all — reaching for one here is the
-                # dereference the three-shape validator exists to prevent.
-                return cls(outcome=QueueOutcome.QUEUE_FULL)
-            case _:  # pragma: no cover — exhaustive over the enum
-                assert_never(admission.outcome)
-        deferral = admission.deferral
-        if deferral is None:  # pragma: no cover — the validator pins the shapes
-            return cls(outcome=outcome)
-        return cls(
-            outcome=outcome,
-            question_id=deferral.id,
-            question_state=question_state(deferral.state),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class IngestSummary:
-    """What became of one proposal folded from a piece of feedback (ADR-0042 §1).
-
-    The orchestration-level echo of a single
-    :class:`~ai_assistant.core.types.MemoryIngestResult`, carrying only what an
-    adapter needs to render a one-line confirmation and none of the raw ``core``
-    type it was translated from.
-
-    Attributes:
-        decision: How memory folded the proposal.
-        record_id: The id of the record left live by the write, or ``None`` when
-            nothing was stored (a rejection, or a deferral). Carried as opaque data
-            an adapter may echo, never interpret.
-        reason: The policy's own human-readable justification for the ruling,
-            surfaced for transparency — as a confirmation carries its ruling's
-            ``reason`` (ADR-0042 §4).
-        queued: Where the question a ``DEFERRED`` ruling raised went, and ``None``
-            on every other ruling. Present on **every** deferral, including the
-            secret-tier one nothing queues, because the distinguishing fact has to
-            reach the adapter for it to say anything honest (ADR-0078 §10 item 9).
-    """
-
-    decision: LearnDecision
-    record_id: str | None
-    reason: str
-    queued: QueuedQuestion | None = None
-
-    @property
-    def stored(self) -> bool:
-        """Whether the write left a record live in memory."""
-        return self.record_id is not None
-
-
-@dataclass(frozen=True, slots=True)
-class LearnOutcome:
-    """What one piece of feedback did to memory (ADR-0042 §1, §3).
-
-    The façade's result for :meth:`Engine.learn`, mirroring :class:`TurnOutcome`: a
-    frozen ``orchestration`` dataclass that crosses no *subsystem* boundary, only
-    `interfaces`, which already depends on this package. It **translates** the
-    ``tuple[MemoryIngestResult, ...]`` the
-    :class:`~ai_assistant.orchestration.loop.LearningLoop` returns into a summary an
-    adapter renders without touching a raw ``core`` type (:meth:`from_results`),
-    the same boundary the other result DTOs hold.
-
-    Attributes:
-        results: One :class:`IngestSummary` per proposal the feedback produced, in
-            the order they were applied — empty when the feedback proposed no update
-            at all.
-    """
-
-    results: tuple[IngestSummary, ...]
-
-    @property
-    def stored(self) -> int:
-        """How many proposals left a record live in memory."""
-        return sum(1 for summary in self.results if summary.stored)
-
-    @classmethod
-    def from_results(cls, outcomes: tuple[WriteOutcome, ...]) -> LearnOutcome:
-        """Translate the write stage's outcomes into an orchestration summary.
-
-        The one place a ``core``
-        :class:`~ai_assistant.core.types.MemoryIngestResult` or
-        :class:`~ai_assistant.core.types.DeferralAdmission` is read on the learn
-        path; everything an adapter sees downstream is ``orchestration``-level
-        (ADR-0042 §1).
-        """
-        return cls(
-            results=tuple(
-                IngestSummary(
-                    decision=learn_decision(outcome.result.decision.kind),
-                    record_id=outcome.result.record_id,
-                    reason=outcome.result.decision.reason,
-                    queued=_queued(outcome),
-                )
-                for outcome in outcomes
+    return LearnOutcome(
+        results=tuple(
+            IngestSummary(
+                decision=learn_decision(outcome.result.decision.kind),
+                record_id=outcome.result.record_id,
+                reason=outcome.result.decision.reason,
+                queued=_queued(outcome),
             )
+            for outcome in outcomes
         )
+    )
 
 
 def _queued(outcome: WriteOutcome) -> QueuedQuestion | None:
@@ -481,11 +232,11 @@ def _queued(outcome: WriteOutcome) -> QueuedQuestion | None:
         return None
     if outcome.admission is None:
         return QueuedQuestion(outcome=QueueOutcome.NOT_QUEUABLE)
-    return QueuedQuestion.from_admission(outcome.admission)
+    return queued_question(outcome.admission)
 
 
 def learn_decision(kind: MemoryDecisionKind) -> LearnDecision:
-    """Map a ``core`` memory ruling to its orchestration-level echo (ADR-0042 §1).
+    """Map a ``core`` memory ruling to its surface-level echo (ADR-0042 §1).
 
     Total by construction: every :class:`~ai_assistant.core.types.MemoryDecisionKind`
     is handled, so a new ruling added to ``core`` fails type-checking here until it
@@ -573,206 +324,80 @@ def presented_confidence(stored: float, *, cited: int, resolved: int) -> float:
     return floor + (stored - floor) * (resolved / cited)
 
 
-@dataclass(frozen=True, slots=True)
-class Evidence:
-    """One citation behind a belief, as a person reads it (ADR-0077 §6).
+def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()) -> Belief:
+    """Project one stored record into the belief a person reads (ADR-0073 §7).
 
-    **Resolved lazily, at this façade, and never by rewriting the record.** The
-    evidence tuple keeps the ids as written; a presenting read resolves each through
-    ``MemoryStore.get`` and renders what it finds. Eager rewriting at deletion time
-    is refused for a decisive reason rather than an economic one: most evidence loss
-    is *expiry*, which retention enforces at read time with no per-record event to
-    hook, so an eager mechanism would handle the conversation deletion and silently
-    leave every expired citation dangling.
+    The one place a ``core`` :class:`~ai_assistant.core.types.MemoryRecord` is read
+    on the single-belief path, and one of the two places
+    :func:`~ai_assistant.core.types.band_of` is applied — which is the deciding
+    reason this is a function in `orchestration` and not a constructor on the
+    promoted model (ADR-0085 §6a). ``band_of`` is ADR-0072 §1's projection and
+    ADR-0073 §7 puts it in the engine; putting it in ``core/types.py`` would make
+    ``core`` the home of a policy decision the engine owns.
 
-    **It carries no id, deliberately.** ADR-0073 §4's floor is that "a citation the
-    surface cannot render as evidence is never rendered *as* evidence — not as a
-    reassuring id, not silently dropped", and an adapter that never receives the id
-    cannot render one as though it were the warrant.
-
-    Attributes:
-        content: The cited record's own canonical text, or ``None`` where the
-            citation no longer resolves — a **tombstone**. The tombstone says an
-            evidence item stood here and is gone, and deliberately does not say what
-            it was, nor whether it was *deleted* or merely *expired*: the read cannot
-            tell those apart, and the user's question — "is there still something
-            behind this?" — is answered by absence either way.
+    ``evidence`` is resolved by the caller, because resolving it is a *store read*
+    and this is a pure projection. It must carry one entry per citation on the
+    record, in order: the presented confidence is computed from how many of them
+    resolved, so a caller that dropped the lost ones would report a belief as fully
+    supported at the exact moment it stopped being.
     """
+    provenance = record.provenance
+    resolved = sum(1 for item in evidence if not item.lost)
+    return Belief(
+        id=record.id,
+        band=band_of(provenance.source),
+        kind=MemoryKind(record.kind),
+        content=record.content,
+        confidence=presented_confidence(
+            provenance.confidence, cited=len(evidence), resolved=resolved
+        ),
+        evidence=evidence,
+        last_updated=provenance.last_updated,
+        valid_until=record.validity.valid_until,
+    )
 
-    content: str | None = None
 
-    @property
-    def lost(self) -> bool:
-        """Whether this citation no longer resolves."""
-        return self.content is None
+def belief_summary_from_record(record: MemoryRecord, *, cited: int, resolved: int) -> BeliefSummary:
+    """Project one stored record into the summary the **listing** ships (ADR-0085 §4a).
 
+    The listing's counterpart to :func:`belief_from_record`, and the difference is
+    the whole of ADR-0077 §6's split: this takes *how many* citations resolved
+    rather than the resolved citations themselves, so no citation's content can
+    reach a page. ADR-0073 §4's floor — "a citation the surface cannot render as
+    evidence is never rendered *as* evidence" — becomes a static guarantee here
+    rather than a convention, because a
+    :class:`~ai_assistant.core.types.BeliefSummary` holds no citations at all.
 
-@dataclass(frozen=True, slots=True)
-class Belief:
-    """One live belief, as a person reads it (ADR-0073 §4, §7).
+    The adjusted confidence still needs the counts, which is why the listing keeps
+    resolving *existence* per citation (ADR-0077 §6).
 
-    A frozen ``orchestration`` dataclass beside :class:`TurnOutcome` and
-    :class:`IngestSummary` and for their reason: it crosses no *subsystem*
-    boundary, only `interfaces`, which already depends on this package (ADR-0042
-    §1). It is deliberately **not** a raw
-    :class:`~ai_assistant.core.types.MemoryRecord`, and the deciding reason is not
-    tidiness — :func:`~ai_assistant.core.types.band_of` is applied *here*, once, in
-    the engine (:meth:`from_record`), because an adapter doing it would put
-    ADR-0072 §1's projection into `interfaces/`. It also flattens the four-member
-    discriminated union an adapter would otherwise branch over, and drops ``score``,
-    which is meaningless on a path where nothing was ranked (ADR-0073 §2).
-
-    **What it carries is exactly ADR-0073 §4's list, and the omissions are ruled
-    rather than incidental.** The kind-specific fields (a preference's ``strength``,
-    an episode's ``participants``) are not carried: ``content`` is the store's own
-    canonical text rendering of every kind. ``SemanticMemory.valid_until`` is not
-    carried either, and is named here because it shares a name with
-    :attr:`valid_until` below while meaning something else — a content-declared
-    fact expiry, not the operational live-belief window.
-
-    **The evidence citations are carried as resolved values and never as ids**,
-    which is ADR-0073 §4's floor made structural: a derived belief must not be
-    presented as carrying a warrant the surface cannot show, and "a citation the
-    surface cannot render as evidence is never rendered *as* evidence — not as a
-    reassuring id, not silently dropped." An adapter that never receives the ids
-    cannot render one as though it were the evidence. ADR-0073 §4 deferred resolving
-    them **with a gate** — a precondition of the first producer of derived beliefs
-    shipping (#431) — and ADR-0077 §6 discharges it: :attr:`evidence` is that field,
-    and a citation that no longer resolves arrives as an explicit tombstone.
-
-    Attributes:
-        id: The record's id, opaque, and what :meth:`Engine.forget` names.
-        band: The standing the belief is held with (ADR-0072 §2), projected from
-            its provenance source. Never omitted, and never left to be implied by
-            position (ADR-0073 §4).
-        kind: Which of the four typed memories this is — what the ``kinds`` filter
-            selects on, and the difference between reading a preference and a fact.
-        content: The canonical text rendering of the belief.
-        confidence: How strongly it is held, in ``[0, 1]`` — **the presented
-            value**, already adjusted for lost support (:func:`presented_confidence`,
-            ADR-0077 §6). The stored number is not carried, and that is the point:
-            every surface that states a confidence must state the adjusted one, and
-            a DTO offering both would let two surfaces quote different numbers for
-            one belief. The record itself is untouched, and ``export`` still carries
-            it as stored.
-        evidence: One entry per citation, in the order the record wrote them —
-            resolved to readable content, or a tombstone where it no longer
-            resolves. Empty for an assertion, whose warrant is the user's own word
-            (ADR-0038 §1a) and needs no citation.
-        last_updated: The transaction stamp — when *the assistant* last revised this
-            belief (ADR-0045 §3) — which is also the enumeration's sort key. It is
-            **our** clock and not a source's: an attested belief synced on Tuesday
-            from a calendar that said so on Monday carries Tuesday here, so a
-            renderer must not offer this as when a source said so (ADR-0073 §4).
-        valid_until: The end of the belief's validity window, where one is set;
-            ``None`` where the window is open. Every listed belief is live by
-            construction, so an open window carries no information and a set end
-            does ("believed until…").
+    Args:
+        record: The stored record.
+        cited: How many citations the record carries.
+        resolved: How many of them still resolve to a record the store holds.
     """
-
-    id: str
-    band: BeliefBand
-    kind: MemoryKind
-    content: str
-    confidence: float
-    last_updated: datetime
-    evidence: tuple[Evidence, ...] = ()
-    valid_until: datetime | None = None
-
-    @property
-    def evidence_count(self) -> int:
-        """How many citations stand behind it, resolved or not."""
-        return len(self.evidence)
-
-    @property
-    def lost_evidence(self) -> int:
-        """How many of its citations no longer resolve."""
-        return sum(1 for item in self.evidence if item.lost)
-
-    @property
-    def unsupported(self) -> bool:
-        """Whether every citation behind it has gone (ADR-0077 §6).
-
-        A belief in this state is **held, marked and answerable — not auto-retired**:
-        retiring it would be the cascade under a softer name, and it may be perfectly
-        true. It sits at its effective floor, ``forget`` still destroys it, and the
-        user asserting it themselves still supersedes it into the asserted band.
-
-        ``False`` for a belief that cites nothing at all: an assertion is not
-        unsupported, it is supported by the user's own word.
-        """
-        return bool(self.evidence) and all(item.lost for item in self.evidence)
-
-    @classmethod
-    def from_record(cls, record: MemoryRecord, evidence: tuple[Evidence, ...] = ()) -> Belief:
-        """Project one stored record into the belief a person reads (ADR-0073 §7).
-
-        The one place a ``core``
-        :class:`~ai_assistant.core.types.MemoryRecord` is read on the inspection
-        path, and the one place :func:`~ai_assistant.core.types.band_of` is applied
-        — everything an adapter sees downstream is ``orchestration``-level, exactly
-        as :meth:`LearnOutcome.from_results` holds that boundary on the learn path.
-
-        ``evidence`` is resolved by the caller, because resolving it is a *store
-        read* and this is a pure projection. It must carry one entry per citation on
-        the record, in order: the presented confidence is computed from how many of
-        them resolved, so a caller that dropped the lost ones would report a belief
-        as fully supported at the exact moment it stopped being.
-        """
-        provenance = record.provenance
-        resolved = sum(1 for item in evidence if not item.lost)
-        return cls(
-            id=record.id,
-            band=band_of(provenance.source),
-            kind=MemoryKind(record.kind),
-            content=record.content,
-            confidence=presented_confidence(
-                provenance.confidence, cited=len(evidence), resolved=resolved
-            ),
-            evidence=evidence,
-            last_updated=provenance.last_updated,
-            valid_until=record.validity.valid_until,
-        )
+    provenance = record.provenance
+    return BeliefSummary(
+        id=record.id,
+        band=band_of(provenance.source),
+        kind=MemoryKind(record.kind),
+        content=record.content,
+        confidence=presented_confidence(provenance.confidence, cited=cited, resolved=resolved),
+        last_updated=provenance.last_updated,
+        evidence_count=cited,
+        lost_evidence=cited - resolved,
+        valid_until=record.validity.valid_until,
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class ConversationSummary:
-    """One conversation, as a person choosing which to continue reads it (ADR-0074 §2).
-
-    A frozen ``orchestration`` dataclass beside :class:`Belief` and for its reason:
-    it crosses no *subsystem* boundary, only `interfaces`, which already depends on
-    this package (ADR-0042 §1). It is deliberately not a raw
-    :class:`~ai_assistant.core.types.Conversation` — ``deleted_at`` has no meaning
-    on this surface, because a stamped conversation never reaches it.
-
-    Attributes:
-        id: The opaque id ``assistant ask --conversation`` takes. Server-minted,
-            encoding nothing; a client holds this and nothing else.
-        started_at: When the conversation record was created.
-        last_active_at: When someone was last here — set at creation and refreshed
-            whenever a turn begins. **This is the listing's sort key**, and never
-            ``last_turn_at``: ordering by "has a turn landed" would sink a
-            conversation the user opened a minute ago below one they abandoned last
-            week.
-        last_turn_at: When a turn was last *recorded*, or ``None`` if none has
-            been. A different fact from activity, and the one that tells an empty
-            conversation from one whose first turn landed instantly.
-    """
-
-    id: str
-    started_at: datetime
-    last_active_at: datetime
-    last_turn_at: datetime | None = None
-
-    @classmethod
-    def from_record(cls, conversation: Conversation) -> ConversationSummary:
-        """Project one stored conversation into the summary a person reads."""
-        return cls(
-            id=conversation.id,
-            started_at=conversation.started_at,
-            last_active_at=conversation.last_active_at,
-            last_turn_at=conversation.last_turn_at,
-        )
+def conversation_summary(conversation: Conversation) -> ConversationSummary:
+    """Project one stored conversation into the summary a person reads (ADR-0074 §2)."""
+    return ConversationSummary(
+        id=conversation.id,
+        started_at=conversation.started_at,
+        last_active_at=conversation.last_active_at,
+        last_turn_at=conversation.last_turn_at,
+    )
 
 
 def _outcome_of(step: StepOutcome | None) -> str:
@@ -865,6 +490,7 @@ class Engine:
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
         id_factory: Callable[[], str] = _uuid,
         max_outstanding_confirmations: int = _DEFAULT_MAX_OUTSTANDING,
+        max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
         drain_timeout: timedelta | None = None,
     ) -> None:
         """Wire the façade from injected collaborators.
@@ -975,6 +601,20 @@ class Engine:
                 enough that this bites only a genuinely saturated system; a caller
                 that wants a different policy sets it here. Must be a positive
                 integer.
+            max_payload_bytes: The contract limit ADR-0085 §8c declares, in bytes:
+                ``hub_max_frame_bytes`` less the 512-byte envelope reserve, applied
+                to the whole serialised payload of every call and every result. It
+                is a **constructor argument rather than a read of ``Settings``**
+                because ``hub_max_frame_bytes`` arrives with the hub (ADR-0084 §3)
+                and ADR-0085 §12 records that the surface ADR adds no setting; the
+                composition root passes ``settings.hub_max_frame_bytes - 512`` when
+                it exists, and until then every engine gets the value derived from
+                ADR-0084 §3's own 16 MiB default. A conformance test sets it small
+                so the boundary is cheap to reach.
+
+                **ADR-0084 §4 makes this the contract's and not the transport's**,
+                enforced by every implementation and in both directions, so a client
+                is never silently less capable than the engine it stands in for.
             drain_timeout: Phase A's budget in :meth:`_drain_and_close` — how long
                 tracked in-flight work is given to finish **on its own** before the
                 remainder is cancelled and awaited (ADR-0083 §4). The composition
@@ -1021,6 +661,7 @@ class Engine:
         self._closers = tuple(closers)
         self._id_factory = id_factory
         self._max_outstanding = max_outstanding_confirmations
+        self._max_payload_bytes = max_payload_bytes
         self._drain_timeout = drain_timeout
         self._parked: dict[str, _Parked] = {}
         self._reserved: set[str] = set()
@@ -1064,10 +705,10 @@ class Engine:
 
     async def converse(
         self,
-        utterance: str,
+        utterance: EncodableText,
         *,
         timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam which owns the deadline (ADR-0029 §4)
-        conversation_id: str | None = None,
+        conversation_id: Identifier | None = None,
     ) -> TurnOutcome:
         """Run one turn and drive the step it produces (ADR-0042 §3, ADR-0074 §2).
 
@@ -1120,8 +761,21 @@ class Engine:
             ToolBindingError: If an authorised call fails its own revalidation.
         """
         self._reject_if_closing()
-        return await self._tracked(
-            self._converse(utterance, timeout=timeout, conversation_id=conversation_id)
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        check_arguments(
+            "converse",
+            limit=self._max_payload_bytes,
+            utterance=utterance,
+            timeout=timeout,
+            conversation_id=selected,
+        )
+        return self._checked(
+            await self._tracked(
+                self._converse(utterance, timeout=timeout, conversation_id=selected)
+            ),
+            "converse",
         )
 
     async def resume(
@@ -1179,7 +833,12 @@ class Engine:
             AuditError, ToolBindingError: As the stages raise.
         """
         self._reject_if_closing()
-        return await self._tracked(self._resume(token, approved=approved, timeout=timeout))
+        check_arguments(
+            "resume", limit=self._max_payload_bytes, token=token, approved=approved, timeout=timeout
+        )
+        return self._checked(
+            await self._tracked(self._resume(token, approved=approved, timeout=timeout)), "resume"
+        )
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback back into memory (ADR-0042 §3; the correction leg).
@@ -1211,9 +870,10 @@ class Engine:
                 record, as the loop raises.
         """
         self._reject_if_closing()
-        return await self._tracked(self._learn(event))
+        check_arguments("learn", limit=self._max_payload_bytes, event=event)
+        return self._checked(await self._tracked(self._learn(event)), "learn")
 
-    async def observe(self, conversation_id: str | None = None) -> ObservationReport:
+    async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
         """Distil beliefs from a conversation's recent turns (ADR-0077 §8).
 
         The accumulation leg, and an **explicit operation**: it is not wired into
@@ -1268,16 +928,20 @@ class Engine:
                 (ADR-0077 §3).
         """
         self._reject_if_closing()
-        return await self._tracked(self._observation.observe(conversation_id))
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        check_arguments("observe", limit=self._max_payload_bytes, conversation_id=selected)
+        return self._checked(await self._tracked(self._observation.observe(selected)), "observe")
 
     async def beliefs(
         self,
         *,
         bands: Sequence[BeliefBand] | None = None,
         kinds: Sequence[MemoryKind] | None = None,
-        limit: int = _DEFAULT_BELIEF_PAGE,
+        limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
-    ) -> tuple[Belief, ...]:
+    ) -> tuple[BeliefSummary, ...]:
         """Enumerate the beliefs the assistant holds right now (ADR-0073 §1, §7).
 
         The read half of "the user can read the assistant's beliefs about them".
@@ -1326,13 +990,30 @@ class Engine:
             MemoryStoreError: If memory cannot be read.
         """
         self._reject_if_closing()
+        # Materialised here, before the first await, so a caller that mutates the
+        # sequence it passed cannot change which page it gets (ADR-0085 §3d).
         snapshot_bands = None if bands is None else tuple(bands)
         snapshot_kinds = None if kinds is None else tuple(kinds)
-        return await self._tracked(
-            self._beliefs(bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset)
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(
+            "beliefs",
+            limit=self._max_payload_bytes,
+            bands=snapshot_bands,
+            kinds=snapshot_kinds,
+            offset=offset,
         )
 
-    async def belief(self, record_id: str) -> Belief | None:
+        return self._checked(
+            await self._tracked(
+                self._beliefs(
+                    bands=snapshot_bands, kinds=snapshot_kinds, limit=limit, offset=offset
+                )
+            ),
+            "beliefs",
+        )
+
+    async def belief(self, record_id: Identifier) -> Belief | None:
         """Read the one belief ``record_id`` names, or ``None`` (ADR-0073 §5, §7).
 
         The single-belief read the deletion ceremony needs: a person cannot consent
@@ -1359,9 +1040,11 @@ class Engine:
             MemoryStoreError: If memory cannot be read.
         """
         self._reject_if_closing()
-        return await self._tracked(self._belief(record_id))
+        named = identifier(record_id, name="record_id")
+        check_arguments("belief", limit=self._max_payload_bytes, record_id=named)
+        return self._checked(await self._tracked(self._belief(named)), "belief")
 
-    async def forget(self, record_id: str) -> bool:
+    async def forget(self, record_id: Identifier) -> bool:
         """Destroy the record ``record_id`` names (ADR-0073 §5; ADR-0007 §1).
 
         "Kill any of them", relayed to
@@ -1406,10 +1089,12 @@ class Engine:
             MemoryStoreError: If memory cannot be written.
         """
         self._reject_if_closing()
-        return await self._tracked(self._memory.delete(record_id))
+        named = identifier(record_id, name="record_id")
+        check_arguments("forget", limit=self._max_payload_bytes, record_id=named)
+        return self._checked(await self._tracked(self._memory.delete(named)), "forget")
 
     async def questions(
-        self, *, limit: int = DEFAULT_QUESTION_PAGE, offset: int = 0
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
     ) -> tuple[Question, ...]:
         """List the deferred questions awaiting an answer (ADR-0078 §8 reach 2).
 
@@ -1446,10 +1131,13 @@ class Engine:
             MemoryStoreError: If a conflict's content cannot be read.
         """
         self._reject_if_closing()
-        return await self._tracked(self._questions.questions(limit=limit, offset=offset))
+        self._check_page("questions", limit=limit, offset=offset)
+        return self._checked(
+            await self._tracked(self._questions.questions(limit=limit, offset=offset)), "questions"
+        )
 
     async def interrupted_questions(
-        self, *, limit: int = DEFAULT_QUESTION_PAGE, offset: int = 0
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
     ) -> tuple[Question, ...]:
         """List the questions whose answer was begun and never recorded (§8, §9).
 
@@ -1479,11 +1167,13 @@ class Engine:
             MemoryStoreError: If a conflict's content cannot be read.
         """
         self._reject_if_closing()
-        return await self._tracked(
-            self._questions.interrupted_questions(limit=limit, offset=offset)
+        self._check_page("interrupted_questions", limit=limit, offset=offset)
+        return self._checked(
+            await self._tracked(self._questions.interrupted_questions(limit=limit, offset=offset)),
+            "interrupted_questions",
         )
 
-    async def answer(self, question_id: str, *, accept: bool) -> AnswerOutcome:
+    async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
         """Answer one deferred question (ADR-0078 §5, §9).
 
         The write half of the deferred-question surface. An accept **claims** the
@@ -1521,9 +1211,13 @@ class Engine:
             DeferralStoreError: If the queue cannot be read or written.
         """
         self._reject_if_closing()
-        return await self._tracked(self._questions.answer(question_id, accept=accept))
+        named = identifier(question_id, name="question_id")
+        check_arguments("answer", limit=self._max_payload_bytes, question_id=named, accept=accept)
+        return self._checked(
+            await self._tracked(self._questions.answer(named, accept=accept)), "answer"
+        )
 
-    async def forget_question(self, question_id: str) -> bool:
+    async def forget_question(self, question_id: Identifier) -> bool:
         """Destroy one deferred question (ADR-0078 §8, §9; ADR-0007).
 
         Relays ``DeferralStore.delete``. **Unconditional**, like every other
@@ -1550,10 +1244,14 @@ class Engine:
             DeferralStoreError: If the queue cannot be written.
         """
         self._reject_if_closing()
-        return await self._tracked(self._questions.forget_question(question_id))
+        named = identifier(question_id, name="question_id")
+        check_arguments("forget_question", limit=self._max_payload_bytes, question_id=named)
+        return self._checked(
+            await self._tracked(self._questions.forget_question(named)), "forget_question"
+        )
 
     async def recent_conversations(
-        self, *, limit: int = _DEFAULT_CONVERSATION_PAGE, offset: int = 0
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
     ) -> tuple[ConversationSummary, ...]:
         """List conversations by last activity, most recent first (ADR-0074 §2).
 
@@ -1587,16 +1285,20 @@ class Engine:
             ConversationStoreError: If the index cannot be read.
         """
         self._reject_if_closing()
-        return await self._tracked(self._recent_conversations(limit=limit, offset=offset))
+        self._check_page("recent_conversations", limit=limit, offset=offset)
+        return self._checked(
+            await self._tracked(self._recent_conversations(limit=limit, offset=offset)),
+            "recent_conversations",
+        )
 
     async def _recent_conversations(
         self, *, limit: int, offset: int
     ) -> tuple[ConversationSummary, ...]:
         """Relay the listing to the stage and project each record."""
         listed = await self._conversations.recent(limit=limit, offset=offset)
-        return tuple(ConversationSummary.from_record(one) for one in listed)
+        return tuple(conversation_summary(one) for one in listed)
 
-    async def conversation(self, conversation_id: str) -> ConversationDigest | None:
+    async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
         """Read the count and span a deletion is about to destroy (ADR-0074 §8).
 
         The single-conversation read the deletion ceremony needs: a person cannot
@@ -1613,9 +1315,11 @@ class Engine:
             ConversationStoreError: If the index cannot be read.
         """
         self._reject_if_closing()
-        return await self._tracked(self._conversations.digest(conversation_id))
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments("conversation", limit=self._max_payload_bytes, conversation_id=named)
+        return self._checked(await self._tracked(self._conversations.digest(named)), "conversation")
 
-    async def forget_conversation(self, conversation_id: str) -> bool:
+    async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Destroy a conversation and every episode it recorded (ADR-0074 §8).
 
         ADR-0004 §6's right at the unit the user thinks in. Unconditional, like
@@ -1649,9 +1353,13 @@ class Engine:
                 content the user asked to be gone would be the worse failure.
         """
         self._reject_if_closing()
-        return await self._tracked(self._conversations.delete(conversation_id))
+        named = identifier(conversation_id, name="conversation_id")
+        check_arguments("forget_conversation", limit=self._max_payload_bytes, conversation_id=named)
+        return self._checked(
+            await self._tracked(self._conversations.delete(named)), "forget_conversation"
+        )
 
-    async def pending_confirmations(self) -> list[Confirmation]:
+    async def pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Recover, from durable state, every confirmation a user may still answer (ADR-0052 §1).
 
         The durable counterpart to the in-process ``_parked`` table. A restarted
@@ -1699,9 +1407,11 @@ class Engine:
         self._reject_if_closing()
         # Tracked like converse/resume: recovery reads the plan store and the audit
         # trail, so shutdown must drain it before closing those connections (§2).
-        return await self._tracked(self._pending_confirmations())
+        return self._checked(
+            await self._tracked(self._pending_confirmations()), "pending_confirmations"
+        )
 
-    async def _pending_confirmations(self) -> list[Confirmation]:
+    async def _pending_confirmations(self) -> tuple[Confirmation, ...]:
         """Enumerate the durably-parked confirmations and reconcile the table.
 
         **Serialized against recovery *and* resolution** (``_recovery_lock``):
@@ -1749,7 +1459,7 @@ class Engine:
                         )
                     )
             await self._reconcile(live)
-            return recovered
+            return tuple(recovered)
 
     async def _reconcile(self, live: set[tuple[str, str]]) -> None:
         """Evict every ``_parked`` entry whose durable binding is no longer pending (ADR-0052 §2).
@@ -2077,7 +1787,7 @@ class Engine:
             await self._plans.save_plan(turn.plan)
             state = await self._plans.start_execution(turn.plan.id)
             disposition = await self._runner.run(state, first.id, timeout=timeout)
-            step = self._step_outcome(turn, disposition, handle=handle)
+            step = self._step_outcome(turn, disposition, step_id=first.id, handle=handle)
         finally:
             # The reservation held the slot across the awaits. It is now either in
             # the parked table (the step parked, which counts it) or unused (it did
@@ -2141,9 +1851,11 @@ class Engine:
             if parked is None:
                 msg = (
                     "this token names no step awaiting confirmation in this engine; it may be "
-                    "from an earlier run of the process, or already resolved"
+                    "from an earlier run of the process, or already resolved. Call "
+                    "pending_confirmations() to re-mint a token for any park that is still "
+                    "answerable"
                 )
-                raise PlanningError(msg)
+                raise UnknownContinuationError(msg)
             state = await self._plans.get_execution(parked.execution_id)
             if state is None:
                 msg = f"the store no longer holds execution {parked.execution_id!r} for this token"
@@ -2157,7 +1869,7 @@ class Engine:
             )
             # A resolving disposition is EXECUTED or DENIED, never AWAITING_CONFIRMATION,
             # so no new handle is needed here.
-            step = self._step_outcome(parked.turn, disposition, handle=None)
+            step = self._step_outcome(parked.turn, disposition, step_id=parked.step_id, handle=None)
             # Resolved once: a second answer would be refused by the trail's
             # single-resolution index anyway; evicting keeps the table bounded and
             # turns a replay into a clean "unknown token" (ADR-0042 §4).
@@ -2225,7 +1937,7 @@ class Engine:
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Delegate to the loop and translate its write outcomes (ADR-0042 §1)."""
         outcomes = await self._loop.learn(event)
-        return LearnOutcome.from_results(outcomes)
+        return learn_outcome(outcomes)
 
     async def _beliefs(
         self,
@@ -2234,8 +1946,8 @@ class Engine:
         kinds: tuple[MemoryKind, ...] | None,
         limit: int,
         offset: int,
-    ) -> tuple[Belief, ...]:
-        """Relay the enumeration to the store and project each record (ADR-0073 §7).
+    ) -> tuple[BeliefSummary, ...]:
+        """Relay the enumeration to the store and summarise each record (ADR-0073 §7).
 
         The filters arrive already materialised by :meth:`beliefs`; the page's order
         and membership are the store's, and this adds no re-ordering, no re-filtering
@@ -2244,42 +1956,102 @@ class Engine:
         records = await self._memory.list_beliefs(
             bands=bands, kinds=kinds, limit=limit, offset=offset
         )
-        return tuple([await self._project(record) for record in records])
+        return tuple([await self._summarise(record) for record in records])
 
     async def _belief(self, record_id: str) -> Belief | None:
         """Read one live record and project it, or report that there is none."""
         record = await self._memory.get(record_id)
         return None if record is None else await self._project(record)
 
-    async def _project(self, record: MemoryRecord) -> Belief:
-        """Resolve the record's citations, then project it (ADR-0077 §6).
+    async def _resolved_citations(self, record: MemoryRecord) -> list[Evidence]:
+        """Resolve the record's citations at the moment of presentation (ADR-0077 §6).
 
         **Lazily, here, and without rewriting anything.** The evidence tuple keeps
         the ids as written and each is resolved through
-        :meth:`~ai_assistant.core.protocols.MemoryStore.get` at the moment of
-        presentation, so a citation the user destroyed — or one that expired under a
-        retention horizon, which is the *commoner* case and has no event to hook —
-        renders as a tombstone rather than a dangling id. Nothing is written: the
-        record graph is frozen (ADR-0068), and losing evidence is not the producer
-        changing its mind.
+        :meth:`~ai_assistant.core.protocols.MemoryStore.get`, so a citation the user
+        destroyed — or one that expired under a retention horizon, which is the
+        *commoner* case and has no event to hook — renders as a tombstone rather than
+        a dangling id. Nothing is written: the record graph is frozen (ADR-0068), and
+        losing evidence is not the producer changing its mind.
 
         Resolution happens at this façade rather than in `interfaces/`, which golden
         rule 3 keeps thin and which ADR-0072 §7 already refused to give a
         live-at-now computation.
-
-        The cost is a ``get`` per citation per presented belief, bounded by the page
-        (ADR-0073 §2's default of 50) and by evidence tuples that are small by
-        construction. Accepted for now, and it is where ADR-0074 §5's declined
-        ``get_many`` gets its second consumer — revisited at the hub.
         """
         resolved: list[Evidence] = []
         for cited in record.provenance.evidence:
             found = await self._memory.get(cited)
             resolved.append(Evidence(content=None if found is None else found.content))
-        return Belief.from_record(record, tuple(resolved))
+        return resolved
+
+    async def _project(self, record: MemoryRecord) -> Belief:
+        """Project one record into the **single-belief** view, citations and all."""
+        return belief_from_record(record, tuple(await self._resolved_citations(record)))
+
+    async def _summarise(self, record: MemoryRecord) -> BeliefSummary:
+        """Project one record into the **listing**'s summary (ADR-0085 §4a).
+
+        The listing "resolves *existence* and renders the count, the lost count, and
+        the adjusted confidence" (ADR-0077 §6), so existence is still resolved per
+        citation — the adjusted confidence is a function of how many resolved — but
+        the contents go nowhere: a
+        :class:`~ai_assistant.core.types.BeliefSummary` has no field one could
+        occupy. That is what removes the ``beliefs * citations * content`` term from
+        ADR-0085 §8f's frame arithmetic, structurally rather than by argument.
+
+        **The cost is still a ``get`` per citation per listed belief**, bounded by
+        the page and by evidence tuples that are small by construction. Making that
+        one batch read is #552's item 1, and it needs ADR-0086 §6's ``get_many``,
+        which the store does not offer yet; what this change closes is the
+        over-*delivery*, which is the half that becomes contract surface.
+        """
+        citations = await self._resolved_citations(record)
+        return belief_summary_from_record(
+            record,
+            cited=len(citations),
+            resolved=sum(1 for item in citations if not item.lost),
+        )
+
+    def _checked(self, result: _T, method: str) -> _T:
+        """Refuse a result the contract does not admit, before returning it (§8c).
+
+        ADR-0084 §4 puts the limit on **both** directions, so an oversized
+        ``Belief.evidence`` coming back is refused exactly as an oversized utterance
+        going in — otherwise the in-process engine would hand a caller a value the
+        client standing in for it provably cannot deliver.
+
+        Measured on the canonical encoding rather than on a cheaper proxy, because
+        the boundary is contract-visible: a caller catches
+        :class:`~ai_assistant.core.errors.OversizedValueError` and branches on it, so
+        two implementations refusing different sets is a disagreement about the
+        contract. ADR-0087 §7 permits "any cheaper test that refuses exactly the same
+        set", and this is not one — it is the definition, which is the right thing
+        for the implementation the conformance suite measures the others against.
+        """
+        check_payload(result, limit=self._max_payload_bytes, subject=f"the result of {method}()")
+        return result
+
+    def _check_page(self, method: str, *, limit: int, offset: int) -> None:
+        """Refuse a malformed page argument locally, then measure the call (§3a, §9).
+
+        The two paging arguments are refused **before any I/O**, so both
+        implementations refuse the same values without a round trip and neither is
+        silently more permissive. ``limit`` is deliberately absent from the measured
+        argument object: it is what a caller *omits* to get
+        :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an argument the
+        caller did not pass is absent rather than ``null`` (ADR-0085 §10).
+        """
+        page_argument(limit, name="limit")
+        page_argument(offset, name="offset")
+        check_arguments(method, limit=self._max_payload_bytes, offset=offset)
 
     def _step_outcome(
-        self, turn: TurnResult | None, disposition: StepDisposition, *, handle: str | None
+        self,
+        turn: TurnResult | None,
+        disposition: StepDisposition,
+        *,
+        step_id: str,
+        handle: str | None,
     ) -> StepOutcome:
         """Wrap a raw stage disposition, enriching a parked step (ADR-0042 §4).
 
@@ -2305,6 +2077,7 @@ class Engine:
         return StepOutcome(
             disposition=disposition.disposition,
             state=disposition.state,
+            step_id=step_id,
             tool_id=disposition.tool_id,
             confirmation=confirmation,
         )
@@ -2343,7 +2116,7 @@ class Engine:
             tool_description=recorded.tool.description,
             parameters=turn.plan.steps[0].parameters,
             reason=recorded.ruling.reason,
-            token=ContinuationToken(handle),
+            token=ContinuationToken(handle=handle),
         )
 
     def _recovered_confirmation(
@@ -2368,7 +2141,7 @@ class Engine:
             tool_description=confirmed.tool.description,
             parameters=parameters,
             reason=confirmed.ruling.reason,
-            token=ContinuationToken(handle),
+            token=ContinuationToken(handle=handle),
         )
 
     def _handle_for_binding(self, execution_id: str, step_id: str) -> str:
@@ -2397,18 +2170,12 @@ class Engine:
 
 
 __all__ = [
-    "Belief",
-    "Confirmation",
-    "ContinuationToken",
-    "ConversationSummary",
     "Engine",
-    "Evidence",
-    "IngestSummary",
-    "LearnDecision",
-    "LearnOutcome",
-    "QueueOutcome",
-    "QueuedQuestion",
-    "StepOutcome",
-    "TurnOutcome",
+    "belief_from_record",
+    "belief_summary_from_record",
+    "conversation_summary",
+    "learn_decision",
+    "learn_outcome",
     "presented_confidence",
+    "queued_question",
 ]

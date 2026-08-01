@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     ActionRequest,
     CostBasis,
     DataTier,
+    Disposition,
     Goal,
     Idempotency,
     MemorySource,
@@ -43,7 +44,10 @@ from ai_assistant.core.types import (
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.orchestration import Disposition, StepExecutor, StepRunner
+from ai_assistant.orchestration import (
+    StepExecutor,
+    StepRunner,
+)
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakePlanStore, FakeToolInvoker
 
 if TYPE_CHECKING:

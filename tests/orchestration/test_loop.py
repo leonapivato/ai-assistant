@@ -35,7 +35,10 @@ from ai_assistant.core.types import (
     SemanticMemory,
     TimeOfDay,
 )
-from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
+from ai_assistant.orchestration import (
+    LearningLoop,
+    MemoryWriteStage,
+)
 from ai_assistant.testing import (
     FakeContextProvider,
     FakeDeferralStore,

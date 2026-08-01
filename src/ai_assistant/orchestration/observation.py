@@ -29,12 +29,17 @@ only through its Protocol (CLAUDE.md golden rule 1).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import UnresolvedEvidenceError
-from ai_assistant.core.types import EpisodicMemory, MemoryKind
-from ai_assistant.orchestration.engine import Evidence, LearnDecision, learn_decision
+from ai_assistant.core.types import (
+    EpisodicMemory,
+    Evidence,
+    MemoryKind,
+    ObservationReport,
+    ObservedProposal,
+)
+from ai_assistant.orchestration.engine import learn_decision
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -45,8 +50,8 @@ if TYPE_CHECKING:
         Observer,
     )
     from ai_assistant.core.types import (
+        LearnDecision,
         MemoryIngestResult,
-        MemorySource,
         MemoryUpdateProposal,
     )
     from ai_assistant.orchestration.writes import MemoryWriteStage
@@ -137,236 +142,80 @@ def _check_citations(
         raise ValueError(msg)
 
 
-@dataclass(frozen=True, slots=True)
-class ObservedProposal:
-    """One belief the observer proposed, and what the write path did with it.
+def observed_ruled(
+    proposal: MemoryUpdateProposal,
+    result: MemoryIngestResult,
+    evidence: tuple[Evidence, ...] = (),
+) -> ObservedProposal:
+    """Pair a proposal with the ruling the write path returned for it.
 
-    A frozen ``orchestration`` dataclass beside
-    :class:`~ai_assistant.orchestration.engine.IngestSummary` and for its reason:
-    it crosses no *subsystem* boundary, only `interfaces`, which already depends on
-    this package (ADR-0042 §1).
-
-    **It pairs the proposal with its ruling, and that pairing is the decision**
-    (ADR-0077 §9.7). A :class:`~ai_assistant.core.types.MemoryIngestResult` carries
-    a ruling and a record id and nothing else, and for an ``ASK_USER`` that id is
-    ``None`` — so an entry built from the result alone would render a deferral as a
-    bare ruling with nothing to show, which is precisely the visibility ADR-0077 §4
-    promises while ADR-0078 is unbuilt.
-
-    **The citations travel with it, resolved, and not as a count.** ADR-0077 §4 is
-    explicit that the outcome carries "the candidate's content, its citations and
-    the policy's stated reason — not merely a count and a ``None`` record id", and
-    the reason is structural rather than stylistic: **nothing persists a deferred
-    proposal**, so there is no later belief-detail view through which its warrant
-    could ever be inspected. A count here would be the last word on a belief the
-    user is being asked to act on. They are resolved to readable content — or to a
-    tombstone where the citation is exactly what went away — and never to an id,
-    which is ADR-0073 §4's floor applying here as it does on the inspection surface.
-
-    Attributes:
-        content: The canonical text rendering of the belief that was proposed.
-        kind: Which typed memory it is. Never ``EPISODIC``: an observer distils
-            evidence, it does not manufacture it (ADR-0077 §2).
-        step: The epistemic step the producer took — ``OBSERVED`` where the cited
-            evidence entails the belief, ``INFERRED`` where it merely supports it
-            (ADR-0072 §3). Both land in the ``DERIVED`` band, so the band carries
-            no information here and the *step* is the informative half.
-        confidence: How strongly the producer proposed holding it, always strictly
-            below 1.0 — the standing only the user's own word carries. Unadjusted,
-            unlike a presented belief's: this is the number the producer proposed
-            and the write path has only just ruled on, so there is no lost support
-            for it to have fallen with.
-        evidence: The episodes it cites, in the order the proposal wrote them,
-            each resolved to readable content — or a tombstone where that citation
-            is the one that stopped resolving. At least one entry, and at least two
-            distinct ones for an ``INFERRED`` belief (ADR-0077 §5).
-        rationale: The producer's own statement of why the batch justifies it.
-        decision: How memory folded it, or ``None`` when **no ruling was ever
-            sought** — the write path refused it because the evidence it cited no
-            longer resolves (ADR-0077 §5). ``None`` is not a sixth ruling: a
-            refusal is not a decision, and fabricating one would put a ruling
-            nobody made into the report.
-        record_id: The id of the record left live by the write, or ``None`` when
-            nothing was stored. This is the id ``assistant beliefs`` lists and
-            ``assistant forget`` takes, so an observed belief is immediately
-            inspectable.
-        reason: The policy's own justification for the ruling — or, where
-            ``decision`` is ``None``, this stage's statement of why the proposal
-            was dropped before any policy saw it.
+    A module function rather than a constructor on the promoted model, like every
+    projection in this package (ADR-0085 §6a): a projection from a ``core`` record
+    into a ``core`` DTO belongs to the layer that *decides* it.
     """
-
-    content: str
-    kind: MemoryKind
-    step: MemorySource
-    confidence: float
-    rationale: str
-    decision: LearnDecision | None
-    record_id: str | None
-    reason: str
-    evidence: tuple[Evidence, ...] = ()
-
-    @property
-    def stored(self) -> bool:
-        """Whether the write left a record live in memory."""
-        return self.record_id is not None
-
-    @property
-    def evidence_count(self) -> int:
-        """How many episodes it cites."""
-        return len(self.evidence)
-
-    @property
-    def inspectable(self) -> bool:
-        """Whether a later read can still show this belief and its warrant.
-
-        ``False`` for everything the write path did not leave a record for — a
-        deferral, a rejection, a drop. Those have **no** later belief-detail view
-        (nothing persists a deferred proposal, ADR-0077 §4), so this report is the
-        only place their evidence is ever shown, and a surface renders it here or
-        nowhere.
-        """
-        return self.record_id is not None
-
-    @classmethod
-    def ruled(
-        cls,
-        proposal: MemoryUpdateProposal,
-        result: MemoryIngestResult,
-        evidence: tuple[Evidence, ...] = (),
-    ) -> ObservedProposal:
-        """Pair a proposal with the ruling the write path returned for it."""
-        return cls._project(
-            proposal,
-            decision=learn_decision(result.decision.kind),
-            record_id=result.record_id,
-            reason=result.decision.reason,
-            evidence=evidence,
-        )
-
-    @classmethod
-    def unsupported(
-        cls, proposal: MemoryUpdateProposal, evidence: tuple[Evidence, ...] = ()
-    ) -> ObservedProposal:
-        """Record a proposal the write path refused for unresolved evidence.
-
-        Reported rather than dropped in silence: a belief whose support went away
-        under the observation is not stored, and saying so is the difference
-        between an outcome the user can read and a count that went missing
-        (ADR-0077 §5).
-        """
-        return cls._project(
-            proposal,
-            decision=None,
-            record_id=None,
-            reason=_UNSUPPORTED_REASON,
-            evidence=evidence,
-        )
-
-    @classmethod
-    def _project(
-        cls,
-        proposal: MemoryUpdateProposal,
-        *,
-        decision: LearnDecision | None,
-        record_id: str | None,
-        reason: str,
-        evidence: tuple[Evidence, ...],
-    ) -> ObservedProposal:
-        """Read the candidate half of a proposal, and pair it with an outcome.
-
-        The one place a ``core``
-        :class:`~ai_assistant.core.types.MemoryUpdateProposal` is read on the
-        observation path, exactly as
-        :meth:`~ai_assistant.orchestration.engine.LearnOutcome.from_results` holds
-        that boundary on the learn path (ADR-0042 §1). Both entry points go through
-        it, so a dropped proposal is rendered as fully as a ruled one.
-
-        ``evidence`` is resolved by the stage rather than here, because resolving it
-        is a read over the batch (and, on one unreachable path, over the store) while
-        this is a pure projection — the same split :meth:`Belief.from_record` makes.
-        It must carry one entry per citation, in order.
-        """
-        record = proposal.proposed
-        provenance = record.provenance
-        return cls(
-            content=record.content,
-            kind=MemoryKind(record.kind),
-            step=provenance.source,
-            confidence=provenance.confidence,
-            rationale=proposal.rationale,
-            decision=decision,
-            record_id=record_id,
-            reason=reason,
-            evidence=evidence,
-        )
+    return _observed(
+        proposal,
+        decision=learn_decision(result.decision.kind),
+        record_id=result.record_id,
+        reason=result.decision.reason,
+        evidence=evidence,
+    )
 
 
-@dataclass(frozen=True, slots=True)
-class ObservationReport:
-    """What one observation pass did (ADR-0077 §9.7).
+def observed_unsupported(
+    proposal: MemoryUpdateProposal, evidence: tuple[Evidence, ...] = ()
+) -> ObservedProposal:
+    """Record a proposal the write path refused for unresolved evidence.
 
-    An ``orchestration`` type beside
-    :class:`~ai_assistant.orchestration.engine.LearnOutcome`, **not** a ``core``
-    one: it crosses no subsystem boundary, only `interfaces` (ADR-0022 §2's
-    reasoning for ``TurnResult``). It is deliberately not named ``…Outcome``,
-    because it *relays* counts from ``core``'s
-    :class:`~ai_assistant.core.types.ObservationOutcome` and two near-identical
-    names for a producer's result and a stage's report would invite reading one
-    invariant onto the other.
-
-    **The counts are kept apart on purpose.** ``ObservationOutcome``'s two are
-    exhaustive over the entries the *model* emitted, so a proposal the producer
-    legitimately made and the writer then refused is a different fact: folding it
-    into either would make that invariant a lie (ADR-0077 §5, §9.7). It gets a
-    count of its own.
-
-    Attributes:
-        proposals: One entry per proposal the observer returned, in the producer's
-            order, each paired with its ruling — or with the unresolved-evidence
-            drop that replaced it. Empty is a normal outcome, not an error.
-        discarded_unusable: Relayed **unchanged** from the producer: entries it
-            refused for a reason of its own — unparseable, failing validation,
-            citing evidence it was never handed, below its evidence floor, or
-            naming a kind an observer may not propose.
-        discarded_over_limit: Relayed unchanged: otherwise-usable proposals the
-            producer dropped to meet its configured maximum.
-        dropped_unsupported: This stage's own count of proposals the **write path**
-            refused because every episode they cited had stopped resolving between
-            selection and the write. An ordinary consequence of a finite retention
-            horizon, never a producer fault — a fault propagates instead.
-        route: The model route that read the episodes, **absent when none did**. A
-            window whose turns have all lost their episodes selects an empty batch
-            and the observer is not called at all, so naming a route would claim a
-            read that never happened — the one thing ADR-0013 §6's reporting exists
-            to make truthful.
-        conversation_id: The conversation whose turns were read, or ``None`` when
-            the store held none to read. Carried because the operation *selects*
-            when it is given no id — "the most recently active" — and a report that
-            did not say which conversation was read would leave the user unable to
-            tell what the model was shown.
-        episodes_read: How many episodes the batch held. At most the configured
-            batch size, and **short** where a turn's episode no longer resolves:
-            such a turn is skipped and the batch is not backfilled, so the window's
-            span stays a fixed number of recent turns (ADR-0074 §5, ADR-0077 §8).
+    Reported rather than dropped in silence: a belief whose support went away
+    under the observation is not stored, and saying so is the difference between
+    an outcome the user can read and a count that went missing (ADR-0077 §5).
     """
+    return _observed(
+        proposal,
+        decision=None,
+        record_id=None,
+        reason=_UNSUPPORTED_REASON,
+        evidence=evidence,
+    )
 
-    proposals: tuple[ObservedProposal, ...] = ()
-    discarded_unusable: int = 0
-    discarded_over_limit: int = 0
-    dropped_unsupported: int = 0
-    route: str | None = None
-    conversation_id: str | None = None
-    episodes_read: int = 0
 
-    @property
-    def stored(self) -> int:
-        """How many proposals left a record live in memory."""
-        return sum(1 for proposal in self.proposals if proposal.stored)
+def _observed(
+    proposal: MemoryUpdateProposal,
+    *,
+    decision: LearnDecision | None,
+    record_id: str | None,
+    reason: str,
+    evidence: tuple[Evidence, ...],
+) -> ObservedProposal:
+    """Read the candidate half of a proposal, and pair it with an outcome.
 
-    @property
-    def discarded(self) -> int:
-        """How much was thrown away in total, by the producer and by the write path."""
-        return self.discarded_unusable + self.discarded_over_limit + self.dropped_unsupported
+    The one place a ``core``
+    :class:`~ai_assistant.core.types.MemoryUpdateProposal` is read on the
+    observation path, exactly as
+    :func:`~ai_assistant.orchestration.engine.learn_outcome` holds that boundary on
+    the learn path (ADR-0042 §1). Both entry points go through it, so a dropped
+    proposal is rendered as fully as a ruled one.
+
+    ``evidence`` is resolved by the stage rather than here, because resolving it is
+    a read over the batch (and, on one unreachable path, over the store) while this
+    is a pure projection — the same split
+    :func:`~ai_assistant.orchestration.engine.belief_from_record` makes. It must
+    carry one entry per citation, in order.
+    """
+    record = proposal.proposed
+    provenance = record.provenance
+    return ObservedProposal(
+        content=record.content,
+        kind=MemoryKind(record.kind),
+        step=provenance.source,
+        confidence=provenance.confidence,
+        rationale=proposal.rationale,
+        decision=decision,
+        record_id=record_id,
+        reason=reason,
+        evidence=evidence,
+    )
 
 
 class ObservationStage:
@@ -615,9 +464,9 @@ class ObservationStage:
             if not unresolved or not unresolved <= batch.keys():
                 raise
             evidence = self._evidence(proposal, batch=batch, unresolved=unresolved)
-            return ObservedProposal.unsupported(proposal, evidence)
+            return observed_unsupported(proposal, evidence)
         evidence = self._evidence(proposal, batch=batch, unresolved=frozenset())
-        return ObservedProposal.ruled(proposal, outcome.result, evidence)
+        return observed_ruled(proposal, outcome.result, evidence)
 
     @staticmethod
     def _evidence(

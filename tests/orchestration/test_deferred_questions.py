@@ -36,6 +36,7 @@ from ai_assistant.core.errors import (
     UnresolvedEvidenceError,
 )
 from ai_assistant.core.types import (
+    AnswerKind,
     DataTier,
     DeferralState,
     MemoryDecision,
@@ -43,15 +44,14 @@ from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
+    QuestionState,
     SemanticMemory,
     Validity,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration import (
-    AnswerKind,
     MemoryWriteStage,
     QuestionStage,
-    QuestionState,
 )
 from ai_assistant.testing import (
     FakeDeferralStore,

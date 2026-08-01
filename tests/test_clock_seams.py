@@ -39,7 +39,10 @@ from ai_assistant.core.types import (
     TimeOfDay,
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor, SqliteMemoryStore
-from ai_assistant.orchestration import LearningLoop, MemoryWriteStage
+from ai_assistant.orchestration import (
+    LearningLoop,
+    MemoryWriteStage,
+)
 from ai_assistant.planning import InMemoryPlanStore, PlanExecution
 from ai_assistant.testing import (
     FakeContextProvider,
