@@ -766,25 +766,39 @@ schema and is therefore fixed by the surface ADR". With §8a's schema:
 > **`hub_max_frame_bytes` is refused at load time below 1024 bytes**, alongside
 > its existing `gt=0` and its upper bound at the 4-byte prefix's ceiling.
 
-The connect reply's payload carries a version (an integer), a build identifier, a
-readiness flag and the effective frame size — every member fixed-width except the
-build identifier, so the floor is only derivable if that one is bounded. It is
-not bounded anywhere today, and a floor resting on an unstated bound is not a
-proof: a hub emitting a 1000-byte build identifier would accept
-`hub_max_frame_bytes=1024` at load and then fail every handshake, which is the
-exact failure this floor exists to prevent, produced by the check that was
-supposed to prevent it. So the bound is made normative here, which ADR-0084 §3's
-assignment of the floor to this ADR necessarily carries with it:
+**A floor is a proof, and it needs the handshake to be bounded — as a whole, not
+member by member.** The connect reply carries a protocol version, a build
+identifier, a readiness flag and the effective frame size (ADR-0084 §2), and
+nothing bounds the encoded width of any of them: a build identifier is a
+free-form string, and a "single integer" version has no stated range, so its
+decimal form is as wide as the value. Either one, left unbounded, yields a hub
+that accepts `hub_max_frame_bytes` at its minimum, passes every ADR-0083 §3
+startup step, and then cannot send its own mandatory reply — the exact failure
+this floor exists to prevent, produced by the check meant to prevent it.
 
-> **The connect reply's build identifier is at most 64 bytes**, and a longer one
-> is a protocol violation.
+**Bounding the members one at a time is the tempting fix and it is the one that
+keeps failing.** Two separate members turned out to be unbounded on inspection,
+which is evidence that inspection is not a reliable way to enumerate them — and a
+later protocol version may add a fifth (ADR-0084 §3 permits it) that no sentence
+here would reach. So the bound is stated over the payload, where it closes:
 
-With that, the connect reply's payload is under 200 bytes; with the 512-byte
-reserve, 1024 leaves room for the handshake and for a small request besides. A value below the
-floor yields a hub that passes every ADR-0083 §3 startup step and then refuses
-every client including the CLI — indistinguishable from a hub that is down, which
-is ADR-0084's ruling 4 failure produced by a config typo, and load time is where
-it should surface.
+> **The connect reply's payload is at most 256 bytes encoded**, and a reply that
+> would exceed it is a hub configuration fault rather than a frame to send. Its
+> build identifier is at most 64 bytes; every other member's encoded width is
+> bounded by the payload bound whatever members a later version adds.
+
+That is fail-closed in the direction that matters: a member nobody thought about
+cannot silently widen the handshake past the floor, because the aggregate is what
+is checked. Today's reply — a version, a 64-byte build identifier, a boolean and
+a frame size that the 4-byte prefix caps at ten digits — encodes to roughly 135
+bytes, so 256 is generous rather than tight.
+
+With that, 512 (the envelope reserve) plus 256 (the connect reply) is 768, and
+**1024** leaves room for the handshake and for a small request besides. A value
+below the floor yields a hub that passes every ADR-0083 §3 startup step and then
+refuses every client including the CLI — indistinguishable from a hub that is
+down, which is ADR-0084's ruling 4 failure produced by a config typo, and load
+time is where it should surface.
 
 #### 8e. #473 is not designed around
 
@@ -1023,11 +1037,13 @@ move to `Accepted` triggers nothing.
   conforming encoders differing only in whitespace or `\u` escaping would
   disagree about whether the same call is oversized — which is one limit in name
   and two in effect.
-- **Derive the `hub_max_frame_bytes` floor without bounding the build
-  identifier.** Rejected in §8d: the floor is then a proof resting on an unstated
-  premise, and a hub emitting a long build identifier would accept the minimum
-  configuration and fail every handshake — the floor's own failure, arriving
-  through the floor.
+- **Derive the `hub_max_frame_bytes` floor from the handshake's members, bounding
+  each one as it is noticed.** Rejected in §8d: two members turned out to be
+  unbounded on inspection — the build identifier and the version's decimal width
+  — which is evidence that enumerating them is not how this is made safe, and a
+  later protocol version may add a member no sentence here reaches. The bound is
+  stated over the whole connect-reply payload instead, so an unforeseen member
+  cannot widen the handshake past the floor.
 - **Set the contract size limit equal to `hub_max_frame_bytes`.** Rejected in §8c:
   a value at exactly the limit passes the contract and overflows the frame by the
   envelope's bytes, so the in-process engine would accept what the client
