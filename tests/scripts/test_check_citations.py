@@ -393,9 +393,26 @@ def test_a_path_that_normalises_out_of_its_root_is_not_a_code_citation(
     resolves against the code.
     """
     _write(tmp_path / "docs" / "review" / "guide.md", "# guide\n")
+    # The directory that makes the *second* reading of `tests/../docs/…`
+    # anchored: without the explicit-root rule the checker would report there.
+    _write(tmp_path / "tests" / "docs" / "conftest.py", "")
     _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\nSee `{cited}`.\n"})
 
     assert _findings(_report(tmp_path, "--no-tracker"), "module-path") == []
+
+
+def test_an_explicit_root_prefix_is_not_re_read_as_a_relative_path(tmp_path: Path) -> None:
+    """A citation that names a root gets that reading and no other.
+
+    ``tests/memory/gone.py`` is absent under ``tests/`` and present nowhere; a
+    second reading relative to each root would look for
+    ``tests/tests/memory/gone.py`` and, if it anchored, report a path the author
+    did not write.
+    """
+    _write(tmp_path / "tests" / "tests" / "memory" / "gone.py", "")
+    _make_repo(tmp_path, {"0001-one.md": "# 1. One\n\nSee `tests/memory/gone.py`.\n"})
+
+    assert _citations(_report(tmp_path, "--no-tracker"), "module-path") == ["tests/memory/gone.py"]
 
 
 def test_a_legacy_line_number_is_stripped_and_the_path_resolved(tmp_path: Path) -> None:
