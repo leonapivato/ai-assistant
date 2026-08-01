@@ -31,7 +31,8 @@ argument, so a test changes one thing without restating the rest.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from itertools import count
 from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import UnknownContinuationError, UnknownConversationError
@@ -48,6 +49,8 @@ from ai_assistant.core.types import (
     ConversationDigest,
     ConversationSummary,
     CurrentContext,
+    Disposition,
+    ExecutionState,
     Goal,
     IngestSummary,
     LearnDecision,
@@ -58,6 +61,10 @@ from ai_assistant.core.types import (
     Provenance,
     Question,
     QuestionState,
+    SkipReason,
+    StepExecution,
+    StepOutcome,
+    StepStatus,
     TimeOfDay,
     TurnOutcome,
     TurnResult,
@@ -72,12 +79,16 @@ from ai_assistant.orchestration.payloads import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import timedelta
 
     from ai_assistant.core.types import EncodableText, FeedbackEvent, Identifier
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
 _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+#: How far each activity stamp advances per event. A logical clock rather than a
+#: real one: it keeps the ordering deterministic and keeps the fake free of a wall
+#: clock.
+_TICK = timedelta(seconds=1)
 
 #: The confidence a stored belief is held at here. Below 1.0 so a
 #: ``DERIVED``-banded record would still validate, and unadjusted because nothing
@@ -123,6 +134,13 @@ class FakeAssistantEngine:
         #: "that question is not open" is what the surface has to say about it.
         self.questions_settled: dict[str, Question] = {}
         self.conversations_held: dict[str, ConversationDigest] = {}
+        #: When each conversation was last active — set at creation and refreshed
+        #: whenever a turn begins against it (ADR-0074 §2). Held beside the digests
+        #: rather than on them because a
+        #: :class:`~ai_assistant.core.types.ConversationDigest` is the deletion
+        #: ceremony's shape and carries no activity stamp.
+        self.activity: dict[str, datetime] = {}
+        self._ticks = count(1)
         self.parked: dict[str, Confirmation] = {}
         self.turn_outcome: TurnOutcome | None = None
         self.observation: ObservationReport = ObservationReport()
@@ -147,6 +165,7 @@ class FakeAssistantEngine:
         if conversation_id not in self.conversations_held:
             msg = f"no conversation {conversation_id!r}"
             raise UnknownConversationError(msg)
+        self.activity[conversation_id] = self._tick()
         return conversation_id
 
     async def converse(
@@ -162,7 +181,7 @@ class FakeAssistantEngine:
         )
         check_arguments(
             "converse",
-            limit=self._max_payload_bytes,
+            max_bytes=self._max_payload_bytes,
             utterance=utterance,
             timeout=timeout,
             conversation_id=selected,
@@ -181,7 +200,11 @@ class FakeAssistantEngine:
     ) -> TurnOutcome:
         """Answer a parked confirmation, or refuse a token this engine cannot resolve."""
         check_arguments(
-            "resume", limit=self._max_payload_bytes, token=token, approved=approved, timeout=timeout
+            "resume",
+            max_bytes=self._max_payload_bytes,
+            token=token,
+            approved=approved,
+            timeout=timeout,
         )
         self.calls.append(("resume", {"token": token.handle, "approved": approved}))
         if token.handle not in self.parked:
@@ -190,14 +213,48 @@ class FakeAssistantEngine:
                 "pending_confirmations() to re-mint a token for any park that is still answerable"
             )
             raise UnknownContinuationError(msg)
-        del self.parked[token.handle]
-        return self._checked(TurnOutcome(turn=None), "resume")
+        confirmation = self.parked.pop(token.handle)
+        # **A denial is a result, not an exception** (ADR-0042 §4): the adapter
+        # conveys consent, the policy rules on it, and the engine records and
+        # executes. Only ``approved=False -> DENY`` is guaranteed; ``approved=True``
+        # may still be refused. Raising here instead would give a client a failure
+        # path the in-process engine does not have.
+        resolved = StepOutcome(
+            disposition=Disposition.EXECUTED if approved else Disposition.DENIED,
+            state=ExecutionState(
+                id=f"exec-{token.handle}",
+                plan_id=f"plan-{token.handle}",
+                steps=(
+                    StepExecution(
+                        step_id="step-1",
+                        # A succeeded step names the decision that cleared it, and a
+                        # denied one names why it was skipped: the type refuses a
+                        # step that claims either without saying so (ADR-0004 §7).
+                        status=StepStatus.SUCCEEDED if approved else StepStatus.SKIPPED,
+                        attempts=1 if approved else 0,
+                        approval_ref=f"decision-{token.handle}" if approved else None,
+                        bound_tool=confirmation.tool_id if approved else None,
+                        skip_reason=None if approved else SkipReason.APPROVAL_DENIED,
+                        started_at=_AT if approved else None,
+                        finished_at=_AT if approved else None,
+                    ),
+                ),
+                updated_at=_AT,
+            ),
+            step_id="step-1",
+            tool_id=confirmation.tool_id,
+        )
+        # ``turn`` is ``None`` here because this engine parks nothing from a live
+        # turn — the shape a **recovered** park produces after a restart, which
+        # ADR-0052 §3 ratifies. The *step* is what a resume is for and is always
+        # present (ADR-0085 §4).
+        return self._checked(TurnOutcome(turn=None, step=resolved), "resume")
 
     # --- the two accumulation legs ----------------------------------------
 
     async def learn(self, event: FeedbackEvent) -> LearnOutcome:
         """Fold one piece of feedback into memory, storing exactly one belief."""
-        check_arguments("learn", limit=self._max_payload_bytes, event=event)
+        check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
         self.calls.append(("learn", {"event": event}))
         record_id = f"rec-{len(self.beliefs_held) + 1}"
         self.hold(record_id, content=event.content)
@@ -217,7 +274,7 @@ class FakeAssistantEngine:
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
-        check_arguments("observe", limit=self._max_payload_bytes, conversation_id=selected)
+        check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
         self.calls.append(("observe", {"conversation_id": selected}))
         if selected is not None and selected not in self.conversations_held:
             msg = f"no conversation {selected!r}"
@@ -246,9 +303,10 @@ class FakeAssistantEngine:
         page_argument(offset, name="offset")
         check_arguments(
             "beliefs",
-            limit=self._max_payload_bytes,
+            max_bytes=self._max_payload_bytes,
             bands=selected_bands,
             kinds=selected_kinds,
+            limit=limit,
             offset=offset,
         )
         self.calls.append(("beliefs", {"bands": selected_bands, "kinds": selected_kinds}))
@@ -263,14 +321,14 @@ class FakeAssistantEngine:
     async def belief(self, record_id: Identifier) -> Belief | None:
         """Read one belief with its citations, or ``None`` where none is held."""
         named = identifier(record_id, name="record_id")
-        check_arguments("belief", limit=self._max_payload_bytes, record_id=named)
+        check_arguments("belief", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("belief", {"record_id": named}))
         return self._checked(self.beliefs_held.get(named), "belief")
 
     async def forget(self, record_id: Identifier) -> bool:
         """Destroy one belief, reporting whether there was one to destroy."""
         named = identifier(record_id, name="record_id")
-        check_arguments("forget", limit=self._max_payload_bytes, record_id=named)
+        check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         self.calls.append(("forget", {"record_id": named}))
         return self._checked(self.beliefs_held.pop(named, None) is not None, "forget")
 
@@ -295,7 +353,9 @@ class FakeAssistantEngine:
     async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
         """Answer one question, applying it or declining it."""
         named = identifier(question_id, name="question_id")
-        check_arguments("answer", limit=self._max_payload_bytes, question_id=named, accept=accept)
+        check_arguments(
+            "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
+        )
         self.calls.append(("answer", {"question_id": named, "accept": accept}))
         if self.answered is not None:
             return self._checked(self.answered, "answer")
@@ -317,7 +377,7 @@ class FakeAssistantEngine:
     async def forget_question(self, question_id: Identifier) -> bool:
         """Destroy one question, reporting whether there was one to destroy."""
         named = identifier(question_id, name="question_id")
-        check_arguments("forget_question", limit=self._max_payload_bytes, question_id=named)
+        check_arguments("forget_question", max_bytes=self._max_payload_bytes, question_id=named)
         self.calls.append(("forget_question", {"question_id": named}))
         gone = (
             self.questions_open.pop(named, None)
@@ -333,29 +393,42 @@ class FakeAssistantEngine:
     ) -> tuple[ConversationSummary, ...]:
         """List conversations, in the order they were started."""
         self._check_page("recent_conversations", limit=limit, offset=offset)
+        # **Activity descending, with the id breaking ties** (ADR-0074 §2). The
+        # sort key is never ``last_turn_at``: ordering by "has a turn landed" would
+        # sink a conversation the user opened a minute ago below one they abandoned
+        # last week — and a fake that returned insertion order would let a client's
+        # ordering tests pass while production rendered stale conversations first.
+        ordered = sorted(
+            self.conversations_held.values(),
+            key=lambda digest: (self.activity[digest.id], digest.id),
+            reverse=True,
+        )
         held = tuple(
             ConversationSummary(
                 id=digest.id,
                 started_at=digest.started_at,
-                last_active_at=digest.started_at,
+                last_active_at=self.activity[digest.id],
                 last_turn_at=digest.last_turn_at,
             )
-            for digest in self.conversations_held.values()
+            for digest in ordered
         )
         return self._checked(held[offset : offset + limit], "recent_conversations")
 
     async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
         """Show the count and span destroying one conversation would destroy."""
         named = identifier(conversation_id, name="conversation_id")
-        check_arguments("conversation", limit=self._max_payload_bytes, conversation_id=named)
+        check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
         self.calls.append(("conversation", {"conversation_id": named}))
         return self._checked(self.conversations_held.get(named), "conversation")
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
         """Destroy one conversation, reporting whether there was one to destroy."""
         named = identifier(conversation_id, name="conversation_id")
-        check_arguments("forget_conversation", limit=self._max_payload_bytes, conversation_id=named)
+        check_arguments(
+            "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
+        )
         self.calls.append(("forget_conversation", {"conversation_id": named}))
+        self.activity.pop(named, None)
         return self._checked(self.conversations_held.pop(named, None) is not None, "forget")
 
     # --- durable recovery --------------------------------------------------
@@ -391,6 +464,15 @@ class FakeAssistantEngine:
         self.beliefs_held[record_id] = held
         return held
 
+    def _tick(self) -> datetime:
+        """The next instant on this engine's logical clock.
+
+        Strictly increasing rather than "one tick past whatever this conversation
+        last had", which would let a continued conversation land *equal* to one
+        started after it and leave the ordering to the tie-break.
+        """
+        return _AT + _TICK * next(self._ticks)
+
     def ask(self, question_id: str, *, content: str, state: QuestionState) -> Question:
         """Put one deferred question in the queue, and return it.
 
@@ -423,10 +505,17 @@ class FakeAssistantEngine:
         return question
 
     def start_conversation(self, conversation_id: str) -> str:
-        """Record one conversation, and return its id."""
+        """Record one conversation, and return its id.
+
+        Its activity stamp starts one tick later than the last conversation's, so
+        "most recently active first" is a fact the ordering can be tested against
+        rather than an accident of a fixed clock.
+        """
+        started = self._tick()
         self.conversations_held[conversation_id] = ConversationDigest(
-            id=conversation_id, started_at=_AT, last_turn_at=None, recorded_turns=0
+            id=conversation_id, started_at=started, last_turn_at=None, recorded_turns=0
         )
+        self.activity[conversation_id] = started
         return conversation_id
 
     def park(self, handle: str, *, tool_id: str = "t-1") -> Confirmation:
@@ -445,14 +534,16 @@ class FakeAssistantEngine:
 
     def _checked[T](self, result: T, method: str) -> T:
         """Refuse a result the contract does not admit, before returning it (§8c)."""
-        check_payload(result, limit=self._max_payload_bytes, subject=f"the result of {method}()")
+        check_payload(
+            result, max_bytes=self._max_payload_bytes, subject=f"the result of {method}()"
+        )
         return result
 
     def _check_page(self, method: str, *, limit: int, offset: int) -> None:
         """Refuse a malformed page argument locally, then measure the call."""
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
-        check_arguments(method, limit=self._max_payload_bytes, offset=offset)
+        check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
         self.calls.append((method, {"limit": limit, "offset": offset}))
 
 

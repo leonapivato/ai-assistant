@@ -28,11 +28,13 @@ from assistant_engine_contract import (
 from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
-    Belief,
     BeliefBand,
     BeliefSummary,
+    ContinuationToken,
+    ConversationSummary,
     MemoryKind,
     QuestionState,
+    TurnOutcome,
 )
 from ai_assistant.testing import FakeAssistantEngine
 
@@ -40,7 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import Identifier
+    from ai_assistant.core.types import Belief, Identifier
 
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
@@ -55,6 +57,13 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def tiny_engine(self) -> AssistantEngine:
         """The same implementation, with the limit small enough to reach."""
         return FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+
+    @pytest.fixture
+    def parked_engine(self) -> AssistantEngine:
+        """One fake engine holding a single answerable park."""
+        engine = FakeAssistantEngine()
+        engine.park("h-1")
+        return engine
 
 
 # --- what the fake offers beyond the contract ------------------------------
@@ -220,3 +229,77 @@ async def test_the_identifier_clause_catches_an_engine_that_does_not_strip() -> 
     permissive = _PermissiveEngine()
     permissive.hold("rec-1", content="the office is in Boston")
     assert await permissive.belief("  rec-1  ") is None  # the raw value was looked up
+
+
+class _InsertionOrderEngine(FakeAssistantEngine):
+    """An engine that lists conversations as they were created — the ADR-0074 §2 gap."""
+
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
+        """Return them in insertion order, which is what a naive dict gives."""
+        held = tuple(
+            ConversationSummary(
+                id=digest.id,
+                started_at=digest.started_at,
+                last_active_at=digest.started_at,
+                last_turn_at=digest.last_turn_at,
+            )
+            for digest in self.conversations_held.values()
+        )
+        return held[offset : offset + limit]
+
+
+async def test_the_ordering_clause_catches_insertion_order() -> None:
+    """The suite's ordering case really does separate the two behaviours.
+
+    Two conversations and no continuation is the shape where the two orders
+    *disagree*: activity descending puts the newer first, insertion order puts the
+    older first. Continuing the older one afterwards makes them agree again, which
+    is why the suite asserts both halves — the second alone would pass against an
+    engine that never ordered anything.
+    """
+
+    async def _listed(engine: FakeAssistantEngine) -> list[str]:
+        await engine.converse("one", timeout=timedelta(seconds=30))
+        await engine.converse("two", timeout=timedelta(seconds=30))
+        return [one.id for one in await engine.recent_conversations()]
+
+    assert await _listed(FakeAssistantEngine()) == ["c-2", "c-1"]
+    assert await _listed(_InsertionOrderEngine()) == ["c-1", "c-2"]  # nothing ordered it
+
+
+class _SteplessEngine(FakeAssistantEngine):
+    """An engine whose resume carries no resolved step — the ADR-0085 §4 gap."""
+
+    async def resume(
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, as the Protocol declares it
+    ) -> TurnOutcome:
+        """Resolve the park and hand back nothing to render."""
+        await super().resume(token, approved=approved, timeout=timeout)
+        return TurnOutcome(turn=None)
+
+
+async def test_the_resume_clause_catches_an_outcome_with_no_step() -> None:
+    """A resume that carries neither a turn nor a step leaves a client nothing.
+
+    ``turn`` is legitimately ``None`` on a recovered park, which is exactly why the
+    step cannot be: between them they are the whole of what a resumption produced.
+    """
+    conforming = FakeAssistantEngine()
+    conforming.park("h-1")
+    resolved = await conforming.resume(
+        ContinuationToken(handle="h-1"), approved=True, timeout=timedelta(seconds=30)
+    )
+    assert resolved.step is not None
+
+    stepless = _SteplessEngine()
+    stepless.park("h-1")
+    empty = await stepless.resume(
+        ContinuationToken(handle="h-1"), approved=True, timeout=timedelta(seconds=30)
+    )
+    assert empty.step is None  # nothing to render, and nothing refused it

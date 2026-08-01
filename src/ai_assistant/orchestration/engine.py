@@ -766,7 +766,7 @@ class Engine:
         )
         check_arguments(
             "converse",
-            limit=self._max_payload_bytes,
+            max_bytes=self._max_payload_bytes,
             utterance=utterance,
             timeout=timeout,
             conversation_id=selected,
@@ -834,7 +834,11 @@ class Engine:
         """
         self._reject_if_closing()
         check_arguments(
-            "resume", limit=self._max_payload_bytes, token=token, approved=approved, timeout=timeout
+            "resume",
+            max_bytes=self._max_payload_bytes,
+            token=token,
+            approved=approved,
+            timeout=timeout,
         )
         return self._checked(
             await self._tracked(self._resume(token, approved=approved, timeout=timeout)), "resume"
@@ -870,7 +874,7 @@ class Engine:
                 record, as the loop raises.
         """
         self._reject_if_closing()
-        check_arguments("learn", limit=self._max_payload_bytes, event=event)
+        check_arguments("learn", max_bytes=self._max_payload_bytes, event=event)
         return self._checked(await self._tracked(self._learn(event)), "learn")
 
     async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
@@ -931,7 +935,7 @@ class Engine:
         selected = (
             None if conversation_id is None else identifier(conversation_id, name="conversation_id")
         )
-        check_arguments("observe", limit=self._max_payload_bytes, conversation_id=selected)
+        check_arguments("observe", max_bytes=self._max_payload_bytes, conversation_id=selected)
         return self._checked(await self._tracked(self._observation.observe(selected)), "observe")
 
     async def beliefs(
@@ -998,9 +1002,10 @@ class Engine:
         page_argument(offset, name="offset")
         check_arguments(
             "beliefs",
-            limit=self._max_payload_bytes,
+            max_bytes=self._max_payload_bytes,
             bands=snapshot_bands,
             kinds=snapshot_kinds,
+            limit=limit,
             offset=offset,
         )
 
@@ -1041,7 +1046,7 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
-        check_arguments("belief", limit=self._max_payload_bytes, record_id=named)
+        check_arguments("belief", max_bytes=self._max_payload_bytes, record_id=named)
         return self._checked(await self._tracked(self._belief(named)), "belief")
 
     async def forget(self, record_id: Identifier) -> bool:
@@ -1090,7 +1095,7 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(record_id, name="record_id")
-        check_arguments("forget", limit=self._max_payload_bytes, record_id=named)
+        check_arguments("forget", max_bytes=self._max_payload_bytes, record_id=named)
         return self._checked(await self._tracked(self._memory.delete(named)), "forget")
 
     async def questions(
@@ -1212,7 +1217,9 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(question_id, name="question_id")
-        check_arguments("answer", limit=self._max_payload_bytes, question_id=named, accept=accept)
+        check_arguments(
+            "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
+        )
         return self._checked(
             await self._tracked(self._questions.answer(named, accept=accept)), "answer"
         )
@@ -1245,7 +1252,7 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(question_id, name="question_id")
-        check_arguments("forget_question", limit=self._max_payload_bytes, question_id=named)
+        check_arguments("forget_question", max_bytes=self._max_payload_bytes, question_id=named)
         return self._checked(
             await self._tracked(self._questions.forget_question(named)), "forget_question"
         )
@@ -1316,7 +1323,7 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
-        check_arguments("conversation", limit=self._max_payload_bytes, conversation_id=named)
+        check_arguments("conversation", max_bytes=self._max_payload_bytes, conversation_id=named)
         return self._checked(await self._tracked(self._conversations.digest(named)), "conversation")
 
     async def forget_conversation(self, conversation_id: Identifier) -> bool:
@@ -1354,7 +1361,9 @@ class Engine:
         """
         self._reject_if_closing()
         named = identifier(conversation_id, name="conversation_id")
-        check_arguments("forget_conversation", limit=self._max_payload_bytes, conversation_id=named)
+        check_arguments(
+            "forget_conversation", max_bytes=self._max_payload_bytes, conversation_id=named
+        )
         return self._checked(
             await self._tracked(self._conversations.delete(named)), "forget_conversation"
         )
@@ -2028,7 +2037,9 @@ class Engine:
         set", and this is not one — it is the definition, which is the right thing
         for the implementation the conformance suite measures the others against.
         """
-        check_payload(result, limit=self._max_payload_bytes, subject=f"the result of {method}()")
+        check_payload(
+            result, max_bytes=self._max_payload_bytes, subject=f"the result of {method}()"
+        )
         return result
 
     def _check_page(self, method: str, *, limit: int, offset: int) -> None:
@@ -2043,7 +2054,7 @@ class Engine:
         """
         page_argument(limit, name="limit")
         page_argument(offset, name="offset")
-        check_arguments(method, limit=self._max_payload_bytes, offset=offset)
+        check_arguments(method, max_bytes=self._max_payload_bytes, limit=limit, offset=offset)
 
     def _step_outcome(
         self,

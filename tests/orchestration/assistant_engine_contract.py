@@ -69,6 +69,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     ContinuationToken,
+    Disposition,
     FeedbackEvent,
     FeedbackKind,
     MemoryKind,
@@ -118,6 +119,20 @@ class AssistantEngineContract(ABC):
         A separate subject rather than a knob on the first, because the limit is a
         construction-time property of an implementation — a deployment's frame size
         — and not something a caller changes mid-flight.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def parked_engine(self) -> AssistantEngine:
+        """A subject holding **exactly one** answerable parked confirmation.
+
+        The resume path cannot be reached by calling the surface: parking is the
+        *policy's* ruling, reached inside a turn, so an implementation has to be
+        handed to the suite already in that state. It is a fixture rather than a
+        step in a test for that reason — and it is the shape ADR-0042 §4's whole
+        park/render/relay sequence depends on, so a suite that skipped it would
+        leave a client with no shared account of the one interaction a human is in
+        the middle of.
         """
 
     # --- the shape of the surface -----------------------------------------
@@ -463,6 +478,105 @@ class AssistantEngineContract(ABC):
             await engine.resume(
                 ContinuationToken(handle="not-a-real-handle"), approved=True, timeout=_PATIENT
             )
+
+    # --- ADR-0042 §4 and ADR-0052 §1: park, render, relay --------------------
+
+    async def test_a_park_is_recovered_with_a_token_that_resolves(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """ADR-0052 §1's enumerate-and-re-mint, held over both implementations.
+
+        The confirmation carries what a person needs to judge the action — the
+        tool, what it does, the parameters it would run with, and the policy's own
+        reason for asking — because the adapter may read neither the audit trail
+        nor a ``PermissionDecision`` to recover any of it (ADR-0042 §6).
+        """
+        pending = await parked_engine.pending_confirmations()
+        assert len(pending) == 1
+        assert pending[0].reason
+        assert pending[0].tool_description
+        resumed = await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+        assert resumed.step is not None
+
+    async def test_a_resume_always_carries_its_resolved_step(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §4: the step is what a resume is *for*, so it is never ``None``.
+
+        ``turn`` may legitimately be absent — a park recovered from durable state
+        after a restart has no live turn, and fabricating one would misrepresent
+        what the turn saw (ADR-0052 §3) — which is exactly why the step cannot be.
+        A client handed neither has nothing to render.
+
+        ``step_id`` names the plan step the pass drove, which is what turns "read
+        ``state`` too" from advice into an addressable operation (ADR-0084 §8).
+        """
+        pending = await parked_engine.pending_confirmations()
+        resumed = await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+        assert resumed.step is not None
+        assert resumed.step.step_id
+        named = [
+            execution
+            for execution in resumed.step.state.steps
+            if execution.step_id == resumed.step.step_id
+        ]
+        assert len(named) == 1, "step_id must address exactly one execution record"
+
+    async def test_a_refusal_is_a_result_and_not_an_exception(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """ADR-0042 §4: only ``approved=False -> DENY`` is guaranteed, and DENY is a *ruling*.
+
+        "The adapter conveys consent; the policy rules on it; the engine records and
+        executes." A denial is therefore a
+        :attr:`~ai_assistant.core.types.Disposition.DENIED` disposition in the
+        outcome, never a raised
+        :class:`~ai_assistant.core.errors.PermissionDeniedError` — an implementation
+        that raised would hand a client a failure path the in-process engine does
+        not have, and the CLI renders the outcome rather than catching anything.
+        """
+        pending = await parked_engine.pending_confirmations()
+        resumed = await parked_engine.resume(pending[0].token, approved=False, timeout=_PATIENT)
+        assert resumed.step is not None
+        assert resumed.step.disposition is Disposition.DENIED
+        assert resumed.step.confirmation is None
+
+    async def test_a_token_is_answered_once(self, parked_engine: AssistantEngine) -> None:
+        """A resolved park is evicted, so a replay is a clean unknown token.
+
+        A second answer would be refused by the trail's single-resolution index
+        anyway; turning the replay into
+        :class:`~ai_assistant.core.errors.UnknownContinuationError` is what keeps
+        the table bounded and gives the client the one refusal that has a remedy.
+        """
+        pending = await parked_engine.pending_confirmations()
+        await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+        with pytest.raises(UnknownContinuationError):
+            await parked_engine.resume(pending[0].token, approved=True, timeout=_PATIENT)
+
+    # --- ADR-0074 §2: the listing is ordered by activity ---------------------
+
+    async def test_conversations_are_listed_by_activity_and_not_by_last_turn(
+        self, engine: AssistantEngine
+    ) -> None:
+        """Most recently active first, and the key is never "has a turn landed".
+
+        Ordering by the latter would sink a conversation the user opened a minute
+        ago below one they abandoned last week. It is held over every
+        implementation because a stand-in that returned insertion order would let a
+        client's ordering tests pass while production rendered stale conversations
+        first — the failure is invisible until someone looks at a real listing.
+        """
+        first = (await engine.converse("one", timeout=_PATIENT)).conversation_id
+        second = (await engine.converse("two", timeout=_PATIENT)).conversation_id
+        assert first is not None
+        assert second is not None
+        assert [one.id for one in await engine.recent_conversations()] == [second, first]
+
+        await engine.converse("again", timeout=_PATIENT, conversation_id=first)
+        listed = await engine.recent_conversations()
+        assert [one.id for one in listed] == [first, second]
+        assert listed[0].last_active_at >= listed[1].last_active_at
 
     # --- forgetting something absent is not an error ------------------------
 

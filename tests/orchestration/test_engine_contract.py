@@ -27,7 +27,18 @@ from typing import TYPE_CHECKING
 import pytest
 from assistant_engine_contract import _TINY_LIMIT, AssistantEngineContract
 
-from ai_assistant.core.types import ActionPlan
+from ai_assistant.core.types import (
+    ActionPlan,
+    CostBasis,
+    DataTier,
+    Disposition,
+    Idempotency,
+    PlanStep,
+    Reversibility,
+    RiskLevel,
+    ToolCost,
+    ToolDefinition,
+)
 from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     ConversationLifecycle,
@@ -66,6 +77,54 @@ OBSERVATION_BATCH = 20
 OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 
 
+CAPABILITY = "send_email"
+PARAMETERS = {"to": "someone@example.com"}
+
+
+def _confirmable() -> ToolDefinition:
+    """A declaration ``FakeActionPolicy`` rules ``CONFIRM`` on.
+
+    It discloses personal data off-device, which is ADR-0021 §5's floor: a
+    disclosure is confirmed whatever the risk level says. Using the policy's own
+    rule rather than a scripted ruling is what makes the parked subject a *real*
+    park — the disposition comes from the permission stage, not from the fixture.
+    """
+    return ToolDefinition(
+        id="smtp",
+        capability=CAPABILITY,
+        description="Send an email.",
+        risk_level=RiskLevel.LOW,
+        reversibility=Reversibility.REVERSIBLE,
+        side_effecting=True,
+        reads=(),
+        writes=(),
+        discloses=(DataTier.PERSONAL,),
+        cost=ToolCost(basis=CostBasis.FREE),
+        idempotency=Idempotency.NATURAL,
+    )
+
+
+class _OneStepPlanner:
+    """A ``Planner`` that plans exactly one step **for the goal it is given**.
+
+    Building the plan from the passed goal is what keeps ``plan.goal_id`` equal to
+    the id the loop minted, so the façade's ``save_plan`` finds its goal.
+    """
+
+    async def plan(
+        self,
+        goal: Goal,
+        *,
+        context: CurrentContext,
+        memories: Sequence[MemoryRecord] = (),
+    ) -> ActionPlan:
+        """Return a one-step plan for the goal."""
+        step = PlanStep(
+            id="step-1", intent="send the note", capability=CAPABILITY, parameters=PARAMETERS
+        )
+        return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
+
+
 class _NoStepPlanner:
     """A ``Planner`` that ends a turn at an empty plan.
 
@@ -97,15 +156,34 @@ def _counter(prefix: str) -> Callable[[], str]:
     return lambda: f"{prefix}-{next(numbers)}"
 
 
-def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> Engine:
-    """Build one engine over in-memory fakes, wired as the composition root would."""
+async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
+    """A tool that does nothing and succeeds."""
+
+
+def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES, parks: bool = False) -> Engine:
+    """Build one engine over in-memory fakes, wired as the composition root would.
+
+    ``parks`` swaps in a one-step plan over a tool the policy confirms, which is
+    the only way to reach the resume path: parking is the permission stage's
+    ruling and no call on the surface asks for it.
+    """
+    # **The conversation store's clock advances**, because ADR-0074 §2's sort key
+    # is activity and a frozen clock cannot express "more recently active" at all —
+    # every conversation would stamp the same instant and the id tie-break would
+    # decide the listing. The other stores keep the fixed instant: nothing else here
+    # is about ordering in time.
+    ticks = count(1)
+    conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
-    invoker = FakeToolInvoker([])
+    invoker = FakeToolInvoker([(_confirmable(), _succeeds)] if parks else [])
     memory = FakeMemoryStore(now=lambda: AT)
-    conversation_store = FakeConversationStore(now=lambda: AT)
+    conversation_store = FakeConversationStore(now=conversation_clock)
     conversations = ConversationLifecycle(
-        conversations=conversation_store, memory=memory, retention=RETENTION, now=lambda: AT
+        conversations=conversation_store,
+        memory=memory,
+        retention=RETENTION,
+        now=conversation_clock,
     )
     writer = FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=lambda: AT)
     deferrals = FakeDeferralStore(now=lambda: AT)
@@ -123,7 +201,7 @@ def _wire(*, max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES) -> Engine:
         context=FakeContextProvider(),
         memory=memory,
         writes=writes,
-        planner=_NoStepPlanner(),
+        planner=_OneStepPlanner() if parks else _NoStepPlanner(),
         feedback=FakeFeedbackProcessor(),
         now=lambda: AT,
         id_factory=_counter("g"),
@@ -170,6 +248,24 @@ class TestEngineContract(AssistantEngineContract):
         built = _wire(max_payload_bytes=_TINY_LIMIT)
         await built.start()
         try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def parked_engine(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine holding a single answerable park.
+
+        Reached by driving a real turn over a tool the policy confirms, so the
+        confirmation the suite then renders and relays is the one the permission
+        stage actually recorded — not a fixture's idea of one.
+        """
+        built = _wire(parks=True)
+        await built.start()
+        try:
+            outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
+            assert outcome.step is not None
+            assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
             yield built
         finally:
             await built.aclose()
