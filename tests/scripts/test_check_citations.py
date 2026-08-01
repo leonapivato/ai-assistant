@@ -372,6 +372,32 @@ def test_a_path_under_no_code_root_is_not_a_code_citation(tmp_path: Path, cited:
     assert _findings(_report(tmp_path, "--no-tracker"), "module-path") == []
 
 
+@pytest.mark.parametrize(
+    "cited",
+    [
+        "src/ai_assistant/../../docs/missing.md",
+        "memory/../../../docs/adr/missing.md",
+        "../docs/review/guide.md",
+        "tests/../docs/missing.py",
+    ],
+    ids=["full-form", "relative-form", "leading", "root-escape"],
+)
+def test_a_path_that_normalises_out_of_its_root_is_not_a_code_citation(
+    tmp_path: Path, cited: str
+) -> None:
+    """§1(b) is about where a path *lies*, and `..` decides that as much as the prefix does.
+
+    Containment in the repository is not the test: ``docs/`` exists here, so a
+    traversal out of a code root anchors on it and would be reported as an
+    absent module path — against a document reference §1(b) says nothing
+    resolves against the code.
+    """
+    _write(tmp_path / "docs" / "review" / "guide.md", "# guide\n")
+    _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\nSee `{cited}`.\n"})
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "module-path") == []
+
+
 def test_a_legacy_line_number_is_stripped_and_the_path_resolved(tmp_path: Path) -> None:
     """§5: "`testing/memory.py:41` is checked as `testing/memory.py`"."""
     body = (
@@ -586,6 +612,42 @@ def test_a_wrapped_status_field_is_read_whole(tmp_path: Path) -> None:
     _make_repo(tmp_path, adrs)
 
     assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
+def test_a_body_list_item_that_looks_like_a_record_is_not_one(tmp_path: Path) -> None:
+    """§4 legislates a *header* line; ADR-0070 §4 forbids reading a supersession out of prose.
+
+    An unfenced body bullet is the case a fence exclusion alone does not cover,
+    and an ADR explaining the rule writes exactly this.
+    """
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            "# 2. Two\n\n- Status: Accepted\n\n## Decision\n\n"
+            "A superseding ADR writes a record like this one:\n\n"
+            "- Supersedes: ADR-0001 (its whole §3)\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
+def test_a_real_header_record_survives_the_header_boundary(tmp_path: Path) -> None:
+    """The boundary must not silence the records §4 exists to compare."""
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            "# 2. Two\n\n- Status: Accepted\n- Supersedes: ADR-0001 (its whole §3)\n"
+            "\n## Context\n\nReplaces it.\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    findings = _findings(_report(tmp_path, "--no-tracker"), "liveness")
+
+    assert len(findings) == 1
+    assert findings[0]["line"] == 4
 
 
 def test_a_fenced_reverse_record_is_an_example_not_a_record(tmp_path: Path) -> None:

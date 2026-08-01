@@ -419,18 +419,30 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
 # --------------------------------------------------------------------------- #
 
 
-def _module_path_candidates(root: Path, cited: str) -> list[Path]:
-    """Return the filesystem paths a b1 citation could mean.
+def _module_path_candidates(root: Path, cited: str) -> Iterator[Path]:
+    """Yield the filesystem paths a b1 citation could mean.
 
     A path is a code citation "when it lies under ``src/ai_assistant/``,
     ``tests/`` or ``scripts/``, written either in full or relative to one of
-    them" (ADR-0088 §1(b)), so both readings are candidates.
+    them" (ADR-0088 §1(b)), so both readings are candidates for each root.
+
+    **A candidate that does not normalise to somewhere inside its own root is
+    discarded**, which is the whole content of "defined by root". Without it
+    ``src/ai_assistant/../../docs/missing.md`` reads as a full-form citation,
+    normalises to ``docs/missing.md``, anchors on the existing ``docs/`` — and
+    is reported as an absent module path, when §1(b) says in terms that a path
+    under ``docs/`` is a document reference nothing resolves against the code.
+    Containment in the *repository* is not enough to catch that; containment in
+    the candidate's own root is.
     """
-    candidates: list[Path] = []
-    if cited.startswith(_FULL_PREFIXES):
-        candidates.append(root / cited)
-    candidates.extend(root / code_root / cited for code_root in _CODE_ROOTS)
-    return candidates
+    for code_root in _CODE_ROOTS:
+        base = (root / code_root).resolve()
+        readings = [base / cited]
+        if cited == code_root or cited.startswith(f"{code_root}/"):
+            readings.append(root / cited)
+        for candidate in readings:
+            if candidate.resolve().is_relative_to(base):
+                yield candidate
 
 
 def _is_anchored(candidate: Path) -> bool:
@@ -446,11 +458,6 @@ def _is_anchored(candidate: Path) -> bool:
     return candidate.parent.is_dir()
 
 
-def _under(root: Path, candidate: Path) -> bool:
-    """Whether a candidate reading stays inside the checkout."""
-    return candidate.resolve().is_relative_to(root.resolve())
-
-
 def resolve_module_path(root: Path, cited: str) -> bool | None:
     """Resolve a b1 module path against the tree.
 
@@ -463,7 +470,7 @@ def resolve_module_path(root: Path, cited: str) -> bool | None:
         ``None`` if nothing anchors it — in which case it is not a code citation
         and nothing is reported.
     """
-    candidates = [c for c in _module_path_candidates(root, cited) if _under(root, c)]
+    candidates = list(_module_path_candidates(root, cited))
     if any(candidate.exists() for candidate in candidates):
         return True
     if any(_is_anchored(candidate) for candidate in candidates):
@@ -641,22 +648,34 @@ def _fold(value: str) -> str:
     return " ".join(value.split())
 
 
-def _outside_fences(text: str) -> str:
-    """Return the text with every fenced line blanked, line numbering preserved.
+def header(text: str) -> str:
+    """Return an ADR's header — everything above its first ``## `` section.
 
-    §1's fence exclusion is general, so the header fields §4 reads obey it too:
-    an ADR exhibiting a ``- Supersedes: …`` line as an example fences it, and a
-    scan that read the example would compare a pair nobody wrote. One blank line
-    per fenced line keeps the newline count intact, so a match's line number is still
-    the line number in the file.
+    §4 legislates a **header** line, and ADR-0070 §4 forbids discovering a
+    supersession by reading prose. A body list item may legitimately look like a
+    record: an ADR explaining the rule writes ``- Supersedes: ADR-A`` as an
+    illustration, and comparing that as a record reports a pair nobody declared.
+    The boundary is markdown's own level-2 heading and needs no numbering
+    scheme, so it is not the document-structure inference §6 forbids — and it is
+    measured, not assumed: every ADR on `main` carries a ``## `` heading and all
+    nine reverse records sit above theirs.
+
+    Fenced lines are blanked rather than dropped — §1's exclusion is general, so
+    a fenced example inside the header is display too — and one blank line per
+    fenced line keeps the newline count intact, so a match's line number is
+    still the line number in the file.
     """
     kept = dict(iter_prose_lines(text))
-    return "\n".join(kept.get(number, "") for number in range(1, len(text.splitlines()) + 1))
+    lines = [kept.get(number, "") for number in range(1, len(text.splitlines()) + 1)]
+    for index, line in enumerate(lines):
+        if line.startswith("## "):
+            return "\n".join(lines[:index])
+    return "\n".join(lines)
 
 
 def status_field(text: str) -> str | None:
     """Return one ADR's whole ``Status`` field, folded onto one line."""
-    match = _STATUS_RE.search(_outside_fences(text))
+    match = _STATUS_RE.search(header(text))
     return None if match is None else _fold(match.group("value"))
 
 
@@ -667,9 +686,9 @@ def reverse_records(text: str) -> list[tuple[int, str, str]]:
         ``(lineno, kind, folded value)`` per record, in document order.
     """
     records: list[tuple[int, str, str]] = []
-    prose = _outside_fences(text)
-    for match in _SUPERSEDES_RE.finditer(prose):
-        lineno = prose.count("\n", 0, match.start()) + 1
+    head = header(text)
+    for match in _SUPERSEDES_RE.finditer(head):
+        lineno = head.count("\n", 0, match.start()) + 1
         records.append((lineno, _fold(match.group("kind")), _fold(match.group("value"))))
     return records
 
