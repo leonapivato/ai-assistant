@@ -334,15 +334,25 @@ catch a name that points at *nothing*. It cannot catch a name that points at the
 wrong thing, and this ADR does not pretend otherwise: that defect is found by
 reading, and by review.
 
-**(c) A tracker citation resolves** when the issue or PR exists. Additionally,
-where the citing sentence makes a **state claim** about it — "`#NNN` tracks the
-conversion", "**#281 is discharged**", "closed by `#NNN`" — the claim is checked
-against the tracker's state. A citation that merely *refers* (`Refs #537`,
-"raised as #473") makes no state claim and is checked for existence only.
-**Existence is Tier 1 and a contradicted state claim is Tier 2** (§6): the
-number either exists or it does not, but recognising that a sentence *makes* a
-state claim is a reading, and #588's defect 2 — a claim falsified four hours
-after it was written — is exactly the case a reader must judge.
+**(c) A tracker citation resolves** when the issue or PR exists. **That is the
+whole of it, and issue *state* is not checked at all.**
+
+This is a deliberate retreat from where this ADR started. A sentence like "`#NNN`
+tracks the conversion" or "**#281 is discharged**" makes a claim about state, and
+checking it means first recognising that a claim was made — separating an
+assertion from a quotation, an attribution, or a negation. This very ADR quotes
+ADR-0085's "**#281 is discharged**" in order to say it is *false*; a
+phrase-matching checker would report this document as making the claim it
+refutes. That is prose inference, §6 forbids it, and no smaller grammar rescues
+it, because the corpus phrases these claims freely.
+
+**So two real defects are conceded to reading rather than tooling**: #593
+(ADR-0085 asserts a discharge the tracker contradicts) and #588's defect 2 (a
+claim falsified four hours after it was written, while its PR sat in review).
+They are genuine and they stay the author's and the reviewer's to catch. What
+survives mechanically — the number exists — is worth having anyway, and it is
+Tier 1 because there is no case where a cited issue number legitimately fails to
+exist.
 
 ### 3. An append-only corpus correctly cites what is not in the tree, so no code citation may fail a check
 
@@ -475,10 +485,12 @@ readings out of the tool for the same reason ADR-0082 §6 declined a mechanical
 ADR says does not control."
 
 **And a section reference inside a supersession scope is not a citation of the
-naming ADR.** ADR-0074's "ADR-0076 §9's obligation set" names ADR-0074's §9. This
-is the collision recorded in Context; under §1 the scope is part of the `Status`
-record, not a decision citation, and a checker that treats it as one reports a
-false defect — as the script written for this ADR did, twice, on its first run.
+naming ADR.** ADR-0074's "ADR-0076 §9's obligation set" names ADR-0074's §9 — the
+collision recorded in Context, which the script written for this ADR walked into
+twice on its first run. **No mechanical rule separates the two**, because the
+distinction lives in the surrounding prose. That is precisely why §6 puts section
+resolution in Tier 2: the ambiguity is unresolvable, so the result is reported
+and never failed, and a correct document is never blocked by it.
 
 ### 5. A citation carries no line number
 
@@ -520,20 +532,30 @@ This section binds the implementation lane; it does not write it.
 **Two tiers, and the boundary is whether a legitimate non-resolving case
 exists.**
 
-**Tier 1 — may fail.** A decision citation naming an ADR file that does not
-exist, or naming a section number an ADR that numbers sections does not define;
-a tracker citation to an issue number that does not exist. These have **no**
-legitimate non-resolving case: ADRs are append-only so a file is never deleted,
-section numbers are never withdrawn, and an issue number once assigned stays
-assigned. A failure here is always a defect. This is the tier that answers
-#588's complaint that no gate step can fail on a `docs/adr/**` change — the
-corpus's 3,387 decision citations pass it today, which makes it a regression
-guard rather than a backlog.
+**Tier 1 — may fail. Two things, and only two.** A decision citation naming an
+**ADR file that does not exist**, and a tracker citation naming an **issue number
+that does not exist**. These have no legitimate non-resolving case at all: ADRs
+are append-only so a file is never deleted, and an issue number once assigned
+stays assigned. A failure is always a defect. The corpus's 3,387 decision
+citations pass today, so this is a regression guard rather than a backlog — and
+it is the tier that answers #588's complaint that no gate step can fail on a
+`docs/adr/**` change.
+
+**Section resolution is deliberately *not* in Tier 1**, though an earlier draft
+of this ADR put it there. A `§K` reference is not always a citation of the ADR
+beside it: ADR-0074 writes "ADR-0076 §9's obligation set", where the §9 is
+ADR-0074's own and names the scope ADR-0076 replaced. ADR-0076 has no §9, so a
+failing section check fails a correct document — the same mistake as the
+heading-only checker in §2(a), and unfixable for the same reason, since telling
+a citation from a scope restatement means reading the surrounding prose. Section
+misses go to Tier 2. The cost is small and measured: the corpus contains **no**
+real section miss, so the check has nothing to catch and would only have had
+something to be wrong about.
 
 **Tier 2 — reported, never failing.** Every code citation that does not resolve
-(§3), every liveness disagreement (§4), and a state claim about an issue whose
-tracker state contradicts it (§2(c)). Each has a legitimate class no mechanical
-test separates from a defect, so each is surfaced for a reader and none blocks.
+(§3), every section number that does not resolve (above), and every liveness
+disagreement (§4). Each has a legitimate class no mechanical test separates from
+a defect, so each is surfaced for a reader and none blocks.
 
 **The input set is §1's forms, and the checker does not infer its own.** This is
 the difference between 479 false positives and a usable check.
@@ -682,10 +704,10 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
 
 - **A `docs/adr/**` change can fail — on Tier 1.** The five-step gate's
   structural blind spot is named, and §6 gives the implementing lane a check
-  whose input set is defined rather than inferred. Tier 1 is small and clean: a
-  dangling ADR reference or section number, and a nonexistent issue number. The
-  corpus passes it today, so it guards against regression rather than presenting
-  a backlog.
+  whose input set is defined rather than inferred. Tier 1 is deliberately tiny —
+  a dangling ADR file reference and a nonexistent issue number, the only two
+  things in the corpus with no legitimate way to fail. It passes today, so it
+  guards against regression rather than presenting a backlog.
 - **The corpus turned out to be much healthier than the brief assumed, and that
   is a finding.** Four instances motivated this ADR; the measurement found the
   cross-reference graph essentially sound (3,387 references, no real failures)
@@ -734,11 +756,13 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   list is permanently non-empty — `MemoryDecisionKind.MERGE` will be on it
   forever, correctly — so whoever builds §6 has to make a standing non-zero
   report legible, and that is harder than making a list that should be empty.
-- **A tracker check is only as good as the tracker.** §2(c) makes an ADR's state
-  claim about an issue falsifiable, which also means an ADR can be made wrong by
-  someone closing an issue. That is the correct direction — #588's defect 2 was
-  exactly a claim that expired while its PR sat in review — but it means ADR text
-  can go stale without anyone touching it.
+- **Two of the motivating defects are conceded outright.** #593 and #588's
+  defect 2 are both claims about issue *state*, and §2(c) rules that state is not
+  checked, because recognising a state claim means separating an assertion from a
+  quotation or a negation. An ADR can still be made false by someone closing an
+  issue, and nothing here will notice. That is the honest boundary of a tool that
+  refuses to read prose, and it is where this ADR ends up after four review
+  rounds each pushed it to promise less.
 
 **Follow-on.**
 
