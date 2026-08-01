@@ -1,6 +1,6 @@
 # 87. The canonical wire encoding, and the vectors that make it testable
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-01
 - **This is a fifth change inserted into ADR-0084 §5's four, and its position is
   *before the triad*.** That is the load-bearing claim and §6 argues it from
