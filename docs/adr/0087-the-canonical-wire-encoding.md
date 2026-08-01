@@ -299,13 +299,20 @@ determined bytes. This is where §2 **replaces** ADR-0084 §3's rule that a payl
 "is serialised through pydantic's JSON mode" (§10 carries the record), and the
 scoping is what keeps the replacement as narrow as it can be.
 
-**The envelope is not touched.** §3 decides the envelope's own representation,
-including that its "member order is therefore not significant and no ordering rule
-is needed", and nothing here changes that: an implementation that emits envelope
-members in any order conforms to both ADRs, and one that happens to sort the
-whole frame in a single pass conforms too, because "not significant" permits
-both. What this ADR determines is the bytes of the payload; it does not determine
-the bytes of the frame, and it does not need to.
+**More precisely: the payload of a `request`, `result` or `error` frame** — the
+values the promoted methods pass and return. **The connect exchange is excluded**,
+and that is a decision rather than an oversight: it is not a method call, its body
+is the handshake ADR-0084 §2 and §3 own, and §3 freezes its representation
+permanently so that a version mismatch can be *reported* rather than dropped. §8
+gives the reasoning; nothing in §2 spells or orders a connect frame's members.
+
+**The envelope is not touched either.** §3 decides the envelope's own
+representation, including that its "member order is therefore not significant and
+no ordering rule is needed", and nothing here changes that: an implementation
+that emits envelope members in any order conforms to both ADRs, and one that
+happens to sort the whole frame in a single pass conforms too, because "not
+significant" permits both. What this ADR determines is the bytes of a call's
+payload; it does not determine the bytes of the frame, and it does not need to.
 
 > **The canonical wire encoding of a payload is ADR-0021 §1's canonical JSON form
 > applied to that value's pydantic JSON-mode projection**, subject to the three
@@ -1061,15 +1068,22 @@ connection. Three cases, and they are genuinely different:
   either an error in the vector or a change to the property, and it takes the
   first case's treatment.
 
-**A vector covering a connect-exchange payload can never change, bump or no
-bump.** ADR-0084 §3 freezes the connect frame's framing and decoding "in every
-protocol version, permanently", precisely so that a v1 hub can read a v2 client's
-version far enough to report the mismatch. An encoding change that reached the
-connect exchange would break the mechanism that reports encoding changes. So the
-freeze binds the connect payload absolutely, and only superseding ADR-0084 §3
-could lift it. This ADR pins no connect-payload vector — its members are not
-named by any ratified text — but §2's properties reach it, and the freeze applies
-to them there.
+**None of this reaches the connect exchange, because §2 does not.** §2's subject
+is the payload of a `request`, `result` or `error` frame — the values the
+promoted methods pass and return, which is what ADR-0084 §4's limit measures. The
+connect exchange is not a method call: it is the handshake ADR-0084 §2 and §3
+own, and this ADR neither spells its members nor orders them. §8's version rule
+therefore applies to encoding changes on the *call* path only.
+
+**Recorded because the temptation to extend §2 there is real, and it must be
+resisted by a later ADR too.** ADR-0084 §3 freezes the connect frame's framing
+and decoding "in every protocol version, permanently", precisely so that a v1 hub
+can read a v2 client's connect frame far enough to report the mismatch — an
+encoding change that reached the connect exchange would break the very mechanism
+that reports encoding changes. So a later ADR that wanted one canonical spelling
+across *all* frames would have to engage that freeze head-on and supersede it.
+This ADR does not, and its silence about the handshake is a decision rather than
+an omission.
 
 **What this does *not* do is make ADR-0084 §3's exact-match rule carry more than
 it says.** The rule is unchanged: one integer, matched exactly, refused at
@@ -1104,11 +1118,13 @@ behaviour at the handshake.
   §5 are byte-identical whether or not they share code; **which one change 4
   builds is change 4's, and filed.** This is the clearest payoff of ratifying an
   output rather than a module, and it is why §1 rejects naming a serialiser.
-- **The connect payload's members.** Described in prose by ADR-0084 §2 — a
-  version, a client identifier, a credential slot — but never enumerated as a
-  schema. §2 encodes them once they are; §8 records that when they arrive they
-  are frozen harder than anything else on the wire, because ADR-0084 §3's
-  permanent-representation rule reaches them.
+- **The connect exchange's spelling.** Its members are described in prose by
+  ADR-0084 §2 — a version, a client identifier, a credential slot — and never
+  enumerated as a schema. **This ADR deliberately does not reach them** (§8): §2
+  is scoped to the call path, and ADR-0084 §3's permanent-representation freeze
+  makes the handshake the one place a canonical encoding could not simply be
+  extended later without superseding that clause. Whether the handshake wants one
+  at all is ADR-0084 §3's question, not this ADR's.
 
 ### 10. Amendment records under ADR-0082 §1
 
@@ -1158,13 +1174,32 @@ changing it, it is superseded by it.
   false, which decision of this ADR did it, and — at length, because it is the
   larger half — what §5 decided that does *not* move.
 
-**The record lands in this change**, and the argument is ADR-0084 §12's own,
+**Both records land in this change**, and the argument is ADR-0084 §12's own,
 inherited: it wrote its records on ADR-0042, ADR-0073 and ADR-0078 in its own
 change so that `main` would never carry text asserting something already false
-"with nothing mechanical to detect it". Nothing detects a stale enumeration. The
-alternative — reporting the obligation and letting a later change discharge it —
-leaves a window in which ADR-0084 says four and the corpus contains five, and the
-window has no natural end.
+"with nothing mechanical to detect it". Nothing detects a stale enumeration or a
+superseded encoding rule. The alternative — reporting the obligation and letting a
+later change discharge it — leaves a window in which ADR-0084 says four and the
+corpus contains five, and the window has no natural end.
+
+**That this ADR is `Proposed` is not an objection to writing the record, and the
+corpus settles it in as many words** — recorded here because it is the question a
+reader most naturally asks of a `Status` line naming an unratified ADR. ADR-0070
+§1 permits "recording a supersession that has landed" and warns that this
+"presupposes the superseding ADR *exists*". ADR-0083 §15 states what that
+condition amounts to:
+
+> **The existence condition is that the naming ADR ships in the same change, not
+> that it has ratified** — so this record is well-formed from the moment it is
+> written, and if this ADR does not land, neither does it.
+
+That is the form ADR-0075 established, and `main` carries it on ADR-0042,
+ADR-0050, ADR-0073, ADR-0074 and ADR-0078. ADR-0084's own §12 used it for the
+record it wrote on ADR-0042 while ADR-0084 was itself `Proposed`: "while this one
+is `Proposed` the line names a supersession that is drafted rather than ratified".
+**So ADR-0084's `Status` names an ADR that exists in the same commit**, which is
+the hazard ADR-0070 §1 guards against, closed. If this change does not land,
+neither does the record.
 
 **Why this ADR carries the record and the surface ADR does not.** The record
 belongs where the falsifying decision is, and the decision that falsifies §5's
