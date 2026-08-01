@@ -330,10 +330,25 @@ bare `str` today and treats each id as opaque, which is right — but "opaque" a
 belief", which is a true sentence about a call the caller never meant to make.
 
 **Because these are Protocol arguments rather than model fields, the annotation
-does not validate anything by itself.** So the contract clause carries it:
+does not validate anything by itself** — and `Identifier` does more than validate.
+Its `AfterValidator` is `_non_blank`, which **returns the value stripped**
+(`core/types.py`): it is a normaliser as well as a check. Left to the annotation,
+a wire client that deserialises its arguments through `Identifier` would turn
+`" rec-1 "` into `"rec-1"` and find the record, while an in-process engine handed
+the raw `str` would look up `" rec-1 "` and answer `None`. Two implementations,
+one call, opposite answers — §4's divergence arriving through a validator nobody
+thought of as behaviour.
 
-> An implementation refuses a blank identifier argument with `ValueError`, before
-> any I/O.
+So the contract clause carries the whole of `Identifier`, not half of it:
+
+> **Every identifier argument undergoes `Identifier` validation before any I/O**
+> — which both **rejects** a blank value with `ValueError` and **strips**
+> surrounding whitespace from the value the implementation then uses.
+
+Stating the normalisation rather than only the refusal is the load-bearing half.
+A rule that said "reject blank" would leave stripping optional, and optional
+normalisation on an *identity* argument is worse than none: it makes the answer to
+`belief(" rec-1 ")` a property of which implementation you are holding.
 
 This is the same shape as §3d's materialisation clause and §8's page-range
 clause: an annotation states the intent and a contract clause makes it
@@ -881,12 +896,33 @@ value — one inserting whitespace after `,` and `:`, one escaping non-ASCII as
 is not one limit. So:
 
 > **The measurement is taken on the payload's UTF-8 JSON encoding in its
-> canonical form: no insignificant whitespace (the `,` and `:` separators carry
-> none), and non-ASCII characters emitted as UTF-8 rather than as `\u` escapes.**
-> This is the encoding ADR-0084 §3 puts on the wire, and it is what pydantic's
-> own `model_dump_json()` produces — so an implementation that measures the bytes
-> it is about to send, and an in-process one that calls the same method, agree by
-> construction rather than by care.
+> canonical form**, which is fixed by all five of the following. Together they
+> determine the byte string exactly; any one left open leaves two conforming
+> encoders disagreeing about the same value.
+>
+> 1. **No insignificant whitespace** — the `,` and `:` separators carry none.
+> 2. **Strings escape only what JSON requires**: `"`, `\` and the control
+>    characters below `U+0020`. **`/` is never escaped**, which `\/` would also
+>    permit and which costs a byte per occurrence.
+> 3. **Control characters use JSON's two-character forms where it defines them**
+>    (`\b`, `\f`, `\n`, `\r`, `\t`) and `\u00XX` otherwise — never the long
+>    form for a character that has a short one.
+> 4. **Non-ASCII characters are emitted as UTF-8**, never as `\u` escapes.
+> 5. **Numbers take their shortest round-tripping decimal form** — integers with
+>    no exponent, no leading `+` and no leading zeros; floats as the shortest
+>    decimal that reads back to the same value. `Belief.confidence` is the field
+>    this bites, and without it `0.1`, `1e-1` and `0.1000000000000000055` are all
+>    valid encodings of one number at three different lengths.
+>
+> **Member order is deliberately not fixed**, because ADR-0084 §3 already rules it
+> insignificant and because it cannot change a byte *count* — only the order of
+> the same bytes.
+>
+> This is the encoding ADR-0084 §3 puts on the wire, and it is what pydantic's own
+> `model_dump_json()` produces. **An implementation may satisfy the five rules by
+> any means; calling that method is the way to satisfy them without thinking about
+> it**, and it is why the in-process engine and the client agree by construction
+> rather than by care.
 
 Pinning it as the *wire's* encoding rather than as a convention of this ADR is
 what keeps the two numbers the same: the client is measuring the frame it will
@@ -1441,11 +1477,17 @@ move to `Accepted` triggers nothing.
   overflows the frame on `timeout` alone — leaving the client to refuse an input
   the contract admitted, or to send a frame the server refuses on its prefix.
   Bounding the payload measures the thing the length prefix counts.
-- **Leave the measurement as "pydantic JSON mode" without pinning the bytes.**
-  Rejected in §8c: JSON mode names a value shape, not a byte string, so two
-  conforming encoders differing only in whitespace or `\u` escaping would
-  disagree about whether the same call is oversized — which is one limit in name
-  and two in effect.
+- **Leave the measurement as "pydantic JSON mode" without pinning the bytes**, or
+  pin only whitespace and non-ASCII escaping. Rejected in §8c: JSON mode names a
+  value shape, not a byte string, and a partial pin is no better — `/` versus
+  `\/`, `\n` versus `\u000a`, and `0.1` versus `1e-1` are all still open, so two
+  conforming encoders disagree about whether the same call is oversized. One limit
+  in name and two in effect.
+- **State only that identifier arguments must be non-blank, leaving stripping to
+  the implementation.** Rejected in §3c: `_non_blank` strips as well as rejects,
+  so a wire client deserialising through `Identifier` and an in-process engine
+  taking the raw `str` give opposite answers for `belief(" rec-1 ")`. Optional
+  normalisation on an identity argument is worse than none.
 - **Derive the `hub_max_frame_bytes` floor from the handshake's members, bounding
   each one as it is noticed.** Rejected in §8d: three separate things turned out
   to be unbounded on inspection — the build identifier, the version's decimal
