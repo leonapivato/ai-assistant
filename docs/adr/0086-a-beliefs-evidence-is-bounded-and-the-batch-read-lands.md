@@ -148,10 +148,19 @@ That is deliberate on both halves:
   enforcement seam on the goal write path" to "the lane that adds an
   inferred-goal producer". No such producer exists, which is why that lane is
   where the seam is decided rather than guessed at here — the same reasoning
-  ADR-0072 §3 used to decline a validator until a producer could violate it. The same bound governs `FeedbackEvent.evidence`, which is
-copied straight into a `Provenance` (`RuleBasedFeedbackProcessor._to_record`,
-`learning/processor.py`) and would otherwise fail at a construction the caller
-cannot see.
+  ADR-0072 §3 used to decline a validator until a producer could violate it.
+
+**`FeedbackEvent.evidence` is not bounded either, and it needs no rule of its
+own.** An earlier draft said the bound "governs" it; after §2 puts enforcement at
+the install that is simply false, and the correction is worth stating rather than
+deleting. A `FeedbackEvent` carrying 65 ids is constructible, and
+`RuleBasedFeedbackProcessor` copies all 65 into the record it proposes
+(`RuleBasedFeedbackProcessor._to_record`, `learning/processor.py`). Nothing there
+is stored: the proposal crosses `MemoryWriter`, which installs the retained
+subset and records the elision like any other. Adding a second enforcement point
+at the feedback boundary would put one rule in two places to drift — the defect
+ADR-0077 §5 names when it explains why the emptiness rule lives at the policy and
+the resolvability rule at the writer, and not both at each.
 
 **A figure is named rather than left to the implementation**, following ADR-0083
 §7 and ADR-0074 §9.3's reason: "a 'bounded default' with no figure is two
