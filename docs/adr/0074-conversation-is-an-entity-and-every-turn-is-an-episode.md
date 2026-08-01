@@ -1,7 +1,53 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract) and ADR-0086 (§5's refusal of a batch read on the memory store, and the entry repeating it in §10's declined list)
 - Date: 2026-07-28
+- Partially superseded: 2026-08-01 by ADR-0086 — **§5's refusal of a batch read on
+  `MemoryStore`, and the entry in §10 repeating it, no longer hold: `get_many` is
+  on the contract.**
+  [ADR-0086](0086-a-beliefs-evidence-is-bounded-and-the-batch-read-lands.md) §6
+  adds `get_many` to the `MemoryStore` Protocol. ADR-0086 §11 names these clauses,
+  quotes them and applies ADR-0070 §1's test; this note records the ruling declared
+  there.
+
+  **Replaced — §5's closing paragraph.** "**A batch read on `MemoryStore` is
+  declined.** Fetching *k* episodes is *k* calls to `get`. A `get_many` would be a
+  contract change bought for one caller at a scale where it buys nothing
+  measurable, and the honest place to revisit it is the hub, where a resume crosses
+  a transport (§11)." **And §10's entry repeating it**, "**A batch `get_many` on
+  `MemoryStore`.** §5. Deferred to the hub, where a resume crosses a transport."
+  A reader holding only this ADR believes the contract has no batch read and writes
+  *k* calls to `get` where one call now serves; both sentences are false.
+
+  **§5's stated trigger did not fire, and this is a supersession rather than a
+  deferral being collected.** ADR-0086 §6 says so outright. The condition §5 named
+  — the hub, "where a resume crosses a transport" — has not arrived and will not:
+  the hub is one resident process holding the stores (ADR-0083 §1), so a resume's
+  *k* reads run *inside* it and never touch the socket, and ADR-0084 §1 puts one
+  loopback connection in front of the whole façade. In ADR-0086 §6's words, "the
+  transport argument is dissolved, not met." What moved is the other half of §5's
+  reasoning — "one caller at a scale where it buys nothing measurable". ADR-0086 §6
+  finds two contract-mandated callers and puts a figure on the scale: a listing page
+  of 50 beliefs each carrying up to 64 citations is 3,200 reads, each one a lock
+  acquisition in a process serving other connections behind it. So §5's decision is
+  overturned on its merits, by an argument §5 could not weigh because ADR-0083 did
+  not exist — not by the revisit condition §5 set arriving.
+
+  **Not replaced — including the rest of §5, which is nearly all of it.** The
+  continuity seam stands whole: recent turns reach the planner as `memories`,
+  `Planner` grows no `history` parameter, the widened meaning of `memories` and its
+  ordering rule stand, the tail stays bounded by a configured count of recent turns,
+  and an id that does not resolve is still **skipped, not an error**. `get_many`
+  changes how those turns are fetched, not what continuity is or what it carries.
+  ADR-0086 replaces nothing else in this ADR — §10's other declinations, and every
+  other section, stand exactly as they stood before it.
+
+  **The three pairs on the `Status` line name different scopes** — ADR-0076 §9's
+  obligation set, ADR-0084 §9 item 5's premise, and this ADR's §5 refusal — so they
+  accumulate under ADR-0070 §4 and its overlap-precedence rule does not arise. No
+  amendment qualifier is on the line, so ADR-0082 §2's move does not arise either.
+  Appended note per ADR-0070 §1; no ratified text below is rewritten. Refs #576,
+  #546.
 - Partially superseded: 2026-07-31 by ADR-0084 — **§9 item 5's premise that the
   façade is concrete and not a contract is false; the conclusion it drew from
   that premise survives for a different reason, and everything §9 item 5 decided
