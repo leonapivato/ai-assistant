@@ -1218,9 +1218,22 @@ fi
 # timeout — "I'm unable to review this repository" — and those do not end in a
 # line that is exactly a verdict word. Anchoring to the whole line is what does
 # the work here; the label never did.
+#
+# Which is why the label's separator is `[^[:alnum:]]*` rather than an
+# enumeration. The reviewer writes `Verdict: X`, `Verdict — X`, `Verdict – X`
+# and `Verdict - X` interchangeably, and demanding a colon discarded the three
+# dash spellings as refusals — a full run and the whole findings body lost each
+# time, presenting as the reviewer refusing (issue #555). Enumerating the dashes
+# instead would only move the next unlisted separator into the same trap, and a
+# bracket class of multibyte dashes is not even locale-safe: under `LC_ALL=C`,
+# `[—–-]` degrades to the individual UTF-8 bytes and stops matching an em dash
+# at all. These scripts pin no locale, so the class must be one that holds under
+# any of them. Accepting any non-alphanumeric run costs nothing the guard was
+# relying on, since the whole-line anchor and the exact verdict word are what
+# reject a refusal.
 last_line="$(grep -v '^[[:space:]]*$' "$out" | tail -n 1 |
     tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-if ! grep -qiE '^(verdict:?[[:space:]]*)?(block|approve with nits|approve)\.?$' <<<"$last_line"; then
+if ! grep -qiE '^(verdict[^[:alnum:]]*)?(block|approve with nits|approve)\.?$' <<<"$last_line"; then
     echo "codex output does not end in a verdict; not recording it as a review" >&2
     echo "this is usually a refusal or a timeout rather than a review" >&2
     echo "last line was: ${last_line}" >&2
