@@ -35,6 +35,7 @@ from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
+    CredentialNotSupportedError,
     ProtocolError,
     UndecodableFrameError,
     error_payload,
@@ -157,10 +158,16 @@ async def _handshake(
 
     try:
         version, client = env.read_connect(frame.payload)
-    except ProtocolError as exc:
+    except CredentialNotSupportedError as exc:
         # §2's credential refusal: "a version mismatch and a non-empty credential
         # are members of an envelope that parsed, so they are reported properly and
         # only then does the connection close."
+        #
+        # **Caught by its own type, never as a ``ProtocolError``.**
+        # ``UndecodableFrameError`` is a ``ProtocolError`` too, and a broad clause
+        # here quietly turned an oversized handshake — which must close with no
+        # response — into a credential refusal. The narrow clause lets it propagate
+        # to the close it is owed.
         await _refuse(
             writer,
             frame.id,

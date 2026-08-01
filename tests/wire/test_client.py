@@ -677,3 +677,57 @@ async def test_a_malformed_connect_reply_is_refused_rather_than_believed(
     async with _listening(tmp_path / "hub.sock", _bad_hub) as client:
         with pytest.raises(ProtocolError):
             await client.probe()
+
+
+async def test_an_oversized_handshake_closes_while_a_credential_still_earns_a_reply(
+    tmp_path: Path,
+) -> None:
+    """ADR-0084 §3's two answers to a connect frame, told apart at the socket.
+
+    A credential is "a member of an envelope that parsed", so it is "reported
+    properly and only then does the connection close"; an undecodable frame — which
+    ADR-0085 §8d's bound makes an over-long handshake into — closes with no response
+    at all. The two are asserted **in one test** because the bug worth pinning is
+    the confusion between them: catching the credential refusal as a plain
+    ``ProtocolError`` also caught the undecodable case (it is a subclass), and an
+    oversized handshake came back as a credential refusal.
+    """
+    engine = FakeAssistantEngine()
+    limits = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await serve_connection(engine, reader, writer, limits=limits)
+
+    async def _connect_with(payload: dict[str, object]) -> bytes:
+        reader, writer = await asyncio.open_unix_connection(str(path))
+        await _send(writer, env.Envelope(kind=env.FrameKind.CONNECT, id="c-1", payload=payload))
+        answer = await asyncio.wait_for(reader.read(), timeout=_PATIENT.total_seconds())
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+        return answer
+
+    path = tmp_path / "hub.sock"
+    server = await asyncio.start_unix_server(_hub, path=str(path))
+    try:
+        credentialled = await _connect_with(
+            {
+                env.CONNECT_VERSION: env.PROTOCOL_VERSION,
+                env.CONNECT_CLIENT: "rogue",
+                env.CONNECT_CREDENTIAL: "hunter2",
+            }
+        )
+        oversized = await _connect_with(
+            {
+                env.CONNECT_VERSION: env.PROTOCOL_VERSION,
+                env.CONNECT_CLIENT: "x" * 400,
+                env.CONNECT_CREDENTIAL: "hunter2",
+            }
+        )
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+
+    assert env.CREDENTIAL_NOT_SUPPORTED.encode() in credentialled
+    assert oversized == b"", "an undecodable handshake closes with no response at all"

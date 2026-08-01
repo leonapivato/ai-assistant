@@ -26,7 +26,11 @@ from enum import StrEnum
 from typing import Any, Final
 
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, canonical_payload, encode_projection
-from ai_assistant.wire.errors import ProtocolError, UndecodableFrameError
+from ai_assistant.wire.errors import (
+    CredentialNotSupportedError,
+    ProtocolError,
+    UndecodableFrameError,
+)
 
 #: The protocol version, exchanged once in the connect handshake and nowhere else
 #: (ADR-0084 §3). It becomes connection state; it is not repeated on subsequent
@@ -410,12 +414,15 @@ def read_connect(payload: object) -> tuple[int, str]:
         The version the client claims, and its identifier.
 
     Raises:
-        UndecodableFrameError: If the payload is not an object or is missing a
-            required member.
-        ProtocolError: If the credential member carries something. "Accepting-and-
-            ignoring is the alternative and it is the dangerous one: a client that
-            presents a credential and is admitted has been told, by admission, that
-            its credential was checked. Nothing on this transport checks anything."
+        UndecodableFrameError: If the payload is not an object, is over ADR-0085
+            §8d's bound, or is missing a required member. These close the
+            connection; they do not earn a reply.
+        CredentialNotSupportedError: If the credential member carries something.
+            "Accepting-and-ignoring is the alternative and it is the dangerous one:
+            a client that presents a credential and is admitted has been told, by
+            admission, that its credential was checked. Nothing on this transport
+            checks anything." This one *is* reported before the close, being "a
+            member of an envelope that parsed" (ADR-0084 §3).
     """
     if not isinstance(payload, dict):
         msg = f"a connect payload must be an object, got {type(payload).__name__}"
@@ -436,7 +443,7 @@ def read_connect(payload: object) -> tuple[int, str]:
             "its credential had been checked when nothing checked anything; the 0600 bit on "
             "the socket is what restricts connection here"
         )
-        raise ProtocolError(msg)
+        raise CredentialNotSupportedError(msg)
     return version, client
 
 
