@@ -312,6 +312,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "See the [section](../adr/#123).",
         "See the [section](#2/#3).",
         "See the [link](https://example.test/x/#123) too.",
+        "[section]: #123",
+        "[section]: /docs/#123",
+        '  [section]: #123 "Title"',
     ],
     ids=[
         "heading",
@@ -328,6 +331,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "relative-destination",
         "slash-joined-destination",
         "absolute-destination",
+        "reference-definition",
+        "reference-definition-path",
+        "titled-reference-definition",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
