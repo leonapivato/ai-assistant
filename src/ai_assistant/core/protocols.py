@@ -104,6 +104,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from ai_assistant.core.types import DEFAULT_PAGE_SIZE
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime, timedelta
@@ -111,9 +113,16 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ActionPlan,
         ActionRequest,
+        AnswerOutcome,
+        Belief,
         BeliefBand,
+        BeliefSummary,
+        Confirmation,
+        ContinuationToken,
         Conversation,
+        ConversationDigest,
         ConversationExport,
+        ConversationSummary,
         ConversationTurn,
         CurrentContext,
         DeferralAdmission,
@@ -121,11 +130,14 @@ if TYPE_CHECKING:
         DeferralState,
         DeferredProposal,
         Embedding,
+        EncodableText,
         EpisodicMemory,
         ExecutionState,
         FeedbackEvent,
         Goal,
         GoalDeletion,
+        Identifier,
+        LearnOutcome,
         MemoryDecision,
         MemoryIngestResult,
         MemoryKind,
@@ -134,14 +146,17 @@ if TYPE_CHECKING:
         MemoryWrite,
         Message,
         ObservationOutcome,
+        ObservationReport,
         ParkedBinding,
         PermissionDecision,
         PermissionRuling,
         PlanExport,
+        Question,
         StepTransition,
         ToolCall,
         ToolDefinition,
         ToolResult,
+        TurnOutcome,
     )
 
 
@@ -2859,5 +2874,483 @@ class DeferralStore(Protocol):
 
         Raises:
             DeferralStoreError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class AssistantEngine(Protocol):
+    """The assistant's whole request surface, as a client sees it (ADR-0085 §1).
+
+    **Provided by `orchestration`, consumed by `interfaces`.** It is the first
+    *provided* contract in a file of consumed ones, and the direction is stated
+    here rather than left to be inferred from the method names: everywhere else in
+    this module a subsystem implements a contract the engine calls, and here the
+    engine implements a contract an adapter calls. ADR-0084 §5 ruled the asymmetry
+    "an observation about the file's current contents, not a rule anyone ratified",
+    and this file is the floor path the review process already treats as contract
+    surface.
+
+    **Why it is a Protocol at all.** ADR-0042 §1 declined one because there was one
+    engine and one class of consumer, and named its own revisit trigger: a second
+    implementation. ADR-0084 §5 finds the trigger fired — a client satisfying this
+    surface over a local transport *is* that second implementation — so the whole
+    surface promotes rather than the part today's caller happens to use. A Protocol
+    trimmed to the CLI would be re-widened by the first adapter that reads beliefs.
+
+    **Lifecycle is deliberately absent.** ``start()`` and ``aclose()`` stay on the
+    concrete class the composition root builds (ADR-0084 §5, ADR-0083 §8): a client
+    that could call ``aclose()`` could shut down the hub from a spoke. Two
+    consequences follow and are easy to miss —
+
+    * a ``RuntimeError`` from a shutting-down engine is **not** a declared failure
+      of any method here. It is a property of *that* object's lifecycle, not of
+      this contract, and a client never observes it: shutdown stops the listener
+      and unlinks the socket before draining, so a spoke arriving during shutdown
+      reads a closed door. An implementation without a lifecycle does not have to
+      invent one to conform;
+    * the concrete engine keeps both methods and stays substitutable, because a
+      Protocol constrains what an implementation must have, not what it may not.
+
+    **One argument convention, applied to all fifteen methods** (ADR-0085 §2): the
+    *subject* of a call — the one thing it acts on — is positional, and every other
+    argument is keyword-only. A keyword-only modifier can be joined by another
+    without changing any call site; a second optional positional cannot. On the
+    wire every argument is named regardless (ADR-0084 §3), which is precisely why
+    the Python surface should agree with it.
+
+    Five clauses bind every implementation and no type expresses them, so the
+    shared conformance suite is what holds implementations to them:
+
+    1. **The page-size default is normative.** An implementation called without
+       ``limit`` behaves as though :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`
+       had been passed. A default written in a ``Protocol`` signature binds nobody,
+       and a client defaulting to 100 against an engine defaulting to 50 would
+       return a different page for the same call (ADR-0085 §3a).
+    2. **Every identifier argument undergoes
+       :data:`~ai_assistant.core.types.Identifier` validation before any I/O** —
+       which both *rejects* a blank value with ``ValueError`` and *strips*
+       surrounding whitespace from the value the implementation then uses. Stating
+       the normalisation is the load-bearing half: optional normalisation on an
+       identity argument would make the answer to ``belief(" rec-1 ")`` a property
+       of which implementation you are holding (ADR-0085 §3c).
+    3. **Both of ``beliefs``' filters are materialised before the first ``await``.**
+       A caller that mutates the sequence it passed cannot change which page it
+       gets (ADR-0085 §3d). ``None`` and empty stay different: ``None`` selects
+       every band or kind, an empty sequence selects nothing, and the two filters
+       compose by conjunction.
+    4. **A malformed page argument or a blank identifier is refused locally,
+       before any I/O**, so both implementations refuse the same values without a
+       round trip and neither is silently more permissive (ADR-0085 §9).
+    5. **The size limit is part of this contract, not of a transport, and every
+       implementation enforces it** — on arguments before dispatch, on results
+       before return, and on errors before they are sent. The limit is the
+       deployment's maximum frame size less a 512-byte envelope reserve, applied to
+       the **whole serialised payload** and measured as the byte length of
+       ADR-0087's canonical UTF-8 JSON encoding of it. It is enforced in **both**
+       directions so a client is never silently less capable than the engine it
+       stands in for: an oversized ``Belief.evidence`` coming back is refused
+       exactly as an oversized utterance going in (ADR-0084 §4, ADR-0085 §8).
+
+    :class:`~ai_assistant.core.errors.OversizedValueError` is therefore declared by
+    **every** method below and is not repeated in fifteen ``Raises`` blocks. No
+    method is provably inside the bound: :data:`~ai_assistant.core.types.Identifier`
+    carries no maximum length, so even ``forget`` can be handed an oversized
+    argument, and every enumerating method's result grows with ``limit``.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060), and how each observes its arguments by the input-observation clause
+    (ADR-0065), of which clause 3 above is the surface's own restatement.
+    """
+
+    # --- the two turn calls (ADR-0042 §3) ---------------------------------
+
+    async def converse(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam that owns the deadline (ADR-0029 §4)
+        conversation_id: Identifier | None = None,
+    ) -> TurnOutcome:
+        """Run one turn: plan against the utterance, and drive the step it produces.
+
+        **The disposition is the gate's verdict; the named step's ``status`` and
+        ``failure`` are the outcome.** A client that renders success from
+        ``outcome.step.disposition`` alone is wrong —
+        :attr:`~ai_assistant.core.types.Disposition.EXECUTED` says the permission
+        gate let the call through and the executor committed something, not that
+        the something succeeded. :attr:`~ai_assistant.core.types.StepOutcome.step_id`
+        addresses the step's own record::
+
+            next(s for s in outcome.step.state.steps if s.step_id == outcome.step.step_id)
+
+        Args:
+            utterance: What the user said. The only bare-text argument on this
+                surface, and it must have a UTF-8 encoding like every other string
+                the surface carries.
+            timeout: The budget for the whole turn.
+            conversation_id: The conversation to continue, or ``None`` to run in a
+                fresh one. The id the outcome carries back is what a client keeps.
+
+        Returns:
+            What the turn produced, including the conversation it ran under and
+            whether retrieval or capture degraded.
+
+        Raises:
+            ValueError: If ``conversation_id`` is present and blank, or the
+                utterance has no UTF-8 encoding — refused locally, before any I/O.
+            UnknownConversationError: If ``conversation_id`` names no conversation
+                this engine can operate on.
+            PlanningError: If the request could not be turned into an executable
+                plan, or a step transition was refused.
+            ContextError: If the situational context could not be assembled.
+            AuditError: If a permission decision could not be recorded.
+            ToolBindingError: If the selected tool could not be bound.
+        """
+        ...
+
+    async def resume(
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, threaded to the seam that owns the deadline (ADR-0029 §4)
+    ) -> TurnOutcome:
+        """Answer a parked confirmation and continue the step it belongs to.
+
+        The disposition rule stated on :meth:`converse` binds here identically: a
+        resumed step's own ``status`` and ``failure`` are its outcome, and the
+        disposition is only the gate's verdict on it.
+
+        ``turn`` is ``None`` on a resume driven from a **recovered** park: a
+        confirmation reconstructed from durable state after a restart has no live
+        turn, and fabricating one would misrepresent what the turn saw. The step is
+        what a resume is for and is always present.
+
+        Args:
+            token: The opaque continuation the engine minted. Relayed, never
+                interpreted or re-derived by the adapter (ADR-0042 §4).
+            approved: The human's answer. The adapter collects it; it never authors
+                the permission outcome itself.
+            timeout: The budget for continuing the step.
+
+        Returns:
+            What the resumption produced.
+
+        Raises:
+            UnknownContinuationError: If the token names no parked step this engine
+                can resume — a restart, or eviction under the outstanding-park cap.
+                **Never a denial**: nobody ruled on this action (ADR-0084 §7).
+            PermissionDeniedError: If the human refused, or the recorded ruling
+                does not authorise the call.
+            AuditError: If the resolution could not be recorded.
+            ToolBindingError: If the selected tool could not be bound.
+        """
+        ...
+
+    # --- the two accumulation legs ----------------------------------------
+
+    async def learn(self, event: FeedbackEvent) -> LearnOutcome:
+        """Fold one piece of feedback into memory, and say what it did.
+
+        The *dictated* half of accumulation, where :meth:`observe` is the passive
+        one. Every proposal the feedback produces goes through the ratified write
+        path, and the summary carries one entry per proposal — including, for a
+        deferral, where the question it raised went.
+
+        Args:
+            event: What the user said about what the assistant got right or wrong.
+
+        Returns:
+            One summary per proposal, in the order they were applied. Empty when
+            the feedback proposed no update at all.
+
+        Raises:
+            MemoryStoreError: If reading or writing memory failed.
+        """
+        ...
+
+    async def observe(self, *, conversation_id: Identifier | None = None) -> ObservationReport:
+        """Read a bounded batch of a conversation's episodes and propose what they justify.
+
+        The *passive* half of accumulation (ADR-0077 §8). It is deliberately
+        explicit: nothing triggers it but a caller. Each proposal goes through the
+        same write path :meth:`learn` uses, so the observer neither widens its own
+        batch nor rules on its own output.
+
+        ``conversation_id`` is a **selector rather than a subject**, which is why it
+        is keyword-only like :meth:`converse`'s: "this conversation, or the most
+        recently active" (ADR-0085 §2).
+
+        Args:
+            conversation_id: The conversation to read, or ``None`` to select the
+                most recently active one.
+
+        Returns:
+            What the pass did — the proposals with their rulings, the counts kept
+            apart, the route that read the episodes, and which conversation it was.
+
+        Raises:
+            ValueError: If ``conversation_id`` is present and blank.
+            UnknownConversationError: If it names no conversation this engine can
+                operate on.
+            ConversationStoreError: If reading the conversation index failed.
+            MemoryStoreError: If reading or writing memory failed.
+            ModelError: If the observing call failed. Surfaced unwrapped and with
+                its classification intact (ADR-0077 §3).
+        """
+        ...
+
+    # --- the inspection surface (ADR-0073 §7, ADR-0077 §6) ----------------
+
+    async def beliefs(
+        self,
+        *,
+        bands: Sequence[BeliefBand] | None = None,
+        kinds: Sequence[MemoryKind] | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+        offset: int = 0,
+    ) -> tuple[BeliefSummary, ...]:
+        """List what the assistant believes, newest revision first.
+
+        **Returns summaries, not beliefs**, and the type is the enforcement
+        (ADR-0085 §4a). ADR-0077 §6 gives the listing *existence* — the count, the
+        lost count and the adjusted confidence — and gives resolved citations to
+        :meth:`belief` alone. A :class:`~ai_assistant.core.types.BeliefSummary` has
+        nowhere to put a citation's content, so a conforming listing cannot ship
+        the corpus on every page.
+
+        The listing still *resolves* existence per citation, because the adjusted
+        confidence is a function of how many citations resolved.
+
+        Args:
+            bands: Which standings to include, or ``None`` for every band. An empty
+                sequence selects nothing, which is a different answer from ``None``.
+            kinds: Which typed memories to include, or ``None`` for every kind. The
+                two filters compose by conjunction.
+            limit: How many to return. Defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`, and an
+                implementation called without it behaves as though it had been
+                passed.
+            offset: How many to skip.
+
+        Returns:
+            One summary per live belief, in the store's stated order.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+                Refused rather than clamped, locally and before any I/O
+                (ADR-0073 §2). An adapter that lets a user supply either should
+                refuse an out-of-range value at its own parse boundary.
+            MemoryStoreError: If reading memory failed.
+        """
+        ...
+
+    async def belief(self, record_id: Identifier) -> Belief | None:
+        """Read one belief with its citations resolved, or ``None`` if there is none.
+
+        The other half of ADR-0077 §6's split: this is the view that renders the
+        surviving citations as readable evidence and the lost ones as tombstones.
+
+        Args:
+            record_id: The belief's id, as the listing showed it.
+
+        Returns:
+            The belief, or ``None`` where the store holds no live record by that
+            id.
+
+        Raises:
+            ValueError: If ``record_id`` is blank.
+            MemoryStoreError: If reading memory failed.
+        """
+        ...
+
+    async def forget(self, record_id: Identifier) -> bool:
+        """Destroy one belief, permanently.
+
+        Args:
+            record_id: The belief's id.
+
+        Returns:
+            Whether a record was destroyed. ``False`` where the id named nothing
+            live, which is not an error: the user's intent — "let this not be held"
+            — is already satisfied.
+
+        Raises:
+            ValueError: If ``record_id`` is blank.
+            MemoryStoreError: If reading or writing memory failed.
+        """
+        ...
+
+    # --- the deferred-question surface (ADR-0078 §8) ----------------------
+
+    async def questions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[Question, ...]:
+        """List the questions waiting for an answer.
+
+        Args:
+            limit: How many to return; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many to skip.
+
+        Returns:
+            The answerable questions, each with what accepting would retire.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            DeferralStoreError: If reading the queue failed.
+            MemoryStoreError: If resolving what a question would retire failed.
+        """
+        ...
+
+    async def interrupted_questions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[Question, ...]:
+        """List the questions whose answer was begun and whose outcome is unrecorded.
+
+        Not "failed" and not "retryable": the system does **not** know whether the
+        memory write landed, which is the actual epistemic situation (ADR-0078 §9),
+        and this enumeration is what lets a user dispose of one deliberately.
+
+        Args:
+            limit: How many to return; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many to skip.
+
+        Returns:
+            The interrupted questions.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            DeferralStoreError: If reading the queue failed.
+            MemoryStoreError: If resolving what a question would retire failed.
+        """
+        ...
+
+    async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
+        """Answer one deferred question, and say what the answer did.
+
+        An accepted answer is **re-submitted through the ratified write path**, so
+        conflict detection, the policy, the atomic applier and the full-set
+        retirement rule all run unchanged — which is what lets an answer raise a
+        further question (``REDEFERRED``) rather than silently widening its own
+        scope (ADR-0078 §5).
+
+        Args:
+            question_id: The question to answer.
+            accept: Whether to have the assistant believe it.
+
+        Returns:
+            Which of the five outcomes happened, and what it left behind.
+
+        Raises:
+            ValueError: If ``question_id`` is blank.
+            MemoryStoreError: If reading or writing memory failed.
+            UnresolvedEvidenceError: If the re-submitted proposal cites a record
+                the store no longer holds.
+            DeferralStoreError: If reading or updating the queue failed.
+        """
+        ...
+
+    async def forget_question(self, question_id: Identifier) -> bool:
+        """Destroy one deferred question, so its subject can be asked again.
+
+        Args:
+            question_id: The question to destroy.
+
+        Returns:
+            Whether a question was destroyed. ``False`` where the id named nothing.
+
+        Raises:
+            ValueError: If ``question_id`` is blank.
+            DeferralStoreError: If reading or updating the queue failed.
+        """
+        ...
+
+    # --- the conversation surface (ADR-0074 §2, §8) -----------------------
+
+    async def recent_conversations(
+        self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0
+    ) -> tuple[ConversationSummary, ...]:
+        """List conversations, most recently active first.
+
+        The sort key is activity and never "has a turn landed": ordering by the
+        latter would sink a conversation the user opened a minute ago below one
+        they abandoned last week (ADR-0074 §2).
+
+        Args:
+            limit: How many to return; defaults to
+                :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`.
+            offset: How many to skip.
+
+        Returns:
+            One summary per live conversation.
+
+        Raises:
+            ValueError: If ``limit`` or ``offset`` is outside ``[0, 2**63)``.
+            ConversationStoreError: If reading the conversation index failed.
+        """
+        ...
+
+    async def conversation(self, conversation_id: Identifier) -> ConversationDigest | None:
+        """Show what destroying one conversation would destroy, or ``None`` if absent.
+
+        ADR-0073 §5's show-then-confirm at the unit the user thinks in: the count
+        and the span, rather than a transcript nobody can read at a prompt
+        (ADR-0074 §8).
+
+        Args:
+            conversation_id: The conversation to describe.
+
+        Returns:
+            The digest, or ``None`` where the id names no live conversation.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank.
+            ConversationStoreError: If reading the conversation index failed.
+        """
+        ...
+
+    async def forget_conversation(self, conversation_id: Identifier) -> bool:
+        """Destroy one conversation and the episodes its turns index.
+
+        Args:
+            conversation_id: The conversation to destroy.
+
+        Returns:
+            Whether a conversation was destroyed. ``False`` where the id named
+            nothing live.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank.
+            ConversationStoreError: If reading or updating the conversation index
+                failed.
+            MemoryStoreError: If destroying the indexed episodes failed.
+        """
+        ...
+
+    # --- durable recovery (ADR-0052 §1) -----------------------------------
+
+    async def pending_confirmations(self) -> tuple[Confirmation, ...]:
+        """Reconstruct every parked confirmation that is still answerable.
+
+        The recovery path ADR-0052 §1 ratifies: after a restart the in-memory
+        handle table is empty, so the answerable parks are rebuilt from durable
+        state and each is handed back with a **freshly minted** token. Enumerating
+        and re-minting is what makes a park survive a restart without the token
+        itself having to be durable.
+
+        Returns:
+            One confirmation per answerable park, each carrying a token this engine
+            will resolve. A tuple rather than a list, like every other enumeration
+            on this surface: a caller that mutated a returned page has changed
+            nothing about the engine's state and may believe otherwise
+            (ADR-0085 §3b).
+
+        Raises:
+            PlanningError: If the durable execution state could not be read or
+                reconciled.
+            AuditError: If a recorded decision could not be read.
         """
         ...
