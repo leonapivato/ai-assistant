@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
 
 import structlog
@@ -57,7 +58,6 @@ from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
-    from datetime import timedelta
 
     from ai_assistant.core.config import Settings
     from ai_assistant.orchestration.engine import Engine
@@ -94,20 +94,48 @@ class Job:
     run: JobBody
 
     def __post_init__(self) -> None:
-        """Refuse a non-positive interval, independently of ``Settings``.
+        """Refuse an interval that is not exactly a positive ``timedelta``.
 
-        ``Settings`` already refuses one at load (``gt=timedelta(0)``, ADR-0083
-        §7), and this is the same guard restated where the invariant is actually
-        *used* — a scheduler constructed in a test, or from a future job table that
-        does not read a setting, must not be able to arm a job that becomes due the
-        instant it finishes. That is not a configuration nit: on a
-        completion-scheduled loop a zero interval turns a retention purge into a hot
-        loop against SQLite, and it is the one failure this loop cannot absorb.
+        ADR-0083 §7's rule is that "every duration this ADR adds is a ``timedelta``
+        refused at load time unless it is **finite** and strictly positive".
+        ``Settings`` refuses one at load (``gt=timedelta(0)``); this is the same rule
+        restated where the invariant is actually *used* — a scheduler constructed in
+        a test, or from a future job table that reads no setting, must not be able to
+        arm a job that becomes due the instant it finishes. That is not a
+        configuration nit: on a completion-scheduled loop a zero interval turns a
+        retention purge into a hot loop against SQLite, and it is the one failure
+        this loop cannot absorb.
+
+        **The type check is what makes "finite" true, and it is not pedantry.**
+        ``timedelta`` is subclassable, and a subclass whose ``total_seconds()``
+        returns ``nan`` passes every comparison a positivity check can make —
+        ``nan <= 0`` is ``False`` — and then poisons the due instant it is added to,
+        so ``due > now`` and ``delay > 0`` are both ``False`` and the loop spins
+        without ever sleeping. A *native* ``timedelta`` cannot hold a non-finite
+        value (its constructor overflows first), so requiring the exact type **is**
+        the finiteness guarantee, and it needs no second check that could never fire
+        on a value which passed the first. ``core.config``'s ``_only_a_duration``
+        makes the identical argument with ``type(value) is timedelta``, for the
+        identical reason: nothing that merely converts to a duration is silently
+        accepted as one.
+
+        The comparison is then against ``timedelta(0)`` directly rather than through
+        ``total_seconds()``, so the guard never routes a duration through a float at
+        all.
 
         Raises:
-            ValueError: If ``interval`` is not strictly positive.
+            TypeError: If ``interval`` is not exactly a ``timedelta``.
+            ValueError: If it is not strictly positive.
         """
-        if self.interval.total_seconds() <= 0:
+        if type(self.interval) is not timedelta:
+            msg = (
+                f"job {self.name!r} must have an interval that is exactly a timedelta, got "
+                f"{self.interval!r} of type {type(self.interval).__name__}; a subclass may "
+                f"report a non-finite total_seconds(), which no positivity check can catch "
+                f"and which makes the loop spin (ADR-0083 §7)"
+            )
+            raise TypeError(msg)
+        if self.interval <= timedelta(0):
             msg = (
                 f"job {self.name!r} must have a strictly positive interval, got "
                 f"{self.interval!r}; 'disabled' is expressed by leaving the job out of "
