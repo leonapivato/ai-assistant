@@ -27,6 +27,48 @@
   (ADR-0082 §1). ADR-0082 §6 records the same fact from the other side, when it
   declined a mechanical `Status` cross-check for a different reason. Refs #518,
   #404.
+- Amended: 2026-07-31 (§1 — its two formulations of the test are one test, and
+  the first is the operative one). §1 opens with "**An ADR may be amended in
+  place only when the amendment changes no decision**", and four lines later
+  glosses the other side with "A change to what was decided is anything a reader
+  would act on differently." **Read as a second, standalone test, the gloss
+  swallows the rule**, and §1 becomes incoherent on its own face: §1 *enumerates*
+  "a broken cross-reference" among the permitted amendments, and correcting one
+  unambiguously makes a reader act differently — they follow a different pointer
+  to a different document. The same goes for "a stale phrase". An enumerated
+  permission cannot be forbidden by a sentence three lines below it.
+
+  **So the operative test is the one §1 leads with and repeats — "changes no
+  decision" — and "anything a reader would act on differently" is a gloss on
+  *what was decided*, not an independent, wider test.** "Differently" means
+  differently **as to the decision**; the first paragraph already says so in its
+  own words, "such that a reader acting on the ADR would act **identically**
+  before and after", and §1 says it again in the line that follows the gloss:
+  "The line is the **decision**, not the size of the edit, not its review cost,
+  and not whether it is 'trivial.'" Correcting a broken cross-reference, a stale
+  phrase or an internal contradiction changes which text a reader is pointed at
+  or which of two sentences they act on; it does not change what the ADR decided,
+  which is why §1 lists all three.
+
+  **This is not hypothetical and it is why the note is here.** Adversarial review
+  of PR #538 read the gloss as standalone, concluded that correcting ADR-0083
+  §2's misstated environment-variable name required a partially-superseding ADR,
+  and raised it as a `blocker`. It was a good-faith reading of one sentence and
+  §1's own enumeration is what refutes it; the finding was waived on the merits
+  with the reasoning recorded on that PR, and the change merged. A governance
+  clause that a careful reviewer can invert is worth one paragraph.
+
+  **Nothing decided changes and no reader acts differently**, which is §1's own
+  test applied to this note. The amend-vs-supersede line sits exactly where §1 put
+  it: an edit that changes a decision is a supersession, one that does not is an
+  amendment, and the enumerated cases are amendments. No case moves across the
+  line in either direction — a reader who read §1 whole, rather than one sentence
+  of it, reaches the same answer before and after. Under §1 that is "a paragraph
+  that only restates the existing decision more clearly", so it is recorded as
+  this appended dated note and the ratified sentences below are **not** rewritten.
+  It names no other ADR — it reconciles this ADR with its own text, ADR-0082 §1's
+  first self-amendment trigger — so no `Status` edit is owed (ADR-0082 §1). Refs
+  #537, PR #538.
 - Partially supersedes: ADR-0001 — its change-a-decision clause ("to change a
   past decision, write a new ADR that supersedes the old one and update the old
   one's status"); §2 below. ADR-0001's other decisions — ADRs in `docs/adr/`,

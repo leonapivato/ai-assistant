@@ -10,6 +10,59 @@
   is an amendment. **No code changes with it**, and no `core` surface is touched:
   the sole `Status` consumer, `scripts/project_status.py`, only *displays* the
   field (ADR-0070 §4), so nothing here is behavioural.
+- Amended: 2026-07-31 (§1 — its two self-amendment triggers carry ADR-0070 §1's
+  full enumeration, so an ADR that misstated a fact predating it is already
+  inside the first one). §1's self-amendment sentence reads "Where an ADR is
+  reconciled **with its own text or with a fact that postdates it**, and no other
+  ADR is the cause, ADR-0070 §1's appended dated note is the whole record; no
+  `Status` edit is owed." **#537 reports that neither trigger covers an ADR that
+  was simply wrong about a fact predating it** — the #535 case, where ADR-0083 §2
+  named `AI_ASSISTANT_DATA_DIR` for a field bound by `env_prefix="ASSISTANT_"`
+  (`core/config.py:554`) — and proposes either widening the enumeration or
+  demoting it to illustrations of the operative condition.
+
+  **Neither is taken, because the case is already inside the first trigger.**
+  §1's two triggers are ADR-0070 §1's two, compressed to its own words: "The
+  amendment reconciles the ADR with its own text — **an internal contradiction, a
+  stale phrase, a broken cross-reference** — or with a fact that postdates it."
+  The enumeration inside the dash is part of what "with its own text" *means*, and
+  §1 quotes the bucket without repeating its members. **The two buckets divide by
+  where the defect is, not by when it arose**: bucket 1 is a defect in the ADR's
+  own words, bucket 2 is the world moving under words that were right when
+  written. An ADR that misstated a fact predating it has a defect in its own
+  words — a stale phrase, in ADR-0070 §1's third term — so it is bucket 1. Reading
+  bucket 1 as "an internal contradiction" alone, which is how #537 states it, is
+  what makes the case look uncovered.
+
+  **What is recorded, then, is the cross-reference rather than a new trigger:**
+  §1's "with its own text" is ADR-0070 §1's bucket in full, including a stale
+  phrase and a broken cross-reference, and a factual misstatement that predates
+  the ADR is a stale phrase. This is the reading PR #538 applied to #535 and
+  argued in its waiver of an adversarial `blocker`, and the reading ADR-0070 §1's
+  own §1 note (2026-07-31) now records from the other side.
+
+  **The operative condition is unchanged and is worth restating as the check that
+  actually decides**: "no other ADR is the cause". Where a later ADR *is* the
+  cause, §1's main rule governs and the record goes on the earlier ADR's `Status`
+  line and note; where none is, this is a self-amendment and the dated note is the
+  whole record. That condition is what carried #535 even on the narrow reading of
+  the triggers, and it is why nothing in the corpus is misfiled.
+
+  **Nothing decided changes and no reader acts differently**, which is ADR-0070
+  §1's test applied to this note. No case moves across any line: under the text as
+  ratified, a case outside the triggers still reached "dated note, no `Status`
+  edit" through §1's main rule, which owes a record "**exactly when** the later ADR
+  amends a named clause of that earlier ADR" and says plainly that "absent a clause
+  that fails §1's test, there is nothing to record" — while ADR-0070 §1 requires
+  the dated note for any amendment regardless. Both routes reached the same
+  outcome before this note and reach it after; the note removes a detour, not a
+  result. **In particular the enumeration is not widened**: no case is admitted
+  that ADR-0070 §1's bucket 1 did not already hold, which is the difference
+  between restating a decision and changing one. Under ADR-0070 §1 that makes this
+  "a paragraph that only restates the existing decision more clearly", recorded as
+  this appended dated note with the ratified sentences below **not** rewritten; it
+  names no other ADR — this ADR reconciled with its own text — so no `Status` edit
+  is owed, under §1's own rule. Refs #537, PR #538.
 
 ## Context
 
