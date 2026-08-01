@@ -1278,10 +1278,31 @@ code and a message". So the failures are declared, and two new types are named �
 both of them the *spelling* of a refusal ADR-0084 already ratified, not a new
 decision.
 
-**`AssistantError` gains one field, `details_elided: bool = False`** (§10a) —
-the only change this ADR makes to an *existing* error type. It exists so a client
-whose reconstruction lost an exception's structured state can say so, instead of
-presenting an empty list as an empty answer. It is `False` everywhere else.
+**`AssistantError` gains one field, `details_elided: bool = False`** (§10a). It
+exists so a client whose reconstruction lost an exception's structured state can
+say so, instead of presenting an empty list as an empty answer. It is `False`
+everywhere else.
+
+**And `AssistantError`'s own text is `EncodableText`, which is the second change
+to an existing type and the one that is easy to miss.** §4c requires every string
+an error payload carries to be encodable, and an exception is where that is least
+obvious: `UnresolvedEvidenceError("bad \ud800", ["\ud800"])` constructs under
+today's `core/errors.py`, and §10a's reduction cannot rescue it — the reduction
+measures a payload, and measuring means encoding, so the failure lands *before*
+the rule that was supposed to handle an oversized error. The declared exception
+would then reach a caller as an undeclared transport failure: §4c's divergence,
+arriving through the diagnosis rather than through the data.
+
+> **An `AssistantError`'s message, and every string in its structured state,
+> validate as `EncodableText`.** Concretely today that is the message on every
+> subtype and `UnresolvedEvidenceError.unresolved_ids`; stated as a rule rather
+> than a list, for §4c's reason.
+
+**`core/errors.py` is not covered by #566's guard**, and saying so is the point:
+`tests/core/test_text_encodability_coverage.py` is scoped to `core.types`
+deliberately, so nothing mechanical enforces this one. It is a clause the
+conformance suite carries, and it is why the requirement is written here rather
+than assumed to have come along with the alias.
 
 **Both new types live in `core/errors.py`**, beside the hierarchy they extend —
 the same file every other `AssistantError` subtype is declared in, and the one a
