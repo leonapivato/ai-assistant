@@ -382,6 +382,24 @@ def page_argument(value: int, *, name: str) -> int:
     error rather than a condition of the system, so an adapter that lets a user
     supply either should refuse an out-of-range value at its own parse boundary.
 
+    **The type is checked before the range, and a ``bool`` is excluded**, in the
+    guard shape :class:`~ai_assistant.orchestration.engine.Engine`'s own
+    ``max_outstanding_confirmations`` and ``LearningLoop``'s retrieval limit
+    already use. Neither half is pedantry:
+
+    * ``0 <= 1.5 < 2**63`` is *true*, so a range check alone admits a float — which
+      then reaches the store and fails inside slice arithmetic, after I/O has begun
+      and as a ``TypeError`` from somewhere the caller cannot place. That is exactly
+      what the "refused locally, before any I/O" clause exists to stop.
+    * ``True`` is an ``int`` and would silently mean a page size of one. A flag is
+      not a count, and a page of one returned for ``limit=True`` is a wrong answer
+      rather than a refusal.
+
+    A wrong *type* is a ``TypeError`` and a wrong *value* a ``ValueError``, which is
+    also what keeps ADR-0085 §9's declaration honest: the clause declares
+    ``ValueError`` for a limit or offset "outside ``[0, 2**63)``", and ``1.5`` is
+    not outside that interval — it is not a page argument at all.
+
     Args:
         value: The page argument as the caller passed it.
         name: The parameter's name, for the message.
@@ -390,8 +408,12 @@ def page_argument(value: int, *, name: str) -> int:
         The value, unchanged.
 
     Raises:
+        TypeError: If the value is not an integer, or is a ``bool``.
         ValueError: If the value falls outside ``[0, 2**63)``.
     """
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{name} must be an integer, got {value!r}"
+        raise TypeError(msg)
     if not 0 <= value < _PAGE_ARGUMENT_BOUND:
         msg = f"{name} must be in [0, 2**63), got {value}"
         raise ValueError(msg)
