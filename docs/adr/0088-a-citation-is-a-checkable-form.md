@@ -455,19 +455,31 @@ instead produces five, all false.
 
 **The checker emits exactly one liveness report, and this is its whole rule.**
 For every ADR `B` carrying a reverse record naming `ADR-A`: if `ADR-A`'s whole
-`Status` field does not mention `ADR-B` anywhere, **report the disagreement**.
-Otherwise, silence. Nothing else about liveness is reported.
+`Status` field does not name `ADR-B` **in a supersession token** — `Superseded
+by` or `partially superseded by`, ADR-0070 §4's canonical vocabulary — **report
+the disagreement**. Otherwise, silence. Nothing else about liveness is reported.
+
+**The supersession token is required, and a bare mention is not enough.** A later
+ADR may both amend one clause of `ADR-A` and supersede another; ADR-0070 §1
+classifies edit by edit, so that is permitted. If `ADR-A`'s status then recorded
+only the amendment — `Accepted, §1 amended by ADR-B` — a test that merely asked
+whether `ADR-B` appeared anywhere in the field would see it, fall silent, and
+miss exactly the omitted supersession record ADR-0070 requires. Requiring the
+token closes that. Both rules report **zero** against `main`'s nine reverse
+records, so the stronger one costs nothing in false positives; it was measured
+before being written here.
 
 Three properties make that rule implementable where the earlier drafts of this
 section were not:
 
-- **It is a membership test, not a classification.** It never has to decide
-  whether `B` superseded or merely amended `A`. That distinction is expressed six
-  ways in the corpus — `- Amends on ratification:` (6 ADRs), `- Amends:` (5),
-  `- Superseded:` (4), and legacy status qualifiers reading `discharged by`,
-  `narrowed by`, `amended by` — and **none of them is specified by this ADR**. So
-  ADR-0038's `Accepted, §1b discharged by ADR-0040` is silent because it mentions
-  ADR-0040, without anyone deciding what `discharged by` means to a machine.
+- **It never classifies the *later* ADR's own header.** It reads one enumerated
+  vocabulary — ADR-0070 §4's supersession tokens, on the earlier ADR's status —
+  and nothing else. How `B` describes its own relation to `A` is expressed six
+  ways in the corpus (`- Amends on ratification:`, 6 ADRs; `- Amends:`, 5;
+  `- Superseded:`, 4; plus legacy qualifiers reading `discharged by`, `narrowed
+  by`, `amended by`) and **none of them is specified by this ADR**. So ADR-0038's
+  `Accepted, §1b discharged by ADR-0040` never has to be classified: ADR-0040
+  carries no reverse record naming ADR-0038, so the pair is never compared.
 - **It reads the whole field, so every legacy shape works.** ADR-0015's
   grandfathered `Accepted, partially superseded by ADR-0020 and ADR-0025` is
   silent, where a rule keyed to a *leading* `Partially superseded by` would find
