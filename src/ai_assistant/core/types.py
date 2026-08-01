@@ -264,16 +264,98 @@ follows. The exemption set that enumerated them is gone, and
 
 
 # --- the other scalar refinements, and the one canonical encoding -------------
-# ``Identifier``, ``Sha256Hex`` and the canonical-JSON encoding sit **here**,
-# beside :data:`UtcInstant`, because they are the same kind of thing: pure
-# refinements of a scalar that every section of this module may reach for. They
-# used to live further down, next to their first consumer in `permissions`, which
-# was fine while there was one consumer. ADR-0078 gives the memory section a
-# second: a deferred question is identified, digested and keyed, and
-# :class:`MemoryUpdateProposal` is declared long before the permission types. A
-# forward reference plus ``model_rebuild`` would have kept the old positions at
-# the cost of making two `core` types depend on an import-order side effect, so
-# the primitives moved instead of the models. Nothing about them changed.
+# ``EncodableText``, ``Identifier``, ``Sha256Hex`` and the canonical-JSON
+# encoding sit **here**, beside :data:`UtcInstant`, because they are the same
+# kind of thing: pure refinements of a scalar that every section of this module
+# may reach for. They used to live further down, next to their first consumer in
+# `permissions`, which was fine while there was one consumer. ADR-0078 gives the
+# memory section a second: a deferred question is identified, digested and
+# keyed, and :class:`MemoryUpdateProposal` is declared long before the permission
+# types. A forward reference plus ``model_rebuild`` would have kept the old
+# positions at the cost of making two `core` types depend on an import-order side
+# effect, so the primitives moved instead of the models. Nothing about them
+# changed. ``_is_encodable`` joined them for the same reason: :data:`Identifier`
+# is now built on it, and it is declared before its first use rather than relying
+# on a ``type`` alias's lazy evaluation to reach forwards.
+
+
+def _is_encodable(text: str) -> bool:
+    r"""Whether ``text`` has a UTF-8 encoding.
+
+    A lone surrogate (``"\ud800"``) is a ``str`` Python is happy to hold but
+    that no UTF-8 encoder will accept, because it is half of a character rather
+    than a character.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _encodable_text(value: str) -> str:
+    r"""Reject text that has no UTF-8 encoding.
+
+    **The predicate is exactly "``value.encode('utf-8')`` succeeds", and nothing
+    wider.** ADR-0087 §2b names one ``str`` that has no wire form — a surrogate
+    code point, which is half of a character rather than a character — and
+    positively *permits* everything a reader might expect to see refused
+    alongside it: a C0 control character takes an escape, U+007F is emitted raw,
+    and so are U+2028 and U+2029. Refusing those would contradict §2b rather
+    than implement it. The set is also exactly the surrogates: any code point in
+    U+D800 to U+DFFF makes a ``str`` unencodable, paired or not, and no other code
+    point does. A real supplementary character such as U+1F600 is four UTF-8
+    bytes and is accepted, which is what a check written against the surrogate
+    *range* would get wrong (issue #121).
+
+    **Why the type and not the boundary.** ADR-0084 §4 obliges *every*
+    implementation of the engine Protocol to enforce the same limits, so a wire
+    client is never less capable than the in-process engine; ADR-0087 §7 then
+    argues against re-validating one value at each boundary it crosses, and fixes
+    that "the place a non-encodable value is refused is the type, not the frame".
+    A plain ``str`` field made the two implementations disagree: ``learn(
+    FeedbackEvent(content="\ud800"))`` constructed, the in-process engine
+    accepted it, and no encoder could put it on the socket (issue #565).
+    Refusing at construction is what makes the two agree *by default* rather
+    than by discipline, and it is the shape :func:`_freeze_json` already uses for
+    the values a :data:`FrozenJson` holder carries.
+
+    **The message names the offending code point and its position, and does not
+    echo the value.** The value may be megabytes of untrusted text, and — the
+    sharper reason — interpolating it raw would build an error message that is
+    itself unencodable, so reporting the fault would fail the same way the fault
+    does. A code point and an index are what a caller needs to find it.
+
+    Raises:
+        ValueError: If the value has no UTF-8 encoding.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = (
+            f"text must have a UTF-8 encoding, so it can cross the wire and reach the store; "
+            f"U+{ord(exc.object[exc.start]):04X} at position {exc.start} has none"
+        )
+        raise ValueError(msg) from exc
+    return value
+
+
+type EncodableText = Annotated[str, AfterValidator(_encodable_text)]
+"""Text that can actually be written down: a ``str`` with a UTF-8 encoding.
+
+**Every ``str`` a model in this module holds is typed with this, or with a
+refinement layered on it.** ``tests/core/test_text_encodability_coverage.py``
+fails the gate on a bare ``str`` field, so the property is total over the file
+rather than true of the fields someone remembered — the shape
+``tests/core/test_instant_coverage.py`` uses for :data:`UtcInstant`, and for the
+same reason: ADR-0068 §1 records that ``core/types.py`` "holds only
+boundary-crossing types", so a field that opts out is a field on the wire.
+
+Applied even where a stricter rule already refuses the same values —
+:data:`Sha256Hex`, :attr:`ToolCost.currency` — deliberately. The point is that
+the *type* carries the property, so the coverage check needs no exemption list
+and a later relaxation of the stricter rule cannot silently reopen the gap.
+"""
 
 
 def _non_blank(value: str) -> str:
@@ -290,8 +372,17 @@ def _non_blank(value: str) -> str:
     return stripped
 
 
-type Identifier = Annotated[str, AfterValidator(_non_blank)]
-"""A non-blank, stripped identifier."""
+type Identifier = Annotated[EncodableText, AfterValidator(_non_blank)]
+"""A non-blank, stripped identifier that has a UTF-8 encoding.
+
+**The encodability half is not the tightening ADR-0018 §2 deferred, and does not
+prejudge it.** That clause declined to fold the *visible-text* rule into this
+type, and issue #62 holds the *canonical syntax* question — internal whitespace,
+control characters, case. Neither is this property: an identifier with no UTF-8
+encoding is not loosely spelled, it cannot be written down at all, and ADR-0087
+§7 puts that refusal on the type. Both clauses stay true; :data:`VisibleIdentifier`
+is still a separate type and #62 is still open.
+"""
 
 
 #: A SHA-256 digest rendered as lowercase hex is exactly this long.
@@ -332,8 +423,12 @@ def _sha256_hex(value: str) -> str:
     return value
 
 
-type Sha256Hex = Annotated[str, AfterValidator(_sha256_hex)]
-"""A lowercase SHA-256 digest in hex — the form :func:`hashlib.sha256` emits."""
+type Sha256Hex = Annotated[EncodableText, AfterValidator(_sha256_hex)]
+"""A lowercase SHA-256 digest in hex — the form :func:`hashlib.sha256` emits.
+
+Layered on :data:`EncodableText` even though :func:`_sha256_hex` already refuses
+everything it would: see that alias's note on why no ``str`` field opts out.
+"""
 
 
 def _canonical_bytes(payload: object) -> bytes:
@@ -373,8 +468,8 @@ class Message(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     role: Role
-    content: str
-    name: str | None = Field(default=None, description="Optional author/tool name.")
+    content: EncodableText
+    name: EncodableText | None = Field(default=None, description="Optional author/tool name.")
 
 
 # --- memory: a record, where it came from, when it is believed (ADR-0005) ----
@@ -475,7 +570,7 @@ class Provenance(BaseModel):
         le=1.0,
         description="Belief strength in [0, 1]; user-asserted records are 1.0.",
     )
-    evidence: tuple[str, ...] = Field(
+    evidence: tuple[EncodableText, ...] = Field(
         default=(),
         description="References (e.g. episode ids) supporting this record.",
     )
@@ -601,8 +696,8 @@ class MemoryBase(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    id: str
-    content: str = Field(description="Canonical text rendering, used for retrieval.")
+    id: EncodableText
+    content: EncodableText = Field(description="Canonical text rendering, used for retrieval.")
     provenance: Provenance
     score: float | None = Field(
         default=None,
@@ -631,8 +726,8 @@ class EpisodicMemory(MemoryBase):
 
     kind: Literal["episodic"] = "episodic"
     occurred_at: UtcInstant
-    participants: tuple[str, ...] = Field(default=())
-    outcome: str | None = None
+    participants: tuple[EncodableText, ...] = Field(default=())
+    outcome: EncodableText | None = None
     importance: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
@@ -640,7 +735,7 @@ class SemanticMemory(MemoryBase):
     """A durable fact about the user or their world."""
 
     kind: Literal["semantic"] = "semantic"
-    fact: str
+    fact: EncodableText
     valid_until: UtcInstant | None = Field(
         default=None,
         description="Optional expiry after which the fact is no longer assumed true.",
@@ -651,8 +746,8 @@ class PreferenceMemory(MemoryBase):
     """A user preference, optionally scoped to a context."""
 
     kind: Literal["preference"] = "preference"
-    preference: str
-    context: str | None = None
+    preference: EncodableText
+    context: EncodableText | None = None
     strength: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
@@ -660,8 +755,8 @@ class ProceduralMemory(MemoryBase):
     """A learned workflow: how the user likes a situation handled."""
 
     kind: Literal["procedural"] = "procedural"
-    situation: str
-    steps: tuple[str, ...] = Field(default=())
+    situation: EncodableText
+    steps: tuple[EncodableText, ...] = Field(default=())
 
 
 MemoryRecord = Annotated[
@@ -805,7 +900,7 @@ class UserConfirmation(BaseModel):
         ),
     )
     confirmed_at: UtcInstant = Field(description="When the user's answer was given (tz-aware).")
-    retires: tuple[str, ...] = Field(
+    retires: tuple[EncodableText, ...] = Field(
         default=(),
         description=(
             "Record ids this answer authorises retiring: exactly the conflicts the "
@@ -824,12 +919,12 @@ class MemoryUpdateProposal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     proposed: MemoryRecord
-    rationale: str = Field(description="Why this memory is being proposed.")
+    rationale: EncodableText = Field(description="Why this memory is being proposed.")
     sensitivity: DataTier = Field(
         default=DataTier.PERSONAL,
         description="How sensitive the proposed memory is.",
     )
-    conflicts: tuple[str, ...] = Field(
+    conflicts: tuple[EncodableText, ...] = Field(
         default=(),
         description="Ids of existing records this proposal contradicts (from the conflict check).",
     )
@@ -995,8 +1090,8 @@ class MemoryDecision(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: MemoryDecisionKind
-    reason: str = Field(description="Human-readable justification, for transparency.")
-    target_id: str | None = Field(
+    reason: EncodableText = Field(description="Human-readable justification, for transparency.")
+    target_id: EncodableText | None = Field(
         default=None,
         description="Target record id; required when ``kind`` is REINFORCE or SUPERSEDE.",
     )
@@ -1058,7 +1153,7 @@ class MemoryIngestResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     decision: MemoryDecision
-    record_id: str | None = Field(
+    record_id: EncodableText | None = Field(
         default=None,
         description=(
             "Id of the record left live by the write, or None if nothing was stored. "
@@ -1066,7 +1161,7 @@ class MemoryIngestResult(BaseModel):
             "of the record now holding the live belief (ADR-0045 §4)."
         ),
     )
-    conflicts: tuple[str, ...] = Field(
+    conflicts: tuple[EncodableText, ...] = Field(
         default=(),
         description=(
             "Ids of the existing records this ingest resolved and the policy ruled "
@@ -1745,11 +1840,13 @@ class FeedbackEvent(BaseModel):
 
     kind: FeedbackKind
     memory_kind: MemoryKind = Field(description="The typed memory this feedback establishes.")
-    content: str = Field(description="Canonical text of the feedback, e.g. 'office is in Boston'.")
-    subject: str | None = Field(
+    content: EncodableText = Field(
+        description="Canonical text of the feedback, e.g. 'office is in Boston'."
+    )
+    subject: EncodableText | None = Field(
         default=None, description="Optional scope/context, e.g. 'email tone'."
     )
-    evidence: tuple[str, ...] = Field(
+    evidence: tuple[EncodableText, ...] = Field(
         default=(),
         description="Interaction/episode ids supporting this, carried into provenance.",
     )
@@ -1977,7 +2074,7 @@ class Goal(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier
-    statement: str = Field(description="Canonical text rendering of the objective.")
+    statement: EncodableText = Field(description="Canonical text rendering of the objective.")
     status: GoalStatus = GoalStatus.ACTIVE
     provenance: Provenance
     created_at: UtcInstant = Field(description="When the goal was recorded (tz-aware).")
@@ -2009,7 +2106,7 @@ class PlanStep(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: Identifier
-    intent: str = Field(description="Human-readable purpose of this step.")
+    intent: EncodableText = Field(description="Human-readable purpose of this step.")
     capability: Identifier = Field(description="What must be done, e.g. 'send_email'.")
     parameters: FrozenJsonMapping = Field(
         default=_EMPTY_PARAMS,
@@ -2032,7 +2129,7 @@ class ActionPlan(BaseModel):
     goal_id: Identifier
     steps: tuple[PlanStep, ...]
     created_at: UtcInstant = Field(description="When the plan was produced (tz-aware).")
-    rationale: str | None = Field(
+    rationale: EncodableText | None = Field(
         default=None, description="Why the planner chose these steps, for transparency."
     )
 
@@ -2209,7 +2306,7 @@ class StepFailure(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    message: str = Field(
+    message: EncodableText = Field(
         description="Operator-facing Tier 2 explanation; visible characters required."
     )
     kind: ToolFailureKind | None = Field(
@@ -2524,11 +2621,11 @@ class GoalDeletion(BaseModel):
     deleted: bool
     plans_removed: int = Field(default=0, ge=0)
     executions_removed: int = Field(default=0, ge=0)
-    blocked_by: tuple[str, ...] = Field(
+    blocked_by: tuple[EncodableText, ...] = Field(
         default=(),
         description="Ids of still-active executions; non-empty exactly when refused.",
     )
-    indeterminate_steps: tuple[str, ...] = Field(
+    indeterminate_steps: tuple[EncodableText, ...] = Field(
         default=(),
         description="Erased steps whose side effect may have landed — surface these to the user.",
     )
@@ -2952,20 +3049,6 @@ _BLANK_RENDERING = frozenset(
 )
 
 
-def _is_encodable(text: str) -> bool:
-    r"""Whether ``text`` has a UTF-8 encoding.
-
-    A lone surrogate (``"\ud800"``) is a ``str`` Python is happy to hold but
-    that no UTF-8 encoder will accept, because it is half of a character rather
-    than a character.
-    """
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
-
-
 def _has_visible_text(value: str) -> bool:
     """Whether ``value`` contains at least one character that renders.
 
@@ -3000,8 +3083,13 @@ def _visible_identifier(value: str) -> str:
     return stripped
 
 
-type VisibleIdentifier = Annotated[str, AfterValidator(_visible_identifier)]
-"""An identifier that renders as something — for ids a user is shown."""
+type VisibleIdentifier = Annotated[EncodableText, AfterValidator(_visible_identifier)]
+"""An identifier that renders as something — for ids a user is shown.
+
+Layered on :data:`EncodableText` rather than on :data:`str`, because visible and
+encodable are independent: ``_has_visible_text`` sees the letters in
+``"smtp_\\ud800"`` and passes it.
+"""
 
 
 # --- tools: what a call costs, and what it may touch (ADR-0016 §4) -----------
@@ -3034,7 +3122,7 @@ class ToolCost(BaseModel):
     amount: Decimal | None = Field(
         default=None, description="Price per invocation; required iff basis is PER_CALL."
     )
-    currency: str | None = Field(
+    currency: EncodableText | None = Field(
         default=None, description="ISO-4217 alphabetic code; required iff basis is PER_CALL."
     )
 
@@ -3149,7 +3237,9 @@ class ToolDefinition(BaseModel):
     capability: VisibleIdentifier = Field(
         description="The single capability this tool satisfies, e.g. 'send_email'."
     )
-    description: str = Field(description="What the tool does; shown to the model and the user.")
+    description: EncodableText = Field(
+        description="What the tool does; shown to the model and the user."
+    )
     risk_level: RiskLevel
     reversibility: Reversibility
     side_effecting: bool = Field(description="Whether invoking it changes anything outside itself.")
@@ -3410,37 +3500,29 @@ class PermissionOutcome(_SeverityScale):
 
 
 # --- durability: a recorded decision must reload (ADR-0021 §4) ---------------
-# Layered on `Identifier` rather than folded into it, because `planning` shares
-# that type; issue #62 holds the identifier-syntax question.
+# The check this section used to carry now sits on `Identifier` itself; the name
+# survives because it is what the fields ADR-0044 spells are annotated with.
 
 
-def _durable_identifier(value: str) -> str:
-    """Reject an identifier with no UTF-8 encoding.
+type DurableIdentifier = Identifier
+"""An :data:`Identifier` that survives serialisation — for fields a record keeps.
 
-    ADR-0021 §4 requires a recorded decision to survive a
-    ``model_dump(mode="json")`` round trip, because a decision that could not be
-    reloaded would make the embedded definition worthless across exactly the
-    restart issue #54 is about. An identifier holding a lone surrogate satisfies
-    :data:`Identifier` — which only strips and refuses a blank — and then fails
-    at the store or export boundary, which is the durability guarantee broken
-    one field family short of complete.
+ADR-0021 §4 requires a recorded decision to reload, because a decision that could
+not be would make the embedded definition worthless across exactly the restart
+issue #54 is about. This type used to carry its own encodability validator,
+layered here rather than folded into :data:`Identifier` because tightening a type
+``planning`` shares was a cross-lane change a permissions lane would not make.
+Issue #565 made that change from `core`, so :data:`Identifier` now refuses text
+with no UTF-8 encoding and the separate validator was **provably unreachable** —
+it ran on an already-validated :data:`Identifier`, and stripping cannot turn
+encodable text unencodable. It is gone rather than left as a dead branch.
 
-    Layered on the permission types rather than folded into :data:`Identifier`
-    itself, which ``planning`` shares (ADR-0014): tightening it there is a
-    cross-lane change, and issue #62 already holds the identifier-syntax
-    question. The same boundary :func:`_visible_identifier` drew for tool ids.
-
-    Raises:
-        ValueError: If the identifier cannot be encoded as UTF-8.
-    """
-    if not _is_encodable(value):
-        msg = f"identifier has no UTF-8 encoding, so the record could not be stored: {value!r}"
-        raise ValueError(msg)
-    return value
-
-
-type DurableIdentifier = Annotated[Identifier, AfterValidator(_durable_identifier)]
-"""An :data:`Identifier` that survives serialisation — for fields a record keeps."""
+**The name is kept, and the guarantee is unchanged or stronger.** ADR-0044 §1
+annotates :attr:`PermissionDecision.execution_id` and :attr:`~.step_id` with this
+spelling, and it still says at the field which fields ADR-0021 §4 singles out.
+Every value this type accepted before, it accepts now; every value it refused, it
+still refuses.
+"""
 
 
 # --- the binding: detachment, and the canonical digest (ADR-0021 §1) ---------
@@ -3607,7 +3689,9 @@ class PermissionRuling(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     outcome: PermissionOutcome
-    reason: str = Field(description="Why, in text shown to the user at the moment they decide.")
+    reason: EncodableText = Field(
+        description="Why, in text shown to the user at the moment they decide."
+    )
     authorised_by: DurableIdentifier | None = Field(
         default=None, description="The recorded user decision this ALLOW rests on, if any."
     )
@@ -3615,19 +3699,22 @@ class PermissionRuling(BaseModel):
     @field_validator("reason")
     @classmethod
     def _reason_is_present(cls, value: str) -> str:
-        """Reject a reason with nothing visible in it, returning it stripped.
+        r"""Reject a reason with nothing visible in it, returning it stripped.
 
         The same ``_has_visible_text`` test ADR-0018 §1 applies to a tool's
         description, and for the same reason: this is shown to the user at the
         moment they are deciding, and a reason that renders as nothing leaves
         the prompt with nothing to say.
+
+        Encodability is no longer checked here. It used to be, because visible
+        and encodable are independent — ``_has_visible_text`` sees the letters in
+        ``"approve \ud800"`` — but the field's annotation is now
+        :data:`EncodableText` (issue #565), which runs first, so the clause was
+        unreachable: stripping cannot turn encodable text unencodable.
         """
         stripped = value.strip()
         if not _has_visible_text(stripped):
             msg = "ruling reason must contain visible text"
-            raise ValueError(msg)
-        if not _is_encodable(stripped):
-            msg = f"ruling reason has no UTF-8 encoding, so it could not be stored: {stripped!r}"
             raise ValueError(msg)
         return stripped
 
@@ -3922,7 +4009,7 @@ class ToolFailure(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: ToolFailureKind
-    message: str = Field(description="Operator-facing explanation; Tier 2 only.")
+    message: EncodableText = Field(description="Operator-facing explanation; Tier 2 only.")
 
     @field_validator("message")
     @classmethod
