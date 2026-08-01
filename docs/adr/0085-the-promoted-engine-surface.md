@@ -28,12 +28,13 @@
   serves both and resolves content for both, which is **#552**. §4a decides the
   shape that makes the ratified split expressible, and §8f shows what it does to
   the frame arithmetic.
-- **The byte-level wire encoding is deliberately *not* here.** §8c fixes the size
-  limit and that it is measured on one canonical encoding; pinning that encoding
-  to the byte is the `wire` package's (ADR-0084 §6, §5's change 4), where a test
-  can hold it. §11a states the obligation by name. Writing that grammar here was
-  attempted and withdrawn — it is the unspiked seam #281 warns about, and the same
-  enumeration §8d and §10a decline elsewhere.
+- **The byte-level wire encoding is ratified by ADR-0087, not here.** §8c fixes
+  the size limit and that it is measured on one canonical encoding; **ADR-0087**
+  fixes that encoding, with normative test vectors, and **merges before the
+  triad** — so the boundary is ratified text before any second implementation
+  exists. ADR-0084 §5's four changes become five (§11a). Writing the grammar here
+  was attempted and withdrawn; so was leaving it to an implementing lane, which
+  the triad's canonical fake refutes (§8c).
 - **This ADR amends nothing.** §12 applies ADR-0082 §1's test to every earlier
   ADR whose text this one touches and finds no record owed — each of the clauses
   examined is a deferral whose deferring sentence stays true and now has an
@@ -909,64 +910,57 @@ the divergence ADR-0084 §4 moved the limit into the contract to prevent, one
 level up from where it was being watched. A whole-payload bound has no such gap,
 because what it measures is the thing the length prefix counts.
 
-**The *encoding* those bytes are counted in is deferred to the wire lane, and
-that is a scoping decision rather than an omission.** A limit is only one limit if
-both implementations measure the same byte string, so something must fix the
-encoding exactly — `/` versus `\/`, `0.1` versus `1e-1`, `"…12:00:00Z"` versus
+**The *encoding* those bytes are counted in is ratified by ADR-0087, not by this
+ADR and not by an implementing lane.** A limit is only one limit if both
+implementations measure the same byte string, so something must fix the encoding
+exactly — `/` versus `\/`, `0.1` versus `1e-1`, `"…12:00:00Z"` versus
 `"…12:00:00+00:00"` and `"PT0.5S"` versus `"PT0.500000S"` are all real
-disagreements at the boundary. What this ADR fixes is that there **is** one
-canonical encoding and that the limit is measured on it; what it declines to fix
-is the bytes.
+disagreements at the boundary. What this ADR fixes is the **limit**; what
+ADR-0087 fixes is the **encoding** the limit is measured on.
 
-> **The measurement is taken on the payload's canonical wire encoding. Pinning
-> that encoding — to the byte — belongs to the `wire` package (ADR-0084 §6),
-> ADR-0084 §5's change 4, where it is exercised by the code that does the
-> encoding.** §11a states the obligation the wire lane inherits.
+> **The measurement is taken on the payload's canonical wire encoding, which
+> ADR-0087 ratifies with normative test vectors.** ADR-0087 is `Proposed` and
+> **merges before the triad**, so the boundary is defined by ratified text before
+> any second implementation exists. §11a states the sequencing.
 
-**Three reasons, in the order they bind:**
+**Why it is a separate ADR rather than a section here**, in the order the reasons
+bind:
 
-- **ADR-0084 already divides it this way.** §4 makes the *limit* part of the
-  promoted Protocol's declared contract; §6 gives the envelope, the framing and
-  the codec to the `wire` package. The limit is a property of the contract because
-  both implementations must agree on what is refused; the byte encoding is a
-  property of the transport, which is what §6 hands over.
-- **A hand-written byte grammar in a contract ADR is an unspiked seam**, which is
-  the hazard #281 and `CONTRIBUTING.md`'s spike-first guidance were written about
-  and the reason this ADR exists at all. It was attempted here: four review rounds
-  each found one more corner it had not covered, and a fifth (`"P2DT3S"` versus
-  `"PT172803S"`) was open when it was withdrawn. An enumeration of a space nobody
-  can prove they have covered is a list of the cases someone thought of, not a
-  specification.
-- **It is the argument this ADR already makes twice.** §8d refuses to bound the
-  handshake member by member and bounds the payload instead; §10a refuses to name
-  each error's `details` members and derives them from the exception's attributes.
-  Both decline an enumeration in favour of something structural. Writing a byte
-  grammar here would be the enumeration those two sections reject, in the one
-  place it is hardest to check.
+- **The bytes must be ratified, and an earlier draft of this section was wrong
+  that they need not be.** That draft argued the conformance suite could test the
+  limit's *behaviour* and leave its boundary open until the transport landed. The
+  argument does not survive the triad's own **canonical fake**
+  (`CONTRIBUTING.md` → "Adding a Protocol"): change 3 ships a second
+  implementation and a shared suite both it and `Engine` must pass, so two
+  implementations can disagree about which calls are refused before the wire
+  package exists at all. Refusal is contract-visible, and a suite can only test
+  what is specified. **Recording the retraction rather than the conclusion alone
+  is deliberate** — the same mistake is available to anyone who reads §8d's and
+  §10a's preference for structure over enumeration and over-applies it.
+- **But they must not be ratified *here*.** Pinning a byte grammar in a
+  nineteen-clause contract ADR is the unspiked seam #281 and `CONTRIBUTING.md`'s
+  spike-first guidance warn about, and it was attempted: four review rounds each
+  found one more corner it had not covered, with a fifth (`"P2DT3S"` versus
+  `"PT172803S"`) still open when it was withdrawn. An enumeration of a space
+  nobody can prove they have covered is a list of the cases someone thought of.
+  ADR-0087 carries **normative test vectors**, which is the form that makes an
+  encoding checkable rather than argued.
+- **The two obligations are different in kind, and separating them is what lets
+  each be reviewed as itself.** This ADR is a *surface* contract — signatures,
+  types, failures. ADR-0087 is a *representation* contract. Merging them would put
+  a byte grammar in front of reviewers reading for method shape, which is how the
+  corners went unnoticed for four rounds.
 
-**Two implementations *do* coexist before the bytes are pinned, so the clause is
-written to be enforceable without them.** It is tempting to argue that ADR-0084
-§5's sequencing makes divergence unreachable — change 4 builds the hub, the
-`wire` package and the client together and is what pins the encoding. That
-argument is **wrong**, and the thing that breaks it is the triad's own
-**canonical fake** (`CONTRIBUTING.md` → "Adding a Protocol"): change 3 ships a
-second implementation and a shared conformance suite both it and `Engine` must
-pass, and change 3 is before change 4. So a suite that asserted a byte-exact
-boundary would be asserting something no ratified text defines yet.
+**ADR-0084 §5's four changes therefore become five**, and the order is what makes
+the reference resolve: this ADR, **ADR-0087**, the triad, then the hub and client.
+ADR-0087 lands before the triad precisely because the canonical fake is the second
+implementation that would otherwise have nothing to conform to.
 
-> **What the conformance suite enforces is the limit's *behaviour*, not its
-> boundary.** Every implementation must refuse an oversized payload with
-> `OversizedValueError` naming the limit, the measured size and the largest
-> contributor (§9), and must accept one that is comfortably inside. **Which
-> payloads sit exactly at the boundary is fixed when the encoding is** (change 4),
-> and the suite does not test the boundary before then.
-
-That is how the test would be written in any case — with a payload oversized
-under *any* conforming encoding and one well inside it — because a boundary test
-that depended on a byte would be brittle even after the encoding is pinned. What
-the deferral costs, precisely, is a boundary assertion nobody wanted; what it
-keeps is the obligation ADR-0084 §4 actually states, that every implementation
-enforces the limit.
+**A forward reference to a `Proposed` ADR is normal here, and the precedent is
+this ADR itself.** ADR-0084 §5 named "the surface ADR (#281's scope)" as its step
+2 before that ADR existed, and §4 and §11 both defer to it by name. The same shape
+one step along: a decision that is dispatched, drafted and sequenced ahead of what
+depends on it is a reference, not a dangling one.
 
 **A `core`-owned codec is the obvious alternative and ADR-0084 §6 forecloses it.**
 That ADR places "the envelope, the framing, the codec, the error mapping, and the
@@ -976,49 +970,10 @@ ratified placement; what this ADR can do — and does — is fix that there is e
 one, that both measurement and transmission use it, and that the limit is measured
 on it.
 
-**What the wire lane can do that this ADR cannot: test it.** A byte encoding is
-exactly the kind of thing a round-trip test pins in a line — encode, measure,
+**What ADR-0087 can do that this ADR cannot: test it.** A byte encoding is
+exactly the kind of thing a round-trip vector pins in a line — encode, measure,
 compare — where a prose grammar is checked only by whoever reads it next. That is
-also why the deferral costs nothing: nothing implements against this contract
-before the triad (ADR-0084 §5's change 3), and nothing encodes a payload before
-change 4.
-
-The measure is a serialisation at all because that is what ADR-0084 §3's length
-prefix counts, and a limit measured on anything else — a character count, a
-Python object size — would be a number the two implementations compute
-differently for the same value. A directory named in a non-ASCII script spends
-more of the budget than it looks like it does, and so does an utterance.
-
-**Subtracting the reserve is the other half of the arithmetic.** Set the contract
-limit equal to `hub_max_frame_bytes` and a payload at exactly the limit overflows
-the frame by the envelope's own bytes. With the subtraction, a payload the
-contract admits always fits a frame, and the in-process engine enforces the
-identical number by reading the same setting.
-
-**The in-process engine pays a measurement it did not pay before, and the
-contract fixes the answer rather than the method.** It has no payload to
-serialise for its own sake, so enforcing the bound means encoding one. That cost
-is ADR-0084 §4's, not this ADR's — "every implementation enforces it, the
-in-process engine included" — but the clause is written so the cost is avoidable
-where it cannot bind:
-
-> What the contract fixes is **which payloads are refused**, not how the refusal
-> is computed. An implementation may use any cheaper test that refuses exactly
-> the same set — for instance skipping the encoding entirely when a conservative
-> upper bound proves the payload is inside the limit.
-
-**The in-process engine reads `Settings.hub_max_frame_bytes` directly.** It has no
-handshake to be told the value by; the client is told it by the connect reply
-(ADR-0084 §3) and enforces the number it was told. Same number, two routes to it.
-
-**An oversized payload raises `OversizedValueError(AssistantError)`, naming the
-limit, the measured size, and the largest argument or field contributing to it**
-(§9) — which is ADR-0084 §4's "naming the limit and the field that exceeded it"
-under a payload-level bound, and is the actionable half: "your request is 17 MiB
-against a 16 MiB limit, mostly `utterance`" tells a user what to do, and a bare
-total does not. On the client this fires *locally*,
-before a byte is sent, which is ADR-0084 §3's stated behaviour for an oversized
-argument — "not as a connection that closes mid-request".
+the whole reason the material moved rather than being cut.
 
 #### 8d. `hub_max_frame_bytes` has a floor of 1024 bytes
 
@@ -1244,8 +1199,8 @@ fixed, so it is stated compactly rather than method by method:
   today and after the move, so the relocation changes no byte.
 - **One canonical encoding serves both jobs.** The bytes a client measures
   against §8c's limit are exactly the bytes it writes, so measurement and
-  transmission can never disagree. **Which bytes those are is §8c's deferral to
-  the wire lane** (§11a), and it is the only thing in this section left open.
+  transmission can never disagree. **Which bytes those are is ratified by
+  ADR-0087** (§11a), which lands before the triad.
 
 #### 10a. The error frame, so a declared failure survives the wire
 
@@ -1400,19 +1355,20 @@ makes "the code is the class name" safe: `ValueError` is not ours to name.
 
 ### 11. Deferred by name, and where the corpus and the tree disagree
 
-#### 11a. What the wire lane inherits from this ADR
+#### 11a. What ADR-0087 decides, and when it lands
 
-Stated as an obligation rather than left as a silence, so ADR-0084 §5's change 4
-starts from a named debt rather than discovering one.
+Stated as sequencing rather than as a deferral, so a reader knows the reference in
+§8c resolves.
 
 > **The canonical wire encoding — the exact byte string a payload serialises to —
-> is the `wire` package's to fix** (ADR-0084 §6). This ADR fixes that there is
-> **one** such encoding, that it is used for both measurement and transmission, and
-> that §8c's limit is measured on it. It does not fix the bytes.
+> is ADR-0087's**, ratified with normative test vectors. This ADR fixes the limit
+> (`hub_max_frame_bytes - 512`, §8c), that it covers all three payload classes,
+> and that it is measured on that encoding. **ADR-0087 merges before the triad**,
+> so the boundary is ratified before a second implementation exists.
 
-**What the wire lane owes, concretely**, because "pin the encoding" is not
-actionable on its own. Every one of these is a place two encoders can differ at
-the limit's boundary, and each was found by review rather than by inspection:
+**What ADR-0087 has to settle**, listed because each is a place two encoders can
+differ at the boundary and each was found by review here rather than by
+inspection — so the list is evidence rather than a guess:
 
 - insignificant whitespace, and the `,` / `:` separators;
 - string escaping — `/` versus `\/`, the two-character control forms versus
@@ -1426,18 +1382,28 @@ the limit's boundary, and each was found by review rather than by inspection:
 - the entry point for payloads that are **not** models — a request's argument
   object, and the bare `true` a `forget` returns;
 - whether a value's bytes may depend on how the object was *constructed* rather
-  than on what it is. **They may not**, and this is the one item stated as a
-  constraint rather than a question: two equal values must encode identically, or
-  the same page lands on opposite sides of the limit depending on which
-  implementation built it.
+  than on what it is. **They may not**, and this one is a constraint rather than a
+  question: two equal values must encode identically, or the same page lands on
+  opposite sides of the limit depending on which implementation built it.
 
-**And it owes a test, which is the point of the deferral.** A round-trip that
-encodes, measures and compares pins this in a line, where a prose grammar is
-checked only by whoever reads it next.
+**This ADR does not pre-judge any of them**, and says so rather than leaving it to
+be inferred: the list is the problem statement ADR-0087 inherits, not a set of
+answers it is expected to reach. Where it and ADR-0087 could be read as
+disagreeing, ADR-0087 governs the encoding and this ADR governs the limit.
 
-**Nothing implements against this before then**, so the deferral costs no
-sequencing: the triad (ADR-0084 §5's change 3) writes the Protocol and the
-conformance suite, and change 4 is the first thing that encodes a payload.
+**The five-change order**, since ADR-0084 §5 wrote four:
+
+1. ADR-0084 — the transport and the promotion (merged);
+2. **this ADR** — the surface: signatures, types, failures, the limit;
+3. **ADR-0087** — the canonical encoding, with normative vectors;
+4. the triad — `core/protocols.py`, `core/types.py`, conformance suite, canonical
+   fake;
+5. the hub, the `wire` package, the client, and the `lint-imports` edits.
+
+Steps 2 and 3 are independent of each other and both precede 4. **Whether
+ADR-0084 §5's own "four changes" sentence owes a record under ADR-0082 §1 is
+ADR-0087's question, not this one** — ADR-0087 is the change that inserts a step
+into that sequence, and §12 explains why the record travels with it.
 
 #### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
@@ -1521,6 +1487,15 @@ move to `Accepted` triggers nothing.
   split, where the tree has one that cannot. An ADR whose text you have to
   contradict to implement is amended; one whose text you have to be *able* to
   implement is served.
+- **ADR-0084 §5's "four changes", and ADR-0087.** §11a records that the sequence
+  gains a fifth step. Under ADR-0070 §1 a reader holding only ADR-0084 would
+  sequence the triad immediately after this ADR and would now be wrong, so a
+  record is owed on that sentence — **but not by this change.** ADR-0087 is what
+  inserts the step, and a record belongs with the change that makes the earlier
+  text false; ADR-0084 §12 applied exactly that rule to itself, landing ADR-0042's
+  record in its own change rather than a follow-up. This ADR neither adds nor
+  removes a step — it is step 2 either way. Naming the question and its owner is
+  the whole of what is owed here.
 - **ADR-0086.** No record, and no dependency in either direction. Its §7 hands
   the DTO shape here explicitly and takes no position on it; §8f states the
   relationship and declines to lean on an unratified ADR.
@@ -1614,6 +1589,13 @@ move to `Accepted` triggers nothing.
   overflows the frame on `timeout` alone — leaving the client to refuse an input
   the contract admitted, or to send a frame the server refuses on its prefix.
   Bounding the payload measures the thing the length prefix counts.
+- **Leave the canonical byte encoding to the implementing lane, with the
+  conformance suite testing only the limit's behaviour.** *Held for two rounds and
+  rejected in §8c.* The triad's canonical fake is a second implementation and it
+  arrives in change 3, so two implementations can disagree about which calls are
+  refused before the wire package exists at all; refusal is contract-visible, and
+  a suite can only test what is specified. ADR-0087 ratifies the bytes before the
+  triad instead.
 - **Pin the canonical byte encoding in this ADR** — first as a grammar of rules an
   encoder must satisfy, then as a named pydantic entry point. *Attempted, and
   withdrawn.* The grammar form took four review rounds, each finding one more
@@ -1622,10 +1604,11 @@ move to `Accepted` triggers nothing.
   answer which adapter, which flags, and what `T` is per payload class, and one of
   those answers made a result's bytes depend on how the object was *constructed*
   rather than on its value. Both are the unspiked seam #281 warns about, and both
-  are the enumeration §8d and §10a decline elsewhere. The encoding is the `wire`
-  package's (ADR-0084 §6), where a round-trip test pins it in a line; §8c defers it
-  and §11a names the obligation. **What is kept is the limit and that it is measured
-  on one canonical encoding** — the part ADR-0084 §4 makes contract.
+  are the enumeration §8d and §10a decline elsewhere. The encoding is a
+  *representation* contract, where a round-trip vector pins it in a line — so it is
+  **ADR-0087's**, ratified before the triad (§11a). **What is kept here is the
+  limit and that it is measured on one canonical encoding** — the part ADR-0084 §4
+  makes contract.
 - **Answer an oversized error payload with `OversizedValueError`, as an oversized
   argument or result is answered.** Rejected in §10a: the response to a failed
   error delivery is itself an error frame, so the rule recurses, and it mislabels
