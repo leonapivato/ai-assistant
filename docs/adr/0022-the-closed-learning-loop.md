@@ -1,7 +1,80 @@
 # 22. The closed learning loop in `orchestration`
 
-- Status: Accepted, §§4, 4a, 5 amended by ADR-0028
+- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger)
 - Date: 2026-07-20
+- Partially superseded: 2026-07-31 by ADR-0084 — **§2's paragraph on where
+  `TurnResult` lives, and on the one condition that would move it, is false;
+  nothing this ADR decided about the learning loop changes.**
+  [ADR-0084](0084-the-local-api-and-the-cli-as-a-client.md) §5 finds ADR-0042
+  §1's revisit trigger fired and promotes the engine façade to a Protocol in
+  `core/protocols.py`, which forces its result types into `core/types.py` (golden
+  rule 2: a `core` Protocol cannot name an `orchestration` return type). ADR-0042
+  §1 is partially superseded there. **This ADR does not cite ADR-0042 — ADR-0042
+  §1 cites *it*, by name**, and that is why the clause below was missed three
+  times; see the method note at the end.
+
+  **Replaced**, both halves of one paragraph in §2:
+
+  1. "`TurnResult` is a frozen dataclass in `orchestration`, not a pydantic model
+     in `core/types.py`". `Engine.converse` and `Engine.resume` return
+     `TurnOutcome`, which ADR-0084 §4 names **explicitly** in its promoted set,
+     and `TurnOutcome.turn` is `TurnResult | None`
+     (`orchestration/engine.py:252`). §4's bound is "the *transitive closure* of
+     what the Protocol's methods name, not just the types they return", because "a
+     promoted DTO drags every type its fields reach" — the rule that pulls
+     `Disposition`, `QuestionState` and `SuccessorLink` along with it. `TurnResult`
+     is reached by that same rule, one field in. **The practical consequence,
+     which is the whole reason this record exists:** changing a field of
+     `TurnResult` was a free `orchestration` edit and is now a `core` contract
+     change under golden rule 5, owing an ADR. A reader acting on the superseded
+     sentence would ship one without — the process failure ADR-0015 §5 exists to
+     prevent.
+  2. **The operative one.** "It graduates to `core` the day a subsystem must
+     receive one." This is the *sole* trigger, and ADR-0084 §12 has already ruled
+     on the identical clause where ADR-0042 §1 restated it — "promotion to `core`
+     is reserved for 'the day a subsystem needs to receive one,' which this is
+     not" — because §4 promotes for a **transport**, not for a subsystem. That
+     ruling lands on this sentence a fortiori: ADR-0042 §1 was quoting ADR-0022
+     §2, so the clause superseded there is this one. A reader holding only ADR-0022
+     reads its graduation condition more widely than it now holds, which is the
+     second limb of ADR-0082 §1's test.
+
+  **Not replaced, and it is nearly everything.** The *reason* half of the
+  sentence — "because it crosses no *subsystem* boundary: only `interfaces`,
+  which already depends on this package, ever sees one" — stays a true statement
+  about where the value travels. What it stops doing is *entailing* the
+  conclusion drawn from it, exactly the separation ADR-0077's record makes for
+  the same borrowed reasoning. §1's pipeline order, §2's ruling that retrieval is
+  not run concurrently with context assembly and why, §3's failure behaviour
+  stage by stage, and §§4, 4a and 5 as already amended by ADR-0028 are all
+  untouched — ADR-0084 changes nothing about the learning loop. **The exact
+  promoted set remains #281's to pin** (ADR-0084 §4 hands it, the field layouts
+  and the method signatures to a follow-on contract ADR rather than to an
+  implementing lane), so this record states the reach of §4's ratified closure
+  rule as the code stands today; it does not pre-empt that ADR's enumeration.
+
+  **Under ADR-0082 §2, the amendment qualifier comes off this line as it takes
+  the leading token.** `Accepted, §§4, 4a, 5 amended by ADR-0028` becomes the
+  leading-token form ADR-0070 §4 requires for a new partial supersession, and the
+  ADR-0028 record stays whole in the `Amended: 2026-07-21 by ADR-0028` note
+  directly below, which names §4, §4a and §5 and states each change. Nothing is
+  lost by the move; it is ADR-0080 §8's operation as ADR-0082 §2 generalises it,
+  and it keeps ADR-0070 §4's extraction invariant true — every `ADR-NNNN` after
+  the leading token is a supersession target, so `ADR-0028` could not stay on the
+  line.
+
+  **How this clause survived three enumerations, recorded because the method is
+  the point.** ADR-0084 §12 corrected a *lexical* search into a semantic one:
+  ask, of every ADR that names the superseded one, what it relied on it **for**.
+  That is necessary and it is not sufficient. This ADR predates ADR-0042 and
+  names it nowhere; the citation runs the other way, ADR-0042 §1 borrowing
+  "ADR-0022 §2's reasoning for `TurnResult`" — and ADR-0077 §10 item 7 borrows it
+  from ADR-0022 directly. A sweep that walks citations **forward** from the
+  superseded ADR cannot reach the ADR a superseded clause was borrowed **from**.
+  Whoever next supersedes a premise should walk the citations in both directions
+  and search for the premise's own words independently of any ADR number: this
+  clause was found by searching for the reasoning ("crosses no … boundary",
+  "graduates to `core`"), not by following a reference.
 - Amended: 2026-07-21 by ADR-0028 — §4's "MERGE is reported but not applied" is
   withdrawn as a standing limitation. It describes the loop until the
   MemoryWriter triad lands and learn delegates to it; from then a MERGE is
