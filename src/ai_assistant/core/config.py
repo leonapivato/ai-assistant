@@ -551,6 +551,31 @@ class EmbedderKind(StrEnum):
 #: what changed is that the default now sits beside the setting that names it.
 _DEFAULT_DATA_DIRNAME: Final = ".ai-assistant"
 
+#: ADR-0084 §3's named default for :attr:`Settings.hub_max_frame_bytes` — 16 MiB.
+#: Set generously on purpose: exceeding it must surface as an error a client can
+#: read rather than as a quietly shortened payload, and ADR-0084 §3 sizes it so
+#: that a belief whose evidence has grown past the limit is unreachable for any
+#: belief this system currently produces while #473's semantic bound is open.
+_DEFAULT_MAX_FRAME_BYTES: Final = 16 * 1024 * 1024
+
+#: ADR-0085 §8d's floor. 512 for the envelope reserve plus 256 for either connect
+#: payload is 768, and 1024 leaves room for both handshake frames and a small
+#: request besides. Below it the hub "would pass every startup step in ADR-0083 §3
+#: and then refuse every client, including the CLI — indistinguishable from a hub
+#: that is down, which is ruling 4's failure" (ADR-0084 §3).
+#:
+#: The figure is repeated here rather than imported because ``core`` depends on
+#: nothing else in ``ai_assistant`` (golden rule 2), and the two packages that hold
+#: it as a constant — ``orchestration`` and ``wire`` — are both below that rule.
+_MIN_FRAME_BYTES: Final = 1024
+
+#: ADR-0084 §3's upper bound: a frame must be **representable by the framing**,
+#: and the 4-byte big-endian prefix caps what follows it at ``2**32 - 1`` bytes.
+#: Without this "a setting of 5 GiB would be accepted at load and would be a limit
+#: the contract declares but the wire cannot encode, so the in-process engine would
+#: accept a value the client provably cannot send".
+_MAX_FRAME_BYTES: Final = 2**32 - 1
+
 
 class Settings(BaseSettings):
     """Typed application settings.
@@ -732,6 +757,88 @@ class Settings(BaseSettings):
             "(ADR-0083 §7, §13); set a duration to enable it."
         ),
     )
+
+    # --- The local API's transport (ADR-0084 §3) -------------------------
+    # The four figures ADR-0084 §3 names rather than leaving to the
+    # implementation, "following ADR-0083 §7, which named every scheduler interval
+    # for ADR-0074 §9.3's reason: 'a "bounded default" with no figure is two
+    # conforming stores handing the same continuation different history.'"
+    #
+    # **None of them is nullable, and that is the one place ADR-0084 departs from
+    # ADR-0083 §7's convention.** There, ``None`` means "disabled", because a
+    # scheduler job that never runs is a coherent deployment. Here it is not: a hub
+    # with no frame cap or no read deadline has exactly the failure §3 exists to
+    # prevent, so "off" is not an available value and a zero is a misconfiguration
+    # rather than a way to express it. A ``hub_max_connections`` of 0 would refuse
+    # every client including the CLI and would look from outside exactly like a hub
+    # that is down — ADR-0084's ruling 4 failure produced by a config typo, and load
+    # time is where it should surface.
+    #
+    # ``hub_max_frame_bytes`` is the **hub's** setting and its value is
+    # authoritative: the connect reply carries it to the client, which enforces the
+    # number it was told rather than one of its own (ADR-0084 §3). It bounds what
+    # the 4-byte length prefix counts — envelope and payload together — and the
+    # *contract* limit an engine measures is this less ADR-0085 §8b's 512-byte
+    # envelope reserve, which the composition root subtracts (#572).
+    hub_max_frame_bytes: _IntegerSetting = Field(
+        default=_DEFAULT_MAX_FRAME_BYTES,
+        ge=_MIN_FRAME_BYTES,
+        le=_MAX_FRAME_BYTES,
+        description=(
+            "The largest frame the hub will read or write, envelope and payload "
+            "together (ADR-0084 §3). Bounded below by ADR-0085 §8d's floor and above "
+            "by what the 4-byte length prefix can express."
+        ),
+    )
+    hub_read_timeout: _DurationSetting = Field(
+        default=timedelta(seconds=30),
+        gt=timedelta(0),
+        description=(
+            "How long a connection may stall — mid-frame, or waiting for the next "
+            "frame's prefix — before the hub closes it (ADR-0084 §3). Positive."
+        ),
+    )
+    hub_max_connections: _IntegerSetting = Field(
+        default=64,
+        ge=1,
+        description=(
+            "How many connections the hub serves at once; beyond it the listener "
+            "refuses rather than queueing without bound (ADR-0084 §3)."
+        ),
+    )
+    hub_max_pending_handshakes: _IntegerSetting = Field(
+        default=8,
+        ge=1,
+        description=(
+            "How many accepted connections may be waiting to complete the handshake "
+            "(ADR-0084 §3). Never above hub_max_connections."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_pending_ceiling_can_bind(self) -> Settings:
+        """Refuse a handshake ceiling above the total (ADR-0084 §3).
+
+        "``hub_max_pending_handshakes`` is refused unless it is **no greater than
+        ``hub_max_connections``**, since a pending ceiling above the total is a
+        limit that can never bind." A limit that cannot bind is not a weaker limit
+        but an absent one, and an operator who set it believes they hold a defence
+        against the cheapest state a misbehaving peer can accumulate.
+
+        Returns:
+            ``self``, once the two ceilings are ordered.
+
+        Raises:
+            ValueError: If the pending ceiling exceeds the connection ceiling.
+        """
+        if self.hub_max_pending_handshakes > self.hub_max_connections:
+            msg = (
+                f"hub_max_pending_handshakes={self.hub_max_pending_handshakes} exceeds "
+                f"hub_max_connections={self.hub_max_connections}, so the pending ceiling "
+                f"can never bind; lower it to at most the connection ceiling"
+            )
+            raise ValueError(msg)
+        return self
 
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
