@@ -229,8 +229,15 @@ whether a machine can tell them apart from ordinary prose**, because §6 forbids
 the checker to infer its own input set and *intent is not in the text*:
 
 - **b1, a module path** — `` `memory/ingest.py` ``, `` `scripts/ship.sh` ``,
-  `` `tests/memory/memory_store_contract.py` ``. Contains a `/` or ends in a
-  source extension. **Unambiguous**: no prose token looks like this.
+  `` `tests/memory/memory_store_contract.py` ``. **Defined by root, not by
+  shape**: a path is a code citation when it lies under `src/ai_assistant/`,
+  `tests/` or `scripts/`, written either in full or relative to one of them.
+  A path under any other root is a **document reference and not a code
+  citation** — `` `docs/review/guide.md` ``, `` `.github/workflows/gate.yml` ``,
+  `` `docs/adr/template.md` `` — and nothing resolves it against the code. Root
+  membership is mechanical, where "contains a `/`" is not: this ADR cites
+  `docs/review/guide.md` itself, and a shape rule would report it as an
+  unresolved symbol.
 - **b2, a dotted symbol** — `` `MemoryStore.get_many` ``,
   `` `Provenance.evidence_elided` ``, `` `MemoryDecisionKind.MERGE` ``. A
   qualified name whose tail is an identifier. **Near-unambiguous**, once
@@ -249,9 +256,10 @@ the checker to infer its own input set and *intent is not in the text*:
   quoted or illustrative material — a status line being shown, a signature being
   drafted, a defect being exhibited — and nothing in it is checked. This is what
   lets an ADR quote a form it forbids, including this one (§5).
-- **A document filename is not a code citation.** `` `CONTRIBUTING.md` ``,
-  `` `CLAUDE.md` ``, `` `CHANGELOG.md` `` and their kind account for 168 of the
-  203 apparently-unresolved dotted names.
+- **A document reference is not a code citation**, whether bare
+  (`` `CONTRIBUTING.md` ``, `` `CLAUDE.md` ``, `` `CHANGELOG.md` ``) or rooted
+  (`` `docs/review/guide.md` ``). Bare ones alone account for 168 of the 203
+  apparently-unresolved dotted names; b1's root rule covers the rooted ones.
 
 **Backticks alone still do not make a citation, and b3 is where that bites.**
 The corpus backticks status vocabulary (`` `Accepted` ``, `` `Proposed` ``,
@@ -394,9 +402,25 @@ disagreement between them is the finding.** Concretely, for a citation of
 `ADR-A §K`:
 
 1. **Forward** — read `ADR-A`'s whole `Status` **field**, every physical line,
-   since a legacy value may wrap (ADR-0070 §4), and collect the `ADR-NNNN`
-   targets after a leading `Partially superseded by`, plus any whole
-   `Superseded by`;
+   since a legacy value may wrap (ADR-0070 §4), and take **every `ADR-NNNN`
+   appearing anywhere in it** as a candidate. Not only the targets after a
+   leading `Partially superseded by`: the corpus's 86 status lines carry at
+   least six shapes, and the leading-token form is 14 of them. ADR-0015's is
+   `Accepted, partially superseded by ADR-0020 and ADR-0025` — grandfathered by
+   ADR-0070 §4 and never retrofitted — so a rule keyed to the leading token
+   finds nothing there while the reverse direction finds two, and reports a
+   disagreement against a record that is correct. Others carry `§2 amended by
+   ADR-NNNN`, `narrowed by`, `discharged by`, or a `;`-joined qualifier.
+   Extraction is safe on all of them because ADR-0070 §4's authoring invariant
+   guarantees it: "**a scope names a clause, not another ADR**: it carries no
+   `ADR-NNNN` token."
+
+   **Each candidate is then resolved against the ADR it names**, which is
+   ADR-0070 §4's consumer rule verbatim — a qualifier that names a later ADR is
+   "not a reliable liveness signal", so the named ADR's own record says whether
+   it superseded the clause or merely amended it. An amendment "is not a status
+   token and never bears on this read", so it drops out here rather than
+   counting as a forward supersession;
 2. **Reverse** — collect every ADR carrying a header line
    `- Supersedes: ADR-A …` or `- Partially supersedes: ADR-A …` (below);
 3. **Transitive** — follow the walk ADR-0070 §4 requires, onward through each
@@ -428,10 +452,12 @@ is honest about what this buys and when.
 
 **Where the two directions disagree, that is the report** — a later ADR declaring
 it supersedes a clause of `ADR-A` while `ADR-A`'s `Status` does not name it, or
-the reverse. This is the check that would have surfaced the ADR-0074/ADR-0086
-window on the day it opened, and it does not depend on that window being
-structural: it is the direct consequence of §4's ruling that the `Status` scope
-is a pointer and the superseding ADR is the authority. A checker that read only
+the reverse. **It would have surfaced the ADR-0074/ADR-0086 window only if
+ADR-0086 had carried the reverse header this section now requires** — it did
+not, and the paragraph above says so. The rule earns out going forward, and it
+does not depend on that window being structural: it is the direct consequence of
+ADR-0070 §4's ruling that the `Status` scope is a pointer and the superseding ADR
+is the authority. A checker that read only
 the pointer would have believed ADR-0074's `Status` and been wrong; a lane that
 trusted ADR-0086's own declaration was right.
 
