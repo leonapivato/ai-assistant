@@ -410,12 +410,17 @@ implementation's behaviour, `pyproject.toml` admits any Python `>=3.14`, and
 ADR-0084 §3 freezes this representation permanently. Two conforming interpreters
 could then write one value two ways.
 
-> Let the value be finite. Among all strings of decimal digits that round-trip to
-> it, take the **shortest**; where several of that length round-trip, take the one
-> whose exact decimal value is **nearest** the binary value, and if two are exactly
-> equidistant the one whose **last digit is even**. Call it **D**, with no leading
-> and no trailing zero, and let **decpt** be the integer with
-> `value = ±0.D × 10^decpt`.
+> Let **v** be a finite binary64 value. A **candidate** is a pair `(D, decpt)` —
+> `D` a string of decimal digits with no leading and no trailing zero, `decpt` an
+> integer — such that the decimal number `0.D × 10^decpt` **parses back to `v`**
+> under IEEE-754 round-to-nearest. Note that this is a round-trip condition, not
+> an equality: the double written `0.1` is exactly
+> `3602879701896397 / 2^55`, and no finite decimal equals it.
+>
+> Among all candidates take those with the **fewest digits**; among those, the one
+> whose **exact** decimal value is nearest `v`'s exact value; and if two are
+> exactly equidistant, the one whose **last digit is even**. That pair is
+> `(D, decpt)`, and it is unique.
 >
 > - **Fixed-point when `-4 < decpt ≤ 16`**, with at least one digit on each side
 >   of the point: `0.0001`, `0.1`, `1.0`, `1000000000000000.0`.
@@ -428,9 +433,11 @@ could then write one value two ways.
 **The tie-break is not decoration, and an earlier draft asserted uniqueness
 instead.** Shortest-round-tripping does not single out a string:
 `-1.5670905694168155e-99` and `-1.5670905694168156e-99` are both seventeen
-digits and both parse to `-0x1.b6bc406aad682p-329`, the same double. Nearest
-separates them — the `…156` candidate is about 2.6e-116 from the exact value and
-the `…155` candidate about 7.4e-116 — and it is what CPython picks. The
+digits and both parse to `-0x1.b6bc406aad682p-329`, the same double — so both are
+candidates and the shortest-length filter keeps both. Nearest separates them: the
+`…156` candidate is about `2.6e-116` from `v`'s exact value and the `…155`
+candidate about `7.4e-116`, and `…156` is what CPython picks. This comparison is
+where exact decimal arithmetic is used, and the only place it is. The
 even-last-digit rule beneath it may well be unreachable, since equidistance would
 need the binary value to sit exactly on a midpoint of the decimal grid; it is
 stated anyway, because a grammar with a gap is not total and this one claims to
