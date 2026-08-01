@@ -944,6 +944,24 @@ is the bytes.
   grammar here would be the enumeration those two sections reject, in the one
   place it is hardest to check.
 
+**Two implementations never coexist under an unpinned encoding, which is what
+makes the deferral safe rather than merely tidy.** The objection to answering
+"one canonical encoding" without saying which is that two conforming
+implementations could refuse different calls — and that requires two
+implementations. ADR-0084 §5's sequencing makes that state unreachable: change 3
+is the triad (Protocol, conformance suite, canonical fake) and **nothing encodes
+a payload**; change 4 builds the hub, the `wire` package and the client
+*together*, and it is the change that pins the encoding. The first moment a
+second implementation exists is inside the change that fixes the bytes.
+
+**A `core`-owned codec is the obvious alternative and ADR-0084 §6 forecloses it.**
+That ADR places "the envelope, the framing, the codec, the error mapping, and the
+client" in the `wire` package, and golden rule 2 keeps `core` free of them. So the
+canonical encoding cannot be ratified here as a `core` API without contradicting a
+ratified placement; what this ADR can do — and does — is fix that there is exactly
+one, that both measurement and transmission use it, and that the limit is measured
+on it.
+
 **What the wire lane can do that this ADR cannot: test it.** A byte encoding is
 exactly the kind of thing a round-trip test pins in a line — encode, measure,
 compare — where a prose grammar is checked only by whoever reads it next. That is
@@ -1103,6 +1121,11 @@ suite can hold anyone to, and ADR-0084 §3 requires a wire error to carry "a typ
 code and a message". So the failures are declared, and two new types are named —
 both of them the *spelling* of a refusal ADR-0084 already ratified, not a new
 decision.
+
+**`AssistantError` gains one field, `details_elided: bool = False`** (§10a) —
+the only change this ADR makes to an *existing* error type. It exists so a client
+whose reconstruction lost an exception's structured state can say so, instead of
+presenting an empty list as an empty answer. It is `False` everywhere else.
 
 **Both new types live in `core/errors.py`**, beside the hierarchy they extend —
 the same file every other `AssistantError` subtype is declared in, and the one a
@@ -1308,16 +1331,34 @@ oversized, the diagnosis of it was. So:
 > leaves room for a code, the member names and a non-empty message at the
 > smallest legal `hub_max_frame_bytes`.
 
-**A client that receives `reduced: true` does not reconstruct the declared
-exception.** It raises a transport-level failure naming the code and saying the
-hub's refusal could not be delivered intact. Constructing the typed exception
-anyway is the tempting answer and it is the dangerous one: `unresolved_ids`
-defaults to `()`, so a fabricated `UnresolvedEvidenceError` would tell a caller
-that **nothing** was unresolved at the exact moment that too much was — the
-half-populated exception this section already refuses, arriving through the size
-path instead of the schema path. A caller that loses the typed refusal has lost
-information; a caller handed an inverted one has been misled, and only the second
-is a defect.
+**A client that receives `reduced: true` raises the declared exception, with its
+structured state absent and *marked* absent.** This is the substitutability
+requirement biting, and an earlier draft got it wrong in an instructive way: it
+had the client raise a *transport-level* failure instead, which meant one
+`answer()` call raised `UnresolvedEvidenceError` in-process and something
+undeclared over the wire. Two observable failure contracts for one call is
+precisely what ADR-0084 §4–§5 promote this surface to prevent.
+
+So the marker lives on the exception, not only on the frame:
+
+> **`AssistantError` carries `details_elided: bool = False`.** It is `True` only
+> on an exception a client reconstructed from a reduced payload. The client
+> raises the **declared type**, with the message it was given, no structured
+> state, and `details_elided` set.
+
+**One optional attribute on the base class is what makes this honest rather than
+inverted.** `unresolved_ids` defaults to `()`, so a reconstructed
+`UnresolvedEvidenceError` without the flag would tell a caller that **nothing**
+was unresolved at the exact moment that too much was. With it, a caller that
+branches on the ids checks `details_elided` first and learns the list is
+*missing* rather than empty.
+
+**Some difference is physically forced here, and the contract's job is to make it
+declared rather than silent.** A client cannot deliver a list through a pipe
+narrower than the list, and no wording changes that. What the contract fixes is
+that both implementations raise the same *type* with the same meaning, and that
+the shortfall is machine-detectable. `details_elided` is `False` on every
+in-process raise, because nothing elides there.
 
 **Truncating the message is acceptable where truncating a payload is not**, and
 the distinction is ADR-0073 §4's. Its no-silent-truncation rule protects a
@@ -1488,8 +1529,8 @@ move to `Accepted` triggers nothing.
   of malformed page arguments and blank identifiers (§3c, §9), the size limit in
   both directions and across all three payload classes with the error payload's
   reduction (§8, §10a), the disposition-is-not-the-outcome rule (§7), and an
-  error type's structured state round-tripping through its own constructor
-  (§10a). Each is
+  error type's structured state round-tripping through its own constructor, with
+  `details_elided` set where it could not (§10a). Each is
   written as a testable sentence for that reason. **Five more are expressed by the
   types themselves** — §4b's cross-field validators — and one more by a return
   type alone (§4a), which is the cheapest of the lot: it needs no clause and no
@@ -1562,6 +1603,20 @@ move to `Accepted` triggers nothing.
   package's (ADR-0084 §6), where a round-trip test pins it in a line; §8c defers it
   and §11a names the obligation. **What is kept is the limit and that it is measured
   on one canonical encoding** — the part ADR-0084 §4 makes contract.
+- **Answer an oversized error payload with `OversizedValueError`, as an oversized
+  argument or result is answered.** Rejected in §10a: the response to a failed
+  error delivery is itself an error frame, so the rule recurses, and it mislabels
+  — what was too large was the diagnosis, not the value the caller sent.
+- **Have the client raise a transport-level failure when an error payload was
+  reduced, rather than the declared exception.** *Held briefly, and rejected in
+  §10a*: it gave one `answer()` call two observable failure contracts —
+  `UnresolvedEvidenceError` in-process, something undeclared over the wire — which
+  is the substitutability ADR-0084 §5 promotes this surface to provide. Raising
+  the declared type with `details_elided` keeps one contract.
+- **Reconstruct the declared exception from a reduced payload with no marker.**
+  Rejected in §10a for the opposite reason: `unresolved_ids` defaults to `()`, so
+  a caller branching on it is told nothing was unresolved at the moment too much
+  was. Losing structured state costs information; inverting it misleads.
 - **Bound `UnresolvedEvidenceError.unresolved_ids` in this ADR so the error
   always fits.** Rejected: bounding an unbounded citation sequence is #473's
   question and another lane's, and taking it here to solve a transport problem
