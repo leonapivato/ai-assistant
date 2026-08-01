@@ -402,11 +402,12 @@ the tool.** The distinguisher is tense and mood — a present-tense assertion ab
 current code versus a past-tense or hypothetical one — and recognising that is
 prose inference, which §6 forbids for the reasons Context gives.
 
-**Therefore no code citation failure may fail a check.** All three sub-forms of
-§1(b) are **reported and never failing**, the same disposition §4 gives liveness
-and for the same reason: the tool surfaces, the reader decides. A checker that
-failed on b1 today would fail this repository on ADR-0015's record of its own
-deletion.
+**Therefore no code citation may fail a check.** The two selectable sub-forms,
+b1 and b2, are **reported and never failing** — the same disposition §4 gives
+liveness, for the same reason: the tool surfaces, the reader decides. A checker
+that failed on b1 today would fail this repository on ADR-0015's record of its
+own deletion. **b3 is neither failed nor reported**, because §1 leaves it
+unselectable; §6 states the boundary once for all three.
 
 **What survives is still worth having.** Three flags corpus-wide on b1 is a list
 a human reads in a minute, and it contains a real defect nobody had found:
@@ -554,9 +555,13 @@ point at unrelated text, 10 of 10 symbols still resolve.
 16 ADRs. Rewriting them would be an append-only violation pointed backwards, on
 exactly the reasoning ADR-0070 §4 and #71 already settled for status lines:
 "converting a merged, ratified decision to satisfy a rule adopted after it is the
-append-only violation the rule exists to prevent." The existing line numbers are
-also not *removed* from checking — under §2(b) the symbol beside them is checked
-and the line number is ignored, so the corpus gets the benefit without an edit.
+append-only violation the rule exists to prevent." **A legacy citation is handled
+by stripping the line number and resolving the path**, which is b1 and therefore
+selectable: `testing/memory.py:41` is checked as `testing/memory.py`. The bare
+symbol beside it — `FakeMemoryStore` — is b3, so nothing selects it, and the
+argument of this section survives that: the rule exists because a *reader*
+follows a symbol name where a line number misleads them, which holds whether or
+not a tool can pick the name out of the prose.
 
 **Where a position genuinely must be conveyed**, name the enclosing symbol and,
 if needed, quote the line. Both are stable under edits elsewhere in the file.
@@ -805,9 +810,9 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   will be disappointed.
 - **Two citation shapes coexist indefinitely.** New ADRs carry no `:NNN`; 16 older
   ones keep 219. A reader meets both, and §5's non-retrofit is what makes that
-  permanent. The mitigation is that the *symbol* beside a legacy line number is
-  checked under §2(b), so the old form degrades to the new one rather than to
-  nothing.
+  permanent. The mitigation is that the *path* in a legacy citation is still b1,
+  so `testing/memory.py:41` is checked as `testing/memory.py` and the old form
+  degrades to a checkable one rather than to nothing.
 - **The check catches none of the four defects that motivated it, and this is
   the honest headline.** #586's `ConversationService` is a b3 bare token, so
   nothing selects it; its `Engine._project` half resolves; #593 and #588's
