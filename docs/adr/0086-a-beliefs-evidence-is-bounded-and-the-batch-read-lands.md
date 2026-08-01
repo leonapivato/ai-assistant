@@ -750,6 +750,18 @@ The triad and its consumers, in the order golden rule 5 fixes.
    that a lane taking it cannot mistake a rendering it has nowhere to put for
    work it was assigned. The listing's payload — §7's other factor — needs
    nothing here at all: ADR-0085 §4a settled it, and **#552** with it.
+7. **The conversation resume path** — `ConversationLifecycle.history()`
+   (`orchestration/conversations.py`) takes `get_many` too. It is the *other*
+   consumer §6 counts, and leaving it on `await self._memory.get(turn.episode_id)`
+   once per turn would land an ADR that cites two callers and converts one. Two
+   behaviours it must preserve exactly, because a mapping loses both and the loop
+   has them for ratified reasons: **turn order**, which is the conversation's
+   ordinal sequence and not the mapping's, so the batch is read back by iterating
+   `turns` and looking each id up; and **skip-not-fail** for an id that does not
+   resolve, which ADR-0074 §5 ratified as "skipped, not an error — whether it was
+   deleted, expired, or is an intent whose episode write never landed". The tests
+   pin both against the current loop's behaviour, and the store's own docstring
+   (`conversations.py`, the `get_many` note §6 supersedes) is corrected with it.
 
 ### 9. Explicitly declined
 
