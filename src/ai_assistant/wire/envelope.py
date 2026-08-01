@@ -23,7 +23,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Final
+from math import isfinite
+from typing import Any, Final, NoReturn
 
 from ai_assistant.wire.codec import CONNECT_PAYLOAD_BYTES, canonical_payload, encode_projection
 from ai_assistant.wire.errors import (
@@ -147,6 +148,54 @@ def _no_duplicate_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return seen
 
 
+def _refuse_a_non_json_constant(token: str) -> NoReturn:
+    """Refuse ``NaN``, ``Infinity`` and ``-Infinity`` (ADR-0084 §3).
+
+    **These are not JSON.** RFC 8259 has three literals — ``true``, ``false`` and
+    ``null`` — and CPython's decoder accepts the three IEEE tokens as an extension.
+    Refusing them is therefore not a new rule but ADR-0084 §3's existing one applied
+    where a permissive parser was letting it slip: "text that is not valid JSON" is
+    already a member of the closed undecodable class.
+
+    Raises:
+        ValueError: Always; :func:`decode_json` maps it to the close it is owed.
+    """
+    msg = f"{token} is not JSON"
+    raise ValueError(msg)
+
+
+def _finite(text: str) -> float:
+    """Decode one JSON number, refusing one whose value is not finite.
+
+    ``1e999`` is *syntactically* well-formed JSON that CPython decodes to
+    ``float("inf")``, and ADR-0087 §2c gives a non-finite float no wire form at all.
+    ADR-0087 §7 fixes the order as **decode, validate, then measure**, and says why
+    measuring first is unsatisfiable — "a receiver that measured before validating
+    would have to produce a size for a value that has none". It answers the payload
+    path by making the *type* refuse it.
+
+    **The handshake has no type to do that**, which is what makes this necessary
+    rather than defensive: ADR-0085 §8d obliges the connect exchange to be measured
+    on receipt, and there is no schema between the bytes and that measurement. So
+    the value is refused where it is decoded, and the frame takes the close that a
+    frame which cannot become a value this contract carries is already owed.
+
+    Args:
+        text: The number as it appeared in the frame.
+
+    Returns:
+        Its value.
+
+    Raises:
+        ValueError: If the value is not finite.
+    """
+    value = float(text)
+    if not isfinite(value):
+        msg = f"the number {text} has no finite value, so it has no form on this wire"
+        raise ValueError(msg)
+    return value
+
+
 def decode_json(data: bytes) -> Any:
     """Decode one frame's bytes into JSON values (ADR-0084 §3's codec).
 
@@ -158,8 +207,9 @@ def decode_json(data: bytes) -> Any:
 
     Raises:
         UndecodableFrameError: If the bytes are not valid UTF-8, are not valid
-            JSON, or carry a duplicate member name. All three are members of
-            ADR-0084 §3's closed undecodable class, whose answer is a close.
+            JSON, carry a duplicate member name, or carry a number with no finite
+            value. All are members of ADR-0084 §3's closed undecodable class, whose
+            answer is a close.
     """
     try:
         text = data.decode("utf-8")
@@ -167,7 +217,12 @@ def decode_json(data: bytes) -> Any:
         msg = "a frame's bytes are not valid UTF-8"
         raise UndecodableFrameError(msg) from exc
     try:
-        return json.loads(text, object_pairs_hook=_no_duplicate_members)
+        return json.loads(
+            text,
+            object_pairs_hook=_no_duplicate_members,
+            parse_constant=_refuse_a_non_json_constant,
+            parse_float=_finite,
+        )
     except ValueError as exc:
         msg = f"a frame is not decodable JSON: {exc}"
         raise UndecodableFrameError(msg) from exc
