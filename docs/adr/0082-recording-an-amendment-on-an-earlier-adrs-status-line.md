@@ -41,6 +41,16 @@
   argued in its waiver of an adversarial `blocker`, and the reading ADR-0070 §1's
   own §1 note (2026-07-31) now records from the other side.
 
+  **This settles the *form* of a record, never whether an in-place edit was
+  permitted at all.** §1's self-amendment sentence presupposes an amendment:
+  ADR-0070 §1 has already had to classify the edit as one, on its own test, before
+  the question "dated note, or `Status` line too?" arises. So a misstated fact
+  whose correction *reverses a decision the ADR made* never reaches this sentence
+  — it is a supersession under ADR-0070 §1 and it takes a new ADR, whatever bucket
+  the defect sits in. Bucket 1 says where the defect is; it does not say the edit
+  is harmless. This is §1's own "**The test controls, not the label**", applied to
+  this note.
+
   **The operative condition is unchanged and is worth restating as the check that
   actually decides**: "no other ADR is the cause". Where a later ADR *is* the
   cause, §1's main rule governs and the record goes on the earlier ADR's `Status`

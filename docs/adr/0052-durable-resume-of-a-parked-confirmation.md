@@ -59,17 +59,22 @@
     public method, so it falls outside ADR-0084 §4's closure and stays a frozen
     `orchestration` dataclass. Making `_Parked.turn` optional remains a free
     `orchestration` edit.
-  - **The Revisit clause stays true and now has an answer.** "if a second engine
+  - **The Revisit clause stays true and is now discharged.** "if a second engine
     implementation is ever needed, the façade — including this method — promotes
     to a Protocol as a triad (ADR-0042 §1's own Revisit clause), at which point
     `pending_confirmations` joins the contract surface" is a conditional whose
-    stated antecedent — a second engine implementation — has **not** occurred: the
-    promotion came through the *other* limb of ADR-0042 §1's revisit clause, a
-    remote engine (ADR-0084 §12). The sentence does not become false and its
-    consequent has happened, which is ADR-0083 §15's stacked-addition carve-out on
-    its own stated test. It also means `pending_confirmations` joining the contract
-    surface has stopped being conditional and is a live obligation on the surface
-    ADR (#281), which ADR-0084 §4 makes the owner of the exact set.
+    antecedent **has** occurred: ADR-0042 §1's trigger reads "If a *second* engine
+    implementation is ever genuinely needed — a remote engine, a degraded offline
+    engine", naming a remote engine as an **example** of that second
+    implementation rather than a separate condition, and ADR-0084 §5 states it
+    outright — "A client that satisfies the façade's surface over a transport
+    **is** that second implementation." So ADR-0052 foresaw this correctly and its
+    sentence does not become false; it has simply been answered, which is ADR-0083
+    §15's stacked-addition carve-out on its own stated test. The consequent
+    follows: `pending_confirmations` joining the contract surface has stopped
+    being conditional and is a **live obligation** on the surface ADR (#281),
+    which ADR-0084 §4 makes the owner of the exact set — and it is stated that way
+    here so no reader defers it to some later remote implementation.
   - **§4's composition-root wiring.** `SqlitePlanStore`'s construction in
     `build_engine`, its place in the ordered shutdown path and the single-instance
     obligation all cite ADR-0042 §2, whose composition root and wiring obligations

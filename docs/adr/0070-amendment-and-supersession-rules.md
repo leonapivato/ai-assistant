@@ -50,6 +50,19 @@
   or which of two sentences they act on; it does not change what the ADR decided,
   which is why §1 lists all three.
 
+  **The enumeration is not a bypass, and this is the limit that makes the reading
+  safe.** Membership in it does not license an in-place edit; the decision test
+  still runs on the specific correction. A stale phrase whose correction *reverses
+  a decision the ADR made* is a supersession however it is labelled — ADR-0082 §1
+  says exactly that ("**The test controls, not the label**"), and ADR-0084 §12
+  applied it to ADR-0042 §1's "we will not add an engine-facing Protocol", which is
+  also a phrase that went stale and is nonetheless superseded rather than amended.
+  What the enumeration establishes is that "a reader does something observably
+  different" is not *by itself* sufficient to force a supersession. The question
+  is always whether the ADR **decided** the thing being corrected — which is why
+  a citation, a cross-reference, or a mechanical consequence of a mechanism the
+  ADR does not own can be corrected in place, and a ruling cannot.
+
   **This is not hypothetical and it is why the note is here.** Adversarial review
   of PR #538 read the gloss as standalone, concluded that correcting ADR-0083
   §2's misstated environment-variable name required a partially-superseding ADR,
