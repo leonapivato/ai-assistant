@@ -32,9 +32,9 @@
   the size limit and that it is measured on one canonical encoding; **ADR-0087**
   fixes that encoding, with normative test vectors, and **merges before the
   triad** — so the boundary is ratified text before any second implementation
-  exists. ADR-0084 §5's four changes become five (§11a). Writing the grammar here
-  was attempted and withdrawn; so was leaving it to an implementing lane, which
-  the triad's canonical fake refutes (§8c).
+  exists, and before the triad (§11a). Writing the grammar here was attempted and
+  withdrawn; so was leaving it to an implementing lane, which the triad's
+  canonical fake refutes (§8c).
 - **This ADR amends nothing.** §12 applies ADR-0082 §1's test to every earlier
   ADR whose text this one touches and finds no record owed — each of the clauses
   examined is a deferral whose deferring sentence stays true and now has an
@@ -951,10 +951,12 @@ bind:
   a byte grammar in front of reviewers reading for method shape, which is how the
   corners went unnoticed for four rounds.
 
-**ADR-0084 §5's four changes therefore become five**, and the order is what makes
-the reference resolve: this ADR, **ADR-0087**, the triad, then the hub and client.
-ADR-0087 lands before the triad precisely because the canonical fake is the second
-implementation that would otherwise have nothing to conform to.
+**ADR-0087 lands before the triad**, precisely because the canonical fake is the
+second implementation that would otherwise have nothing to conform to. That is the
+one ordering fact this ADR states, and it is what makes the reference above
+resolve. **How ADR-0084 §5's own sequence is renumbered around it is ADR-0087's to
+state and to record** (§11a, §12): the sentence there becomes false only once
+ADR-0087 exists, and this ADR is its step 2 under any count.
 
 **A forward reference to a `Proposed` ADR is normal here, and the precedent is
 this ADR itself.** ADR-0084 §5 named "the surface ADR (#281's scope)" as its step
