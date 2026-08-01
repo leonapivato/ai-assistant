@@ -137,6 +137,12 @@ _DOTTED_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
 #: An ADR filename, e.g. ``0088-a-citation-is-a-checkable-form.md``.
 _ADR_FILENAME_RE = re.compile(r"^(\d{4})-.*\.md$")
 
+#: A level-2 ATX heading, which is where an ADR's header ends. Markdown's own
+#: rule, not a guess at one: up to three leading spaces, and the marker is
+#: closed by a space, a tab, or the end of the line. ``###`` is a *third* ``#``
+#: rather than whitespace, so a level-3 heading does not end the header.
+_HEADING_2_RE = re.compile(r"^ {0,3}##(?:[ \t].*)?$")
+
 #: The two tiers of ADR-0088 §6.
 _TIER_FAILING = 1
 _TIER_REPORTED = 2
@@ -658,7 +664,11 @@ def header(text: str) -> str:
     The boundary is markdown's own level-2 heading and needs no numbering
     scheme, so it is not the document-structure inference §6 forbids — and it is
     measured, not assumed: every ADR on `main` carries a ``## `` heading and all
-    nine reverse records sit above theirs.
+    nine reverse records sit above theirs. It is matched by markdown's rule
+    rather than by the one spelling this corpus happens to use, because a
+    heading written with leading spaces, or with a tab after the marker, that
+    the boundary did not recognise would put the whole body back in scope — and
+    the body is where an illustrative bullet lives.
 
     Fenced lines are blanked rather than dropped — §1's exclusion is general, so
     a fenced example inside the header is display too — and one blank line per
@@ -668,7 +678,7 @@ def header(text: str) -> str:
     kept = dict(iter_prose_lines(text))
     lines = [kept.get(number, "") for number in range(1, len(text.splitlines()) + 1)]
     for index, line in enumerate(lines):
-        if line.startswith("## "):
+        if _HEADING_2_RE.match(line):
             return "\n".join(lines[:index])
     return "\n".join(lines)
 

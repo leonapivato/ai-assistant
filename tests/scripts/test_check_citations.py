@@ -633,6 +633,41 @@ def test_a_body_list_item_that_looks_like_a_record_is_not_one(tmp_path: Path) ->
     assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
 
 
+@pytest.mark.parametrize(
+    "heading",
+    ["## Decision", "  ## Decision", "   ##\tDecision", "##\tDecision", "##"],
+    ids=["plain", "indented", "indented-tab", "tab", "bare"],
+)
+def test_the_header_boundary_follows_markdown_not_one_spelling(
+    tmp_path: Path, heading: str
+) -> None:
+    """A heading the boundary did not recognise puts the whole body back in scope."""
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            f"# 2. Two\n\n- Status: Accepted\n\n{heading}\n\n"
+            "A record is written like this:\n\n- Supersedes: ADR-0001\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
+def test_a_level_three_heading_does_not_end_the_header(tmp_path: Path) -> None:
+    """``###`` closes its marker with a third ``#``, not with whitespace."""
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            "# 2. Two\n\n- Status: Accepted\n### A subsection in the header\n"
+            "- Supersedes: ADR-0001\n\n## Context\n\nReplaces it.\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert len(_findings(_report(tmp_path, "--no-tracker"), "liveness")) == 1
+
+
 def test_a_real_header_record_survives_the_header_boundary(tmp_path: Path) -> None:
     """The boundary must not silence the records §4 exists to compare."""
     adrs = {
