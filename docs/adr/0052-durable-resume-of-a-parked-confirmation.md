@@ -1,7 +1,83 @@
 # 52. Durable resume of a parked confirmation through the façade
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0084 (§3's and the header's placement of the widened `TurnOutcome` outside contract surface)
 - Date: 2026-07-24
+- Partially superseded: 2026-07-31 by ADR-0084 — **two sentences placing
+  `TurnOutcome` outside contract surface are false; every decision this ADR made
+  about durable resume stands, and so does its Revisit clause.**
+  [ADR-0084](0084-the-local-api-and-the-cli-as-a-client.md) §5 finds ADR-0042
+  §1's revisit trigger fired and promotes the engine façade to a Protocol in
+  `core/protocols.py`, which forces its result types into `core/types.py` (golden
+  rule 2: a `core` Protocol cannot name an `orchestration` return type). ADR-0042
+  §1 is partially superseded there, and the clauses below rest on it by citation.
+
+  **Replaced**, both naming the same DTO:
+
+  1. **The operative one**, in §3: "This widens two of the façade's own DTOs, not
+     a contract: `TurnOutcome` 'crosses no *subsystem* boundary, only
+     `interfaces`' (ADR-0042 §1)". `TurnOutcome` is named **explicitly** in
+     ADR-0084 §4's promoted set, so it is a `core` pydantic model frozen under
+     ADR-0068 §1, not an `orchestration` dataclass. **The practical consequence,
+     which is the whole reason this record exists:** widening `TurnOutcome` —
+     precisely what §3 does — was an `orchestration` edit and is now a `core`
+     contract change under golden rule 5, owing an ADR. A reader acting on this
+     sentence would ship one without, the process failure ADR-0015 §5 exists to
+     prevent.
+  2. The header's "widens two of the façade's *own* `orchestration`-level DTOs
+     (`TurnOutcome`, and the private `_Parked`)". The description of `TurnOutcome`
+     as `orchestration`-level fails for the same reason. It is recorded separately
+     because a reader who never reaches §3 meets it in the header — ADR-0077's
+     record made the same separation for the same reason.
+
+  **One clause is overtaken at the implementation level, and that is not a
+  supersession** — separated out rather than swept into the two above. §4's
+  "`interfaces/cli.py` gains a `resume` command: it builds the engine, calls
+  `pending_confirmations()`…" describes what ADR-0052 itself shipped, and after
+  ADR-0084 §6 a CLI client does not build an engine (ADR-0042 §2's rule to that
+  effect is superseded in ADR-0084 §12, and ADR-0083 §10's `lint-imports` edit
+  makes the attempt a build failure). But §4 states a fact about its own change
+  rather than a rule for future adapters — ADR-0042 §2 and §7 are where that rule
+  lived, and they carry the record. What §4 *decided* stands: recovery is exposed
+  as a command that renders the parked action, collects a human answer and relays
+  an opaque token, authoring nothing (ADR-0042 §6). Only the transport under it
+  moves, in the client lane.
+
+  **Not replaced, and it is nearly all of this ADR.**
+
+  - **The header's headline claim survives as a claim about *this* change.**
+    "**This is not a contract change** … It injects one existing Protocol
+    (`AuditTrail`) into the façade, adds one façade method, and widens two of the
+    façade's own DTOs" was true of ADR-0052 when it landed and stays true — the
+    same ruling ADR-0084 §12 reached for ADR-0073's "Adds no `core/types.py`
+    type". What went stale is the embedded description of where `TurnOutcome`
+    lives, not the classification of the change that shipped. Its historical
+    half — "`Engine` is the concrete `orchestration` façade ADR-0042 §1
+    deliberately did *not* make a Protocol" — is a true statement about what
+    ADR-0042 decided; ADR-0084 §5 changes that decision, not this history.
+  - **`_Parked` is untouched**, so only half of §3's sentence is quoted above. It
+    is private to the engine (`orchestration/engine.py:828`) and returned by no
+    public method, so it falls outside ADR-0084 §4's closure and stays a frozen
+    `orchestration` dataclass. Making `_Parked.turn` optional remains a free
+    `orchestration` edit.
+  - **The Revisit clause stays true and now has an answer.** "if a second engine
+    implementation is ever needed, the façade — including this method — promotes
+    to a Protocol as a triad (ADR-0042 §1's own Revisit clause), at which point
+    `pending_confirmations` joins the contract surface" is a conditional whose
+    stated antecedent — a second engine implementation — has **not** occurred: the
+    promotion came through the *other* limb of ADR-0042 §1's revisit clause, a
+    remote engine (ADR-0084 §12). The sentence does not become false and its
+    consequent has happened, which is ADR-0083 §15's stacked-addition carve-out on
+    its own stated test. It also means `pending_confirmations` joining the contract
+    surface has stopped being conditional and is a live obligation on the surface
+    ADR (#281), which ADR-0084 §4 makes the owner of the exact set.
+  - **§4's composition-root wiring.** `SqlitePlanStore`'s construction in
+    `build_engine`, its place in the ordered shutdown path and the single-instance
+    obligation all cite ADR-0042 §2, whose composition root and wiring obligations
+    ADR-0042's own record keeps standing — what changed is that the hub, not the
+    adapter, is its caller.
+  - **§§1–3's durable-resume decisions**, the recovery-by-binding route through
+    `confirmation_id=None` (ADR-0044 §3), and every Consequence about what survives
+    a restart. ADR-0084 changes none of it.
 - **This is not a contract change.** `Engine` is the concrete `orchestration`
   façade ADR-0042 §1 deliberately did *not* make a Protocol; it has one
   implementation and one class of consumer. So this ADR is Accepted on merge and
