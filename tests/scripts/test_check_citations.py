@@ -315,6 +315,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "[section]: #123",
         "[section]: /docs/#123",
         '  [section]: #123 "Title"',
+        'See <a href="#123">section</a>.',
+        "See <a href='/docs/#123'>section</a>.",
+        'An <img src="#123"> tag.',
     ],
     ids=[
         "heading",
@@ -334,6 +337,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "reference-definition",
         "reference-definition-path",
         "titled-reference-definition",
+        "html-href",
+        "html-single-quoted",
+        "html-src",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
@@ -356,6 +362,7 @@ def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, l
         "#2 is the one.",
         "See https://example.test/x and #2.",
         "See the [guide](https://example.test/g) and #2.",
+        'ADR-0021 says in terms that "#2 stays open".',
     ],
     ids=[
         "parenthesised",
@@ -364,6 +371,7 @@ def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, l
         "leading",
         "beside-a-url",
         "beside-a-link",
+        "quoted-in-prose",
     ],
 )
 def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str) -> None:
