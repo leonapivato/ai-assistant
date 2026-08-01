@@ -2162,21 +2162,37 @@ class Engine:
         """Resolve the record's citations at the moment of presentation (ADR-0077 §6).
 
         **Lazily, here, and without rewriting anything.** The evidence tuple keeps
-        the ids as written and each is resolved through
-        :meth:`~ai_assistant.core.protocols.MemoryStore.get`, so a citation the user
-        destroyed — or one that expired under a retention horizon, which is the
+        the ids as written and the whole tuple is resolved through
+        :meth:`~ai_assistant.core.protocols.MemoryStore.get_many`, so a citation the
+        user destroyed — or one that expired under a retention horizon, which is the
         *commoner* case and has no event to hook — renders as a tombstone rather than
         a dangling id. Nothing is written: the record graph is frozen (ADR-0068), and
         losing evidence is not the producer changing its mind.
+
+        **One batch read per record, not one ``get`` per citation** (ADR-0086 §6, §8
+        item 6). `get_many` never disagrees with `get` — an id it omits is exactly an
+        id `get` would answer ``None`` for, on all three read-time outcomes — so every
+        tombstone this renders is the one the loop rendered. What changes is that a
+        record's citations are now judged against **one** instant and one state of the
+        store rather than against *n* of each, so a belief's rendered count can no
+        longer disagree with its own tombstones because a citation expired partway
+        through its own presentation.
+
+        The answer is assembled by walking ``provenance.evidence``, never the mapping:
+        the tuple carries the order and any repeated id, and a mapping carries neither
+        (§6, "a mapping, not a sequence"). A record citing nothing asks for nothing,
+        which §6 gives an answer and no round trip.
 
         Resolution happens at this façade rather than in `interfaces/`, which golden
         rule 3 keeps thin and which ADR-0072 §7 already refused to give a
         live-at-now computation.
         """
+        cited = record.provenance.evidence
+        found = await self._memory.get_many(cited)
         resolved: list[Evidence] = []
-        for cited in record.provenance.evidence:
-            found = await self._memory.get(cited)
-            resolved.append(Evidence(content=None if found is None else found.content))
+        for one in cited:
+            episode = found.get(one)
+            resolved.append(Evidence(content=None if episode is None else episode.content))
         return resolved
 
     async def _project(self, record: MemoryRecord) -> Belief:
@@ -2194,11 +2210,12 @@ class Engine:
         occupy. That is what removes the ``beliefs * citations * content`` term from
         ADR-0085 §8f's frame arithmetic, structurally rather than by argument.
 
-        **The cost is still a ``get`` per citation per listed belief**, bounded by
-        the page and by evidence tuples that are small by construction. Making that
-        one batch read is #552's item 1, and it needs ADR-0086 §6's ``get_many``,
-        which the store does not offer yet; what this change closes is the
-        over-*delivery*, which is the half that becomes contract surface.
+        **The listing still resolves, and now it resolves in one read per belief.**
+        ADR-0085 §4a removed the payload and none of the reads — the count, the lost
+        count and the adjusted confidence are all functions of how many citations
+        resolved — so this shares :meth:`_resolved_citations` with the single-belief
+        view and inherits its batch (ADR-0086 §6, §8 item 6). A page is one
+        ``get_many`` per listed belief rather than one ``get`` per citation of each.
         """
         citations = await self._resolved_citations(record)
         return belief_summary_from_record(

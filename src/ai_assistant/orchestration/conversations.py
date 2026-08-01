@@ -255,19 +255,31 @@ class ConversationLifecycle:
         bound, because an unbounded replay of a months-old conversation is a prompt
         nobody sized.
 
-        A batch read is deliberately not asked of ``MemoryStore``: fetching *k*
-        episodes is *k* calls to ``get``, and a ``get_many`` would be a contract
-        change bought for one caller at a scale where it buys nothing measurable
-        (§5, revisited at the hub where a resume crosses a transport).
+        **The tail is one batch read** (ADR-0086 §6, §8 item 7). §5 declined a
+        ``get_many`` as "a contract change bought for one caller at a scale where it
+        buys nothing measurable", and named the hub as where to revisit it; ADR-0086
+        §6 records that that trigger never fired — the hub owns the databases, so a
+        resume's *k* reads never cross a socket — and lands the method on the
+        argument the deferral actually turned on, with a second caller and a figure.
+        This is the resume half of it, and §6 partially supersedes §5 here.
+
+        **Both behaviours the loop had for ratified reasons survive the batch, and
+        neither is free.** The order is the *conversation's* ordinal sequence and not
+        the mapping's, so the result is assembled by walking ``turns`` and looking
+        each id up. And an id that does not resolve is still simply absent from the
+        mapping — §6's omission is the same skip ``get`` answering ``None`` was, on
+        the identical liveness predicate, so a deleted, expired or never-landed
+        episode is a gap here exactly as before.
 
         Returns:
             The records and whether reading them failed outright.
         """
         try:
             turns = await self._conversations.turns(conversation_id)
+            episodes = await self._memory.get_many([turn.episode_id for turn in turns])
             records: list[MemoryRecord] = []
             for turn in turns:
-                episode = await self._memory.get(turn.episode_id)
+                episode = episodes.get(turn.episode_id)
                 if episode is not None:
                     records.append(episode)
         except ConversationStoreError, MemoryStoreError:
