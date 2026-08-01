@@ -653,6 +653,40 @@ and §3c and §9 already declare `ValueError` on every method that takes text. W
 §4c adds is that both implementations raise it for the same inputs at the same
 point, rather than one of them discovering it at the socket.
 
+**What this covers, and what it does not.** `WireText` reaches the **promoted
+types' own fields** and the surface's **direct arguments**. It does **not** reach
+the strings inside the pre-existing `core` types §5's walk terminates at —
+`FeedbackEvent.content`, `.subject` and `.evidence` are plain `str`
+(`core/types.py:1748-1755`), and `Goal`, `CurrentContext`, `ActionPlan`,
+`MemoryRecord` and `ExecutionState` have the same shape. So
+`learn(FeedbackEvent(content="\ud800"))` still constructs today. **That is
+tracked as #565, and a lane is closing it.**
+
+**The boundary is where it is for a reason, not for want of noticing.** ADR-0087
+§9 scoped its handover in as many words — "the refusal belongs on the type, and
+**the promoted types** are the surface ADR's" — and the leaves are not promoted.
+They predate this ADR and are consumed by `memory`, `planning`, `tools` and
+`permissions`, none of which is on a wire; re-annotating them changes the shared
+record graph ADR-0068 froze, with a blast radius outside any contract ADR's fence.
+Absorbing that here is the mistake ADR-0087 exists as evidence against — a
+representation concern reviewed by people reading for method shape.
+
+**And #565 is a *fix*, not a decision this ADR is ducking**, which is what makes
+leaving it out cost the corpus nothing:
+
+- **No ADR ever ratified that those fields accept unencodable text.** There is no
+  clause to supersede and no reader acting on one; the plain `str` is an absence,
+  not a decision.
+- **ADR-0087 §9 is a deferring clause acquiring an answer**, which is ADR-0083
+  §15's stacked-addition carve-out on its own stated test: its sentence stays true
+  and now has somewhere to be answered. So #565 owes no supersession either.
+- **Nothing durable can already hold such a value**, so closing it later needs no
+  migration and can invalidate no stored record. The five stores are SQLite, whose
+  driver encodes text as UTF-8: inserting a lone surrogate raises
+  `UnicodeEncodeError` at the `INSERT`, verified against the tree. The gap is
+  reachable only in memory, between construction and a socket that does not exist
+  yet.
+
 ### 5. The complete transitive closure, and the boundary it stops at
 
 This is the enumeration ADR-0084 §4 assigns to this ADR. It is written as a
