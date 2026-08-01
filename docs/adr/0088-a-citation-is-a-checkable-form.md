@@ -425,9 +425,18 @@ machine-readable form.** An ADR that supersedes another, wholly or partly, write
 `- Supersedes: ADR-A …` or `- Partially supersedes: ADR-A …` in its header. Seven
 and two ADRs respectively carry one today, ADR-0070 and ADR-0015 among them. Like
 the forward record it is a pointer: the superseding ADR's own text remains the
-authority on extent. The check must not discover a supersession by reading prose
-— "ADR-0090 replaces ADR-0080's retry rule" is a sentence, and recognising it is
-exactly the structural inference §6 forbids.
+authority on extent. The check must not discover a supersession by reading prose.
+A sentence of the shape
+
+```text
+ADR-0090 replaces ADR-0080's retry rule.
+```
+
+declares a supersession to a human and nothing to a checker, and recognising it
+is exactly the structural inference §6 forbids. **That example is fenced for the
+same reason §5's are**: it names an ADR that does not exist, and §1 excludes
+fenced content from the input set, so this ADR does not fail its own Tier 1.
+Every ADR that needs to write a hypothetical reference does the same.
 
 **The target is the first `ADR-NNNN` in the record, and one record names one
 ADR.** Everything after that token is scope prose and is not extracted. This is
