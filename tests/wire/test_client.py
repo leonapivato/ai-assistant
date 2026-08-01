@@ -576,3 +576,104 @@ async def test_a_well_formed_argument_still_reaches_the_socket(tmp_path: Path) -
     client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
     with pytest.raises(HubUnavailableError):
         await client.converse("perfectly ordinary", timeout=_PATIENT)
+
+
+async def test_a_malformed_frame_arriving_mid_request_closes_with_no_reply(
+    tmp_path: Path,
+) -> None:
+    """ADR-0084 §3, on the interleaving that is easy to get half right.
+
+    A peer that writes **anything** before its reply has violated the serial rule,
+    and an undecodable second frame is a violation twice over. Treating it as "no
+    overlap" is worse than missing it: the malformed bytes have already been
+    consumed, so the reply would be written to a peer that has already broken the
+    framing — "not one to write more framed bytes at".
+
+    The assertion is that **nothing at all** comes back. A server that answered the
+    first request and then waited for another frame — the shape that swallows the
+    malformed one — would send a result here.
+    """
+    engine = FakeAssistantEngine()
+    limits = ConnectionLimits(max_frame_bytes=_FRAME, read_timeout=_PATIENT, build="test")
+
+    async def _hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await serve_connection(engine, reader, writer, limits=limits)
+
+    path = tmp_path / "hub.sock"
+    server = await asyncio.start_unix_server(_hub, path=str(path))
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(path))
+        await _send(
+            writer,
+            env.Envelope(
+                kind=env.FrameKind.CONNECT, id="c-0", payload=env.connect_payload(client="rogue")
+            ),
+        )
+        assert (await _read_one(reader)).kind is env.FrameKind.CONNECT_ACK
+        await _send(
+            writer,
+            env.Envelope(
+                kind=env.FrameKind.REQUEST,
+                id="c-1",
+                payload={"record_id": "rec-1"},
+                method="forget",
+            ),
+        )
+        # Not a frame any decoder accepts, written before the reply could arrive.
+        writer.write((8).to_bytes(PREFIX_BYTES, "big") + b"not json")
+        await writer.drain()
+        rest = await asyncio.wait_for(reader.read(), timeout=_PATIENT.total_seconds())
+        writer.close()
+    finally:
+        server.close()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
+    assert rest == b"", "the connection must close with no reply to the request either"
+
+
+@pytest.mark.parametrize(
+    ("reply", "why"),
+    [
+        ({env.ACK_VERSION: 1, env.ACK_READY: True, env.ACK_MAX_FRAME_BYTES: 1024}, "no build"),
+        (
+            {
+                env.ACK_VERSION: 1,
+                env.ACK_BUILD: "b",
+                env.ACK_READY: True,
+                env.ACK_MAX_FRAME_BYTES: 0,
+            },
+            "an impossible frame size",
+        ),
+        (
+            {
+                env.ACK_VERSION: 1,
+                env.ACK_BUILD: "b",
+                env.ACK_READY: True,
+                env.ACK_MAX_FRAME_BYTES: 2**40,
+            },
+            "a frame size the prefix cannot express",
+        ),
+    ],
+)
+async def test_a_malformed_connect_reply_is_refused_rather_than_believed(
+    tmp_path: Path, reply: dict[str, object], why: str
+) -> None:
+    """The client enforces the number it was told, so the number has to be legal.
+
+    A reply of ``0`` would make the contract limit negative and every ordinary
+    argument would come back as an ``OversizedValueError`` — a malformed handshake
+    misreported as the caller's fault, which is the failure mode that makes a
+    permissive reader worse than a strict one. The bounds are the ones the setting
+    itself carries: ADR-0085 §8d's floor and what the 4-byte prefix can express.
+    """
+
+    async def _bad_hub(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connect = await _read_one(reader)
+        await _send(
+            writer,
+            env.Envelope(kind=env.FrameKind.CONNECT_ACK, id=connect.id, payload=reply),
+        )
+
+    async with _listening(tmp_path / "hub.sock", _bad_hub) as client:
+        with pytest.raises(ProtocolError):
+            await client.probe()

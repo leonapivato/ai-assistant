@@ -49,6 +49,15 @@ MAX_CORRELATION_ID_BYTES: Final[int] = 36
 #: the floor's proof; this is the per-member bound the same clause states.
 MAX_IDENTIFIER_BYTES: Final[int] = 64
 
+#: ADR-0085 §8d's floor on a hub's frame size, and ADR-0084 §3's ceiling — what the
+#: 4-byte prefix can express. Repeated here rather than imported because ``wire``
+#: depends on ``core`` and nothing else (ADR-0084 §6) and the setting that carries
+#: them is ``core.config``'s private business; the client needs them to judge the
+#: number a hub *publishes*, which is a fact about a peer rather than about this
+#: deployment's own configuration.
+MIN_FRAME_BYTES: Final[int] = 1024
+MAX_FRAME_BYTES: Final[int] = 2**32 - 1
+
 _KIND: Final = "kind"
 _ID: Final = "id"
 _METHOD: Final = "method"
@@ -457,8 +466,25 @@ def read_connect_ack(payload: object) -> tuple[int, int]:
     if not isinstance(version, int) or isinstance(version, bool):
         msg = "a connect reply's version must be an integer"
         raise UndecodableFrameError(msg)
+    if not isinstance(payload.get(ACK_BUILD), str):
+        # ADR-0084 §2 requires the reply to carry one, and it is the only thing in
+        # the exchange that tells an operator reading two logs which build answered.
+        msg = "a connect reply must name the build that answered"
+        raise UndecodableFrameError(msg)
     if not isinstance(frame_bytes, int) or isinstance(frame_bytes, bool):
         msg = "a connect reply must carry the hub's effective maximum frame size"
+        raise UndecodableFrameError(msg)
+    if not MIN_FRAME_BYTES <= frame_bytes <= MAX_FRAME_BYTES:
+        # **A published limit outside its own legal range is worse than useless.**
+        # The client enforces the number it was told (ADR-0084 §3), so a reply of
+        # ``0`` would make the contract limit negative and every ordinary argument
+        # would be refused as oversized — a malformed handshake misreported as the
+        # caller's fault. The bounds are the ones the setting itself carries:
+        # ADR-0085 §8d's floor and what the 4-byte prefix can express.
+        msg = (
+            f"a connect reply advertises a maximum frame size of {frame_bytes} bytes, "
+            f"outside the [{MIN_FRAME_BYTES}, {MAX_FRAME_BYTES}] range a hub may serve"
+        )
         raise UndecodableFrameError(msg)
     if ready is not True:
         msg = "the hub answered the handshake but reports that it is not ready to serve"
