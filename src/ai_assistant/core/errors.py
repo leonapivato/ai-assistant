@@ -9,12 +9,66 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
+from ai_assistant.core.types import encodable_text
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
 class AssistantError(Exception):
-    """Base class for every error raised by ai-assistant."""
+    r"""Base class for every error raised by ai-assistant.
+
+    **Its text is encodable, and its structured state says whether it survived
+    delivery** (ADR-0085 §9, §10a). Both obligations arrive with the promoted
+    engine surface, and both are properties of *this* class rather than of any
+    subtype, so they are stated once here.
+
+    **Every ``str`` an error carries validates as
+    :data:`~ai_assistant.core.types.EncodableText`.** ADR-0085 §4c requires every
+    string the promoted surface can carry to have a UTF-8 encoding, and an
+    exception is where that is least obvious:
+    ``UnresolvedEvidenceError("bad \ud800", ["\ud800"])`` constructed before this,
+    and ADR-0085 §10a's reduction cannot rescue it — the reduction *measures* a
+    payload, and measuring means encoding, so the failure lands before the rule
+    that was meant to handle an oversized error. The declared exception would then
+    reach a caller as an undeclared transport failure. ``core/errors.py`` is
+    deliberately outside ``tests/core/test_text_encodability_coverage.py``'s reach
+    (that check is scoped to ``core.types``), so this is held by
+    :func:`~ai_assistant.core.types.encodable_text` running in the constructor and
+    by a structural test over every subtype rather than by a field list.
+
+    The message is validated here; a subtype carrying structured state validates
+    its own strings, because only it knows which of its arguments are text.
+
+    Attributes:
+        details_elided: Whether this exception was reconstructed from an error
+            payload whose structured state did not fit (ADR-0085 §10a). ``False``
+            everywhere else, and in particular on every in-process raise, because
+            nothing elides there. It exists so a client whose reconstruction lost
+            an exception's structured state can say so instead of presenting an
+            empty list as an empty answer: ``unresolved_ids`` defaults to ``()``,
+            so a reconstructed :class:`UnresolvedEvidenceError` without the flag
+            would tell a caller that *nothing* was unresolved at the exact moment
+            that too much was. It is **transport metadata rather than exception
+            state**, so it is excluded from the wire's ``details`` object and is
+            carried by the frame's own ``reduced`` member.
+    """
+
+    def __init__(self, *args: object) -> None:
+        r"""Create the error, refusing text that cannot be written down.
+
+        Args:
+            *args: The exception's arguments, as :class:`Exception` takes them.
+                Every ``str`` among them is validated.
+
+        Raises:
+            ValueError: If any string argument has no UTF-8 encoding.
+        """
+        for arg in args:
+            if isinstance(arg, str):
+                encodable_text(arg)
+        super().__init__(*args)
+        self.details_elided: bool = False
 
 
 class ConfigurationError(AssistantError):
@@ -237,9 +291,15 @@ class UnresolvedEvidenceError(MemoryStoreError):
             unresolved_ids: The cited ids the store does not hold, in the order
                 they were cited. Snapshotted into a tuple, so a caller mutating
                 the sequence it passed cannot rewrite the error after the fact.
+
+        Raises:
+            ValueError: If the message or any id has no UTF-8 encoding
+                (:class:`AssistantError`).
         """
         super().__init__(message)
-        self.unresolved_ids: tuple[str, ...] = tuple(unresolved_ids)
+        self.unresolved_ids: tuple[str, ...] = tuple(
+            encodable_text(unresolved) for unresolved in unresolved_ids
+        )
 
 
 class ConversationStoreError(AssistantError):
@@ -466,3 +526,90 @@ class ActiveExecutionError(PlanningError):
     with nothing recording it. The caller cancels the execution first, then
     retries (ADR-0014 §5).
     """
+
+
+class UnknownContinuationError(PlanningError):
+    """The continuation token names no parked step this engine can resume (ADR-0084 §7).
+
+    ADR-0084 §7 ratified that presenting a token the server cannot resolve "yields
+    one specific, typed refusal — an unknown-continuation error — and never a
+    generic failure, and never a denial", covering both a hub restart, after which
+    a process-scoped handle table is empty, and eviction under
+    ``max_outstanding_confirmations``. Before this the engine raised a bare
+    :class:`PlanningError`, indistinguishable from four other planning faults.
+
+    **Never a denial**, and that is the distinction the type exists to keep: an
+    unresolvable token means nobody ruled on the action, whereas
+    :class:`PermissionDeniedError` means somebody did and said no. Reporting one as
+    the other would tell a user their action was refused when it was merely
+    forgotten.
+
+    **A subclass of :class:`PlanningError` rather than of
+    :class:`AssistantError` directly**, deliberately: every existing
+    ``Raises: PlanningError`` contract on the engine surface stays true and a
+    caller that already handles it keeps working, while a caller that wants
+    ADR-0084 §7's specific remedy — enumerate ``pending_confirmations()`` and
+    re-mint — can catch the thing that has that remedy.
+    """
+
+
+class OversizedValueError(AssistantError):
+    """A call's payload is larger than the contract admits (ADR-0085 §8).
+
+    ADR-0084 §4 makes the size limit "part of the promoted Protocol's declared
+    contract, not a property of the transport, and *every* implementation enforces
+    it" — so a client is never silently less capable than the engine it stands in
+    for, in either direction. ADR-0085 §8c fixes the number and its subject: the
+    limit is ``hub_max_frame_bytes`` less a 512-byte envelope reserve, applied to
+    the **whole serialised payload** rather than to any one value, measured as the
+    byte length of ADR-0087's canonical UTF-8 JSON encoding of it.
+
+    **It is declared by every method on that surface**, because no method is
+    provably inside the bound: :data:`~ai_assistant.core.types.Identifier` carries
+    no maximum length, so even ``forget(record_id=…)`` can be handed an oversized
+    argument, and every enumerating method's result grows with ``limit``.
+
+    **The error payload is the one class that is reduced rather than refused**
+    (ADR-0085 §10a): answering an oversized *error* with another error would
+    recurse, and would mislabel — what was too large was the diagnosis, not the
+    value the caller sent.
+
+    Attributes:
+        limit: The contract limit in bytes, so "too large" comes with a number a
+            caller can act on.
+        size: The payload's measured size in bytes, under the same encoding.
+        field: The top-level member of the payload whose own canonical encoding is
+            longest, ties broken by the member name's bytes in ascending order, or
+            ``None`` where the payload has no named members. **Top-level only, and
+            no path syntax**: naming ``utterance`` or ``evidence`` is what a caller
+            needs to act, and ``proposals[3].evidence[7].content`` is not enough
+            better to be worth a grammar and its escaping rules. The ``None`` case
+            is reachable rather than defensive — an oversized ``beliefs`` page is a
+            bare JSON array with no member to name, and a ``forget`` result a bare
+            ``true``.
+
+    ADR-0084 §4 asks for "the field that exceeded it"; under a payload-level bound
+    no single field *exceeds* the limit — the payload does — so the faithful
+    reading is the field that contributed most to exceeding it, which is what
+    :attr:`field` names. Naming it by a rule rather than by judgement is what keeps
+    two implementations from reconstructing different errors for one payload.
+    """
+
+    def __init__(self, message: str, *, limit: int, size: int, field: str | None = None) -> None:
+        """Create the refusal, carrying the number and the largest contributor.
+
+        Args:
+            message: What was refused and why, for a human reader.
+            limit: The contract limit in bytes.
+            size: The payload's measured size in bytes.
+            field: The largest contributing top-level member, or ``None`` where the
+                payload has no named members.
+
+        Raises:
+            ValueError: If the message or ``field`` has no UTF-8 encoding
+                (:class:`AssistantError`).
+        """
+        super().__init__(message)
+        self.limit = limit
+        self.size = size
+        self.field = None if field is None else encodable_text(field)

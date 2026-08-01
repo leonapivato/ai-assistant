@@ -21,7 +21,7 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
-from typing import Annotated, Any, Literal, assert_never
+from typing import Annotated, Any, Final, Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic.functional_serializers import PlainSerializer
@@ -293,7 +293,7 @@ def _is_encodable(text: str) -> bool:
     return True
 
 
-def _encodable_text(value: str) -> str:
+def encodable_text(value: str) -> str:
     r"""Reject text that has no UTF-8 encoding.
 
     **The predicate is exactly "``value.encode('utf-8')`` succeeds", and nothing
@@ -340,7 +340,7 @@ def _encodable_text(value: str) -> str:
     return value
 
 
-type EncodableText = Annotated[str, AfterValidator(_encodable_text)]
+type EncodableText = Annotated[str, AfterValidator(encodable_text)]
 """Text that can actually be written down: a ``str`` with a UTF-8 encoding.
 
 **Every ``str`` a model in this module holds is typed with this, or with a
@@ -4145,3 +4145,1115 @@ class ToolCall(BaseModel):
         if self.decision.tool.idempotency is not Idempotency.KEYED:
             return None
         return self.decision.id
+
+
+# --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
+# The twenty-four types :class:`~ai_assistant.core.protocols.AssistantEngine`'s
+# fifteen methods name, and the complete transitive closure of what their fields
+# reach (ADR-0085 §5). They lived in `orchestration` while one concrete engine
+# and one class of consumer was the whole story (ADR-0042 §1); ADR-0084 §5 rules
+# that a client satisfying the same surface over a transport *is* the second
+# implementation ADR-0042's own revisit clause named, so the surface is a
+# Protocol and its types are `core`'s.
+#
+# **The closure is why this block is large.** Promote a type while something its
+# fields reach stays in `orchestration` and `core` imports `orchestration`, which
+# golden rule 2 forbids and `lint-imports` fails. The walk follows *declared
+# field types*, stops at anything already here, and never follows a method — which
+# is what makes it terminate, and what keeps the projection helpers behind
+# (ADR-0085 §6a: the promoted models carry their fields, not their constructors).
+#
+# Every model below is frozen under ADR-0068 §1, every collection is a tuple, and
+# every string is :data:`EncodableText` (ADR-0085 §4c) — the last held
+# mechanically by ``tests/core/test_text_encodability_coverage.py`` rather than by
+# anyone remembering.
+
+
+#: The page size every enumerating method on the engine surface returns when it
+#: is called without ``limit`` (ADR-0085 §3a). One public constant rather than the
+#: three private ones that carried the figure in two `orchestration` modules, so
+#: the Protocol's stated defaults have a name to refer to. ADR-0073 §2's bounded
+#: default, matching ``AuditTrail.recent``.
+#:
+#: **The default is normative, not decorative.** A default written in a
+#: ``Protocol`` method signature binds nobody — each implementation writes its own
+#: — so a client defaulting to 100 against an engine defaulting to 50 would return
+#: a different page for the same call. ADR-0085 §3a therefore makes it a contract
+#: clause: an implementation called without ``limit`` behaves as though this had
+#: been passed.
+DEFAULT_PAGE_SIZE: Final[int] = 50
+
+
+class ContinuationToken(BaseModel):
+    """An opaque handle to a parked step (ADR-0042 §4).
+
+    The adapter stores this and relays it back on ``AssistantEngine.resume``. It
+    **must not** interpret, construct, or re-derive its contents: an adapter that
+    branched on the token to decide allow/deny would be authoring a permission
+    outcome in `interfaces/`, exactly what ADR-0042 §4 forbids. The ``handle`` is
+    deliberately meaningless outside the engine instance that minted it — it names
+    an entry in that instance's private table, nothing more.
+
+    **Lifetime is process-scoped.** The table lives in the engine object, so a
+    handle does not survive a restart. A token presented to an engine that cannot
+    resolve it yields
+    :class:`~ai_assistant.core.errors.UnknownContinuationError` and never a denial
+    (ADR-0084 §7); recovering an answerable confirmation across a restart is
+    ``pending_confirmations`` (ADR-0052 §1).
+
+    Attributes:
+        handle: The opaque handle itself. :data:`Identifier` rather than a bare
+            ``str`` because a blank handle satisfies "a token is present" while
+            naming nothing, which is the failure that type exists to refuse.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    handle: Identifier = Field(description="The engine-private handle, opaque to every caller.")
+
+
+class Confirmation(BaseModel):
+    """What a person needs to judge a parked action (ADR-0042 §4).
+
+    The engine assembles this because the adapter may not read the audit trail or
+    a :class:`PermissionDecision` to recover it (ADR-0042 §6). The values are
+    carried **as data, not pre-formatted**: "safe" is target-specific — a parameter
+    value holding an ANSI escape or Rich markup is valid data a terminal would
+    interpret as a control sequence, but an HTTP front end encodes differently — so
+    escaping is each adapter's own job on render.
+
+    Attributes:
+        tool_id: The selected tool's id, human-readable and shown to the user.
+        tool_description: What the tool does, from the declaration ruled on.
+        parameters: The arguments it would run with, as structured data.
+        reason: The recorded ``CONFIRM`` ruling's own ``reason`` — the policy's
+            explanation of *why* confirmation is required (an off-device
+            disclosure, an unknown cost). Not optional:
+            :attr:`PermissionRuling.reason` is "text shown to the user at the
+            moment they decide", so a prompt omitting it would drop what the user
+            most needs.
+        token: The opaque continuation to relay back on ``resume``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_id: Identifier = Field(description="The selected tool's id, shown to the user.")
+    tool_description: EncodableText = Field(
+        description="What the tool does, from the declaration that was ruled on."
+    )
+    parameters: FrozenJsonMapping = Field(
+        description="The arguments the tool would run with, as structured data."
+    )
+    reason: EncodableText = Field(
+        description="The policy's stated reason confirmation is required."
+    )
+    token: ContinuationToken = Field(description="The opaque continuation to relay back.")
+
+
+class Disposition(StrEnum):
+    """What became of one plan step at the runner stage (ADR-0037 §1, §4, §5).
+
+    Five members, and the two that commit nothing are as much a result as the
+    three that do: a step the stage declines to act on is a fact its caller has to
+    be told, not an error.
+
+    **Relocating an enum is not redefining it** (ADR-0084 §4). It keeps its five
+    members and everything ADR-0037 ratified about them, including §8's refusal of
+    a ``FAILED`` member, and the ``StrEnum`` base is unchanged so every existing
+    value string is byte-identical on the wire.
+    """
+
+    EXECUTED = "executed"
+    """The call was authorised and handed to the executor; ``state`` carries the
+    outcome the executor committed."""
+
+    DENIED = "denied"
+    """The policy refused. The step is ``SKIPPED``/``APPROVAL_DENIED``, naming
+    the recorded decision."""
+
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    """The policy wants a human answer. The step is durably
+    ``AWAITING_APPROVAL``; ``AssistantEngine.resume`` continues it."""
+
+    NO_CAPABLE_TOOL = "no_capable_tool"
+    """Nothing advertises the step's capability. The step is
+    ``SKIPPED``/``NO_CAPABLE_TOOL`` (ADR-0014 §4)."""
+
+    AMBIGUOUS_CAPABILITY = "ambiguous_capability"
+    """Several tools advertise it and no rule chooses between them (ADR-0037 §1,
+    #241). Nothing is committed and the step stays ``PENDING``."""
+
+
+class StepOutcome(BaseModel):
+    """What became of the one step a turn drove (ADR-0042 §3, §4; ADR-0084 §8).
+
+    **The disposition is the gate's verdict; the named step's ``status`` and
+    ``failure`` are the outcome.** A client that renders success from
+    :attr:`disposition` alone is wrong — ``EXECUTED`` says the permission gate
+    let the call through and the executor committed *something*, not that the
+    something succeeded. :attr:`step_id` is what turns "read ``state`` too" from
+    advice into an addressable operation::
+
+        next(s for s in outcome.state.steps if s.step_id == outcome.step_id)
+
+    That rule is a contract clause on the Protocol rather than commentary here,
+    because #531's defect was an adapter reading the disposition and discarding
+    the state, and every future spoke will have the same two fields in front of
+    it.
+
+    Attributes:
+        disposition: Which of the five outcomes the step reached — the gate's
+            verdict, and not the step's own result.
+        state: The durable execution state after the last transition committed.
+        step_id: The plan step this pass drove. Required and never ``None``: a
+            turn whose plan had no step returns ``TurnOutcome(step=None)`` and
+            constructs no :class:`StepOutcome` at all, so an optional field would
+            be an optionality nothing can produce and every client would carry a
+            ``None`` branch it can never reach. It is the key that addresses
+            :attr:`ExecutionState.steps`, whose elements carry
+            :attr:`StepExecution.step_id`, so it is the same
+            :data:`Identifier` type a client compares it against.
+        tool_id: The tool selected, or ``None`` where none was. **Not an
+            alternative to** :attr:`step_id`: two steps may bind the same tool, so
+            a tool id cannot identify a step (ADR-0084 §8).
+        confirmation: Present **iff** :attr:`disposition` is
+            :attr:`Disposition.AWAITING_CONFIRMATION` — the content and token the
+            adapter renders and relays.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    disposition: Disposition = Field(description="Which of the five outcomes the step reached.")
+    state: ExecutionState = Field(
+        description="Durable execution state after the last transition committed."
+    )
+    step_id: Identifier = Field(description="The plan step this pass drove.")
+    tool_id: Identifier | None = Field(
+        default=None, description="The tool selected, or ``None`` where none was."
+    )
+    confirmation: Confirmation | None = Field(
+        default=None,
+        description="Present iff the disposition is AWAITING_CONFIRMATION.",
+    )
+
+    @model_validator(mode="after")
+    def _confirmation_matches_disposition(self) -> StepOutcome:
+        """A parked step carries its confirmation, and nothing else does (ADR-0085 §4b).
+
+        **This is the invariant a wire client cannot work around.** ADR-0042 §4
+        obliges a parked step's result to carry the confirmation content and the
+        opaque token the adapter renders and relays; a nullable field with no
+        invariant permits an ``AWAITING_CONFIRMATION`` outcome carrying neither,
+        and a client handed one has nothing to resume with and no contract
+        violation to point at. Stated in both directions, because a confirmation
+        on a disposition that did not park is a prompt for an action nobody is
+        waiting on.
+        """
+        parked = self.disposition is Disposition.AWAITING_CONFIRMATION
+        if parked and self.confirmation is None:
+            msg = "an AWAITING_CONFIRMATION outcome must carry the confirmation to resume with"
+            raise ValueError(msg)
+        if not parked and self.confirmation is not None:
+            msg = (
+                f"a {self.disposition.name} outcome must not carry a confirmation: "
+                "nothing is waiting on an answer"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class TurnResult(BaseModel):
+    """What one conversational turn produced (ADR-0022 §2).
+
+    Attributes:
+        goal: The objective this turn was planned against, minted from the
+            utterance.
+        context: The situational context assembled for the turn.
+        memories: What the pipeline assembled for this turn, in the order the
+            planner is handed it (ADR-0074 §5): the conversation's recent turns
+            **first**, in order, then the records retrieved as relevant, best first
+            within that group. Empty on the first turn of a fresh conversation, and
+            empty for whichever half degraded.
+        plan: What the planner decided to do.
+        memory_degraded: Whether assembling those records failed — retrieval, or
+            the conversation's history, or both — making :attr:`plan` a *generic*
+            answer rather than a personal one. Reported rather than swallowed: an
+            unpersonalised answer is the one failure a user of this system most
+            deserves to be told about.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    goal: Goal = Field(description="The objective this turn was planned against.")
+    context: CurrentContext = Field(description="The situational context assembled for the turn.")
+    memories: tuple[MemoryRecord, ...] = Field(
+        description="History first, then relevance — the order the planner is handed them in."
+    )
+    plan: ActionPlan = Field(description="What the planner decided to do.")
+    memory_degraded: bool = Field(
+        default=False, description="Whether assembling those records failed."
+    )
+
+
+class TurnOutcome(BaseModel):
+    """One unit of what a turn call produced (ADR-0042 §3).
+
+    Attributes:
+        turn: The turn's goal, context, retrieved memories, plan, and — obliged to
+            be surfaced, not swallowed — whether retrieval degraded. ``None`` on a
+            resume driven from a **recovered** park (ADR-0052 §3): a confirmation
+            reconstructed from durable state after a restart has no live turn —
+            context and retrieved memories are ephemeral and were never persisted —
+            so a fabricated :class:`TurnResult` would misrepresent what the turn
+            saw. The :attr:`step` — the resolution — is what a resume is for and is
+            always present.
+        step: The disposition of the step the engine drove, or ``None`` when the
+            plan had no step to drive. On a resumption this is the resolved step.
+        conversation_id: The conversation this turn ran under (ADR-0074 §2), which
+            a client keeps and presents to continue. ``None`` only on a resumption
+            whose parked binding no longer resolves to a turn — a park predating
+            capture, or one whose conversation the user deleted — which ADR-0074 §3
+            ratifies as "not captured at all, and no conversation invented".
+        capture_degraded: Whether the exchange went **unrecorded** (ADR-0074 §9
+            item 6). The answer is still the answer: capture failure degrades a
+            turn rather than failing it, because failing would throw away an answer
+            the user already has because the record of it could not be written. But
+            it is reported beside :attr:`TurnResult.memory_degraded` and not
+            swallowed, because a user whose turns are silently not being recorded
+            will not find out until they try to continue.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    turn: TurnResult | None = Field(
+        description="What the turn produced, or ``None`` on a recovered resume."
+    )
+    step: StepOutcome | None = Field(
+        default=None, description="The step the engine drove, or ``None`` where there was none."
+    )
+    conversation_id: Identifier | None = Field(
+        default=None, description="The conversation this turn ran under."
+    )
+    capture_degraded: bool = Field(
+        default=False, description="Whether the exchange went unrecorded."
+    )
+
+
+class LearnDecision(StrEnum):
+    """How memory folded one piece of feedback — the surface's echo of a ruling.
+
+    One member per :class:`MemoryDecisionKind`, named for the effect on memory
+    rather than the relation the policy names, so a client can render what became
+    of the feedback without holding the policy's own vocabulary.
+    """
+
+    STORED = "stored"
+    """A new memory was written (``ACCEPT``)."""
+
+    REJECTED = "rejected"
+    """The proposal was refused; nothing was written (``REJECT``)."""
+
+    REINFORCED = "reinforced"
+    """An existing memory was strengthened by folding the proposal into it
+    (``REINFORCE``)."""
+
+    SUPERSEDED = "superseded"
+    """A prior belief was retired and the correction written in its place
+    (``SUPERSEDE``)."""
+
+    DEFERRED = "deferred"
+    """The policy wants a human answer before acting; nothing was written yet
+    (``ASK_USER``)."""
+
+    STORED_TEMPORARILY = "stored_temporarily"
+    """A memory was written with a retention window (``STORE_TEMPORARY``)."""
+
+
+class QueueOutcome(StrEnum):
+    """What became of the question a deferred ruling raised (ADR-0078 §7, §10 item 9).
+
+    The surface's echo of :class:`DeferralAdmissionOutcome`, plus the one arm
+    ADR-0078 deliberately does **not** close. A closed set with a name because the
+    surface must say a *different sentence* for each — a single "not stored, go
+    answer it" line covering all four would tell a user to answer a question that
+    was never queued.
+    """
+
+    QUEUED = "queued"
+    """The question was parked, and ``question_id`` names it."""
+
+    ALREADY_ASKED = "already_asked"
+    """An existing question the key still speaks for stands in the way, and
+    ``question_id`` and ``question_state`` say **which and in what state** — a
+    declined one to forget, an interrupted answer to dispose of, or one still
+    waiting (ADR-0078 §7)."""
+
+    QUEUE_FULL = "queue_full"
+    """The answerable queue was at its cap, so nothing was queued and there is no
+    question to read. The refusal is **reported, not swallowed**: the cap refuses
+    the *new* question rather than evicting an old one, which is safe only because
+    the producer still holds what it proposed and can re-propose."""
+
+    NOT_QUEUABLE = "not_queuable"
+    """Secret-tier data, which is never queued at all (ADR-0078 §1). ADR-0004 §3
+    puts Tier 0 content in the OS keyring and forbids it a committed file, and a
+    durable queue is a file — so today's deferral is precisely what keeps such
+    content out of storage."""
+
+
+class QuestionState(StrEnum):
+    """Where a deferred question stands, as a surface says it (ADR-0078 §8).
+
+    The surface's echo of :class:`DeferralState`, one member per state, named for
+    what the user can *do* rather than for the row's internal label.
+    """
+
+    OPEN = "open"
+    """Answerable: nobody has begun an answer (``PENDING``)."""
+
+    INTERRUPTED = "interrupted"
+    """An answer was begun and its outcome is not recorded (``APPLYING``).
+
+    Not "failed" and not "retryable": the system does **not** know whether the
+    memory write landed, which is the actual epistemic situation (ADR-0078 §9).
+    """
+
+    DECLINED = "declined"
+    """The user said no, and the record is retained so they are not re-asked."""
+
+    APPLIED = "applied"
+    """The answer was applied and a record is live (``ACCEPTED``)."""
+
+    STALE = "stale"
+    """The answer arrived and the belief it was about no longer applied."""
+
+    REDEFERRED = "redeferred"
+    """The answer was used and raised a further question the record names."""
+
+
+class QueuedQuestion(BaseModel):
+    """Where a deferred proposal's question went (ADR-0078 §7, §8 reach 1).
+
+    Carried on :class:`IngestSummary` so ``learn`` can point the user at the
+    question in the moment they submitted the correction.
+
+    Attributes:
+        outcome: Which of the four things happened.
+        question_id: The question parked, or the existing one standing in the way.
+            ``None`` for ``QUEUE_FULL`` and ``NOT_QUEUABLE``, where there is no
+            question to name.
+        question_state: The state of the question :attr:`question_id` names, for
+            the same reason :class:`SuccessorLink` carries one: "you declined this"
+            and "an answer to this may be committing right now" are different
+            sentences, and naming a question without its state would render one as
+            the other.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    outcome: QueueOutcome = Field(description="Which of the four things happened.")
+    question_id: Identifier | None = Field(
+        default=None, description="The question parked, or the one standing in the way."
+    )
+    question_state: QuestionState | None = Field(
+        default=None, description="The state of the question ``question_id`` names."
+    )
+
+    @model_validator(mode="after")
+    def _unqueued_names_no_question(self) -> QueuedQuestion:
+        """An outcome that queued nothing names nothing (ADR-0078 §7, ADR-0085 §4b).
+
+        **Stated in one direction only, deliberately.** The converse — that a
+        ``QUEUED`` or ``ALREADY_ASKED`` outcome always names a question — is
+        *nearly* true and is not asserted, because the projection keeps a defensive
+        branch for an admission whose deferral is absent, which
+        :class:`DeferralAdmission`'s own validator is supposed to make unreachable.
+        Asserting an invariant that a defensive branch can violate would turn a
+        store-conformance fault into an unconstructable DTO.
+        """
+        if self.outcome in (QueueOutcome.QUEUE_FULL, QueueOutcome.NOT_QUEUABLE) and (
+            self.question_id is not None or self.question_state is not None
+        ):
+            msg = (
+                f"a {self.outcome.name} outcome queued nothing, so it names no question: "
+                "question_id and question_state must both be None"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class IngestSummary(BaseModel):
+    """What became of one proposal folded from a piece of feedback.
+
+    Attributes:
+        decision: How memory folded the proposal.
+        record_id: The id of the record left live by the write, or ``None`` when
+            nothing was stored (a rejection, or a deferral). Carried as opaque data
+            an adapter may echo, never interpret.
+        reason: The policy's own human-readable justification for the ruling,
+            surfaced for transparency.
+        queued: Where the question a ``DEFERRED`` ruling raised went, and ``None``
+            on every other ruling. Present on **every** deferral, including the
+            secret-tier one nothing queues, because the distinguishing fact has to
+            reach the adapter for it to say anything honest (ADR-0078 §10 item 9).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    decision: LearnDecision = Field(description="How memory folded the proposal.")
+    record_id: Identifier | None = Field(
+        description="The record left live by the write, or ``None`` where nothing was stored."
+    )
+    reason: EncodableText = Field(description="The policy's own justification for the ruling.")
+    queued: QueuedQuestion | None = Field(
+        default=None, description="Where a deferred ruling's question went."
+    )
+
+    @model_validator(mode="after")
+    def _queued_iff_deferred(self) -> IngestSummary:
+        """A queued question accompanies a deferral and nothing else (ADR-0085 §4b).
+
+        ADR-0078 §10 item 9 obliges every deferral to say where its question went,
+        including the secret-tier one nothing queues. A ruling that wrote or
+        refused raised no question at all, so carrying one would name a question
+        the user cannot act on.
+        """
+        deferred = self.decision is LearnDecision.DEFERRED
+        if deferred and self.queued is None:
+            msg = "a DEFERRED ruling must say where its question went"
+            raise ValueError(msg)
+        if not deferred and self.queued is not None:
+            msg = f"a {self.decision.name} ruling raised no question, so it queues none"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def stored(self) -> bool:
+        """Whether the write left a record live in memory."""
+        return self.record_id is not None
+
+
+class LearnOutcome(BaseModel):
+    """What one piece of feedback did to memory (ADR-0042 §1, §3).
+
+    Attributes:
+        results: One :class:`IngestSummary` per proposal the feedback produced, in
+            the order they were applied — empty when the feedback proposed no
+            update at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    results: tuple[IngestSummary, ...] = Field(
+        description="One summary per proposal, in the order they were applied."
+    )
+
+    @property
+    def stored(self) -> int:
+        """How many proposals left a record live in memory."""
+        return sum(1 for summary in self.results if summary.stored)
+
+
+class Evidence(BaseModel):
+    """One citation behind a belief, as a person reads it (ADR-0077 §6).
+
+    **It carries no id, deliberately.** ADR-0073 §4's floor is that "a citation the
+    surface cannot render as evidence is never rendered *as* evidence — not as a
+    reassuring id, not silently dropped", and an adapter that never receives the id
+    cannot render one as though it were the warrant.
+
+    Attributes:
+        content: The cited record's own canonical text, or ``None`` where the
+            citation no longer resolves — a **tombstone**. The tombstone says an
+            evidence item stood here and is gone, and deliberately does not say
+            what it was, nor whether it was *deleted* or merely *expired*: the read
+            cannot tell those apart, and the user's question — "is there still
+            something behind this?" — is answered by absence either way.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content: EncodableText | None = Field(
+        default=None, description="The cited record's text, or ``None`` for a tombstone."
+    )
+
+    @property
+    def lost(self) -> bool:
+        """Whether this citation no longer resolves."""
+        return self.content is None
+
+
+class BeliefSummary(BaseModel):
+    """One live belief on the **listing**, which ships counts and not citations.
+
+    ADR-0077 §6 divides the inspection surface in as many words — the listing
+    "resolves *existence* and renders the count, the lost count, and the adjusted
+    confidence", the single-belief view "renders the surviving citations as
+    readable evidence and the lost ones as tombstones" — and this is the type that
+    makes the split expressible (ADR-0085 §4a).
+
+    **The wrong behaviour is unrepresentable here rather than merely detectable.**
+    :class:`Evidence` carries ``content: str | None`` and a lost citation is one
+    whose content is ``None``, so a listing that derived its counts from an
+    evidence tuple would have to ship every cited episode's full text on every page
+    or misreport every citation as a tombstone. This type has nowhere to put a
+    content, so a conforming listing cannot over-deliver — which is also what
+    removes the ``beliefs * citations * content`` term from the frame arithmetic
+    ADR-0085 §8f works through.
+
+    **ADR-0073 §4's floor becomes a static guarantee rather than a convention**: a
+    client holding one of these cannot render a citation as evidence, because it
+    holds no citations. It holds how many there are and how many are gone, which is
+    what §4 asked the listing to convey.
+
+    Attributes:
+        id: The record's id, opaque, and what ``forget`` names.
+        band: The standing the belief is held with (ADR-0072 §2), projected from
+            its provenance source. Never omitted, and never left to be implied by
+            position.
+        kind: Which of the four typed memories this is.
+        content: The canonical text rendering of the belief.
+        confidence: How strongly it is held, in ``[0, 1]`` — **the presented
+            value**, already adjusted for lost support (ADR-0077 §6).
+        last_updated: The transaction stamp — when *the assistant* last revised
+            this belief (ADR-0045 §3) — which is also the enumeration's sort key.
+            It is **our** clock and not a source's.
+        evidence_count: How many citations stand behind it, resolved or not. A
+            **field** here rather than a property, because this type carries no
+            evidence to derive it from.
+        lost_evidence: How many of those citations no longer resolve. A field for
+            the same reason.
+        valid_until: The end of the belief's validity window, where one is set;
+            ``None`` where the window is open. Every listed belief is live by
+            construction, so an open window carries no information and a set end
+            does.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The record's id, opaque, and what ``forget`` names.")
+    band: BeliefBand = Field(description="The standing the belief is held with.")
+    kind: MemoryKind = Field(description="Which of the four typed memories this is.")
+    content: EncodableText = Field(description="The canonical text rendering of the belief.")
+    confidence: float = Field(
+        ge=0.0, le=1.0, description="The presented confidence, adjusted for lost support."
+    )
+    last_updated: UtcInstant = Field(
+        description="When the assistant last revised this belief (ADR-0045 §3)."
+    )
+    evidence_count: int = Field(
+        default=0, ge=0, description="How many citations stand behind it, resolved or not."
+    )
+    lost_evidence: int = Field(
+        default=0, ge=0, description="How many of those citations no longer resolve."
+    )
+    valid_until: UtcInstant | None = Field(
+        default=None, description="The end of the belief's validity window, where one is set."
+    )
+
+    @model_validator(mode="after")
+    def _lost_within_cited(self) -> BeliefSummary:
+        """More citations cannot be gone than were ever made (ADR-0085 §4b).
+
+        **The price of counts-as-fields.** On :class:`Belief` the two counts cannot
+        disagree with the evidence because they are computed from it; moving them
+        to fields buys the listing its shape at the cost of the one constraint the
+        model must now assert for itself.
+        """
+        if self.lost_evidence > self.evidence_count:
+            msg = (
+                f"lost_evidence ({self.lost_evidence}) exceeds evidence_count "
+                f"({self.evidence_count}): more citations cannot be gone than were made"
+            )
+            raise ValueError(msg)
+        return self
+
+    @property
+    def unsupported(self) -> bool:
+        """Whether every citation behind it has gone (ADR-0077 §6).
+
+        A belief in this state is **held, marked and answerable — not
+        auto-retired**: retiring it would be the cascade under a softer name, and
+        it may be perfectly true.
+
+        ``False`` for a belief that cites nothing at all: an assertion is not
+        unsupported, it is supported by the user's own word (ADR-0038 §1a). Derived
+        rather than stored, because the two count fields already determine it — a
+        third field would be a second source of truth for a fact a client can
+        compute exactly, and two implementations could then measure the same call
+        at two sizes.
+        """
+        return self.evidence_count > 0 and self.lost_evidence == self.evidence_count
+
+
+class Belief(BaseModel):
+    """One live belief on the **single-belief view**, with its citations resolved.
+
+    The other half of ADR-0077 §6's split (:class:`BeliefSummary` is the listing).
+    Deliberately **not** a raw :class:`MemoryRecord`: :func:`band_of` is applied
+    once, by the engine, because an adapter doing it would put ADR-0072 §1's
+    projection into `interfaces/`. It also flattens the four-member discriminated
+    union an adapter would otherwise branch over, and drops ``score``, which is
+    meaningless on a path where nothing was ranked.
+
+    **The evidence citations are carried as resolved values and never as ids**,
+    which is ADR-0073 §4's floor made structural.
+
+    Attributes:
+        id: The record's id, opaque, and what ``forget`` names.
+        band: The standing the belief is held with (ADR-0072 §2).
+        kind: Which of the four typed memories this is.
+        content: The canonical text rendering of the belief.
+        confidence: How strongly it is held, in ``[0, 1]`` — **the presented
+            value**, already adjusted for lost support (ADR-0077 §6). The stored
+            number is not carried, and that is the point: a DTO offering both would
+            let two surfaces quote different numbers for one belief.
+        evidence: One entry per citation, in the order the record wrote them —
+            resolved to readable content, or a tombstone where it no longer
+            resolves. Empty for an assertion, whose warrant is the user's own word
+            (ADR-0038 §1a) and needs no citation.
+        last_updated: The transaction stamp (ADR-0045 §3), our clock and not a
+            source's.
+        valid_until: The end of the belief's validity window, where one is set.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The record's id, opaque, and what ``forget`` names.")
+    band: BeliefBand = Field(description="The standing the belief is held with.")
+    kind: MemoryKind = Field(description="Which of the four typed memories this is.")
+    content: EncodableText = Field(description="The canonical text rendering of the belief.")
+    confidence: float = Field(
+        ge=0.0, le=1.0, description="The presented confidence, adjusted for lost support."
+    )
+    last_updated: UtcInstant = Field(
+        description="When the assistant last revised this belief (ADR-0045 §3)."
+    )
+    evidence: tuple[Evidence, ...] = Field(
+        default=(), description="One entry per citation, resolved or a tombstone."
+    )
+    valid_until: UtcInstant | None = Field(
+        default=None, description="The end of the belief's validity window, where one is set."
+    )
+
+    @property
+    def evidence_count(self) -> int:
+        """How many citations stand behind it, resolved or not."""
+        return len(self.evidence)
+
+    @property
+    def lost_evidence(self) -> int:
+        """How many of its citations no longer resolve."""
+        return sum(1 for item in self.evidence if item.lost)
+
+    @property
+    def unsupported(self) -> bool:
+        """Whether every citation behind it has gone (ADR-0077 §6).
+
+        One definition everywhere, and it reads identically on
+        :class:`BeliefSummary`: ``evidence_count > 0 and lost_evidence ==
+        evidence_count``. A belief citing nothing at all is not "unsupported", it
+        is supported by the user's own word (ADR-0038 §1a).
+        """
+        return self.evidence_count > 0 and self.lost_evidence == self.evidence_count
+
+
+class ConversationSummary(BaseModel):
+    """One conversation, as a person choosing which to continue reads it (ADR-0074 §2).
+
+    Attributes:
+        id: The opaque id a turn call takes to continue this conversation.
+            Server-minted, encoding nothing; a client holds this and nothing else.
+        started_at: When the conversation record was created.
+        last_active_at: When someone was last here — set at creation and refreshed
+            whenever a turn begins. **This is the listing's sort key**, and never
+            :attr:`last_turn_at`: ordering by "has a turn landed" would sink a
+            conversation the user opened a minute ago below one they abandoned last
+            week.
+        last_turn_at: When a turn was last *recorded*, or ``None`` if none has
+            been. A different fact from activity, and the one that tells an empty
+            conversation from one whose first turn landed instantly.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The opaque id a client presents to continue.")
+    started_at: UtcInstant = Field(description="When the conversation record was created.")
+    last_active_at: UtcInstant = Field(description="When someone was last here — the sort key.")
+    last_turn_at: UtcInstant | None = Field(
+        default=None, description="When a turn was last recorded, or ``None`` if none has been."
+    )
+
+
+class ConversationDigest(BaseModel):
+    """What a person is shown before consenting to destroy a conversation (ADR-0074 §8).
+
+    ADR-0073 §5's show-then-confirm, at the unit the user thinks in: "what will be
+    destroyed is shown before consent is taken, in a form a human can judge — for a
+    conversation, **the count and span** rather than every turn". Printing every
+    turn would be a transcript nobody can read at a prompt, and printing nothing
+    would be consent to destroy something unseen.
+
+    Attributes:
+        id: The conversation's id.
+        started_at: When it began.
+        last_turn_at: When a turn was last recorded in it, or ``None`` if none ever
+            was — the span's other end.
+        recorded_turns: How many turns its index holds. It counts **recorded
+            turns**, not surviving episodes: a turn whose episode expired or was
+            destroyed still happened, and this is the ceremony for destroying the
+            conversation rather than a report on its content.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The conversation's id.")
+    started_at: UtcInstant = Field(description="When it began.")
+    last_turn_at: UtcInstant | None = Field(
+        description="When a turn was last recorded, or ``None`` if none ever was."
+    )
+    recorded_turns: int = Field(ge=0, description="How many turns its index holds.")
+
+
+class Retirement(BaseModel):
+    """One record a question's answer would retire (ADR-0078 §8).
+
+    **Not decoration: this is the exact scope the answer authorises.** The content
+    is resolved through the ratified ``MemoryStore.get``, which hides a closed
+    window (ADR-0045 §6) — so a conflict retired since the question was asked does
+    not resolve, and renders as *no longer held* rather than being omitted. The
+    user should be told that the thing they would be overruling is already gone.
+
+    Attributes:
+        record_id: The conflict's id, opaque data an adapter may echo.
+        content: What that record says, or ``None`` when it is no longer held.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    record_id: Identifier = Field(description="The conflict's id.")
+    content: EncodableText | None = Field(
+        description="What that record says, or ``None`` when it is no longer held."
+    )
+
+
+class SuccessorLink(BaseModel):
+    """A question raised by an answer, and the state it is in (ADR-0078 §7, §9).
+
+    The state is carried because **naming it without its state would be the failure
+    §9 names**: an ``OPEN`` successor is a question the user can go and answer, a
+    ``DECLINED`` one means they already declined this and must forget it to be
+    asked again, and an ``INTERRUPTED`` one is another interrupted answer. Calling
+    any of those "the follow-on question" would tell a user their answer raised
+    something askable when it raised nothing they can act on.
+
+    Attributes:
+        id: The successor question's id.
+        state: Where that question stands, and therefore what can be said about it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The successor question's id.")
+    state: QuestionState = Field(description="Where that question stands.")
+
+
+class Question(BaseModel):
+    """A deferred memory decision, as the user is shown it (ADR-0078 §8).
+
+    Attributes:
+        id: The question's id, which ``answer`` and ``forget_question`` take.
+        state: Where it stands, and therefore what the user can do about it.
+        content: What accepting would have the assistant believe.
+        kind: Which typed memory it would establish.
+        band: The band the record **would** enter if accepted — a conditional,
+            never a belief held. A pending question is not a belief of any band:
+            :func:`band_of` applied to its proposal says only where it would land.
+        rationale: Why the proposal was made, in its producer's words.
+        reason: **Why the user is being asked** — the ``ASK_USER`` ruling's own
+            non-optional ``reason``.
+        retires: What accepting would retire, resolved to content.
+        asked_at: When the question was admitted.
+        expires_at: When it stops being answerable, or ``None`` under the user's
+            deliberate "ask me forever".
+        successor: The question this one's answer already raised, when it has one —
+            the state a cancellation caught after a re-deferral admitted a
+            successor leaves behind (ADR-0078 §9).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: Identifier = Field(description="The question's id.")
+    state: QuestionState = Field(description="Where it stands.")
+    content: EncodableText = Field(description="What accepting would have the assistant believe.")
+    kind: MemoryKind = Field(description="Which typed memory it would establish.")
+    band: BeliefBand = Field(description="The band the record would enter if accepted.")
+    rationale: EncodableText = Field(description="Why the proposal was made, in its own words.")
+    reason: EncodableText = Field(description="Why the user is being asked.")
+    retires: tuple[Retirement, ...] = Field(description="What accepting would retire.")
+    asked_at: UtcInstant = Field(description="When the question was admitted.")
+    expires_at: UtcInstant | None = Field(
+        description="When it stops being answerable, or ``None`` for 'ask me forever'."
+    )
+    successor: SuccessorLink | None = Field(
+        default=None, description="The question this one's answer already raised."
+    )
+
+
+class AnswerKind(StrEnum):
+    """What answering a question produced (ADR-0078 §8).
+
+    Four outcomes the ADR names — *applied*, *rejected*, *stale* and *re-deferred*
+    — plus the one an answer to a question that is not open produces. Rendering a
+    re-deferral as a failure would be a lie in a small place, so it is its own
+    member and carries the successor.
+    """
+
+    APPLIED = "applied"
+    """The correction landed; ``record_id`` names what is now live."""
+
+    REJECTED = "rejected"
+    """Nothing was written. Either the user declined, or the policy ruled
+    ``REJECT`` on the re-submitted proposal (ADR-0078 §2)."""
+
+    STALE = "stale"
+    """The proposal's own validity window had closed by the answer instant, so
+    accepting would have written a belief born dead (ADR-0078 §6). Distinct from a
+    lapsed deadline: telling a user who answered promptly they were too slow would
+    be the wrong sentence."""
+
+    REDEFERRED = "redeferred"
+    """The answer was **used** and raised a further question, because re-ingesting
+    surfaced an assertion the user was never shown (ADR-0078 §5a). A completed
+    answer, not a failed one."""
+
+    NOT_OPEN = "not_open"
+    """That question is not open — absent, lapsed, already being answered, or
+    already answered. Nothing was written."""
+
+
+class AnswerOutcome(BaseModel):
+    """What one answer did (ADR-0078 §8, §9).
+
+    Attributes:
+        kind: Which of the five outcomes happened.
+        question_id: The question that was answered, echoed back.
+        record_id: What an applied answer left live; ``None`` otherwise.
+        successor: The question a re-deferred answer raised — newly admitted, or
+            the already-open one it collapsed onto — with the state that decides
+            what to say about it. ``None`` when no successor could be queued.
+        successor_refused: Whether a re-deferral could queue **no** follow-on
+            question at all, because the queue was full and this admission had no
+            exemption to spend. Reporting it as an ordinary re-deferral would claim
+            a question was asked when none was.
+        disposed: Whether the question was **destroyed while its answer was being
+            applied**, so the bookkeeping found nothing. A true statement the
+            caller reports; what it reports *about the answer* comes from the
+            ingest, which it still holds, and never from the failed bookkeeping
+            (ADR-0078 §9).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: AnswerKind = Field(description="Which of the five outcomes happened.")
+    question_id: Identifier = Field(description="The question that was answered.")
+    record_id: Identifier | None = Field(
+        default=None, description="What an applied answer left live."
+    )
+    successor: SuccessorLink | None = Field(
+        default=None, description="The question a re-deferred answer raised."
+    )
+    successor_refused: bool = Field(
+        default=False, description="Whether a re-deferral could queue no follow-on at all."
+    )
+    disposed: bool = Field(
+        default=False, description="Whether the question was destroyed mid-apply."
+    )
+
+    @model_validator(mode="after")
+    def _outcome_carries_only_its_own_fields(self) -> AnswerOutcome:
+        """Each outcome carries what it produced, and nothing another one would (§4b).
+
+        Two ratified rules, both from ADR-0078 §8: a record is left live **iff**
+        the answer applied, and a successor — or the refusal to queue one — belongs
+        to a re-deferral alone. Without them an ``APPLIED`` outcome could name no
+        record while claiming a correction landed, and a ``REJECTED`` one could
+        carry a follow-on question nobody raised.
+        """
+        applied = self.kind is AnswerKind.APPLIED
+        if applied and self.record_id is None:
+            msg = "an APPLIED answer must name the record it left live"
+            raise ValueError(msg)
+        if not applied and self.record_id is not None:
+            msg = f"a {self.kind.name} answer wrote nothing, so it names no record"
+            raise ValueError(msg)
+        if self.kind is not AnswerKind.REDEFERRED and (
+            self.successor is not None or self.successor_refused
+        ):
+            msg = (
+                f"a {self.kind.name} answer raised no further question: "
+                "successor and successor_refused belong to a re-deferral"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class ObservedProposal(BaseModel):
+    """One belief the observer proposed, and what the write path did with it.
+
+    **It pairs the proposal with its ruling, and that pairing is the decision**
+    (ADR-0077 §9.7). A :class:`MemoryIngestResult` carries a ruling and a record id
+    and nothing else, and for an ``ASK_USER`` that id is ``None`` — so an entry
+    built from the result alone would render a deferral as a bare ruling with
+    nothing to show.
+
+    **The citations travel with it, resolved, and not as a count**, because
+    **nothing persists a deferred proposal**: there is no later belief-detail view
+    through which its warrant could ever be inspected, so a count here would be the
+    last word on a belief the user is being asked to act on.
+
+    Attributes:
+        content: The canonical text rendering of the belief that was proposed.
+        kind: Which typed memory it is. Never ``EPISODIC``: an observer distils
+            evidence, it does not manufacture it (ADR-0077 §2).
+        step: The epistemic step the producer took — ``OBSERVED`` where the cited
+            evidence entails the belief, ``INFERRED`` where it merely supports it
+            (ADR-0072 §3). Both land in the ``DERIVED`` band, so the band carries
+            no information here and the *step* is the informative half.
+        confidence: How strongly the producer proposed holding it. Unadjusted,
+            unlike a presented belief's. Bounded ``[0, 1]`` and **not** ``[0, 1)``,
+            though a conforming producer is always strictly below 1.0: encoding
+            the producer's rule as a validation constraint would convert a producer
+            bug into an unreadable report, and the entry that most needs to reach a
+            human — a proposal something got wrong — would fail to construct, with
+            the whole :class:`ObservationReport` behind it.
+        rationale: The producer's own statement of why the batch justifies it.
+        decision: How memory folded it, or ``None`` when **no ruling was ever
+            sought** — the write path refused it because the evidence it cited no
+            longer resolves (ADR-0077 §5). ``None`` is not a sixth ruling: a
+            refusal is not a decision, and fabricating one would put a ruling
+            nobody made into the report.
+        record_id: The id of the record left live by the write, or ``None`` when
+            nothing was stored. This is the id the belief listing shows and
+            ``forget`` takes, so an observed belief is immediately inspectable.
+        reason: The policy's own justification for the ruling — or, where
+            :attr:`decision` is ``None``, the stage's statement of why the proposal
+            was dropped before any policy saw it.
+        evidence: The episodes it cites, in the order the proposal wrote them, each
+            resolved to readable content — or a tombstone where that citation is
+            the one that stopped resolving.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content: EncodableText = Field(description="The text of the belief that was proposed.")
+    kind: MemoryKind = Field(description="Which typed memory it is; never EPISODIC.")
+    step: MemorySource = Field(description="OBSERVED where entailed, INFERRED where supported.")
+    confidence: float = Field(
+        ge=0.0, le=1.0, description="How strongly the producer proposed holding it."
+    )
+    rationale: EncodableText = Field(description="Why the producer says the batch justifies it.")
+    decision: LearnDecision | None = Field(
+        description="How memory folded it, or ``None`` where no ruling was sought."
+    )
+    record_id: Identifier | None = Field(
+        description="The record left live by the write, or ``None``."
+    )
+    reason: EncodableText = Field(description="The ruling's justification, or why it was dropped.")
+    evidence: tuple[Evidence, ...] = Field(
+        default=(), description="The episodes it cites, resolved or tombstoned."
+    )
+
+    @property
+    def stored(self) -> bool:
+        """Whether the write left a record live in memory."""
+        return self.record_id is not None
+
+    @property
+    def evidence_count(self) -> int:
+        """How many episodes it cites."""
+        return len(self.evidence)
+
+    @property
+    def inspectable(self) -> bool:
+        """Whether a later read can still show this belief and its warrant.
+
+        ``False`` for everything the write path did not leave a record for — a
+        deferral, a rejection, a drop. Those have **no** later belief-detail view
+        (nothing persists a deferred proposal, ADR-0077 §4), so the report is the
+        only place their evidence is ever shown, and a surface renders it there or
+        nowhere.
+        """
+        return self.record_id is not None
+
+
+class ObservationReport(BaseModel):
+    """What one observation pass did (ADR-0077 §9.7).
+
+    **The counts are kept apart on purpose.** :class:`ObservationOutcome`'s two are
+    exhaustive over the entries the *model* emitted, so a proposal the producer
+    legitimately made and the writer then refused is a different fact: folding it
+    into either would make that invariant a lie (ADR-0077 §5, §9.7). It gets a
+    count of its own.
+
+    Attributes:
+        proposals: One entry per proposal the observer returned, in the producer's
+            order, each paired with its ruling — or with the unresolved-evidence
+            drop that replaced it. Empty is a normal outcome, not an error.
+        discarded_unusable: Relayed **unchanged** from the producer: entries it
+            refused for a reason of its own — unparseable, failing validation,
+            citing evidence it was never handed, below its evidence floor, or
+            naming a kind an observer may not propose.
+        discarded_over_limit: Relayed unchanged: otherwise-usable proposals the
+            producer dropped to meet its configured maximum.
+        dropped_unsupported: The stage's own count of proposals the **write path**
+            refused because every episode they cited had stopped resolving between
+            selection and the write. An ordinary consequence of a finite retention
+            horizon, never a producer fault — a fault propagates instead.
+        route: The model route that read the episodes, **absent when none did**. A
+            window whose turns have all lost their episodes selects an empty batch
+            and the observer is not called at all, so naming a route would claim a
+            read that never happened. It stays plain text rather than an
+            :data:`Identifier`: it is a model route label whose shape belongs to
+            `models/`, and a `core` model is not the place to start constraining
+            it.
+        conversation_id: The conversation whose turns were read, or ``None`` when
+            the store held none to read. Carried because the operation *selects*
+            when it is given no id — "the most recently active" — and a report that
+            did not say which conversation was read would leave the user unable to
+            tell what the model was shown.
+        episodes_read: How many episodes the batch held. At most the configured
+            batch size, and **short** where a turn's episode no longer resolves.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    proposals: tuple[ObservedProposal, ...] = Field(
+        default=(), description="One entry per proposal, in the producer's order."
+    )
+    discarded_unusable: int = Field(
+        default=0, ge=0, description="Entries the producer refused for a reason of its own."
+    )
+    discarded_over_limit: int = Field(
+        default=0, ge=0, description="Usable proposals the producer dropped to meet its maximum."
+    )
+    dropped_unsupported: int = Field(
+        default=0, ge=0, description="Proposals the write path refused for unresolved evidence."
+    )
+    route: EncodableText | None = Field(
+        default=None, description="The model route that read the episodes, or ``None``."
+    )
+    conversation_id: Identifier | None = Field(
+        default=None, description="The conversation whose turns were read."
+    )
+    episodes_read: int = Field(default=0, ge=0, description="How many episodes the batch held.")
+
+    @property
+    def stored(self) -> int:
+        """How many proposals left a record live in memory."""
+        return sum(1 for proposal in self.proposals if proposal.stored)
+
+    @property
+    def discarded(self) -> int:
+        """How much was thrown away in total, by the producer and by the write path."""
+        return self.discarded_unusable + self.discarded_over_limit + self.dropped_unsupported
