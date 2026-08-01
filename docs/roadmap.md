@@ -59,12 +59,17 @@ interaction-implicit learning language covers.
 3. **Hub and spokes, with one spoke for now.** One resident service — the hub —
    owns all state and intelligence; every interface is a stateless client of
    its API. Conversations, memory, and identity live server-side and are
-   device-agnostic. **The only spoke for the time being is the CLI on the hub's
-   own machine, over a loopback transport.** All large network constraints —
-   transport security, device identity and enrolment, push delivery, backup —
-   are deliberately deferred until a second physical device matters (see the
-   later arc). Slices landing before the hub exists must not bake in
-   single-shot or single-client assumptions.
+   device-agnostic. **This one is no longer a premise: ADR-0083 and ADR-0084
+   ratify it**, down to the transport — the only spoke for the time being is the
+   CLI on the hub's own machine, over a loopback Unix socket in the data
+   directory. All large network constraints — transport security, device
+   identity and enrolment, push delivery, backup — are deliberately deferred
+   until a second physical device matters (see the later arc), and ADR-0084 §1
+   and §11 fix the price of crossing that line: a non-loopback hop is user data
+   leaving the device, so it engages ADR-0017 §1 and owes its own ratified
+   decision. It is not reached by swapping an address family. Slices landing
+   before the hub exists must not bake in single-shot or single-client
+   assumptions.
 4. **Deepen before broaden.** VISION.md's answer to its own scope risk still
    governs: narrow, complete loops over shallow breadth.
 
@@ -95,34 +100,64 @@ capability, not when a test can.** Legs 1–4 run inside the existing in-process
 application; the hub (leg 5) is decided early enough that they are written for
 it, and built before anything ambient or polling.
 
-1. **The user model, visible.** The `UserProfile` ADR — what is asserted and
-   user-owned versus inferred and revisable, and which the retrieval path
-   reads — designed together with the observer (leg 3), since the inferred side
-   is otherwise an empty ledger. The `VISION.md` amendment ratifying the design
-   stances above. An inspection surface in the CLI: list, show, correct, and
-   forget what the assistant believes, with provenance and confidence visible —
-   this is where the `delete`/`export` obligations ADR-0007 put on the
-   `MemoryStore` contract first meet an interface. *Exit: the user can read the assistant's beliefs
-   about them, see why each is held, and kill any of them.*
-2. **Conversation and episodic capture.** A conversation becomes a first-class,
-   server-side entity — device-agnostic, resumable from any future spoke — and
-   every turn is durably recorded as `EpisodicMemory`. This is the substrate
-   observation reads; `Provenance.evidence` was designed to cite episode ids
-   (ADR-0005). Needs its own ADR: conversation identity and retention are new
-   `core` surface. *Exit: the user can continue yesterday's conversation, and
-   episodes exist that an observer could cite.*
-3. **The observer.** A model-backed producer that reads episodes and proposes
-   `OBSERVED`/`INFERRED` memories through the existing `MemoryPolicy` gate. Its
-   ADR must decide, explicitly: the scope of observation and what justifies
-   retention (VISION.md's selective-memory principle and ADR-0004's posture are
-   the constraints, and the propose/dispose gate plus provenance-visible
-   inspection is the mechanism that makes watching trustworthy); and **which
-   model reads the raw episodes** — the episodic stream is the most sensitive
-   data the system holds, the on-device embedder (ADR-0006/0024) is the
-   precedent, and the router seam (ADR-0013) makes a local/small-model route a
-   named option rather than an accident of configuration. *Exit: the assistant
-   holds a correct belief the user never told it, and the user can see where it
-   came from.*
+1. **The user model, visible.** Decided and built. ADR-0072 answers what the
+   profile *is*, and the answer is not the artifact this leg was written
+   expecting: the profile is a **band** of the one memory store — `ASSERTED` is
+   the profile, `DERIVED` the inferred model, `ATTESTED` a third band for what a
+   source reported — classified by a total function, with confidence a matter of
+   presentation rather than ranking. ADR-0073 decides the surface over it: the
+   band-scoped read is an **enumeration**, inspection shows live beliefs only,
+   killing one is show-then-confirm, and **correcting is `learn`** rather than a
+   second correction path. The `VISION.md` amendment ratifying the design stances
+   above landed with ADR-0072 §9, as a new Core Principle. *Exit: the user can
+   read the assistant's beliefs about them, see why each is held, and kill any of
+   them.* ADR-0073 §4 rules that test met by what it ships, and names the two
+   days it would stop being met — both gated on leg 6's first `EXTERNAL`
+   producer, which may not land without the explanation its band owes.
+
+   **The residual is `export`.** This leg is where ADR-0007's `delete` obligation
+   first met an interface; its `export` obligation did not, and ADR-0073 §10
+   deliberately declined to bundle it, `MemoryStore.export` having existed since
+   ADR-0007 and the remaining question being presentational rather than
+   contractual.
+2. **Conversation and episodic capture.** Decided and built. A conversation is a
+   first-class, server-side entity — device-agnostic, resumable from any future
+   spoke — and every turn is durably recorded as `EpisodicMemory`. This is the
+   substrate observation reads; `Provenance.evidence` was designed to cite
+   episode ids (ADR-0005). The `core` surface it needed is ratified across three
+   decisions: ADR-0074 (identity, lifecycle, one episode per turn, retention,
+   ordered conversation-scoped deletion, and the `ConversationStore` contract),
+   ADR-0075 (deterministic capture is exempt from the proposal → policy write
+   path), and ADR-0076 (a stamped conversation is enumerable, so a crashed
+   deletion can be finished). *Exit: the user can continue yesterday's
+   conversation, and episodes exist that an observer could cite.*
+
+   **The residual is a window, not a gap in the surface.** ADR-0074 §11 leaves
+   open the cross-store case under a process death — an episode landing after its
+   conversation's tombstone was reclaimed — which wants a transaction rather than
+   a lock. ADR-0083 §12 keeps it deferred and records that the hub narrows it
+   without closing it, because the reclaim runs at every start rather than at
+   whenever the user next types a command.
+3. **The observer.** Decided and built, with two residuals. A model-backed
+   producer reads episodes and proposes `OBSERVED`/`INFERRED` memories through
+   the existing `MemoryPolicy` gate. **ADR-0077 decides both questions this leg
+   was written to force**: the scope of observation — the producer reads the
+   episodes it is handed and can read nothing else, proposes three kinds against
+   a utility bar, and is refused for citing its evidence badly (§§1, 2, 5) — and
+   **which model reads the raw episodes**, a named route with no fallback and a
+   minimal payload (§3), the on-device embedder (ADR-0006/0024) having been the
+   precedent and the router seam (ADR-0013) the mechanism. Observation is an
+   explicit operation, not ambient machinery (§8); cadence belongs to leg 5's
+   scheduler, which ships that job **disabled** until the durable cursor
+   ADR-0083 §13 defers exists, because a timer without a cursor re-reads one
+   window and reaches nothing new. *Exit: the assistant holds a correct belief
+   the user never told it, and the user can see where it came from.*
+
+   **Both residuals are gaps in reach, not undecided questions.** **#462** —
+   nothing configures an endpoint, so ADR-0077 §3's on-device route cannot
+   actually be named; ADR-0084 §9 rules that an egress-surface question under
+   ADR-0004 §2 and ADR-0013 §6, owing its own ADR rather than a settings field.
+   **#494** — an observation report cannot say where a deferred proposal went.
 4. **Epistemic soundness.** Observation mass-produces exactly the
    low-confidence, conflicting beliefs the write path used to mishandle at the
    edges. All three edges are now decided, and each decision has shipped. A
@@ -157,31 +192,71 @@ it, and built before anything ambient or polling.
    full-conflict-set retirement into the `MemoryWriter` contract with the shared
    suite and `FakeMemoryWriter` matched, and ADR-0078 §11 records it and #313 as
    "decided, and merged".
-5. **The hub.** The resident service, as two decisions. The **service ADR**:
-   process model and lifecycle (graceful drain of in-flight steps, supervision,
-   upgrade-with-state discipline — of which the embedder-change migration,
-   #425, is the first instance), and an internal scheduler — the home for
-   `purge_expired` (ADR-0007), confirmation deadlines (ADR-0059,
-   whose wall-clock fragility #277 a resident process makes urgent), and later
-   consolidation. The **local API ADR**: the Engine façade (ADR-0042) behind a
-   loopback transport with the CLI as its first client — the spoke — with DTO
-   and versioning choices made as if remote spokes exist, because they will.
-   Hardening tail attached: the execution-id nonce under multi-process reality
-   (#305), and the stores' concurrent-access posture. *Exit: the assistant is
-   running before the user arrives and after they leave, and the CLI is merely
-   a client of it.*
+5. **The hub.** Decided in full, and being built. Both of this leg's decisions
+   are ratified and neither shipped code. **ADR-0083 decides the process**: one
+   resident instance per data directory, holding an exclusive lock and owning the
+   five databases so that no other process opens them; a fixed startup sequence
+   with readiness signalled last; a two-phase shutdown, bounded where bounding is
+   safe and unbounded where it is not; exit codes distinguishing "come back" from
+   "stay down"; a refusal to start over state this build would serve *silently
+   wrongly* — of which the embedder-change migration (#425) is the first instance
+   — and the internal scheduler that five earlier decisions had already named as
+   the home of a deferred job. **ADR-0084 decides the door**: a loopback Unix
+   socket in the data directory, a connect handshake carrying a protocol version
+   and a slot for a credential this transport refuses to carry, an envelope whose
+   interpretation that version fixes, carried in a length-prefixed JSON frame
+   with ceilings and deadlines against a peer that misbehaves, the Engine façade
+   (ADR-0042) promoted to a Protocol with its result types promoted to
+   `core/types.py` behind it, and the CLI demoted from *being* the application to
+   being a client of it. *Exit: the assistant is running before the user arrives
+   and after they leave, and the CLI is merely a client of it.*
+
+   **What the implementing lanes deliver is fixed as four changes in order**
+   (ADR-0084 §5): those two ADRs; the surface ADR that ratifies the method
+   signatures, the promoted DTO set and the complete transitive type graph its
+   fields reach (#281's scope); the triad — Protocol, shared conformance suite
+   and canonical fake — which merges before any client; then the hub, the `wire`
+   package, the client and the `lint-imports` edits that close `interfaces → app`
+   and forbid everything → `service`. **#473 is a prerequisite of that last
+   change, not context for it** (ADR-0084 §11): a belief's evidence tuple grows
+   without bound, and a bounded frame and an unbounded contract reconcile only
+   through a failure the contract itself declares.
+
+   **The scheduler's job list is one job shorter than the deferrals naming it
+   suggest, and the hardening tail is nearly gone.** Confirmation deadlines are
+   not a scheduler job: reclaiming a permanently-parked confirmation is a
+   contract ADR-0059 §3 deferred and nothing offers (#333), the lifetime is
+   enforced at
+   answer time regardless so nothing goes unenforced, and #277's wall-clock
+   fragility is *not* fixed by a resident process (ADR-0083 §7, §9). Of the
+   hardening tail, #305 is struck — ADR-0049 §3 already applied the fix and
+   exclusivity removes the multi-process premise — and the stores'
+   concurrent-access posture resolves rather than lands: with no second writer,
+   #526 becomes consistency work and #505 a deliberately deferred durability
+   decision (ADR-0083 §12, ADR-0084 §10).
 6. **Sensors.** The first read-only ingestion source or two, feeding both
    context facets (ADR-0008 anticipated calendar/tasks as optional fields) and
    the observer's episode stream. This is where ADR-0017 §3's conditions for a
    networked seam are finally met or consciously revised — at read-only stakes.
    MCP-shaped clients are welcome here, but as sensors only; actuators stay in
-   the later arc. *Exit: the assistant knows something true about the user's
-   day it was never told, from a source the user granted.*
+   the later arc. One precondition is already ratified onto this leg's first
+   `EXTERNAL` producer: it may not ship without conveying both the reporting
+   source's identity and the time that source reported it, since a belief in the
+   `ATTESTED` band must not be readable as the user's own word or as our
+   inference, and must not be offered our revision time as the source's. Whether
+   `Provenance` grows fields for that is a `core` decision made with the producer
+   in hand (ADR-0073 §4, §10). *Exit: the assistant knows something true about
+   the user's day it was never told, from a source the user granted.*
 7. **Memory at volume.** Consolidation (many episodes distilled into few
    durable beliefs, run by the hub's scheduler), confidence decay and salience
    so unreinforced beliefs age instead of accumulating, the size caps ADR-0007
    deferred, retrieval ranking under load, and the re-embedding migration
-   (#425). *Exit: months of use make retrieval better, not slower and noisier.*
+   (#425) — which leg 5 makes a legible refusal to start rather than an automated
+   fix, leaving the automation to this leg and to ADR-0006 §4, run as an offline
+   tool that takes the hub's own instance lock (ADR-0083 §6, §10). Consolidation
+   is also the job most likely to make the scheduler's serial, one-at-a-time
+   shape worth revisiting (ADR-0083 §7). *Exit: months of use make retrieval
+   better, not slower and noisier.*
 8. **Minimal evaluation.** The `EvaluationTrace` slice — Tier-2 operational
    data, no egress (ADR-0004) — plus a first few of VISION.md's success
    measures: memory precision, correction rate, repeated-explanation rate. This
@@ -203,8 +278,25 @@ still needs decomposing into ADR-backed slices.
   ADR-0004's deferred catalogue gains a sibling), and the audit trail's
   "approved from where" — a server-push delivery seam, and encrypted
   backup/restore, which is also the honest test of VISION.md's portable
-  context-graph claim. ADR-0042's opaque continuation tokens already support
-  cross-device park/resume unchanged.
+  context-graph claim. **ADR-0084 buys the three expensive retrofits in advance**
+  — a versioned connect handshake, a defined place for a credential the loopback
+  transport carries nothing in, and a client stateless by decision — so the wire
+  is ready for this leg. **What no wire format can pre-authorise is the hop
+  itself**: a spoke off the device moves user data off the device, which
+  ADR-0017 §1 governs and which this leg owes a ratified decision for
+  (ADR-0084 §1, §11).
+
+  **What is portable across a process — and would be across a device — is the
+  durable execution and audit state, not the handle.** ADR-0052 §1 enumerates
+  parked executions and re-mints a continuation from durable state, and chose
+  that over encoding durable identity into the token deliberately. The
+  continuation token stays **process-scoped**: it names an entry in one engine's
+  private table (ADR-0042's revisit-if clause, #242), and the hub will not
+  persist that table, because ADR-0052 §1 already provides the durable path
+  (ADR-0083 §14.7). So a token minted by a previous process life yields one
+  specific typed refusal — an unknown continuation, never a denial and never an
+  expiry, both of which would report something no policy and no deadline decided
+  — and the remedy is `pending_confirmations()` (ADR-0084 §7).
 - **Actuators, in bulk.** MCP-shaped tool breadth, behind the decisions it
   forces: ranking among capable tools (#241 — a second capable tool stalls the
   step by design, ADR-0037 §1), parameter-schema enforcement (ADR-0029 §7),
@@ -214,8 +306,8 @@ still needs decomposing into ADR-backed slices.
   case.
 - **Proactivity.** `NotificationCandidate` and the interruption policy — the
   one proposal artifact of the propose/dispose principle still unbuilt. It
-  structurally requires the hub (something must be awake to notice) and a
-  delivery channel (remote spokes' push seam).
+  structurally requires the hub (something must be awake to notice — ADR-0083)
+  and a delivery channel (remote spokes' push seam).
 - **An engagement surface.** The accumulation flywheel needs daily use, and
   nothing on this roadmap yet makes the assistant compelling daily. This entry
   is deliberately undesigned; it is named so its absence is a known debt of the
@@ -224,9 +316,13 @@ still needs decomposing into ADR-backed slices.
 
 ## Parked
 
-- **The design-debt plans** (record mutability #41, enforcement scope, ADR
-  governance): queued before this reorientation, explicitly parked behind the
-  accumulation legs now. Revisit after leg 3 lands.
+- **The design-debt plans**, queued before this reorientation and parked behind
+  the accumulation legs. Two of the three have since been decided on their own:
+  record mutability by ADR-0068 (immutability is a property of the types, closing
+  #41), and ADR governance by ADR-0070 and ADR-0082 (when a decision may be
+  amended in place, when it must be superseded, and where the record goes). What
+  remains of the enforcement-scope plan is tracker work, and leg 3 having landed,
+  the revisit this entry deferred is due.
 - **The test-hardening issue backlog** stays in the tracker and is worked
   opportunistically; none of it is scheduled here. The tracker, not this
   document, owns that list (ADR-0015/0019).
@@ -242,8 +338,8 @@ ledger rather than into this document.
 
 | VISION promise | What closes the gap |
 | --- | --- |
-| Understood — a persistent user model | Legs 1–3 (profile ADR, capture, observer) |
-| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract) |
+| Understood — a persistent user model | Legs 1–3 (the bands, capture, the observer) |
+| In Control — inspect, correct, restrict, delete | Leg 1 (inspection surface over ADR-0007's contract); `export` still has no interface (ADR-0073 §10) |
 | More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation |
 | Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on remote spokes |
 | Supported — acts across tools | Later arc (actuators); deliberately last |
