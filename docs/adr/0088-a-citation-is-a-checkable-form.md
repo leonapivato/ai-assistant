@@ -36,8 +36,9 @@ re-checked against the tree, and the check changed two of them:
 
 - **#586, defect 2 — confirmed.** ADR-0086 §6 writes ``ConversationService``.
   `ConversationService` appears **nowhere** in `src/`; the class is
-  `ConversationLifecycle`, in `orchestration/conversations.py`, and ADR-0086 §8
-  names it correctly two hundred lines later.
+  `ConversationLifecycle`, in `orchestration/conversations.py`, which ADR-0086 §8
+  item 7 then names correctly. One ADR names one object two ways, and only one of
+  the two names resolves.
 - **#586, defect 1 — confirmed as a defect, but *not* of the kind #588 thinks.**
   §8 item 6 names `Engine._project` for a saving §6 argues about the listing.
   The defect is real — the listing goes through `Engine._summarise`, and the loop
@@ -96,10 +97,15 @@ name. That understates it, because a line that still exists need not hold what
 the citation says. ADR-0026's Context carries a ten-row table pairing a symbol
 with a `file.py:line`. Checked against the tree today:
 
-- **8 of the 10 line numbers point at unrelated text** — `ClockContextSource` at
-  `context/sources.py:69` lands on `def _time_of_day(hour: int) -> TimeOfDay:`;
-  `FakeMemoryStore` at `testing/memory.py:41` lands on an `import` statement;
-  `InMemoryMemoryStore` at `memory/store.py:54` lands on a blank line.
+- **8 of the 10 line numbers point at unrelated text.** Three, as written in
+  ADR-0026 and as they land today:
+
+  ```text
+  ClockContextSource   context/sources.py:69  ->  def _time_of_day(hour: int) …
+  FakeMemoryStore      testing/memory.py:41   ->  an import statement
+  InMemoryMemoryStore  memory/store.py:54     ->  a blank line
+  ```
+
 - **All 10 symbol names still resolve**, each to exactly one definition in
   `src/`.
 
@@ -217,26 +223,44 @@ reference `§K`, where `K` is a section number the target ADR defines, optionall
 with a sub-letter (`§8c`) and optionally an item (`§8 item 6`). Multiple sections
 may be joined (`§5/§6`, `§§3–5`). `NNNN` is four digits.
 
-**(b) A code citation** — a backticked name that identifies something in the
-repository:
+**(b) A code citation** — a backticked name identifying something in the
+repository. It has **three sub-forms, and they are deliberately separated by
+whether a machine can tell them apart from ordinary prose**, because §6 forbids
+the checker to infer its own input set and *intent is not in the text*:
 
-- a module path, `` `memory/ingest.py` `` or `` `orchestration/engine.py` ``,
-  written relative to `src/ai_assistant/` or `tests/`;
-- a symbol, `` `ConversationLifecycle` ``, `` `MemoryStore.get_many` ``,
-  `` `Provenance.evidence_elided` ``;
-- the two joined, as prose pairing a symbol with the file that holds it.
+- **b1, a module path** — `` `memory/ingest.py` ``, `` `scripts/ship.sh` ``,
+  `` `tests/memory/memory_store_contract.py` ``. Contains a `/` or ends in a
+  source extension. **Unambiguous**: no prose token looks like this.
+- **b2, a dotted symbol** — `` `MemoryStore.get_many` ``,
+  `` `Provenance.evidence_elided` ``, `` `MemoryDecisionKind.MERGE` ``. A
+  qualified name whose tail is an identifier. **Near-unambiguous**, once
+  document filenames are excluded — `` `CONTRIBUTING.md` `` and
+  `` `CLAUDE.md` `` share the shape and are not code.
+- **b3, a bare single token** — `` `ConversationLifecycle` ``, `` `Engine` ``.
+  **Not mechanically separable** from the vocabulary the corpus also backticks.
 
 **A code citation carries no line number** (§5).
 
 **(c) A tracker citation** — `#NNN`, a GitHub issue or PR number.
 
-**Backticks alone do not make a citation.** The corpus backticks status
-vocabulary (`` `Accepted` ``), enum members (`` `MERGE` ``), tool codes
-(`` `DTZ` ``), git refs (`` `HEAD` ``) and filenames (`` `LICENSE` ``) — 479
-occurrences of tokens that resolve nowhere in `src/` and are not meant to. Form
-(b) is a claim *about the repository*; the test for whether an author has made
-one is whether they intended a reader to go and find it. Where that is genuinely
-ambiguous, §6 resolves it in favour of silence, not of a finding.
+**Two exclusions, both mechanical, neither requiring intent.**
+
+- **A fenced block is display, not citation.** Everything inside a ``` fence is
+  quoted or illustrative material — a status line being shown, a signature being
+  drafted, a defect being exhibited — and nothing in it is checked. This is what
+  lets an ADR quote a form it forbids, including this one (§5).
+- **A document filename is not a code citation.** `` `CONTRIBUTING.md` ``,
+  `` `CLAUDE.md` ``, `` `CHANGELOG.md` `` and their kind account for 168 of the
+  203 apparently-unresolved dotted names.
+
+**Backticks alone still do not make a citation, and b3 is where that bites.**
+The corpus backticks status vocabulary (`` `Accepted` ``, `` `Proposed` ``,
+`` `Status` ``), enum members (`` `MERGE` ``, `` `ALLOW` ``), Python literals
+(`` `None` ``, `` `False` ``), tool codes (`` `DTZ` ``) and git refs
+(`` `HEAD` ``). Roughly **one bare backticked token in five** resolves to no
+definition and is not meant to. That ratio is not reducible by a cleverer
+checker, which is why §2 grades the three sub-forms rather than promising one
+check over all of them.
 
 ### 2. What "resolves" means, per kind
 
@@ -244,6 +268,18 @@ ambiguous, §6 resolves it in favour of silence, not of a finding.
 where a `§K` is given, that file defines a section numbered `K`. Nothing about
 the ADR's status is part of resolution — that is liveness, and §4 keeps the two
 apart deliberately.
+
+**A joined or ranged citation resolves on the numbers it writes, and only
+those.** `§5/§6` and `§3, §5` resolve when **every** section named resolves. A
+range `§§3–5` resolves when **its two endpoints** resolve; intermediate numbers
+are not expanded and not required to exist, because a range is a span of
+document that a reader reads, not a set a checker enumerates — and expanding it
+would invent members (`§4`) the author never wrote. An item or sub-letter
+suffix — `§8 item 6`, `§8c` — resolves on the section number; **the item or
+letter is not checked**, since the corpus numbers items in running prose and no
+uniform structure exists to resolve them against. This is deliberately the
+weakest reading available: it makes the result determinate, which is what §6
+needs, without inventing structure.
 
 **"Defines a section numbered K" is not "has a heading K", and this is
 normative.** The corpus marks sections three ways and a checker must accept all
@@ -257,12 +293,32 @@ checker built on the heading assumption alone reports 92 false defects against
 `main` as it stands, 78 of them against `ADR-0015 §K`. No new ADR is required to
 adopt a numbering shape, and none is retrofitted.
 
-**(b) A code citation resolves** when the name it gives is found by an
-exact-token search of `src/` **or** `tests/`. Both, not `src/` alone:
-conformance suites and their factories live under `tests/` by
-`CONTRIBUTING.md`'s "Adding a Protocol", and three of the corpus's apparently
-unresolved symbols are exactly that. A dotted name resolves on its final
-component; a module path resolves as a path.
+**(b) A code citation resolves** against `src/ai_assistant/`, `tests/` **and**
+`scripts/`. All three, not `src/` alone: conformance suites and their factories
+live under `tests/` by `CONTRIBUTING.md`'s "Adding a Protocol", and the corpus
+cites `scripts/` by name nine times.
+
+**Resolution is a definition lookup, not a text search, and the difference is
+not pedantic.** A free-text search for the name finds it in any docstring or
+comment that happens to use the word, so `` `Status` `` "resolves" against prose
+in a `.py` file. A module path resolves against the **filesystem**; a symbol
+resolves against a **definition site** — a `class`, a `def`, an assignment or a
+class-body annotation.
+
+**The three sub-forms differ sharply in how much noise they carry**, which is
+why §1 separates them at all:
+
+| form | occurrences | not resolving |
+|---|---|---|
+| **b1** module path | 574 | 3 (0.5%) |
+| **b2** dotted symbol | ~770 (excl. document names) | ~4% |
+| **b3** bare token | 6,675 | ~20% |
+
+**But none of the three may fail a check, and §3 is why.** The measurement above
+was taken to justify failing on b1 and b2. Reading the flags refuses it: of b1's
+three, one is a genuine defect and **two are correct citations that an
+append-only corpus must be able to write**. That result generalises, and §3
+states it.
 
 **Resolution is not correctness.** `Engine._project` resolves and is still the
 wrong symbol for the claim ADR-0086 §8 attaches to it (#586). §6 promises to
@@ -273,27 +329,58 @@ reading, and by review.
 **(c) A tracker citation resolves** when the issue or PR exists. Additionally,
 where the citing sentence makes a **state claim** about it — "`#NNN` tracks the
 conversion", "**#281 is discharged**", "closed by `#NNN`" — the claim is checked
-against the tracker's state, and a claim contradicted by that state is a defect.
-A citation that merely *refers* (`Refs #537`, "raised as #473") makes no state
-claim and is checked for existence only.
+against the tracker's state. A citation that merely *refers* (`Refs #537`,
+"raised as #473") makes no state claim and is checked for existence only.
+**Existence is Tier 1 and a contradicted state claim is Tier 2** (§6): the
+number either exists or it does not, but recognising that a sentence *makes* a
+state claim is a reading, and #588's defect 2 — a claim falsified four hours
+after it was written — is exactly the case a reader must judge.
 
-### 3. A citation to something not yet built is exempt, and the exemption is dated, not permanent
+### 3. An append-only corpus correctly cites what is not in the tree, so no code citation may fail a check
 
-ADRs routinely name a type before it exists — that is what a contract ADR *is*
-under ADR-0015 §5, which requires the decision to merge before anything
-implements against it. `Provenance.evidence_elided` was fictional until ADR-0086
-§4 landed; `hub_max_frame_bytes` was fictional when ADR-0085 §8c cited it and is
-real now (#572).
+**"Resolves against today's `src/`" is the wrong test for a decision record, and
+this is the central finding of this ADR.** ADRs are append-only (ADR-0001): they
+record what was decided *at a moment*, and a corpus of them necessarily
+accumulates correct citations to things the tree does not contain. There are
+three such classes and **all three are indistinguishable, by form, from a stale
+citation** — each is a backticked name resolving nowhere.
 
-So a code citation in an ADR whose `Status` is `Proposed`, or in a section the
-ADR itself marks as the work it commissions, **is not checked**. The exemption
-attaches to the ADR's state, not to an allowlist an author edits, because an
-allowlist entry is one more citation nothing checks.
+**Class 1 — not yet built.** A contract ADR names a type before it exists;
+ADR-0015 §5 requires exactly that ordering. `Provenance.evidence_elided` was
+fictional until ADR-0086 §4 landed. `hub_max_frame_bytes` was fictional when
+ADR-0085 §8c cited it and is real now (#572) — correct to flag the day ADR-0085
+merged, correct to pass today, with no edit in between.
 
-**Where an ADR is `Accepted` and its implementing change has merged, the
-exemption is spent** and its code citations are checked normally. #572 is the
-worked example in both directions: correct to fire on the day ADR-0085 merged,
-correct to stay silent today, with no edit to ADR-0085 in between.
+**Class 2 — deliberately removed.** The ADR that removes something must name it,
+and every later ADR recording that history names it again. ADR-0015 §1 removes
+`scripts/codex_review_decision.py`; the citation is right and the file is
+correctly absent. `MemoryDecisionKind.MERGE` is the same case seen seven times:
+ADR-0040 replaced it with two members, and ADR-0028, ADR-0038 and ADR-0040 all
+name it while recording the replacement. **Every one of those seven is correct,
+and every one resolves nowhere.**
+
+**Class 3 — considered and declined.** An alternatives section names a shape the
+ADR then refuses. ADR-0031 weighs "a new `core/invocation.py`, by analogy with
+`core/clock.py`" and rejects it in the next sentence. The file never existed and
+never should; the citation is not defective, it is the record of a road not
+taken.
+
+**Separating these from a real defect is a reading, and §6 keeps readings out of
+the tool.** The distinguisher is tense and mood — a present-tense assertion about
+current code versus a past-tense or hypothetical one — and recognising that is
+prose inference, which §6 forbids for the reasons Context gives.
+
+**Therefore no code citation failure may fail a check.** All three sub-forms of
+§1(b) are **reported and never failing**, the same disposition §4 gives liveness
+and for the same reason: the tool surfaces, the reader decides. A checker that
+failed on b1 today would fail this repository on ADR-0015's record of its own
+deletion.
+
+**What survives is still worth having.** Three flags corpus-wide on b1 is a list
+a human reads in a minute, and it contains a real defect nobody had found:
+ADR-0045 names `testing/store.py` as the fake store's home, and the fake store is
+`FakeMemoryStore` in `testing/memory.py` — which ADR-0026 cites correctly. The
+value is in the shortness of the list, not in the power to fail.
 
 ### 4. Liveness is in scope, is derived from both directions, and is reported rather than adjudicated
 
@@ -306,14 +393,38 @@ quotation establishes nothing about it (Context).
 disagreement between them is the finding.** Concretely, for a citation of
 `ADR-A §K`:
 
-1. read `ADR-A`'s whole `Status` **field** — every physical line, since a legacy
-   value may wrap (ADR-0070 §4) — and collect the `ADR-NNNN` targets after a
-   leading `Partially superseded by`, plus any whole `Superseded by`;
-2. read each **naming** ADR's own text, which ADR-0070 §4 makes the authority on
-   extent;
-3. follow the transitive walk ADR-0070 §4 requires, onward through each target's
-   own status, which terminates because an ADR is only ever superseded by a
-   higher-numbered one.
+1. **Forward** — read `ADR-A`'s whole `Status` **field**, every physical line,
+   since a legacy value may wrap (ADR-0070 §4), and collect the `ADR-NNNN`
+   targets after a leading `Partially superseded by`, plus any whole
+   `Superseded by`;
+2. **Reverse** — collect every ADR carrying a header line
+   `- Supersedes: ADR-A …` or `- Partially supersedes: ADR-A …` (below);
+3. **Transitive** — follow the walk ADR-0070 §4 requires, onward through each
+   target's own status, which terminates because an ADR is only ever superseded
+   by a higher-numbered one.
+
+**The reverse record is that header line, and this ADR ratifies it as the
+canonical machine-readable form.** The check must not discover a supersession by
+reading prose: "ADR-0090 replaces ADR-0080's retry rule" is a sentence, and
+recognising it is exactly the structural inference §6 forbids. The corpus
+already has the form — nine ADRs carry `- Supersedes:` or
+`- Partially supersedes:` in their header, ADR-0070 and ADR-0015 among them —
+and **an ADR that supersedes another, wholly or partly, writes one going
+forward.** It names the target ADR and the scope in the same shape ADR-0070 §4
+gives the forward record, and like that record it is a pointer: the superseding
+ADR's own text remains the authority on extent.
+
+So both directions read a **declared header field**, and the comparison is
+between two machine-readable sets. Nothing infers structure from prose.
+
+**Where the reverse record is absent, nothing is reported.** Only nine ADRs
+carry one today; the rule is forward-only and no header is retrofitted, on
+ADR-0070 §4's non-retrofit reasoning. An older ADR that superseded something
+without a header line simply yields no reverse entry, and §6's miss-is-benign
+rule governs: the check is silent rather than wrong. ADR-0086 is exactly this
+case — it declares its supersessions in §11 and carries no header line — so the
+window it opened would be caught **only once the rule is being followed**. That
+is honest about what this buys and when.
 
 **Where the two directions disagree, that is the report** — a later ADR declaring
 it supersedes a clause of `ADR-A` while `ADR-A`'s `Status` does not name it, or
@@ -364,17 +475,36 @@ and the line number is ignored, so the corpus gets the benefit without an edit.
 **Where a position genuinely must be conveyed**, name the enclosing symbol and,
 if needed, quote the line. Both are stable under edits elsewhere in the file.
 
-**This ADR's own Context quotes three of the rotted citations** — `sources.py:69`,
-`testing/memory.py:41`, `memory/store.py:54` — because they are the evidence for
-this section. Quoting a defect to demonstrate it is not committing it, and the
-rule's own ADR is the one document guaranteed to contain what the rule forbids.
-A checker will flag them; that is a known and accepted cost, recorded here so the
-implementing lane recognises the hits rather than treating them as a corpus
-defect.
+**This ADR's own Context exhibits three of the rotted citations, and they sit
+inside a fenced block.** That is not a courtesy; it is the mechanism. §1 excludes
+fenced content from the input set, so the examples are excluded **by their form**
+rather than by anyone judging that they are illustrations. The rule's own ADR is
+the one document guaranteed to contain what the rule forbids, and a rule whose
+own statement violates it — or which needs a hand-written exception to avoid
+doing so — is not a rule an implementation can apply. Any ADR needing to exhibit
+a forbidden form does the same thing: it fences it.
 
 ### 6. What a checker may and may not report
 
 This section binds the implementation lane; it does not write it.
+
+**Two tiers, and the boundary is whether a legitimate non-resolving case
+exists.**
+
+**Tier 1 — may fail.** A decision citation naming an ADR file that does not
+exist, or naming a section number an ADR that numbers sections does not define;
+a tracker citation to an issue number that does not exist. These have **no**
+legitimate non-resolving case: ADRs are append-only so a file is never deleted,
+section numbers are never withdrawn, and an issue number once assigned stays
+assigned. A failure here is always a defect. This is the tier that answers
+#588's complaint that no gate step can fail on a `docs/adr/**` change — the
+corpus's 3,387 decision citations pass it today, which makes it a regression
+guard rather than a backlog.
+
+**Tier 2 — reported, never failing.** Every code citation that does not resolve
+(§3), every liveness disagreement (§4), and a state claim about an issue whose
+tracker state contradicts it (§2(c)). Each has a legitimate class no mechanical
+test separates from a defect, so each is surfaced for a reader and none blocks.
 
 **The input set is §1's forms, and the checker does not infer its own.** This is
 the difference between 479 false positives and a usable check.
@@ -439,13 +569,17 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
 
 ### 8. This ADR classified under ADR-0070 §1 and ADR-0082 §1, edit by edit
 
-- **ADR-0070 — nothing owed.** §4 anticipated a liveness-classifying consumer and
-  bound it in advance ("this rule binds any liveness-classifying consumer added
-  later"). §4 above supplies that consumer's rule where §4 gave none; it
-  contradicts no sentence of §4 and in fact rests on two of them — the pointer/
-  authority distinction and the transitive walk. Under ADR-0082 §1 that is a
-  **stacked addition**: "it is recorded in the ADR that makes it, and nowhere
-  else." No `Status` edit and no dated note are owed on ADR-0070.
+- **ADR-0070 — nothing owed, on two counts.** First, §4 anticipated a
+  liveness-classifying consumer and bound it in advance ("this rule binds any
+  liveness-classifying consumer added later"); §4 above supplies that consumer's
+  rule where §4 gave none, contradicts no sentence of §4, and in fact rests on
+  two of them — the pointer/authority distinction and the transitive walk.
+  Second, §4 above requires a `- Supersedes:` header line on the **later** ADR.
+  ADR-0070 §4 legislates the **earlier** ADR's `Status` field and says nothing
+  about the later ADR's header, which ADR-0070's own header nonetheless carries.
+  Neither is a change to what §4 decided. Under ADR-0082 §1 both are **stacked
+  additions**: "recorded in the ADR that makes it, and nowhere else." No `Status`
+  edit and no dated note are owed on ADR-0070.
 - **ADR-0082 — nothing owed.** §6's declining of a mechanical `Status`
   cross-check stands whole and is relied on rather than narrowed; §4 above is a
   *reporting* check, not the adjudicating one §6 refused. Nothing ADR-0082
@@ -490,10 +624,22 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   in one change — that belong to whoever is paying them. Detection does not need
   the mandate; if the window recurs after detection exists, that is the ADR to
   write.
-- **An allowlist for not-yet-built symbols.** §3 keys the exemption to the ADR's
-  own `Status` instead. An allowlist is a hand-maintained file that decays
+- **An allowlist of known-absent symbols**, to let code citations fail on
+  everything else. §3 removes the need by making them all Tier 2, and the
+  allowlist was the wrong instrument anyway: a hand-maintained file that decays
   exactly when it matters — ADR-0015 §4's finding about `WORKING.md`, in
-  miniature — and it would be one more list of citations nothing checks.
+  miniature — and one more list of citations nothing checks. It would also have
+  had to grow an entry for every road not taken in every alternatives section.
+- **A new marker syntax for code citations** — a sigil or role that would make
+  every citation unambiguous, as `` :py:class:`X` `` does elsewhere. It is the
+  clean answer to b3's irreducible ~20% and it is declined on cost: it is worth
+  nothing until the corpus is marked, marking 86 ratified ADRs is the retrofit
+  §5 and ADR-0070 §4 both refuse, and marking only new ADRs buys a check that
+  sees almost nothing for a long time. §1's b1/b2/b3 grading gets most of the
+  precision — the two checkable forms cover 1,344 citations at ~1% error —
+  without asking the corpus to be rewritten. **Revisit if** b3's advisory
+  reports prove worth failing on, which is the condition under which a marker
+  starts paying for itself.
 - **Extending §1's forms to `src/` docstrings** (#579's amplifying half). §7
   records why: it is a bigger rule than this ADR was read for.
 - **Verifying quotation text as a hard check.** §6 permits a quotation check but
@@ -505,10 +651,18 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
 
 **Easier.**
 
-- **A `docs/adr/**` change can fail.** The five-step gate's structural blind spot
-  is named, and §6 gives the implementing lane a check whose input set is defined
-  rather than inferred — the difference between 479 flags for 3 defects and a
-  usable signal.
+- **A `docs/adr/**` change can fail — on Tier 1.** The five-step gate's
+  structural blind spot is named, and §6 gives the implementing lane a check
+  whose input set is defined rather than inferred. Tier 1 is small and clean: a
+  dangling ADR reference or section number, and a nonexistent issue number. The
+  corpus passes it today, so it guards against regression rather than presenting
+  a backlog.
+- **The corpus turned out to be much healthier than the brief assumed, and that
+  is a finding.** Four instances motivated this ADR; the measurement found the
+  cross-reference graph essentially sound (3,387 references, no real failures)
+  and the code-citation "failures" mostly correct history. The expensive mistake
+  available here was to ratify a failing check over 1,344 citations and spend the
+  implementation lane's time on false positives. §3 is what prevents it.
 - **An author has one place to look.** Three forms, three definitions of
   "resolves", one rule about line numbers. The judgement that stays with the
   author is now a small and stated one: is this a claim about the repository?
@@ -525,20 +679,32 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
 
 **Harder.**
 
-- **The corpus is asked to change.** Line numbers were being written three days
-  ago and stop being written now. This is a real cost paid by authors, and §5
-  pays it deliberately rather than pretending the convention already existed.
+- **The corpus is asked to change, in two places.** Line numbers were being
+  written three days ago and stop being written now (§5); and a superseding ADR
+  now writes a `- Supersedes:` header line, which only nine ADRs carry today
+  (§4). Both are real costs paid by authors, and both are stated as changes
+  rather than dressed up as conventions that already existed.
+- **The liveness check is worth little until the reverse record is habitual.**
+  §4 is honest that ADR-0086 — the case that motivated it — would not have been
+  caught, because ADR-0086 carries no header line. The check earns out on ADRs
+  written after this one, and a reader expecting it to audit the existing corpus
+  will be disappointed.
 - **Two citation shapes coexist indefinitely.** New ADRs carry no `:NNN`; 16 older
   ones keep 219. A reader meets both, and §5's non-retrofit is what makes that
   permanent. The mitigation is that the *symbol* beside a legacy line number is
   checked under §2(b), so the old form degrades to the new one rather than to
   nothing.
-- **The check will not catch the defect that started this.** `Engine._project`
-  resolves. #586's first half — a name that points at the wrong object — is
-  outside anything §6 can promise, and §2 says so plainly rather than letting the
-  implementing lane discover it. Of the four known instances, §6 catches two
-  (`ConversationService`, `#281 is discharged`), would have caught a third at the
-  time (#572), and cannot catch the fourth.
+- **The check will not catch the defect that started this, and mostly will not
+  *fail*.** `Engine._project` resolves; #586's first half — a name pointing at the
+  wrong object — is outside anything §6 can promise. And of the known instances,
+  every code-citation one lands in Tier 2, so the check reports them and blocks
+  nothing. A reader who expected "the gate can now fail on a bad ADR citation"
+  gets that only for Tier 1.
+- **Tier 2 needs someone to read it.** A report nobody reads is worse than no
+  report, because it looks like coverage. §3's three legitimate classes mean the
+  list is permanently non-empty — `MemoryDecisionKind.MERGE` will be on it
+  forever, correctly — so whoever builds §6 has to make a standing non-zero
+  report legible, and that is harder than making a list that should be empty.
 - **A tracker check is only as good as the tracker.** §2(c) makes an ADR's state
   claim about an issue falsifiable, which also means an ADR can be made wrong by
   someone closing an issue. That is the correct direction — #588's defect 2 was
@@ -563,10 +729,14 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
 - **#586 and #593 are the two live defects §6 would catch.** Both remain open and
   both need a `docs/adr/**` amendment or a tracker action; neither is written by
   this lane, whose fence is this file.
-- **Two further candidate defects surfaced by the measurement, unverified:**
+- **Three further candidates surfaced by the measurement, filed for triage.**
   `ClassifiedToolError` and `UserProfile` are backticked in ADR text and resolve
-  in neither `src/` nor `tests/`. They may be proposed-but-unbuilt types under §3
-  or genuine instances. Filed for triage.
+  in none of `src/`, `tests/` or `scripts/`; each is either a §3 class or a
+  genuine instance, and only a reading tells which. **ADR-0045's
+  `testing/store.py` is the one this ADR is confident about** — the fake store is
+  `FakeMemoryStore` in `testing/memory.py`, which ADR-0026 cites correctly, so
+  one ADR names it right and another names it wrong. That is #586's shape
+  exactly, found by the method rather than by a lane tripping over it.
 
 **Revisit when** the check of §6 has run over the whole corpus for the first
 time. Its true-positive and false-positive counts against §1's forms are the only
