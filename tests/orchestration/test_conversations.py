@@ -41,7 +41,7 @@ from ai_assistant.orchestration.conversations import (
 from ai_assistant.testing import FakeConversationStore, FakeMemoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from ai_assistant.core.types import MemoryRecord, MemoryWrite
@@ -421,10 +421,16 @@ async def test_history_skips_a_turn_whose_episode_no_longer_resolves() -> None:
 
 
 async def test_history_degrades_rather_than_failing_the_turn() -> None:
-    """Losing continuity costs the answer its history, not its usefulness."""
+    """Losing continuity costs the answer its history, not its usefulness.
+
+    Faults the method the tail actually reads through — ``get_many`` since ADR-0086
+    §8 item 7 — because a store that only refuses ``get`` no longer reaches this path
+    at all, and a case wired to the abandoned method would report a degradation this
+    code never produced.
+    """
 
     class Faulting(FakeMemoryStore):
-        async def get(self, record_id: str) -> MemoryRecord | None:
+        async def get_many(self, record_ids: Sequence[str]) -> Mapping[str, MemoryRecord]:
             msg = "the store would not read"
             raise MemoryStoreError(msg)
 
