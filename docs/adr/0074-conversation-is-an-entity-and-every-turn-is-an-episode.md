@@ -1,7 +1,55 @@
 # 74. A conversation is a first-class entity; a turn is an episode
 
-- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion)
+- Status: Partially superseded by ADR-0076 (§9's `ConversationStore` obligation set and the reach of its stamped-conversation exclusion) and ADR-0084 (§9 item 5's premise that the façade is not a contract)
 - Date: 2026-07-28
+- Partially superseded: 2026-07-31 by ADR-0084 — **§9 item 5's premise that the
+  façade is concrete and not a contract is false; the conclusion it drew from
+  that premise survives for a different reason, and everything §9 item 5 decided
+  about `Engine.resume` stands.**
+  [ADR-0084](0084-the-local-api-and-the-cli-as-a-client.md) §5 finds ADR-0042
+  §1's revisit trigger fired and promotes the engine façade to a Protocol in
+  `core/protocols.py`, which forces its result types into `core/types.py` (golden
+  rule 2). ADR-0042 §1 is partially superseded there, and the clause below rests
+  on it by citation.
+
+  **Replaced**, one sentence, in §9 item 5: "The façade is concrete and not a
+  contract (ADR-0042 §1), so those names are shape, not spelling (ADR-0073 §7)."
+  The premise is false after ADR-0084 §5. This is **word for word** the clause
+  ADR-0077 §10 item 7 carried and ADR-0084's fan-out recorded there, so it is
+  ruled the same way. **The conclusion outlives its premise, for a different
+  reason:** ADR-0084 §4 hands the exact set, the field layouts and the method
+  signatures to a follow-on contract ADR (#281) rather than to an implementing
+  lane, so `Engine.converse`'s optional conversation id and the reported one, and
+  `Engine.resume` taking none, are still **shape** and the spelling is still a
+  later ADR's — ADR-0073 §7's form, reached now because the surface is ratified
+  elsewhere rather than because it is not a contract at all. What changes is the
+  cost: those names now land on `core` contract surface under golden rule 5
+  instead of being an `orchestration` lane's to choose.
+
+  **The `Refs` gloss is ruled on explicitly, and no record is owed for it.** The
+  header's "ADR-0042 §1 (the concrete façade)" **names** the clause it points at
+  without asserting its conclusion — unlike ADR-0077's "ADR-0042 §1 (the façade is
+  concrete, **not a contract**)", which does assert it and is recorded for that
+  reason. A pointer resolves against ADR-0042's own `Status` line, which now
+  carries the leading token and declares the supersession itself, so a reader
+  following the gloss is not misled. This is stated rather than passed over
+  because #540 left it open as a judgement call in either direction. The glosses
+  beside it are untouched: ADR-0084 §12 supersedes §1, §2 and §7 of ADR-0042, and
+  not "§3 (one call in, one result out)" or "§4 (a parked confirmation)", which is
+  also why §3's citation at the capture point and §4's at the opaque-token
+  relay stand unchanged.
+
+  **Not replaced, and it is nearly all of this ADR.** Everything §9 item 5
+  decided is untouched and now binds #281: `Engine.resume` takes no conversation
+  id and recovers the parked turn's conversation from the binding, because a
+  resume that accepted an id could be handed the wrong one and one that defaulted
+  to starting a conversation would orphan every recovered resolution. §§1–8 —
+  conversation as an entity, the turn-as-episode capture rule, the capture point,
+  the memory ordering handed to the planner — and §10's declinations are all
+  unaffected. **ADR-0076's earlier partial supersession is unaffected too**: the
+  two pairs on the `Status` line name different scopes (ADR-0076 §9's obligation
+  set, ADR-0084 §9 item 5's premise), so they accumulate under ADR-0070 §4 and its
+  overlap-precedence rule does not arise.
 - Note (2026-07-28): **§9's obligation set is no longer the whole of what
   `ConversationStore` owes, and its clause "no read returns a stamped
   conversation's rows at all" no longer holds for the deletion sweep.** ADR-0076
