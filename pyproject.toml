@@ -277,6 +277,12 @@ source_modules = [
     # The composition root wires concrete subsystems but still reaches models only
     # through the `ModelProvider` seam, never a provider SDK (ADR-0042 §Consequences).
     "ai_assistant.app",
+    # The wire carries whatever the engine returns and never asks a model anything
+    # (ADR-0084 §6). Listed because golden rule 4 is meant to be *mechanical*: the
+    # sibling contract below keeps `wire` free of every `ai_assistant` package but
+    # says nothing about an external one, so without this line a direct
+    # `import openai` here would pass the gate.
+    "ai_assistant.wire",
 ]
 # `huggingface_hub` is here for ADR-0024 §4: the model-artifact acquisition seam
 # stays owned by `models/`, and this makes that mechanically enforced rather than
