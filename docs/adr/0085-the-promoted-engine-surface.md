@@ -201,12 +201,24 @@ step 4) is rewriting anyway.
 
 ### 3. The fifteen signatures
 
-Written as they appear on the Protocol, **verbatim rather than abbreviated** —
-this block is what an implementation is generated from, so unlike §4's tables it
-spells every annotation out. `Identifier` and `UtcInstant` are `core/types.py`'s
-existing annotated aliases (a non-blank `str`, a tz-aware `datetime`);
-`EncodableText` is `core/types.py:343`'s alias for a `str` with a UTF-8
-encoding (§4c), and `utterance` is the only bare-text argument on the surface; `DEFAULT_PAGE_SIZE` is §3a below.
+**Every annotation is spelled out rather than abbreviated** — this block is what
+an implementation is generated from, so unlike §4's tables it uses no shorthand.
+`Identifier` and `UtcInstant` are `core/types.py`'s existing annotated aliases (a
+non-blank `str`, a tz-aware `datetime`); `EncodableText` is
+`core/types.py:343`'s alias for a `str` with a UTF-8 encoding (§4c), and
+`utterance` is the only bare-text argument on the surface; `DEFAULT_PAGE_SIZE` is
+§3a below.
+
+**Docstrings are omitted from the block and are not optional in the Protocol.**
+This is a signature listing, not the file: `CONTRIBUTING.md`'s Google-style
+requirement applies to the real `core/protocols.py`, and two docstring
+obligations are ratified elsewhere in this ADR rather than shown here — §1's,
+that `AssistantEngine`'s own docstring records it is **provided** by
+`orchestration` and **consumed** by `interfaces`, and §7's, that `converse` and
+`resume` carry the rule that the disposition is the gate's verdict while the
+named step's `status` and `failure` are the outcome. Reproducing nineteen
+docstrings would bury the shapes this section exists to fix; stating that they
+are owed, and where each is specified, is what the triad needs.
 
 ```python
 class AssistantEngine(Protocol):
