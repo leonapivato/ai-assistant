@@ -20,12 +20,15 @@ the precedent `test_ship.py` sets for the `_diff_opts` fixtures: a hand-copied
 constant would let production drift while the tests kept asserting against a
 pattern no script uses.
 
-Locale is pinned deliberately. Neither script sets one (`ship.sh` scopes
-`LC_ALL=C` to a single `awk` and nothing more), so the pattern has to hold under
-whatever the environment supplies. That rules out a bracket class of multibyte
-dashes: under `LC_ALL=C`, a class of em dash, en dash and hyphen degrades to
-the individual UTF-8 bytes of those code points and stops matching an em dash
-at all.
+Locale gets its own cases because character classes are locale-dependent and
+neither script inherits a trustworthy one. The rule has to survive both ends of
+that: a bracket class of multibyte dashes breaks under `LC_ALL=C`, where the
+dashes degrade to their individual UTF-8 bytes, while an unpinned
+`[^[:alnum:]]*` breaks under a single-byte non-ASCII locale, where an em dash's
+lead byte decodes as a letter and so *is* alphanumeric. The scripts answer both
+by pinning `LC_ALL=C` on the match itself, and the pin is asserted here — once
+structurally, so it always runs, and once against a real `en_US.ISO-8859-1`
+built for the purpose.
 """
 
 from __future__ import annotations
@@ -62,6 +65,19 @@ def _verdict_pattern(script: str) -> str:
     assert len(found) == 1, f"{script} must carry exactly one verdict pattern, got {found}"
     pattern: str = found[0]
     return pattern
+
+
+def _verdict_grep_invocation(script: str) -> str:
+    """The whole `grep` command line the script runs the verdict pattern through.
+
+    Separate from the pattern because the locale the match runs under is part of
+    the rule and not visible in the regex itself.
+    """
+    text = (_SCRIPTS / script).read_text(encoding="utf-8")
+    found = re.findall(r"([\w=]* *grep -qiE '\^\(verdict[^']*' <<<)", text)
+    assert len(found) == 1, f"{script} must carry exactly one verdict grep, got {found}"
+    invocation: str = found[0]
+    return invocation
 
 
 _PATTERNS = {name: _verdict_pattern(name) for name in _SCRIPT_NAMES}
@@ -128,12 +144,20 @@ _REJECTED = [
 ]
 
 
-def _matches(pattern: str, line: str, locale: str) -> bool:
-    """Whether `grep -qiE` accepts `line`, run exactly as the scripts run it."""
+def _matches(pattern: str, line: str, locale: str, locpath: Path | None = None) -> bool:
+    """Whether an *unpinned* `grep -qiE` accepts `line` under `locale`.
+
+    Deliberately unpinned: this is the probe for what the ambient locale would
+    do, which is what makes the scripts' own `LC_ALL=C` prefix demonstrably
+    load-bearing rather than decorative.
+    """
     assert _BASH is not None
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": locale}
+    if locpath is not None:
+        env["LOCPATH"] = str(locpath)
     result = subprocess.run(  # noqa: S603  # resolved bash path, test-controlled input
         [_BASH, "-c", 'grep -qiE "$1" <<<"$2"', "_", pattern, line],
-        env={"PATH": "/usr/bin:/bin", "LC_ALL": locale},
+        env=env,
         check=False,
     )
     return result.returncode == 0
@@ -229,7 +253,7 @@ def test_an_enumerated_dash_class_would_not_have_survived_the_c_locale(locale: s
     assert _matches(pattern, "Verdict \u2014 BLOCK", locale)
 
 
-def _artifact_has_verdict(artifact: Path, locale: str) -> bool:
+def _artifact_has_verdict(artifact: Path, locale: str, locpath: Path | None = None) -> bool:
     """Run `ship.sh`'s real `artifact_has_verdict` against a file.
 
     The function is evaluated on its own rather than by running `ship.sh`, which
@@ -242,9 +266,12 @@ def _artifact_has_verdict(artifact: Path, locale: str) -> bool:
     text = (_SCRIPTS / "ship.sh").read_text(encoding="utf-8")
     match = re.search(r"^artifact_has_verdict\(\) \{\n.*?^\}\n", text, re.MULTILINE | re.DOTALL)
     assert match is not None, "no `artifact_has_verdict` function found in ship.sh"
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": locale}
+    if locpath is not None:
+        env["LOCPATH"] = str(locpath)
     result = subprocess.run(  # noqa: S603  # resolved bash path, test-controlled input
         [_BASH, "-c", f'{match.group(0)}\nartifact_has_verdict "$1"', "_", str(artifact)],
-        env={"PATH": "/usr/bin:/bin", "LC_ALL": locale},
+        env=env,
         check=False,
     )
     return result.returncode == 0
@@ -300,3 +327,85 @@ def test_ship_still_refuses_a_verdict_with_no_findings(tmp_path: Path, locale: s
     )
 
     assert not _artifact_has_verdict(artifact, locale)
+
+
+def _single_byte_locale(tmp_path: Path) -> Path | None:
+    """Build an `en_US.ISO-8859-1` locale, or None if this machine cannot.
+
+    Built rather than looked up: the single-byte locale that breaks an unpinned
+    match is exactly the one a CI image is least likely to ship, so relying on
+    `locale -a` would skip the regression everywhere it matters. `localedef` is
+    part of glibc; on a machine without it (musl, or a trimmed image) the test
+    skips rather than failing for an unrelated reason.
+    """
+    if shutil.which("localedef") is None:
+        return None
+    root = tmp_path / "locales"
+    target = root / "en_US.ISO-8859-1"
+    target.mkdir(parents=True)
+    built = subprocess.run(  # noqa: S603  # resolved localedef path, fixed arguments
+        ["localedef", "-i", "en_US", "-f", "ISO-8859-1", str(target)],  # noqa: S607
+        capture_output=True,
+        check=False,
+    )
+    if built.returncode != 0 or not any(target.iterdir()):
+        return None
+    return root
+
+
+@pytest.mark.parametrize("script", _SCRIPT_NAMES)
+def test_the_verdict_match_pins_the_c_locale(script: str) -> None:
+    """The pin is part of the rule, and this is the assertion that always runs.
+
+    `[^[:alnum:]]*` only means "any separator" if the locale says so. Character
+    classes are locale-dependent, and in a single-byte non-ASCII locale the
+    leading byte of a UTF-8 em dash decodes as a letter — so an unpinned match
+    classifies it as `[[:alnum:]]`, refuses to consume it, and discards the dash
+    verdicts that #555 was filed about. Neither script pins an ambient locale.
+
+    Asserted structurally because the behavioural proof below needs a locale the
+    machine may not be able to build, and a rule this easy to drop in a later
+    edit should not be guarded only by a test that can skip.
+    """
+    assert _verdict_grep_invocation(script).startswith("LC_ALL=C grep"), (
+        f"{script} must run the verdict match under a pinned locale, got: "
+        f"{_verdict_grep_invocation(script)!r}"
+    )
+
+
+def test_a_single_byte_locale_cannot_discard_a_dash_verdict(tmp_path: Path) -> None:
+    """The regression the pin exists for, proved against a real locale.
+
+    Two halves, and the second is what makes the first mean anything: the
+    *unpinned* pattern is shown to discard an em-dash verdict under
+    `en_US.ISO-8859-1`, and the shipped invocation is shown to accept the same
+    artifact under the same ambient locale. Without the hazard half, a green
+    test would be consistent with the locale never having loaded at all.
+    """
+    locpath = _single_byte_locale(tmp_path)
+    if locpath is None:
+        pytest.skip("no localedef available to build a single-byte locale")
+    latin1 = "en_US.ISO-8859-1"
+
+    # The hazard: unpinned, this locale classifies the em dash's lead byte as
+    # alnum, so `[^[:alnum:]]*` stops dead and the verdict is read as a refusal.
+    assert not _matches(_PATTERNS["ship.sh"], "Verdict — BLOCK", latin1, locpath=locpath), (
+        "expected the unpinned pattern to fail under a single-byte locale"
+    )
+    # Sanity: the locale really is loaded and really is single-byte, so the
+    # assertion above cannot pass by silently falling back to C.
+    assert _matches(_PATTERNS["ship.sh"], "Verdict: BLOCK", latin1, locpath=locpath)
+
+    # The fix: ship.sh's real invocation pins its own locale, so the ambient one
+    # cannot reach it.
+    artifact = tmp_path / "review.md"
+    artifact.write_text(
+        "<!-- persona=adversarial base_sha=abc123 patch_id=deadbeef -->\n"
+        "**major** `scripts/thing.sh:12` — the guard fails open here.\n"
+        "**nit** `scripts/thing.sh:40` — stale comment.\n"
+        "\n"
+        "**Verdict — BLOCK**\n",
+        encoding="utf-8",
+    )
+
+    assert _artifact_has_verdict(artifact, latin1, locpath=locpath)

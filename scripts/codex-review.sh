@@ -1227,13 +1227,22 @@ fi
 # instead would only move the next unlisted separator into the same trap, and a
 # bracket class of multibyte dashes is not even locale-safe: under `LC_ALL=C`,
 # `[—–-]` degrades to the individual UTF-8 bytes and stops matching an em dash
-# at all. These scripts pin no locale, so the class must be one that holds under
-# any of them. Accepting any non-alphanumeric run costs nothing the guard was
-# relying on, since the whole-line anchor and the exact verdict word are what
-# reject a refusal.
+# at all. Accepting any non-alphanumeric run costs nothing the guard was relying
+# on, since the whole-line anchor and the exact verdict word are what reject a
+# refusal.
+#
+# `LC_ALL=C` on the match is what makes that class mean the same thing
+# everywhere, and it is not optional. Character classes are locale-dependent: in
+# a single-byte non-ASCII locale such as `en_US.ISO-8859-1`, an em dash's
+# leading UTF-8 byte 0xE2 decodes as a letter and *is* `[[:alnum:]]`, so
+# `[^[:alnum:]]*` cannot consume it and the dash verdicts are discarded again —
+# the same bug, reappearing only on machines nobody tested on. These scripts pin
+# no ambient locale, so the match pins its own. Matching bytes is the right
+# choice here: the verdict words are ASCII, and the separator is only ever
+# skipped over, never interpreted.
 last_line="$(grep -v '^[[:space:]]*$' "$out" | tail -n 1 |
     tr -d '*#`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-if ! grep -qiE '^(verdict[^[:alnum:]]*)?(block|approve with nits|approve)\.?$' <<<"$last_line"; then
+if ! LC_ALL=C grep -qiE '^(verdict[^[:alnum:]]*)?(block|approve with nits|approve)\.?$' <<<"$last_line"; then
     echo "codex output does not end in a verdict; not recording it as a review" >&2
     echo "this is usually a refusal or a timeout rather than a review" >&2
     echo "last line was: ${last_line}" >&2
