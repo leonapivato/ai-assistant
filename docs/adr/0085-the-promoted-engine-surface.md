@@ -30,11 +30,9 @@
   the frame arithmetic.
 - **The byte-level wire encoding is ratified by ADR-0087, not here.** §8c fixes
   the size limit and that it is measured on one canonical encoding; **ADR-0087**
-  fixes that encoding, with normative test vectors, and **merges before the
-  triad** — so the boundary is ratified text before any second implementation
-  exists, and before the triad (§11a). Writing the grammar here was attempted and
-  withdrawn; so was leaving it to an implementing lane, which the triad's
-  canonical fake refutes (§8c).
+  fixes that encoding, with normative test vectors (§11a). Writing the grammar
+  here was attempted and withdrawn; so was leaving it to an implementing lane,
+  which the triad's canonical fake refutes (§8c).
 - **This ADR amends nothing.** §12 applies ADR-0082 §1's test to every earlier
   ADR whose text this one touches and finds no record owed — each of the clauses
   examined is a deferral whose deferring sentence stays true and now has an
@@ -919,9 +917,8 @@ disagreements at the boundary. What this ADR fixes is the **limit**; what
 ADR-0087 fixes is the **encoding** the limit is measured on.
 
 > **The measurement is taken on the payload's canonical wire encoding, which
-> ADR-0087 ratifies with normative test vectors.** ADR-0087 is `Proposed` and
-> **merges before the triad**, so the boundary is defined by ratified text before
-> any second implementation exists. §11a states the sequencing.
+> ADR-0087 ratifies with normative test vectors.** ADR-0087 is `Proposed`; §11a
+> says what it settles.
 
 **Why it is a separate ADR rather than a section here**, in the order the reasons
 bind:
@@ -951,18 +948,16 @@ bind:
   a byte grammar in front of reviewers reading for method shape, which is how the
   corners went unnoticed for four rounds.
 
-**ADR-0087 lands before the triad**, precisely because the canonical fake is the
-second implementation that would otherwise have nothing to conform to. That is the
-one ordering fact this ADR states, and it is what makes the reference above
-resolve. **How ADR-0084 §5's own sequence is renumbered around it is ADR-0087's to
-state and to record** (§11a, §12): the sentence there becomes false only once
-ADR-0087 exists, and this ADR is its step 2 under any count.
+**Where ADR-0087 sits in the work is ADR-0087's to state, not this ADR's**, and
+the restraint is deliberate rather than coy. A position in a sequence is a fact
+about the ADR that occupies it; asserting it here would be this document deciding
+something about another one, and ADR-0084 §5's own enumeration is what it would
+be deciding against. §12 records why that leaves no amendment owed here.
 
-**A forward reference to a `Proposed` ADR is normal here, and the precedent is
-this ADR itself.** ADR-0084 §5 named "the surface ADR (#281's scope)" as its step
-2 before that ADR existed, and §4 and §11 both defer to it by name. The same shape
-one step along: a decision that is dispatched, drafted and sequenced ahead of what
-depends on it is a reference, not a dangling one.
+**A forward reference to a `Proposed` ADR is normal, and the precedent is this
+ADR itself.** ADR-0084 §5 named "the surface ADR (#281's scope)" before that ADR
+existed, and §4 and §11 both defer to it by name. Citing a decision that is
+dispatched and drafted is a reference, not a dangling one.
 
 **A `core`-owned codec is the obvious alternative and ADR-0084 §6 forecloses it.**
 That ADR places "the envelope, the framing, the codec, the error mapping, and the
@@ -1202,7 +1197,7 @@ fixed, so it is stated compactly rather than method by method:
 - **One canonical encoding serves both jobs.** The bytes a client measures
   against §8c's limit are exactly the bytes it writes, so measurement and
   transmission can never disagree. **Which bytes those are is ratified by
-  ADR-0087** (§11a), which lands before the triad.
+  ADR-0087** (§11a).
 
 #### 10a. The error frame, so a declared failure survives the wire
 
@@ -1357,16 +1352,14 @@ makes "the code is the class name" safe: `ValueError` is not ours to name.
 
 ### 11. Deferred by name, and where the corpus and the tree disagree
 
-#### 11a. What ADR-0087 decides, and when it lands
+#### 11a. What ADR-0087 decides
 
-Stated as sequencing rather than as a deferral, so a reader knows the reference in
-§8c resolves.
+Named so the reference in §8c resolves to a decision rather than to a silence.
 
 > **The canonical wire encoding — the exact byte string a payload serialises to —
 > is ADR-0087's**, ratified with normative test vectors. This ADR fixes the limit
 > (`hub_max_frame_bytes - 512`, §8c), that it covers all three payload classes,
-> and that it is measured on that encoding. **ADR-0087 merges before the triad**,
-> so the boundary is ratified before a second implementation exists.
+> and that it is measured on that encoding.
 
 **What ADR-0087 has to settle**, listed because each is a place two encoders can
 differ at the boundary and each was found by review here rather than by
@@ -1393,26 +1386,13 @@ be inferred: the list is the problem statement ADR-0087 inherits, not a set of
 answers it is expected to reach. Where it and ADR-0087 could be read as
 disagreeing, ADR-0087 governs the encoding and this ADR governs the limit.
 
-**This ADR states one ordering constraint and deliberately does not restate
-ADR-0084 §5's sequence.** The constraint is that **ADR-0087 merges before the
-triad**, which is what makes §8c's reference resolve: the boundary is ratified
-before the canonical fake gives the surface a second implementation.
-
-**Renumbering ADR-0084 §5's four changes into five is *not* done here, and the
-distinction is not a dodge.** An earlier draft of this section printed a five-item
-list, and printing it is what would make ADR-0084 §5's "four changes" sentence
-false *in this document* — at which point this change would owe the ADR-0082 §1
-record for it. That is incoherent with §12's position that the record travels with
-ADR-0087, so the list is gone rather than the position.
-
-**The reason the record belongs to ADR-0087 is that the sequence change is
-contingent on it.** If ADR-0087 never lands, ADR-0084 §5's four changes stand
-unaltered and nothing here needs revisiting: this ADR is step 2 either way, and it
-adds no step. ADR-0087 is the change that introduces the step, and under ADR-0070
-§1 a record belongs with the change that makes the earlier text false — the rule
-ADR-0084 §12 applied to itself when it landed ADR-0042's record in its own change
-rather than in a follow-up. **So ADR-0087's lane owes a record on ADR-0084 §5**,
-and that obligation is named here so it is not discovered late.
+**This ADR says nothing about where ADR-0087 sits in the work, and the omission
+is the decision.** A position in a sequence is a fact about the ADR that occupies
+it, so **ADR-0087 states its own**, and the ADR-0082 §1 record that goes with it
+is ADR-0087's. Placing it from here would have made ADR-0084 §5's enumeration
+false *in this document* and made this the amending change (§12). This ADR
+neither adds a step nor moves one: it is ADR-0084 §5's step 2 whatever else
+lands.
 
 #### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
@@ -1496,19 +1476,15 @@ move to `Accepted` triggers nothing.
   split, where the tree has one that cannot. An ADR whose text you have to
   contradict to implement is amended; one whose text you have to be *able* to
   implement is served.
-- **ADR-0084 §5's "four changes".** A record **is** owed on that sentence, and it
-  is **not owed by this change** — the two halves have to be stated together
-  because asserting only the first would make this ADR the amending one.
-
-  This ADR does not renumber the sequence and does not print a five-step list
-  (§11a); it states one constraint, that ADR-0087 merges before the triad. The
-  sentence in ADR-0084 §5 becomes false only once ADR-0087 exists, and if
-  ADR-0087 never lands it stays true — this ADR is step 2 under either count and
-  adds no step. Under ADR-0070 §1 the record belongs with the change that makes
-  the earlier text false, which is the rule ADR-0084 §12 applied to itself when it
-  landed ADR-0042's record in its own change rather than a follow-up. **The
-  obligation is ADR-0087's**, named in §11a so its lane inherits it rather than
-  discovering it.
+- **ADR-0084 §5's four-change sequence — no record owed, because this ADR does
+  not decide the sequence.** Stated rather than left silent, because the silence
+  is what invites the question. This ADR *cites* ADR-0087 for the encoding (§8c)
+  and says nothing about where it lands (§11a). Citing an ADR is not sequencing
+  one: ADR-0070 §1 puts a record where the falsifying decision is, and the
+  decision that would falsify §5's enumeration is ADR-0087's insertion into it —
+  a fact about ADR-0087, made wherever ADR-0087 states it. Under this ADR alone,
+  §5's four changes stand and the triad still follows step 2. **The obligation
+  travels with ADR-0087**, whose lane owns it.
 - **ADR-0086.** No record, and no dependency in either direction. Its §7 hands
   the DTO shape here explicitly and takes no position on it; §8f states the
   relationship and declines to lean on an unratified ADR.
@@ -1607,8 +1583,7 @@ move to `Accepted` triggers nothing.
   rejected in §8c.* The triad's canonical fake is a second implementation and it
   arrives in change 3, so two implementations can disagree about which calls are
   refused before the wire package exists at all; refusal is contract-visible, and
-  a suite can only test what is specified. ADR-0087 ratifies the bytes before the
-  triad instead.
+  a suite can only test what is specified. ADR-0087 ratifies the bytes instead.
 - **Pin the canonical byte encoding in this ADR** — first as a grammar of rules an
   encoder must satisfy, then as a named pydantic entry point. *Attempted, and
   withdrawn.* The grammar form took four review rounds, each finding one more
@@ -1619,7 +1594,7 @@ move to `Accepted` triggers nothing.
   rather than on its value. Both are the unspiked seam #281 warns about, and both
   are the enumeration §8d and §10a decline elsewhere. The encoding is a
   *representation* contract, where a round-trip vector pins it in a line — so it is
-  **ADR-0087's**, ratified before the triad (§11a). **What is kept here is the
+  **ADR-0087's** (§11a). **What is kept here is the
   limit and that it is measured on one canonical encoding** — the part ADR-0084 §4
   makes contract.
 - **Answer an oversized error payload with `OversizedValueError`, as an oversized
