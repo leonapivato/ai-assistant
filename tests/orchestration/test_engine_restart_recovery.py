@@ -156,6 +156,7 @@ def _make_engine(
         plans=plans,
         trail=trail,
         memory=memory,
+        deferrals=deferrals,
         conversations=ConversationLifecycle(
             conversations=conversations,
             memory=memory,

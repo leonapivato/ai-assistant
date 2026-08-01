@@ -683,6 +683,56 @@ class Settings(BaseSettings):
         ),
     )
 
+    # The hub scheduler's three job intervals (ADR-0083 §7). One field per job,
+    # with the ADR's own default, because §7 requires exactly that: "Each interval
+    # is a ``Settings`` field with the default above, which is what ADR-0077 §8
+    # asks for: 'Cadence then becomes configuration rather than a contract
+    # change.'" The defaults are named in the ADR rather than left to the
+    # implementation, following ADR-0074 §9.3.
+    #
+    # **All three are ``_OptionalDuration``, and the ``None`` is load-bearing.**
+    # §7: "Every duration this ADR adds is a ``timedelta`` refused at load time
+    # unless it is finite and strictly positive… **'Disabled' is ``None``, never
+    # ``0``**". Both halves matter and for the same reason: the scheduler
+    # re-arms a job from its *completion*, so an interval of zero would make a
+    # job due again the instant it finished — a retention purge turned into a hot
+    # loop against SQLite. ``gt=timedelta(0)`` refuses that at load, and the
+    # sentinel gives "off" a spelling that cannot be confused with "as fast as
+    # possible", which is the one confusion a scheduler cannot afford because the
+    # two look identical in a config file.
+    retention_purge_interval: _OptionalDuration = Field(
+        default=timedelta(hours=1),
+        gt=timedelta(0),
+        description=(
+            "How often the hub sweeps expired memory records and purgeable deferred "
+            "questions (ADR-0083 §7). Set it to 'none' to disable the job; never 0."
+        ),
+    )
+    conversation_sweep_interval: _OptionalDuration = Field(
+        default=timedelta(hours=1),
+        gt=timedelta(0),
+        description=(
+            "How often the hub finishes pending conversation deletions and then reclaims "
+            "what retention has emptied (ADR-0083 §7). Set it to 'none' to disable the "
+            "job; never 0."
+        ),
+    )
+    # Ships **disabled**, and §7 argues the default rather than assuming it:
+    # ADR-0077 §8 leaves observation with no durable cursor, so a periodic run
+    # re-reads the same recent window and spends a model call each time while
+    # never reaching the turns the window has already passed. Enabling it on a
+    # timer before the cursor exists (ADR-0083 §13) buys repeated cost and no new
+    # coverage. The field exists so that enabling it is configuration.
+    observation_interval: _OptionalDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How often the hub distils beliefs from the most recently active "
+            "conversation. Disabled by default until the observation cursor lands "
+            "(ADR-0083 §7, §13); set a duration to enable it."
+        ),
+    )
+
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
     # orchestration layer reaches for when a caller doesn't specify one.

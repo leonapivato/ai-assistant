@@ -59,7 +59,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar, assert_never
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Final, TypeVar, assert_never
 
 import structlog
 
@@ -104,7 +105,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from datetime import timedelta
 
-    from ai_assistant.core.protocols import AuditTrail, MemoryStore, PlanStore
+    from ai_assistant.core.protocols import AuditTrail, DeferralStore, MemoryStore, PlanStore
     from ai_assistant.core.types import (
         AnswerOutcome,
         BeliefBand,
@@ -145,6 +146,72 @@ _DEFAULT_MAX_OUTSTANDING = 1024
 #: implementation called without ``limit`` behaves as though it had been passed.
 #: It is still relayed explicitly on every store call, so a store whose own default
 #: drifted could not silently change what this surface returns.
+
+#: What :meth:`Engine._reject_if_closing` raises a ``RuntimeError`` *saying*.
+#:
+#: Public and named because ADR-0083 §8 makes a caller act on it: "the scheduler
+#: treats the ``RuntimeError`` that ``_reject_if_closing`` raises… as **stop**, not
+#: as a job failure to log and retry". A caller that has to tell *this*
+#: ``RuntimeError`` from any other one needs something to compare against, and the
+#: alternatives are worse in both directions — treating every ``RuntimeError`` as a
+#: shutdown would silence real bugs by turning them into a clean exit, and matching
+#: a message re-spelled at the comparison site would stop matching the moment this
+#: one is reworded. Sharing the constant makes the two sides the same object, so
+#: they cannot drift.
+#:
+#: The exception *type* is deliberately unchanged: ``RuntimeError`` is what
+#: ``AssistantEngine``'s Protocol docstrings declare every public method raises when
+#: the engine is closing, and narrowing it to a subclass here would be contract
+#: surface (golden rule 5) for a distinction only one caller needs.
+ENGINE_SHUTTING_DOWN: Final = "the engine is shutting down and is not accepting new work"
+
+
+class DrainPhase(StrEnum):
+    """Which phase of ADR-0083 §4's two-phase drain a shutdown ended in.
+
+    Read by the hub *after* :meth:`Engine.aclose` returns, so a shutdown that has
+    completed says how it completed (#559). Phase B is the transition an operator
+    most needs to see: it is the only one where in-flight work was actively
+    cancelled, and the only one whose tail ADR-0083 §4 leaves unbounded.
+    """
+
+    #: :meth:`Engine.aclose` has not been entered, or has not reached the drain.
+    NOT_RUN = "not_run"
+    #: Every tracked task finished **on its own** — either nothing was in flight,
+    #: or phase A's budget was enough. Nothing was cancelled.
+    QUIESCED = "phase_a_quiesced"
+    #: Phase A's budget was reached; the remainder was cancelled and then awaited
+    #: to completion, unbounded (ADR-0083 §4).
+    CANCELLED = "phase_b_cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeReport:
+    """What one retention sweep physically reclaimed (ADR-0083 §7, §8).
+
+    The result of :meth:`Engine.purge_expired`, which is **one** job over **two**
+    stores because ADR-0078 §10 item 8 says so in as many words: the deferral
+    queue's purge "is wired wherever ``purge_expired`` is wired and inherits the
+    same fate", and "inventing a second sweeping mechanism for one store would be
+    the thing that has to be undone at leg 5".
+
+    The counts are reclamation, not visibility: both stores already hide what is
+    past its deadline at *read* time (ADR-0007 §2, ADR-0078 §6), so a sweep that
+    never runs costs the exposure cap ADR-0078 §1 names and costs nothing else.
+    They are here so the job can say what it did — a sweep whose log line is
+    indistinguishable from a sweep that found nothing is the shape #559 objects to
+    at the other end of the lifecycle.
+
+    A plain dataclass rather than a ``core`` DTO **deliberately**: this is
+    maintenance surface on a concrete class in ``orchestration`` (ADR-0083 §8), not
+    something that crosses a subsystem boundary, and the only caller is the
+    scheduler that lives above the composition root.
+    """
+
+    #: Expired :class:`~ai_assistant.core.types.MemoryRecord` rows removed.
+    records: int
+    #: Purgeable deferred-question rows removed.
+    questions: int
 
 
 def _uuid() -> str:
@@ -484,6 +551,7 @@ class Engine:
         plans: PlanStore,
         trail: AuditTrail,
         memory: MemoryStore,
+        deferrals: DeferralStore,
         conversations: ConversationLifecycle,
         observation: ObservationStage,
         questions: QuestionStage,
@@ -537,6 +605,18 @@ class Engine:
                 make the stage the seam for a question it has no part in. Wired to a
                 *second* store, a listing would show beliefs the assistant does not
                 use and ``forget`` would destroy nothing the user was shown.
+            deferrals: The durable deferred-question queue — the **same** instance
+                ``questions`` holds and the write stage enqueues into, a
+                composition-root single-instance obligation of the same shape as
+                ``plans`` and ``trail``. Held directly, and for exactly one reason:
+                :meth:`purge_expired` is *one* job over *both* stores because
+                ADR-0078 §10 item 8 forbids a second sweeping mechanism, so the
+                façade has to be able to reach this one. Everything a *user* does to
+                a question still goes through ``questions``; nothing else on this
+                surface touches this handle. Wired to a second queue, the sweep
+                would reclaim rows nobody can see while the rows the user's
+                questions actually live in kept growing — which is ADR-0078 §1's cap
+                reported as kept and not kept.
             conversations: The capture/lifecycle stage (ADR-0074 §9) — the one
                 layer that holds both durable stores, and therefore the owner of
                 every sequence spanning them. It must be wired to the *same*
@@ -655,6 +735,7 @@ class Engine:
         self._plans = plans
         self._trail = trail
         self._memory = memory
+        self._deferrals = deferrals
         self._conversations = conversations
         self._observation = observation
         self._questions = questions
@@ -669,6 +750,24 @@ class Engine:
         self._inflight: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._shutdown: asyncio.Task[None] | None = None
+        self._drain_phase = DrainPhase.NOT_RUN
+
+    @property
+    def drain_phase(self) -> DrainPhase:
+        """Which phase of ADR-0083 §4's drain this engine's shutdown ended in.
+
+        :data:`DrainPhase.NOT_RUN` until :meth:`aclose` reaches the drain. Read by
+        the hub once ``aclose`` has returned, so its completion event can say
+        whether phase A was enough or the budget was spent and work cancelled
+        (#559) — the distinction an operator cannot otherwise make, because both
+        look identical from outside: a process that has not exited yet.
+
+        Exposed as a **read** rather than as ``aclose``'s return value on purpose:
+        ``aclose`` is memoised and every caller awaits the same shielded task
+        (ADR-0042 §2), so a return value would have to be duplicated to every
+        caller of an idempotent method whose contract is "everything is closed".
+        """
+        return self._drain_phase
 
     async def start(self) -> None:
         """Finish the sweeps a previous run left behind (ADR-0074 §7, §8; ADR-0076).
@@ -702,6 +801,68 @@ class Engine:
         """Finish pending deletions, then reclaim what retention has emptied."""
         await self._conversations.sweep_deletions()
         await self._conversations.reclaim()
+
+    async def purge_expired(self) -> PurgeReport:
+        """Physically reclaim what both Tier 1 stores have promised to forget.
+
+        The **maintenance surface** ADR-0083 §8 says this façade grows: "new
+        *concrete* surface on a class in ``orchestration``, not ``core`` contract
+        surface". Its only caller is the hub's scheduler (ADR-0083 §7), which holds
+        an ``Engine`` and nothing else — no concrete store, no subsystem import —
+        so it is a client of the same façade the CLI is a client of, which is what
+        makes ADR-0076 §5's "a scheduler is a second caller of the same read"
+        literally true rather than approximately.
+
+        **One operation over two stores, deliberately.** ADR-0078 §10 item 8:
+        the deferral queue's purge "is wired wherever ``purge_expired`` is wired and
+        inherits the same fate… Inventing a second sweeping mechanism for one store
+        would be the thing that has to be undone at leg 5." One method calling both
+        is that instruction taken literally, and it is why
+        ``tests/app/test_composition.py``'s sweep guard now names *this* method's
+        body as the one place either name may be called (ADR-0083 §11).
+
+        **Correctness does not depend on it running.** Both stores exclude what is
+        past its deadline at *read* time — ADR-0007 §2 ("This holds regardless of
+        whether ``purge_expired`` has run, so the privacy guarantee does not depend
+        on a background job") and ADR-0078 §6 — so a missed or late sweep is never a
+        correctness bug. What it buys is ADR-0078 §1's *exposure cap*: unswept, a
+        lapsed question's proposal is the user's own words sitting on disk
+        indefinitely.
+
+        Tracked like every other public method, so shutdown drains it before
+        closing the connections it is writing through (ADR-0042 §2). The order is
+        memory then questions and nothing depends on it: neither sweep reads the
+        other's rows.
+
+        Returns:
+            How many rows each store reclaimed.
+
+        Raises:
+            RuntimeError: If the engine is shutting down. The scheduler treats this
+                as *stop* rather than as a job failure (ADR-0083 §8), which is what
+                :data:`ENGINE_SHUTTING_DOWN` exists for.
+            MemoryStoreError: If the memory store could not be swept. The deferral
+                sweep does **not** run in that case: nothing sequences the two, so
+                the next tick simply re-runs both, and swallowing the first failure
+                to reach the second would report a sweep that half happened.
+            DeferralStoreError: If the deferral queue could not be swept.
+        """
+        self._reject_if_closing()
+        return await self._tracked(self._purge_expired())
+
+    async def _purge_expired(self) -> PurgeReport:
+        """Sweep both Tier 1 stores — **the only place either purge is called**.
+
+        ADR-0083 §11 pins that claim mechanically rather than by convention: the
+        composition-root guard scans the whole package for a call to ``purge`` or
+        ``purge_expired`` by those bare attribute names, receiver-blind, and now
+        requires the set it finds to be *exactly* these two lines. A sweep added
+        anywhere else — under a different name, over a different store, by a
+        second timer — still fails it.
+        """
+        records = await self._memory.purge_expired()
+        questions = await self._deferrals.purge()
+        return PurgeReport(records=records, questions=questions)
 
     async def converse(
         self,
@@ -1634,6 +1795,12 @@ class Engine:
         the whole drain, which is what this façade did before ADR-0083.
         """
         pending = set(self._inflight)
+        # Recorded before anything is awaited, and narrowed only if phase B is
+        # actually entered, so the hub's completion event (#559) is accurate at
+        # every point a reader could reach it — including a shutdown that raised in
+        # a closer after the drain, which is exactly when an operator wants to know
+        # whether work had been cancelled.
+        self._drain_phase = DrainPhase.QUIESCED
         if not pending:
             return
         if self._drain_timeout is None:
@@ -1650,6 +1817,7 @@ class Engine:
         # Phase B. Logged before cancelling: this is the moment a deployment's stop
         # timeout is being spent, so an operator reading the journal after a
         # SIGKILL can see that the drain had reached its budget and was cancelling.
+        self._drain_phase = DrainPhase.CANCELLED
         _log.info("shutdown_drain_budget_exceeded", cancelling=len(pending))
         for task in pending:
             task.cancel()
@@ -1681,12 +1849,17 @@ class Engine:
     def _reject_if_closing(self) -> None:
         """Refuse new work once shutdown has begun (ADR-0042 §2 stops accepting).
 
+        The message is :data:`ENGINE_SHUTTING_DOWN` rather than a literal, because
+        ADR-0083 §8 makes the hub's scheduler act on *this* ``RuntimeError``
+        specifically — as **stop**, not as a job failure to log and retry — and a
+        caller that has to recognise it needs something to compare against that
+        cannot drift from what is raised here.
+
         Raises:
             RuntimeError: If :meth:`aclose` has been entered.
         """
         if self._closing:
-            msg = "the engine is shutting down and is not accepting new work"
-            raise RuntimeError(msg)
+            raise RuntimeError(ENGINE_SHUTTING_DOWN)
 
     def _admit_and_reserve(self) -> str:
         """Admit one step for driving under the confirmation ceiling, reserving its slot.
