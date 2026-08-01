@@ -300,16 +300,42 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
     [
         "#### 4. A heading",
         "See the [anchor](#some-heading).",
+        "See the [section](#123).",
+        'See the [section](#123 "title").',
         "The colour #abc123 is wrong.",
         "Item ##7 is odd.",
     ],
-    ids=["heading", "anchor", "hex-colour", "doubled-hash"],
+    ids=[
+        "heading",
+        "slug-anchor",
+        "numeric-anchor",
+        "titled-anchor",
+        "hex-colour",
+        "doubled-hash",
+    ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
+    """Tier 1 is the tier that *fails*, so a false selection here is the costly one."""
     _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\n{line}\n"})
     env = _fake_gh(tmp_path, [1])
 
-    assert _findings(_report(tmp_path, env=env), "tracker") == []
+    result = _run(tmp_path, env=env)
+
+    assert result.returncode == 0
+    assert _findings(json.loads(result.stdout), "tracker") == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["The fix (#2) landed.", "Tracked by #2.", "See #2/#3.", "#2 is the one."],
+    ids=["parenthesised", "trailing", "slash-joined", "leading"],
+)
+def test_a_tracker_citation_in_prose_is_still_selected(tmp_path: Path, line: str) -> None:
+    """The exclusions above must not swallow the form the corpus actually writes."""
+    _make_repo(tmp_path, {"0001-one.md": f"# 1. One\n\n{line}\n"})
+    env = _fake_gh(tmp_path, [1])
+
+    assert _citations(_report(tmp_path, env=env), "tracker")
 
 
 # --------------------------------------------------------------------------- #

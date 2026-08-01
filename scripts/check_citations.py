@@ -99,9 +99,22 @@ _DOCUMENT_SUFFIXES = frozenset(
 #: scope (ADR-0074's "ADR-0076 §9's obligation set" names ADR-0074's own §9).
 _DECISION_RE = re.compile(r"\bADR-(\d{4})\b")
 
-#: A tracker citation (ADR-0088 §1(c)). The lookaround excludes a markdown
-#: heading (``#`` then a space), an anchor (``](#slug)``), and a hex colour.
-_TRACKER_RE = re.compile(r"(?<![\w#])#(\d{1,6})(?![\w#])")
+#: A tracker citation (ADR-0088 §1(c)).
+#:
+#: **This is the one selector whose mistakes reach Tier 1**, where a false
+#: positive *fails* a change rather than joining a list a reader scans, so its
+#: exclusions are the strictest here. Ruled out: a markdown heading (``#`` then
+#: a space), a hex colour and a doubled ``#`` by the character classes; and a
+#: **numeric** fragment link — ``[section](#123)`` — by the ``](`` lookbehind,
+#: which the slug case never exercised.
+#:
+#: **The exclusions are narrow on purpose, and were measured against the corpus
+#: rather than reasoned about.** A parenthesised citation in prose — "the fix
+#: (#123) landed" — stays selected, which is why this names ``](`` instead of
+#: dropping everything inside brackets. A leading ``/`` was tried and reverted:
+#: it reads like a URL fragment and is in fact how the corpus joins citations,
+#: ``#313/#314`` and ``#66/#83/#93``, 14 times.
+_TRACKER_RE = re.compile(r"(?<![\w#])(?<!\]\()#(\d{1,6})(?![\w#])")
 
 #: An inline code span. Longest run of backticks first, so ``` ``a `b` c`` ```
 #: is read as one span rather than two. Spans do not cross a line here: a
