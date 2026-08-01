@@ -410,9 +410,12 @@ implementation's behaviour, `pyproject.toml` admits any Python `>=3.14`, and
 ADR-0084 §3 freezes this representation permanently. Two conforming interpreters
 could then write one value two ways.
 
-> Let the value be finite and let **D** be the shortest string of decimal digits,
-> with no leading and no trailing zero, that round-trips — the unique such string
-> — and let **decpt** be the integer with `value = ±0.D × 10^decpt`.
+> Let the value be finite. Among all strings of decimal digits that round-trip to
+> it, take the **shortest**; where several of that length round-trip, take the one
+> whose exact decimal value is **nearest** the binary value, and if two are exactly
+> equidistant the one whose **last digit is even**. Call it **D**, with no leading
+> and no trailing zero, and let **decpt** be the integer with
+> `value = ±0.D × 10^decpt`.
 >
 > - **Fixed-point when `-4 < decpt ≤ 16`**, with at least one digit on each side
 >   of the point: `0.0001`, `0.1`, `1.0`, `1000000000000000.0`.
@@ -421,6 +424,17 @@ could then write one value two ways.
 >   `decpt − 1` in **at least two digits**: `1e-05`, `1e+16`, `1.5e+300`.
 > - **Zero is `0.0`**, and negative zero is `-0.0` (§4a).
 > - A negative value is a leading `-` followed by the encoding of its magnitude.
+
+**The tie-break is not decoration, and an earlier draft asserted uniqueness
+instead.** Shortest-round-tripping does not single out a string:
+`-1.5670905694168155e-99` and `-1.5670905694168156e-99` are both seventeen
+digits and both parse to `-0x1.b6bc406aad682p-329`, the same double. Nearest
+separates them — the `…156` candidate is about 2.6e-116 from the exact value and
+the `…155` candidate about 7.4e-116 — and it is what CPython picks. The
+even-last-digit rule beneath it may well be unreachable, since equidistance would
+need the binary value to sit exactly on a midpoint of the decimal grid; it is
+stated anyway, because a grammar with a gap is not total and this one claims to
+be.
 
 **Verified rather than asserted**: this grammar reproduces CPython 3.14.6's
 `repr` on every case in §5b, on both notation thresholds, on the subnormal
@@ -811,6 +825,7 @@ U+007F and U+2028 rows fix that the escaping stops at U+0020 and does not resume
 | `1e16` | `1e+16` | 5 |
 | `0` (`int`) | `0` | 1 |
 | `2**63` | `9223372036854775808` | 19 |
+| `-1.5670905694168156e-99` | `-1.5670905694168156e-99` — **the tie-break witness**: `…155` is equally short and round-trips too, and is not chosen | 23 |
 | `inf`, `nan` | **no encoding — the encoder raises** | — |
 
 **The five `==`-equal values that must stay apart**, taken inside a
