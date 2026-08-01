@@ -228,3 +228,43 @@ def test_a_hub_that_is_not_ready_is_reported_rather_than_assumed_away() -> None:
     payload["ready"] = False
     with pytest.raises(ProtocolError, match="not ready"):
         read_connect_ack(payload)
+
+
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        (b'{"kind":"result","id":"c-1","payload":NaN}', "NaN is not a JSON literal"),
+        (b'{"kind":"result","id":"c-1","payload":Infinity}', "nor is Infinity"),
+        (b'{"kind":"result","id":"c-1","payload":-Infinity}', "nor is -Infinity"),
+        (b'{"kind":"result","id":"c-1","payload":1e999}', "and this overflows to inf"),
+        (b'{"kind":"result","id":"c-1","payload":{"x":-1e999}}', "at any depth"),
+    ],
+)
+def test_a_number_with_no_wire_form_makes_the_frame_undecodable(raw: bytes, why: str) -> None:
+    """ADR-0087 §2c gives a non-finite float no encoding, so no frame may carry one.
+
+    The first three are the easy half: ``NaN`` and ``Infinity`` are **not JSON** —
+    RFC 8259 has three literals and CPython's decoder accepts these as an extension
+    — so refusing them applies ADR-0084 §3's existing "text that is not valid JSON"
+    rather than adding a rule.
+
+    ``1e999`` is the interesting one: syntactically well-formed, and it decodes to
+    ``float("inf")``. ADR-0087 §7 answers it on the payload path by making the
+    *type* refuse it, and fixes the order as decode, validate, **then** measure. The
+    handshake has no type — ADR-0085 §8d has it measured on receipt with no schema
+    in between — so a value with no form would reach the measurement step that §7
+    says it must not, and escape as a bare ``ValueError`` rather than as a protocol
+    failure a client can render.
+    """
+    with pytest.raises(UndecodableFrameError):
+        decode_envelope(raw)
+
+
+def test_an_ordinary_float_still_decodes() -> None:
+    """The discriminating half: the refusal refuses only what has no form.
+
+    A decoder that rejected every float would pass every case above and be unable
+    to carry a ``Belief.confidence``.
+    """
+    decoded = decode_envelope(b'{"kind":"result","id":"c-1","payload":{"confidence":0.9}}')
+    assert decoded.payload == {"confidence": 0.9}
