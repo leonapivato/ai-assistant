@@ -909,9 +909,10 @@ value — one inserting whitespace after `,` and `:`, one escaping non-ASCII as
 `\uXXXX` — and a limit whose measurement differs between the two implementations
 is not one limit. So:
 
-> **The canonical encoding is the byte string
-> `TypeAdapter(T).dump_json(value, exclude_unset=True)` produces**, at the
-> pydantic version the environment pins. That byte string is what §8c measures and
+> **The canonical encoding is the byte string `TypeAdapter(T).dump_json(value)`
+> produces**, at the pydantic version the environment pins, **with
+> `exclude_unset=True` on a request payload and no exclusion flag on a result or
+> an error.** That byte string is what §8c measures and
 > what §10 puts on the wire — one definition serving both, so an implementation
 > measures the bytes it is about to send.
 
@@ -934,11 +935,22 @@ choice of adapter:
 | **error** | the error model of §10a — `code`, `message`, optional `details`, optional `reduced` |
 
 **`exclude_unset=True` is what makes §10's omission rule a byte fact rather than an
-intention.** An argument the caller did not pass is *unset*, not `None`, so it
-does not appear — which is what lets the receiver apply its own declared default
-(§3a) instead of being handed a `null` it would have to distinguish from a
-deliberate one. Without the flag the same call encodes `"conversation_id":null`
-and measures twenty-four bytes longer.
+intention — on a request, and only there.** An argument the caller did not pass is
+*unset*, not `None`, so it does not appear, which is what lets the receiver apply
+its own declared default (§3a) instead of being handed a `null` it would have to
+distinguish from a deliberate one. Without the flag the same call encodes
+`"conversation_id":null` and measures twenty-four bytes longer.
+
+**Applying it to a result would make the bytes depend on construction history, and
+that is the trap this section keeps setting for itself.** `exclude_unset` asks
+which fields were *assigned*, not what the value *is*. `BeliefSummary` defaults
+`evidence_count`, `lost_evidence` and `valid_until`, so one implementation
+building `BeliefSummary(id=…, band=…, …)` and another building the **equal** value
+with `evidence_count=0, lost_evidence=0, valid_until=None` would emit different
+byte strings for the same page — and could land on opposite sides of §8c's limit.
+A result has no "not passed" to express: the value is the value, every field
+appears, and two equal values encode identically however they were built. Same for
+an error.
 
 **The encoder is the definition, and a property list is the description — that
 way round, deliberately.** Three review rounds each found one more corner where a
@@ -1259,7 +1271,14 @@ it.
 | --- | --- | --- |
 | `code` | always | the exception type's own class name |
 | `message` | always | the exception's human-readable message |
-| `details` | only where the type carries structured state | an object whose members are the exception's public attributes |
+| `details` | always | an object whose members are the exception's public attributes, or `null` where the type carries none |
+| `reduced` | always | `true` where the payload was reduced to fit (below), otherwise `false` |
+
+**Every member is always present**, which follows from §8c serialising an error
+with no exclusion flag: a conditional member would be a second thing an
+implementation could get differently, and `"details":null` costs fifteen bytes to
+remove the question. A client reads `details` as null-or-object and `reduced` as a
+plain boolean, with no absence to interpret.
 
 **The code is the class name, which makes the mapping total by construction
 rather than by a registry someone maintains.** A hand-kept table of tokens is a
@@ -1327,9 +1346,8 @@ the response to a failed error delivery would itself be an error frame, so the
 rule would recurse, and it would mislabel — the value the caller sent was not
 oversized, the diagnosis of it was. So:
 
-> **If an error payload exceeds the limit, `details` is dropped in its entirety
-> and `message` is truncated so the payload fits, and the payload carries the
-> reserved member `reduced: true`.** This is always satisfiable: §8d's floor
+> **If an error payload exceeds the limit, `details` is set to `null` and
+> `message` is truncated so the payload fits, and `reduced` becomes `true`.** This is always satisfiable: §8d's floor
 > leaves room for a code, the member names and a non-empty message at the
 > smallest legal `hub_max_frame_bytes`.
 
@@ -1548,6 +1566,11 @@ move to `Accepted` triggers nothing.
 - **Leave the measurement as "pydantic JSON mode".** Rejected in §8c for the
   opposite reason: JSON mode names a *value shape*, not a byte string, so it does
   not determine a length at all.
+- **Apply `exclude_unset=True` to every payload, not only requests.** Rejected in
+  §8c: it asks which fields were *assigned* rather than what the value is, so two
+  implementations building the same `BeliefSummary` differently would emit
+  different bytes for one page and could land on opposite sides of the limit. A
+  result has no "not passed" to express.
 - **Name `model_dump_json()` as the entry point.** Rejected in §8c: a request
   payload is an object of arguments and a `forget` result is a bare `true`, and
   neither is a model — so the entry point would be undefined for two of the three
