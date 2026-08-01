@@ -275,7 +275,11 @@ check over all of them.
 **(a) A decision citation resolves** when `docs/adr/NNNN-*.md` exists **and**,
 where a `§K` is given, that file defines a section numbered `K`. Nothing about
 the ADR's status is part of resolution — that is liveness, and §4 keeps the two
-apart deliberately.
+apart deliberately. **The section half of this definition is for authors and for
+a future check; §6 does not check it**, because a `§K` in prose cannot be
+distinguished from a restatement of a supersession scope. The definition is
+stated all the same, so the rule is written down when a form that separates them
+exists.
 
 **A joined or ranged citation resolves on the numbers it writes, and only
 those.** `§5/§6` and `§3, §5` resolve when **every** section named resolves. A
@@ -541,21 +545,23 @@ citations pass today, so this is a regression guard rather than a backlog — an
 it is the tier that answers #588's complaint that no gate step can fail on a
 `docs/adr/**` change.
 
-**Section resolution is deliberately *not* in Tier 1**, though an earlier draft
-of this ADR put it there. A `§K` reference is not always a citation of the ADR
-beside it: ADR-0074 writes "ADR-0076 §9's obligation set", where the §9 is
-ADR-0074's own and names the scope ADR-0076 replaced. ADR-0076 has no §9, so a
-failing section check fails a correct document — the same mistake as the
-heading-only checker in §2(a), and unfixable for the same reason, since telling
-a citation from a scope restatement means reading the surrounding prose. Section
-misses go to Tier 2. The cost is small and measured: the corpus contains **no**
-real section miss, so the check has nothing to catch and would only have had
+**A section number that does not resolve is not checked at all — not Tier 1, and
+not Tier 2 either.** Two earlier drafts of this ADR put it in each tier in turn,
+and both were wrong. A `§K` reference is not always a citation of the ADR beside
+it: ADR-0074 writes "ADR-0076 §9's obligation set", where the §9 is ADR-0074's own
+and names the scope ADR-0076 replaced. ADR-0076 has no §9. Failing on that fails
+a correct document; *reporting* it is no better, because the ambiguity rule below
+requires an unevaluable citation to pass silently, and a rule that both reports
+and passes the same input is not implementable. **So section references are
+passed silently until a mechanically distinct scope-reference form exists**, and
+§9 declines to invent one here. The cost is measured and near zero: the corpus
+contains **no** real section miss, so the check had nothing to catch and only
 something to be wrong about.
 
 **Tier 2 — reported, never failing.** Every code citation that does not resolve
-(§3), every section number that does not resolve (above), and every liveness
-disagreement (§4). Each has a legitimate class no mechanical test separates from
-a defect, so each is surfaced for a reader and none blocks.
+(§3), and every liveness disagreement (§4). Each has a legitimate class no
+mechanical test separates from a defect — but each is at least *evaluable*, which
+is what section references are not. Each is surfaced for a reader; none blocks.
 
 **The input set is §1's forms, and the checker does not infer its own.** This is
 the difference between 479 false positives and a usable check.
@@ -691,6 +697,13 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   without asking the corpus to be rewritten. **Revisit if** b3's advisory
   reports prove worth failing on, which is the condition under which a marker
   starts paying for itself.
+- **A distinct written form for a supersession-scope restatement**, which would
+  let §6 check section numbers. It is the honest fix for ADR-0074's "ADR-0076
+  §9's obligation set" and it is declined on the same ground as the marker
+  syntax: it buys a check over a category with **no known real misses**, and it
+  would ask the corpus to re-render prose that reads correctly to a human.
+  **Revisit if** a real section miss ever appears, which is the evidence this
+  decision currently lacks.
 - **Extending §1's forms to `src/` docstrings** (#579's amplifying half). §7
   records why: it is a bigger rule than this ADR was read for.
 - **Verifying quotation text as a hard check.** §6 permits a quotation check but
@@ -779,9 +792,12 @@ that a `docs/adr/**` change is no longer gated by five steps that cannot see it.
   symbols are what #579 itself proposed as the better instrument ("Cite
   `file:symbol`, not prose … A pointer to code is checkable by the gate in a way a
   quotation is not"). #579 should close, pointing here and at #588.
-- **#586 and #593 are the two live defects §6 would catch.** Both remain open and
-  both need a `docs/adr/**` amendment or a tracker action; neither is written by
-  this lane, whose fence is this file.
+- **#586 and #593 remain open, and neither is caught by §6.** #586's
+  `ConversationService` is a Tier 2 report at best — surfaced, never failing —
+  and its `Engine._project` half resolves, so nothing sees it. #593 is a tracker
+  state claim, which §2(c) does not check at all. Both need a `docs/adr/**`
+  amendment or a tracker action, and neither is written by this lane, whose
+  fence is this file.
 - **Three further candidates surfaced by the measurement, filed for triage.**
   `ClassifiedToolError` and `UserProfile` are backticked in ADR text and resolve
   in none of `src/`, `tests/` or `scripts/`; each is either a §3 class or a
