@@ -1,6 +1,6 @@
 # 86. A belief's evidence is bounded, the elision is on the record, and the batch read lands
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-31
 - **This is a contract change.** §1–§4 bound `Provenance.evidence` and add one
   field to it — a `core` type both `memory` and `planning` construct (ADR-0068
@@ -12,32 +12,40 @@
   before their implementation"). **No code changes with it.**
 - **Records owed on earlier ADRs (ADR-0082 §1), declared here and written
   elsewhere.** §11 names each clause, quotes it, and applies ADR-0070 §1's test.
-  Two records are owed — on ADR-0040 and on ADR-0074 — and one commonly-assumed
-  third is argued *not* owed. They are declared in this text, which is where
-  ADR-0082 §1 says the judgement is made and reviewed, and the edits themselves
-  are sequenced into a following change — the split ADR-0084 §12 made days ago,
-  deferring its ADR-0077 record "to its own lane (#536)". §11 gives the grounding;
-  the short of it is that ADR-0070 §1 permits recording a supersession that has
-  **landed**, and a `Proposed` ADR's decision has not.
+  Two records are owed — on ADR-0040 and on ADR-0074 — and five commonly-assumed
+  others are argued *not* owed, ADR-0085 and ADR-0087 among them. They are
+  declared in this text, which is where ADR-0082 §1 says the judgement is made and
+  reviewed, and the edits themselves are sequenced into a following change — the
+  split ADR-0084 §12 made, deferring its ADR-0077 record "to its own lane (#536)",
+  and whose records landed after `ratify ADR-0084`. Each goes in a *different*
+  file (`docs/adr/0040-*.md`, `docs/adr/0074-*.md`), so neither could have landed
+  in this change's fence in any case.
 - **Closes #473.** Its two questions are decided together, in §1–§5 and in §6,
   because each turns on the other: the bound decides whether the batch read is
   buying anything, and the batch read decides how expensive the bound is allowed
   to be.
+- **Ratified against a base that moved under it.** ADR-0085, ADR-0087 and #566
+  landed while this ADR was `Proposed`. §2 answers #566's element-level validators
+  on this very field, §7 re-grounds its arithmetic on ADR-0085 §8c's number and
+  ADR-0087 §2b's bytes rather than on ADR-0084 §3, and §7's second gate is closed
+  by ADR-0085 §4a — which came out of **#552**, filed from this lane. No decision
+  of this ADR moved; what moved is which authority each claim rests on.
 
 ## Context
 
 ### What #473 found, and the half the review that raised it did not
 
-`Provenance.evidence` is a `tuple[str, ...]` with no `max_length`
-(`core/types.py:478`), and `FeedbackEvent.evidence` is the same
-(`core/types.py:1752`). `MemoryIngestor._merge` **unions** both records'
+`Provenance.evidence` carries no `max_length` — it is a `tuple[EncodableText,
+...]` since #566, an element-level rule about a string's *wire form* and not a
+bound on the tuple — and `FeedbackEvent.evidence` is the same (`Provenance` and
+`FeedbackEvent`, `core/types.py`). `MemoryIngestor._merge` **unions** both records'
 evidence on every `REINFORCE`:
 
 ```python
 evidence=tuple(dict.fromkeys([*target.provenance.evidence, *incoming.provenance.evidence])),
 ```
 
-(`memory/ingest.py:703`). A belief reinforced repeatedly therefore accumulates
+(`MemoryIngestor._merge`, `memory/ingest.py`). A belief reinforced repeatedly therefore accumulates
 one citation per distinct supporting episode, without bound. Nothing caps it and
 nothing prunes it.
 
@@ -59,7 +67,8 @@ ADR-0077 §6 accepted the resulting read amplification on a stated premise:
 "Small by construction" holds **per proposal** and fails **over time**. Per
 proposal it is true and enforced: the observer cites at most
 `observation_batch_size` episodes (default 20, refused at load outside
-`[1, 2**63)`, `core/config.py:785`), `RuleBasedFeedbackProcessor` copies
+`[1, 2**63)`, `Settings.observation_batch_size`, `core/config.py`),
+`RuleBasedFeedbackProcessor` copies
 `FeedbackEvent.evidence` straight through, and `assistant learn` constructs a
 `FeedbackEvent` with no evidence at all. No shipped surface can author a large
 tuple in one act. But the union has no such bound, and a belief that is
@@ -84,8 +93,9 @@ engine it stands in for — and then records the residual honestly:
 contract" — for the citation *count*, which is the factor that grows.** §7 states
 exactly how far that goes and where it stops, because "unreachable" is a claim
 about an arithmetic and the arithmetic has a second factor this ADR does not own.
-ADR-0084 §4's prerequisite therefore has two gates and this ADR closes the first;
-the second is already ratified elsewhere and merely unimplemented (§7, #552).
+ADR-0084 §4's prerequisite therefore has two gates. This ADR closes the first;
+ADR-0085 §4a closed the second while this one was `Proposed`, out of #552 filed
+from this lane (§7).
 
 ### The read amplification is contract-mandated, not an implementation choice
 
@@ -97,11 +107,12 @@ ADR-0077 §6 discharges that gate by ruling that "the listing resolves *existenc
 and renders the count, the lost count, and the adjusted confidence". Rendering a
 lost count requires knowing which citations still resolve, which requires reading
 each one. `Engine._project` does precisely that, in a sequential loop, for every
-record on the page (`orchestration/engine.py:2190-2194`).
+record on the page (`Engine._project`, `orchestration/engine.py`).
 
 And each of those reads is not free. `SqliteMemoryStore.get` takes the store's
 `asyncio.Lock` and dispatches to a worker thread through `_run_to_completion`
-(`memory/sqlite_store.py:641-647`), so the cost is a lock acquisition and a
+(`SqliteMemoryStore.get`, `memory/sqlite_store.py`), so the cost is a lock
+acquisition and a
 thread hop per citation — serialised against every other operation on the memory
 store. In a one-shot CLI that is invisible. In ADR-0083's resident process,
 serving up to `hub_max_connections` clients (ADR-0084 §3, default 64), it is a
@@ -119,8 +130,9 @@ MAX_EVIDENCE_CITATIONS = 64
 
 and no record this system writes carries more than that many citations in
 `provenance.evidence`. The same bound governs `FeedbackEvent.evidence`, which is
-copied straight into a `Provenance` (`learning/processor.py:99`) and would
-otherwise fail at a construction the caller cannot see.
+copied straight into a `Provenance` (`RuleBasedFeedbackProcessor._to_record`,
+`learning/processor.py`) and would otherwise fail at a construction the caller
+cannot see.
 
 **A figure is named rather than left to the implementation**, following ADR-0083
 §7 and ADR-0074 §9.3's reason: "a 'bounded default' with no figure is two
@@ -188,6 +200,27 @@ So:
 > retained subset §3 specifies and records the count of what it did not, as §4
 > specifies. `Provenance` itself admits a longer tuple, and a record already
 > stored with one stays readable.
+
+**#566 put element-level validators on this very field, and that is the sharpest
+objection to this section — so it is answered rather than left standing.**
+`Provenance.evidence` is `tuple[EncodableText, ...]` today: a `core` validator,
+added to a shared frozen type, applied to data a running deployment already
+holds. If that was safe, why is a `max_length` not?
+
+**Because the two refuse different things, and only one of them refuses a record
+that reads today.** `EncodableText` refuses a string with **no wire form at all**
+— ADR-0087 §2b: "A string with no UTF-8 encoding has no wire form and the encoder
+raises." A record carrying one was already unreadable *through the transport*;
+the validator moves an existing failure earlier, to a place that has a name and a
+field. It cannot take a record that round-trips today and make it fail tomorrow,
+because a value with no encoding never round-tripped.
+
+A cardinality bound is the opposite. A belief with 65 citations encodes
+perfectly, transports perfectly, and reads perfectly — it is merely *large*. A
+`max_length` would take a record that is readable in every sense and make it
+unreadable, which is a strictly new failure invented on the read path. **The test
+is not "is it a validator on a `core` type"; it is "does it refuse something that
+already worked".** #566 does not; a `max_length` would.
 
 This is the shape ADR-0077 §5 already chose for the closely related
 resolvability floor, and for a related reason: "what a deployment's own policy
@@ -301,6 +334,16 @@ tombstone "deliberately does not say what it was": where an exact answer costs
 the thing the mechanism is for, the mechanism says less rather than saying
 something false.
 
+**The corpus now has a second elision marker, and the two agree on the
+principle.** ADR-0085 §9 gives `AssistantError` a `details_elided: bool` so "a
+client whose reconstruction lost an exception's structured state can say so,
+instead of presenting an empty list as an empty answer" — the same rule as §4's,
+that an elision is declared rather than silent. The shapes differ for a stated
+reason: `details_elided` marks a loss whose size the *client* cannot know, so a
+boolean is all that is honest there; this field marks a capacity decision the
+*writer* made and can count, up to the collisions above. A flag here would discard
+a magnitude the writer holds.
+
 **It is additive with a default**, so a stored record written before this ADR
 deserialises with `evidence_elided=0` and nothing migrates. Every `Goal` carries
 a `Provenance` too (ADR-0068 §2); its value is always zero, which is the same
@@ -394,13 +437,22 @@ nothing measurable." Both halves have changed, and the scale is now a figure
 rather than an intuition:
 
 - **Two callers, both contract-mandated.** Conversation resume fetches *k* turn
-  ids (`orchestration/conversations.py:288`); belief presentation resolves every
+  ids (`ConversationService`'s history tail, `orchestration/conversations.py`);
+  belief presentation resolves every
   citation of every belief on the page, which ADR-0073 §4 and ADR-0077 §6 make
   obligatory, not optional (Context, above).
 - **The scale is 50 × 64.** A listing page is ADR-0073 §2's default of 50
   beliefs, each with up to §1's 64 citations: **3,200** reads for one screen. Each
   is an `asyncio.Lock` acquisition and a worker-thread hop on the shipped store
-  (`memory/sqlite_store.py:641`). `get_many` makes it 50.
+  (`SqliteMemoryStore.get`). `get_many` makes it 50.
+- **`BeliefSummary` did not make this go away, and it is worth saying so.**
+  ADR-0085 §4a now has `beliefs()` return a type with no `evidence` field, which
+  removes the listing's *payload*. It removes none of its *reads*: §4a says in as
+  many words that "this does not change what the listing computes, only what it
+  ships", because the adjusted confidence and the lost count are still functions
+  of how many citations resolved. So the 50 × 64 figure above is unchanged by the
+  one ADR that might have been expected to change it, and ADR-0085 §4a names this
+  section's `get_many` as what makes that resolution cheap.
 - **The process it runs in changed.** This is the half ADR-0074 §5 could not
   weigh, because ADR-0083 did not exist. A one-shot CLI absorbs 3,200 serialised
   reads; a resident process serving up to 64 concurrent connections holds one
@@ -479,55 +531,59 @@ currently produces" is now unreachable for any belief any conforming writer can
 ever produce, which is what the section asked for. **Accumulation is no longer a
 path to an unreadable belief.**
 
-**What is not closed, and it is not this ADR's to close.** A frame carries
+**The other factor, and where the arithmetic now stands.** A frame carries
 *rendered* evidence, not ids: `Evidence.content` is the cited episode's own text
-(`orchestration/engine.py:602`), and no contract bounds an episode's content. So
-the payload is `citations × content`, and §1 bounds only the first factor.
-Working the arithmetic against §3's 16 MiB default:
+(`Evidence.content`, `orchestration/engine.py`), and no contract bounds an
+episode's content. So the payload is `beliefs × citations × content`, and §1
+bounds the middle factor only.
 
-- **A single-belief view** carries at most 64 contents — roughly 256 KiB per
-  citation before the frame refuses. Comfortable, and this is the surface
-  ADR-0077 §6 assigns the rendered citations to.
-- **A `beliefs()` page** carries, as `Engine._project` is written today, the
-  resolved content of every citation of all 50 beliefs — up to 3,200 contents,
-  or roughly 5 KiB per citation before the frame refuses. That is not
-  comfortable, and it is not provably safe.
+**Both the number and the bytes are ratified now, which makes this exact rather
+than approximate.** An earlier draft worked against "ADR-0084 §3's 16 MiB
+default", which was the wrong authority on both halves:
 
-**The second figure is an over-delivery, not a requirement**, and naming it is
-the useful part of this check. ADR-0073 §4 asks the listing for "how many
-citations stand behind it"; ADR-0077 §6 discharges that with "the listing
-resolves *existence* and renders the count, the lost count, and the adjusted
-confidence". Neither asks the listing for the citations' *content* — only the
-single-belief view is given that. `Engine._project` is shared by both paths and
-resolves content for both, so the listing carries a payload two ADRs already say
-it does not need.
+- **The number is ADR-0085 §8c's**: the contract limit is `hub_max_frame_bytes -
+  512`, applied to the **whole payload** rather than to any one value, on
+  arguments, results and errors alike. ADR-0084 §3's `hub_max_frame_bytes` is the
+  setting the reserve is subtracted from, not the limit itself.
+- **The bytes are ADR-0087's**, which replaced ADR-0084 §3's "serialised through
+  pydantic's JSON mode" outright. §2b pins them: UTF-8 unescaped wherever JSON
+  permits, `/` unescaped, nothing at or above U+007F escaped, and only the
+  two-character escapes plus `\u00XX` below U+0020. A citation's byte cost is
+  therefore a *computable* function of its text, not an estimate — which is what
+  turns the rows below from illustrations into measurements.
 
-**So the coherence statement, precisely:** with the listing carrying counts
-rather than contents, the largest evidence payload in any frame is one belief's
-64 citations, and §1's bound and §3's ceiling are coherent by a wide margin. With
-the listing carrying contents, they are not provably coherent for any bound this
-ADR could pick, because the unbounded factor is the one it does not own.
+So, at the default `hub_max_frame_bytes` of 16 MiB, against `16 MiB - 512`:
 
-**Which means ADR-0084 §4's prerequisite has two gates, and this ADR closes
-one.** That is stated plainly rather than folded into a claim of discharge,
-because a client lane that read this ADR as closing the whole thing would ship
-against a `beliefs()` response that can still exceed the frame. The two gates:
+| Response | Citation contents in one payload | Budget per citation |
+| --- | --- | --- |
+| `belief()` — one belief | ≤ 64 (§1) | ~256 KiB |
+| `beliefs()` — `BeliefSummary` (ADR-0085 §4a) | **zero — no field to hold one** | not applicable |
+
+**So the coherence statement, precisely:** the largest evidence payload any frame
+can carry is one belief's citations, that count is 64, and the per-citation budget
+is a quarter of a megabyte of canonical UTF-8. §1's bound and ADR-0085 §8c's limit
+are coherent, and coherent by measurement rather than by assurance.
+
+**ADR-0084 §4's prerequisite had two gates, and both are now closed — one by
+each of two ADRs that do not depend on each other.** An earlier draft of this
+section left the second open and handed it to the surface ADR; that lane took it,
+and the hand-off is recorded from both sides.
 
 1. **Growth — closed here.** No belief's citation count can exceed 64, whatever
    the system does or how long it runs. §1 through §4.
-2. **The listing's payload — not closed here, and not an open design question
-   either.** It is already decided: ADR-0073 §4 and ADR-0077 §6 both give the
-   listing counts rather than contents, and `Engine._project` does not honour
-   that. So this is an implementation diverging from two ratified ADRs, filed as
-   **#552**, and not a decision anyone still owes.
+2. **The page multiplier — closed by ADR-0085 §4a**, which came out of #552,
+   filed from this lane. `beliefs()` returns `BeliefSummary`, which carries
+   `evidence_count` and `lost_evidence` as fields and **has no `evidence` field at
+   all**, so a listing has nowhere to put a citation's content. §4a's own reason
+   is the better one: the over-delivery is now *unrepresentable* rather than
+   merely forbidden, where ADR-0073 §4 and ADR-0077 §6 had only forbidden it.
 
-**The fix belongs to the surface ADR (#281) and the client lane, not here** —
-this ADR is fenced to the memory contract and will not reach into `orchestration`
-to take it, and the second half of #552 (how a listing `Belief` expresses "counts,
-no content") *is* the DTO shape #281 owns. §11 hands it over as an input rather
-than as a courtesy: a promoted `Belief` that carries resolved content on the
-listing path bakes the over-delivery into contract surface, where withdrawing it
-becomes a Protocol change instead of an edit.
+**Neither ADR leans on the other**, and ADR-0085 §8f says so from its side —
+"each removes one factor of the same product". That independence is what makes the
+pair sound: this ADR was ratified after ADR-0085 and could have leaned on it;
+ADR-0085 was written while this one was `Proposed` and correctly refused to lean
+on an unratified ADR. Both stand alone, and together the product `beliefs ×
+citations × content` has no unbounded factor left.
 
 ### 8. What the implementing lane owes
 
@@ -625,12 +681,12 @@ The triad and its consumers, in the order golden rule 5 fixes.
 
 ### 10. What this ADR does not decide
 
-- **Whether the belief *listing* carries resolved evidence content**, and how a
-  listing `Belief` expresses counts without it. §7, filed as **#552**. The first
-  half is not undecided — ADR-0073 §4 and ADR-0077 §6 already give the listing
-  counts rather than contents — but the DTO shape that expresses it is the
-  surface ADR's (#281), and §7's arithmetic is why it is urgent rather than
-  tidy.
+- **How a listing conveys citation counts without carrying citations.** Filed
+  from this lane as **#552** and **decided elsewhere**: ADR-0085 §4a gives
+  `beliefs()` its own return type, `BeliefSummary`, with `evidence_count` and
+  `lost_evidence` as fields and no `evidence` field at all. Recorded here because
+  §7's arithmetic depends on it and a reader should not have to rediscover which
+  ADR closed which factor.
 - **The exact rendering of an elision.** §4 fixes what is conveyed — the total
   count, the showable count, and that the difference is capacity rather than loss
   — and leaves the words to the surface, exactly as ADR-0077 §6 left the
@@ -702,8 +758,25 @@ this is a maximum; the two cannot conflict, since 64 is above every floor §5
 sets. ADR-0068 froze the graph and did not close it, and §4's field is additive.
 ADR-0073 §4's floor is *satisfied* here, not narrowed — §4 above is what keeps
 the drop from being silent. ADR-0084 §4 named this ADR as its prerequisite and §7
-above discharges the part of it that is a memory-contract problem; §3's ceiling
-and its settings are untouched.
+above discharges the memory-contract half of it; §3's ceiling and its settings are
+untouched, and §3's encoding clause was replaced by ADR-0087 before this ADR was
+ratified, which this ADR reads rather than moves.
+
+**Not owed — ADR-0085, and it is recorded from both sides.** ADR-0085 §12 already
+rules "no record, and no dependency in either direction" against this ADR, and the
+test comes out the same way from here. Two clauses are worth naming because they
+look like candidates:
+
+- **§8e — "`evidence` carries no `max_length`."** This ADR does not add one; §2
+  declines it, and for a reason §8e would recognise. The sentence stays true.
+- **§8e — "until its bound lands the bad state is unreachable rather than
+  provably unreachable."** A conditional the earlier ADR wrote in anticipation of
+  this one, discharged by the ADR it was anticipating. That is a stacked addition,
+  the same treatment ADR-0082 §1 blesses on `main` for ADR-0072 §3 → ADR-0077 §7.
+
+**Not owed — ADR-0087.** This ADR cites it for what the bytes are (§7) and takes
+no position on them. Nothing about a cardinality bound bears on an encoding, and
+ADR-0087 §2b's rules are used exactly as written.
 
 **The edits themselves are sequenced into their own change, and this is the
 corpus's own practice rather than a convenience.** ADR-0084 §12 made exactly this
@@ -737,13 +810,12 @@ than changing a past one" and which must stay trivial for exactly that reason.
 - **The unreadable-by-accumulation belief becomes unreachable by contract.** A
   belief's citation count can no longer grow, at all, however long the system
   runs.
-- **ADR-0084 §4's prerequisite is *not* thereby fully discharged, and §7 says so
-  in as many words.** Its second gate — a `beliefs()` page that carries the
-  content of every citation of every belief on it — is an implementation
-  diverging from ADR-0073 §4 and ADR-0077 §6, filed as **#552**, and the client
-  lane needs both closed rather than one. Recording that difference is the same
-  discipline ADR-0084 §4 applied to itself when it refused to call the problem
-  solved by picking a big number.
+- **ADR-0084 §4's prerequisite is discharged, by this ADR and ADR-0085 §4a
+  together.** Its second gate — a `beliefs()` page carrying the content of every
+  citation of every belief on it — closed when ADR-0085 §4a gave the listing
+  `BeliefSummary`, out of **#552** filed from this lane. Neither ADR leans on the
+  other (ADR-0085 §8f); each removed one factor of `beliefs × citations ×
+  content`, and no unbounded factor is left. The client lane's gate is clear.
 - **A belief's warrant stops being a function of how long the system has run.**
   Sixty-four citations is what any belief can show, and the count of what it
   cannot show is on the record.
