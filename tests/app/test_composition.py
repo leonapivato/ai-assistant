@@ -9,6 +9,7 @@ or API key is needed.
 from __future__ import annotations
 
 import ast
+import os
 import stat
 import sys
 from datetime import timedelta
@@ -20,7 +21,7 @@ import pytest
 import ai_assistant
 from ai_assistant.app import build_engine, ensure_model_credentials
 from ai_assistant.app import composition as composition_module
-from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.config import EmbedderKind, Settings, load_settings
 from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
@@ -486,6 +487,55 @@ def test_the_data_dir_binds_to_the_prefixed_variable(
 
     monkeypatch.setenv("ASSISTANT_DATA_DIR", str(tmp_path / "right"))
     assert Settings().data_dir == tmp_path / "right"
+
+
+def test_a_relative_data_dir_is_refused_at_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ADR-0084 §1: the value must mean one directory, and a relative one does not.
+
+    "A hub started at boot with a working directory of ``/`` and a setting of
+    ``state`` binds ``/state/hub.sock``, while a CLI run from a project directory
+    looks for ``<project>/state/hub.sock`` and truthfully reports the hub down.
+    Both read the same setting and disagree." Refusing at load is what makes the
+    one-setting-locates-both property §9 rests on hold by construction, rather
+    than surfacing later as a missing socket that names nothing about its cause.
+    """
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", "state")
+
+    with pytest.raises(ConfigurationError, match="must be an absolute path"):
+        load_settings()
+
+
+def test_the_data_dir_is_canonicalised_at_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Canonicalised **once**, where both readers pick it up already resolved.
+
+    Two readers that each resolve are two chances to resolve differently, and the
+    composition root and the hub are exactly those two readers. Doing it in the
+    field is what makes "the same field" mean the same directory (ADR-0084 §1),
+    rather than making it a rule each caller has to remember.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", f"{link}/./nested/..")
+
+    assert Settings().data_dir == real
+
+
+def test_a_tilde_data_dir_is_expanded_rather_than_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``~/.ai-assistant`` and the default name one directory, so both are accepted.
+
+    ``Path`` performs no expansion, so a bare ``is_absolute()`` test would reject
+    the very directory the default factory produces — a distinction with no
+    justification an operator could anticipate.
+    """
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", "~/.ai-assistant")
+
+    assert Settings().data_dir == Path(os.path.realpath(Path.home() / ".ai-assistant"))
 
 
 # --- the shutdown budget reaches the façade (ADR-0083 §4) --------------

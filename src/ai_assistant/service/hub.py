@@ -40,6 +40,7 @@ from ai_assistant.app import build_engine, ensure_model_credentials
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.logging import configure_logging
+from ai_assistant.service import datadir
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 
@@ -153,18 +154,20 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event) -> int:
     Returns:
         The process exit code.
     """
-    # Step 2. Resolve the data directory, create it if absent, and take the
-    # instance lock. Resolution happens *here*, once, and the resolved path is
-    # handed to `build_engine` below rather than letting it resolve the setting a
-    # second time: the lock, the stores and (under ADR-0084) the socket must name
-    # one directory, and two resolutions of one relative or `~`-bearing setting
-    # are two directories waiting to happen.
-    data_dir = settings.data_dir.expanduser().resolve()
-    # An OSError here — a read-only filesystem, a path that is not a directory —
-    # is a deployment fault and `classify` maps it as one. It is deliberately not
-    # caught: step 2 is also the writability check, and the raw errno is what
-    # carries the distinction.
-    data_dir.mkdir(parents=True, exist_ok=True)
+    # Step 2. Prepare the data directory, then take the instance lock — in that
+    # order, because taking the lock means opening a file inside the directory.
+    #
+    # The path needs no resolving here: `Settings` refuses a relative value and
+    # canonicalises the rest (ADR-0084 §1), so this and the composition root read
+    # one directory by construction rather than by each doing the same arithmetic
+    # and hoping to agree.
+    #
+    # `prepare` creates it `0700` if absent and validates the whole ancestor
+    # chain; an `OSError` it raises — a read-only filesystem, a path that is not a
+    # directory — is deliberately not caught, because the raw errno is what tells
+    # a stay-down access fault from a transient one (§3 step 3, §5).
+    data_dir = settings.data_dir
+    datadir.prepare(data_dir)
     lock = InstanceLock(data_dir / LOCK_FILENAME)
     if not await _acquire_instance_lock(lock, data_dir):
         return EXIT_RESTART

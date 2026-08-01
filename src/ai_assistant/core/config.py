@@ -8,6 +8,7 @@ configuration knob is discoverable, typed, and validated in one place.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import Iterator
 from collections.abc import Set as AbstractSet
@@ -614,9 +615,47 @@ class Settings(BaseSettings):
         default_factory=lambda: Path.home() / _DEFAULT_DATA_DIRNAME,
         description=(
             "Directory the hub owns exclusively: the five SQLite stores, the "
-            "instance lock, and any transport-local artefact (ADR-0083 §1, §2)."
+            "instance lock, and any transport-local artefact (ADR-0083 §1, §2). "
+            "Must be absolute; it is canonicalised at load (ADR-0084 §1)."
         ),
     )
+
+    @field_validator("data_dir")
+    @classmethod
+    def _data_dir_is_absolute_and_canonical(cls, value: Path) -> Path:
+        """Refuse a relative directory, and canonicalise the rest (ADR-0084 §1).
+
+        "A relative value is therefore rejected at settings load, and the path is
+        canonicalised before either side derives anything from it." The failure it
+        prevents is one nobody would diagnose from its symptom: a hub started at
+        boot with a working directory of ``/`` and a setting of ``state`` uses
+        ``/state``, while a CLI run from a project directory uses
+        ``<project>/state`` — **both read the same setting and disagree**, and
+        under ADR-0084 §9 the visible result is a client truthfully reporting the
+        hub down. One setting locating both the data and the door is the property
+        §9 rests on, and it only holds if the value means one directory.
+
+        Canonicalising **here** rather than in each reader is what makes that true
+        by construction: two readers that each resolve are two chances to resolve
+        differently, and the composition root and the hub are exactly those two
+        readers.
+
+        ``~`` is expanded before the test rather than rejected with the relative
+        paths. ``Path`` does no expansion, so ``~/.ai-assistant`` would otherwise
+        be refused while the *default* — the very same directory, spelled through
+        ``Path.home()`` — is accepted, which is a distinction an operator has no
+        way to anticipate.
+        """
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            msg = (
+                f"data_dir must be an absolute path, got {str(value)!r}; a relative "
+                f"value resolves against each process's working directory, so the hub "
+                f"and a client reading the same setting would reach different "
+                f"directories (ADR-0084 §1)"
+            )
+            raise ValueError(msg)
+        return Path(os.path.realpath(expanded))
 
     # The budget for phase A of the hub's two-phase shutdown (ADR-0083 §4): how
     # long tracked in-flight work is given to finish **on its own** before the
