@@ -87,6 +87,7 @@ from ai_assistant.testing import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
@@ -416,21 +417,28 @@ async def test_ask_renders_a_config_failure_and_exits_nonzero(
     assert "unknown timezone" in output.getvalue()
 
 
-async def test_ask_renders_a_build_failure_and_exits_nonzero(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
+async def test_ask_reports_a_closed_door_as_an_instruction_and_exits_nonzero(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A composition-root failure is caught by the same boundary (§7)."""
-    monkeypatch.setattr(cli, "load_settings", Settings)
+    """No hub, no fallback: an instruction and a non-zero exit (ADR-0084 §9).
+
+    The whole of ruling 3 and ruling 5 at the adapter, and the assertions are
+    written so that a fallback could not pass them: the message must name the
+    socket it tried *and* how to start the hub, and the exit code must be non-zero.
+    An in-process fallback would render a turn and exit ``0``.
+
+    It is driven through the real client against a directory with no socket in it,
+    rather than through a stubbed one, so what is exercised is the actual
+    ``connect`` failure rather than a test double's idea of it.
+    """
+    monkeypatch.setattr(cli, "load_settings", lambda: Settings(data_dir=tmp_path))
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
-
-    def _bad_build(_settings: object) -> object:
-        msg = "could not open the store"
-        raise MemoryStoreError(msg)
-
-    monkeypatch.setattr(cli, "build_engine", _bad_build)
     code = await cli._ask("hello", timeout_seconds=1.0, assume_yes=True)
     assert code == 1
-    assert "could not open the store" in output.getvalue()
+    rendered = output.getvalue()
+    assert "hub.sock" in rendered
+    assert "ai-assistant-hub" in rendered
+    assert "not reachable" in rendered
 
 
 @pytest.mark.parametrize("bad", ["inf", "nan", "0", "-1", "1e100", "1e-7"])
@@ -438,42 +446,6 @@ def test_ask_rejects_an_unusable_timeout(bad: str) -> None:
     """A non-finite, non-positive, overflowing, or sub-resolution --timeout is a usage error."""
     result = CliRunner().invoke(cli.app, ["ask", "hello", "--timeout", bad])
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
-
-
-# --- shutdown-failure boundary (ADR-0042 §2, §7) ------------------------
-
-
-async def _failing_closer() -> None:
-    """A closer that fails, as a broken owned resource would."""
-    msg = "the store would not close"
-    raise RuntimeError(msg)
-
-
-async def test_close_reports_a_failing_closer_as_nonzero(output: StringIO) -> None:
-    """``aclose`` raises an ExceptionGroup on a closer failure; the cause is shown, exit 1."""
-    engine = _engine(closers=(_failing_closer,))
-    code = await cli._close(engine)
-    assert code == cli._EXIT_ERROR
-    rendered = output.getvalue()
-    assert "Error" in rendered
-    # The contained cause is surfaced, not just the ExceptionGroup summary.
-    assert "the store would not close" in rendered
-
-
-async def test_a_shutdown_failure_after_a_good_turn_still_exits_nonzero(
-    output: StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A turn can succeed yet the process fail to shut down cleanly — that is exit 1 (§7)."""
-    engine = _engine(tools=(tool(),), closers=(_failing_closer,))
-    monkeypatch.setattr(cli, "load_settings", Settings)
-    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
-    monkeypatch.setattr(cli, "build_engine", lambda _settings: engine)
-
-    code = await cli._ask("send it", timeout_seconds=1.0, assume_yes=True)
-    assert code == 1  # the step ran, but the failed close downgrades the exit code
-    rendered = output.getvalue()
-    assert "Done" in rendered  # the turn's success was still reported
-    assert "Error" in rendered  # and so was the shutdown failure
 
 
 # --- learn: the correction leg (roadmap leg 1; ADR-0042 §3, §6) ---------
@@ -524,10 +496,20 @@ def _stored_outcome() -> LearnOutcome:
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
-    """Point the ``learn`` command's startup at ``engine`` with valid settings."""
+    """Point the ``learn`` command's startup at ``engine``.
+
+    The seam is :func:`~ai_assistant.interfaces.cli._open_engine` rather than
+    ``build_engine``, because after ADR-0084 §6 the CLI has no composition root to
+    reach: it obtains a *client*, and the one function that obtains it is the one
+    place a test substitutes.
+    """
+
+    async def _open() -> object:
+        return engine
+
     monkeypatch.setattr(cli, "load_settings", Settings)
     monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
-    monkeypatch.setattr(cli, "build_engine", lambda _settings: engine)
+    monkeypatch.setattr(cli, "_open_engine", _open)
     monkeypatch.setattr(cli, "_utcnow", lambda: AT)
 
 

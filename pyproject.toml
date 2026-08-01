@@ -220,6 +220,12 @@ forbidden_modules = [
     "ai_assistant.learning",
     "ai_assistant.orchestration",
     "ai_assistant.interfaces",
+    # The two top-level packages leg 5 adds. Listed for the same reason every
+    # other one is: golden rule 2 says `core` depends on nothing else in
+    # `ai_assistant`, and a package absent from this list is a package the rule
+    # is asserted about and not checked on.
+    "ai_assistant.wire",
+    "ai_assistant.service",
 ]
 
 [[tool.importlinter.contracts]]
@@ -308,6 +314,9 @@ source_modules = [
     "ai_assistant.interfaces",
     # The composition root is production code, so the same ban applies (ADR-0042 §Consequences).
     "ai_assistant.app",
+    # So is the wire (ADR-0084 §6): it ships in the same wheel and runs in both
+    # the hub and every spoke.
+    "ai_assistant.wire",
 ]
 forbidden_modules = ["ai_assistant.testing"]
 
@@ -370,5 +379,69 @@ source_modules = [
     "ai_assistant.interfaces",
     "ai_assistant.app",
     "ai_assistant.testing",
+    # `wire` is the addition ADR-0084 §6 makes, and the direction matters: the
+    # *service* imports the wire for its server half, never the other way round.
+    "ai_assistant.wire",
 ]
 forbidden_modules = ["ai_assistant.service"]
+
+[[tool.importlinter.contracts]]
+# ADR-0084 §6: the `wire` package "depends on `core` and nothing else". `service`
+# imports it for the server half; `interfaces` imports it for the client half;
+# nothing imports `service`, so ADR-0083 §8 stands unamended.
+#
+# **This is the contract that decides #571**, and it decides it in one direction
+# while the golden rules decide the other. The canonical encoder cannot move here
+# from `orchestration/payloads.py` and be *shared*, because sharing would need one
+# of two edges: `wire -> orchestration`, which this forbids, or
+# `orchestration -> wire`, which ADR-0087 §9 records as engaging golden rule 1. So
+# `wire` carries its own encoder, which ADR-0087 §7 licenses in as many words —
+# "two encoders may exist without the contract weakening", because conformance is
+# defined by *output* — and `tests/wire/test_codec.py` asserts vector by vector
+# that the two agree byte for byte.
+#
+# Every package is listed rather than relying on `ai_assistant` wholesale, in the
+# shape the service contract above established: a new top-level package is a
+# deliberate addition here rather than something that silently escapes the rule.
+name = "the wire depends on core and nothing else"
+type = "forbidden"
+source_modules = ["ai_assistant.wire"]
+forbidden_modules = [
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.service",
+]
+
+[[tool.importlinter.contracts]]
+# ADR-0083 §10, sequenced into ADR-0084's lane and landing with it: "Closing that
+# edge — so no interface adapter can build an engine — becomes the mechanical
+# enforcement of exclusivity, and it also forecloses the in-process fallback
+# ruling 5 already rejects."
+#
+# **It is well-formed only now.** Until this change the CLI *was* the application:
+# `_open_engine` called `build_engine` and the process that rendered the prompt
+# was the process that opened `memory.db`. Forbidding the edge before a client
+# existed would have broken `main` for something that did not exist yet — which is
+# exactly why ADR-0084 §6 sequences this edit here and not with ADR-0083's lane.
+#
+# The rule it makes mechanical is ADR-0083's ruling 4: the hub is the only process
+# that opens the five databases, and the API is the only door. An adapter that
+# cannot reach the composition root cannot open a store, so exclusivity stops
+# being a convention a future adapter could forget.
+#
+# Direct imports only, as the sibling contract above is: what is forbidden is
+# `interfaces` reaching the composition root itself. `interfaces -> wire -> core`
+# is the sanctioned path and is untouched.
+name = "interface adapters do not build an engine"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["ai_assistant.interfaces"]
+forbidden_modules = ["ai_assistant.app"]

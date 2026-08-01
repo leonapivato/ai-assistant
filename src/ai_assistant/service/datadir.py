@@ -27,6 +27,14 @@ matters about an ancestor is whether an untrusted user can *replace* the entry
 below it — which is exactly what the sticky bit prevents, and why an
 other-writable ancestor carrying it (``/tmp``) is accepted.
 
+**The fourth condition is a length, and it is here for the same reason** (#554).
+ADR-0084 §1 puts the ``sun_path`` budget at this step too: "a perfectly writable,
+perfectly valid data directory can have a path no socket can be bound inside", and
+left unchecked that failure lands at ADR-0083 §3's **step 6** — after the lock is
+held, the five stores are open and the start-up sweeps have run. It is a property
+of ``data_dir`` rather than of the listener, which is why it sits beside the other
+three rather than in :mod:`ai_assistant.service.transport`.
+
 **What this is not.** ADR-0084 §1 is explicit that a filesystem walk "can be
 wrong — a bind mount, an ACL, a symlinked ancestor" and that what actually closes
 the hole is the client authenticating the *server* from the kernel's peer
@@ -42,6 +50,7 @@ import stat
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -58,10 +67,10 @@ def prepare(data_dir: Path) -> None:
     """Create the data directory if it is absent, then validate the whole chain.
 
     ADR-0083 §3's step 2, in the order the ADRs fix it: create, then check the
-    leaf, then check every ancestor. Creating first is what makes the leaf check
-    meaningful on a fresh deployment — there is nothing to validate until the
-    directory exists, and a hub that refused to start because its directory was
-    missing would fail every first run.
+    leaf, then check every ancestor, then check that the path can hold the socket.
+    Creating first is what makes the leaf check meaningful on a fresh deployment:
+    there is nothing to validate until the directory exists, and a hub that refused
+    to start because its directory was missing would fail every first run.
 
     **An existing directory is validated, never repaired.** Silently widening or
     narrowing a mode the operator set would hide the misconfiguration rather than
@@ -75,7 +84,8 @@ def prepare(data_dir: Path) -> None:
 
     Raises:
         ConfigurationError: If the directory or any ancestor fails ADR-0084 §1's
-            conditions. Raised as this class so ADR-0083 §5's mapping reaches it
+            conditions, or the socket path exceeds this platform's ``sun_path``
+            budget (#554). Raised as this class so ADR-0083 §5's mapping reaches it
             through the same type check every other startup misconfiguration
             takes — none of these is fixed by restarting.
         OSError: If the directory cannot be created at all. Left to propagate,
@@ -95,6 +105,7 @@ def prepare(data_dir: Path) -> None:
 
     _check_leaf(data_dir)
     _check_ancestors(data_dir)
+    check_socket_path(data_dir)
 
 
 def _check_leaf(data_dir: Path) -> None:

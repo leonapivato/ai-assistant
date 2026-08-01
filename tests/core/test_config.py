@@ -800,6 +800,17 @@ def test_every_integer_setting_is_discovered() -> None:
         "observation_batch_size",
         "observation_max_proposals",
         "deferral_queue_limit",
+        # ADR-0084 §3's transport figures. Acknowledged here rather than exempted:
+        # each is refused at load unless strictly positive, and joining this tuple
+        # is what subjects them to the parametrised guards below. The ``bool`` one
+        # earns its place twice over — ``hub_max_connections=True`` would be a hub
+        # that serves exactly one client at a time while reporting health, and
+        # ``hub_max_frame_bytes=True`` a one-byte frame ceiling, which is ADR-0084
+        # §3's own worked example of a value that "would pass every startup step in
+        # ADR-0083 §3 and then refuse every client, including the CLI".
+        "hub_max_frame_bytes",
+        "hub_max_connections",
+        "hub_max_pending_handshakes",
     }
 
 
@@ -1002,6 +1013,11 @@ def test_every_duration_setting_is_discovered() -> None:
         "retention_purge_interval",
         "conversation_sweep_interval",
         "observation_interval",
+        # ADR-0084 §3's read deadline. It is **not** nullable, and that is the one
+        # place ADR-0084 departs from ADR-0083 §7's convention: "a hub with no frame
+        # cap or no read deadline has exactly the failure §3 exists to prevent, so
+        # 'off' is not an available value".
+        "hub_read_timeout",
     }
 
 

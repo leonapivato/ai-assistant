@@ -63,7 +63,6 @@ from rich.console import Console
 from rich.markup import escape
 
 from ai_assistant import __version__
-from ai_assistant.app import build_engine
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.logging import configure_logging
@@ -77,11 +76,15 @@ from ai_assistant.core.types import (
     MemoryKind,
     QuestionState,
     QueueOutcome,
+    StepStatus,
 )
+from ai_assistant.wire import HubEngineClient, TransportError
+from ai_assistant.wire.address import socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import (
         AnswerOutcome,
         Belief,
@@ -95,9 +98,9 @@ if TYPE_CHECKING:
         ObservedProposal,
         Question,
         QueuedQuestion,
+        StepOutcome,
         TurnOutcome,
     )
-    from ai_assistant.orchestration import Engine
 
 app = typer.Typer(
     name="assistant",
@@ -630,32 +633,43 @@ def forget(
     raise typer.Exit(code)
 
 
-async def _open_engine() -> Engine:
-    """Load settings, build the façade, and run its start-up sweeps (ADR-0074 §8).
+async def _open_engine() -> AssistantEngine:
+    """Load settings and obtain a client of the running hub (ADR-0084 §6, §9).
 
-    The one place a command obtains an engine. ``Engine.start`` runs here rather
-    than being left to each command, because ADR-0074 §8 puts the reclaim at
-    **engine start** — "the deleting call, at engine start, and later by the hub's
-    scheduler" — and a start-up sweep that some commands ran and others did not
-    would be a rule about which subcommand the user happened to type. It is cheap
-    when there is nothing to do (one bounded enumeration, usually empty) and it is
-    what finishes a deletion a previous run died part-way through.
+    **The one seam the whole of ADR-0084 lands on.** It used to call
+    ``build_engine`` and ``Engine.start()``; the process that rendered the prompt
+    was the process that opened ``memory.db``. It cannot any more, and not only by
+    convention: ADR-0083 ruling 4 makes the hub the only process that opens the
+    five databases and the API the only door, and the ``interfaces -> app`` import
+    contract now makes building an engine here a build failure rather than a
+    choice (ADR-0084 §6).
 
-    A start-up failure closes what was already opened before propagating, so a
-    command that never got its engine still leaks no connection (ADR-0042 §2).
+    **The start-up sweeps moved with the engine, which is a gain rather than a
+    loss.** ADR-0074 §8 puts the reclaim at engine start, and under a resident hub
+    that is once per *process life* instead of once per command a user happens to
+    type — and the hub restarts after a crash, so the reclaim that finishes an
+    interrupted deletion now runs after every crash rather than at the next command
+    (ADR-0083 §3 step 4).
+
+    **A closed door is an instruction, never a fallback** (ADR-0084 §9). The probe
+    is what makes that legible *here* rather than at whichever call happens to be
+    first: the hub being down is a fact the user reads before anything else is
+    rendered. It does not spawn the hub (ruling 3) and does not fall back in-process
+    (ruling 5).
+
+    Returns:
+        A client of the hub, which is an ``AssistantEngine`` like any other.
 
     Raises:
-        AssistantError: As any stage raises; the caller's boundary renders it.
+        AssistantError: If settings will not load.
+        TransportError: If no hub is listening, or the one that answers is not
+            this user's, or speaks another protocol version.
     """
     settings = load_settings()
     configure_logging(settings)
-    engine = build_engine(settings)
-    try:
-        await engine.start()
-    except AssistantError:
-        await _close(engine)
-        raise
-    return engine
+    client = HubEngineClient(socket_path(settings.data_dir), read_timeout=settings.hub_read_timeout)
+    await client.probe()
+    return client
 
 
 async def _ask(
@@ -683,19 +697,13 @@ async def _ask(
     )
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_turn(
-            engine, utterance, timeout=timeout, approver=approver, conversation_id=conversation_id
-        )
-    finally:
-        shutdown_code = await _close(engine)
-    # A failure closing an owned resource is itself a failure to report (§7): the
-    # turn may have succeeded, but the process did not shut down cleanly.
-    return max(code, shutdown_code)
+    return await _drive_turn(
+        engine, utterance, timeout=timeout, approver=approver, conversation_id=conversation_id
+    )
 
 
 async def _list_conversations(*, limit: int, offset: int) -> int:
@@ -708,15 +716,11 @@ async def _list_conversations(*, limit: int, offset: int) -> int:
     """
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_conversations(engine, limit=limit, offset=offset)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_conversations(engine, limit=limit, offset=offset)
 
 
 async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int:
@@ -732,15 +736,11 @@ async def _forget_conversation(conversation_id: str, *, assume_yes: bool) -> int
     )
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_forget_conversation(engine, conversation_id, confirm=confirm)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_forget_conversation(engine, conversation_id, confirm=confirm)
 
 
 async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
@@ -762,15 +762,11 @@ async def _resume_pending(*, timeout_seconds: float, assume_yes: bool) -> int:
     )
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_resume(engine, timeout=timeout, approver=approver)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_resume(engine, timeout=timeout, approver=approver)
 
 
 async def _learn_feedback(
@@ -796,15 +792,11 @@ async def _learn_feedback(
     )
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_learn(engine, event)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_learn(engine, event)
 
 
 async def _list_beliefs(
@@ -826,15 +818,11 @@ async def _list_beliefs(
     """
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_beliefs(engine, bands=bands, kinds=kinds, limit=limit, offset=offset)
 
 
 async def _list_questions(*, limit: int, offset: int) -> int:
@@ -847,15 +835,11 @@ async def _list_questions(*, limit: int, offset: int) -> int:
     """
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_questions(engine, limit=limit, offset=offset)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_questions(engine, limit=limit, offset=offset)
 
 
 async def _answer_question(question_id: str, *, accept: bool) -> int:
@@ -867,15 +851,11 @@ async def _answer_question(question_id: str, *, accept: bool) -> int:
     """
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_answer(engine, question_id, accept=accept)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_answer(engine, question_id, accept=accept)
 
 
 async def _forget_question(question_id: str) -> int:
@@ -894,15 +874,11 @@ async def _forget_question(question_id: str) -> int:
     """
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_forget_question(engine, question_id)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_forget_question(engine, question_id)
 
 
 async def _observe_conversation(conversation_id: str | None) -> int:
@@ -918,15 +894,11 @@ async def _observe_conversation(conversation_id: str | None) -> int:
     """
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_observe(engine, conversation_id)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_observe(engine, conversation_id)
 
 
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
@@ -941,19 +913,15 @@ async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     confirm: Callable[[Belief], bool] = (lambda _belief: True) if assume_yes else _confirm_forget
     try:
         engine = await _open_engine()
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
 
-    try:
-        code = await _drive_forget(engine, belief_id, confirm=confirm)
-    finally:
-        shutdown_code = await _close(engine)
-    return max(code, shutdown_code)
+    return await _drive_forget(engine, belief_id, confirm=confirm)
 
 
 async def _drive_beliefs(
-    engine: Engine,
+    engine: AssistantEngine,
     *,
     bands: list[BeliefBand] | None,
     kinds: list[MemoryKind] | None,
@@ -969,7 +937,7 @@ async def _drive_beliefs(
     """
     try:
         page = await engine.beliefs(bands=bands, kinds=kinds, limit=limit, offset=offset)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     _render_beliefs(page, limit=limit, offset=offset)
@@ -977,7 +945,7 @@ async def _drive_beliefs(
 
 
 async def _drive_forget(
-    engine: Engine, belief_id: str, *, confirm: Callable[[Belief], bool]
+    engine: AssistantEngine, belief_id: str, *, confirm: Callable[[Belief], bool]
 ) -> int:
     """Show the belief, take the answer, and destroy it if the answer is yes.
 
@@ -1002,7 +970,7 @@ async def _drive_forget(
             console.print("[dim]Left alone. Nothing was forgotten.[/]")
             return _EXIT_OK
         destroyed = await engine.forget(belief.id)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
@@ -1013,7 +981,7 @@ async def _drive_forget(
 
 
 async def _drive_resume(
-    engine: Engine,
+    engine: AssistantEngine,
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
     approver: Callable[[Confirmation], bool],
@@ -1028,6 +996,7 @@ async def _drive_resume(
     must not run a recovered action the user never saw. An :class:`AssistantError`
     from any stage is rendered and mapped to a non-zero exit code.
     """
+    failed = False
     try:
         pending = await engine.pending_confirmations()
         if not pending:
@@ -1037,34 +1006,16 @@ async def _drive_resume(
             _render_confirmation(confirmation)
             approved = approver(confirmation)
             resumed = await engine.resume(confirmation.token, approved=approved, timeout=timeout)
-            _render_turn(resumed)
+            failed = _render_turn(resumed) or failed
             _render_conversation_footer(resumed)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
-    return _EXIT_OK
-
-
-async def _close(engine: Engine) -> int:
-    """Close the façade on exit, reporting a shutdown failure rather than crashing.
-
-    Returns a non-zero code if closing fails, so the caller can fold it into the
-    exit status (ADR-0042 §7). Catches ``Exception`` — not just ``AssistantError``
-    — because :meth:`Engine.aclose` raises an ``ExceptionGroup`` when an owned
-    resource's ``close`` fails; a shutdown fault must be surfaced, not propagated
-    as a traceback, and must not be mistaken for success. ``BaseException`` (a
-    cancellation, a keyboard interrupt) is left to propagate.
-    """
-    try:
-        await engine.aclose()
-    except Exception as exc:  # shutdown must surface any fault, not crash
-        _render_error(exc)
-        return _EXIT_ERROR
-    return _EXIT_OK
+    return _EXIT_ERROR if failed else _EXIT_OK
 
 
 async def _drive_turn(
-    engine: Engine,
+    engine: AssistantEngine,
     utterance: str,
     *,
     timeout: timedelta,  # noqa: ASYNC109 — the caller's budget, relayed to the façade (ADR-0029 §4)
@@ -1076,7 +1027,11 @@ async def _drive_turn(
     A turn drives at most one step today (ADR-0042 §3), so at most one
     confirmation can arise; ``resume`` resolves it to ``EXECUTED`` or ``DENIED``.
     An :class:`AssistantError` from any stage is rendered and mapped to a non-zero
-    exit code — the adapter surfaces the failure, it does not swallow it.
+    exit code — the adapter surfaces the failure, it does not swallow it. **So is a
+    step that ran and failed** (#531): a non-zero exit on a failed step is an
+    ordinary adapter responsibility under ADR-0042 §6 once the outcome is
+    addressable, and without it a scripted caller reads success from a turn whose
+    tool raised.
 
     The conversation footer is printed **once**, from the last outcome produced: a
     parked turn and the resolution that answers it are two episodes in one
@@ -1084,22 +1039,22 @@ async def _drive_turn(
     """
     try:
         outcome = await engine.converse(utterance, timeout=timeout, conversation_id=conversation_id)
-        _render_turn(outcome)
+        failed = _render_turn(outcome)
         step = outcome.step
         if step is not None and step.confirmation is not None:
             approved = approver(step.confirmation)
             outcome = await engine.resume(
                 step.confirmation.token, approved=approved, timeout=timeout
             )
-            _render_turn(outcome)
-    except AssistantError as exc:
+            failed = _render_turn(outcome)
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     _render_conversation_footer(outcome)
-    return _EXIT_OK
+    return _EXIT_ERROR if failed else _EXIT_OK
 
 
-async def _drive_conversations(engine: Engine, *, limit: int, offset: int) -> int:
+async def _drive_conversations(engine: AssistantEngine, *, limit: int, offset: int) -> int:
     """Ask the façade for one page of conversations and render it (ADR-0074 §2).
 
     The adapter relays the page and renders what comes back; it re-orders nothing,
@@ -1108,7 +1063,7 @@ async def _drive_conversations(engine: Engine, *, limit: int, offset: int) -> in
     """
     try:
         page = await engine.recent_conversations(limit=limit, offset=offset)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     _render_conversations(page, limit=limit, offset=offset)
@@ -1116,7 +1071,7 @@ async def _drive_conversations(engine: Engine, *, limit: int, offset: int) -> in
 
 
 async def _drive_forget_conversation(
-    engine: Engine, conversation_id: str, *, confirm: Callable[[ConversationDigest], bool]
+    engine: AssistantEngine, conversation_id: str, *, confirm: Callable[[ConversationDigest], bool]
 ) -> int:
     """Show the conversation's count and span, take the answer, then destroy it.
 
@@ -1134,7 +1089,7 @@ async def _drive_forget_conversation(
             console.print("[dim]Left alone. Nothing was forgotten.[/]")
             return _EXIT_OK
         destroyed = await engine.forget_conversation(digest.id)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
@@ -1144,7 +1099,7 @@ async def _drive_forget_conversation(
     return _EXIT_OK
 
 
-async def _drive_observe(engine: Engine, conversation_id: str | None) -> int:
+async def _drive_observe(engine: AssistantEngine, conversation_id: str | None) -> int:
     """Run one observation pass and render what it did (ADR-0077 §8, ADR-0042 §6).
 
     The adapter conveys the request and renders the engine's
@@ -1155,14 +1110,14 @@ async def _drive_observe(engine: Engine, conversation_id: str | None) -> int:
     """
     try:
         report = await engine.observe(conversation_id=conversation_id)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     _render_observation(report)
     return _EXIT_OK
 
 
-async def _drive_questions(engine: Engine, *, limit: int, offset: int) -> int:
+async def _drive_questions(engine: AssistantEngine, *, limit: int, offset: int) -> int:
     """Ask the façade for the two question lists and render them (ADR-0078 §8).
 
     **Two calls, two lists, never merged.** An interrupted question is not answerable,
@@ -1180,14 +1135,14 @@ async def _drive_questions(engine: Engine, *, limit: int, offset: int) -> int:
     try:
         waiting = await engine.questions(limit=limit, offset=offset)
         stranded = await engine.interrupted_questions(limit=limit, offset=offset)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     _render_questions(waiting, stranded, limit=limit, offset=offset)
     return _EXIT_OK
 
 
-async def _drive_answer(engine: Engine, question_id: str, *, accept: bool) -> int:
+async def _drive_answer(engine: AssistantEngine, question_id: str, *, accept: bool) -> int:
     """Relay one answer and render what it did (ADR-0078 §9, ADR-0042 §6).
 
     The adapter conveys the user's yes/no and renders the engine's outcome; it authors
@@ -1196,17 +1151,17 @@ async def _drive_answer(engine: Engine, question_id: str, *, accept: bool) -> in
     """
     try:
         outcome = await engine.answer(question_id, accept=accept)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     return _render_answer(outcome)
 
 
-async def _drive_forget_question(engine: Engine, question_id: str) -> int:
+async def _drive_forget_question(engine: AssistantEngine, question_id: str) -> int:
     """Destroy one question and report whether anything was there (ADR-0078 §9)."""
     try:
         destroyed = await engine.forget_question(question_id)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     if not destroyed:
@@ -1221,7 +1176,7 @@ async def _drive_forget_question(engine: Engine, question_id: str) -> int:
     return _EXIT_OK
 
 
-async def _drive_learn(engine: Engine, event: FeedbackEvent) -> int:
+async def _drive_learn(engine: AssistantEngine, event: FeedbackEvent) -> int:
     """Submit one feedback event and render what memory did with it (ADR-0042 §3, §6).
 
     The correction leg of the pipeline: the adapter conveys the feedback and renders
@@ -1233,7 +1188,7 @@ async def _drive_learn(engine: Engine, event: FeedbackEvent) -> int:
     try:
         outcome = await engine.learn(event)
         _render_learn(outcome)
-    except AssistantError as exc:
+    except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     return _EXIT_OK
@@ -1255,14 +1210,17 @@ def _safe(value: str) -> str:
     return escape(cleaned)
 
 
-def _render_turn(outcome: TurnOutcome) -> None:
-    """Render one turn's plan, degraded-memory notice, and step disposition.
+def _render_turn(outcome: TurnOutcome) -> bool:
+    """Render one turn's plan, degraded-memory notice, and step outcome.
 
     ``outcome.turn`` is ``None`` on a resume driven from a **recovered** park
     (ADR-0052 §3) — a confirmation reconstructed from durable state after a restart
-    has no live turn to render — so only the step disposition is shown there. The
-    action itself was already shown from the recovered confirmation before the user
-    answered.
+    has no live turn to render — so only the step is shown there. The action itself
+    was already shown from the recovered confirmation before the user answered.
+
+    Returns:
+        Whether a step ran and did not succeed, which the caller folds into the
+        process exit code (#531).
     """
     turn = outcome.turn
     if outcome.capture_degraded:
@@ -1289,8 +1247,62 @@ def _render_turn(outcome: TurnOutcome) -> None:
             )
 
     step = outcome.step
-    if step is not None and step.confirmation is None:
+    if step is None or step.confirmation is not None:
+        return False
+    return _render_step(step)
+
+
+def _render_step(step: StepOutcome) -> bool:
+    """Render what became of the step this pass drove — gate *and* outcome (#531).
+
+    **The disposition is the gate's verdict; the named step's ``status`` and
+    ``failure`` are the outcome** (ADR-0084 §8, ADR-0085 §7). This adapter is where
+    #531's defect lived: it read ``disposition`` and discarded ``state``, so a tool
+    that raised — recorded in ``plans.db`` as ``status: "failed"`` with its
+    ``kind``, exactly as ADR-0029 §4 requires — was rendered
+    ":green:`Done.`" and exited ``0``. A scripted caller "cannot tell a successful
+    turn from a failed one without opening ``plans.db``".
+
+    :attr:`~ai_assistant.core.types.StepOutcome.step_id` is what makes the outcome
+    *addressable*: ``state.steps`` is the whole tuple and ``tool_id`` cannot
+    identify a step, since two steps may bind the same tool.
+
+    Args:
+        step: What the pass did with the plan's step.
+
+    Returns:
+        Whether the step ran and failed.
+    """
+    if step.disposition is not Disposition.EXECUTED:
         _render_disposition(step.disposition, step.tool_id)
+        return False
+
+    named = [one for one in step.state.steps if one.step_id == step.step_id]
+    if not named:
+        # Unreachable by contract — ``step_id`` addresses exactly one execution
+        # record, and the conformance suite holds every implementation to it. If it
+        # ever is reached, "we cannot tell" must not render as success: that is the
+        # whole of what #531 reported, and a green exit code for an unknown outcome
+        # is the version of it a script would trust.
+        console.print(
+            "[yellow]The step's own execution record could not be found, so whether it "
+            "succeeded cannot be shown.[/]"
+        )
+        return True
+
+    execution = named[0]
+    if execution.status is not StepStatus.FAILED:
+        _render_disposition(step.disposition, step.tool_id)
+        return False
+
+    tool = _safe(step.tool_id) if step.tool_id is not None else "the selected tool"
+    failure = execution.failure
+    # `failure` is required when the status is FAILED (`core/types.py`), so the
+    # `None` arm is the type's optionality rather than a state this can reach.
+    cause = "" if failure is None else f" {_safe(failure.message)}"
+    kind = "" if failure is None or failure.kind is None else f" [dim]({failure.kind.value})[/]"
+    console.print(f"[red]Failed.[/] {tool} ran and did not succeed.{cause}{kind}")
+    return True
 
 
 def _render_conversation_footer(outcome: TurnOutcome) -> None:
@@ -1392,7 +1404,14 @@ def _confirm_forget_conversation(_digest: ConversationDigest) -> bool:
 
 
 def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
-    """Render the outcome of the driven step (ADR-0042 §3)."""
+    """Render the permission gate's verdict on the driven step (ADR-0042 §3).
+
+    **Only the verdict.** ``EXECUTED`` says the call was authorised and handed to
+    the executor, not that the executor succeeded — its own documentation delegates
+    that downward — so :func:`_render_step` consults the step's record before
+    reaching for this, and "Done." is printed only for a step that really is done
+    (ADR-0084 §8).
+    """
     tool = _safe(tool_id) if tool_id is not None else "the selected tool"
     messages = {
         Disposition.EXECUTED: f"[green]Done.[/] Ran {tool}.",
@@ -2168,12 +2187,23 @@ def _confirm(_confirmation: Confirmation) -> bool:
 def _render_error(exc: Exception) -> None:
     """Render an error for the terminal, without leaking a traceback.
 
-    Accepts any ``Exception`` — an :class:`AssistantError` from a stage, or the
-    ``ExceptionGroup`` :meth:`Engine.aclose` raises when an owned resource fails to
-    close — and shows the actual cause. For a group that means the **contained**
-    messages (recursively), not just the group's summary, so an operator sees
-    *which* resource failed, not merely that one did.
+    Accepts any ``Exception`` — an :class:`AssistantError` the hub declined a
+    request with, a :class:`~ai_assistant.wire.errors.TransportError` from the
+    connection itself, or an exception group — and shows the actual cause. For a
+    group that means the **contained** messages (recursively), not just the group's
+    summary, so an operator sees *which* part failed, not merely that one did.
+
+    **A transport failure is rendered as its own thing**, and that difference is
+    ADR-0084 §3's rather than a presentation choice: "a connection-level close is a
+    **transport** failure, which is not the same event as a request the hub
+    received and declined, and ruling 4's legibility is the reason the difference
+    survives to the user rather than being flattened into one message". A user who
+    reads "Error:" for a hub that is not running looks for a fault in their
+    request; the hub simply is not there.
     """
+    if isinstance(exc, TransportError):
+        console.print(f"[red]The assistant hub is not reachable:[/] {_safe(str(exc))}")
+        return
     console.print(f"[red]Error:[/] {_safe('; '.join(_leaf_messages(exc)))}")
 
 
