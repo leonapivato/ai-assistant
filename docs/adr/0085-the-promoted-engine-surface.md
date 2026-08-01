@@ -14,7 +14,7 @@
   `runner.py`, `questions.py`, `loop.py`, `observation.py` and `conversations.py`
   at `main` @ `4d6aa7c`, not derived from the ADRs. **Every line citation below is
   grounded at that commit** and was re-checked against it symbol by symbol. Where the corpus and the tree
-  disagree, §11 says so and says which one this ADR follows.
+  disagree, §11b says so and says which one this ADR follows.
 - **No implementation lands with it.** No `src/`, no `tests/`. It ratifies what
   `core/protocols.py` and `core/types.py` will contain; the triad — Protocol +
   shared conformance suite + canonical fake in `ai_assistant.testing` — is
@@ -28,6 +28,12 @@
   serves both and resolves content for both, which is **#552**. §4a decides the
   shape that makes the ratified split expressible, and §8f shows what it does to
   the frame arithmetic.
+- **The byte-level wire encoding is deliberately *not* here.** §8c fixes the size
+  limit and that it is measured on one canonical encoding; pinning that encoding
+  to the byte is the `wire` package's (ADR-0084 §6, §5's change 4), where a test
+  can hold it. §11a states the obligation by name. Writing that grammar here was
+  attempted and withdrawn — it is the unspiked seam #281 warns about, and the same
+  enumeration §8d and §10a decline elsewhere.
 - **This ADR amends nothing.** §12 applies ADR-0082 §1's test to every earlier
   ADR whose text this one touches and finds no record owed — each of the clauses
   examined is a deferral whose deferring sentence stays true and now has an
@@ -878,12 +884,12 @@ several of them, without anyone having to notice.
 
 > **The contract limit is `hub_max_frame_bytes - 512`, applied to the whole
 > serialised **payload**, measured as the byte length of that payload's canonical
-> UTF-8 JSON encoding, which is pinned below.** There are **three** payload
-> classes and the limit covers all of them: for a call, the request's argument
-> object as §10 encodes it; for a return, the result value as §10 encodes it; and
-> for a failure, the error payload as §10a encodes it. Every implementation
-> enforces it, on arguments before dispatch, on results before return, and on
-> errors before they are sent.
+> UTF-8 JSON encoding** — the codec ADR-0084 §3 already fixes. There are **three**
+> payload classes and the limit covers all of them: for a call, the request's
+> argument object as §10 encodes it; for a return, the result value as §10 encodes
+> it; and for a failure, the error payload as §10a encodes it. Every
+> implementation enforces it, on arguments before dispatch, on results before
+> return, and on errors before they are sent.
 
 **The error payload is the third class and it is the one with no room to fail**,
 which is why §10a gives it a reduction rule of its own rather than the refusal the
@@ -903,97 +909,47 @@ the divergence ADR-0084 §4 moved the limit into the contract to prevent, one
 level up from where it was being watched. A whole-payload bound has no such gap,
 because what it measures is the thing the length prefix counts.
 
-**The encoding is pinned, because "JSON mode" names a value shape and not a byte
-string.** Two conforming encoders can produce different byte counts for the same
-value — one inserting whitespace after `,` and `:`, one escaping non-ASCII as
-`\uXXXX` — and a limit whose measurement differs between the two implementations
-is not one limit. So:
+**The *encoding* those bytes are counted in is deferred to the wire lane, and
+that is a scoping decision rather than an omission.** A limit is only one limit if
+both implementations measure the same byte string, so something must fix the
+encoding exactly — `/` versus `\/`, `0.1` versus `1e-1`, `"…12:00:00Z"` versus
+`"…12:00:00+00:00"` and `"PT0.5S"` versus `"PT0.500000S"` are all real
+disagreements at the boundary. What this ADR fixes is that there **is** one
+canonical encoding and that the limit is measured on it; what it declines to fix
+is the bytes.
 
-> **The canonical encoding is the byte string `TypeAdapter(T).dump_json(value)`
-> produces**, at the pydantic version the environment pins, **with
-> `exclude_unset=True` on a request payload and no exclusion flag on a result or
-> an error.** That byte string is what §8c measures and
-> what §10 puts on the wire — one definition serving both, so an implementation
-> measures the bytes it is about to send.
+> **The measurement is taken on the payload's canonical wire encoding. Pinning
+> that encoding — to the byte — belongs to the `wire` package (ADR-0084 §6),
+> ADR-0084 §5's change 4, where it is exercised by the code that does the
+> encoding.** §11a states the obligation the wire lane inherits.
 
-**`TypeAdapter` rather than `model_dump_json()`, because two of the three payload
-classes are not models.** A request payload is an object of arguments and a
-`forget` result is a bare `true`; neither has a `model_dump_json()` to call, and
-wrapping a `bool` in an ordinary model yields `{"root":true}` where a `RootModel`
-yields `true` — two byte strings for one response, which is the divergence this
-section exists to remove. `TypeAdapter` is pydantic's entry point for *any*
-annotated type, it agrees byte-for-byte with `model_dump_json()` where both apply,
-and it gives `true`, `null` and `[…]` their bare forms.
+**Three reasons, in the order they bind:**
 
-**`T` is fixed per payload class**, so nothing is left to an implementation's
-choice of adapter:
+- **ADR-0084 already divides it this way.** §4 makes the *limit* part of the
+  promoted Protocol's declared contract; §6 gives the envelope, the framing and
+  the codec to the `wire` package. The limit is a property of the contract because
+  both implementations must agree on what is refused; the byte encoding is a
+  property of the transport, which is what §6 hands over.
+- **A hand-written byte grammar in a contract ADR is an unspiked seam**, which is
+  the hazard #281 and `CONTRIBUTING.md`'s spike-first guidance were written about
+  and the reason this ADR exists at all. It was attempted here: four review rounds
+  each found one more corner it had not covered, and a fifth (`"P2DT3S"` versus
+  `"PT172803S"`) was open when it was withdrawn. An enumeration of a space nobody
+  can prove they have covered is a list of the cases someone thought of, not a
+  specification.
+- **It is the argument this ADR already makes twice.** §8d refuses to bound the
+  handshake member by member and bounds the payload instead; §10a refuses to name
+  each error's `details` members and derives them from the exception's attributes.
+  Both decline an enumeration in favour of something structural. Writing a byte
+  grammar here would be the enumeration those two sections reject, in the one
+  place it is hardest to check.
 
-| Payload | `T` |
-| --- | --- |
-| **result** | the method's declared return annotation (§3) |
-| **request** | a model whose fields are the method's parameters, carrying their declared annotations and defaults, with `extra="forbid"` |
-| **error** | the error model of §10a — `code`, `message`, optional `details`, optional `reduced` |
-
-**`exclude_unset=True` is what makes §10's omission rule a byte fact rather than an
-intention — on a request, and only there.** An argument the caller did not pass is
-*unset*, not `None`, so it does not appear, which is what lets the receiver apply
-its own declared default (§3a) instead of being handed a `null` it would have to
-distinguish from a deliberate one. Without the flag the same call encodes
-`"conversation_id":null` and measures twenty-four bytes longer.
-
-**Applying it to a result would make the bytes depend on construction history, and
-that is the trap this section keeps setting for itself.** `exclude_unset` asks
-which fields were *assigned*, not what the value *is*. `BeliefSummary` defaults
-`evidence_count`, `lost_evidence` and `valid_until`, so one implementation
-building `BeliefSummary(id=…, band=…, …)` and another building the **equal** value
-with `evidence_count=0, lost_evidence=0, valid_until=None` would emit different
-byte strings for the same page — and could land on opposite sides of §8c's limit.
-A result has no "not passed" to express: the value is the value, every field
-appears, and two equal values encode identically however they were built. Same for
-an error.
-
-**The encoder is the definition, and a property list is the description — that
-way round, deliberately.** Three review rounds each found one more corner where a
-property list left two conforming encoders disagreeing: `/` versus `\/`, `0.1`
-versus `1e-1`, `"…12:00:00Z"` versus `"…12:00:00+00:00"`, then `"PT0.5S"` versus
-`"PT0.500000S"` — and `"P2DT3S"` versus `"PT172803S"` was still open when the
-list was abandoned. **That is the same lesson §8d already carries** about bounding
-the handshake member by member, and §10a about naming each error's `details`: an
-enumeration of a space nobody can prove they have covered is not a specification,
-it is a list of the cases someone thought of. A limit whose measurement is a
-function of *which corners the author enumerated* is not one limit.
-
-**What the encoding looks like**, non-normatively, so an implementer knows what to
-expect and a reviewer can sanity-check a frame: no insignificant whitespace;
-strings escaping only `"`, `\` and control characters, with `/` unescaped, JSON's
-two-character forms where they exist, and non-ASCII as UTF-8; numbers in their
-shortest round-tripping decimal form; instants as RFC 3339 in UTC with `Z`; and
-durations as ISO-8601 with trailing zeros stripped. **None of that is the
-contract** — the encoder's output is — and where this paragraph and the encoder
-disagree, the encoder is right and this paragraph is a defect to fix.
-
-**Binding to an encoder rather than a grammar is what ADR-0084 already did**, and
-this is that choice followed through rather than a new one. §3 fixes "the codec is
-UTF-8 JSON" and §4 promotes to pydantic models precisely because "binding to the
-encoding the stores already depend on is what makes #421's integer-encodability
-question **one** question rather than two". The same argument decides this: a
-grammar this ADR wrote would be a second specification of the bytes, to be kept in
-step with the encoder by hand and tested by nobody.
-
-**The cost is named: a conforming implementation is a pydantic one.** That is
-already true of everything ADR-0084 §5 contemplates — both halves "are the same
-`uv` environment on the same machine, installed together and upgraded together"
-(§3), which is why that ADR refuses tolerant version negotiation. A
-second-language spoke is the remote leg, and §4 of that ADR already says the
-separate wire schema it rejected "becomes the right answer on the day the two
-halves version independently". So this ADR does not foreclose that; it declines to
-pay for it now with a grammar nothing would exercise.
-
-**One consequence is worth stating because it is not obvious**: the pinned
-pydantic version becomes part of what the protocol version (ADR-0084 §3) governs.
-An upgrade that changed a serialised byte would change every payload's measured
-size, which is exactly the "half-finished upgrade" §3's exact-match refusal exists
-to make legible.
+**What the wire lane can do that this ADR cannot: test it.** A byte encoding is
+exactly the kind of thing a round-trip test pins in a line — encode, measure,
+compare — where a prose grammar is checked only by whoever reads it next. That is
+also why the deferral costs nothing: nothing implements against this contract
+before the triad (ADR-0084 §5's change 3), and nothing encodes a payload before
+change 4.
 
 The measure is a serialisation at all because that is what ADR-0084 §3's length
 prefix counts, and a limit measured on anything else — a character count, a
@@ -1228,29 +1184,31 @@ forms" here. It follows mechanically from §3's own rules once the signatures ar
 fixed, so it is stated compactly rather than method by method:
 
 - **A request payload** is a JSON object whose members are the call's arguments,
-  named exactly as the Python parameters are, encoded through §8c's request `T`
-  with `exclude_unset=True` — so an omitted optional argument is absent rather
-  than `null`, the receiver applies its own declared default (§3a), and the two
-  implementations cannot disagree about what "not passed" means. The method name
-  is the envelope's `method` member (§8a), not a payload member.
+  named exactly as the Python parameters are. **An argument the caller did not
+  pass is absent, not `null`** — so the receiver applies its own declared default
+  (§3a) and the two implementations cannot disagree about what "not passed"
+  means. That distinction is semantic and is fixed here; the bytes that express it
+  are §8c's deferral. The method name is the envelope's `method` member (§8a), not
+  a payload member.
 - **Argument scalars** take pydantic's JSON-mode form for their type: `timeout`
   is an ISO-8601 duration string, a `bool` is a JSON boolean, an `Identifier` is a
   string, and `bands`/`kinds` are JSON arrays of their enum values.
-- **A result payload** is the value serialised through §8c's result `T` — the
-  method's own return annotation, so the shape follows the signature rather than a
-  second declaration: `null` where the method returns an optional (`belief`,
-  `conversation`); a
-  JSON array where it returns a tuple (`beliefs` — of `BeliefSummary`, §4a —
-  `questions`,
-  `interrupted_questions`, `recent_conversations`, `pending_confirmations`); and a
-  JSON boolean for the three methods returning `bool` (`forget`,
-  `forget_question`, `forget_conversation`, and no other).
+- **A result payload** takes the shape of the method's own declared return
+  annotation, so it follows the signature rather than a second declaration:
+  `null` where the method returns an optional (`belief`, `conversation`); a JSON
+  array where it returns a tuple (`beliefs` — of `BeliefSummary`, §4a —
+  `questions`, `interrupted_questions`, `recent_conversations`,
+  `pending_confirmations`); and a JSON boolean for the three methods returning
+  `bool` (`forget`, `forget_question`, `forget_conversation`, and no other).
+  **A result carries every field of its type** — there is no "not passed" on a
+  return, and a value's bytes must not depend on how the object was built.
 - **Every promoted `StrEnum` serialises as its member value**, which is why §4
   keeps the `StrEnum` base: `Disposition.EXECUTED` is `"executed"` on the wire
   today and after the move, so the relocation changes no byte.
-- **The byte encoding is §8c's canonical encoding** — `model_dump_json()`'s
-  output at the pinned pydantic version — for every payload on this wire, so the
-  bytes a client measures against §8c's limit are exactly the bytes it writes.
+- **One canonical encoding serves both jobs.** The bytes a client measures
+  against §8c's limit are exactly the bytes it writes, so measurement and
+  transmission can never disagree. **Which bytes those are is §8c's deferral to
+  the wire lane** (§11a), and it is the only thing in this section left open.
 
 #### 10a. The error frame, so a declared failure survives the wire
 
@@ -1274,10 +1232,9 @@ it.
 | `details` | always | an object whose members are the exception's public attributes, or `null` where the type carries none |
 | `reduced` | always | `true` where the payload was reduced to fit (below), otherwise `false` |
 
-**Every member is always present**, which follows from §8c serialising an error
-with no exclusion flag: a conditional member would be a second thing an
-implementation could get differently, and `"details":null` costs fifteen bytes to
-remove the question. A client reads `details` as null-or-object and `reduced` as a
+**Every member is always present**, deliberately: a conditional member would be a
+second thing two implementations could do differently, and `"details":null` costs
+fifteen bytes to remove the question. A client reads `details` as null-or-object and `reduced` as a
 plain boolean, with no absence to interpret.
 
 **The code is the class name, which makes the mapping total by construction
@@ -1377,7 +1334,48 @@ before any I/O** (§3c, §9), so it never crosses a frame. The wire's error
 vocabulary is therefore exactly the `AssistantError` subtree, which is also what
 makes "the code is the class name" safe: `ValueError` is not ours to name.
 
-### 11. Where the corpus and the tree disagree, and which this ADR follows
+### 11. Deferred by name, and where the corpus and the tree disagree
+
+#### 11a. What the wire lane inherits from this ADR
+
+Stated as an obligation rather than left as a silence, so ADR-0084 §5's change 4
+starts from a named debt rather than discovering one.
+
+> **The canonical wire encoding — the exact byte string a payload serialises to —
+> is the `wire` package's to fix** (ADR-0084 §6). This ADR fixes that there is
+> **one** such encoding, that it is used for both measurement and transmission, and
+> that §8c's limit is measured on it. It does not fix the bytes.
+
+**What the wire lane owes, concretely**, because "pin the encoding" is not
+actionable on its own. Every one of these is a place two encoders can differ at
+the limit's boundary, and each was found by review rather than by inspection:
+
+- insignificant whitespace, and the `,` / `:` separators;
+- string escaping — `/` versus `\/`, the two-character control forms versus
+  `\u00XX`, and non-ASCII as UTF-8 versus `\u`;
+- number form — the shortest round-tripping decimal, and whether an exponent is
+  ever emitted (`Belief.confidence` is the field this bites);
+- instants — the UTC designator (`Z` versus `+00:00`) and fractional-second
+  digits;
+- durations — fractional seconds, trailing zeros, and whether a day component is
+  used (`"P2DT3S"` versus `"PT172803S"`);
+- the entry point for payloads that are **not** models — a request's argument
+  object, and the bare `true` a `forget` returns;
+- whether a value's bytes may depend on how the object was *constructed* rather
+  than on what it is. **They may not**, and this is the one item stated as a
+  constraint rather than a question: two equal values must encode identically, or
+  the same page lands on opposite sides of the limit depending on which
+  implementation built it.
+
+**And it owes a test, which is the point of the deferral.** A round-trip that
+encodes, measures and compares pins this in a line, where a prose grammar is
+checked only by whoever reads it next.
+
+**Nothing implements against this before then**, so the deferral costs no
+sequencing: the triad (ADR-0084 §5's change 3) writes the Protocol and the
+conformance suite, and change 4 is the first thing that encodes a payload.
+
+#### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
 Recorded rather than smoothed over, because each was found by reading the code and
 a later reader will otherwise find the same discrepancy and wonder which won.
@@ -1552,119 +1550,18 @@ move to `Accepted` triggers nothing.
   overflows the frame on `timeout` alone — leaving the client to refuse an input
   the contract admitted, or to send a frame the server refuses on its prefix.
   Bounding the payload measures the thing the length prefix counts.
-- **Specify the canonical encoding as a grammar — a list of rules an encoder must
-  satisfy — rather than as an encoder's output.** Rejected in §8c, and it is the
-  alternative this ADR actually tried: three review rounds each found one more
-  corner the list had not covered (`/` versus `\/`, `0.1` versus `1e-1`, `Z`
-  versus `+00:00`, `"PT0.5S"` versus `"PT0.500000S"`), with `"P2DT3S"` versus
-  `"PT172803S"` still open when it was abandoned. A grammar is a second
-  specification of the same bytes, kept in step with the encoder by hand and
-  exercised by nothing — §4's objection to a separate wire schema, and §8d's to
-  bounding the handshake member by member. The cost of the choice made instead is
-  named rather than hidden: a conforming implementation is a pydantic one, which
-  ADR-0084 §3 already assumes of both halves.
-- **Leave the measurement as "pydantic JSON mode".** Rejected in §8c for the
-  opposite reason: JSON mode names a *value shape*, not a byte string, so it does
-  not determine a length at all.
-- **Apply `exclude_unset=True` to every payload, not only requests.** Rejected in
-  §8c: it asks which fields were *assigned* rather than what the value is, so two
-  implementations building the same `BeliefSummary` differently would emit
-  different bytes for one page and could land on opposite sides of the limit. A
-  result has no "not passed" to express.
-- **Name `model_dump_json()` as the entry point.** Rejected in §8c: a request
-  payload is an object of arguments and a `forget` result is a bare `true`, and
-  neither is a model — so the entry point would be undefined for two of the three
-  payload classes, and wrapping a scalar to reach it yields `{"root":true}` or
-  `true` depending on the wrapper chosen. `TypeAdapter` covers every annotated
-  type and agrees with `model_dump_json()` where both apply.
-- **State only that identifier arguments must be non-blank, leaving stripping to
-  the implementation.** Rejected in §3c: `_non_blank` strips as well as rejects,
-  so a wire client deserialising through `Identifier` and an in-process engine
-  taking the raw `str` give opposite answers for `belief(" rec-1 ")`. Optional
-  normalisation on an identity argument is worse than none.
-- **Derive the `hub_max_frame_bytes` floor from the handshake's members, bounding
-  each one as it is noticed.** Rejected in §8d: three separate things turned out
-  to be unbounded on inspection — the build identifier, the version's decimal
-  width, and then the whole connect *request*, which is sent before the client has
-  been told the limit — which is evidence that enumerating them is not how this is
-  made safe, and a later protocol version may add a member no sentence here
-  reaches. The bound is stated over each connect payload as a whole instead, so an
-  unforeseen member cannot widen either handshake frame past the floor.
-- **Set the contract size limit equal to `hub_max_frame_bytes`.** Rejected in §8c:
-  a value at exactly the limit passes the contract and overflows the frame by the
-  envelope's bytes, so the in-process engine would accept what the client
-  provably cannot send — §4's divergence, from the side nobody was watching. The
-  fixed reserve is what relates the two limits.
-- **Compute the envelope reserve exactly (109 bytes) rather than fixing it at
-  512.** Rejected in §8b: ADR-0084 §3 permits a later version to add envelope
-  members, and an exact reserve turns any such addition into a silent overflow at
-  the ceiling. The slack costs 402 bytes out of a 16 MiB default.
-- **Leave the correlation id unbounded.** Rejected in §8a: without a bound the
-  envelope reserve is not a constant, so §8c's arithmetic has nothing to subtract
-  and the contract limit cannot be stated at all.
-- **Make `StepOutcome.step_id` optional.** Rejected in §7: both construction sites
-  hold the id already and a `StepOutcome` cannot exist without a step, so the
-  optionality is unproducible and every client would carry a dead `None` branch.
-- **Give `Disposition` a `FAILED` member, or duplicate `status`/`failure` onto
-  `StepOutcome`.** Both already rejected by ADR-0084 §8 — the first fuses the
-  gate's verdict with the invocation's outcome and amends ADR-0037; the second
-  creates two sources of truth for a fact `state` already carries correctly. §7
-  adds one field instead.
-- **Keep `pending_confirmations` returning a `list` to avoid touching ADR-0052's
-  printed signature.** Rejected in §3b: it is the only mutable page on a
-  fifteen-method surface, and ADR-0052's own note delegates the spelling here.
-- **Freeze the thirteen unspecified argument conventions as they are today rather
-  than adopting a rule.** Rejected in §2: it preserves one positional optional
-  (`observe`) that cannot be joined by a second without ordering ambiguity, and it
-  leaves a `core` Protocol with no stated convention for the next method anyone
-  adds. The rule costs one call-site edit in a file the client lane is rewriting.
-- **Constrain `ObservedProposal.confidence` to `[0, 1)`, matching ADR-0077 §5's
-  producer rule.** Rejected in §4: it converts a producer bug into a report that
-  cannot be constructed, so the entry a human most needs to see — a proposal
-  something got wrong — would take the whole `ObservationReport` down with it.
-- **Leave `beliefs()` returning `Belief` and say nothing** — the shape this ADR
-  carried until #552. Rejected in §4a: it ratifies an implementation that
-  contradicts ADR-0077 §6 into contract surface, and it leaves §8 with a
-  multiplicative term it cannot bound. Silence here was not neutrality; it was a
-  decision taken by omission.
-- **Keep one `Belief` and add `evidence_count`/`lost_evidence` as fields beside
-  `evidence`, so a listing can send `evidence=()` honestly.** The closest call,
-  and rejected in §4a on one ground: a `beliefs()` implementation could still
-  populate `evidence`, so today's over-delivery stays *conforming* and the
-  ratified split survives only as a clause the conformance suite polices. The
-  only invariant available — `len(evidence) in (0, evidence_count)` — is weak
-  enough to admit a half-delivered page nobody intends. Two types make the wrong
-  answer unrepresentable instead of merely detectable, for the same words.
-- **Give `Evidence` a third state, so "resolves but not delivered here" is
-  distinct from a tombstone.** Rejected in §4a: it keeps the page × citations
-  product (3,200 entries on a full page, small ones but present), it adds a state
-  every client must handle to convey what `evidence_count` already conveys, and
-  it invites a renderer to print sixty-four "content withheld" placeholders per
-  belief — the listing burial `_render_belief`'s own docstring says it exists to
-  avoid.
-- **Argue the over-delivery is correct and let §3's frame ceiling refuse the
-  oversized page.** Rejected in §4a: it reads ADR-0077 §6's split out of
-  existence, and it converts a routine fifty-row listing into a call whose
-  success depends on how much episode text happens to sit behind the page — the
-  opposite of the legibility ADR-0084's ruling 4 asks for, arriving at the one
-  surface a user reaches for to understand what the assistant believes.
-- **Carry error codes in a hand-maintained registry of tokens rather than using
-  the class name, and name each error's `details` members in a table here.**
-  Rejected in §10a: both are second vocabularies kept in step with
-  `core/errors.py` by hand, on the paths least likely to be exercised — §4's
-  objection to mapping `Disposition` to a bare string, applied to failures. The
-  class name and the public attributes are the schema, so there is nothing to
-  drift; the two structured types are listed as a check on the rule, not as its
-  source.
-- **Answer an oversized error payload with `OversizedValueError`, as an oversized
-  argument or result is answered.** Rejected in §10a: the response to a failed
-  error delivery is itself an error frame, so the rule recurses, and it mislabels
-  — what was too large was the diagnosis, not the value the caller sent.
-- **Reconstruct the declared exception from a reduced error payload anyway, so
-  the caller still gets a typed refusal.** Rejected in §10a: `unresolved_ids`
-  defaults to `()`, so the caller would be told nothing was unresolved at the
-  moment too much was. Losing a typed refusal costs information; an inverted one
-  misleads.
+- **Pin the canonical byte encoding in this ADR** — first as a grammar of rules an
+  encoder must satisfy, then as a named pydantic entry point. *Attempted, and
+  withdrawn.* The grammar form took four review rounds, each finding one more
+  corner (`/` versus `\/`, `0.1` versus `1e-1`, `Z` versus `+00:00`, `"PT0.5S"`
+  versus `"PT0.500000S"`) with a fifth still open; the entry-point form then had to
+  answer which adapter, which flags, and what `T` is per payload class, and one of
+  those answers made a result's bytes depend on how the object was *constructed*
+  rather than on its value. Both are the unspiked seam #281 warns about, and both
+  are the enumeration §8d and §10a decline elsewhere. The encoding is the `wire`
+  package's (ADR-0084 §6), where a round-trip test pins it in a line; §8c defers it
+  and §11a names the obligation. **What is kept is the limit and that it is measured
+  on one canonical encoding** — the part ADR-0084 §4 makes contract.
 - **Bound `UnresolvedEvidenceError.unresolved_ids` in this ADR so the error
   always fits.** Rejected: bounding an unbounded citation sequence is #473's
   question and another lane's, and taking it here to solve a transport problem
