@@ -56,6 +56,13 @@ dependencies = [
 
 [project.scripts]
 assistant = "ai_assistant.interfaces.cli:app"
+# The hub gets its **own** console script, not an `assistant hub` subcommand, and
+# that is a constraint falling out of a ratified rule rather than a preference
+# (ADR-0084 §6). A subcommand would live in `interfaces`, which would then have to
+# import `service` — and ADR-0083 §8 forbids anything importing `service` at all.
+# Recorded here because the natural instinct is to add a subcommand, and the
+# failure would otherwise surface only as a `lint-imports` error, late.
+ai-assistant-hub = "ai_assistant.service:main"
 
 [dependency-groups]
 dev = [
@@ -326,3 +333,42 @@ forbidden_modules = [
     "ai_assistant.permissions",
     "ai_assistant.learning",
 ]
+
+[[tool.importlinter.contracts]]
+# ADR-0083 §8: "`service` may import `app`… and `core`; nothing may import
+# `service`." The ADR left this contract to the implementing lane and ADR-0084 §6
+# names it as one of two edits; this is the half that is well-formed today.
+#
+# **The rule is one-directional and the direction is the point.** `service` is the
+# resident process — entry point, signal handling, instance lock, exit-code
+# mapping, and later the scheduler. Nothing in the system is *below* it, so an
+# import pointing at it is always something reaching up into a deployment concern
+# from inside the application. That is also what forces the hub's own console
+# script (ADR-0084 §6): an `assistant hub` subcommand would put exactly such an
+# edge in `interfaces`.
+#
+# Every package in the tree is listed rather than relying on `ai_assistant`
+# wholesale, so a new top-level package is a deliberate addition here rather than
+# something that silently inherits — or silently escapes — the rule.
+#
+# `interfaces -> app` is **not** closed here. ADR-0083 §10 sequences that edit
+# with the lane that makes the CLI a client of the API: today the CLI is the only
+# interface and it builds an engine, so forbidding the edge before a client exists
+# would break `main` for something that does not exist yet (ADR-0084 §6).
+name = "nothing imports the service"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.core",
+    "ai_assistant.models",
+    "ai_assistant.memory",
+    "ai_assistant.context",
+    "ai_assistant.planning",
+    "ai_assistant.tools",
+    "ai_assistant.permissions",
+    "ai_assistant.learning",
+    "ai_assistant.orchestration",
+    "ai_assistant.interfaces",
+    "ai_assistant.app",
+    "ai_assistant.testing",
+]
+forbidden_modules = ["ai_assistant.service"]
