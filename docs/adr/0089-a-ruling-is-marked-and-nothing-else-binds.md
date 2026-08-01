@@ -178,24 +178,51 @@ conviction all leave the question exactly where §2 puts it, which is on the mar
 
 ### 2. The mark
 
-> **Normative.** A normative clause is written as a Markdown block quote,
-> preceded by a blank line, whose first line begins at column 0 with `> `
-> followed by the literal `**Normative.**`. Every physical line of the clause
-> carries the same column-0 `> ` prefix, or is a bare `>`. The clause contains no
-> fenced block.
+> **Normative.** A normative clause is a run of consecutive physical lines, each
+> of which is, at column 0, either `> ` followed by text or a bare `>`. Its first
+> line begins `> **Normative.**` and is immediately preceded by a blank line or
+> by the start of the file. The run ends at the first line that is neither of
+> those two shapes. A clause contains no fenced block.
 
 > **Normative.** A `**Normative.**` line inside a fenced block is display, not a
 > mark.
 
-> **Normative.** One block quote is one clause. A clause that states two separable
-> obligations is two block quotes.
+> **Normative.** A line that fails any part of that grammar is not a mark, and no
+> ADR is marked by it.
+
+> **Normative.** A clause states one obligation. A passage stating two separable
+> obligations is two clauses.
 
 **Extraction is a scan, and that is the whole requirement.** Read the file line by
-line, tracking fence state; every column-0 `> ` run whose first line carries the
-token is one clause. Nothing is inferred: not a section, not a heading, not a
+line tracking fence state, and apply the grammar above with nothing added to it:
+outside a fence, a blank-line-preceded run of column-0 `> `-or-bare-`>` lines
+whose first line carries the token is one clause, and the clause ends exactly
+where that run ends. Nothing is inferred: not a section, not a heading, not a
 list, not a paragraph. This is what ADR-0088 §6 demands of a checker — "the
 checker touches only what it can pick out of the text without guessing what the
 author meant" — and it is the property the whole design is bought for.
+
+**The grammar is stated once, and this is not a stylistic preference.** An
+earlier draft of this section stated the mark in the clause and then described
+the scan in the prose beside it, in slightly looser terms — the prose said `> `
+where the clause said `> ` *or* a bare `>`, and omitted the blank line the clause
+required. Adversarial review found it on the first round. It is worth recording
+rather than quietly fixing: **the defect this ADR exists to prevent occurred in
+the section defining the prevention**, which is the best available evidence that
+the drift is a property of the form and not of any author's care. Under §3 the
+clause would have governed and the looser prose bound nothing, so the rule was
+never actually ambiguous — but a reader would have had to know that to resolve
+it, and the fix is that there is one grammar to read.
+
+**A near-mark fails closed.** A token line that is indented, not blank-line
+preceded, or inside a fence is not a mark at all, so it neither becomes a clause
+nor switches an ADR into the marked regime (§4). That direction is deliberate:
+the alternative — treating a malformed line as a mark — would silently narrow
+the ADR to whatever *was* well-formed, which is §4's under-marking hazard reached
+by accident instead of by omission. The malformed case is also the one thing here
+a machine can name precisely: a column-0 `> ` line carrying the token and failing
+the rest of the grammar is a well-formedness defect, and §7 leaves to a later
+decision whether anything reports it.
 
 **Column 0 is load-bearing, and ADR-0043 is the precedent.** Its `PROPOSAL`
 markers open and close "on their **own column-0 line**, preceded by a blank
@@ -216,12 +243,14 @@ twice, and both are fenced. No ADR on `main` carries a block-quote-shaped line
 inside a fence, so the escape is defined before it is first needed rather than
 after — and this document is the first to need it.
 
-**One block quote is one clause because the corpus has already broken it.**
+**One clause is one obligation, because the corpus has already broken it.**
 ADR-0086 §2's block quote carries two rules joined by a bare `>` — the install
 bound and the retirement exemption — so an extraction of it yields one span
 holding two obligations, of which a ruleset can adopt neither separately. A bare
 `>` still joins *paragraphs of one clause*; what it may not join is two rules.
-That distinction is a reading, so it is a reviewer's to enforce, not a checker's.
+That distinction is a reading, so it is a reviewer's to enforce, not a checker's:
+the grammar deliberately cannot tell one obligation from two, and pretending
+otherwise would be the prose inference ADR-0088 §6 forbids.
 
 **Why a literal token and not the emergent shape.** Three reasons, and the third
 decides it:
@@ -316,6 +345,24 @@ default runs the other way.
 
 > **Normative.** A normative clause is added only before ratification. No mark is
 > added to a ratified ADR, by a dated note or otherwise.
+
+**The first clause binds on ratification, while `docs/adr/template.md` and
+`CONTRIBUTING.md` still say nothing about the form.** That gap is real and it is
+deliberate. ADR-0070 §5 and ADR-0088 §5 are the precedent on both halves: each
+ratified a forward-only authoring rule here and directed the corresponding
+`CONTRIBUTING.md` correction elsewhere, ADR-0088 three days ago and as an issue
+(#595) rather than in its own diff. Deferring the rule until the authoring
+documents catch up would invert that sequence and leave the ADR that decides the
+form unable to state it.
+
+**What makes the gap tolerable rather than merely conventional is §4.** A
+positive obligation is easier to miss than ADR-0088 §5's prohibition — an author
+violates "write no line number" by doing something and violates "mark every
+clause" by doing nothing — so the risk that the next few ADRs land unmarked is a
+real one. §4 is what bounds the damage: an ADR that marks nothing is unmarked,
+binds as prose, and is exactly as useful as every ADR on `main` today. The rule
+degrades to the status quo rather than to a defect, which is why it can bind
+before its authoring path exists. #600 and #601 close the gap.
 
 **The 87 ADRs on `main` at this ADR's date stay unmarked, permanently.** Context
 gives the ground and it is ratified law rather than a cost calculation: ADR-0070
@@ -449,12 +496,14 @@ else.
   implementation"). It touches no Protocol and no `core` type and decides no
   contract surface, so **adversarial is the required set** — the same reading
   ADR-0082 §5 and ADR-0088 §8 recorded for themselves.
-- **This ADR is its own worked example.** It states **ten** normative clauses,
-  occupying fewer than thirty of its physical lines. Both figures are
-  recomputable from the file by anyone with `grep`, at any commit — which is the
-  property ADR-0088's "~25 in ~880" does not have, and the difference is the
-  whole point. They are deliberately not pinned to an exact total here: a count
-  that must be maintained by hand is the positional citation ADR-0088 §5 refuses.
+- **This ADR is its own worked example, including where it failed.** Its
+  normative core is eleven clauses occupying about thirty physical lines, and
+  both figures are recomputable from the file by anyone with `grep`, at any
+  commit — which is the property ADR-0088's "~25 in ~880" does not have. They are
+  deliberately not pinned to exact totals here: a count maintained by hand is the
+  positional citation ADR-0088 §5 refuses, and it would go stale on the next
+  edit. §2 records the round-1 finding in which this document's own ruling and
+  the prose beside it disagreed.
 
 ### 9. Explicitly declined
 
@@ -544,6 +593,13 @@ else.
   byte comparison and against 87 unmarked ADRs it is a substring search over
   wrapped prose, which ADR-0088 §6 already identifies as the hard case. Backfill
   pays this, once per clause, and §9 records the revisit condition.
+- **§5 binds before the authoring path carries it.** `docs/adr/template.md` is
+  where an author meets the ADR form and it says nothing about marks until #600
+  lands, so the ADRs written immediately after this one may well be unmarked. §5
+  explains why the sequence is right and §4 is why it is survivable — an unmarked
+  ADR binds as prose — but the cost is that §5 could sit dead for several ADRs,
+  which is the failure mode ADR-0088 §9 named when it refused to ratify a rule
+  nobody was following. #600 and #601 are the mitigation and they should not sit.
 - **A `docs/adr/**` change still cannot fail on any of this.** No check is decided
   (§7), so nothing mechanical enforces §2's form or §5's forward-only rule until
   someone decides one. Until then this is a convention with a reviewer behind it,
