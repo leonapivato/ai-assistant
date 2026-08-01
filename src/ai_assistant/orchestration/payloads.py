@@ -276,43 +276,57 @@ def _largest_member(projection: Any) -> str | None:
     return largest
 
 
-def check_payload(value: object, *, limit: int, subject: str) -> None:
+def check_payload(value: object, *, max_bytes: int, subject: str) -> None:
     """Refuse a payload the contract does not admit (ADR-0085 §8c).
+
+    **The byte bound is spelled ``max_bytes`` and not ``limit``** so that
+    :func:`check_arguments` can carry an argument *named* ``limit`` — which four
+    methods on this surface have. A member the wire would call ``limit`` and this
+    module called something else would put a name in
+    :attr:`~ai_assistant.core.errors.OversizedValueError.field` that no parameter
+    has, and ADR-0085 §9 makes that field a value the far side reconstructs.
 
     Args:
         value: The payload to measure.
-        limit: The contract limit in bytes.
+        max_bytes: The contract limit in bytes.
         subject: What is being measured, for the message — ``"the arguments to
             converse()"``, ``"the result of beliefs()"``.
 
     Raises:
-        OversizedValueError: If the payload's canonical encoding exceeds ``limit``.
+        OversizedValueError: If the payload's canonical encoding exceeds
+            ``max_bytes``.
         ValueError: If the payload holds a value with no canonical encoding, which
             is refused **before** measurement rather than measured (ADR-0087 §7).
     """
     projection = project(value)
     size = len(_encode(projection))
-    if size <= limit:
+    if size <= max_bytes:
         return
     field = _largest_member(projection)
     largest = "" if field is None else f"; the largest member is {field!r}"
-    msg = f"{subject} encodes to {size} bytes, over the {limit}-byte contract limit{largest}"
-    raise OversizedValueError(msg, limit=limit, size=size, field=field)
+    msg = f"{subject} encodes to {size} bytes, over the {max_bytes}-byte contract limit{largest}"
+    raise OversizedValueError(msg, limit=max_bytes, size=size, field=field)
 
 
-def check_arguments(method: str, *, limit: int, **arguments: object) -> None:
+def check_arguments(method: str, *, max_bytes: int, **arguments: object) -> None:
     """Refuse a call whose argument payload the contract does not admit.
 
     **An argument the caller did not pass is absent, not ``null``** (ADR-0085 §10),
-    and on this surface every optional argument's declared default is ``None`` — so
-    a ``None`` here *is* "not passed" and is dropped from the object. What is left
-    is the arguments that carry a value, which is what a client sends and what a
-    receiver measures once its own defaults have been applied (ADR-0087 §7's
-    decode-validate-measure order).
+    and on this surface every argument whose absence is expressible has ``None`` for
+    its declared default — so a ``None`` here *is* "not passed" and is dropped from
+    the object.
+
+    **Everything else is present, including a paging ``limit`` whose value came from
+    the default.** ADR-0087 §7 fixes the order as decode, validate, **then** measure
+    — "the receiver decodes, validates into the declared type, and measures the
+    canonical encoding of the validated value" — and a validated call has its
+    defaults applied. Measuring the applied value is also the conservative
+    direction: it can never admit a payload the receiver would go on to refuse.
 
     Args:
         method: The method being called, for the message.
-        limit: The contract limit in bytes.
+        max_bytes: The contract limit in bytes, spelled so that an argument may be
+            called ``limit`` (:func:`check_payload`).
         **arguments: The call's arguments, named exactly as the Python parameters
             are. Members are sorted by the encoding, so the caller's keyword order
             is not observable — ``f(b=…, a=…)`` and ``f(a=…, b=…)`` are one call
@@ -320,10 +334,10 @@ def check_arguments(method: str, *, limit: int, **arguments: object) -> None:
 
     Raises:
         OversizedValueError: If the argument object's canonical encoding exceeds
-            ``limit``.
+            ``max_bytes``.
     """
     passed = {name: value for name, value in arguments.items() if value is not None}
-    check_payload(passed, limit=limit, subject=f"the arguments to {method}()")
+    check_payload(passed, max_bytes=max_bytes, subject=f"the arguments to {method}()")
 
 
 def identifier(value: str, *, name: str) -> str:

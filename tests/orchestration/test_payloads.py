@@ -397,14 +397,14 @@ class TestTheContractLimit:
         """The boundary is inclusive: a payload *at* the limit is not over it."""
         payload = "x" * 8
         size = len(canonical_payload(payload))
-        check_payload(payload, limit=size, subject="the result of belief()")
+        check_payload(payload, max_bytes=size, subject="the result of belief()")
 
     def test_a_payload_over_the_limit_is_refused_with_the_number(self) -> None:
         """ "Too large" without a number is not actionable (ADR-0085 §9)."""
         payload = "x" * 64
         size = len(canonical_payload(payload))
         with pytest.raises(OversizedValueError) as caught:
-            check_payload(payload, limit=size - 1, subject="the result of belief()")
+            check_payload(payload, max_bytes=size - 1, subject="the result of belief()")
         assert caught.value.limit == size - 1
         assert caught.value.size == size
 
@@ -412,25 +412,25 @@ class TestTheContractLimit:
         """§9: the ``None`` case is reachable, not defensive — a page is a bare array."""
         page = tuple(Evidence(content="x" * 32) for _ in range(4))
         with pytest.raises(OversizedValueError) as caught:
-            check_payload(page, limit=8, subject="the result of beliefs()")
+            check_payload(page, max_bytes=8, subject="the result of beliefs()")
         assert caught.value.field is None
 
     def test_the_largest_member_is_named(self) -> None:
         """The member whose own canonical encoding is longest."""
         with pytest.raises(OversizedValueError) as caught:
-            check_arguments("converse", limit=8, utterance="x" * 64, conversation_id="c-1")
+            check_arguments("converse", max_bytes=8, utterance="x" * 64, conversation_id="c-1")
         assert caught.value.field == "utterance"
 
     def test_a_tie_is_broken_by_the_member_name_ascending(self) -> None:
         """Two members of equal encoded length: the lower name wins, every time."""
         with pytest.raises(OversizedValueError) as caught:
-            check_arguments("converse", limit=4, beta="xx", alpha="xx")
+            check_arguments("converse", max_bytes=4, beta="xx", alpha="xx")
         assert caught.value.field == "alpha"
 
     def test_an_argument_the_caller_did_not_pass_is_absent(self) -> None:
         """ADR-0085 §10: absent, not ``null`` — so it contributes no bytes."""
         with pytest.raises(OversizedValueError) as caught:
-            check_arguments("observe", limit=1, conversation_id=None, other="x")
+            check_arguments("observe", max_bytes=1, conversation_id=None, other="x")
         assert caught.value.size == len(canonical_payload({"other": "x"}))
 
 
@@ -462,3 +462,39 @@ class TestArgumentClauses:
     def test_a_well_formed_page_argument_passes_through(self, value: int) -> None:
         """The bound is ``[0, 2**63)`` — both ends checked, so neither is guessed."""
         assert page_argument(value, name="limit") == value
+
+
+class TestThePagingArguments:
+    """An explicitly-supplied paging argument is part of the payload (ADR-0085 §8c)."""
+
+    def test_a_paging_limit_contributes_bytes(self) -> None:
+        """The bound is on the **whole** argument object, so no member is exempt.
+
+        An earlier draft measured ``offset`` and not ``limit``, on the ground that
+        ``limit`` is what a caller omits to get the default. That reading fails on
+        ADR-0087 §7's stated order — "decode, then validate, then measure", where
+        "the receiver … measures the canonical encoding of the *validated* value"
+        and a validated call has its defaults applied — and it fails conservatively
+        in the wrong direction: it admits a payload the receiver would go on to
+        refuse. Including it can only refuse earlier, never later.
+        """
+        with_limit = canonical_payload({"limit": 2**63 - 1, "offset": 0})
+        without = canonical_payload({"offset": 0})
+        assert len(with_limit) > len(without)
+        check_arguments("beliefs", max_bytes=len(with_limit), limit=2**63 - 1, offset=0)
+        with pytest.raises(OversizedValueError) as caught:
+            check_arguments("beliefs", max_bytes=len(with_limit) - 1, limit=2**63 - 1, offset=0)
+        assert caught.value.field == "limit"
+
+    def test_the_member_is_named_for_the_parameter(self) -> None:
+        """``field`` names something a caller can act on.
+
+        ADR-0085 §9 makes it a value the far side reconstructs, so a member this
+        module called ``page_size`` while the wire called it ``limit`` would name a
+        parameter that does not exist. That is why the byte bound is spelled
+        ``max_bytes`` here rather than ``limit``.
+        """
+        with pytest.raises(OversizedValueError) as caught:
+            check_arguments("beliefs", max_bytes=4, limit=2**63 - 1, offset=0)
+        assert caught.value.field in {"limit", "offset"}
+        assert caught.value.field == "limit"
