@@ -455,9 +455,19 @@ instead produces five, all false.
 
 **The checker emits exactly one liveness report, and this is its whole rule.**
 For every ADR `B` carrying a reverse record naming `ADR-A`: if `ADR-A`'s whole
-`Status` field does not name `ADR-B` **in a supersession token** — `Superseded
-by` or `partially superseded by`, ADR-0070 §4's canonical vocabulary — **report
-the disagreement**. Otherwise, silence. Nothing else about liveness is reported.
+`Status` field does not name `ADR-B` **in a supersession token** — `superseded
+by` or `partially superseded by`, ADR-0070 §4's canonical vocabulary, **matched
+case-insensitively** — **report the disagreement**. Otherwise, silence. Nothing
+else about liveness is reported.
+
+**The case-insensitive match is required, not incidental.** The token's first
+letter is capitalised when it leads the line and lower-case when it follows a
+grandfathered `Accepted,` — `Superseded by ADR-0015` on ADR-0012 against
+`Accepted, partially superseded by ADR-0020 and ADR-0025` on ADR-0015. ADR-0070
+§4 sets one vocabulary for both positions and says nothing about case. Matching
+`superseded by` case-sensitively reports **one** pair on `main` — ADR-0015
+against ADR-0012, a correct record — and matching case-insensitively reports
+none. Both figures were measured on the corpus.
 
 **The supersession token is required, and a bare mention is not enough.** A later
 ADR may both amend one clause of `ADR-A` and supersede another; ADR-0070 §1
