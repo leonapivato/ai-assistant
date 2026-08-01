@@ -36,6 +36,7 @@ from ai_assistant.core.types import (
     DataTier,
     Disposition,
     Evidence,
+    ExecutionState,
     FeedbackEvent,
     FeedbackKind,
     Idempotency,
@@ -54,6 +55,10 @@ from ai_assistant.core.types import (
     Retirement,
     Reversibility,
     RiskLevel,
+    StepExecution,
+    StepFailure,
+    StepOutcome,
+    StepStatus,
     SuccessorLink,
     ToolCost,
     ToolDefinition,
@@ -2418,3 +2423,70 @@ def test_forget_question_reports_an_id_naming_nothing_with_a_nonzero_exit(
 
     assert result.exit_code == 1
     assert "Nothing to forget" in output.getvalue()
+
+
+# --- the disposition is the gate's verdict, not the outcome (#531) ----------
+
+
+def _driven(status: StepStatus) -> StepOutcome:
+    """One executed step whose own record carries ``status``.
+
+    Built directly rather than driven through a turn because the point is the
+    *renderer*: #531's defect was an adapter reading ``disposition`` and discarding
+    ``state``, and what has to be pinned is that every non-successful status the
+    record can carry is rendered as one.
+    """
+    failure = None if status is StepStatus.SUCCEEDED else StepFailure(message="the tool raised")
+    return StepOutcome(
+        disposition=Disposition.EXECUTED,
+        step_id="step-1",
+        tool_id="smtp",
+        state=ExecutionState(
+            id="exec-1",
+            plan_id="plan-1",
+            updated_at=AT,
+            steps=(
+                StepExecution(
+                    step_id="step-1",
+                    status=status,
+                    attempts=1,
+                    bound_tool="smtp",
+                    approval_ref="decision-1",
+                    started_at=AT,
+                    finished_at=AT,
+                    failure=failure,
+                ),
+            ),
+        ),
+    )
+
+
+def test_an_executed_step_that_succeeded_reads_as_done(output: StringIO) -> None:
+    """The discriminating half: success still renders success and still exits 0."""
+    assert cli._render_step(_driven(StepStatus.SUCCEEDED)) is False
+    assert "Done" in output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("status", "headline"),
+    [(StepStatus.FAILED, "Failed"), (StepStatus.INDETERMINATE, "Unresolved")],
+)
+def test_every_non_successful_status_reads_as_one(
+    output: StringIO, status: StepStatus, headline: str
+) -> None:
+    """ADR-0084 §8: the named step's ``status`` is the outcome, not the disposition.
+
+    **Both** of ``core/types.py``'s ``_FAILURE_STATUSES`` are covered, and that is
+    the point of parametrising rather than testing ``FAILED`` alone: a renderer
+    written as "not ``FAILED`` means done" reproduces #531 exactly one status over —
+    on ``INDETERMINATE``, which ADR-0014 §4 makes durable *because* it must be
+    resolved explicitly and where the tool may in fact have acted.
+
+    They are told apart rather than flattened: "failed" says the call finished
+    badly, "unresolved" says nobody knows whether it took effect.
+    """
+    assert cli._render_step(_driven(status)) is True
+    rendered = output.getvalue()
+    assert headline in rendered
+    assert "the tool raised" in rendered
+    assert "Done" not in rendered

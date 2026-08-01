@@ -543,3 +543,36 @@ def test_the_request_frame_carries_the_method_in_the_envelope() -> None:
     decoded = json.loads(frame)
     assert decoded["method"] == "belief"
     assert decoded["payload"] == {"record_id": "r-1"}
+
+
+async def test_a_value_with_no_wire_form_is_refused_before_the_socket_is_opened(
+    tmp_path: Path,
+) -> None:
+    """ADR-0085 §9's "before any I/O", for the values ADR-0087 §2 gives no form.
+
+    **Driven with no hub at all**, which is what makes it a test of the *ordering*
+    rather than of the refusal: if the utterance were validated after ``connect``,
+    this would raise ``HubUnavailableError`` instead. So the error a caller sees
+    would depend on whether a hub happened to be up — a ``ValueError`` in-process, a
+    transport failure over the wire — for one value both implementations must refuse
+    the same way.
+    """
+    client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+    with pytest.raises(ValueError, match="UTF-8"):
+        await client.converse("bad \ud800", timeout=_PATIENT)
+    # An *identifier* is refused one step earlier still, by Identifier's own
+    # validation (ADR-0085 §3c) rather than by the projection — a different message
+    # for the same obligation, and still before anything is opened.
+    with pytest.raises(ValueError, match="identifier"):
+        await client.belief("bad \ud800")
+
+
+async def test_a_well_formed_argument_still_reaches_the_socket(tmp_path: Path) -> None:
+    """The discriminating half: the local refusal refuses only what has no form.
+
+    Without it, a client that raised on every argument would pass the case above and
+    never talk to a hub at all.
+    """
+    client = HubEngineClient(tmp_path / "hub.sock", read_timeout=_PATIENT)
+    with pytest.raises(HubUnavailableError):
+        await client.converse("perfectly ordinary", timeout=_PATIENT)

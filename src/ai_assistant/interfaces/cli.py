@@ -1266,9 +1266,18 @@ def _render_step(step: StepOutcome) -> bool:
     ``failure`` are the outcome** (ADR-0084 §8, ADR-0085 §7). This adapter is where
     #531's defect lived: it read ``disposition`` and discarded ``state``, so a tool
     that raised — recorded in ``plans.db`` as ``status: "failed"`` with its
-    ``kind``, exactly as ADR-0029 §4 requires — was rendered
-    ":green:`Done.`" and exited ``0``. A scripted caller "cannot tell a successful
-    turn from a failed one without opening ``plans.db``".
+    ``kind``, exactly as ADR-0029 §4 requires — was rendered "Done." and exited
+    ``0``. A scripted caller "cannot tell a successful turn from a failed one
+    without opening ``plans.db``".
+
+    **Only ``SUCCEEDED`` is success, and taking the rule that way round is the
+    load-bearing half.** ``FAILED`` is the obvious non-success and
+    ``INDETERMINATE`` is the other one: ``core/types.py``'s ``_FAILURE_STATUSES``
+    holds both, "because both are finished, non-successful outcomes", and both
+    *require* a ``failure`` on the record. A renderer written as "not ``FAILED``
+    means done" reproduces #531 exactly one status over — and on the status
+    ADR-0014 §4 makes durable *because* it must be resolved explicitly, which is the
+    one a user most needs to be told about.
 
     :attr:`~ai_assistant.core.types.StepOutcome.step_id` is what makes the outcome
     *addressable*: ``state.steps`` is the whole tuple and ``tool_id`` cannot
@@ -1278,7 +1287,8 @@ def _render_step(step: StepOutcome) -> bool:
         step: What the pass did with the plan's step.
 
     Returns:
-        Whether the step ran and failed.
+        Whether the step did **not** succeed, which the caller folds into the
+        process exit code.
     """
     if step.disposition is not Disposition.EXECUTED:
         _render_disposition(step.disposition, step.tool_id)
@@ -1298,18 +1308,40 @@ def _render_step(step: StepOutcome) -> bool:
         return True
 
     execution = named[0]
-    if execution.status is not StepStatus.FAILED:
+    if execution.status is StepStatus.SUCCEEDED:
         _render_disposition(step.disposition, step.tool_id)
         return False
 
     tool = _safe(step.tool_id) if step.tool_id is not None else "the selected tool"
     failure = execution.failure
-    # `failure` is required when the status is FAILED (`core/types.py`), so the
-    # `None` arm is the type's optionality rather than a state this can reach.
+    # ``failure`` is required on both non-successful finished statuses
+    # (``core/types.py``'s ``_FAILURE_STATUSES``), so the ``None`` arm is the type's
+    # optionality rather than a state this can reach.
     cause = "" if failure is None else f" {_safe(failure.message)}"
     kind = "" if failure is None or failure.kind is None else f" [dim]({failure.kind.value})[/]"
-    console.print(f"[red]Failed.[/] {tool} ran and did not succeed.{cause}{kind}")
+    console.print(f"{_step_headline(execution.status, tool)}{cause}{kind}")
     return True
+
+
+def _step_headline(status: StepStatus, tool: str) -> str:
+    """Say what became of a step that did not succeed, in its own terms.
+
+    ``FAILED`` and ``INDETERMINATE`` are both non-successful and they are not the
+    same news: a failure is a call that finished badly, while an indeterminate step
+    "awaits explicit resolution" (``TERMINAL_STEP_STATUSES``) — the tool may have
+    acted. Collapsing them into one word would tell a user the side effect did not
+    happen when nobody knows whether it did.
+    """
+    if status is StepStatus.FAILED:
+        return f"[red]Failed.[/] {tool} ran and did not succeed."
+    if status is StepStatus.INDETERMINATE:
+        return (
+            f"[red]Unresolved.[/] {tool} was called and the outcome could not be "
+            f"determined, so it may or may not have taken effect."
+        )
+    # Anything else that is not `SUCCEEDED` after an `EXECUTED` disposition: still
+    # not success, and said as plainly as the status allows.
+    return f"[yellow]Not finished.[/] {tool} is {_safe(status.value)}."
 
 
 def _render_conversation_footer(outcome: TurnOutcome) -> None:
