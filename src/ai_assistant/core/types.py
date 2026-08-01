@@ -554,12 +554,61 @@ class MemoryKind(StrEnum):
     PROCEDURAL = "procedural"
 
 
+MAX_EVIDENCE_CITATIONS = 64
+"""How many citations a :class:`MemoryRecord` this system **installs** may carry.
+
+A fixed constant and deliberately **not** a ``Settings`` field (ADR-0086 §1): a
+bound a deployment can raise is not a bound, and ``export`` crosses deployments,
+so a record written under one ceiling and imported under a lower one would be a
+record the receiving system's own contract refuses for a reason its user cannot
+see and did not cause.
+
+**It is enforced at the ``MemoryWriter`` seam and nowhere on this type** — see
+:attr:`Provenance.evidence` for why a ``max_length`` here would be the wrong
+mechanism, and :meth:`~ai_assistant.core.protocols.MemoryWriter.ingest` for the
+obligation itself. The scope is a ``MemoryRecord`` *install*: :class:`Goal`
+carries a :class:`Provenance` too and is not reached, because nothing accumulates
+on the goal write path and ADR-0077 §11 already assigns that seam to the lane
+that adds an inferred-goal producer.
+
+64 sits comfortably above ``observation_batch_size``'s default of 20 — more than
+three whole batches, so accumulation is real before the bound bites — and is
+small enough to keep the contract-mandated resolution cost of a listing page
+legible (ADR-0086 §1).
+"""
+
+
 class Provenance(BaseModel):
     """Where a memory came from and how much it should be trusted.
 
     Attaching this to every record is what distinguishes user-asserted facts
     (the profile) from inferred beliefs (the user model), and what stops one
     unusual interaction from hardening into a permanent, wrong "preference".
+
+    **``evidence`` is ordered oldest-accumulated first, and carries no
+    ``max_length``** (ADR-0086 §2, §3). The order is what lets a fold displace by
+    age; the absence of a length bound is the decision, not an omission. A
+    validator runs on *deserialisation* as well as on construction, so a
+    ``max_length`` would take a belief a running deployment already holds above
+    :data:`MAX_EVIDENCE_CITATIONS` — perfectly encodable, perfectly readable,
+    merely large — and make ``get``, ``list_beliefs`` and ``export`` fail on it:
+    a strictly new failure invented on the read path, which is exactly what the
+    bound exists to make unreachable. The test is not "is it a validator on a
+    ``core`` type" but "does it refuse something that already worked":
+    :data:`EncodableText` does not, because a string with no UTF-8 encoding never
+    round-tripped, and a cardinality bound would. So the bound lives at the
+    ``MemoryWriter`` seam, on *installs*, and this type admits a longer tuple.
+
+    **``evidence_elided`` is an elision, not a tombstone, and the two are
+    different facts** (ADR-0086 §4). ADR-0077 §6's tombstone says a cited episode
+    stood here and *went away* — deleted or expired. An elision says it stood here
+    and **we stopped carrying the reference**: the episode may be perfectly
+    intact, so a surface must not render the two alike or it tells the user their
+    data was lost when it was not. It is a count and never an id, because the ids
+    are the payload the bound exists to stop carrying, and it is an **upper
+    bound** rather than a total: a displaced citation that is later re-cited, or
+    two elided histories folded together, both double-count, and making it exact
+    would need the ids back.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -572,7 +621,19 @@ class Provenance(BaseModel):
     )
     evidence: tuple[EncodableText, ...] = Field(
         default=(),
-        description="References (e.g. episode ids) supporting this record.",
+        description=(
+            "References (e.g. episode ids) supporting this record, oldest "
+            "accumulated first (ADR-0086 §3)."
+        ),
+    )
+    evidence_elided: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many displacements this record's history has performed, and "
+            "therefore an upper bound — never a total — on the citations it no "
+            "longer carries (ADR-0086 §4)."
+        ),
     )
     last_updated: UtcInstant = Field(
         description=(
@@ -1063,7 +1124,9 @@ class MemoryDecisionKind(StrEnum):
 
     - ``REINFORCE`` — the incoming record agrees with the target and strengthens
       it. The applier folds the two, and the surviving record carries **both**
-      records' ``evidence``.
+      records' ``evidence`` — up to :data:`MAX_EVIDENCE_CITATIONS`, beyond which
+      the oldest are displaced and counted (ADR-0086 §3, partially superseding
+      ADR-0040 §1's unqualified "both").
     - ``SUPERSEDE`` — the incoming record overturns the belief the target holds.
       The applier retires what the target held and carries **nothing** of it
       across.
