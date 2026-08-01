@@ -680,12 +680,15 @@ leaving it out cost the corpus nothing:
 - **ADR-0087 §9 is a deferring clause acquiring an answer**, which is ADR-0083
   §15's stacked-addition carve-out on its own stated test: its sentence stays true
   and now has somewhere to be answered. So #565 owes no supersession either.
-- **Nothing durable can already hold such a value**, so closing it later needs no
-  migration and can invalidate no stored record. The five stores are SQLite, whose
-  driver encodes text as UTF-8: inserting a lone surrogate raises
-  `UnicodeEncodeError` at the `INSERT`, verified against the tree. The gap is
-  reachable only in memory, between construction and a socket that does not exist
-  yet.
+- **Nothing durable can already hold such a value, and that is the load-bearing
+  reason rather than a reassurance.** The five stores are SQLite, whose driver
+  encodes text as UTF-8, so inserting a lone surrogate raises
+  `UnicodeEncodeError` at the `INSERT` — checked against the tree, not assumed,
+  because the whole claim turns on it. It follows that #565 can invalidate no
+  stored record and needs no migration: the gap is reachable only **in memory**,
+  between constructing a value and a socket that does not exist yet. A fix with
+  no durable footprint is one a later change can simply make, which is what
+  separates it from a decision this ADR would be ducking.
 
 ### 5. The complete transitive closure, and the boundary it stops at
 
@@ -1500,7 +1503,7 @@ makes "the code is the class name" safe: `ValueError` is not ours to name.
 
 ### 11. Deferred by name, and where the corpus and the tree disagree
 
-#### 11a. What ADR-0087 decides
+#### 11a. What is settled elsewhere: ADR-0087's encoding, and #565's prerequisite
 
 Named so the reference in §8c resolves to a decision rather than to a silence.
 
@@ -1554,6 +1557,27 @@ recording because it is the reason neither document has to mention the other's
 position: "the relative order of this ADR and the surface ADR is deliberately not
 fixed… neither is a prerequisite of the other". Both are contract changes before
 the triad. This ADR is ADR-0084 §5's step 2 whatever else lands.
+
+**#565's fix is a prerequisite of the client lane, not merely context for it**
+(§4c). §4c closes encodability for the promoted types and direct arguments and
+records that the strings inside the pre-existing `core` leaves — `FeedbackEvent`,
+`Goal`, `CurrentContext`, `ActionPlan`, `MemoryRecord`, `ExecutionState` — are
+not reached. Until that lands, this contract declares request and result values
+that ADR-0087 §2b gives no wire form, so **the client lane does not proceed
+without it**: a client built first would be one whose encoder raises on inputs
+this Protocol admits, which is ADR-0084 §4's substitutability failure arriving
+through the leaves.
+
+**This is ADR-0084 §11's own form, deliberately** — that ADR attaches exactly
+this kind of condition to #473 twice, at `0084:839` ("**So #473 is a prerequisite
+of the client lane, not merely context for it**") and again in its §11. It is
+named as that form so a reader probing it lands on the precedent rather than on
+the shape this ADR avoids elsewhere: **a prerequisite is a fact about the client
+lane's readiness, not a claim about when a change merges.** It orders no ADRs
+against each other and enumerates nothing, so it leaves ADR-0084 §5's enumeration
+of *changes* untouched and owes no record — the same reason ADR-0084 §11 owed
+none for #473. **Nothing here says when #565's fix merges**, only that the client
+lane is not ready before it does.
 
 #### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
