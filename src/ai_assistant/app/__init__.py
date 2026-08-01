@@ -18,11 +18,13 @@ existing ``lint-imports`` contracts — provider SDKs confined to ``models``, te
 doubles confined to tests — so it gains no licence those forbid (ADR-0042
 §Consequences).
 
-The single entry point is :func:`build_engine`.
+The entry point is :func:`build_engine`. :func:`ensure_model_credentials` sits
+beside it for the one caller that needs a startup answer ``build_engine``
+deliberately does not give (issue #530, ADR-0083 §3).
 """
 
 from __future__ import annotations
 
-from ai_assistant.app.composition import build_engine
+from ai_assistant.app.composition import build_engine, ensure_model_credentials
 
-__all__ = ["build_engine"]
+__all__ = ["build_engine", "ensure_model_credentials"]

@@ -18,7 +18,7 @@ from types import ModuleType
 import pytest
 
 import ai_assistant
-from ai_assistant.app import build_engine
+from ai_assistant.app import build_engine, ensure_model_credentials
 from ai_assistant.app import composition as composition_module
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import (
@@ -416,6 +416,180 @@ async def test_build_engine_creates_a_missing_data_dir(tmp_path: Path) -> None:
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=nested)
     try:
         assert nested.is_dir()
+    finally:
+        await engine.aclose()
+
+
+# --- `data_dir` as a setting (ADR-0083 §2) -----------------------------
+
+
+async def test_build_engine_reads_the_data_dir_from_settings(tmp_path: Path) -> None:
+    """The field the hub's exclusivity, its lock and its socket are all keyed to.
+
+    Before ADR-0083 §2 the data directory existed only as this function's keyword,
+    resolved by a private helper — so nothing but a caller passing a path could
+    move it, and a resident process had no configuration surface for the one item
+    it needs most.
+    """
+    configured = tmp_path / "configured"
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING, data_dir=configured))
+    try:
+        assert (configured / "memory.db").exists()
+    finally:
+        await engine.aclose()
+
+
+async def test_the_keyword_overrides_the_setting(tmp_path: Path) -> None:
+    """§2 keeps the keyword, and keeps it winning.
+
+    It is the injection seam every existing test uses, and it is how the hub hands
+    over the directory it resolved and locked in startup's step 2 rather than
+    letting this function resolve the same setting a second time.
+    """
+    configured = tmp_path / "configured"
+    passed = tmp_path / "passed"
+    engine = build_engine(
+        Settings(embedder=EmbedderKind.HASHING, data_dir=configured), data_dir=passed
+    )
+    try:
+        assert (passed / "memory.db").exists()
+        assert not configured.exists()
+    finally:
+        await engine.aclose()
+
+
+def test_the_data_dir_default_is_the_directory_this_module_used_to_resolve() -> None:
+    """Purely additive: an unconfigured deployment's data does not move.
+
+    The default moved from a private helper here to a field factory in
+    ``core.config``, and the *value* has to be identical — a field that resolved
+    anywhere else would silently strand every existing installation's memory.
+    """
+    assert Settings().data_dir == Path.home() / ".ai-assistant"
+
+
+def test_the_data_dir_binds_to_the_prefixed_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``ASSISTANT_DATA_DIR``, and **not** ``AI_ASSISTANT_DATA_DIR`` (#535).
+
+    ADR-0083 §2's prose printed the second name and was wrong when written; its
+    own amendment note and ADR-0084 §9 carry the correction. This is pinned rather
+    than trusted because the failure the wrong name causes is **silent**:
+    ``Settings`` sets ``extra="ignore"``, so an operator who followed that sentence
+    gets no error at all and lands on the default directory — while the hub's
+    exclusivity, its instance lock and (under ADR-0084) its socket path are all
+    keyed to the directory they think they configured.
+    """
+    monkeypatch.setenv("AI_ASSISTANT_DATA_DIR", str(tmp_path / "wrong"))
+    assert Settings().data_dir == Path.home() / ".ai-assistant"
+
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", str(tmp_path / "right"))
+    assert Settings().data_dir == tmp_path / "right"
+
+
+# --- the shutdown budget reaches the façade (ADR-0083 §4) --------------
+
+
+async def test_build_engine_hands_the_facade_the_configured_drain_budget(
+    tmp_path: Path,
+) -> None:
+    """Every production engine gets phase A's bound, hub and CLI alike.
+
+    It is set here rather than as an ``Engine`` default because it is a deployment
+    value and this is the layer that reads deployment values — an ``Engine`` a test
+    builds directly keeps the unbounded drain it always had.
+    """
+    settings = Settings(embedder=EmbedderKind.HASHING, shutdown_drain_seconds=timedelta(seconds=7))
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert engine._drain_timeout == timedelta(seconds=7)
+    finally:
+        await engine.aclose()
+
+
+# --- the hub's credential preflight (#530) -----------------------------
+
+
+def test_the_credential_preflight_covers_every_configured_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router's whole preference order *and* the observer's own route.
+
+    The observer's route never falls back (ADR-0077 §3), so a credential it lacks
+    disables observation rather than being covered by a sibling — which is exactly
+    the silent, hours-later failure #530 is about, in the one place nothing is
+    waiting to notice it.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(composition_module, "ensure_vendor_available", lambda spec: None)
+    monkeypatch.setattr(composition_module, "ensure_credential_available", asked.append)
+
+    ensure_model_credentials(
+        Settings(
+            default_model="anthropic:one",
+            fallback_models=("openai:two",),
+            observer_model="anthropic:three",
+        )
+    )
+
+    assert asked == ["anthropic:one", "openai:two", "anthropic:three"]
+
+
+def test_the_credential_preflight_asks_once_per_distinct_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The observer's spec defaults to ``default_model``; repeating only repeats the message."""
+    asked: list[str] = []
+    monkeypatch.setattr(composition_module, "ensure_vendor_available", lambda spec: None)
+    monkeypatch.setattr(composition_module, "ensure_credential_available", asked.append)
+
+    ensure_model_credentials(Settings(default_model="anthropic:one"))
+
+    assert asked == ["anthropic:one"]
+
+
+def test_the_vendor_check_runs_before_the_credential_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordering, because the two failures have very different messages.
+
+    The vendor check names the extra to install; the credential probe presumes the
+    vendor resolved and would report an uninstalled package as a bare
+    ``ImportError``. Asking in the wrong order would replace a good diagnostic with
+    a worse one at the exact moment an operator needs the good one.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(
+        composition_module, "ensure_vendor_available", lambda spec: order.append("vendor")
+    )
+    monkeypatch.setattr(
+        composition_module, "ensure_credential_available", lambda spec: order.append("credential")
+    )
+
+    ensure_model_credentials(Settings(default_model="anthropic:one"))
+
+    assert order == ["vendor", "credential"]
+
+
+async def test_build_engine_does_not_check_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The decision at the heart of #530's fix, pinned so it cannot drift.
+
+    #530 records that the shipped CLI's behaviour is correct: the failure lands on
+    the command that needed a credential, and ``beliefs``, ``learn``, ``questions``,
+    ``answer`` and ``forget`` — none of which touch a model — are not blocked by
+    its absence. Folding the check into the composition root would make every one
+    of them start failing without a key: a regression introduced by a fix, for a
+    defect the CLI does not have. Only the hub asks.
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(composition_module, "ensure_credential_available", asked.append)
+
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert asked == []
     finally:
         await engine.aclose()
 

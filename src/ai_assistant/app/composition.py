@@ -8,7 +8,6 @@ shutdown path — everything ADR-0042 §2 requires of this layer.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ai_assistant.context import AssemblingContextProvider, ClockContextSource
@@ -28,6 +27,7 @@ from ai_assistant.models import (
     RetryingProvider,
     Route,
     RoutingProvider,
+    ensure_credential_available,
     ensure_vendor_available,
 )
 from ai_assistant.models.retry import RetryPolicy
@@ -47,14 +47,10 @@ from ai_assistant.tools import build_default_registry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import Embedder
-
-#: Where the connection-owning SQLite stores live by default. A per-user directory
-#: rather than a value read from the environment (``core.config.Settings`` owns
-#: configuration; this is a filesystem default, overridable via ``data_dir``).
-_DEFAULT_DATA_DIRNAME = ".ai-assistant"
 
 
 def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
@@ -127,10 +123,15 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             lifetime the runner enforces (``confirmation_ttl``, #310), the four
             permission gate thresholds the policy is constructed with (#239), and
             the observer's route and its two per-call bounds (``observer_model``,
-            ``observation_batch_size``, ``observation_max_proposals``; ADR-0077).
-        data_dir: Where the SQLite stores live. Defaults to a per-user directory
-            (``~/.ai-assistant``), created if absent; a test passes a temporary
-            path.
+            ``observation_batch_size``, ``observation_max_proposals``; ADR-0077),
+            the data directory (``data_dir``) and the shutdown drain budget the
+            façade is handed (``shutdown_drain_seconds``; ADR-0083 §2, §4).
+        data_dir: Where the SQLite stores live, **overriding**
+            ``settings.data_dir`` when given. It keeps its keyword rather than
+            being folded into the setting (ADR-0083 §2): it is the injection seam
+            every existing test uses, and the hub passes the directory it already
+            resolved and locked in §3's step 2 so that one resolution is shared
+            rather than performed twice. Created if absent.
 
     Returns:
         A ready :class:`Engine`. Drive it with ``converse``/``resume`` and close
@@ -176,7 +177,13 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     # (ADR-0006 §2 default, #372's above-disk contract; see :func:`_build_embedder`).
     embedder = _build_embedder(settings)
 
-    directory = data_dir if data_dir is not None else _default_data_dir()
+    # The keyword still wins over the setting when it is given (ADR-0083 §2), so
+    # every existing caller — and the hub, handing over the directory it resolved
+    # and locked before any store was opened — keeps its injection seam. What
+    # changed is only where the *default* comes from: ``Settings.data_dir``,
+    # whose factory produces the very ``~/.ai-assistant`` this module resolved
+    # privately before, so nothing moves for a deployment that configures nothing.
+    directory = data_dir if data_dir is not None else settings.data_dir
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -348,6 +355,12 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
                 # remove than it buys.
                 _as_async(deferrals.close),
             ],
+            # The shutdown budget every production engine gets, hub and CLI alike
+            # (ADR-0083 §4). It belongs here rather than on the ``Engine`` default
+            # because it is a *deployment* value, and this is the layer that reads
+            # deployment values: an ``Engine`` a test builds directly keeps the
+            # unbounded drain it always had.
+            drain_timeout=settings.shutdown_drain_seconds,
         )
     except BaseException:
         # Close anything already opened before re-raising, so a failed build
@@ -356,6 +369,67 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
         for close in reversed(opened):
             close()
         raise
+
+
+def ensure_model_credentials(settings: Settings) -> None:
+    """Fail now if any configured route holds no credential (issue #530).
+
+    **Deliberately not part of :func:`build_engine`, and that is the decision
+    rather than a detail.** For a one-shot CLI the present behaviour is right and
+    #530 says so in as many words: the failure lands on the command that needed a
+    credential, and the commands that did not — ``beliefs``, ``learn``,
+    ``questions``, ``answer``, ``forget``, none of which touch a model — are not
+    blocked by its absence. Folding this into ``build_engine`` would make every
+    one of them start failing without a key: a regression introduced by a fix, for
+    a defect the CLI does not have.
+
+    What changed is the **process model**. ADR-0083 §3 signals readiness last and
+    §5/§6 make a fault nothing can clear a stay-down exit, on the ruling that "if
+    the hub is not running, there is a reason, and the reason is legible". A
+    resident hub with no credential starts, signals ready, looks healthy to every
+    supervisor and monitor, and then fails on a user's first real request hours
+    later on a box nobody is watching — the exact inverse of the legibility §6
+    establishes. So the *hub* asks this question at startup, and nothing else
+    does.
+
+    It lives here because the answer is only reachable from ``models`` (golden
+    rule 4 confines the provider SDK there) and ADR-0083 §8 lets ``service``
+    import ``app`` and ``core`` but no subsystem. This is the composition root
+    doing what it already does for the vendor check: asking ``models`` the one
+    question only ``models`` can answer.
+
+    **Presence, never validity.** It performs no completion and no round trip, so
+    ADR-0083 §3's "nothing in startup may block indefinitely on a network" holds
+    and a supervisor's start timeout keeps its meaning. A key that is present but
+    revoked or throttled still fails at request time, classified there as the
+    model error it is.
+
+    Every route is checked — the router's whole preference order *and* the
+    observer's own — because ADR-0077 §3 gives the observer a route that never
+    falls back, so a credential it lacks disables observation silently rather
+    than being covered by a sibling. Duplicates are checked once; the observer's
+    spec defaults to ``default_model``, and repeating the probe would only repeat
+    the message.
+
+    Args:
+        settings: Loaded application settings — the router's preference order and
+            the observer's route.
+
+    Raises:
+        ConfigurationError: If a spec names a vendor whose package is missing or
+            unknown, or one for which this deployment holds no credential. One
+            class for both, which is what lets the hub map every startup
+            misconfiguration to a single exit code through one type check
+            (ADR-0083 §5).
+    """
+    for spec in dict.fromkeys((*_model_specs(settings), _observer_spec(settings))):
+        # In this order: the vendor check owns the "package not installed" message
+        # and names the extra to install, and the credential probe presumes the
+        # vendor resolved. Repeating a check `build_engine` also runs is cheap and
+        # deliberate — the same reasoning `_build_observer_provider` records for
+        # re-checking a spec that may equal `default_model`.
+        ensure_vendor_available(spec)
+        ensure_credential_available(spec)
 
 
 def _model_specs(settings: Settings) -> tuple[str, ...]:
@@ -630,8 +704,3 @@ def _as_async(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
         close()
 
     return _aclose
-
-
-def _default_data_dir() -> Path:
-    """The per-user data directory, resolved without touching the environment."""
-    return Path.home() / _DEFAULT_DATA_DIRNAME
