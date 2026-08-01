@@ -60,16 +60,19 @@ interaction-implicit learning language covers.
    owns all state and intelligence; every interface is a stateless client of
    its API. Conversations, memory, and identity live server-side and are
    device-agnostic. **This one is no longer a premise: ADR-0083 and ADR-0084
-   ratify it**, down to the transport — the only spoke for the time being is the
+   ratify it and leg 5 built it**, down to the transport — the only spoke for the
+   time being is the
    CLI on the hub's own machine, over a loopback Unix socket in the data
    directory. All large network constraints — transport security, device
    identity and enrolment, push delivery, backup — are deliberately deferred
    until a second physical device matters (see the later arc), and ADR-0084 §1
    and §11 fix the price of crossing that line: a non-loopback hop is user data
    leaving the device, so it engages ADR-0017 §1 and owes its own ratified
-   decision. It is not reached by swapping an address family. Slices landing
-   before the hub exists must not bake in single-shot or single-client
-   assumptions.
+   decision. It is not reached by swapping an address family. The caution this
+   stance carried before the hub existed — that a slice must not bake in
+   single-shot or single-client assumptions — is now the standing rule above
+   rather than advice: a subsequent interface is a client of the API or it is not
+   an interface.
 4. **Deepen before broaden.** VISION.md's answer to its own scope risk still
    governs: narrow, complete loops over shallow breadth.
 
@@ -96,9 +99,10 @@ is worth more than any breadth this roadmap defers.
 Each leg decomposes into ADR-backed slices when it is dispatched, contract
 first (`CLAUDE.md`). An exit test is stated in product terms, honouring the
 previous revision's rule: **a gap closes when a user can exercise the
-capability, not when a test can.** Legs 1–4 run inside the existing in-process
-application; the hub (leg 5) is decided early enough that they are written for
-it, and built before anything ambient or polling.
+capability, not when a test can.** Legs 1–4 were built inside the in-process
+application; the hub (leg 5) was decided early enough that they were written for
+it, and built before anything ambient or polling. Everything after leg 5 is built
+behind the hub's API.
 
 1. **The user model, visible.** Decided and built. ADR-0072 answers what the
    profile *is*, and the answer is not the artifact this leg was written
@@ -195,8 +199,7 @@ it, and built before anything ambient or polling.
    full-conflict-set retirement into the `MemoryWriter` contract with the shared
    suite and `FakeMemoryWriter` matched, and ADR-0078 §11 records it and #313 as
    "decided, and merged".
-5. **The hub.** Decided in full, and being built. Both of this leg's decisions
-   are ratified and neither shipped code. **ADR-0083 decides the process**: one
+5. **The hub.** Decided and built. **ADR-0083 decides the process**: one
    resident instance per data directory, holding an exclusive lock and owning the
    five databases so that no other process opens them; a fixed startup sequence
    with readiness signalled last; a two-phase shutdown, bounded where bounding is
@@ -212,37 +215,60 @@ it, and built before anything ambient or polling.
    (ADR-0042) promoted to a Protocol with its result types promoted to
    `core/types.py` behind it, and the CLI demoted from *being* the application to
    being a client of it. *Exit: the assistant is running before the user arrives
-   and after they leave, and the CLI is merely a client of it.*
+   and after they leave, and the CLI is merely a client of it.* **Met, and
+   exercised against the shipped code rather than asserted**: with no hub, the CLI
+   refuses legibly at exit 1, spawning nothing and creating no data directory;
+   with the hub resident, one client process writes a belief through the socket
+   and a *separate* client process reads it back; with the hub killed, the CLI can
+   do nothing at all, because ADR-0084's rulings 3 and 5 leave it neither a spawn
+   nor an in-process fallback.
 
-   **What the implementing lanes deliver is fixed as four changes in order**
-   (ADR-0084 §5): those two ADRs; the surface ADR that ratifies the method
-   signatures, the promoted DTO set and the complete transitive type graph its
-   fields reach (#281's scope); the triad — Protocol, shared conformance suite
-   and canonical fake — which merges before any client; then the hub, the `wire`
-   package, the client and the `lint-imports` edits that close `interfaces → app`
-   and forbid everything → `service`. **#473 is a prerequisite of that last
-   change, not context for it** (ADR-0084 §11): a belief's evidence tuple grows
-   without bound, and a bounded frame and an unbounded contract reconcile only
-   through a failure the contract itself declares.
+   **ADR-0084 §5 fixed the sequence as four changes; it took five, and the fifth
+   is a rule about contract order rather than an accident.** ADR-0087 ratifies the
+   canonical wire encoding and lands *before* the triad, because the triad ships a
+   canonical fake — a second implementation — and two implementations holding an
+   unratified byte count can both pass a behavioural conformance suite while
+   disagreeing about which calls they refuse. ADR-0084's status line is where the
+   amended sequence and the replaced payload-encoding rule are read; this entry
+   does not restate them (ADR-0019). Two further contract decisions came out of
+   the same implementation contact: **ADR-0085** fixes the promoted surface itself
+   — fifteen methods, twenty-four types, one closed graph (#281's scope) — and
+   **ADR-0086** bounds a belief's evidence and lands `MemoryStore.get_many`,
+   because a bounded frame and an unbounded contract reconcile only through a
+   failure the contract itself declares (ADR-0084 §11).
+
+   **The residual is reach; the rest is corpus hygiene, not a gap in what
+   shipped.** **#590** — the shared conformance suite lives beside the Protocol's
+   first implementation, so the third implementation binds to it through a
+   `sys.path` line rather than plainly. All three run the same file today, which is
+   what ADR-0084 §4 asks for; the arrangement is what a fourth would trip on. The
+   hygiene cluster is what the leg surfaced in the ADR corpus: **#571** (ADR-0087
+   §6 and §9 disagree over which change owes an encoder), **#586**, **#589**, and
+   **#588** — no gate step can fail on a `docs/adr/**` change, so an ADR's citation
+   into the code is the one claim nothing checks.
 
    **The scheduler's job list is one job shorter than the deferrals naming it
    suggest, and the hardening tail is nearly gone.** Confirmation deadlines are
    not a scheduler job: reclaiming a permanently-parked confirmation is a
    contract ADR-0059 §3 deferred and nothing offers (#333), the lifetime is
-   enforced at
-   answer time regardless so nothing goes unenforced, and #277's wall-clock
-   fragility is *not* fixed by a resident process (ADR-0083 §7, §9). Of the
-   hardening tail, #305 is struck — ADR-0049 §3 already applied the fix and
-   exclusivity removes the multi-process premise — and the stores'
-   concurrent-access posture resolves rather than lands: with no second writer,
-   #526 becomes consistency work and #505 a deliberately deferred durability
-   decision (ADR-0083 §12, ADR-0084 §10).
+   enforced at answer time regardless so nothing goes unenforced, and #277's
+   wall-clock fragility is *not* fixed by a resident process (ADR-0083 §7, §9).
+   Of the hardening tail, #305 leaves it for ordinary test backlog — ADR-0049 §3
+   already applied the fix and exclusivity removes the multi-process premise — and
+   the stores' concurrent-access posture is settled by there being no second
+   writer: #526's `BEGIN IMMEDIATE` landed across all five stores as consistency
+   work, leaving #505's journal-mode durability decision deliberately deferred
+   (ADR-0083 §12, ADR-0084 §10).
 6. **Sensors.** The first read-only ingestion source or two, feeding both
    context facets (ADR-0008 anticipated calendar/tasks as optional fields) and
    the observer's episode stream. This is where ADR-0017 §3's conditions for a
    networked seam are finally met or consciously revised — at read-only stakes.
-   MCP-shaped clients are welcome here, but as sensors only; actuators stay in
-   the later arc. One precondition is already ratified onto this leg's first
+   **Leg 5 did not spend that decision and could not**: ADR-0084 §9 read ADR-0017
+   clause by clause and found that a loopback listener moving bytes between two
+   processes on one machine engages neither §1's off-device rule nor §3's
+   conditions, changing nothing about ADR-0017. A hub with a socket is not a
+   precedent for a network. MCP-shaped clients are welcome here, but as sensors
+   only; actuators stay in the later arc. One precondition is already ratified onto this leg's first
    `EXTERNAL` producer: it may not ship without conveying both the reporting
    source's identity and the time that source reported it, since a belief in the
    `ATTESTED` band must not be readable as the user's own word or as our
@@ -281,10 +307,10 @@ still needs decomposing into ADR-backed slices.
   ADR-0004's deferred catalogue gains a sibling), and the audit trail's
   "approved from where" — a server-push delivery seam, and encrypted
   backup/restore, which is also the honest test of VISION.md's portable
-  context-graph claim. **ADR-0084 buys the three expensive retrofits in advance**
-  — a versioned connect handshake, a defined place for a credential the loopback
-  transport carries nothing in, and a client stateless by decision — so the wire
-  is ready for this leg. **What no wire format can pre-authorise is the hop
+  context-graph claim. **ADR-0084 bought the three expensive retrofits in advance
+  and leg 5 shipped them** — a versioned connect handshake, a defined place for a
+  credential the loopback transport carries nothing in, and a client stateless by
+  decision — so the wire is ready for this leg. **What no wire format can pre-authorise is the hop
   itself**: a spoke off the device moves user data off the device, which
   ADR-0017 §1 governs and which this leg owes a ratified decision for
   (ADR-0084 §1, §11).
@@ -308,9 +334,11 @@ still needs decomposing into ADR-backed slices.
   and reversible, so the irreversibility and disclosure floors have had no live
   case.
 - **Proactivity.** `NotificationCandidate` and the interruption policy — the
-  one proposal artifact of the propose/dispose principle still unbuilt. It
-  structurally requires the hub (something must be awake to notice — ADR-0083)
-  and a delivery channel (remote spokes' push seam).
+  one proposal artifact of the propose/dispose principle still unbuilt. Of its
+  two structural requirements, leg 5 met one: something is now awake to notice,
+  with a scheduler to notice on (ADR-0083 §7). What it still waits on is a
+  delivery channel — remote spokes' push seam — because a hub that notices and
+  cannot reach the user has produced a candidate and delivered nothing.
 - **An engagement surface.** The accumulation flywheel needs daily use, and
   nothing on this roadmap yet makes the assistant compelling daily. This entry
   is deliberately undesigned; it is named so its absence is a known debt of the
@@ -346,6 +374,6 @@ ledger rather than into this document.
 | More Capable Over Time | Explicit correction: ADR-0009/0022; legs 3–4 and 7 extend it to observation |
 | Context determines usefulness | Leg 6 feeds facets ADR-0008 anticipated; device context waits on remote spokes |
 | Supported — acts across tools | Later arc (actuators); deliberately last |
-| Proactivity that earns its place | Later arc; requires the hub |
+| Proactivity that earns its place | Later arc; the hub it required is leg 5, so what remains is the delivery channel |
 | Free to choose models | ADR-0002/0011/0013/0061/0062; no leg needed |
 | Observability and evaluation | Leg 8, then the full harness |
