@@ -628,20 +628,30 @@ default", which was the wrong authority on both halves:
   pydantic's JSON mode" outright. §2b pins them: UTF-8 unescaped wherever JSON
   permits, `/` unescaped, nothing at or above U+007F escaped, and only the
   two-character escapes plus `\u00XX` below U+0020. A citation's byte cost is
-  therefore a *computable* function of its text, not an estimate — which is what
-  turns the rows below from illustrations into measurements.
+  therefore a *computable* function of its text rather than an estimate — which is
+  what makes the check below decidable at all.
 
-So, at the default `hub_max_frame_bytes` of 16 MiB, against `16 MiB - 512`:
+| Response | Citation contents in one payload |
+| --- | --- |
+| `belief()` — one belief | ≤ 64 (§1) |
+| `beliefs()` — `BeliefSummary` (ADR-0085 §4a) | **zero — no field to hold one** |
 
-| Response | Citation contents in one payload | Budget per citation |
-| --- | --- | --- |
-| `belief()` — one belief | ≤ 64 (§1) | ~256 KiB |
-| `beliefs()` — `BeliefSummary` (ADR-0085 §4a) | **zero — no field to hold one** | not applicable |
+**No per-citation budget is quoted, and an earlier draft was wrong to quote one.**
+Dividing `hub_max_frame_bytes - 512` by 64 looks like a threshold and is not one:
+§8c bounds the **whole payload**, so the same frame also carries the `Belief`'s
+own fields, each `Evidence` object's braces and member name, and the array's
+commas and brackets. A belief whose 64 contents sum to just under the limit is
+still refused, because the structure around them has not been counted. The
+divided figure is an upper bound that is never attained, and quoting it as a
+budget would misstate ADR-0085 §8c's rule in the one place this ADR leans on it.
 
-**So the coherence statement, precisely:** the largest evidence payload any frame
-can carry is one belief's citations, that count is 64, and the per-citation budget
-is a quarter of a megabyte of canonical UTF-8. §1's bound and ADR-0085 §8c's limit
-are coherent, and coherent by measurement rather than by assurance.
+**So the coherence statement, as strongly as it can honestly be put:** the
+largest evidence payload any frame can carry is **one belief's citations**, that
+count is **fixed at 64 and no longer a function of time**, and whether a given
+belief fits is decided by ADR-0085 §8c against the whole encoded payload — a
+question about the size of some episodes, answerable by measurement, and not a
+question about how long the assistant has been running. That last clause is the
+whole of what §1 buys here.
 
 **ADR-0084 §4's prerequisite had two gates, and both are now closed — one by
 each of two ADRs that do not depend on each other.** An earlier draft of this
@@ -669,9 +679,8 @@ payload.** Of the product `beliefs × citations × content`, ADR-0085 §4a remov
 the first factor and §1 bounds the second. **The third has no contract bound and
 this ADR does not give it one.** A belief citing a single 20 MiB episode carries
 one citation, satisfies §1 with 63 to spare, and still produces a `Belief` that
-ADR-0085 §8c refuses. The 256 KiB in the table above is the threshold at which
-that refusal fires — it is a property of the limit, not a constraint anything
-enforces on an episode.
+ADR-0085 §8c refuses. Nothing in §1 constrains an episode's size, and §7 quotes
+no figure that could be mistaken for such a constraint.
 
 **What is eliminated is *growth*, which is the whole of what #473 and ADR-0084 §4
 asked for.** The failure mode they name is a belief that becomes unreadable
