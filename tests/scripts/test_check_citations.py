@@ -654,6 +654,47 @@ def test_the_header_boundary_follows_markdown_not_one_spelling(
     assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
 
 
+@pytest.mark.parametrize(
+    "record",
+    ["    - Supersedes: ADR-0001", "  - Supersedes: ADR-0001", "\t- Supersedes: ADR-0001"],
+    ids=["four-spaces", "nested-two", "tab"],
+)
+def test_an_item_nested_under_a_header_field_is_not_a_record(tmp_path: Path, record: str) -> None:
+    """§4 makes the reverse record a header *field*; a nested item is not one.
+
+    An ADR explaining the rule hangs the illustration under its own ``Status``,
+    and reading that as a field declares a supersession nobody wrote.
+    """
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            f"# 2. Two\n\n- Status: Accepted\n{record}\n- Date: 2026-01-02\n\n"
+            "## Context\n\nExplains the form.\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
+def test_a_commented_out_record_is_display_not_a_record(tmp_path: Path) -> None:
+    """An HTML comment is display for the same reason a fence is (§1).
+
+    ``docs/adr/template.md`` documents the supersession form inside one.
+    """
+    adrs = {
+        "0001-one.md": "# 1. One\n\n- Status: Accepted\n\n## Context\n\nStands.\n",
+        "0002-two.md": (
+            "# 2. Two\n\n- Status: Accepted\n"
+            "<!-- Write the record like this:\n- Supersedes: ADR-0001 (its §3)\n-->\n"
+            "- Date: 2026-01-02\n\n## Context\n\nExplains the form.\n"
+        ),
+    }
+    _make_repo(tmp_path, adrs)
+
+    assert _findings(_report(tmp_path, "--no-tracker"), "liveness") == []
+
+
 def test_a_setext_heading_ends_the_header_too(tmp_path: Path) -> None:
     """``Decision`` over ``-------`` is a level-2 heading; the corpus writes none, and it counts."""
     adrs = {
