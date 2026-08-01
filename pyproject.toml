@@ -167,7 +167,12 @@ docstring-code-format = true
 # -----------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.14"
-files = ["src", "tests", "hatch_build.py"]
+# `scripts` is here because CLAUDE.md's "type everything" is a rule about the
+# repository, not about the wheel: the developer tooling under `scripts/` is
+# Python that agents read and change, and it was outside the strict check purely
+# by omission. It passed on the day it was added with no edit to the two scripts
+# already there.
+files = ["src", "tests", "scripts", "hatch_build.py"]
 strict = true
 warn_unreachable = true
 warn_redundant_casts = true
