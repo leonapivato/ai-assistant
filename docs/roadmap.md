@@ -111,9 +111,12 @@ it, and built before anything ambient or polling.
    second correction path. The `VISION.md` amendment ratifying the design stances
    above landed with ADR-0072 §9, as a new Core Principle. *Exit: the user can
    read the assistant's beliefs about them, see why each is held, and kill any of
-   them.* ADR-0073 §4 rules that test met by what it ships, and names the two
-   days it would stop being met — both gated on leg 6's first `EXTERNAL`
-   producer, which may not land without the explanation its band owes.
+   them.* ADR-0073 §4 rules that test met by what it ships, under a floor and two
+   gates: no belief may be presented as carrying a warrant the surface cannot
+   show, and neither empty band's first producer may land without the explanation
+   its band owes. The `DERIVED` gate fell to leg 3, where ADR-0077 §6 ruled what
+   a citation that no longer resolves renders. The `ATTESTED` gate still stands,
+   on leg 6.
 
    **The residual is `export`.** This leg is where ADR-0007's `delete` obligation
    first met an interface; its `export` obligation did not, and ADR-0073 §10
