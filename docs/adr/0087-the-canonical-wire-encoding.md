@@ -344,7 +344,7 @@ ceiling that any ADR has set or will set.
 | --- | --- |
 | `bool` | `true` / `false` |
 | `None` | `null` |
-| `int` | decimal, no sign for zero, no exponent, any width CPython will render — an integer past its integer-string conversion guard has no encoding and the encoder raises, symmetrically with the decoder, which cannot parse one either |
+| `int` | decimal, no sign for zero, no exponent, no width bound of this ADR's (below) |
 | `float` | CPython's `float.__repr__` — the shortest decimal that round-trips, with a decimal point or an exponent always present, and an exponent of at least two digits (`1e-07`, `1e+16`) |
 | `str` / `Identifier` | §2b, on the *validated* value: `Identifier` strips, so `" x "` and `"x"` are one value and one encoding |
 | `StrEnum` | the member's `value` as a string — `Disposition.EXECUTED` is `"executed"` |
@@ -358,6 +358,21 @@ tokens `NaN` and `Infinity`, and pydantic emits `null`, which turns a value into
 a different value silently. `core/types.py`'s `_deep_freeze` already makes this
 exact observation about `json.dumps` for `FrozenJson`, and this generalises it to
 every float on the surface.
+
+**The integer domain is deliberately *not* fixed here, and the reason is that
+ADR-0084 has already ruled on it.** CPython's `sys.int_max_str_digits` is
+process-global and mutable, so whether a >4300-digit integer renders is an
+ambient property rather than a value's — a real portability hazard, and it is
+**#421's**, not a gap this ADR opens. ADR-0084 answers it in as many words:
+adopting "a fixed application-owned bound across all four paths … *reverses a
+ratified design decision*" and "*needs its own ADR*", which "is not a local-API
+decision"; what ADR-0084 adds instead is a deployment constraint — the reference
+deployment does not set `PYTHONINTMAXSTRDIGITS`, so both halves inherit one
+interpreter default. **Pinning a digit bound here would be exactly the ADR that
+ruling says is owed**, written in an ADR about byte spellings and reversing a
+decision ADR-0014 made. So this ADR states the integer's *form* and leaves its
+*domain* where ADR-0084 left it. An earlier draft of §2c said otherwise and was
+wrong to.
 
 #### 2d. Instants
 
@@ -938,19 +953,23 @@ behaviour at the handshake.
 
 ### 9. What is left open, honestly
 
-- **A declared type that admits a value with no canonical form.** §2 gives three
-  values no encoding — a lone surrogate `str` (§2b), a non-finite `float` and an
-  oversized `int` (§2c) — and §7 fixes that the type is where each must be
-  refused, before measurement. Two holders already do it: `FrozenJson` refuses
-  the non-finite float structurally and catches the other two **by running the
-  real encoder at validation time** rather than by enumerating the value types
-  that can fail, which is exactly what the surrogate and big-integer cases
-  defeated when they were enumerated (issues #121, #127). A plain `str` or an
-  unbounded `float` on the promoted surface has no such validator, so a value the
-  in-process engine accepts could be one the wire cannot carry. `_freeze_json` is
-  both the shape of the fix and the reason it is not made here: **the refusal
-  belongs on the type, and the promoted types are the surface ADR's.** Filed
-  rather than designed around.
+- **A declared type that admits a value with no canonical form.** §2 gives two
+  values no encoding — a lone surrogate `str` (§2b) and a non-finite `float`
+  (§2c) — and §7 fixes that the type is where each must be refused, before
+  measurement. `FrozenJson` already does it: it refuses the non-finite float
+  structurally and catches the surrogate **by running the real encoder at
+  validation time** rather than by enumerating the value types that can fail,
+  which is exactly what the surrogate and big-integer cases defeated when they
+  were enumerated (issues #121, #127). A plain `str` or an unbounded `float` on
+  the promoted surface has no such validator, so a value the in-process engine
+  accepts could be one the wire cannot carry. `_freeze_json` is both the shape of
+  the fix and the reason it is not made here: **the refusal belongs on the type,
+  and the promoted types are the surface ADR's.** Filed rather than designed
+  around.
+- **The oversized integer is *not* on that list, and its absence is a ruling
+  rather than an oversight** — §2c: the domain is #421's and ADR-0084 has already
+  declined to bound it here, adding a deployment constraint instead. Recorded so
+  that a later reader does not read the previous item as covering it.
 - **Where the encoder lives, for the in-process engine.** ADR-0084 §4 obliges
   every implementation to enforce the limit — "the in-process engine included" —
   and an engine with no payload to serialise for its own sake must build one to
