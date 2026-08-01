@@ -38,12 +38,20 @@
   `Planner` grows no `history` parameter, the widened meaning of `memories` and its
   ordering rule stand, the tail stays bounded by a configured count of recent turns,
   and an id that does not resolve is still **skipped, not an error**. What ADR-0086
-  §6 lands is the batch read's *availability* on the contract; converting this ADR's
-  own caller to it is ADR-0086 §8's work and has not happened yet — `history` still
-  fetches turn by turn, and issue #575 tracks the conversion. Either way what
-  changes is how the turns are fetched, never what continuity is or what it carries.
+  §6 lands is the batch read's *availability* on the contract, and §5's own caller
+  has since taken it: `ConversationLifecycle.history`
+  (`orchestration/conversations.py`) now fetches the tail with one `get_many`
+  instead of a `get` per turn, under ADR-0086 §8 item 7. What changes is how the
+  turns are fetched, never what continuity is or what it carries — the order is
+  still the conversation's own, and an unresolvable id is still simply absent.
   ADR-0086 replaces nothing else in this ADR — §10's other declinations, and every
   other section, stand exactly as they stood before it.
+
+  **The caller ADR-0086 §6 calls `ConversationService` is `ConversationLifecycle`.**
+  No `ConversationService` exists anywhere in `src/`; §6's file path is right and §8
+  item 7 names the class correctly, so the reference is recoverable, but this record
+  names the symbol that resolves rather than repeat one that does not. Correcting §6
+  itself is #586's work, not this change's.
 
   **The three pairs on the `Status` line name different scopes** — ADR-0076 §9's
   obligation set, ADR-0084 §9 item 5's premise, and this ADR's §5 refusal — so they
