@@ -14,9 +14,13 @@
   golden rule 5 and ADR-0015 §5 applied to the one clause of this contract that
   is defined in bytes.
 - **It ratifies the bytes and nothing else.** No method, no field, no type, no
-  setting, no figure, no limit. §2's member ordering is length-preserving and
-  §4 normalises nothing, so no value's encoding is shorter or longer than the
-  faithful spelling of what it is, and no ceiling ADR-0084 §3 sets moves.
+  setting, no figure, no limit. **One rule does move a length**, and it is stated
+  here rather than buried: §2e's duration form changes a duration of 365 days or
+  more by at most **two bytes** — `"P1Y"` becomes `"P365D"`, and most longer
+  durations get *shorter* — while §2a's ordering is length-preserving and §4
+  normalises nothing. So any reserve, floor or limit computed downstream must be
+  computed on §2's forms rather than the library's; §7 says who owns those
+  numbers.
 - **Written with implementation contact.** Every byte string in §5 was produced
   by running the encoding against `pydantic 2.13.4` / `pydantic-core 2.46.4` on
   CPython 3.14.6, over the shapes the tree carries at `main` @ `89e0cfe` and the
@@ -359,8 +363,9 @@ an edit no reviewer would call a protocol change — silently changes every fram
 carrying that type, and moves the boundary of a contract limit. Sorting makes
 field order a private matter of the class again. It also costs nothing to state,
 matches `_canonical_bytes` exactly, and is **length-preserving** — reordering an
-object's members changes no byte count — so it moves no limit, no reserve and no
-ceiling that any ADR has set or will set.
+object's members changes no byte count — so *this* rule moves no limit, no
+reserve and no ceiling. (§2e's duration form does move one, by up to two bytes;
+the header says so and §7 names who owns the affected figures.)
 
 #### 2b. Strings
 
@@ -470,6 +475,15 @@ cheaper alternative — ratify `Y` and define it as exactly 365 days — was
 considered and rejected for the same reason: it makes the convention public
 without making it correct, and it leaves a decoder built to the standard unable
 to conform.
+
+**This is the one rule in §2 that moves a byte count, and the movement is
+bounded and measured.** `"P1Y"` becomes `"P365D"`: **+2 bytes**, the worst case
+over the whole `timedelta` range. Most longer durations get shorter —
+`"P2Y270D"` becomes `"P1000D"` (−1), `"P10Y350D"` becomes `"P4000D"` (−2) — and
+`timedelta.max` is unchanged at 30 bytes. Nothing under 365 days moves at all.
+The consequence is stated rather than left to be discovered: **a reserve or floor
+derived from a worst-case payload width must be derived from §2's forms**, not
+from what the library emits, and whoever sets those numbers (§7) owns that.
 
 **The cost is one serialiser function in the wire lane**, and it is bounded: for
 every duration under 365 days the library already produces the ratified form, so
@@ -1197,8 +1211,11 @@ dated note beneath it (ADR-0082 §2).
   the wire lane inherits, this change discharges early — a debt discharged before
   the debtor expected is discharged — and what its text would need is one
   sentence saying the limit is measured on the canonical encoding ratified here.
-  **No figure of its moves**: §2's ordering is length-preserving and §4
-  normalises nothing, so any reserve, floor or ceiling it computes stands.
+  **One caveat on its figures, and it is small but real**: §2a's ordering is
+  length-preserving and §4 normalises nothing, but §2e changes a ≥365-day
+  duration by up to two bytes. Any reserve, floor or worst-case width that ADR
+  computes must be computed on §2's forms. Nothing in this ADR's own text depends
+  on which numbers it picks.
 - **ADR-0021.** §2 uses §1's canonical form as the form it is, for a second
   consumer. Applying a rule at its stated scope is the rule being used rather
   than changed, and ADR-0084 §3 asked for exactly this reuse by name. Nothing
