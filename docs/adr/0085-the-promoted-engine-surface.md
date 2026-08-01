@@ -944,15 +944,29 @@ is the bytes.
   grammar here would be the enumeration those two sections reject, in the one
   place it is hardest to check.
 
-**Two implementations never coexist under an unpinned encoding, which is what
-makes the deferral safe rather than merely tidy.** The objection to answering
-"one canonical encoding" without saying which is that two conforming
-implementations could refuse different calls — and that requires two
-implementations. ADR-0084 §5's sequencing makes that state unreachable: change 3
-is the triad (Protocol, conformance suite, canonical fake) and **nothing encodes
-a payload**; change 4 builds the hub, the `wire` package and the client
-*together*, and it is the change that pins the encoding. The first moment a
-second implementation exists is inside the change that fixes the bytes.
+**Two implementations *do* coexist before the bytes are pinned, so the clause is
+written to be enforceable without them.** It is tempting to argue that ADR-0084
+§5's sequencing makes divergence unreachable — change 4 builds the hub, the
+`wire` package and the client together and is what pins the encoding. That
+argument is **wrong**, and the thing that breaks it is the triad's own
+**canonical fake** (`CONTRIBUTING.md` → "Adding a Protocol"): change 3 ships a
+second implementation and a shared conformance suite both it and `Engine` must
+pass, and change 3 is before change 4. So a suite that asserted a byte-exact
+boundary would be asserting something no ratified text defines yet.
+
+> **What the conformance suite enforces is the limit's *behaviour*, not its
+> boundary.** Every implementation must refuse an oversized payload with
+> `OversizedValueError` naming the limit, the measured size and the largest
+> contributor (§9), and must accept one that is comfortably inside. **Which
+> payloads sit exactly at the boundary is fixed when the encoding is** (change 4),
+> and the suite does not test the boundary before then.
+
+That is how the test would be written in any case — with a payload oversized
+under *any* conforming encoding and one well inside it — because a boundary test
+that depended on a byte would be brittle even after the encoding is pinned. What
+the deferral costs, precisely, is a boundary assertion nobody wanted; what it
+keeps is the obligation ADR-0084 §4 actually states, that every implementation
+enforces the limit.
 
 **A `core`-owned codec is the obvious alternative and ADR-0084 §6 forecloses it.**
 That ADR places "the envelope, the framing, the codec, the error mapping, and the
@@ -1252,7 +1266,7 @@ it.
 | --- | --- | --- |
 | `code` | always | the exception type's own class name |
 | `message` | always | the exception's human-readable message |
-| `details` | always | an object whose members are the exception's public attributes, or `null` where the type carries none |
+| `details` | always | an object whose members are the exception's public attributes **other than `details_elided`**, or `null` where the type carries none |
 | `reduced` | always | `true` where the payload was reduced to fit (below), otherwise `false` |
 
 **Every member is always present**, deliberately: a conditional member would be a
@@ -1278,6 +1292,13 @@ hand, and it would go stale the first time a structured error is added. So:
 > and `details` is exactly those attributes serialised in pydantic JSON mode. A
 > client reconstructs by calling the named type with the message positionally and
 > the `details` members as keyword arguments.
+>
+> **`details_elided` is excluded from `details`, because it is transport metadata
+> rather than exception state.** It says something about *this delivery*, not
+> about the failure; it is carried by the frame's own `reduced` member and set on
+> the reconstructed exception by the client. Without the exclusion every
+> exception would carry structured state, `details: null` could never be sent,
+> and no subtype's constructor would accept the member back.
 
 That is a **contract clause on the error types**, testable by the conformance
 suite: an attribute the constructor will not accept back under the same name
@@ -1291,6 +1312,8 @@ named because the general rule is only checkable against a known set:
 | `OversizedValueError` | `limit: int`, `size: int`, `field: str` |
 | `UnresolvedEvidenceError` | `unresolved_ids: tuple[str, ...]` |
 
+Both counts are of *structured state*, and `details_elided` is not that (above),
+so adding it to the base class leaves this list at two.
 `UnresolvedEvidenceError` is the one this ADR did not invent — it already carries
 `unresolved_ids` (`core/errors.py:232-242`), it is declared by `answer` (§9), and
 its ids are the whole content of the refusal. Every other type in §9's vocabulary
