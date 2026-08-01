@@ -477,6 +477,33 @@ def test_an_identifier_is_stripped(field: str) -> None:
         pytest.param({"id": "smtp_\ud800"}, id="id"),
         pytest.param({"capability": "send_\ud800"}, id="capability"),
         pytest.param({"description": "Send \ud800 mail."}, id="description"),
+    ],
+)
+def test_a_definition_text_field_with_no_utf8_encoding_is_refused(
+    override: dict[str, object],
+) -> None:
+    r"""A valid model that cannot be serialised is not a valid declaration.
+
+    A lone surrogate satisfies ``str``, renders as something to
+    ``_has_visible_text``, and has no UTF-8 encoding — so before this it passed
+    every rule the type had and failed at whatever tried to store it, with a
+    ``PydanticSerializationError`` from the serialiser rather than a
+    ``ValidationError`` from the author's own call.
+
+    **These three are refused by their own annotation now** (issue #565): ``id``
+    and ``capability`` are :data:`VisibleIdentifier` and ``description`` is
+    :data:`EncodableText`, both layered on the alias that runs the encoder, so
+    the diagnostic names the offending code point rather than the definition as a
+    whole. ``ToolDefinition._is_storable`` still backstops the definition; what
+    moved is which of the two speaks first for a text field.
+    """
+    with pytest.raises(ValidationError, match="UTF-8 encoding"):
+        _definition(**override)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
         pytest.param({"parameters_schema": {"to": "\ud800"}}, id="schema-value"),
         pytest.param({"parameters_schema": {"\ud800": "string"}}, id="schema-key"),
         pytest.param(
@@ -494,13 +521,12 @@ def test_an_identifier_is_stripped(field: str) -> None:
     ],
 )
 def test_a_definition_with_no_json_encoding_is_refused(override: dict[str, object]) -> None:
-    r"""A valid model that cannot be serialised is not a valid declaration.
+    r"""The schema half, which no field annotation can reach.
 
-    A lone surrogate satisfies ``str``, renders as something to
-    ``_has_visible_text``, and has no UTF-8 encoding — so before this it passed
-    every rule the type had and failed at whatever tried to store it, with a
-    ``PydanticSerializationError`` from the serialiser rather than a
-    ``ValidationError`` from the author's own call.
+    ``parameters_schema`` is a :data:`FrozenJsonMapping`, so ``_freeze_json``
+    runs the real encoder over keys and values at any depth. Same predicate as
+    the text fields above, different mechanism — which is why the two diagnostics
+    differ, and why both are pinned.
     """
     with pytest.raises(ValidationError, match="JSON encoding"):
         _definition(**override)
