@@ -837,22 +837,37 @@ limit, the payload's measured size, and the name of the largest argument or fiel
 contributing to it, because ADR-0084 §4 requires the limit and the field and
 because "too large" without a number is not actionable.
 
-**The per-method declared failures:**
+**`OversizedValueError` is declared by *every* method, and is therefore stated
+once here rather than repeated in fifteen rows.** §8c's bound applies to every
+request payload and every result payload, and no method on this surface is
+provably inside it: `Identifier` carries no maximum length, so even
+`forget(record_id=…)` can be handed an oversized argument, and every enumerating
+method's result grows with `limit`. A table that listed it per method would
+invite exactly the omission that a universal rule cannot have — and the rule is
+what the conformance suite tests anyway.
+
+**The per-method declared failures**, `OversizedValueError` assumed throughout:
 
 | Method | Declares |
 | --- | --- |
-| `converse` | `ValueError`, `UnknownConversationError`, `PlanningError`, `ContextError`, `AuditError`, `ToolBindingError`, `OversizedValueError` |
-| `resume` | `UnknownContinuationError`, `PermissionDeniedError`, `AuditError`, `ToolBindingError`, `OversizedValueError` |
-| `learn` | `MemoryStoreError`, `OversizedValueError` |
-| `observe` | `ValueError`, `UnknownConversationError`, `ConversationStoreError`, `MemoryStoreError`, `ModelError`, `OversizedValueError` |
-| `beliefs`, `belief` | `MemoryStoreError`, `ValueError`, `OversizedValueError` |
-| `forget` | `MemoryStoreError`, `ValueError` |
-| `questions`, `interrupted_questions` | `DeferralStoreError`, `MemoryStoreError`, `ValueError`, `OversizedValueError` |
-| `answer` | `MemoryStoreError`, `UnresolvedEvidenceError`, `DeferralStoreError`, `ValueError`, `OversizedValueError` |
-| `forget_question` | `DeferralStoreError`, `ValueError` |
-| `recent_conversations`, `conversation` | `ConversationStoreError`, `ValueError` |
-| `forget_conversation` | `ConversationStoreError`, `MemoryStoreError`, `ValueError` |
-| `pending_confirmations` | `PlanningError`, `AuditError`, `OversizedValueError` |
+| `converse` | `ValueError`, `UnknownConversationError`, `PlanningError`, `ContextError`, `AuditError`, `ToolBindingError` |
+| `resume` | `UnknownContinuationError`, `PermissionDeniedError`, `AuditError`, `ToolBindingError` |
+| `learn` | `MemoryStoreError` |
+| `observe` | `ValueError`, `UnknownConversationError`, `ConversationStoreError`, `MemoryStoreError`, `ModelError` |
+| `beliefs`, `belief` | `ValueError`, `MemoryStoreError` |
+| `forget` | `ValueError`, `MemoryStoreError` |
+| `questions`, `interrupted_questions` | `ValueError`, `DeferralStoreError`, `MemoryStoreError` |
+| `answer` | `ValueError`, `MemoryStoreError`, `UnresolvedEvidenceError`, `DeferralStoreError` |
+| `forget_question` | `ValueError`, `DeferralStoreError` |
+| `recent_conversations`, `conversation` | `ValueError`, `ConversationStoreError` |
+| `forget_conversation` | `ValueError`, `ConversationStoreError`, `MemoryStoreError` |
+| `pending_confirmations` | `PlanningError`, `AuditError` |
+
+**`ValueError` is *not* universal, and the three exceptions are the check on that
+table.** `resume`, `learn` and `pending_confirmations` take no bare identifier
+and no page argument — `ContinuationToken` and `FeedbackEvent` are pydantic
+models whose own validation fires at construction, before the call — so there is
+nothing for them to refuse locally.
 
 **`ValueError` is declared and is deliberately not an `AssistantError`.** It
 covers a malformed page argument (`limit` or `offset` outside `[0, 2**63)`) and a
