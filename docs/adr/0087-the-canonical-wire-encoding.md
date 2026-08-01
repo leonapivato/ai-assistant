@@ -15,12 +15,11 @@
   is defined in bytes.
 - **It ratifies the bytes and nothing else.** No method, no field, no type, no
   setting, no figure, no limit. **One rule does move a length**, and it is stated
-  here rather than buried: §2e's duration form changes a duration of 365 days or
-  more by at most **two bytes** — `"P1Y"` becomes `"P365D"`, and most longer
-  durations get *shorter* — while §2a's ordering is length-preserving and §4
-  normalises nothing. So any reserve, floor or limit computed downstream must be
-  computed on §2's forms rather than the library's; §7 says who owns those
-  numbers.
+  here rather than buried: §2e's duration form grows a duration of 365 days or
+  more by at most **three bytes** — the bound is proved in §2e rather than
+  sampled — while §2a's ordering is length-preserving and §4 normalises nothing.
+  So any reserve, floor or limit computed downstream must be computed on §2's
+  forms rather than the library's; §7 says who owns those numbers.
 - **Written with implementation contact.** Every byte string in §5 was produced
   by running the encoding against `pydantic 2.13.4` / `pydantic-core 2.46.4` on
   CPython 3.14.6, over the shapes the tree carries at `main` @ `89e0cfe` and the
@@ -364,7 +363,7 @@ carrying that type, and moves the boundary of a contract limit. Sorting makes
 field order a private matter of the class again. It also costs nothing to state,
 matches `_canonical_bytes` exactly, and is **length-preserving** — reordering an
 object's members changes no byte count — so *this* rule moves no limit, no
-reserve and no ceiling. (§2e's duration form does move one, by up to two bytes;
+reserve and no ceiling. (§2e's duration form does move one, by up to three bytes;
 the header says so and §7 names who owns the affected figures.)
 
 #### 2b. Strings
@@ -476,14 +475,29 @@ considered and rejected for the same reason: it makes the convention public
 without making it correct, and it leaves a decoder built to the standard unable
 to conform.
 
-**This is the one rule in §2 that moves a byte count, and the movement is
-bounded and measured.** `"P1Y"` becomes `"P365D"`: **+2 bytes**, the worst case
-over the whole `timedelta` range. Most longer durations get shorter —
-`"P2Y270D"` becomes `"P1000D"` (−1), `"P10Y350D"` becomes `"P4000D"` (−2) — and
-`timedelta.max` is unchanged at 30 bytes. Nothing under 365 days moves at all.
-The consequence is stated rather than left to be discovered: **a reserve or floor
-derived from a worst-case payload width must be derived from §2's forms**, not
-from what the library emits, and whoever sets those numbers (§7) owns that.
+**This is the one rule in §2 that moves a byte count, and the bound is *proved*
+rather than sampled** — an earlier draft of this ADR sampled it, got two bytes,
+and was wrong.
+
+> **A duration's canonical form is at most three bytes longer than the library's,
+> and never more.**
+
+The proof is short enough to state. The time components are identical in both
+spellings and cancel, as does the sign, so only the day part differs: the library
+writes `P{y}Y[{r}D]` with `y = d // 365`, and §2e writes `P{d}D`. The growth is
+therefore `len(str(d)) − len(str(y))` when `r` is zero, and strictly less when it
+is not — a non-zero remainder only lengthens the library's form. Since
+`d = 365y < 365 × 10^k` for any `y < 10^k`, `d` has at most **three** more digits
+than `y`, so the growth is at most three. It is attained: `timedelta(days=1095)`
+is `"P3Y"` (5 bytes) against `"P1095D"` (8), and so is
+`timedelta(days=360991935)` — `"P989019Y"` (10) against `"P360991935D"` (13).
+
+Most durations move less or not at all: `"P1Y"` → `"P365D"` is +2, `"P2Y270D"` →
+`"P1000D"` is −1, `"P10Y350D"` → `"P4000D"` is −2, `timedelta.max` is unchanged
+at 30 bytes, and nothing under 365 days moves. The consequence is stated rather
+than left to be discovered: **a reserve or floor derived from a worst-case
+payload width must be derived from §2's forms**, not from what the library emits,
+and whoever sets those numbers (§7) owns that.
 
 **The cost is one serialiser function in the wire lane**, and it is bounded: for
 every duration under 365 days the library already produces the ratified form, so
@@ -778,12 +792,16 @@ have to. Rows 3–5 fix six digits with trailing zeros kept.
 | `timedelta(microseconds=1)` | `"PT0.000001S"` | 13 |
 | `timedelta(seconds=-30)` | `"-PT30S"` | 8 |
 | `timedelta(days=365)` | `"P365D"` — **library emits `"P1Y"`, §3 row 2** | 7 |
+| `timedelta(days=1095)` | `"P1095D"` — **library emits `"P3Y"`; the +3 worst case, §2e** | 8 |
+| `timedelta(days=360991935)` | `"P360991935D"` — **library emits `"P989019Y"`; +3 again** | 13 |
 | `timedelta.max` | `"P999999999DT23H59M59.999999S"` — **library emits `"P2739726Y9DT23H59M59.999999S"`** | 30 |
 
 Rows 3 and 4 are §2e's point made as a vector: two spellings of one value, one
-encoding, no decision needed. The last two rows are the whole of the nominal-component
-correction, and they are why that correction cannot go unnoticed by an
-implementation that reaches for `model_dump_json()`.
+encoding, no decision needed. The last four rows are the nominal-component
+correction, and they are why it cannot go unnoticed by an implementation that
+reaches for `model_dump_json()`. Two of them pin §2e's proved **+3** worst case
+at both ends of its range, so a reserve computed against them is computed
+against the widest a duration gets.
 
 #### 5e. Composite payloads, and the entry point for values that are not models
 
@@ -1213,7 +1231,7 @@ dated note beneath it (ADR-0082 §2).
   sentence saying the limit is measured on the canonical encoding ratified here.
   **One caveat on its figures, and it is small but real**: §2a's ordering is
   length-preserving and §4 normalises nothing, but §2e changes a ≥365-day
-  duration by up to two bytes. Any reserve, floor or worst-case width that ADR
+  duration by up to three bytes (§2e proves the bound). Any reserve, floor or worst-case width that ADR
   computes must be computed on §2's forms. Nothing in this ADR's own text depends
   on which numbers it picks.
 - **ADR-0021.** §2 uses §1's canonical form as the form it is, for a second
