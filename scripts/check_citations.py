@@ -120,6 +120,12 @@ _TRACKER_RE = re.compile(r"(?<![\w#])#(\d{1,6})(?![\w#])")
 #: closing bracket before it and stays selected.
 _LINK_DESTINATION_RE = re.compile(r"\]\([^)\n]*\)")
 
+#: The destination of a **reference-style** link definition, ``[label]: dest``.
+#: Markdown's other way of writing a destination, and the same rule applies to
+#: it: nothing in a destination is a citation. The label is left alone, so a
+#: definition labelled ``[#588]`` still reads as one.
+_LINK_REFERENCE_RE = re.compile(r"(?<=\]:)[ \t]*\S+")
+
 #: **The one case the pattern above cannot decide: a ``/`` before the ``#``.**
 #: It is how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``, 14
 #: occurrences — and it is also every fragment identifier that is not caught by
@@ -486,9 +492,11 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
     for lineno, line in iter_prose_lines(text):
         for match in _DECISION_RE.finditer(line):
             found.append(Citation("decision", match.group(0), path, lineno))
-        # Link destinations are blanked to the same width, so a citation
-        # elsewhere on the line keeps its position and its context.
+        # Link destinations — inline and reference-style — are blanked to the
+        # same width, so a citation elsewhere on the line keeps its position and
+        # its context.
         outside_links = _LINK_DESTINATION_RE.sub(lambda m: " " * len(m.group(0)), line)
+        outside_links = _LINK_REFERENCE_RE.sub(lambda m: " " * len(m.group(0)), outside_links)
         for match in _TRACKER_RE.finditer(outside_links):
             if _is_fragment_identifier(outside_links[: match.start()]):
                 continue
