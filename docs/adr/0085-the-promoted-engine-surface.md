@@ -1,4 +1,4 @@
-# 85. The promoted engine surface: fifteen methods, twenty-three types, one closed graph
+# 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
 - Status: Proposed
 - Date: 2026-07-31
@@ -19,6 +19,14 @@
   shared conformance suite + canonical fake in `ai_assistant.testing` — is
   ADR-0084 §5's step 3 and a separate lane, merging before any client (golden
   rule 5, ADR-0015 §5).
+- **The belief *listing* and the single-belief view return different types, and
+  that is this ADR's one substantive departure from the tree.** ADR-0077 §6
+  splits the two surfaces — the listing "resolves *existence* and renders the
+  count, the lost count, and the adjusted confidence", the single-belief view
+  "renders the surviving citations as readable evidence". `Engine._project`
+  serves both and resolves content for both, which is **#552**. §4a decides the
+  shape that makes the ratified split expressible, and §8f shows what it does to
+  the frame arithmetic.
 - **This ADR amends nothing.** §12 applies ADR-0082 §1's test to every earlier
   ADR whose text this one touches and finds no record owed — each of the clauses
   examined is a deferral whose deferring sentence stays true and now has an
@@ -58,7 +66,7 @@ mechanical: promote a type to `core` while something its fields reach stays in
 `orchestration`, and `core` imports `orchestration`, which golden rule 2 forbids
 and `lint-imports` fails.
 
-Enumerated from the tree, the closure is **twenty-three types**, not three.
+Enumerated from the tree, the closure is **twenty-four types**, not three.
 Naming the three ADR-0084 could see from where it stood would have left twenty
 for the triad lane to find one `lint-imports` failure at a time. §5 below is that
 enumeration, and §6 is the boundary: what the closure reaches and stops at.
@@ -83,6 +91,35 @@ Three questions ADR-0084 left open are settled here because a Protocol cannot be
 written without them: what a promoted model's fields *are*, what a method's
 declared failures are, and what "the size limit is part of the contract" means as
 a number two implementations can both compute.
+
+### The listing and the single-belief view are two surfaces, and the tree has one type
+
+ADR-0077 §6 divides the inspection surface in as many words:
+
+> The listing resolves *existence* and renders the count, the lost count, and the
+> adjusted confidence; the single-belief view renders the surviving citations as
+> readable evidence and the lost ones as tombstones.
+
+`Engine._project` (`engine.py:2169`) serves both — `_beliefs` calls it per record
+and `_belief` calls it once — and it resolves each citation's *content* for both,
+so every belief on a fifty-row page carries the full text of every episode behind
+it. Two ratified ADRs ask the listing for a count; the code delivers the corpus.
+That is **#552**, filed out of ADR-0086's lane and handed here because the second
+half of it is a DTO shape.
+
+**The tree's own adapter already honours the split**, which is the implementation
+contact that decides §4a. `_render_belief(belief, *, evidence=False)`
+(`cli.py:1987`) documents the two views and prints citations only when `evidence`
+is true; the listing path and its `_why` line (`cli.py:1936-1950`) read `band`,
+`kind`, `confidence`, `content`, `last_updated`, `valid_until`, `id`,
+`evidence_count`, `lost_evidence` and `unsupported` — and never `evidence`. The
+only consumer that exists already wants the smaller shape.
+
+**This matters now rather than later** because a promoted `Belief` that carries
+resolved content on the listing path makes the over-delivery contract surface,
+where withdrawing it is a Protocol change instead of an edit — and because §8's
+frame arithmetic has a multiplicative term it cannot bound while the listing
+carries contents.
 
 Three are closed and stay closed: a smaller Protocol covering just what the CLI
 uses (rejected, §5); a separate wire schema mapped to and from the façade types
@@ -188,7 +225,7 @@ class AssistantEngine(Protocol):
         self, *, conversation_id: Identifier | None = None
     ) -> ObservationReport: ...
 
-    # The inspection surface (ADR-0073 §7)
+    # The inspection surface (ADR-0073 §7, ADR-0077 §6 — two surfaces, two types)
     async def beliefs(
         self,
         *,
@@ -196,7 +233,7 @@ class AssistantEngine(Protocol):
         kinds: Sequence[MemoryKind] | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
-    ) -> tuple[Belief, ...]: ...
+    ) -> tuple[BeliefSummary, ...]: ...
 
     async def belief(self, record_id: Identifier) -> Belief | None: ...
 
@@ -330,7 +367,7 @@ happens to be written.
 selects every band or kind, an empty sequence selects nothing, and the two
 filters compose by conjunction.
 
-### 4. The twenty-three promoted types and their normative fields
+### 4. The twenty-four promoted types and their normative fields
 
 Every type below moves to `core/types.py` as a frozen pydantic model or a
 `StrEnum`, under ADR-0068 §1 — `frozen=True`, `tuple` collections, nested models
@@ -364,6 +401,7 @@ the field and left its spelling and type here.
 | Type | Fields |
 | --- | --- |
 | `Evidence` | `content: str \| None = None` |
+| `BeliefSummary` | `id: Identifier`, `band: BeliefBand`, `kind: MemoryKind`, `content: str`, `confidence: float` (`ge=0.0, le=1.0`), `last_updated: UtcInstant`, `evidence_count: int = 0` (`ge=0`), `lost_evidence: int = 0` (`ge=0`), `valid_until: UtcInstant \| None = None` |
 | `Belief` | `id: Identifier`, `band: BeliefBand`, `kind: MemoryKind`, `content: str`, `confidence: float` (`ge=0.0, le=1.0`), `last_updated: UtcInstant`, `evidence: tuple[Evidence, ...] = ()`, `valid_until: UtcInstant \| None = None` |
 | `ConversationSummary` | `id: Identifier`, `started_at: UtcInstant`, `last_active_at: UtcInstant`, `last_turn_at: UtcInstant \| None = None` |
 
@@ -393,11 +431,75 @@ the field and left its spelling and type here.
 | `TurnResult` | `loop.py:118` | `goal: Goal`, `context: CurrentContext`, `memories: tuple[MemoryRecord, ...]`, `plan: ActionPlan`, `memory_degraded: bool = False` |
 | `ConversationDigest` | `conversations.py:140` | `id: Identifier`, `started_at: UtcInstant`, `last_turn_at: UtcInstant \| None`, `recorded_turns: int` (`ge=0`) |
 
-#### 4a. The cross-field invariants promote with the fields
+#### 4a. `beliefs()` returns `BeliefSummary`, and the split is enforced by the type
+
+**The question ADR-0084 left unasked**, and which #552 makes unavoidable before
+`Belief` becomes contract surface: must the promoted surface be able to
+distinguish *"this citation exists and resolves, but its text is not delivered
+here"* from *"this citation no longer resolves"*?
+
+**On the tree's shape it cannot.** `Evidence` carries `content: str | None` and
+`lost` is `content is None` (`engine.py:602`, `:605-607`); `Belief.evidence_count`
+is `len(self.evidence)` and `lost_evidence` counts the `None`s (`:683-690`). So a
+listing that renders a count must populate `evidence`, and an entry with no
+content is *indistinguishable from a tombstone*. Exactly two behaviours are
+available: ship every episode's full text on every page, or misreport every
+citation as lost. The tree does the first.
+
+> **We will give the two surfaces two types.** `beliefs()` returns
+> `tuple[BeliefSummary, ...]`; `belief()` returns `Belief | None`.
+> `BeliefSummary` carries `evidence_count` and `lost_evidence` as **fields** and
+> has **no `evidence` field at all**. `Belief` is unchanged: it carries the
+> resolved `evidence` tuple, and its counts stay derived from it.
+
+**The deciding reason is that this is the only shape where the wrong behaviour is
+unrepresentable rather than merely detectable.** Every alternative leaves a
+`beliefs()` implementation *able* to ship citation contents, so the ratified split
+survives only as a clause a conformance suite has to police. Here the return type
+has nowhere to put a content, so a conforming listing cannot over-deliver — and my
+five prose contract clauses (§3a, §3c/§9, §3d, §7, §8) do not become six. A
+contract that makes a rule structural has spent the same words to better effect.
+
+**The second reason is implementation contact, which is what ADR-0084 §4 asked
+this ADR to be written with.** The shipped listing renderer reads exactly
+`BeliefSummary`'s nine fields and never `evidence` (`cli.py:1936-1950`, `:1987`).
+The only adapter that exists already treats these as two shapes; this makes the
+contract agree with it rather than with `_project`.
+
+**The third is that it bounds the frame by construction**, which §8f works
+through: with no per-citation field on the listing type, the page × citations ×
+content term does not exist, and what is left is the single-belief view's
+citations — the term #473 was always about.
+
+**The same three names read identically on both types**, which is what keeps a
+renderer from needing two code paths: `evidence_count`, `lost_evidence` and
+`unsupported` are fields on `BeliefSummary` (nothing to derive them from) and
+properties on `Belief` (where `evidence` is complete, so a field would be the
+second source of truth §6b rejects). `unsupported` has one definition on both —
+`evidence_count > 0 and lost_evidence == evidence_count` — so a belief citing
+nothing is not "unsupported", it is supported by the user's own word (ADR-0038
+§1a).
+
+**ADR-0073 §4's floor gets a static guarantee rather than a convention.** Its rule
+is that "a citation the surface cannot render as evidence is never rendered *as*
+evidence — not as a reassuring id, not silently dropped". A client holding a
+`BeliefSummary` cannot render a citation as evidence, because it holds no
+citations; it holds how many there are and how many are gone, which is what
+ADR-0073 §4 asked the listing to convey.
+
+**This does not change what the listing computes, only what it ships.** The
+adjusted confidence is a function of how many citations resolved
+(`presented_confidence`, ADR-0077 §6), so the listing still resolves *existence*
+per citation. That is #552's item 1 and it belongs to the lane that edits
+`_project`; a batch read is what makes it cheap, which is ADR-0086 §6's
+`get_many` — named as context, not as a dependency of this ADR.
+
+#### 4b. The cross-field invariants promote with the fields
 
 **A field list is not the whole of a DTO's contract, and dropping an invariant
-while promoting one is the quiet way to lose it.** Four of these types state a
-cross-field rule in the text they carry today; those rules are ratified content,
+while promoting one is the quiet way to lose it.** Five of these types carry a
+cross-field rule — four state one in the text they carry today, and `BeliefSummary`
+acquires one with its counts (§4a); those rules are ratified content,
 not commentary, and they become **model validators** on the promoted models —
 which is precisely the "what it adds is validation" ADR-0084 §4 names as the
 reason for moving to pydantic in the first place.
@@ -408,6 +510,7 @@ reason for moving to pydantic in the first place.
 | `IngestSummary` | `queued` is present **iff** `decision` is `DEFERRED` |
 | `QueuedQuestion` | `question_id` and `question_state` are both `None` when `outcome` is `QUEUE_FULL` or `NOT_QUEUABLE` |
 | `AnswerOutcome` | `record_id` is present **iff** `kind` is `APPLIED`; `successor` and `successor_refused` are set only when `kind` is `REDEFERRED` |
+| `BeliefSummary` | `lost_evidence <= evidence_count` |
 
 **`StepOutcome`'s is the one a wire client cannot work around**, which is why it
 is listed first. ADR-0042 §4 obliges a parked step's result to carry the
@@ -421,7 +524,10 @@ in-process.
 **The three others are the same shape**: each is an existing ratified rule
 (ADR-0078 §10 item 9 for `IngestSummary.queued`, ADR-0078 §7 for
 `QueuedQuestion`, ADR-0078 §8 for `AnswerOutcome`) that a bare field list would
-silently drop.
+silently drop. **`BeliefSummary`'s is the price of counts-as-fields**: on `Belief`
+the counts cannot disagree with the evidence because they are computed from it,
+and moving them to fields buys the listing its shape at the cost of one
+constraint the model must now assert for itself.
 
 **`QueuedQuestion`'s is stated in one direction only, deliberately.** The
 converse — that a `QUEUED` or `ALREADY_ASKED` outcome always names a question —
@@ -469,8 +575,9 @@ which "complete" is checkable.
 **Roots — what the fifteen methods name.** Arguments: `str`, `timedelta`, `bool`,
 `int`, `Identifier`, `FeedbackEvent`, `Sequence[BeliefBand]`,
 `Sequence[MemoryKind]`, `ContinuationToken`. Returns: `TurnOutcome`,
-`LearnOutcome`, `ObservationReport`, `Belief`, `Question`, `AnswerOutcome`,
-`ConversationSummary`, `ConversationDigest`, `Confirmation`, `bool`.
+`LearnOutcome`, `ObservationReport`, `BeliefSummary`, `Belief`, `Question`,
+`AnswerOutcome`, `ConversationSummary`, `ConversationDigest`, `Confirmation`,
+`bool`.
 
 **The walk**, with each edge being a field:
 
@@ -494,7 +601,10 @@ ObservationReport → ObservedProposal ┬─ kind      → MemoryKind    [core]
                                      ├─ decision  → LearnDecision
                                      └─ evidence  → Evidence
 
-Belief ┬─ band     → BeliefBand [core]
+BeliefSummary ┬─ band → BeliefBand [core]      (the `beliefs()` page — §4a)
+              └─ kind → MemoryKind [core]      (no citation field: the walk ends)
+
+Belief ┬─ band     → BeliefBand [core]         (the `belief()` view — §4a)
        ├─ kind     → MemoryKind [core]
        └─ evidence → Evidence
 
@@ -511,10 +621,11 @@ ConversationSummary  → (scalars only)
 ConversationDigest   → (scalars only)
 ```
 
-**The twenty-three that promote**, gathered from that walk: `ContinuationToken`,
+**The twenty-four that promote**, gathered from that walk: `ContinuationToken`,
 `Confirmation`, `StepOutcome`, `TurnOutcome`, `LearnDecision`, `QueueOutcome`,
-`QueuedQuestion`, `IngestSummary`, `LearnOutcome`, `Evidence`, `Belief`,
-`ConversationSummary` (twelve from `engine.py`); `QuestionState`, `Retirement`,
+`QueuedQuestion`, `IngestSummary`, `LearnOutcome`, `Evidence`, `BeliefSummary`,
+`Belief`, `ConversationSummary` (thirteen from `engine.py`, of which
+`BeliefSummary` is new — §4a); `QuestionState`, `Retirement`,
 `SuccessorLink`, `Question`, `AnswerKind`, `AnswerOutcome` (six from
 `questions.py`); `Disposition` (from `runner.py`); `TurnResult` (from `loop.py`);
 `ObservedProposal`, `ObservationReport` (from `observation.py`);
@@ -599,7 +710,7 @@ rather than convenient: the walk follows declared field types and never follows 
 method (§5).
 
 **(b) Derived predicates stay as plain properties on the promoted models, and are
-not `computed_field`.** **Eleven exist**, and the list is normative — a triad
+not `computed_field`.** **Twelve exist**, and the list is normative — a triad
 implementation that carried a subset would leave the CLI reading an attribute
 that is not there:
 
@@ -609,12 +720,20 @@ that is not there:
 | `LearnOutcome` | `stored` |
 | `Evidence` | `lost` |
 | `Belief` | `evidence_count`, `lost_evidence`, `unsupported` |
+| `BeliefSummary` | `unsupported` |
 | `ObservedProposal` | `stored`, `evidence_count`, `inspectable` |
 | `ObservationReport` | `stored`, `discarded` |
 
 Every one is a pure function of fields the model already carries — verified
 individually, and it is what makes the non-serialisation rule below safe rather
 than merely tidy.
+
+**`BeliefSummary` is where the field/property line is drawn deliberately rather
+than by habit** (§4a). `evidence_count` and `lost_evidence` are *fields* there
+because the type carries no evidence to derive them from, and `unsupported` stays
+a property because it is a pure function of those two. On `Belief` all three stay
+properties. The rule is the same one in both places — derive what the fields
+already determine, and store only what nothing else can produce.
 
 > They stay as `@property`, so they are **not serialised**. A client
 > reconstructing a promoted model from JSON recomputes them from the same fields
@@ -869,6 +988,47 @@ same holds here. What this ADR adds is that the failure, when it comes, is
 `OversizedValueError` naming `Belief.evidence` — a sentence a user can read and
 act on — rather than a frame that will not send.
 
+#### 8f. The worst case is the belief page, and §4a is what bounds it
+
+**A limit is only useful if someone has asked which payload is largest, and §8
+did not until #552 raised it.** The answer is not a turn or an observation — it is
+`beliefs()`, because it is the one response whose size is a *product* of three
+factors rather than a sum.
+
+`Evidence.content` is a cited episode's own text and no contract bounds an
+episode's content. So the evidence payload is `beliefs × citations × content`, and
+against §3's 16 MiB default the three shapes differ by two orders of magnitude:
+
+| Response | Citation contents in one frame | Budget per citation before refusal |
+| --- | --- | --- |
+| `belief()` — one belief | at most its own citation count | wide |
+| `beliefs()` **as the tree writes it** — 50 beliefs, each fully resolved | 50 × the per-belief count | narrow, and it *shrinks as the page fills* |
+| `beliefs()` **under §4a** — `BeliefSummary` | **zero** | not applicable |
+
+**§4a removes the product, not the number.** The contract limit is unchanged —
+`hub_max_frame_bytes - 512`, §8c — and no figure in §8 moves. What changes is that
+the listing's evidence payload is not merely small but **structurally absent**: a
+`BeliefSummary` has no field a citation's content could occupy, so the page-size
+factor disappears from the arithmetic rather than being argued down. A fifty-row
+page is bounded by fifty beliefs' own `content` plus a handful of scalars each.
+
+**What is left is exactly the term #473 is about**, and this ADR does not close it
+and does not pretend to. `belief()` returns one `Belief` whose `evidence` tuple is
+unbounded in the tree, so the single-belief view's payload is bounded only once a
+citation *count* bound exists. ADR-0084 §11 already names #473 a prerequisite of
+the **client** lane rather than of this one, and that stays exactly true: §4a
+narrows the residual from a page-multiplied product to one belief's citations, and
+closing it is #473's.
+
+**This ADR does not lean on ADR-0086.** That ADR is `Proposed` on another lane and
+proposes the citation bound; a contract ADR that derived its own soundness from an
+unratified one would be asserting a guarantee the corpus does not yet hold. The
+relationship is the other direction and is worth stating plainly: ADR-0086 §7
+works the same arithmetic, finds the listing's product is "not provably safe" for
+any bound *it* could pick because the unbounded factor is not one it owns, and
+hands the shape here. §4a is that shape. Neither ADR depends on the other; each
+removes one factor of the same product.
+
 ### 9. The declared failures, and the two error types this surface needs
 
 A Protocol whose methods raise unnamed exceptions is not a contract a conformance
@@ -963,7 +1123,8 @@ fixed, so it is stated compactly rather than method by method:
   string, and `bands`/`kinds` are JSON arrays of their enum values.
 - **A result payload** is the promoted model serialised through pydantic's JSON
   mode; `null` where the method returns an optional (`belief`, `conversation`); a
-  JSON array where it returns a tuple (`beliefs`, `questions`,
+  JSON array where it returns a tuple (`beliefs` — of `BeliefSummary`, §4a —
+  `questions`,
   `interrupted_questions`, `recent_conversations`, `pending_confirmations`); and a
   JSON boolean for the three methods returning `bool` (`forget`,
   `forget_question`, `forget_conversation`, and no other).
@@ -992,6 +1153,19 @@ a later reader will otherwise find the same discrepancy and wonder which won.
   a different method.
 - **A bare `PlanningError` for an unresolvable token (`engine.py:2061`).** ADR-0084
   §7 requires a distinct typed refusal; §9 names it.
+- **`Engine._project` resolves citation *content* on the listing path
+  (`engine.py:2169`).** ADR-0077 §6 gives the listing existence and counts and
+  gives content to the single-belief view alone. **Here this ADR follows the
+  ADRs and not the tree** (§4a), and the reversal of direction is the point of
+  listing it separately.
+
+  Every other entry above is a place the *corpus* has gone stale about code that
+  is correct, so the tree wins. This one is the opposite: the code diverges from
+  two ratified ADRs, which is **#552**, and a contract ADR ratifies the decision
+  rather than the defect. Promoting `Belief` as the tree projects it would make
+  the divergence contract surface and turn its withdrawal into a Protocol change
+  — which is precisely the cost ADR-0084 §4 says the promotion imposes, spent on
+  preserving a bug.
 
 ### 12. Amendment records under ADR-0082 §1
 
@@ -1029,9 +1203,23 @@ move to `Accepted` triggers nothing.
 - **ADR-0037.** `Disposition` keeps its five members and its module changes.
   ADR-0084 §12 reached the same conclusion for the same reason; relocating an enum
   is not redefining it (ADR-0084 §4).
-- **ADR-0068.** §1's rule is applied to twenty-three new models, which is the rule
+- **ADR-0068.** §1's rule is applied to twenty-four new models, which is the rule
   being used rather than changed. §9's frozen-pydantic mechanism is §1's form
   exactly: `frozen=True`, `tuple` collections, nested models frozen.
+- **ADR-0073 §4 and ADR-0077 §6, specifically.** §4a is worth its own entry
+  because it changes a *shape*, and a shape change is the kind of thing that
+  usually owes a record. It does not, on ADR-0070 §1's test in either limb. A
+  reader holding only ADR-0077 §6 would act **exactly** as §4a requires — they
+  would give the listing counts and the single view citations, which is what §6
+  says in as many words; and no clause is read more widely than it holds, because
+  §6's sentence is being applied at its stated scope rather than extended. What
+  §4a changes is the *tree*, not either ADR: it makes a type that can express §6's
+  split, where the tree has one that cannot. An ADR whose text you have to
+  contradict to implement is amended; one whose text you have to be *able* to
+  implement is served.
+- **ADR-0086.** No record, and no dependency in either direction. Its §7 hands
+  the DTO shape here explicitly and takes no position on it; §8f states the
+  relationship and declines to lean on an unratified ADR.
 - **ADR-0073, ADR-0074, ADR-0077, ADR-0078.** Each supplies the semantic content
   of a promoted DTO — what `Belief` carries, what a `ConversationSummary` sorts
   by, what an `ObservationReport` counts, what a `Question` shows — and this ADR
@@ -1046,11 +1234,11 @@ move to `Accepted` triggers nothing.
 ## Consequences
 
 - **The triad lane has a specification rather than a design task.** Fifteen
-  signatures, twenty-three types with their fields, one closed graph, five
+  signatures, twenty-four types with their fields, one closed graph, five
   contract clauses and two error types. ADR-0015 §5's purpose — that no lane
   authors `core` contract surface unreviewed — is discharged by this document
   existing and being reviewed as contract surface.
-- **`core/types.py` grows by twenty-three types**, which is the largest single
+- **`core/types.py` grows by twenty-four types**, which is the largest single
   addition it has taken. That is the cost ADR-0084 §5 named ("a large Protocol and
   a large conformance suite — considerably more than the triads the corpus has
   written so far"), quantified.
@@ -1059,14 +1247,27 @@ move to `Accepted` triggers nothing.
   default (§3a), pre-`await` materialisation of the filters (§3d), local refusal
   of malformed page arguments and blank identifiers (§3c, §9), the size limit in
   both directions (§8), and the disposition-is-not-the-outcome rule (§7). Each is
-  written as a testable sentence for that reason. **Four more are expressed by the
-  types themselves** — §4a's cross-field validators — which is one of the things
-  the move to pydantic buys.
+  written as a testable sentence for that reason. **Five more are expressed by the
+  types themselves** — §4b's cross-field validators — and one more by a return
+  type alone (§4a), which is the cheapest of the lot: it needs no clause and no
+  test, because the wrong response cannot be constructed.
 - **What becomes harder: every one of these fields now costs an ADR to change.**
   ADR-0084 §4 anticipated it — "changing a field that was free to change in
-  `orchestration` now costs an ADR" — and the figure is twenty-three types' worth
+  `orchestration` now costs an ADR" — and the figure is twenty-four types' worth
   of fields. A subsystem that wants a new field on `TurnOutcome` writes an ADR;
   before this, it edited a dataclass.
+- **The belief listing stops carrying the corpus** (§4a). `beliefs()` returns
+  `BeliefSummary`, so ADR-0077 §6's split is a type signature rather than a
+  convention, and the frame arithmetic's page-multiplied term disappears (§8f).
+  **The listing still resolves existence** — the adjusted confidence needs it —
+  so the lane that edits `_project` owes #552's item 1, and a batch read is what
+  makes it cheap.
+- **Two adapter consequences fall to the client lane**, not one: `observe`'s
+  selector becomes keyword-only (§2), and the listing renderer takes
+  `BeliefSummary`. The second is nearly free — `_render_belief(evidence=False)`
+  and `_why` already read only the summary's fields (`cli.py:1936-1950`,
+  `:1987`), so the change is the annotation and the `evidence=` parameter going
+  away on that path.
 - **What becomes easier: a spoke is writable.** A client author has the whole
   surface, the whole type graph, the wire form of every argument and result, and
   the failures each method declares, without reading `orchestration`.
@@ -1151,6 +1352,32 @@ move to `Accepted` triggers nothing.
   producer rule.** Rejected in §4: it converts a producer bug into a report that
   cannot be constructed, so the entry a human most needs to see — a proposal
   something got wrong — would take the whole `ObservationReport` down with it.
+- **Leave `beliefs()` returning `Belief` and say nothing** — the shape this ADR
+  carried until #552. Rejected in §4a: it ratifies an implementation that
+  contradicts ADR-0077 §6 into contract surface, and it leaves §8 with a
+  multiplicative term it cannot bound. Silence here was not neutrality; it was a
+  decision taken by omission.
+- **Keep one `Belief` and add `evidence_count`/`lost_evidence` as fields beside
+  `evidence`, so a listing can send `evidence=()` honestly.** The closest call,
+  and rejected in §4a on one ground: a `beliefs()` implementation could still
+  populate `evidence`, so today's over-delivery stays *conforming* and the
+  ratified split survives only as a clause the conformance suite polices. The
+  only invariant available — `len(evidence) in (0, evidence_count)` — is weak
+  enough to admit a half-delivered page nobody intends. Two types make the wrong
+  answer unrepresentable instead of merely detectable, for the same words.
+- **Give `Evidence` a third state, so "resolves but not delivered here" is
+  distinct from a tombstone.** Rejected in §4a: it keeps the page × citations
+  product (3,200 entries on a full page, small ones but present), it adds a state
+  every client must handle to convey what `evidence_count` already conveys, and
+  it invites a renderer to print sixty-four "content withheld" placeholders per
+  belief — the listing burial `_render_belief`'s own docstring says it exists to
+  avoid.
+- **Argue the over-delivery is correct and let §3's frame ceiling refuse the
+  oversized page.** Rejected in §4a: it reads ADR-0077 §6's split out of
+  existence, and it converts a routine fifty-row listing into a call whose
+  success depends on how much episode text happens to sit behind the page — the
+  opposite of the legibility ADR-0084's ruling 4 asks for, arriving at the one
+  surface a user reaches for to understand what the assistant believes.
 - **Add a `data_export` method to the Protocol while the surface is being
   pinned.** Rejected in §6c: `Engine` exposes no export today and no CLI command
   reaches `ConversationLifecycle.export`, so adding one would be widening the
