@@ -18,10 +18,13 @@ and where it sits in the sequence is load-bearing rather than decorative: ADR-00
 that ordering is what leaves the engine's drain with nothing of the scheduler's
 left to wait for.
 
-**One thing this process does not have yet, by sequencing rather than oversight.**
-The transport (ADR-0084) is a later lane: until it lands, readiness is signalled by
-the structured log event alone, which ADR-0083 §3 names as one of the two
-observables and which needs no supervisor-specific protocol.
+**The door is the transport** (:mod:`ai_assistant.service.transport`, ADR-0084),
+and where it opens and closes in the sequence is a decision rather than a
+convenience: it begins accepting at ADR-0083 §3's **step 6**, after the sweeps and
+before the readiness event, so "no request is ever served against a half-built
+engine"; and it stops accepting and unlinks the socket at the **start of phase A**,
+so a new client meets one clear "not running" rather than a connection that hangs
+for the length of an unbounded phase B.
 
 **Both ends of the lifecycle are legible, and the symmetry is the point** (#559).
 A hub that will not start says why, to stderr and the log (§5, §6). A hub that is
@@ -48,6 +51,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from ai_assistant import __version__
 from ai_assistant.app import build_engine, ensure_model_credentials
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
@@ -57,6 +61,7 @@ from ai_assistant.service import datadir
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART, classify
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.scheduler import Scheduler, jobs_for
+from ai_assistant.service.transport import Listener
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -281,6 +286,7 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
         # on a stop that arrives between here and step 5. An unstarted scheduler's
         # ``aclose`` is a no-op, which is what makes that unconditional join safe.
         scheduler = Scheduler(jobs_for(engine, settings))
+        listener = Listener(engine, settings, data_dir=data_dir)
         try:
             if stop.is_set():
                 return EXIT_OK
@@ -297,24 +303,28 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
             # a list of jobs that are actually armed.
             scheduler.start()
 
-            # Step 6. Begin accepting requests, and only then signal readiness.
-            # The transport is ADR-0084's lane, so there is no door yet and this
-            # step is the log event alone — one of the two observables §3 names,
-            # and the one that needs no supervisor-specific protocol. §14's
-            # constraint on the later lane is that the transport must not accept
-            # before the *other* readiness conditions hold; it goes above this
-            # line, not below it.
+            # Step 6. Begin accepting requests, and only then signal readiness —
+            # in that order, which is ADR-0083 §14.2 ("the transport must not
+            # accept before readiness") read against §3: every *other* readiness
+            # condition already holds by the time the listener binds, and the
+            # event is what says so to a supervisor. The stale-socket unlink
+            # inside `start` is safe here and nowhere earlier, because the
+            # instance lock has been held since step 2 (ADR-0084 §1).
             if stop.is_set():
                 return EXIT_OK
+            await listener.start(build=__version__)
             _log.info(
                 "hub_ready",
                 pid=os.getpid(),
                 data_dir=str(data_dir),
+                socket=str(listener.path),
                 jobs=list(scheduler.job_names),
             )
             await stop.wait()
         finally:
-            await _shut_down(engine, scheduler, shutdown, budget=settings.shutdown_drain_seconds)
+            await _shut_down(
+                engine, scheduler, listener, shutdown, budget=settings.shutdown_drain_seconds
+            )
     finally:
         lock.release()
     return EXIT_OK
@@ -323,6 +333,7 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
 async def _shut_down(
     engine: Engine,
     scheduler: Scheduler,
+    listener: Listener,
     record: _ShutdownRecord,
     *,
     budget: timedelta,
@@ -350,9 +361,19 @@ async def _shut_down(
     afterwards is about the shutdown that actually happened rather than about the
     one that was planned.
 
+    **The door closes first**, before the scheduler and before the drain. ADR-0084
+    §1 puts the listener's stop and the socket's unlink "at the start of phase A",
+    and taking it first is what makes the rest honest: no new request can arrive
+    while the scheduler is being joined or while tracked work is finishing, so the
+    drain converges on a set that is only shrinking. Connections already accepted
+    are in-flight work and ADR-0083 §4's phases own them; what
+    :meth:`~ai_assistant.service.transport.Listener.aclose` collects afterwards is
+    only a connection whose peer never spoke again.
+
     Args:
         engine: The façade to drain and close.
         scheduler: The loop to stop and join first. Never started is fine.
+        listener: The door to close before either.
         record: Filled in as each part completes.
         budget: Phase A's configured budget, reported so a drain time can be read
             against the figure it was measured against.
@@ -361,6 +382,7 @@ async def _shut_down(
     record.jobs = scheduler.job_names
     began = time.monotonic()
     try:
+        await listener.stop_accepting()
         await scheduler.aclose()
         record.scheduler_join_seconds = round(time.monotonic() - began, 3)
         _log.info(
@@ -375,6 +397,7 @@ async def _shut_down(
         finally:
             record.drain_seconds = round(time.monotonic() - drain_began, 3)
             record.phase = engine.drain_phase
+            await listener.aclose()
     finally:
         record.elapsed_seconds = round(time.monotonic() - began, 3)
 

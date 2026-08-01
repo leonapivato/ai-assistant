@@ -41,6 +41,7 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import SqliteAuditTrail, ThresholdActionPolicy
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.tools import build_default_registry
@@ -368,6 +369,26 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
             # deployment values: an ``Engine`` a test builds directly keeps the
             # unbounded drain it always had.
             drain_timeout=settings.shutdown_drain_seconds,
+            # The contract limit ADR-0085 §8c declares — ``hub_max_frame_bytes``
+            # less §8b's 512-byte envelope reserve — passed from the deployment's
+            # own setting rather than left to the constructor's default (#572).
+            #
+            # **The setting is what makes the two implementations agree**, which is
+            # the whole of ADR-0084 §4: the limit is a clause of the contract that
+            # every implementation enforces, and the client is told the hub's
+            # effective frame size in the handshake and "enforces the number it was
+            # told". If this layer did not subtract the reserve from the *same*
+            # field the listener publishes, a deployment that raised
+            # ``hub_max_frame_bytes`` would move the client's limit and not the
+            # engine's — and the engine would accept a value the client provably
+            # cannot send, which is the divergence §4 moved the limit into the
+            # contract to prevent.
+            #
+            # The reserve is taken from ``orchestration.payloads`` rather than from
+            # ``wire``: it is the same 512 bytes either way (ADR-0087 §7 — the two
+            # encoders are byte-identical or the vectors fail), and reading it
+            # beside the engine that will measure with it adds no package edge here.
+            max_payload_bytes=settings.hub_max_frame_bytes - ENVELOPE_RESERVE_BYTES,
         )
     except BaseException:
         # Close anything already opened before re-raising, so a failed build

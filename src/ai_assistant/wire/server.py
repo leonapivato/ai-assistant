@@ -43,6 +43,7 @@ from ai_assistant.wire.framing import read_frame, write_frame
 from ai_assistant.wire.surface import METHODS, argument_adapter, parameters
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
@@ -83,6 +84,7 @@ async def serve_connection(
     writer: asyncio.StreamWriter,
     *,
     limits: ConnectionLimits,
+    on_handshake: Callable[[], None] | None = None,
 ) -> None:
     """Drive one accepted connection to its end.
 
@@ -96,13 +98,29 @@ async def serve_connection(
         reader: The connection's reader.
         writer: The connection's writer.
         limits: The frame ceiling, the deadline and the build identifier.
+        on_handshake: Called once the handshake completes, so a listener can move
+            this connection off its *pending* ceiling and onto its total. The
+            listener owns both figures (ADR-0084 §3) and the handshake happens
+            here, so one of the two has to tell the other.
     """
     try:
         if not await _handshake(reader, writer, limits=limits):
             return
+        if on_handshake is not None:
+            on_handshake()
         await _serve_requests(engine, reader, writer, limits=limits)
     except (ConnectionClosedError, UndecodableFrameError, ProtocolError) as exc:
         _log.info("hub_connection_closed", reason=str(exc), error_class=type(exc).__name__)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # One connection's fault must never be the resident process's. The engine
+        # declares its failures and they are answered above as error frames; what
+        # reaches here is an undeclared one — including the ``RuntimeError`` a
+        # shutting-down engine raises, which a client is not meant to observe
+        # (ADR-0085 §1) and which ADR-0084 §1 answers by having already unlinked
+        # the socket.
+        _log.exception("hub_connection_failed")
     finally:
         await _hang_up(writer)
 
