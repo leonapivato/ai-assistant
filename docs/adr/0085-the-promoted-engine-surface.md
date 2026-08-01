@@ -655,12 +655,31 @@ point, rather than one of them discovering it at the socket.
 
 **What this covers, and what it does not.** `WireText` reaches the **promoted
 types' own fields** and the surface's **direct arguments**. It does **not** reach
-the strings inside the pre-existing `core` types §5's walk terminates at —
-`FeedbackEvent.content`, `.subject` and `.evidence` are plain `str`
-(`core/types.py:1748-1755`), and `Goal`, `CurrentContext`, `ActionPlan`,
-`MemoryRecord` and `ExecutionState` have the same shape. So
+the strings inside the pre-existing `core` types §5's walk terminates at. So
 `learn(FeedbackEvent(content="\ud800"))` still constructs today. **That is
 tracked as #565, and a lane is closing it.**
+
+**The affected fields, named rather than gestured at**, so #565's lane has a
+target and does not go looking in types that do not need it:
+
+| Type | Plain-`str` fields |
+| --- | --- |
+| `FeedbackEvent` | `content`, `subject`, `evidence` (`core/types.py:1748-1755`) |
+| `Goal` | `statement` |
+| `ActionPlan` | `rationale`, and `PlanStep.intent` beneath it |
+| `MemoryRecord` | `content`, and its kind-specific text |
+| `ExecutionState` | none of its own — reached via `StepExecution.failure` → `StepFailure.message` |
+
+**`CurrentContext` is *not* on that list**, and saying so is worth a line because
+it is the obvious one to assume: it carries only `now` (`UtcInstant`),
+`time_of_day` (an enum) and two booleans, so it has no string to refuse.
+
+**Nor are the JSON-shaped fields**, and for a better reason than absence:
+`PlanStep.parameters`, `StepExecution.output` and `Confirmation.parameters` are
+`FrozenJsonMapping`/`FrozenJsonValue`, and `FrozenJson` **already** catches a
+surrogate by running the real encoder at validation — which is exactly the
+precedent ADR-0087 §9 points at and the method §4c adopts. The gap is in the
+fields that were left as bare `str`, not in the ones that were given a validator.
 
 **The boundary is where it is for a reason, not for want of noticing.** ADR-0087
 §9 scoped its handover in as many words — "the refusal belongs on the type, and
@@ -1561,8 +1580,8 @@ the triad. This ADR is ADR-0084 §5's step 2 whatever else lands.
 **#565's fix is a prerequisite of the client lane, not merely context for it**
 (§4c). §4c closes encodability for the promoted types and direct arguments and
 records that the strings inside the pre-existing `core` leaves — `FeedbackEvent`,
-`Goal`, `CurrentContext`, `ActionPlan`, `MemoryRecord`, `ExecutionState` — are
-not reached. Until that lands, this contract declares request and result values
+`Goal`, `ActionPlan`, `MemoryRecord`, and `ExecutionState` transitively through
+`StepFailure.message` — are not reached. Until that lands, this contract declares request and result values
 that ADR-0087 §2b gives no wire form, so **the client lane does not proceed
 without it**: a client built first would be one whose encoder raises on inputs
 this Protocol admits, which is ADR-0084 §4's substitutability failure arriving
