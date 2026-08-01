@@ -1391,19 +1391,26 @@ be inferred: the list is the problem statement ADR-0087 inherits, not a set of
 answers it is expected to reach. Where it and ADR-0087 could be read as
 disagreeing, ADR-0087 governs the encoding and this ADR governs the limit.
 
-**The five-change order**, since ADR-0084 §5 wrote four:
+**This ADR states one ordering constraint and deliberately does not restate
+ADR-0084 §5's sequence.** The constraint is that **ADR-0087 merges before the
+triad**, which is what makes §8c's reference resolve: the boundary is ratified
+before the canonical fake gives the surface a second implementation.
 
-1. ADR-0084 — the transport and the promotion (merged);
-2. **this ADR** — the surface: signatures, types, failures, the limit;
-3. **ADR-0087** — the canonical encoding, with normative vectors;
-4. the triad — `core/protocols.py`, `core/types.py`, conformance suite, canonical
-   fake;
-5. the hub, the `wire` package, the client, and the `lint-imports` edits.
+**Renumbering ADR-0084 §5's four changes into five is *not* done here, and the
+distinction is not a dodge.** An earlier draft of this section printed a five-item
+list, and printing it is what would make ADR-0084 §5's "four changes" sentence
+false *in this document* — at which point this change would owe the ADR-0082 §1
+record for it. That is incoherent with §12's position that the record travels with
+ADR-0087, so the list is gone rather than the position.
 
-Steps 2 and 3 are independent of each other and both precede 4. **Whether
-ADR-0084 §5's own "four changes" sentence owes a record under ADR-0082 §1 is
-ADR-0087's question, not this one** — ADR-0087 is the change that inserts a step
-into that sequence, and §12 explains why the record travels with it.
+**The reason the record belongs to ADR-0087 is that the sequence change is
+contingent on it.** If ADR-0087 never lands, ADR-0084 §5's four changes stand
+unaltered and nothing here needs revisiting: this ADR is step 2 either way, and it
+adds no step. ADR-0087 is the change that introduces the step, and under ADR-0070
+§1 a record belongs with the change that makes the earlier text false — the rule
+ADR-0084 §12 applied to itself when it landed ADR-0042's record in its own change
+rather than in a follow-up. **So ADR-0087's lane owes a record on ADR-0084 §5**,
+and that obligation is named here so it is not discovered late.
 
 #### 11b. Where the corpus and the tree disagree, and which this ADR follows
 
@@ -1487,15 +1494,19 @@ move to `Accepted` triggers nothing.
   split, where the tree has one that cannot. An ADR whose text you have to
   contradict to implement is amended; one whose text you have to be *able* to
   implement is served.
-- **ADR-0084 §5's "four changes", and ADR-0087.** §11a records that the sequence
-  gains a fifth step. Under ADR-0070 §1 a reader holding only ADR-0084 would
-  sequence the triad immediately after this ADR and would now be wrong, so a
-  record is owed on that sentence — **but not by this change.** ADR-0087 is what
-  inserts the step, and a record belongs with the change that makes the earlier
-  text false; ADR-0084 §12 applied exactly that rule to itself, landing ADR-0042's
-  record in its own change rather than a follow-up. This ADR neither adds nor
-  removes a step — it is step 2 either way. Naming the question and its owner is
-  the whole of what is owed here.
+- **ADR-0084 §5's "four changes".** A record **is** owed on that sentence, and it
+  is **not owed by this change** — the two halves have to be stated together
+  because asserting only the first would make this ADR the amending one.
+
+  This ADR does not renumber the sequence and does not print a five-step list
+  (§11a); it states one constraint, that ADR-0087 merges before the triad. The
+  sentence in ADR-0084 §5 becomes false only once ADR-0087 exists, and if
+  ADR-0087 never lands it stays true — this ADR is step 2 under either count and
+  adds no step. Under ADR-0070 §1 the record belongs with the change that makes
+  the earlier text false, which is the rule ADR-0084 §12 applied to itself when it
+  landed ADR-0042's record in its own change rather than a follow-up. **The
+  obligation is ADR-0087's**, named in §11a so its lane inherits it rather than
+  discovering it.
 - **ADR-0086.** No record, and no dependency in either direction. Its §7 hands
   the DTO shape here explicitly and takes no position on it; §8f states the
   relationship and declines to lean on an unratified ADR.
