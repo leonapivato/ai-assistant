@@ -516,9 +516,15 @@ it is not.** An alphabet plus "omit zero components" admits `"PT61S"` and
 conforming to the letter and disagreeing on bytes, which is the whole failure this
 ADR exists to close, reproduced inside its own rule. An earlier draft had exactly
 that gap. With the ranges fixed the decomposition is a function of the value, and
-it is the one `timedelta` already stores: `.days`, `.seconds` and `.microseconds`
-are normalised on construction to the same ranges, so an encoder reads the fields
-rather than choosing a split.
+it is one `timedelta` already computes — **but only for the magnitude, and the
+distinction is a trap worth naming.** Python stores a negative duration with a
+negative day field: `timedelta(days=-1, seconds=1)` is `(-1, 1, 0)`, not the
+`(0, 86399, 0)` its magnitude holds. An encoder that read those fields directly
+would emit `"-P1DT1S"`, which is −86401 seconds rather than the −86399 it was
+given, or `"P-1D…"`, which the grammar forbids. So the rule is **take
+`abs(duration)` first**, read `.days`, `.seconds` and `.microseconds` off *that*
+— they are normalised on construction to exactly the ranges above — and prefix
+the sign.
 
 **`"P2DT3S"` versus `"PT172803S"` is not a choice, and finding that out is what
 this rule is really about.** `timedelta` normalises on construction:
@@ -907,6 +913,7 @@ have to. Rows 3–5 fix six digits with trailing zeros kept.
 | `timedelta(microseconds=500000)` | `"PT0.5S"` | 8 |
 | `timedelta(microseconds=1)` | `"PT0.000001S"` | 13 |
 | `timedelta(seconds=-30)` | `"-PT30S"` | 8 |
+| `timedelta(days=-1, seconds=1)` | `"-PT23H59M59S"` — stored as `(-1, 1, 0)`; the magnitude is what is decomposed, §2e | 14 |
 | `timedelta(days=365)` | `"P365D"` — **library emits `"P1Y"`, §3 row 2** | 7 |
 | `timedelta(days=1095)` | `"P1095D"` — **library emits `"P3Y"`; the +3 worst case, §2e** | 8 |
 | `timedelta(days=360991935)` | `"P360991935D"` — **library emits `"P989019Y"`; +3 again** | 13 |
