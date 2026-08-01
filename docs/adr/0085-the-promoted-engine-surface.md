@@ -909,65 +909,59 @@ value — one inserting whitespace after `,` and `:`, one escaping non-ASCII as
 `\uXXXX` — and a limit whose measurement differs between the two implementations
 is not one limit. So:
 
-> **The measurement is taken on the payload's UTF-8 JSON encoding in its
-> canonical form**, which is fixed by all five of the following. Together they
-> determine the byte string exactly; any one left open leaves two conforming
-> encoders disagreeing about the same value.
->
-> 1. **No insignificant whitespace** — the `,` and `:` separators carry none.
-> 2. **Strings escape only what JSON requires**: `"`, `\` and the control
->    characters below `U+0020`. **`/` is never escaped**, which `\/` would also
->    permit and which costs a byte per occurrence.
-> 3. **Control characters use JSON's two-character forms where it defines them**
->    (`\b`, `\f`, `\n`, `\r`, `\t`) and `\u00XX` otherwise — never the long
->    form for a character that has a short one.
-> 4. **Non-ASCII characters are emitted as UTF-8**, never as `\u` escapes.
-> 5. **Numbers take their shortest round-tripping decimal form** — integers with
->    no exponent, no leading `+` and no leading zeros; floats as the shortest
->    decimal that reads back to the same value. `Belief.confidence` is the field
->    this bites, and without it `0.1`, `1e-1` and `0.1000000000000000055` are all
->    valid encodings of one number at three different lengths.
-> 6. **Scalars JSON has no native form for take one spelling each.** These are
->    strings on the wire, so rules 2–4 fix their *escaping* and nothing fixes
->    their *content* until this rule does:
->    - an **instant** (`UtcInstant`) is RFC 3339 in UTC with the **`Z`**
->      designator, never `+00:00`, and fractional seconds are **omitted when
->      zero** and otherwise carry exactly six digits —
->      `"2026-07-31T12:00:00Z"`, `"2026-07-31T12:00:00.500000Z"`;
->    - a **duration** (`timeout`) is ISO-8601 carrying only its non-zero
->      components, largest first, and `"PT0S"` for zero — `"PT30S"`,
->      `"PT1H30M"`. Never a numeric form.
->
-> **Rule 6's list is closed**, which is what makes the five rules above
-> sufficient: across the twenty-four promoted types and the fifteen signatures the
-> only field and argument types are `str`, `int`, `float`, `bool`, `None`,
-> `StrEnum` members, `UtcInstant`, `timedelta`, and containers of those. The first
-> six are JSON-native and rules 1–5 fix them; the last two are rule 6's.
->
-> **`Z` is *satisfiable* rather than an extra burden**, because `UtcInstant`'s
-> validator already converts every value to UTC before it is stored
-> (`_utc_instant`, `core/types.py`) — so a promoted model never holds an instant
-> at another offset that would have to be rewritten to meet this rule.
->
-> **Member order is deliberately not fixed**, because ADR-0084 §3 already rules it
-> insignificant and because it cannot change a byte *count* — only the order of
-> the same bytes.
->
-> This is the encoding ADR-0084 §3 puts on the wire, and it is what pydantic's own
-> `model_dump_json()` produces. **An implementation may satisfy the five rules by
-> any means; calling that method is the way to satisfy them without thinking about
-> it**, and it is why the in-process engine and the client agree by construction
-> rather than by care.
+> **The canonical encoding is the byte string pydantic's `model_dump_json()`
+> produces for the payload**, at the pydantic version the environment pins. That
+> byte string is what §8c measures and what §10 puts on the wire — one definition
+> serving both, so an implementation measures the bytes it is about to send.
 
-Pinning it as the *wire's* encoding rather than as a convention of this ADR is
-what keeps the two numbers the same: the client is measuring the frame it will
-actually write, not a proxy for it.
+**The encoder is the definition, and a property list is the description — that
+way round, deliberately.** Three review rounds each found one more corner where a
+property list left two conforming encoders disagreeing: `/` versus `\/`, `0.1`
+versus `1e-1`, `"…12:00:00Z"` versus `"…12:00:00+00:00"`, then `"PT0.5S"` versus
+`"PT0.500000S"` — and `"P2DT3S"` versus `"PT172803S"` was still open when the
+list was abandoned. **That is the same lesson §8d already carries** about bounding
+the handshake member by member, and §10a about naming each error's `details`: an
+enumeration of a space nobody can prove they have covered is not a specification,
+it is a list of the cases someone thought of. A limit whose measurement is a
+function of *which corners the author enumerated* is not one limit.
+
+**What the encoding looks like**, non-normatively, so an implementer knows what to
+expect and a reviewer can sanity-check a frame: no insignificant whitespace;
+strings escaping only `"`, `\` and control characters, with `/` unescaped, JSON's
+two-character forms where they exist, and non-ASCII as UTF-8; numbers in their
+shortest round-tripping decimal form; instants as RFC 3339 in UTC with `Z`; and
+durations as ISO-8601 with trailing zeros stripped. **None of that is the
+contract** — the encoder's output is — and where this paragraph and the encoder
+disagree, the encoder is right and this paragraph is a defect to fix.
+
+**Binding to an encoder rather than a grammar is what ADR-0084 already did**, and
+this is that choice followed through rather than a new one. §3 fixes "the codec is
+UTF-8 JSON" and §4 promotes to pydantic models precisely because "binding to the
+encoding the stores already depend on is what makes #421's integer-encodability
+question **one** question rather than two". The same argument decides this: a
+grammar this ADR wrote would be a second specification of the bytes, to be kept in
+step with the encoder by hand and tested by nobody.
+
+**The cost is named: a conforming implementation is a pydantic one.** That is
+already true of everything ADR-0084 §5 contemplates — both halves "are the same
+`uv` environment on the same machine, installed together and upgraded together"
+(§3), which is why that ADR refuses tolerant version negotiation. A
+second-language spoke is the remote leg, and §4 of that ADR already says the
+separate wire schema it rejected "becomes the right answer on the day the two
+halves version independently". So this ADR does not foreclose that; it declines to
+pay for it now with a grammar nothing would exercise.
+
+**One consequence is worth stating because it is not obvious**: the pinned
+pydantic version becomes part of what the protocol version (ADR-0084 §3) governs.
+An upgrade that changed a serialised byte would change every payload's measured
+size, which is exactly the "half-finished upgrade" §3's exact-match refusal exists
+to make legible.
 
 The measure is a serialisation at all because that is what ADR-0084 §3's length
 prefix counts, and a limit measured on anything else — a character count, a
 Python object size — would be a number the two implementations compute
-differently for the same value. A directory named in a non-ASCII script spends more of the budget
-than it looks like it does, and so does an utterance.
+differently for the same value. A directory named in a non-ASCII script spends
+more of the budget than it looks like it does, and so does an utterance.
 
 **Subtracting the reserve is the other half of the arithmetic.** Set the contract
 limit equal to `hub_max_frame_bytes` and a payload at exactly the limit overflows
@@ -1214,9 +1208,9 @@ fixed, so it is stated compactly rather than method by method:
 - **Every promoted `StrEnum` serialises as its member value**, which is why §4
   keeps the `StrEnum` base: `Disposition.EXECUTED` is `"executed"` on the wire
   today and after the move, so the relocation changes no byte.
-- **The byte encoding is §8c's canonical form** — compact separators, non-ASCII
-  as UTF-8 rather than `\u` escapes — for every payload on this wire, so the
-  bytes a client measures against §8c's limit are the bytes it writes.
+- **The byte encoding is §8c's canonical encoding** — `model_dump_json()`'s
+  output at the pinned pydantic version — for every payload on this wire, so the
+  bytes a client measures against §8c's limit are exactly the bytes it writes.
 
 #### 10a. The error frame, so a declared failure survives the wire
 
@@ -1512,15 +1506,20 @@ move to `Accepted` triggers nothing.
   overflows the frame on `timeout` alone — leaving the client to refuse an input
   the contract admitted, or to send a frame the server refuses on its prefix.
   Bounding the payload measures the thing the length prefix counts.
-- **Leave the measurement as "pydantic JSON mode" without pinning the bytes**, or
-  pin only whitespace and non-ASCII escaping, or pin only the JSON-native scalars.
-  Rejected in §8c: JSON mode names a value shape, not a byte string, and each
-  partial pin leaves a real disagreement — `/` versus `\/`, `\n` versus
-  `\u000a`, `0.1` versus `1e-1`, and `"…12:00:00Z"` versus `"…12:00:00+00:00"`,
-  the last differing by four bytes on a field every promoted model carries. Two
-  conforming encoders would disagree about whether the same call is oversized: one
-  limit in name and two in effect. The rule list is closed against the payload's
-  scalar vocabulary rather than left open-ended.
+- **Specify the canonical encoding as a grammar — a list of rules an encoder must
+  satisfy — rather than as an encoder's output.** Rejected in §8c, and it is the
+  alternative this ADR actually tried: three review rounds each found one more
+  corner the list had not covered (`/` versus `\/`, `0.1` versus `1e-1`, `Z`
+  versus `+00:00`, `"PT0.5S"` versus `"PT0.500000S"`), with `"P2DT3S"` versus
+  `"PT172803S"` still open when it was abandoned. A grammar is a second
+  specification of the same bytes, kept in step with the encoder by hand and
+  exercised by nothing — §4's objection to a separate wire schema, and §8d's to
+  bounding the handshake member by member. The cost of the choice made instead is
+  named rather than hidden: a conforming implementation is a pydantic one, which
+  ADR-0084 §3 already assumes of both halves.
+- **Leave the measurement as "pydantic JSON mode".** Rejected in §8c for the
+  opposite reason: JSON mode names a *value shape*, not a byte string, so it does
+  not determine a length at all.
 - **State only that identifier arguments must be non-blank, leaving stripping to
   the implementation.** Rejected in §3c: `_non_blank` strips as well as rejects,
   so a wire client deserialising through `Identifier` and an in-process engine
