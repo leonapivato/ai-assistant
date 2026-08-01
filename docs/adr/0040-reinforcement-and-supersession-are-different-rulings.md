@@ -1,8 +1,60 @@
 # 40. Reinforcement and supersession are different rulings
 
-- Status: Accepted, §5a/§5b/§3 amended by ADR-0045 (window-closing `SUPERSEDE`; the
-  `EXTERNAL` refusal narrowed to `REINFORCE`)
+- Status: Partially superseded by ADR-0086 (§1's and §5a's rule that a `REINFORCE` retains both records' `evidence`)
 - Date: 2026-07-22
+- Partially superseded: 2026-08-01 by ADR-0086 — **two clauses: §1's and §5a's
+  statement that a `REINFORCE` retains *both* records' `evidence` no longer holds
+  at the boundary.**
+  [ADR-0086](0086-a-beliefs-evidence-is-bounded-and-the-batch-read-lands.md) §1
+  gives `Provenance.evidence` a fixed cardinality bound, `MAX_EVIDENCE_CITATIONS`,
+  and §3 rules what a `REINFORCE` whose union would exceed it does. ADR-0086 §11
+  names these clauses, quotes them and applies ADR-0070 §1's test; this note
+  records the ruling declared there.
+
+  **Replaced — §5a's second conformance obligation.** "**`REINFORCE` retains both
+  records' `evidence`.** Everything else about the fold — which content wins, how
+  confidence combines, `last_updated` — is unasserted." A conforming writer now
+  retains the union *up to* `MAX_EVIDENCE_CITATIONS`, keeping the most recently
+  accumulated citations and displacing the oldest, and records the displacement on
+  `Provenance.evidence_elided` (ADR-0086 §3, §4). **And §1's member definition,
+  which says the same thing:** "The applier folds the two, and the surviving record
+  carries **both** records' `evidence`." §5a states in terms that "§1's definitions
+  say no more than this, deliberately", so the two sentences move together — left
+  standing, §1 would assert a guarantee the widened suite does not enforce, which
+  is the divergence §5a exists to prevent.
+
+  **Why a supersession and not an amendment.** A reader holding only this ADR
+  builds a writer that keeps every citation of the union, and that writer fails the
+  conformance obligation ADR-0086 §3 adds. They act differently, and what moved is
+  what was decided rather than how it was worded (ADR-0070 §1).
+
+  **Not replaced — and the asymmetry §5a insists on survives intact.** `SUPERSEDE`
+  still "carries nothing of the target onto the surviving record", so there is no
+  union to bound and no elision to carry across; ADR-0086 §3 says so in terms.
+  Everything §5a leaves unasserted stays unasserted — which content wins, how
+  confidence combines, `last_updated` — as do ADR-0028 §8's other exclusions.
+  ADR-0086 replaces nothing else here: §1's naming rule and its removal of `MERGE`,
+  `SUPERSEDE`'s definition, §1a's `target_id`, §2, §3, §4, §5, §5b, §6 and §7 all
+  stand as they stood, and `DefaultMemoryPolicy`, `MemoryDecision` and the
+  `MemoryPolicy` suite are untouched.
+
+  **The `Status` line takes the leading token, so ADR-0045's amendment qualifier
+  moves off it.** The value was `Accepted, §5a/§5b/§3 amended by ADR-0045
+  (window-closing `SUPERSEDE`; the `EXTERNAL` refusal narrowed to `REINFORCE`)`.
+  ADR-0070 §4 requires a new partial supersession to lead the line and drop
+  `Accepted`, and ADR-0082 §2 requires any qualifier already on the line to move to
+  the dated note in the same change. Left in place it would also break ADR-0070
+  §4's extraction invariant — "every `ADR-NNNN` after the leading `Partially
+  superseded by` is a target" — by presenting ADR-0045 as a supersession target,
+  which is #477's failure exactly. **Nothing is lost by the move:** the `Amended:
+  2026-07-23 by ADR-0045` note directly below is untouched and carries that
+  amendment in full, which is ADR-0080 §8's operation as ADR-0082 §2 generalises
+  it. This is not the retrofit ADR-0070 §4 grandfathers — the line is not being
+  reformatted for its own sake, it is being written anew because a partial
+  supersession landed on it.
+
+  Appended note per ADR-0070 §1; no ratified text below is rewritten. Refs #576,
+  #546.
 - Amended: 2026-07-23 by ADR-0045 — the `MemoryWriter` mechanism clauses this ADR
   set as issue #112's frontier (§6) are now taken up. **§5a's id clause is
   rewritten:** a `SUPERSEDE` no longer writes the correction "at the target's id,
