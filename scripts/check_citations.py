@@ -108,23 +108,23 @@ _DECISION_RE = re.compile(r"\bADR-(\d{4})\b")
 #: **numeric** fragment link — ``[section](#123)`` — by the ``](`` lookbehind,
 #: which the slug case never exercised.
 #:
-#: **The exclusions are narrow on purpose, and were measured against the corpus
-#: rather than reasoned about.** A parenthesised citation in prose — "the fix
-#: (#123) landed" — stays selected, which is why this names ``](`` instead of
-#: dropping everything inside brackets.
-#:
-#: A leading ``/`` was tried and reverted. It reads like a URL fragment, and it
-#: is *also* how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``,
-#: 14 occurrences the exclusion silently dropped. The two are separated by
-#: excising the URL rather than by inspecting the character before the ``#``:
-#: ``_URL_RE`` below removes ``https://…/#123`` from the line, and what is left
-#: of ``#313/#314`` is still two citations.
+#: A parenthesised citation in prose — "the fix (#123) landed" — stays
+#: selected, which is why this names ``](`` instead of dropping everything
+#: inside brackets.
 _TRACKER_RE = re.compile(r"(?<![\w#])(?<!\]\()#(\d{1,6})(?![\w#])")
 
-#: A URL, blanked out of a line before tracker citations are read from it. A
-#: ``#NNN`` inside one is a fragment identifier, and on Tier 1 mistaking one for
-#: an issue number fails a change over an anchor.
-_URL_RE = re.compile(r"<?\b[a-z][a-z0-9+.-]*://[^\s<>()\[\]]*>?", re.IGNORECASE)
+#: **The one case the pattern above cannot decide: a ``/`` before the ``#``.**
+#: It is how the corpus joins citations — ``#313/#314``, ``#66/#83/#93``, 14
+#: occurrences — and it is also every fragment identifier that is not caught by
+#: the ``\w`` lookbehind: ``https://x/#123``, ``//host/docs/#123``,
+#: ``[section](/docs/#123)``.
+#:
+#: Enumerating the URL shapes does not converge — three review rounds found
+#: three more — so this states the *citation* instead: a ``/`` before a tracker
+#: number is only a separator when everything back to a space or an opening
+#: bracket is itself a run of ``#NNN/``. Anything else before that slash is a
+#: path, whatever scheme it carries or does not.
+_SLASH_JOINED_RE = re.compile(r"(?:^|[\s(\[])(?:#\d+/)+$")
 
 #: An inline code span. Longest run of backticks first, so ``` ``a `b` c`` ```
 #: is read as one span rather than two. Spans do not cross a line here: a
@@ -449,6 +449,20 @@ def _as_dotted_symbol(content: str, top_names: frozenset[str]) -> tuple[str, str
     return ("dotted-symbol", content)
 
 
+def _is_fragment_identifier(prefix: str) -> bool:
+    """Whether a ``#NNN`` following ``prefix`` is a URL fragment, not a citation.
+
+    Only a ``/`` immediately before it is ambiguous, and it is decided by what
+    that slash follows: a run of ``#NNN/`` back to whitespace or an opening
+    bracket is the corpus's way of joining citations, and anything else is a
+    path — a scheme-relative URL, a root-relative link destination, or an
+    absolute one. Stating the citation this way rather than enumerating URL
+    shapes is what makes the answer closed; ADR-0088 §6 puts this selector's
+    mistakes in Tier 1, where a false positive fails a change.
+    """
+    return prefix.endswith("/") and _SLASH_JOINED_RE.search(prefix) is None
+
+
 def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[Citation]:
     """Select every citation ADR-0088 §1 defines out of one document.
 
@@ -464,11 +478,9 @@ def extract_citations(path: str, text: str, top_names: frozenset[str]) -> list[C
     for lineno, line in iter_prose_lines(text):
         for match in _DECISION_RE.finditer(line):
             found.append(Citation("decision", match.group(0), path, lineno))
-        # A URL is excised before trackers are read, so its fragment is not an
-        # issue number. Blanked to the same width rather than removed, so a
-        # citation elsewhere on the line is unaffected.
-        outside_urls = _URL_RE.sub(lambda m: " " * len(m.group(0)), line)
-        for match in _TRACKER_RE.finditer(outside_urls):
+        for match in _TRACKER_RE.finditer(line):
+            if _is_fragment_identifier(line[: match.start()]):
+                continue
             found.append(Citation("tracker", match.group(0), path, lineno))
         for content in _iter_code_spans(line):
             classified = classify_code_span(content, top_names)

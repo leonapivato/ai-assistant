@@ -307,6 +307,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "See <https://example.test/docs/#123>.",
         "See https://example.test/docs/#123 for detail.",
         "See http://example.test/#123.",
+        "See //example.test/docs/#123.",
+        "See the [section](/docs/#123).",
+        "See the [section](../adr/#123).",
     ],
     ids=[
         "heading",
@@ -318,6 +321,9 @@ def test_issue_state_is_not_checked(tmp_path: Path) -> None:
         "autolink-fragment",
         "bare-url-fragment",
         "http-fragment",
+        "protocol-relative",
+        "root-relative-destination",
+        "relative-destination",
     ],
 )
 def test_a_hash_that_is_not_a_tracker_citation_is_not_selected(tmp_path: Path, line: str) -> None:
